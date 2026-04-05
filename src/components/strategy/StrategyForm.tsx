@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
 import { Card } from "@/components/ui/Card";
-import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
+import { STRATEGY_NAMES, STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
 
 interface StrategyFormProps {
@@ -17,7 +17,7 @@ interface StrategyFormProps {
 }
 
 export function StrategyForm({ strategy, mode }: StrategyFormProps) {
-  const [name, setName] = useState(strategy?.name ?? "");
+  const [name, setName] = useState(strategy?.name ?? STRATEGY_NAMES[0]);
   const [description, setDescription] = useState(strategy?.description ?? "");
   const [categoryId, setCategoryId] = useState<string>(strategy?.category_id ?? "");
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
@@ -88,7 +88,12 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       <Card>
         <h2 className="text-lg font-semibold text-text-primary mb-4">Strategy Details</h2>
         <div className="space-y-4">
-          <Input label="Strategy Name" value={name} onChange={(e) => setName(e.target.value)} required />
+          <Select
+            label="Strategy Name"
+            options={STRATEGY_NAMES.map((n) => ({ value: n, label: n }))}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
           <Textarea
             label="Description"
             value={description}
