@@ -71,14 +71,19 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
-      const { error: insertError } = await supabase.from("api_keys").insert({
+      const { data: newKey, error: insertError } = await supabase.from("api_keys").insert({
         user_id: user.id,
         exchange: data.exchange,
         label: data.label,
         ...dbFields,
-      });
+      }).select("id").single();
 
       if (insertError) throw new Error(insertError.message);
+
+      // Auto-link key to strategy
+      if (newKey) {
+        await supabase.from("strategies").update({ api_key_id: newKey.id }).eq("id", strategyId);
+      }
 
       setShowForm(false);
       await loadKeys();
@@ -122,8 +127,12 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Sync failed" }));
-        throw new Error(err.error || "Trade sync failed");
+        const contentType = res.headers.get("content-type") ?? "";
+        if (contentType.includes("application/json")) {
+          const err = await res.json().catch(() => ({ error: "Sync failed" }));
+          throw new Error(err.error || "Trade sync failed");
+        }
+        throw new Error("Analytics service unavailable. Ensure SUPABASE_SERVICE_ROLE_KEY is configured.");
       }
 
       router.refresh();
