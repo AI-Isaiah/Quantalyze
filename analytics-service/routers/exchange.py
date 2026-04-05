@@ -120,13 +120,13 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
     finally:
         await exchange.close()
 
-    # Store trades (upsert to avoid duplicates on re-sync)
+    # Store trades (delete old ones first to avoid duplicates on re-sync)
     if trades:
+        supabase.table("trades").delete().eq("strategy_id", req.strategy_id).execute()
         for batch_start in range(0, len(trades), 500):
             batch = trades[batch_start:batch_start + 500]
-            supabase.table("trades").upsert(
-                [{"strategy_id": req.strategy_id, **t} for t in batch],
-                on_conflict="strategy_id,exchange,symbol,timestamp,side",
+            supabase.table("trades").insert(
+                [{"strategy_id": req.strategy_id, **t} for t in batch]
             ).execute()
 
         supabase.table("api_keys").update({
