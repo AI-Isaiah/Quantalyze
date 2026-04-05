@@ -22,10 +22,10 @@ CREATE TABLE api_keys (
   exchange TEXT NOT NULL CHECK (exchange IN ('binance', 'okx', 'bybit')),
   label TEXT NOT NULL,
   api_key_encrypted TEXT NOT NULL,
-  api_secret_encrypted TEXT NOT NULL,
+  api_secret_encrypted TEXT,
   passphrase_encrypted TEXT,
-  dek_encrypted TEXT NOT NULL,
-  nonce TEXT NOT NULL,
+  dek_encrypted TEXT,
+  nonce TEXT,
   is_active BOOLEAN NOT NULL DEFAULT true,
   last_sync_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
