@@ -80,12 +80,13 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         throw new Error(err.error || "Key validation failed");
       }
       const encrypted = await res.json();
+      const { valid, read_only, ...dbFields } = encrypted;
 
       const supabase = createClient();
       const { error: insertError } = await supabase.from("api_keys").insert({
         exchange: apiExchange,
         label: `${apiExchange} key`,
-        ...encrypted,
+        ...dbFields,
       });
       if (insertError) throw new Error(insertError.message);
 

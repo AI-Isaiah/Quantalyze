@@ -66,12 +66,13 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
 
       const encrypted = await res.json();
 
-      // Step 3: Store encrypted key in Supabase
+      // Step 3: Store encrypted key in Supabase (only DB columns, not validation fields)
+      const { valid, read_only, ...dbFields } = encrypted;
       const supabase = createClient();
       const { error: insertError } = await supabase.from("api_keys").insert({
         exchange: data.exchange,
         label: data.label,
-        ...encrypted,
+        ...dbFields,
       });
 
       if (insertError) throw new Error(insertError.message);
