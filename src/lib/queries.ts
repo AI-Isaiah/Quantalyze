@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import type { Strategy, StrategyAnalytics } from "./types";
+import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount } from "./types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
@@ -132,4 +132,47 @@ export async function getStrategyDetail(strategyId: string): Promise<{
     strategy,
     analytics: strategy.strategy_analytics?.[0] ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
   };
+}
+
+export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return [];
+
+  const { data: portfolios, error } = await supabase
+    .from("portfolios")
+    .select("*, portfolio_strategies(strategy_id)")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+
+  if (error || !portfolios) return [];
+
+  return portfolios.map((p) => ({
+    id: p.id,
+    user_id: p.user_id,
+    name: p.name,
+    description: p.description,
+    created_at: p.created_at,
+    strategy_count: Array.isArray(p.portfolio_strategies) ? p.portfolio_strategies.length : 0,
+  }));
+}
+
+export async function getDecks(): Promise<DeckWithCount[]> {
+  const supabase = await createClient();
+
+  const { data: decks, error } = await supabase
+    .from("decks")
+    .select("*, deck_strategies(strategy_id)")
+    .order("created_at", { ascending: false });
+
+  if (error || !decks) return [];
+
+  return decks.map((d) => ({
+    id: d.id,
+    name: d.name,
+    description: d.description,
+    slug: d.slug,
+    created_at: d.created_at,
+    strategy_count: Array.isArray(d.deck_strategies) ? d.deck_strategies.length : 0,
+  }));
 }

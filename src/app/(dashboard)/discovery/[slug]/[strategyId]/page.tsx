@@ -5,6 +5,7 @@ import { PerformanceReport } from "@/components/strategy/PerformanceReport";
 import { ComputeStatus } from "@/components/strategy/ComputeStatus";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
+import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
@@ -53,6 +54,7 @@ export default async function StrategyDetailPage({
           >
             Factsheet
           </a>
+          <AddToPortfolio strategyId={strategy.id} />
           <ShareableLink strategyId={strategy.id} />
           <RequestIntroButton strategyId={strategy.id} />
         </div>

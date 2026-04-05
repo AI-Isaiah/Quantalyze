@@ -102,3 +102,27 @@ export interface DiscoveryCategory {
   access_level: "public" | "qualified_only";
   created_at: string;
 }
+
+export interface Portfolio {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+}
+
+export interface PortfolioWithCount extends Portfolio {
+  strategy_count: number;
+}
+
+export interface Deck {
+  id: string;
+  name: string;
+  description: string | null;
+  slug: string;
+  created_at: string;
+}
+
+export interface DeckWithCount extends Deck {
+  strategy_count: number;
+}
