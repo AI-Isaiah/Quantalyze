@@ -1,3 +1,11 @@
+export type Role = "manager" | "allocator" | "both";
+
+export const ROLES: { value: Role; label: string; description: string }[] = [
+  { value: "manager", label: "Asset Manager", description: "Publish strategies with verified exchange data" },
+  { value: "allocator", label: "Allocator", description: "Discover, compare, and connect with managers" },
+  { value: "both", label: "Both", description: "Manage strategies and discover others" },
+];
+
 export interface Profile {
   id: string;
   display_name: string;
@@ -8,7 +16,7 @@ export interface Profile {
   website: string | null;
   linkedin: string | null;
   avatar_url: string | null;
-  role: "manager" | "allocator" | "both";
+  role: Role;
   manager_status: "newbie" | "pending" | "verified";
   allocator_status: "newbie" | "pending" | "verified";
   created_at: string;
