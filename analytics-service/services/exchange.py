@@ -114,29 +114,34 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     try:
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) with pagination for full history
+            # Try multiple instrument types since "ANY" is not supported
             from datetime import datetime, timezone
             all_bills: list[dict] = []
-            after_id = ""
-            max_pages = 50  # Safety limit (50 pages * 100 bills = 5000 entries)
 
-            for _ in range(max_pages):
-                params: dict[str, str] = {"instType": "ANY", "type": "8", "limit": "100"}
-                if since_ms:
-                    params["begin"] = str(since_ms)
-                if after_id:
-                    params["after"] = after_id
+            for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
+                after_id = ""
+                max_pages = 50
 
-                bills = await exchange.private_get_account_bills(params)
-                data = bills.get("data", [])
-                if not data:
-                    break
+                for _ in range(max_pages):
+                    params: dict[str, str] = {"instType": inst_type, "limit": "100"}
+                    if since_ms:
+                        params["begin"] = str(since_ms)
+                    if after_id:
+                        params["after"] = after_id
 
-                all_bills.extend(data)
-                after_id = data[-1].get("billId", "")
+                    try:
+                        bills = await exchange.private_get_account_bills(params)
+                        data = bills.get("data", [])
+                        if not data:
+                            break
 
-                # Stop if we got fewer than the limit (last page)
-                if len(data) < 100:
-                    break
+                        all_bills.extend(data)
+                        after_id = data[-1].get("billId", "")
+
+                        if len(data) < 100:
+                            break
+                    except Exception:
+                        break
 
             for bill in all_bills:
                 pnl_val = float(bill.get("pnl", 0))
