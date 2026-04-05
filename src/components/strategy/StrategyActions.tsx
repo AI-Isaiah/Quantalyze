@@ -99,11 +99,7 @@ export function StrategyActions({ strategyId, status, hasApiKey }: StrategyActio
   }
 
   if (status === "pending_review") {
-    return (
-      <span className="text-xs text-badge-market-neutral font-medium">
-        Awaiting Review
-      </span>
-    );
+    return null;
   }
 
   if (status === "published") {

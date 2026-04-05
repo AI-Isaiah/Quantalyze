@@ -17,6 +17,13 @@ const statusMap: Record<string, string> = {
   archived: "bg-badge-other/10 text-text-muted",
 };
 
+const statusLabelMap: Record<string, string> = {
+  published: "Published",
+  draft: "Draft",
+  pending_review: "Pending Review",
+  archived: "Archived",
+};
+
 interface BadgeProps {
   label: string;
   type?: "strategy" | "status";
@@ -29,11 +36,13 @@ export function Badge({ label, type = "strategy", className = "" }: BadgeProps) 
       ? statusMap[label] ?? statusMap.draft
       : colorMap[label] ?? colorMap.Other;
 
+  const displayLabel = type === "status" ? (statusLabelMap[label] ?? label) : label;
+
   return (
     <span
       className={cn("inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium", styles, className)}
     >
-      {label}
+      {displayLabel}
     </span>
   );
 }

@@ -9,7 +9,7 @@ type IconComponent = ({ className }: { className?: string }) => React.JSX.Elemen
 interface NavItem { label: string; href: string; icon: IconComponent }
 interface NavSection { heading: string; items: NavItem[] }
 
-function buildNavSections(populatedSlugs?: string[]): NavSection[] {
+function buildNavSections(populatedSlugs?: string[], isAdmin?: boolean): NavSection[] {
   const categories = populatedSlugs
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
     : DISCOVERY_CATEGORIES;
@@ -31,6 +31,12 @@ function buildNavSections(populatedSlugs?: string[]): NavSection[] {
           })),
         }]
       : []),
+    ...(isAdmin
+      ? [{
+          heading: "ADMIN",
+          items: [{ label: "Dashboard", href: "/admin", icon: BarChartIcon }],
+        }]
+      : []),
     {
       heading: "ACCOUNT",
       items: [{ label: "Profile", href: "/profile", icon: UserIcon }],
@@ -38,9 +44,9 @@ function buildNavSections(populatedSlugs?: string[]): NavSection[] {
   ];
 }
 
-export function Sidebar({ populatedSlugs }: { populatedSlugs?: string[] } = {}) {
+export function Sidebar({ populatedSlugs, isAdmin }: { populatedSlugs?: string[]; isAdmin?: boolean } = {}) {
   const pathname = usePathname();
-  const sections = useMemo(() => buildNavSections(populatedSlugs), [populatedSlugs]);
+  const sections = useMemo(() => buildNavSections(populatedSlugs, isAdmin), [populatedSlugs, isAdmin]);
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text">
