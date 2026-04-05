@@ -9,29 +9,18 @@ interface CsvUploadProps {
   strategyId: string;
 }
 
-interface ParsedTrade {
-  timestamp: string;
-  symbol: string;
-  side: string;
-  price: string;
-  quantity: string;
-  fee: string;
-  order_type: string;
+interface ParsedPnl {
+  date: string;
+  pnl: string;
 }
 
-const REQUIRED_COLUMNS = ["timestamp", "symbol", "side", "price", "quantity"];
-const OPTIONAL_COLUMNS = ["fee", "order_type"];
-const ALL_COLUMNS = [...REQUIRED_COLUMNS, ...OPTIONAL_COLUMNS];
+const REQUIRED_COLUMNS = ["date", "pnl"];
+const ALL_COLUMNS = [...REQUIRED_COLUMNS];
 
 // Fuzzy column name matching
 const COLUMN_ALIASES: Record<string, string[]> = {
-  timestamp: ["time", "date", "datetime", "executed_at", "trade_time", "created_at"],
-  symbol: ["pair", "market", "instrument", "ticker"],
-  side: ["direction", "type", "buy_sell", "trade_side"],
-  price: ["avg_price", "execution_price", "fill_price", "trade_price"],
-  quantity: ["amount", "size", "qty", "volume", "filled"],
-  fee: ["commission", "fees", "cost", "trading_fee"],
-  order_type: ["ordertype", "order_kind"],
+  date: ["timestamp", "time", "datetime", "day", "trade_date"],
+  pnl: ["profit", "p&l", "daily_pnl", "net_pnl", "return", "profit_loss", "pl"],
 };
 
 function matchColumn(header: string): string | null {
@@ -152,44 +141,39 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
       const { rows } = parseCsv(text);
       const { mapping } = preview;
 
-      // Transform rows to trade objects
-      const trades: ParsedTrade[] = rows.map((row) => {
-        const trade: Record<string, string> = {};
+      // Transform rows to daily PnL records
+      const pnlRows: ParsedPnl[] = rows.map((row) => {
+        const record: Record<string, string> = {};
         for (const [idx, col] of Object.entries(mapping)) {
-          trade[col] = row[parseInt(idx)] ?? "";
+          record[col] = row[parseInt(idx)] ?? "";
         }
         return {
-          timestamp: trade.timestamp ?? "",
-          symbol: trade.symbol ?? "",
-          side: trade.side?.toLowerCase() ?? "",
-          price: trade.price ?? "0",
-          quantity: trade.quantity ?? "0",
-          fee: trade.fee ?? "0",
-          order_type: trade.order_type ?? "unknown",
+          date: record.date ?? "",
+          pnl: record.pnl ?? "0",
         };
       });
 
       // Validate
-      const invalid = trades.filter(
-        (t) => !t.timestamp || !t.symbol || !["buy", "sell"].includes(t.side) || isNaN(parseFloat(t.price)) || isNaN(parseFloat(t.quantity)),
+      const invalid = pnlRows.filter(
+        (r) => !r.date || isNaN(parseFloat(r.pnl)),
       );
       if (invalid.length > 0) {
-        setError(`${invalid.length} rows have invalid data (missing fields or non-numeric price/quantity). Check your CSV format.`);
+        setError(`${invalid.length} rows have invalid data (missing date or non-numeric PnL). Check your CSV format.`);
         setUploading(false);
         return;
       }
 
-      // Upload via server route (service-role client bypasses RLS)
-      const tradeRows = trades.map((t) => ({
+      // Convert daily PnL to trade-like records for the trades table
+      const tradeRows = pnlRows.map((r) => ({
         strategy_id: strategyId,
         exchange: "csv_import",
-        symbol: t.symbol,
-        side: t.side,
-        price: parseFloat(t.price),
-        quantity: parseFloat(t.quantity),
-        fee: t.fee ? parseFloat(t.fee) : 0,
-        order_type: t.order_type,
-        timestamp: t.timestamp,
+        symbol: "PORTFOLIO",
+        side: parseFloat(r.pnl) >= 0 ? "buy" : "sell",
+        price: Math.abs(parseFloat(r.pnl)),
+        quantity: 1,
+        fee: 0,
+        order_type: "daily_pnl",
+        timestamp: r.date.includes("T") ? r.date : `${r.date}T00:00:00Z`,
       }));
 
       const uploadRes = await fetch("/api/trades/upload", {
@@ -223,12 +207,12 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
   }
 
   function downloadTemplate() {
-    const csv = "timestamp,symbol,side,price,quantity,fee,order_type\n2024-01-15T10:30:00Z,BTCUSDT,buy,42500.00,0.1,4.25,market\n2024-01-15T14:00:00Z,BTCUSDT,sell,43100.00,0.1,4.31,market\n";
+    const csv = "date,pnl\n2024-01-15,1250.50\n2024-01-16,-430.25\n2024-01-17,890.00\n2024-01-18,2100.75\n2024-01-19,-150.00\n";
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "quantalyze-trade-template.csv";
+    a.download = "quantalyze-daily-pnl-template.csv";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -236,7 +220,7 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
   return (
     <Card>
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-text-primary">Import Trade History (CSV)</h3>
+        <h3 className="text-sm font-semibold text-text-primary">Import Daily PnL (CSV)</h3>
         <Button size="sm" variant="ghost" onClick={downloadTemplate}>
           Download Template
         </Button>
@@ -265,7 +249,7 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
             Drop a CSV file here or click to browse
           </p>
           <p className="text-xs text-text-muted">
-            Required: timestamp, symbol, side, price, quantity. Max 10MB.
+            Required columns: date, pnl (daily profit/loss). Max 10MB.
           </p>
           <input
             ref={fileInputRef}
