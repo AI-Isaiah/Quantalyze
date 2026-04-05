@@ -1,8 +1,9 @@
 import { cn } from "@/lib/utils";
 
 const colorMap: Record<string, string> = {
-  Directional: "bg-badge-directional/10 text-badge-directional",
-  Bidirectional: "bg-badge-bidirectional/10 text-badge-bidirectional",
+  "Long-Only": "bg-badge-directional/10 text-badge-directional",
+  "Short-Only": "bg-badge-bidirectional/10 text-badge-bidirectional",
+  "Long-Short": "bg-badge-directional/10 text-badge-directional",
   "Market Neutral": "bg-badge-market-neutral/10 text-badge-market-neutral",
   "Delta Neutral": "bg-badge-delta-neutral/10 text-badge-delta-neutral",
   Arbitrage: "bg-badge-arbitrage/10 text-badge-arbitrage",

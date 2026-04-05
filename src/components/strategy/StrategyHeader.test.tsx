@@ -10,7 +10,7 @@ const makeStrategy = (overrides?: Partial<Strategy>): Strategy => ({
   api_key_id: null,
   name: "Test Strategy",
   description: null,
-  strategy_types: ["Directional"],
+  strategy_types: ["Long-Only"],
   subtypes: ["Trend Following"],
   markets: ["Futures"],
   supported_exchanges: ["Binance"],

@@ -38,8 +38,9 @@ export const STRATEGY_NAMES = [
 ] as const;
 
 export const STRATEGY_TYPES = [
-  "Directional",
-  "Bidirectional",
+  "Long-Only",
+  "Short-Only",
+  "Long-Short",
   "Market Neutral",
   "Delta Neutral",
   "Arbitrage",
