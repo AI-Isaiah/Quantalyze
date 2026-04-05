@@ -45,10 +45,18 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setError("Not authenticated"); setLoading(false); return; }
 
+    // Resolve category slug to ID
+    const { data: catData } = await supabase
+      .from("discovery_categories")
+      .select("id")
+      .eq("slug", categorySlug)
+      .single();
+
     const payload = {
       user_id: user.id,
       name,
       description: description || null,
+      category_id: catData?.id ?? null,
       strategy_types: selectedTypes,
       subtypes: selectedSubtypes,
       markets: selectedMarkets,

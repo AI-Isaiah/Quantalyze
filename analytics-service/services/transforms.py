@@ -26,9 +26,12 @@ def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
     )
     daily_pnl["pnl"] = daily_pnl["net_notional"] - daily_pnl["total_fees"]
 
-    # Convert PnL to returns (using cumulative capital)
-    capital = abs(daily_pnl["net_notional"].iloc[0]) or 10000
-    daily_pnl["return"] = daily_pnl["pnl"] / capital
+    # Convert PnL to returns using running cumulative equity
+    initial_capital = abs(daily_pnl["net_notional"].iloc[0]) or 10000
+    equity = initial_capital + daily_pnl["pnl"].cumsum()
+    # Shift equity by one day so each day's return = pnl / previous day's equity
+    prev_equity = equity.shift(1).fillna(initial_capital)
+    daily_pnl["return"] = daily_pnl["pnl"] / prev_equity
 
     returns = pd.Series(
         daily_pnl["return"].values,

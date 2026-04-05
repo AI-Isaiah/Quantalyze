@@ -30,9 +30,9 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
 
     # Rolling metrics
     rolling = {
-        "sharpe_30d": _rolling_metric(returns, 30, qs.stats.sharpe),
-        "sharpe_90d": _rolling_metric(returns, 90, qs.stats.sharpe),
-        "sharpe_365d": _rolling_metric(returns, 365, qs.stats.sharpe),
+        "sharpe_30d": _rolling_sharpe(returns, 30),
+        "sharpe_90d": _rolling_sharpe(returns, 90),
+        "sharpe_365d": _rolling_sharpe(returns, 365),
     }
 
     # Return quantiles
@@ -74,20 +74,51 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
     metrics_json["ytd"] = float(returns[returns.index >= pd.Timestamp(f"{returns.index[-1].year}-01-01")].add(1).prod() - 1)
     metrics_json["best_day"] = float(returns.max())
     metrics_json["worst_day"] = float(returns.min())
+    metrics_json["three_month"] = float(returns.tail(63).add(1).prod() - 1) if len(returns) >= 63 else None
 
     monthly_rets = returns.resample("M").apply(lambda x: (1 + x).prod() - 1)
     if len(monthly_rets) > 0:
         metrics_json["best_month"] = float(monthly_rets.max())
         metrics_json["worst_month"] = float(monthly_rets.min())
 
-    # Benchmark metrics
+    # Additional risk metrics
+    try:
+        metrics_json["var_1m_99"] = float(qs.stats.value_at_risk(returns * np.sqrt(21), cutoff=0.01))
+    except Exception:
+        pass
+    try:
+        metrics_json["gini"] = float(qs.stats.gini(returns))
+    except Exception:
+        pass
+    try:
+        metrics_json["omega"] = float(qs.stats.omega(returns))
+    except Exception:
+        pass
+    try:
+        metrics_json["gain_pain"] = float(qs.stats.gain_to_pain_ratio(returns))
+    except Exception:
+        pass
+    try:
+        metrics_json["tail_ratio"] = float(qs.stats.tail_ratio(returns))
+    except Exception:
+        pass
+
+    # Benchmark metrics (single greeks() call for alpha + beta)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:
-            metrics_json["alpha"] = float(qs.stats.greeks(returns, benchmark_returns).get("alpha", 0))
-            metrics_json["beta"] = float(qs.stats.greeks(returns, benchmark_returns).get("beta", 0))
+            greeks = qs.stats.greeks(returns, benchmark_returns)
+            metrics_json["alpha"] = float(greeks.get("alpha", 0))
+            metrics_json["beta"] = float(greeks.get("beta", 0))
             aligned = returns.align(benchmark_returns, join="inner")
             if len(aligned[0]) > 1:
                 metrics_json["correlation"] = float(aligned[0].corr(aligned[1]))
+                excess = aligned[0] - aligned[1]
+                te = float(excess.std() * np.sqrt(252))
+                if te > 0:
+                    metrics_json["info_ratio"] = float(excess.mean() * 252 / te)
+                beta = metrics_json.get("beta", 0)
+                if beta and beta != 0:
+                    metrics_json["treynor"] = float((cagr - 0) / beta)
         except Exception:
             pass
 
@@ -136,23 +167,18 @@ def _monthly_returns_grid(returns: pd.Series) -> dict[str, dict[str, float]]:
     return grid
 
 
-def _rolling_metric(returns: pd.Series, window: int, fn) -> list[dict[str, Any]]:
-    """Compute a rolling metric over a window."""
-    result = []
+def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+    """Compute rolling annualized Sharpe using vectorized pandas rolling."""
     if len(returns) < window:
-        return result
-    for i in range(window, len(returns)):
-        chunk = returns.iloc[i - window:i]
-        try:
-            val = float(fn(chunk))
-            if np.isnan(val) or np.isinf(val):
-                continue
-        except Exception:
-            continue
-        result.append({
-            "date": returns.index[i].strftime("%Y-%m-%d"),
-            "value": val,
-        })
+        return []
+    roll_mean = returns.rolling(window).mean()
+    roll_std = returns.rolling(window).std()
+    rolling_sharpe = (roll_mean / roll_std) * np.sqrt(252)
+    rolling_sharpe = rolling_sharpe.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    result = [
+        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
+        for d, v in rolling_sharpe.items()
+    ]
     return cap_data_points(result)
 
 

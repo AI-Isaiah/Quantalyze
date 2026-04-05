@@ -17,13 +17,17 @@ export function RollingMetrics({ data }: RollingMetricsProps) {
   const keys = Object.keys(data);
   if (keys.length === 0) return null;
 
-  const merged = data[keys[0]].map((point, i) => {
-    const row: Record<string, string | number> = { date: point.date };
-    for (const key of keys) {
-      row[key] = data[key][i]?.value ?? 0;
+  // Merge by date key (series have different lengths due to window sizes)
+  const dateMap = new Map<string, Record<string, string | number>>();
+  for (const key of keys) {
+    for (const point of data[key]) {
+      if (!dateMap.has(point.date)) dateMap.set(point.date, { date: point.date });
+      dateMap.get(point.date)![key] = point.value;
     }
-    return row;
-  });
+  }
+  const merged = Array.from(dateMap.values()).sort((a, b) =>
+    String(a.date).localeCompare(String(b.date))
+  );
 
   return (
     <ResponsiveContainer width="100%" height={250}>

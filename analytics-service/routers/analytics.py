@@ -82,6 +82,6 @@ async def compute_analytics(req: ComputeRequest):
         supabase.table("strategy_analytics").upsert({
             "strategy_id": req.strategy_id,
             "computation_status": "failed",
-            "computation_error": str(e),
+            "computation_error": "Analytics computation failed. Contact support if this persists.",
         }).execute()
         raise HTTPException(status_code=500, detail="Analytics computation failed")

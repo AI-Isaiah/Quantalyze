@@ -1,3 +1,5 @@
+import { Fragment } from "react";
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 interface MonthlyHeatmapProps {
@@ -30,8 +32,8 @@ export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
         ))}
 
         {years.map((year) => (
-          <>
-            <div key={`${year}-label`} className="bg-surface px-2 py-2 text-xs font-medium text-text-primary">
+          <Fragment key={year}>
+            <div className="bg-surface px-2 py-2 text-xs font-medium text-text-primary">
               {year}
             </div>
             {MONTHS.map((m) => {
@@ -46,7 +48,7 @@ export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
                 </div>
               );
             })}
-          </>
+          </Fragment>
         ))}
       </div>
     </div>
