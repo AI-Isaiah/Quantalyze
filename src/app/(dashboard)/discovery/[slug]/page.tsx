@@ -3,7 +3,7 @@ import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { MOCK_STRATEGIES } from "@/lib/mock-data";
+import { getStrategiesByCategory } from "@/lib/queries";
 
 export default async function DiscoveryPage({
   params,
@@ -13,6 +13,8 @@ export default async function DiscoveryPage({
   const { slug } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
   const meta = cat ?? { name: slug, slug, description: "" };
+
+  const strategies = await getStrategiesByCategory(slug);
 
   return (
     <>
@@ -26,7 +28,7 @@ export default async function DiscoveryPage({
       {meta.description && (
         <InfoBanner className="mb-6">{meta.description}</InfoBanner>
       )}
-      <StrategyTable strategies={MOCK_STRATEGIES} categorySlug={slug} />
+      <StrategyTable strategies={strategies} categorySlug={slug} />
     </>
   );
 }

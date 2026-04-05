@@ -2,8 +2,9 @@ import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { StrategyHeader } from "@/components/strategy/StrategyHeader";
 import { MetadataCards } from "@/components/strategy/MetadataCards";
 import { PerformanceReport } from "@/components/strategy/PerformanceReport";
+import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { MOCK_STRATEGIES, generateDetailAnalytics } from "@/lib/mock-data";
+import { getStrategyDetail } from "@/lib/queries";
 
 export default async function StrategyDetailPage({
   params,
@@ -12,9 +13,9 @@ export default async function StrategyDetailPage({
 }) {
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
-  const strategy = MOCK_STRATEGIES.find((s) => s.id === strategyId);
+  const result = await getStrategyDetail(strategyId);
 
-  if (!strategy) {
+  if (!result) {
     return (
       <div className="text-center py-16 text-text-muted">
         Strategy not found.
@@ -22,7 +23,7 @@ export default async function StrategyDetailPage({
     );
   }
 
-  const analytics = generateDetailAnalytics(strategyId);
+  const { strategy, analytics } = result;
 
   return (
     <>
@@ -33,7 +34,10 @@ export default async function StrategyDetailPage({
           { label: strategy.name },
         ]}
       />
-      <StrategyHeader strategy={strategy} onRequestIntro={() => {}} />
+      <div className="flex items-start justify-between mb-6">
+        <StrategyHeader strategy={strategy} />
+        <RequestIntroButton strategyId={strategy.id} />
+      </div>
       <MetadataCards strategy={strategy} />
       <PerformanceReport analytics={analytics} />
     </>
