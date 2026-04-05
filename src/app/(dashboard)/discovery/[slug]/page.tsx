@@ -4,12 +4,18 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategiesByCategory } from "@/lib/queries";
+import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
 
 export default async function DiscoveryPage({
   params,
 }: {
   params: Promise<{ slug: string }>;
 }) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
   const { slug } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
   const meta = cat ?? { name: slug, slug, description: "" };

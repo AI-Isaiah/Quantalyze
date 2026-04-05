@@ -27,47 +27,40 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 
 
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
-    """Validate that the API key is read-only."""
+    """Validate that the API key is functional using safe read-only operations."""
     result = {"valid": False, "read_only": False, "error": None}
 
     try:
-        # Test basic connectivity
         await exchange.load_markets()
-        balance = await exchange.fetch_balance()
+        await exchange.fetch_balance()
         result["valid"] = True
 
-        # Check permissions (exchange-specific)
+        # Check permissions via read-only methods (never place orders)
         if exchange.id == "binance":
             try:
                 api_restrictions = await exchange.sapi_get_account_apirestrictions()
                 can_withdraw = api_restrictions.get("enableWithdrawals", False)
-                can_trade = api_restrictions.get("enableSpotAndMarginTrading", False) or api_restrictions.get("enableFutures", False)
                 result["read_only"] = not can_withdraw
                 if can_withdraw:
                     result["error"] = "Key has withdrawal permissions. Please use a read-only key."
             except Exception:
-                # If we can't check, assume it's ok but flag it
                 result["read_only"] = True
         else:
-            # For OKX/Bybit, try a small operation that would fail without trade perms
+            # OKX/Bybit: if we can fetch balance and orders, the key works.
+            # We assume read-only if balance fetch succeeds. The user must
+            # configure read-only keys on the exchange side.
             try:
-                await exchange.create_order("BTC/USDT", "limit", "buy", 0.00001, 1.0)
-                # If this succeeds, the key has trade permissions
-                result["read_only"] = False
-                result["error"] = "Key has trading permissions. Please use a read-only key."
+                await exchange.fetch_open_orders("BTC/USDT")
+                result["read_only"] = True
             except ccxt.PermissionDenied:
                 result["read_only"] = True
-            except ccxt.InvalidOrder:
-                # Order was invalid (expected for tiny amount) but we have trade perms
-                result["read_only"] = False
-                result["error"] = "Key has trading permissions. Please use a read-only key."
             except Exception:
                 result["read_only"] = True
 
-    except ccxt.AuthenticationError as e:
-        result["error"] = f"Authentication failed: {str(e)}"
-    except Exception as e:
-        result["error"] = f"Validation failed: {str(e)}"
+    except ccxt.AuthenticationError:
+        result["error"] = "Authentication failed. Check your API key and secret."
+    except Exception:
+        result["error"] = "Key validation failed. Please verify your credentials."
 
     return result
 
@@ -80,7 +73,6 @@ async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, s
         symbols = [symbol]
     else:
         await exchange.load_markets()
-        # Get all USDT pairs
         symbols = [s for s in exchange.symbols if s.endswith("/USDT")]
 
     for sym in symbols:

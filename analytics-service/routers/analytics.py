@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, HTTPException
 from models.schemas import ComputeRequest
 from services.metrics import compute_all_metrics
@@ -6,6 +7,7 @@ import os
 from supabase import create_client
 
 router = APIRouter(prefix="/api", tags=["analytics"])
+logger = logging.getLogger("quantalyze.analytics")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
@@ -15,6 +17,14 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 async def compute_analytics(req: ComputeRequest):
     """Compute analytics for a strategy from its trade history."""
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+    # Verify strategy exists
+    strategy_result = supabase.table("strategies").select("id, user_id").eq(
+        "id", req.strategy_id
+    ).single().execute()
+
+    if not strategy_result.data:
+        raise HTTPException(status_code=404, detail="Strategy not found")
 
     # Update status to computing
     supabase.table("strategy_analytics").upsert({
@@ -59,19 +69,19 @@ async def compute_analytics(req: ComputeRequest):
             **metrics,
         }).execute()
 
-        # Auto-publish: update strategy status if currently draft
-        supabase.table("strategies").update({
-            "status": "published"
-        }).eq("id", req.strategy_id).in_("status", ["draft", "pending_review"]).execute()
+        # NOTE: Auto-publish removed from HTTP endpoint for security.
+        # Strategy publishing should be handled by the frontend or an admin endpoint
+        # after verifying ownership.
 
         return {"status": "complete", "strategy_id": req.strategy_id}
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.error("Compute analytics failed for %s: %s", req.strategy_id, str(e))
         supabase.table("strategy_analytics").upsert({
             "strategy_id": req.strategy_id,
             "computation_status": "failed",
             "computation_error": str(e),
         }).execute()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Analytics computation failed")

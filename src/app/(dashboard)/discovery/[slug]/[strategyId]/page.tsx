@@ -5,12 +5,18 @@ import { PerformanceReport } from "@/components/strategy/PerformanceReport";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
+import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
   params,
 }: {
   params: Promise<{ slug: string; strategyId: string }>;
 }) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
   const result = await getStrategyDetail(strategyId);

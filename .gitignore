@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# gstack security reports and local state
+.gstack/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -1,4 +1,6 @@
 import os
+import secrets
+import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -6,6 +8,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from routers import analytics, exchange
+
+logger = logging.getLogger("quantalyze.analytics")
 
 app = FastAPI(
     title="Quantalyze Analytics Service",
@@ -18,11 +22,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_methods=["POST", "GET"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-Service-Key"],
 )
 
-# Service-to-service auth
-SERVICE_KEY = os.getenv("SERVICE_KEY", "")
+# Service-to-service auth (no default, fail closed)
+SERVICE_KEY = os.getenv("SERVICE_KEY")
 
 
 @app.middleware("http")
@@ -30,10 +34,12 @@ async def verify_service_key(request: Request, call_next):
     if request.url.path == "/health":
         return await call_next(request)
 
-    if SERVICE_KEY:
-        provided = request.headers.get("X-Service-Key", "")
-        if provided != SERVICE_KEY:
-            raise HTTPException(status_code=401, detail="Invalid service key")
+    if not SERVICE_KEY:
+        raise HTTPException(status_code=503, detail="Service not configured")
+
+    provided = request.headers.get("X-Service-Key", "")
+    if not secrets.compare_digest(provided, SERVICE_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     return await call_next(request)
 

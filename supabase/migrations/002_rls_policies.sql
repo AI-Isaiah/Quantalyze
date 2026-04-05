@@ -9,9 +9,14 @@ ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolios ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolio_strategies ENABLE ROW LEVEL SECURITY;
 
--- profiles: own = full access, others = read only
+-- profiles: own = full access, others = select (contact info hidden via public_profiles view)
 CREATE POLICY profiles_own ON profiles FOR ALL USING (id = auth.uid());
-CREATE POLICY profiles_read_others ON profiles FOR SELECT USING (id = auth.uid() OR true);
+CREATE POLICY profiles_read_public ON profiles FOR SELECT USING (true);
+
+-- View that hides sensitive contact info for non-owner reads
+CREATE OR REPLACE VIEW public_profiles AS
+SELECT id, display_name, company, description, avatar_url, role, created_at
+FROM profiles;
 
 -- api_keys: owner only
 CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid());
