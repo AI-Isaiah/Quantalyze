@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/Input";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/utils";
 import { ROLES, type Profile, type Role } from "@/lib/types";
+import { Textarea } from "@/components/ui/Textarea";
 
 export function ProfileForm({ profile }: { profile: Profile }) {
   const [displayName, setDisplayName] = useState(profile.display_name);
@@ -69,18 +70,13 @@ export function ProfileForm({ profile }: { profile: Profile }) {
             value={company}
             onChange={(e) => setCompany(e.target.value)}
           />
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-text-primary">
-              Description
-            </label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-              className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
-              placeholder="Tell allocators about yourself..."
-            />
-          </div>
+          <Textarea
+            label="Description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            placeholder="Tell allocators about yourself..."
+          />
           <div className="grid grid-cols-2 gap-4">
             <Input
               label="Telegram"

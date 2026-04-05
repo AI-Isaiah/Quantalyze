@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
 import { Card } from "@/components/ui/Card";
 import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES, DISCOVERY_CATEGORIES } from "@/lib/constants";
@@ -84,16 +85,13 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         <h2 className="text-lg font-semibold text-text-primary mb-4">Strategy Details</h2>
         <div className="space-y-4">
           <Input label="Strategy Name" value={name} onChange={(e) => setName(e.target.value)} required />
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium text-text-primary">Description</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-              className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
-              placeholder="Describe your strategy..."
-            />
-          </div>
+          <Textarea
+            label="Description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            placeholder="Describe your strategy..."
+          />
           <Select
             label="Category"
             options={DISCOVERY_CATEGORIES.map((c) => ({ value: c.slug, label: c.name }))}

@@ -1,15 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { Textarea } from "@/components/ui/Textarea";
 
 export function RequestIntroButton({ strategyId }: { strategyId: string }) {
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState("");
-  const [status, setStatus] = useState<"idle" | "loading" | "sent" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "loading" | "sent" | "checking" | "error">("checking");
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function checkExisting() {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setStatus("idle"); return; }
+
+      const { data } = await supabase
+        .from("contact_requests")
+        .select("id")
+        .eq("allocator_id", user.id)
+        .eq("strategy_id", strategyId)
+        .maybeSingle();
+
+      setStatus(data ? "sent" : "idle");
+    }
+    checkExisting();
+  }, [strategyId]);
 
   async function handleSubmit() {
     setStatus("loading");
@@ -32,10 +51,10 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
 
     if (error) {
       if (error.code === "23505") {
-        setError("You have already requested an intro for this strategy.");
-      } else {
-        setError(error.message);
+        setStatus("sent");
+        return;
       }
+      setError("Failed to send request. Please try again.");
       setStatus("error");
       return;
     }
@@ -47,9 +66,9 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
     <>
       <Button
         onClick={() => setOpen(true)}
-        disabled={status === "sent"}
+        disabled={status === "sent" || status === "checking"}
       >
-        {status === "sent" ? "Intro Requested" : "Request Intro"}
+        {status === "checking" ? "..." : status === "sent" ? "Intro Requested" : "Request Intro"}
       </Button>
 
       <Modal open={open && status !== "sent"} onClose={() => setOpen(false)} title="Request Introduction">
@@ -57,12 +76,12 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
           The team will review your request and facilitate an introduction
           with the strategy manager.
         </p>
-        <textarea
+        <Textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           rows={3}
           placeholder="What are you looking for? (optional)"
-          className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20 mb-4"
+          className="mb-4"
         />
         {error && <p className="text-sm text-negative mb-4">{error}</p>}
         <div className="flex justify-end gap-3">

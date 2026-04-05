@@ -7,7 +7,6 @@ import { cn } from "@/lib/utils";
 const TABS = [
   { label: "Discovery", href: "/discovery/crypto-sma", icon: SearchIcon },
   { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-  { label: "Portfolios", href: "/portfolios", icon: FolderIcon },
   { label: "Profile", href: "/profile", icon: UserIcon },
 ];
 

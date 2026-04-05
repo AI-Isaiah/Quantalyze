@@ -2,7 +2,9 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 const PUBLIC_ROUTES = ["/login", "/signup"];
+const ADMIN_ROUTES = ["/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? "";
 
 export async function proxy(request: NextRequest) {
   const supabaseResponse = NextResponse.next({ request });
@@ -42,9 +44,24 @@ export async function proxy(request: NextRequest) {
   }
 
   if (session && isPublicRoute) {
+    const redirect = request.nextUrl.searchParams.get("redirect");
     const url = request.nextUrl.clone();
-    url.pathname = DEFAULT_AUTHENTICATED_ROUTE;
+    url.pathname = redirect ?? DEFAULT_AUTHENTICATED_ROUTE;
+    url.searchParams.delete("redirect");
     return NextResponse.redirect(url);
+  }
+
+  // Admin route protection (optimistic check by email from JWT)
+  const isAdminRoute = ADMIN_ROUTES.some((route) =>
+    request.nextUrl.pathname.startsWith(route)
+  );
+  if (isAdminRoute && ADMIN_EMAIL) {
+    const email = session?.user?.email;
+    if (!email || email.toLowerCase() !== ADMIN_EMAIL.toLowerCase()) {
+      const url = request.nextUrl.clone();
+      url.pathname = DEFAULT_AUTHENTICATED_ROUTE;
+      return NextResponse.redirect(url);
+    }
   }
 
   return supabaseResponse;

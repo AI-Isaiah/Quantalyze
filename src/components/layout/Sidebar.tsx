@@ -13,8 +13,6 @@ const NAV_SECTIONS: NavSection[] = [
     heading: "MY WORKSPACE",
     items: [
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-      { label: "Portfolios", href: "/portfolios", icon: FolderIcon },
-      { label: "Decks", href: "/decks", icon: LayersIcon },
     ],
   },
   {
@@ -24,12 +22,6 @@ const NAV_SECTIONS: NavSection[] = [
       href: `/discovery/${cat.slug}`,
       icon: SearchIcon,
     })),
-  },
-  {
-    heading: "NETWORK",
-    items: [
-      { label: "Referral Program", href: "/referral", icon: UsersIcon },
-    ],
   },
   {
     heading: "ACCOUNT",
