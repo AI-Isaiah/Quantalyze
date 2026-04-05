@@ -1,36 +1,88 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Quantalyze
 
-## Getting Started
+Verified quantitative strategy marketplace. Asset managers publish strategies with exchange-verified performance data. Allocators discover, compare, and request introductions.
 
-First, run the development server:
+## Prerequisites
+
+- Node.js 20.9+
+- Python 3.12+ (for analytics service)
+- A [Supabase](https://supabase.com) project
+
+## Quick Start
 
 ```bash
+# 1. Clone and install
+git clone https://github.com/AI-Isaiah/Quantalyze.git
+cd quantalyze
+npm install
+
+# 2. Set up environment
+cp .env.example .env.local
+# Edit .env.local with your Supabase project URL and anon key
+
+# 3. Run database migrations
+# In Supabase SQL Editor, run:
+#   supabase/migrations/001_initial_schema.sql
+#   supabase/migrations/002_rls_policies.sql
+
+# 4. Start the dev server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). You'll be redirected to the login page.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Project Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+quantalyze/
+  src/
+    app/              # Next.js App Router pages
+      (auth)/         # Login, signup, onboarding
+      (dashboard)/    # Authenticated pages (discovery, strategies, profile)
+    components/       # React components (ui/, layout/, charts/, strategy/, auth/)
+    lib/              # Utilities, types, Supabase clients, mock data
+  analytics-service/  # FastAPI backend (Python)
+  supabase/           # Database migrations
+```
 
-## Learn More
+## Tech Stack
 
-To learn more about Next.js, take a look at the following resources:
+| Layer | Technology |
+|-------|-----------|
+| Frontend | Next.js 16, TypeScript, Tailwind CSS 4 |
+| Charts | Lightweight Charts, Recharts, @nivo/boxplot |
+| Database | Supabase (PostgreSQL + Auth + RLS) |
+| Analytics | FastAPI + quantstats + CCXT |
+| Deploy | Vercel (frontend), Railway (analytics) |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## npm Scripts
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start Next.js dev server |
+| `npm run build` | Production build |
+| `npm run lint` | Run ESLint |
+| `npm run typecheck` | Run TypeScript type checker |
+| `npm test` | Run Vitest tests |
 
-## Deploy on Vercel
+## Analytics Service (Optional)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The Python analytics service computes strategy metrics from exchange trade data.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+cd analytics-service
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Set environment variables (see .env.example for full list)
+export SERVICE_KEY=your-key
+export SUPABASE_URL=https://your-project.supabase.co
+export SUPABASE_SERVICE_KEY=your-service-role-key
+
+uvicorn main:app --reload
+```
+
+## Environment Variables
+
+See [`.env.example`](.env.example) for all required and optional variables.
