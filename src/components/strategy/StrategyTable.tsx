@@ -232,12 +232,21 @@ export function StrategyTable({ strategies, categorySlug }: StrategyTableProps) 
                   className="border-b border-border last:border-0 hover:bg-page/50 transition-colors"
                 >
                   <td className="px-4 py-3">
-                    <Link
-                      href={`/discovery/${categorySlug}/${s.id}`}
-                      className="font-medium text-text-primary hover:text-accent transition-colors"
-                    >
-                      {s.name}
-                    </Link>
+                    <div className="flex items-center gap-1.5">
+                      <Link
+                        href={`/discovery/${categorySlug}/${s.id}`}
+                        className="font-medium text-text-primary hover:text-accent transition-colors"
+                      >
+                        {s.name}
+                      </Link>
+                      {s.api_key_id && (
+                        <span title="Verified via exchange API" className="text-accent">
+                          <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M8 0a8 8 0 110 16A8 8 0 018 0zm3.78 5.22a.75.75 0 00-1.06 0L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25a.75.75 0 000-1.06z" />
+                          </svg>
+                        </span>
+                      )}
+                    </div>
                     <div className="flex gap-1 mt-1">
                       {s.strategy_types.map((t) => (
                         <Badge key={t} label={t} />
