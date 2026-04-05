@@ -6,9 +6,18 @@ Deno.serve(async (req: Request) => {
     return new Response("Method not allowed", { status: 405 });
   }
 
+  // This function should be invoked only by Supabase database triggers (not direct HTTP).
+  // The bearer token should be the service-role key from the database trigger context.
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     return new Response("Unauthorized", { status: 401 });
+  }
+
+  // Verify the token is the service role key (not a user JWT)
+  const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  const token = authHeader.replace("Bearer ", "");
+  if (SUPABASE_SERVICE_KEY && token !== SUPABASE_SERVICE_KEY) {
+    return new Response("Forbidden: only database triggers may invoke this function", { status: 403 });
   }
 
   if (!ANALYTICS_URL || !SERVICE_KEY) {

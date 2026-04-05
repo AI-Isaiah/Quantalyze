@@ -2,7 +2,6 @@
 
 import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 
@@ -49,14 +48,41 @@ function sanitizeCsvValue(val: string): string {
   return val.replace(/^[=+\-@\t\r]+/, "").trim();
 }
 
+function parseCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      fields.push(sanitizeCsvValue(current.trim()));
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(sanitizeCsvValue(current.trim()));
+  return fields;
+}
+
 function parseCsv(text: string): { headers: string[]; rows: string[][] } {
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   if (lines.length < 2) return { headers: [], rows: [] };
 
-  const headers = lines[0].split(",").map((h) => h.trim().replace(/^["']|["']$/g, ""));
-  const rows = lines.slice(1).map((line) =>
-    line.split(",").map((cell) => sanitizeCsvValue(cell.replace(/^["']|["']$/g, ""))),
-  );
+  const headers = parseCsvLine(lines[0]);
+  const rows = lines.slice(1).map((line) => parseCsvLine(line));
 
   return { headers, rows };
 }
@@ -153,24 +179,28 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
         return;
       }
 
-      // Upload in batches
-      const supabase = createClient();
-      const batchSize = 500;
-      for (let i = 0; i < trades.length; i += batchSize) {
-        const batch = trades.slice(i, i + batchSize).map((t) => ({
-          strategy_id: strategyId,
-          exchange: "csv_import",
-          symbol: t.symbol,
-          side: t.side,
-          price: parseFloat(t.price),
-          quantity: parseFloat(t.quantity),
-          fee: t.fee ? parseFloat(t.fee) : 0,
-          order_type: t.order_type,
-          timestamp: t.timestamp,
-        }));
+      // Upload via server route (service-role client bypasses RLS)
+      const tradeRows = trades.map((t) => ({
+        strategy_id: strategyId,
+        exchange: "csv_import",
+        symbol: t.symbol,
+        side: t.side,
+        price: parseFloat(t.price),
+        quantity: parseFloat(t.quantity),
+        fee: t.fee ? parseFloat(t.fee) : 0,
+        order_type: t.order_type,
+        timestamp: t.timestamp,
+      }));
 
-        const { error: insertError } = await supabase.from("trades").insert(batch);
-        if (insertError) throw new Error(insertError.message);
+      const uploadRes = await fetch("/api/trades/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId, trades: tradeRows }),
+      });
+
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json().catch(() => ({ error: "Upload failed" }));
+        throw new Error(err.error || "Trade upload failed");
       }
 
       // Trigger analytics computation

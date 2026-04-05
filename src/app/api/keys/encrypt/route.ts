@@ -1,12 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { encryptKey } from "@/lib/analytics-client";
-import { createClient } from "@/lib/supabase/server";
+import { withAuth } from "@/lib/api/withAuth";
 
-export async function POST(req: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
+export const POST = withAuth(async (req: NextRequest) => {
   const body = await req.json();
   const { exchange, api_key, api_secret, passphrase } = body;
 
@@ -21,4 +17,4 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : "Encryption failed";
     return NextResponse.json({ error: message }, { status: 500 });
   }
-}
+});

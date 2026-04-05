@@ -41,7 +41,8 @@ async def validate_key(request: Request, req: ValidateKeyRequest):
 
 
 @router.post("/encrypt-key")
-async def encrypt_key(req: EncryptKeyRequest):
+@limiter.limit("100/hour")
+async def encrypt_key(request: Request, req: EncryptKeyRequest):
     """Encrypt exchange credentials for storage. Returns encrypted fields to store in Supabase."""
     try:
         kek = get_kek()
@@ -53,7 +54,8 @@ async def encrypt_key(req: EncryptKeyRequest):
 
 
 @router.post("/fetch-trades")
-async def fetch_trades(req: FetchTradesRequest):
+@limiter.limit("10/hour")
+async def fetch_trades(request: Request, req: FetchTradesRequest):
     """Fetch trades from exchange for a strategy using stored encrypted API key."""
     try:
         kek = get_kek()
@@ -70,13 +72,17 @@ async def fetch_trades(req: FetchTradesRequest):
     if not strategy_result.data or not strategy_result.data.get("api_key_id"):
         raise HTTPException(status_code=400, detail="Strategy has no connected API key")
 
-    # Fetch encrypted API key
+    # Fetch encrypted API key and verify ownership
     api_key_row = supabase.table("api_keys").select("*").eq(
         "id", strategy_result.data["api_key_id"]
     ).single().execute()
 
     if not api_key_row.data:
         raise HTTPException(status_code=404, detail="API key not found")
+
+    # Verify the API key belongs to the same user as the strategy
+    if api_key_row.data.get("user_id") != strategy_result.data.get("user_id"):
+        raise HTTPException(status_code=403, detail="API key does not belong to strategy owner")
 
     key_data = api_key_row.data
 

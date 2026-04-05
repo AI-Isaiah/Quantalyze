@@ -47,8 +47,8 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
     setError(null);
 
     try {
-      // Step 1: Validate key is read-only
-      const validateRes = await fetch("/api/keys/validate", {
+      // Validate + encrypt atomically (prevents TOCTOU race on key permissions)
+      const res = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -59,33 +59,12 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
         }),
       });
 
-      if (!validateRes.ok) {
-        const err = await validateRes.json().catch(() => ({ error: "Validation failed" }));
-        throw new Error(err.error || err.detail || "Key validation failed");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Validation failed" }));
+        throw new Error(err.error || "Key validation failed");
       }
 
-      const validation = await validateRes.json();
-      if (!validation.read_only) {
-        throw new Error("This key has trading or withdrawal permissions. Only read-only keys are accepted.");
-      }
-
-      // Step 2: Encrypt key
-      const encryptRes = await fetch("/api/keys/encrypt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          exchange: data.exchange,
-          api_key: data.apiKey,
-          api_secret: data.apiSecret,
-          passphrase: data.passphrase || null,
-        }),
-      });
-
-      if (!encryptRes.ok) {
-        throw new Error("Failed to encrypt credentials");
-      }
-
-      const encrypted = await encryptRes.json();
+      const encrypted = await res.json();
 
       // Step 3: Store encrypted key in Supabase
       const supabase = createClient();
@@ -115,9 +94,13 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
 
   async function handleDeleteKey(keyId: string) {
     const supabase = createClient();
-    await supabase.from("api_keys").delete().eq("id", keyId);
+    const { error: deleteError } = await supabase.from("api_keys").delete().eq("id", keyId);
     setConfirmDelete(null);
-    await loadKeys();
+    if (deleteError) {
+      setError("Failed to delete key: " + deleteError.message);
+      return;
+    }
+    setKeys((prev) => prev.filter((k) => k.id !== keyId));
     router.refresh();
   }
 
