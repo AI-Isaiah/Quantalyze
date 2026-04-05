@@ -30,7 +30,7 @@ export default async function FactsheetPage({
   const { id } = await params;
   const result = await getFactsheetDetail(id);
 
-  if (!result) {
+  if (!result || !result.analytics) {
     return <div className="p-8 text-center text-text-muted">Strategy not found.</div>;
   }
 

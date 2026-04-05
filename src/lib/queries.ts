@@ -3,6 +3,14 @@ import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount } f
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
+// Supabase returns embedded relations as object (unique FK) or array
+function extractAnalytics(raw: unknown): StrategyAnalytics | null {
+  if (!raw) return null;
+  if (Array.isArray(raw)) return raw[0] ?? null;
+  if (typeof raw === "object") return raw as StrategyAnalytics;
+  return null;
+}
+
 export const EMPTY_ANALYTICS: StrategyAnalytics = {
   id: "",
   strategy_id: "",
@@ -50,7 +58,7 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
 
   return strategies.map((s) => ({
     ...s,
-    analytics: s.strategy_analytics?.[0] ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
+    analytics: extractAnalytics(s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
   }));
 }
 
@@ -92,7 +100,7 @@ export async function getPublicStrategyDetail(strategyId: string) {
 
   return {
     strategy,
-    analytics: strategy.strategy_analytics?.[0] ?? null,
+    analytics: extractAnalytics(strategy.strategy_analytics),
   };
 }
 
@@ -110,7 +118,7 @@ export async function getFactsheetDetail(strategyId: string) {
 
   return {
     strategy,
-    analytics: strategy.strategy_analytics?.[0] ?? null,
+    analytics: extractAnalytics(strategy.strategy_analytics),
   };
 }
 
@@ -130,7 +138,7 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 
   return {
     strategy,
-    analytics: strategy.strategy_analytics?.[0] ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
+    analytics: extractAnalytics(strategy.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
   };
 }
 

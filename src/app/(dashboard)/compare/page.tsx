@@ -38,7 +38,7 @@ export default async function ComparePage({
 
   const items = (strategies ?? []).map((s) => ({
     strategy: s as Strategy,
-    analytics: (s.strategy_analytics?.[0] ?? { ...EMPTY_ANALYTICS, strategy_id: s.id }) as StrategyAnalytics,
+    analytics: ((Array.isArray(s.strategy_analytics) ? s.strategy_analytics[0] : s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id }) as StrategyAnalytics,
   }));
 
   return (
