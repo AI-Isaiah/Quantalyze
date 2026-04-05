@@ -58,7 +58,7 @@ export default async function StrategiesPage() {
                 </div>
                 <div className="flex items-center gap-3 ml-4">
                   <Badge label={s.status} type="status" />
-                  <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} />
+                  <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} hasData={!!s.api_key_id} />
                   <span className="text-xs text-text-muted">
                     {new Date(s.created_at).toLocaleDateString()}
                   </span>

@@ -10,9 +10,10 @@ interface StrategyActionsProps {
   strategyId: string;
   status: string;
   hasApiKey?: boolean;
+  hasData?: boolean;
 }
 
-export function StrategyActions({ strategyId, status, hasApiKey }: StrategyActionsProps) {
+export function StrategyActions({ strategyId, status, hasApiKey, hasData }: StrategyActionsProps) {
   const [loading, setLoading] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [showDataGate, setShowDataGate] = useState(false);
@@ -31,7 +32,7 @@ export function StrategyActions({ strategyId, status, hasApiKey }: StrategyActio
   }
 
   function handleSubmitForReview() {
-    if (!hasApiKey) {
+    if (!hasData && !hasApiKey) {
       setShowDataGate(true);
       return;
     }
