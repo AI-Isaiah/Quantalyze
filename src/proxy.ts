@@ -42,7 +42,8 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (session && isPublicRoute) {
+  const isApiRoute = request.nextUrl.pathname.startsWith("/api/");
+  if (session && isPublicRoute && !isApiRoute) {
     const redirect = request.nextUrl.searchParams.get("redirect");
     const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
     const url = request.nextUrl.clone();
