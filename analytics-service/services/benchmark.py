@@ -122,6 +122,6 @@ async def get_benchmark_returns(symbol: str = "BTC", days: int = 1000) -> pd.Ser
         ]
         await db_execute(lambda: supabase.table("benchmark_prices").upsert(rows).execute())
     except Exception as e:
-            logger.warning("Benchmark cache write failed: %s", str(e))
+        logger.warning("Benchmark cache write failed: %s", str(e))
 
     return returns

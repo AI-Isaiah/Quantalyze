@@ -171,6 +171,16 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
     except Exception:
         pass
 
+    # Risk of Ruin (Cox-Miller approximation)
+    if len(wins) > 0 and len(losses) > 0:
+        total_trades = len(wins) + len(losses)
+        wr = len(wins) / total_trades
+        avg_loss_abs_rr = abs(float(losses.mean()))
+        pr = float(wins.mean()) / avg_loss_abs_rr if avg_loss_abs_rr > 0 else 0.0
+        avg_size = float(returns.abs().mean())
+        if avg_size > 0:
+            metrics_json["risk_of_ruin"] = compute_risk_of_ruin(wr, pr, avg_size)
+
     # Consecutive streaks
     is_positive = (returns > 0).astype(int)
     streaks = is_positive.groupby((is_positive != is_positive.shift()).cumsum())
@@ -211,6 +221,20 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
         except Exception:
             pass
 
+        # Store benchmark cumulative returns series aligned to strategy dates
+        try:
+            strat_start = returns.index.min()
+            strat_end = returns.index.max()
+            bm_slice = benchmark_returns[(benchmark_returns.index >= strat_start) & (benchmark_returns.index <= strat_end)]
+            if len(bm_slice) > 0:
+                bm_cumulative = (1 + bm_slice).cumprod()
+                metrics_json["benchmark_returns"] = [
+                    {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
+                    for d, v in bm_cumulative.items()
+                ]
+        except Exception:
+            pass
+
     # All individual metrics already passed through _safe_float().
     # sanitize_metrics() is a final guardrail for nested structures (metrics_json, rolling, quantiles).
     return sanitize_metrics({
@@ -232,6 +256,37 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
         "rolling_metrics": rolling,
         "return_quantiles": quantiles,
     })
+
+
+def compute_risk_of_ruin(
+    win_rate: float,
+    payoff_ratio: float,
+    avg_trade_size: float,
+) -> list[dict[str, float | None]]:
+    """Cox-Miller analytical approximation for probability of reaching various loss levels.
+
+    If p * r > q the strategy has a positive edge and ruin probability decays
+    exponentially with loss depth.  Otherwise ruin is certain at every level.
+    """
+    p = win_rate
+    q = 1.0 - p
+    r = payoff_ratio
+    loss_levels = [0.10, 0.20, 0.30, 0.50, 1.00]
+
+    results: list[dict[str, float | None]] = []
+    for level in loss_levels:
+        if p <= 0 or avg_trade_size <= 0:
+            prob = _safe_float(1.0)
+        elif p * r > q:
+            exponent = min(level / max(avg_trade_size, 0.001), 500)
+            prob = _safe_float((q / p) ** exponent)
+        else:
+            prob = _safe_float(1.0)
+        results.append({
+            "loss_pct": _safe_float(level * 100),
+            "probability": prob,
+        })
+    return results
 
 
 def _max_dd_duration(dd_series: pd.Series) -> int:

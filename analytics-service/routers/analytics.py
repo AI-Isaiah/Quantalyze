@@ -5,6 +5,7 @@ from slowapi.util import get_remote_address
 from models.schemas import ComputeRequest
 from services.metrics import compute_all_metrics
 from services.transforms import trades_to_daily_returns
+from services.benchmark import get_benchmark_returns
 from services.db import get_supabase, db_execute
 
 router = APIRouter(prefix="/api", tags=["analytics"])
@@ -58,8 +59,15 @@ async def compute_analytics(request: Request, req: ComputeRequest):
             }).execute()
             raise HTTPException(status_code=400, detail="Insufficient trading days")
 
+        # Fetch benchmark returns for BTC overlay
+        try:
+            benchmark_rets = await get_benchmark_returns("BTC")
+        except Exception as e:
+            logger.warning("Benchmark fetch failed: %s", str(e))
+            benchmark_rets = None
+
         # Compute all metrics
-        metrics = compute_all_metrics(returns)
+        metrics = compute_all_metrics(returns, benchmark_rets)
 
         # Store results
         supabase.table("strategy_analytics").upsert({

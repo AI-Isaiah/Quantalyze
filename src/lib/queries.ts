@@ -3,7 +3,7 @@ import type { Strategy, StrategyAnalytics } from "./types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
-const EMPTY_ANALYTICS: StrategyAnalytics = {
+export const EMPTY_ANALYTICS: StrategyAnalytics = {
   id: "",
   strategy_id: "",
   computed_at: "",
@@ -74,6 +74,44 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
     }
   }
   return Array.from(slugs);
+}
+
+const PUBLIC_ANALYTICS_COLUMNS = "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
+
+export async function getPublicStrategyDetail(strategyId: string) {
+  const supabase = await createClient();
+
+  const { data: strategy, error } = await supabase
+    .from("strategies")
+    .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS})`)
+    .eq("id", strategyId)
+    .eq("status", "published")
+    .single();
+
+  if (error || !strategy) return null;
+
+  return {
+    strategy,
+    analytics: strategy.strategy_analytics?.[0] ?? null,
+  };
+}
+
+export async function getFactsheetDetail(strategyId: string) {
+  const supabase = await createClient();
+
+  const { data: strategy, error } = await supabase
+    .from("strategies")
+    .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json)`)
+    .eq("id", strategyId)
+    .eq("status", "published")
+    .single();
+
+  if (error || !strategy) return null;
+
+  return {
+    strategy,
+    analytics: strategy.strategy_analytics?.[0] ?? null,
+  };
 }
 
 export async function getStrategyDetail(strategyId: string): Promise<{

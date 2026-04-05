@@ -2,13 +2,14 @@
 
 import { useState } from "react";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
+import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
 import type { StrategyAnalytics } from "@/lib/types";
 
 interface MetricGroup {
   title: string;
   defaultOpen: boolean;
   hide?: boolean;
-  metrics: { label: string; value: string; colorClass?: string }[];
+  metrics: { label: string; value: string; colorClass?: string; qualKey?: string; qualValue?: number | null }[];
 }
 
 function buildGroups(a: StrategyAnalytics): MetricGroup[] {
@@ -21,12 +22,12 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
       defaultOpen: true,
       metrics: [
         { label: "Cumulative Return", value: formatPercent(a.cumulative_return), colorClass: metricColor(a.cumulative_return) },
-        { label: "CAGR", value: formatPercent(a.cagr), colorClass: metricColor(a.cagr) },
-        { label: "Volatility", value: formatPercent(a.volatility) },
-        { label: "Sharpe", value: formatNumber(a.sharpe), colorClass: metricColor(a.sharpe) },
-        { label: "Sortino", value: formatNumber(a.sortino), colorClass: metricColor(a.sortino) },
-        { label: "Calmar", value: formatNumber(a.calmar), colorClass: metricColor(a.calmar) },
-        { label: "Max Drawdown", value: formatPercent(a.max_drawdown), colorClass: "text-negative" },
+        { label: "CAGR", value: formatPercent(a.cagr), colorClass: metricColor(a.cagr), qualKey: "cagr", qualValue: a.cagr },
+        { label: "Volatility", value: formatPercent(a.volatility), qualKey: "volatility", qualValue: a.volatility },
+        { label: "Sharpe", value: formatNumber(a.sharpe), colorClass: metricColor(a.sharpe), qualKey: "sharpe", qualValue: a.sharpe },
+        { label: "Sortino", value: formatNumber(a.sortino), colorClass: metricColor(a.sortino), qualKey: "sortino", qualValue: a.sortino },
+        { label: "Calmar", value: formatNumber(a.calmar), colorClass: metricColor(a.calmar), qualKey: "calmar", qualValue: a.calmar },
+        { label: "Max Drawdown", value: formatPercent(a.max_drawdown), colorClass: "text-negative", qualKey: "max_drawdown", qualValue: a.max_drawdown },
         { label: "DD Duration", value: a.max_drawdown_duration_days != null ? `${a.max_drawdown_duration_days}d` : "—" },
       ],
     },
@@ -145,14 +146,24 @@ function MetricAccordion({ group }: { group: MetricGroup }) {
       </button>
       {open && (
         <div className="px-4 pb-3 space-y-2">
-          {group.metrics.map((m) => (
-            <div key={m.label} className="flex items-center justify-between">
-              <span className="text-xs text-text-muted">{m.label}</span>
-              <span className={cn("text-xs font-metric", m.colorClass ?? "text-text-secondary")}>
-                {m.value}
-              </span>
-            </div>
-          ))}
+          {group.metrics.map((m) => {
+            const qual = m.qualKey ? getMetricLabel(m.qualKey, m.qualValue) : null;
+            return (
+              <div key={m.label} className="flex items-center justify-between">
+                <span className="text-xs text-text-muted">{m.label}</span>
+                <div className="flex items-center gap-2">
+                  {qual && (
+                    <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", LABEL_COLORS[qual.color])}>
+                      {qual.label}
+                    </span>
+                  )}
+                  <span className={cn("text-xs font-metric", m.colorClass ?? "text-text-secondary")}>
+                    {m.value}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

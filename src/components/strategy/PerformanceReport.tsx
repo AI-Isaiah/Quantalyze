@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Card } from "@/components/ui/Card";
 import { EquityCurve } from "@/components/charts/EquityCurve";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
@@ -9,6 +9,7 @@ import { MonthlyReturnsBar } from "@/components/charts/MonthlyReturnsBar";
 import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
 import { RollingMetrics } from "@/components/charts/RollingMetrics";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { RiskOfRuin } from "@/components/charts/RiskOfRuin";
 import { YearlyReturns } from "@/components/charts/YearlyReturns";
 import { MetricPanel } from "./MetricPanel";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
@@ -19,6 +20,18 @@ type Tab = (typeof TABS)[number];
 
 export function PerformanceReport({ analytics }: { analytics: StrategyAnalytics }) {
   const [tab, setTab] = useState<Tab>("Overview");
+
+  const benchmarkSeries = useMemo(() => {
+    const raw = analytics.metrics_json?.benchmark_returns;
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    return raw as { date: string; value: number }[];
+  }, [analytics.metrics_json]);
+
+  const riskOfRuinData = useMemo(() => {
+    const raw = analytics.metrics_json?.risk_of_ruin;
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    return raw as { loss_pct: number; probability: number }[];
+  }, [analytics.metrics_json]);
 
   return (
     <div>
@@ -31,7 +44,7 @@ export function PerformanceReport({ analytics }: { analytics: StrategyAnalytics 
 
       {/* Hero: equity curve */}
       <Card className="mb-6" padding="sm">
-        <EquityCurve data={analytics.returns_series ?? []} />
+        <EquityCurve data={analytics.returns_series ?? []} benchmarkSeries={benchmarkSeries} />
       </Card>
 
       {/* Tabs */}
@@ -92,6 +105,10 @@ export function PerformanceReport({ analytics }: { analytics: StrategyAnalytics 
               <Card padding="sm">
                 <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Rolling Sharpe</h3>
                 <RollingMetrics data={analytics.rolling_metrics ?? {}} />
+              </Card>
+              <Card padding="sm">
+                <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Risk of Ruin</h3>
+                <RiskOfRuin data={riskOfRuinData} />
               </Card>
             </>
           )}
