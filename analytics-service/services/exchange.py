@@ -111,19 +111,21 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     """
     daily_pnl: list[dict[str, Any]] = []
 
+    import logging
+    logger = logging.getLogger("quantalyze.analytics")
+
     try:
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) with pagination for full history
-            # Try multiple instrument types since "ANY" is not supported
             from datetime import datetime, timezone
             all_bills: list[dict] = []
 
             # Fetch bills across all instrument types, paginate for full history
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                 after_id = ""
-                max_pages = 100  # Up to 10,000 bills per type
+                type_count = 0
 
-                for _ in range(max_pages):
+                for page in range(100):
                     params: dict[str, str] = {"instType": inst_type, "limit": "100"}
                     if since_ms:
                         params["begin"] = str(since_ms)
@@ -136,17 +138,24 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         if not data:
                             break
                         all_bills.extend(data)
+                        type_count += len(data)
                         after_id = data[-1].get("billId", "")
                         if len(data) < 100:
                             break
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("OKX bills fetch failed for %s page %d: %s", inst_type, page, str(e))
                         break
 
-            # If no bills found via typed endpoints, try bills-archive for older history
+                if type_count > 0:
+                    logger.info("OKX %s: fetched %d bills", inst_type, type_count)
+
+            # If no bills found, try bills-archive for older history
             if not all_bills:
+                logger.info("OKX: no recent bills found, trying archive API...")
                 for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                     after_id = ""
-                    for _ in range(100):
+                    type_count = 0
+                    for page in range(100):
                         params = {"instType": inst_type, "limit": "100"}
                         if after_id:
                             params["after"] = after_id
@@ -156,11 +165,17 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             if not data:
                                 break
                             all_bills.extend(data)
+                            type_count += len(data)
                             after_id = data[-1].get("billId", "")
                             if len(data) < 100:
                                 break
-                        except Exception:
+                        except Exception as e:
+                            logger.warning("OKX archive failed for %s: %s", inst_type, str(e))
                             break
+                    if type_count > 0:
+                        logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
+
+            logger.info("OKX total: %d bills fetched across all types", len(all_bills))
 
             # Aggregate bills into daily PnL
             from collections import defaultdict
