@@ -16,14 +16,20 @@ async function analyticsRequest(path: string, body: Record<string, unknown>) {
     throw new Error("Analytics service is not reachable. Please ensure it is running.");
   }
 
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const error = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(error.detail ?? "Analytics service error");
+    }
+    // Non-JSON error (FastAPI unhandled exception returns text/plain)
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(text || `Analytics service error (${res.status})`);
+  }
+
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) {
     throw new Error("Analytics service returned an unexpected response. Is it running on the correct port?");
-  }
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(error.detail ?? "Analytics service error");
   }
 
   return res.json();

@@ -25,14 +25,23 @@ class EncryptKeyRequest(BaseModel):
 @limiter.limit("100/hour")
 async def validate_key(request: Request, req: ValidateKeyRequest):
     """Validate that an API key is read-only and functional."""
-    exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
+    try:
+        exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to initialize exchange connection")
 
     try:
         result = await validate_key_permissions(exchange)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Key validation failed")
+    except Exception as e:
+        logger.error("Key validation error: %s", str(e))
+        raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
     if result["error"]:
         raise HTTPException(status_code=400, detail=result["error"])
