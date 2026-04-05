@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { StrategyForm } from "@/components/strategy/StrategyForm";
+import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
 import { redirect } from "next/navigation";
 
 export default async function EditStrategyPage({
@@ -38,7 +39,14 @@ export default async function EditStrategyPage({
         ]}
       />
       <PageHeader title={`Edit: ${strategy.name}`} />
-      <StrategyForm strategy={strategy} mode="edit" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2">
+          <StrategyForm strategy={strategy} mode="edit" />
+        </div>
+        <div>
+          <ApiKeyManager strategyId={strategy.id} currentKeyId={strategy.api_key_id} />
+        </div>
+      </div>
     </>
   );
 }

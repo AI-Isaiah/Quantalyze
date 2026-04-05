@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
@@ -9,6 +11,7 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
 logger = logging.getLogger("quantalyze.analytics")
+limiter = Limiter(key_func=get_remote_address)
 
 
 class EncryptKeyRequest(BaseModel):
@@ -19,7 +22,8 @@ class EncryptKeyRequest(BaseModel):
 
 
 @router.post("/validate-key")
-async def validate_key(req: ValidateKeyRequest):
+@limiter.limit("100/hour")
+async def validate_key(request: Request, req: ValidateKeyRequest):
     """Validate that an API key is read-only and functional."""
     exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
 

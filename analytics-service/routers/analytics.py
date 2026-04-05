@@ -1,5 +1,7 @@
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from models.schemas import ComputeRequest
 from services.metrics import compute_all_metrics
 from services.transforms import trades_to_daily_returns
@@ -7,10 +9,12 @@ from services.db import get_supabase, db_execute
 
 router = APIRouter(prefix="/api", tags=["analytics"])
 logger = logging.getLogger("quantalyze.analytics")
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("/compute-analytics")
-async def compute_analytics(req: ComputeRequest):
+@limiter.limit("10/hour")
+async def compute_analytics(request: Request, req: ComputeRequest):
     """Compute analytics for a strategy from its trade history."""
     supabase = get_supabase()
 
