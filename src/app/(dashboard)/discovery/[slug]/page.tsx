@@ -1,7 +1,9 @@
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { InfoBanner } from "@/components/ui/InfoBanner";
+import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
+import { MOCK_STRATEGIES } from "@/lib/mock-data";
 
 export default async function DiscoveryPage({
   params,
@@ -24,9 +26,7 @@ export default async function DiscoveryPage({
       {meta.description && (
         <InfoBanner className="mb-6">{meta.description}</InfoBanner>
       )}
-      <div className="rounded-xl border border-border bg-surface p-8 text-center text-text-muted">
-        Strategy table coming in Step 4
-      </div>
+      <StrategyTable strategies={MOCK_STRATEGIES} categorySlug={slug} />
     </>
   );
 }

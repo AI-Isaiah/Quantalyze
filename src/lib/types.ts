@@ -22,8 +22,6 @@ export interface Profile {
   created_at: string;
 }
 
-import type { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "./constants";
-
 export interface Strategy {
   id: string;
   user_id: string;
@@ -31,10 +29,10 @@ export interface Strategy {
   api_key_id: string | null;
   name: string;
   description: string | null;
-  strategy_types: (typeof STRATEGY_TYPES)[number][];
-  subtypes: (typeof SUBTYPES)[number][];
-  markets: (typeof MARKETS)[number][];
-  supported_exchanges: (typeof EXCHANGES)[number][];
+  strategy_types: string[];
+  subtypes: string[];
+  markets: string[];
+  supported_exchanges: string[];
   leverage_range: string | null;
   avg_daily_turnover: number | null;
   aum: number | null;
