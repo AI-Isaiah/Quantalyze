@@ -35,3 +35,12 @@ export async function validateKey(exchange: string, apiKey: string, apiSecret: s
     passphrase: passphrase ?? null,
   });
 }
+
+export async function encryptKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
+  return analyticsRequest("/api/encrypt-key", {
+    exchange,
+    api_key: apiKey,
+    api_secret: apiSecret,
+    passphrase: passphrase ?? null,
+  });
+}

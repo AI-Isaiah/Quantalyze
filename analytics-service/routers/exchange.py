@@ -2,6 +2,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades
+from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
+from pydantic import BaseModel
 import os
 from supabase import create_client
 
@@ -10,6 +12,13 @@ logger = logging.getLogger("quantalyze.analytics")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+
+class EncryptKeyRequest(BaseModel):
+    exchange: str
+    api_key: str
+    api_secret: str
+    passphrase: str | None = None
 
 
 @router.post("/validate-key")
@@ -30,11 +39,72 @@ async def validate_key(req: ValidateKeyRequest):
     return {"valid": result["valid"], "read_only": result["read_only"]}
 
 
+@router.post("/encrypt-key")
+async def encrypt_key(req: EncryptKeyRequest):
+    """Encrypt exchange credentials for storage. Returns encrypted fields to store in Supabase."""
+    try:
+        kek = get_kek()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Encryption not configured")
+
+    encrypted = encrypt_credentials(req.api_key, req.api_secret, req.passphrase, kek)
+    return encrypted
+
+
 @router.post("/fetch-trades")
 async def fetch_trades(req: FetchTradesRequest):
-    """Fetch trades from exchange for a strategy (using stored API key)."""
-    # Encryption not yet implemented. Block until it is.
-    raise HTTPException(
-        status_code=501,
-        detail="Trade fetching is not yet available. API key encryption must be implemented first."
-    )
+    """Fetch trades from exchange for a strategy using stored encrypted API key."""
+    try:
+        kek = get_kek()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Encryption not configured")
+
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+    # Look up strategy
+    strategy_result = supabase.table("strategies").select("id, user_id, api_key_id").eq(
+        "id", req.strategy_id
+    ).single().execute()
+
+    if not strategy_result.data or not strategy_result.data.get("api_key_id"):
+        raise HTTPException(status_code=400, detail="Strategy has no connected API key")
+
+    # Fetch encrypted API key
+    api_key_row = supabase.table("api_keys").select("*").eq(
+        "id", strategy_result.data["api_key_id"]
+    ).single().execute()
+
+    if not api_key_row.data:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    key_data = api_key_row.data
+
+    # Decrypt credentials
+    try:
+        api_key, api_secret, passphrase = decrypt_credentials(key_data, kek)
+    except Exception:
+        logger.error("Failed to decrypt API key %s", key_data["id"])
+        raise HTTPException(status_code=500, detail="Failed to decrypt credentials")
+
+    exchange = create_exchange(key_data["exchange"], api_key, api_secret, passphrase)
+
+    try:
+        trades = await fetch_all_trades(exchange)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to fetch trades from exchange")
+    finally:
+        await exchange.close()
+
+    # Store trades
+    if trades:
+        for batch_start in range(0, len(trades), 500):
+            batch = trades[batch_start:batch_start + 500]
+            supabase.table("trades").insert(
+                [{"strategy_id": req.strategy_id, **t} for t in batch]
+            ).execute()
+
+        supabase.table("api_keys").update({
+            "last_sync_at": "now()"
+        }).eq("id", key_data["id"]).execute()
+
+    return {"trades_fetched": len(trades), "strategy_id": req.strategy_id}
