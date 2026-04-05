@@ -2,15 +2,11 @@ import httpx
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Any
-import os
 import logging
 
-from supabase import create_client
+from .db import get_supabase, db_execute
 
 logger = logging.getLogger("quantalyze.analytics")
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 
 async def fetch_btc_daily_prices(days: int = 1000) -> pd.Series:
@@ -80,38 +76,38 @@ async def get_benchmark_returns(symbol: str = "BTC", days: int = 1000) -> pd.Ser
         raise ValueError(f"Unsupported benchmark: {symbol}")
 
     # Try cache first
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-            result = supabase.table("benchmark_prices").select("*").eq(
+    try:
+        supabase = get_supabase()
+        result = await db_execute(
+            lambda: supabase.table("benchmark_prices").select("*").eq(
                 "symbol", symbol
             ).order("date", desc=True).limit(days).execute()
+        )
 
-            if result.data and len(result.data) > 10:
-                df = pd.DataFrame(result.data)
-                prices = pd.Series(
-                    df["close_price"].astype(float).values,
-                    index=pd.DatetimeIndex(pd.to_datetime(df["date"])),
-                    name=symbol,
-                ).sort_index()
-                return prices_to_returns(prices)
-        except Exception as e:
-            logger.warning("Benchmark cache read failed: %s", str(e))
+        if result.data and len(result.data) > 10:
+            df = pd.DataFrame(result.data)
+            prices = pd.Series(
+                df["close_price"].astype(float).values,
+                index=pd.DatetimeIndex(pd.to_datetime(df["date"])),
+                name=symbol,
+            ).sort_index()
+            return prices_to_returns(prices)
+    except Exception as e:
+        logger.warning("Benchmark cache read failed: %s", str(e))
 
     # Fetch fresh
     prices = await fetch_btc_daily_prices(days)
     returns = prices_to_returns(prices)
 
     # Cache for next time
-    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-        try:
-            supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-            rows = [
-                {"date": d.strftime("%Y-%m-%d"), "symbol": symbol, "close_price": float(v)}
-                for d, v in prices.items()
-            ]
-            supabase.table("benchmark_prices").upsert(rows).execute()
-        except Exception as e:
+    try:
+        supabase = get_supabase()
+        rows = [
+            {"date": d.strftime("%Y-%m-%d"), "symbol": symbol, "close_price": float(v)}
+            for d, v in prices.items()
+        ]
+        await db_execute(lambda: supabase.table("benchmark_prices").upsert(rows).execute())
+    except Exception as e:
             logger.warning("Benchmark cache write failed: %s", str(e))
 
     return returns

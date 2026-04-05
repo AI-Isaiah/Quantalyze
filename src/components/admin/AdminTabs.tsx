@@ -21,6 +21,13 @@ interface AdminTabsProps {
 export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators }: AdminTabsProps) {
   const [tab, setTab] = useState<Tab>("Intro Requests");
 
+  const pendingIntroCount = introRequests.filter((r) => r.status === "pending").length;
+  const badgeCounts: Record<string, number> = {
+    "Intro Requests": pendingIntroCount,
+    "Strategy Review": pendingStrategies.length,
+    "Allocators": pendingAllocators.length,
+  };
+
   return (
     <div>
       <div className="flex gap-1 border-b border-border mb-6">
@@ -36,19 +43,9 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators 
             )}
           >
             {t}
-            {t === "Intro Requests" && introRequests.filter((r) => r.status === "pending").length > 0 && (
+            {badgeCounts[t] > 0 && (
               <span className="ml-2 bg-accent text-white text-[10px] rounded-full px-1.5 py-0.5">
-                {introRequests.filter((r) => r.status === "pending").length}
-              </span>
-            )}
-            {t === "Strategy Review" && pendingStrategies.length > 0 && (
-              <span className="ml-2 bg-accent text-white text-[10px] rounded-full px-1.5 py-0.5">
-                {pendingStrategies.length}
-              </span>
-            )}
-            {t === "Allocators" && pendingAllocators.length > 0 && (
-              <span className="ml-2 bg-accent text-white text-[10px] rounded-full px-1.5 py-0.5">
-                {pendingAllocators.length}
+                {badgeCounts[t]}
               </span>
             )}
           </button>

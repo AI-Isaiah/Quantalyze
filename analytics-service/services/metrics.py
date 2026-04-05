@@ -25,8 +25,9 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
     dd_series = qs.stats.to_drawdown_series(returns)
     dd_duration = _max_dd_duration(dd_series)
 
-    # Monthly returns grid
-    monthly = _monthly_returns_grid(returns)
+    # Monthly returns (computed once, reused for grid + best/worst + VaR)
+    monthly_rets = returns.resample("M").apply(lambda x: (1 + x).prod() - 1)
+    monthly = _monthly_returns_grid_from_series(monthly_rets)
 
     # Rolling metrics
     rolling = {
@@ -76,16 +77,14 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
     metrics_json["worst_day"] = float(returns.min())
     metrics_json["three_month"] = float(returns.tail(63).add(1).prod() - 1) if len(returns) >= 63 else None
 
-    monthly_rets = returns.resample("M").apply(lambda x: (1 + x).prod() - 1)
     if len(monthly_rets) > 0:
         metrics_json["best_month"] = float(monthly_rets.max())
         metrics_json["worst_month"] = float(monthly_rets.min())
 
     # Additional risk metrics
     try:
-        monthly_for_var = returns.resample("M").apply(lambda x: (1 + x).prod() - 1)
-        if len(monthly_for_var) > 0:
-            metrics_json["var_1m_99"] = float(np.percentile(monthly_for_var, 1))
+        if len(monthly_rets) > 0:
+            metrics_json["var_1m_99"] = float(np.percentile(monthly_rets, 1))
     except Exception:
         pass
     try:
@@ -211,10 +210,9 @@ def _max_dd_duration(dd_series: pd.Series) -> int:
     return int(durations.max())
 
 
-def _monthly_returns_grid(returns: pd.Series) -> dict[str, dict[str, float]]:
-    """Year x Month grid of returns."""
+def _monthly_returns_grid_from_series(monthly: pd.Series) -> dict[str, dict[str, float]]:
+    """Year x Month grid from pre-computed monthly returns."""
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    monthly = returns.resample("M").apply(lambda x: (1 + x).prod() - 1)
     grid: dict[str, dict[str, float]] = {}
     for date, val in monthly.items():
         year = str(date.year)

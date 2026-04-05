@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
 import { Card } from "@/components/ui/Card";
-import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES, DISCOVERY_CATEGORIES } from "@/lib/constants";
+import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
 
 interface StrategyFormProps {
@@ -19,9 +19,20 @@ interface StrategyFormProps {
 export function StrategyForm({ strategy, mode }: StrategyFormProps) {
   const [name, setName] = useState(strategy?.name ?? "");
   const [description, setDescription] = useState(strategy?.description ?? "");
-  const [categorySlug, setCategorySlug] = useState<string>(
-    DISCOVERY_CATEGORIES[0].slug
-  );
+  const [categoryId, setCategoryId] = useState<string>(strategy?.category_id ?? "");
+  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+
+  useEffect(() => {
+    async function loadCategories() {
+      const supabase = createClient();
+      const { data } = await supabase.from("discovery_categories").select("id, name").order("sort_order");
+      if (data) {
+        setCategories(data);
+        if (!categoryId && data.length > 0) setCategoryId(data[0].id);
+      }
+    }
+    loadCategories();
+  }, []);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(strategy?.strategy_types ?? []);
   const [selectedSubtypes, setSelectedSubtypes] = useState<string[]>(strategy?.subtypes ?? []);
   const [selectedMarkets, setSelectedMarkets] = useState<string[]>(strategy?.markets ?? []);
@@ -46,18 +57,11 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setError("Not authenticated"); setLoading(false); return; }
 
-    // Resolve category slug to ID
-    const { data: catData } = await supabase
-      .from("discovery_categories")
-      .select("id")
-      .eq("slug", categorySlug)
-      .single();
-
     const payload = {
       user_id: user.id,
       name,
       description: description || null,
-      category_id: catData?.id ?? null,
+      category_id: categoryId || null,
       strategy_types: selectedTypes,
       subtypes: selectedSubtypes,
       markets: selectedMarkets,
@@ -94,9 +98,9 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
           />
           <Select
             label="Category"
-            options={DISCOVERY_CATEGORIES.map((c) => ({ value: c.slug, label: c.name }))}
-            value={categorySlug}
-            onChange={(e) => setCategorySlug(e.target.value)}
+            options={categories.map((c) => ({ value: c.id, label: c.name }))}
+            value={categoryId}
+            onChange={(e) => setCategoryId(e.target.value)}
           />
         </div>
       </Card>

@@ -34,25 +34,15 @@ const EMPTY_ANALYTICS: StrategyAnalytics = {
 export async function getStrategiesByCategory(categorySlug: string): Promise<StrategyWithAnalytics[]> {
   const supabase = await createClient();
 
-  const { data: category, error: catError } = await supabase
-    .from("discovery_categories")
-    .select("id")
-    .eq("slug", categorySlug)
-    .single();
-
-  if (catError || !category) {
-    console.warn("Category lookup failed:", catError?.message);
-    return [];
-  }
-
-  const { data: strategies, error: stratError } = await supabase
+  // Single query: join strategies with category filter + analytics
+  const { data: strategies, error } = await supabase
     .from("strategies")
-    .select(`*, strategy_analytics (*)`)
-    .eq("category_id", category.id)
+    .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
+    .eq("discovery_categories.slug", categorySlug)
     .eq("status", "published");
 
-  if (stratError) {
-    console.error("Strategy query failed:", stratError.message);
+  if (error) {
+    console.error("Strategy query failed:", error.message);
     return [];
   }
 

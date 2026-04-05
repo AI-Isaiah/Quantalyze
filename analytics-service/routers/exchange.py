@@ -3,15 +3,11 @@ from fastapi import APIRouter, HTTPException
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
+from services.db import get_supabase, db_execute
 from pydantic import BaseModel
-import os
-from supabase import create_client
 
 router = APIRouter(prefix="/api", tags=["exchange"])
 logger = logging.getLogger("quantalyze.analytics")
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 
 class EncryptKeyRequest(BaseModel):
@@ -59,7 +55,7 @@ async def fetch_trades(req: FetchTradesRequest):
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Encryption not configured")
 
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    supabase = get_supabase()
 
     # Look up strategy
     strategy_result = supabase.table("strategies").select("id, user_id, api_key_id").eq(

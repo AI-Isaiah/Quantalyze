@@ -3,20 +3,16 @@ from fastapi import APIRouter, HTTPException
 from models.schemas import ComputeRequest
 from services.metrics import compute_all_metrics
 from services.transforms import trades_to_daily_returns
-import os
-from supabase import create_client
+from services.db import get_supabase, db_execute
 
 router = APIRouter(prefix="/api", tags=["analytics"])
 logger = logging.getLogger("quantalyze.analytics")
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 
 @router.post("/compute-analytics")
 async def compute_analytics(req: ComputeRequest):
     """Compute analytics for a strategy from its trade history."""
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    supabase = get_supabase()
 
     # Verify strategy exists
     strategy_result = supabase.table("strategies").select("id, user_id").eq(
