@@ -14,7 +14,7 @@ export default async function StrategiesPage() {
 
   const { data: strategies } = await supabase
     .from("strategies")
-    .select("id, name, status, strategy_types, review_note, created_at")
+    .select("id, name, status, strategy_types, review_note, created_at, api_key_id")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false });
 
@@ -58,7 +58,7 @@ export default async function StrategiesPage() {
                 </div>
                 <div className="flex items-center gap-3 ml-4">
                   <Badge label={s.status} type="status" />
-                  <StrategyActions strategyId={s.id} status={s.status} />
+                  <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} />
                   <span className="text-xs text-text-muted">
                     {new Date(s.created_at).toLocaleDateString()}
                   </span>
