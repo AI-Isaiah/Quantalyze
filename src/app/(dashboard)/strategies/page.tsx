@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
+import { StrategyActions } from "@/components/strategy/StrategyActions";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -13,7 +14,7 @@ export default async function StrategiesPage() {
 
   const { data: strategies } = await supabase
     .from("strategies")
-    .select("id, name, status, strategy_types, created_at")
+    .select("id, name, status, strategy_types, review_note, created_at")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false });
 
@@ -38,26 +39,32 @@ export default async function StrategiesPage() {
       ) : (
         <div className="space-y-3">
           {strategies.map((s) => (
-            <Link key={s.id} href={`/strategies/${s.id}/edit`}>
-              <Card className="hover:shadow-elevated transition-shadow cursor-pointer">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="font-medium text-text-primary">{s.name}</h3>
-                    <div className="flex gap-1.5 mt-1">
-                      {s.strategy_types.map((t: string) => (
-                        <Badge key={t} label={t} />
-                      ))}
-                    </div>
+            <Card key={s.id}>
+              <div className="flex items-center justify-between">
+                <div className="flex-1 min-w-0">
+                  <Link href={`/strategies/${s.id}/edit`} className="font-medium text-text-primary hover:text-accent transition-colors">
+                    {s.name}
+                  </Link>
+                  <div className="flex gap-1.5 mt-1">
+                    {s.strategy_types.map((t: string) => (
+                      <Badge key={t} label={t} />
+                    ))}
                   </div>
-                  <div className="flex items-center gap-3">
-                    <Badge label={s.status} type="status" />
-                    <span className="text-xs text-text-muted">
-                      {new Date(s.created_at).toLocaleDateString()}
-                    </span>
-                  </div>
+                  {s.review_note && s.status === "draft" && (
+                    <p className="mt-2 text-xs text-negative bg-negative/5 rounded px-2 py-1">
+                      Review feedback: {s.review_note}
+                    </p>
+                  )}
                 </div>
-              </Card>
-            </Link>
+                <div className="flex items-center gap-3 ml-4">
+                  <Badge label={s.status} type="status" />
+                  <StrategyActions strategyId={s.id} status={s.status} />
+                  <span className="text-xs text-text-muted">
+                    {new Date(s.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+              </div>
+            </Card>
           ))}
         </div>
       )}
