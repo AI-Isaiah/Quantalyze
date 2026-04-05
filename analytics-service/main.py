@@ -7,6 +7,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Sentry error tracking (optional, production only)
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=0.1)
+    except ImportError:
+        logging.getLogger("quantalyze.analytics").warning("SENTRY_DSN set but sentry-sdk not installed")
+
 from routers import analytics, exchange
 
 logger = logging.getLogger("quantalyze.analytics")

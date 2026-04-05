@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades
@@ -87,7 +88,6 @@ async def fetch_trades(req: FetchTradesRequest):
     # Use last_sync_at to avoid re-fetching old trades
     since_ms = None
     if key_data.get("last_sync_at"):
-        from datetime import datetime
         try:
             dt = datetime.fromisoformat(key_data["last_sync_at"].replace("Z", "+00:00"))
             since_ms = int(dt.timestamp() * 1000)
@@ -111,7 +111,7 @@ async def fetch_trades(req: FetchTradesRequest):
             ).execute()
 
         supabase.table("api_keys").update({
-            "last_sync_at": "now()"
+            "last_sync_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", key_data["id"]).execute()
 
     return {"trades_fetched": len(trades), "strategy_id": req.strategy_id}

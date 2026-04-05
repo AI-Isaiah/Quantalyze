@@ -54,6 +54,28 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   }));
 }
 
+export async function getPopulatedCategorySlugs(): Promise<string[]> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("strategies")
+    .select("discovery_categories!inner(slug)")
+    .eq("status", "published");
+
+  if (error || !data) return [];
+
+  const slugs = new Set<string>();
+  for (const row of data) {
+    const raw = (row as Record<string, unknown>).discovery_categories;
+    const cats = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    for (const cat of cats) {
+      const slug = (cat as Record<string, unknown>)?.slug;
+      if (typeof slug === "string") slugs.add(slug);
+    }
+  }
+  return Array.from(slugs);
+}
+
 export async function getStrategyDetail(strategyId: string): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;

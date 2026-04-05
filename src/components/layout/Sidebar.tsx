@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
@@ -8,29 +9,38 @@ type IconComponent = ({ className }: { className?: string }) => React.JSX.Elemen
 interface NavItem { label: string; href: string; icon: IconComponent }
 interface NavSection { heading: string; items: NavItem[] }
 
-const NAV_SECTIONS: NavSection[] = [
-  {
-    heading: "MY WORKSPACE",
-    items: [
-      { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-    ],
-  },
-  {
-    heading: "DISCOVERY",
-    items: DISCOVERY_CATEGORIES.map((cat) => ({
-      label: cat.name,
-      href: `/discovery/${cat.slug}`,
-      icon: SearchIcon,
-    })),
-  },
-  {
-    heading: "ACCOUNT",
-    items: [{ label: "Profile", href: "/profile", icon: UserIcon }],
-  },
-];
+function buildNavSections(populatedSlugs?: string[]): NavSection[] {
+  const categories = populatedSlugs
+    ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
+    : DISCOVERY_CATEGORIES;
 
-export function Sidebar() {
+  return [
+    {
+      heading: "MY WORKSPACE",
+      items: [
+        { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+      ],
+    },
+    ...(categories.length > 0
+      ? [{
+          heading: "DISCOVERY",
+          items: categories.map((cat) => ({
+            label: cat.name,
+            href: `/discovery/${cat.slug}`,
+            icon: SearchIcon,
+          })),
+        }]
+      : []),
+    {
+      heading: "ACCOUNT",
+      items: [{ label: "Profile", href: "/profile", icon: UserIcon }],
+    },
+  ];
+}
+
+export function Sidebar({ populatedSlugs }: { populatedSlugs?: string[] } = {}) {
   const pathname = usePathname();
+  const sections = useMemo(() => buildNavSections(populatedSlugs), [populatedSlugs]);
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text">
@@ -41,7 +51,7 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
-        {NAV_SECTIONS.map((section) => (
+        {sections.map((section) => (
           <div key={section.heading} className="mt-6 first:mt-2">
             <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-sidebar-text/50">
               {section.heading}

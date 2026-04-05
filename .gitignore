@@ -39,6 +39,19 @@ yarn-error.log*
 # gstack security reports and local state
 .gstack/
 
+# python
+__pycache__/
+*.pyc
+.coverage
+*.venv/
+
+# playwright state
+.playwright-mcp/
+
+# screenshots and docs at repo root
+*.png
+*.docx
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

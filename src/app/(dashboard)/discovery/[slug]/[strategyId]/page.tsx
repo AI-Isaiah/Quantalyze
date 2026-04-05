@@ -3,6 +3,7 @@ import { StrategyHeader } from "@/components/strategy/StrategyHeader";
 import { MetadataCards } from "@/components/strategy/MetadataCards";
 import { PerformanceReport } from "@/components/strategy/PerformanceReport";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
+import { Disclaimer } from "@/components/ui/Disclaimer";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
@@ -41,11 +42,12 @@ export default async function StrategyDetailPage({
         ]}
       />
       <div className="flex items-start justify-between mb-6">
-        <StrategyHeader strategy={strategy} />
+        <StrategyHeader strategy={strategy} computedAt={analytics.computed_at} />
         <RequestIntroButton strategyId={strategy.id} />
       </div>
       <MetadataCards strategy={strategy} />
       <PerformanceReport analytics={analytics} />
+      <Disclaimer variant="strategy" />
     </>
   );
 }

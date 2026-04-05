@@ -1,6 +1,6 @@
 import httpx
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import logging
 
@@ -19,27 +19,41 @@ async def fetch_btc_daily_prices(days: int = 1000) -> pd.Series:
 
 
 async def _fetch_from_binance(days: int) -> pd.Series:
-    """Fetch from Binance public klines API (no auth needed)."""
-    end_ms = int(datetime.utcnow().timestamp() * 1000)
-    start_ms = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
+    """Fetch from Binance public klines API with pagination (1000 candles per request max)."""
+    now = datetime.now(timezone.utc)
+    end_ms = int(now.timestamp() * 1000)
+    start_ms = int((now - timedelta(days=days)).timestamp() * 1000)
 
+    all_candles: list[list[Any]] = []
+    cursor_ms = start_ms
+
+    max_pages = 20
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            "https://api.binance.com/api/v3/klines",
-            params={
-                "symbol": "BTCUSDT",
-                "interval": "1d",
-                "startTime": start_ms,
-                "endTime": end_ms,
-                "limit": 1000,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        while cursor_ms < end_ms and max_pages > 0:
+            max_pages -= 1
+            resp = await client.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": "BTCUSDT",
+                    "interval": "1d",
+                    "startTime": cursor_ms,
+                    "endTime": end_ms,
+                    "limit": 1000,
+                },
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            all_candles.extend(batch)
+            new_cursor = int(batch[-1][6]) + 1
+            if new_cursor <= cursor_ms:
+                break
+            cursor_ms = new_cursor
 
     dates = []
     closes = []
-    for candle in data:
+    for candle in all_candles:
         dates.append(pd.Timestamp(candle[0], unit="ms").date())
         closes.append(float(candle[4]))  # Close price
 
