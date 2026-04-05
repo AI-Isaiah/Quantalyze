@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { StrategyForm } from "@/components/strategy/StrategyForm";
 import { ApiKeyManager } from "@/components/strategy/ApiKeyManager";
+import { CsvUpload } from "@/components/strategy/CsvUpload";
 import { redirect } from "next/navigation";
 
 export default async function EditStrategyPage({
@@ -43,8 +44,9 @@ export default async function EditStrategyPage({
         <div className="lg:col-span-2">
           <StrategyForm strategy={strategy} mode="edit" />
         </div>
-        <div>
+        <div className="space-y-6">
           <ApiKeyManager strategyId={strategy.id} currentKeyId={strategy.api_key_id} />
+          <CsvUpload strategyId={strategy.id} />
         </div>
       </div>
     </>

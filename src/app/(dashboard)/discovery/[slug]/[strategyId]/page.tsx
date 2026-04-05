@@ -2,6 +2,7 @@ import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { StrategyHeader } from "@/components/strategy/StrategyHeader";
 import { MetadataCards } from "@/components/strategy/MetadataCards";
 import { PerformanceReport } from "@/components/strategy/PerformanceReport";
+import { ComputeStatus } from "@/components/strategy/ComputeStatus";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
@@ -46,6 +47,11 @@ export default async function StrategyDetailPage({
         <RequestIntroButton strategyId={strategy.id} />
       </div>
       <MetadataCards strategy={strategy} />
+      {analytics.computation_status !== "complete" && (
+        <div className="mb-6">
+          <ComputeStatus status={analytics.computation_status} error={analytics.computation_error} />
+        </div>
+      )}
       <PerformanceReport analytics={analytics} />
       <Disclaimer variant="strategy" />
     </>
