@@ -1,5 +1,4 @@
 import { createClient } from "@/lib/supabase/server";
-import { MOCK_STRATEGIES, generateDetailAnalytics } from "./mock-data";
 import type { Strategy, StrategyAnalytics } from "./types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
@@ -42,26 +41,22 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
     .single();
 
   if (catError || !category) {
-    // Category not found in DB. Show mock data for demo purposes.
-    console.warn("Category lookup failed, using mock data:", catError?.message);
-    return MOCK_STRATEGIES;
+    console.warn("Category lookup failed:", catError?.message);
+    return [];
   }
 
   const { data: strategies, error: stratError } = await supabase
     .from("strategies")
-    .select(`
-      *,
-      strategy_analytics (*)
-    `)
+    .select(`*, strategy_analytics (*)`)
     .eq("category_id", category.id)
     .eq("status", "published");
 
   if (stratError) {
     console.error("Strategy query failed:", stratError.message);
-    return MOCK_STRATEGIES;
+    return [];
   }
 
-  if (!strategies || strategies.length === 0) return MOCK_STRATEGIES;
+  if (!strategies || strategies.length === 0) return [];
 
   return strategies.map((s) => ({
     ...s,
@@ -81,12 +76,7 @@ export async function getStrategyDetail(strategyId: string): Promise<{
     .eq("id", strategyId)
     .single();
 
-  if (error || !strategy) {
-    // Fallback to mock for demo
-    const mock = MOCK_STRATEGIES.find((s) => s.id === strategyId);
-    if (!mock) return null;
-    return { strategy: mock, analytics: generateDetailAnalytics(strategyId) };
-  }
+  if (error || !strategy) return null;
 
   const { data: analytics } = await supabase
     .from("strategy_analytics")
@@ -96,6 +86,6 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 
   return {
     strategy,
-    analytics: analytics ?? generateDetailAnalytics(strategyId),
+    analytics: analytics ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
   };
 }

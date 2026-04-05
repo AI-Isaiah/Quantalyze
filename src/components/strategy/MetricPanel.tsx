@@ -7,6 +7,7 @@ import type { StrategyAnalytics } from "@/lib/types";
 interface MetricGroup {
   title: string;
   defaultOpen: boolean;
+  hide?: boolean;
   metrics: { label: string; value: string; colorClass?: string }[];
 }
 
@@ -59,6 +60,7 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
     {
       title: "Benchmark Metrics",
       defaultOpen: false,
+      hide: m?.alpha == null && m?.beta == null,
       metrics: [
         { label: "Alpha", value: formatNumber(m?.alpha), colorClass: metricColor(m?.alpha) },
         { label: "Beta", value: formatNumber(m?.beta) },
@@ -70,6 +72,7 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
     {
       title: "Trade Metrics",
       defaultOpen: false,
+      hide: tm == null,
       metrics: [
         { label: "Total Trades", value: tm?.total_trades != null ? Math.round(tm.total_trades).toLocaleString() : "—" },
         { label: "Win Rate", value: formatPercent(tm?.win_rate) },
@@ -85,7 +88,7 @@ export function MetricPanel({ analytics }: { analytics: StrategyAnalytics }) {
 
   return (
     <div className="sticky top-8 space-y-1 overflow-y-auto max-h-[calc(100vh-8rem)]">
-      {groups.map((group) => (
+      {groups.filter((g) => !g.hide).map((group) => (
         <MetricAccordion key={group.title} group={group} />
       ))}
     </div>
