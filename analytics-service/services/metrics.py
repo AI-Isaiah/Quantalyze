@@ -103,6 +103,62 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
     except Exception:
         pass
 
+    # Distribution metrics
+    try:
+        metrics_json["skewness"] = float(returns.skew())
+    except Exception:
+        pass
+    try:
+        metrics_json["kurtosis"] = float(returns.kurtosis())
+    except Exception:
+        pass
+    try:
+        metrics_json["smart_sharpe"] = float(qs.stats.smart_sharpe(returns))
+    except Exception:
+        pass
+    try:
+        metrics_json["smart_sortino"] = float(qs.stats.smart_sortino(returns))
+    except Exception:
+        pass
+
+    # Win/Loss metrics
+    wins = returns[returns > 0]
+    losses = returns[returns < 0]
+    if len(wins) > 0:
+        metrics_json["avg_win"] = float(wins.mean())
+    if len(losses) > 0:
+        metrics_json["avg_loss"] = float(losses.mean())
+    if len(losses) > 0 and len(wins) > 0:
+        metrics_json["win_loss_ratio"] = float(len(wins) / len(losses)) if len(losses) > 0 else None
+        avg_loss_abs = abs(float(losses.mean()))
+        if avg_loss_abs > 0:
+            metrics_json["payoff_ratio"] = float(wins.mean() / avg_loss_abs)
+    try:
+        metrics_json["profit_factor"] = float(qs.stats.profit_factor(returns))
+    except Exception:
+        pass
+
+    # Consecutive streaks
+    is_positive = (returns > 0).astype(int)
+    streaks = is_positive.groupby((is_positive != is_positive.shift()).cumsum())
+    win_streaks = streaks.sum()
+    loss_streaks = (~is_positive.astype(bool)).astype(int).groupby(
+        (is_positive != is_positive.shift()).cumsum()
+    ).sum()
+    metrics_json["consecutive_wins"] = int(win_streaks.max()) if len(win_streaks) > 0 else 0
+    metrics_json["consecutive_losses"] = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
+
+    # Outlier ratios
+    try:
+        mean_ret = float(returns.mean())
+        std_ret = float(returns.std())
+        if std_ret > 0:
+            outlier_threshold = 2 * std_ret
+            metrics_json["outlier_win_ratio"] = float((returns > mean_ret + outlier_threshold).mean())
+            metrics_json["outlier_loss_ratio"] = float((returns < mean_ret - outlier_threshold).mean())
+    except Exception:
+        pass
+
     # Benchmark metrics (single greeks() call for alpha + beta)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:

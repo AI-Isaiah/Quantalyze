@@ -8,6 +8,8 @@ import { MonthlyHeatmap } from "@/components/charts/MonthlyHeatmap";
 import { MonthlyReturnsBar } from "@/components/charts/MonthlyReturnsBar";
 import { ReturnQuantiles } from "@/components/charts/ReturnQuantiles";
 import { RollingMetrics } from "@/components/charts/RollingMetrics";
+import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
+import { YearlyReturns } from "@/components/charts/YearlyReturns";
 import { MetricPanel } from "./MetricPanel";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
 import type { StrategyAnalytics } from "@/lib/types";
@@ -74,6 +76,14 @@ export function PerformanceReport({ analytics }: { analytics: StrategyAnalytics 
               <Card padding="sm">
                 <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Return Quantiles</h3>
                 <ReturnQuantiles data={analytics.return_quantiles ?? {}} />
+              </Card>
+              <Card padding="sm">
+                <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Yearly Returns</h3>
+                <YearlyReturns monthlyReturns={analytics.monthly_returns ?? {}} />
+              </Card>
+              <Card padding="sm">
+                <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Return Distribution</h3>
+                <ReturnHistogram returns={analytics.returns_series ?? []} />
               </Card>
             </>
           )}

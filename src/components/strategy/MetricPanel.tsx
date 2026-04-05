@@ -70,6 +70,33 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
       ],
     },
     {
+      title: "Distribution",
+      defaultOpen: false,
+      hide: m?.skewness == null && m?.kurtosis == null,
+      metrics: [
+        { label: "Skewness", value: formatNumber(m?.skewness) },
+        { label: "Kurtosis", value: formatNumber(m?.kurtosis) },
+        { label: "Smart Sharpe", value: formatNumber(m?.smart_sharpe), colorClass: metricColor(m?.smart_sharpe) },
+        { label: "Smart Sortino", value: formatNumber(m?.smart_sortino), colorClass: metricColor(m?.smart_sortino) },
+        { label: "Outlier Win %", value: formatPercent(m?.outlier_win_ratio) },
+        { label: "Outlier Loss %", value: formatPercent(m?.outlier_loss_ratio) },
+      ],
+    },
+    {
+      title: "Win/Loss Analysis",
+      defaultOpen: false,
+      hide: m?.avg_win == null && m?.avg_loss == null,
+      metrics: [
+        { label: "Avg Win", value: formatPercent(m?.avg_win), colorClass: "text-positive" },
+        { label: "Avg Loss", value: formatPercent(m?.avg_loss), colorClass: "text-negative" },
+        { label: "Win/Loss Ratio", value: formatNumber(m?.win_loss_ratio) },
+        { label: "Payoff Ratio", value: formatNumber(m?.payoff_ratio) },
+        { label: "Profit Factor", value: formatNumber(m?.profit_factor), colorClass: metricColor(m?.profit_factor != null ? m.profit_factor - 1 : null) },
+        { label: "Max Win Streak", value: m?.consecutive_wins != null ? String(m.consecutive_wins) : "—" },
+        { label: "Max Loss Streak", value: m?.consecutive_losses != null ? String(m.consecutive_losses) : "—" },
+      ],
+    },
+    {
       title: "Trade Metrics",
       defaultOpen: false,
       hide: tm == null,
