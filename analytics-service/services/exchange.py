@@ -102,32 +102,133 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     return result
 
 
-async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, since_ms: int | None = None) -> list[dict[str, Any]]:
-    """Fetch trade history from the exchange."""
-    all_trades: list[dict[str, Any]] = []
+async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) -> list[dict[str, Any]]:
+    """Fetch daily PnL from the exchange account bills/ledger.
 
-    if symbol:
-        symbols = [symbol]
-    else:
-        await exchange.load_markets()
-        symbols = [s for s in exchange.symbols if s.endswith("/USDT")]
+    Instead of scanning every trading pair for individual trades (200+ API calls),
+    this fetches account-level P&L history directly. Much faster and gives us
+    exactly what we need for analytics: daily profit/loss.
+    """
+    daily_pnl: list[dict[str, Any]] = []
 
-    for sym in symbols:
-        try:
-            trades = await exchange.fetch_my_trades(sym, since=since_ms, limit=1000)
-            for trade in trades:
-                all_trades.append({
-                    "exchange": exchange.id,
-                    "symbol": trade["symbol"],
-                    "side": trade["side"],
-                    "price": trade["price"],
-                    "quantity": trade["amount"],
-                    "fee": trade.get("fee", {}).get("cost"),
-                    "fee_currency": trade.get("fee", {}).get("currency"),
-                    "timestamp": trade["datetime"],
-                    "order_type": trade.get("type"),
+    try:
+        if exchange.id == "okx":
+            # OKX: fetch account bills (P&L history) with pagination for full history
+            from datetime import datetime, timezone
+            all_bills: list[dict] = []
+            after_id = ""
+            max_pages = 50  # Safety limit (50 pages * 100 bills = 5000 entries)
+
+            for _ in range(max_pages):
+                params: dict[str, str] = {"instType": "ANY", "type": "8", "limit": "100"}
+                if since_ms:
+                    params["begin"] = str(since_ms)
+                if after_id:
+                    params["after"] = after_id
+
+                bills = await exchange.private_get_account_bills(params)
+                data = bills.get("data", [])
+                if not data:
+                    break
+
+                all_bills.extend(data)
+                after_id = data[-1].get("billId", "")
+
+                # Stop if we got fewer than the limit (last page)
+                if len(data) < 100:
+                    break
+
+            for bill in all_bills:
+                pnl_val = float(bill.get("pnl", 0))
+                ts_raw = bill.get("ts", "")
+                ts_iso = ""
+                if ts_raw and ts_raw.isdigit():
+                    ts_iso = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc).isoformat()
+
+                daily_pnl.append({
+                    "exchange": "okx",
+                    "symbol": "PORTFOLIO",
+                    "side": "buy" if pnl_val >= 0 else "sell",
+                    "price": abs(pnl_val),
+                    "quantity": 1,
+                    "fee": abs(float(bill.get("fee", 0))),
+                    "fee_currency": bill.get("ccy", "USDT"),
+                    "timestamp": ts_iso,
+                    "order_type": "daily_pnl",
                 })
-        except Exception:
-            continue
 
-    return all_trades
+        elif exchange.id == "binance":
+            # Binance: fetch income history (futures P&L)
+            try:
+                params = {"limit": 1000}
+                if since_ms:
+                    params["startTime"] = since_ms
+                income = await exchange.fapiPrivate_get_income(params)
+                for item in income:
+                    if item.get("incomeType") in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+                        daily_pnl.append({
+                            "exchange": "binance",
+                            "symbol": item.get("symbol", "PORTFOLIO"),
+                            "side": "buy" if float(item.get("income", 0)) >= 0 else "sell",
+                            "price": abs(float(item.get("income", 0))),
+                            "quantity": 1,
+                            "fee": 0,
+                            "fee_currency": "USDT",
+                            "timestamp": item.get("time", ""),
+                            "order_type": "daily_pnl",
+                        })
+                for entry in daily_pnl:
+                    if entry["timestamp"] and str(entry["timestamp"]).isdigit():
+                        from datetime import datetime, timezone
+                        ts = int(entry["timestamp"]) / 1000
+                        entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            except Exception:
+                # Fallback: fetch spot trades for BTC only
+                trades = await exchange.fetch_my_trades("BTC/USDT", since=since_ms, limit=1000)
+                for t in trades:
+                    daily_pnl.append({
+                        "exchange": "binance", "symbol": t["symbol"],
+                        "side": t["side"], "price": t["price"],
+                        "quantity": t["amount"],
+                        "fee": t.get("fee", {}).get("cost"),
+                        "fee_currency": t.get("fee", {}).get("currency"),
+                        "timestamp": t["datetime"], "order_type": t.get("type"),
+                    })
+
+        elif exchange.id == "bybit":
+            # Bybit: fetch closed PnL
+            try:
+                params = {"category": "linear", "limit": 200}
+                result = await exchange.private_get_v5_position_closed_pnl(params)
+                items = result.get("result", {}).get("list", [])
+                for item in items:
+                    daily_pnl.append({
+                        "exchange": "bybit",
+                        "symbol": item.get("symbol", "PORTFOLIO"),
+                        "side": "buy" if float(item.get("closedPnl", 0)) >= 0 else "sell",
+                        "price": abs(float(item.get("closedPnl", 0))),
+                        "quantity": 1,
+                        "fee": 0,
+                        "fee_currency": "USDT",
+                        "timestamp": item.get("createdTime", ""),
+                        "order_type": "daily_pnl",
+                    })
+                for entry in daily_pnl:
+                    if entry["timestamp"] and str(entry["timestamp"]).isdigit():
+                        from datetime import datetime, timezone
+                        ts = int(entry["timestamp"]) / 1000
+                        entry["timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            except Exception:
+                pass
+
+    except Exception as e:
+        import logging
+        logging.getLogger("quantalyze.analytics").error("fetch_daily_pnl failed: %s", str(e))
+
+    return daily_pnl
+
+
+async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, since_ms: int | None = None) -> list[dict[str, Any]]:
+    """Fetch daily PnL from exchange. Uses account-level APIs instead of
+    scanning individual trading pairs (which is 200+ API calls on OKX)."""
+    return await fetch_daily_pnl(exchange, since_ms)
