@@ -19,13 +19,13 @@ export function StrategyActions({ strategyId, status }: StrategyActionsProps) {
   async function updateStatus(newStatus: string) {
     setLoading(true);
     const supabase = createClient();
-    await supabase
+    const { error } = await supabase
       .from("strategies")
       .update({ status: newStatus, review_note: null })
       .eq("id", strategyId);
     setLoading(false);
     setConfirmArchive(false);
-    router.refresh();
+    if (!error) router.refresh();
   }
 
   if (status === "draft") {

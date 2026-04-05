@@ -4,7 +4,6 @@ import { createServerClient } from "@supabase/ssr";
 const PUBLIC_ROUTES = ["/login", "/signup"];
 const ADMIN_ROUTES = ["/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? "";
 
 export async function proxy(request: NextRequest) {
   const supabaseResponse = NextResponse.next({ request });
@@ -55,9 +54,10 @@ export async function proxy(request: NextRequest) {
   const isAdminRoute = ADMIN_ROUTES.some((route) =>
     request.nextUrl.pathname.startsWith(route)
   );
-  if (isAdminRoute && ADMIN_EMAIL) {
-    const email = session?.user?.email;
-    if (!email || email.toLowerCase() !== ADMIN_EMAIL.toLowerCase()) {
+  if (isAdminRoute) {
+    const adminEmail = process.env.ADMIN_EMAIL ?? "";
+    const email = session?.user?.email ?? "";
+    if (!adminEmail || email.toLowerCase() !== adminEmail.toLowerCase()) {
       const url = request.nextUrl.clone();
       url.pathname = DEFAULT_AUTHENTICATED_ROUTE;
       return NextResponse.redirect(url);

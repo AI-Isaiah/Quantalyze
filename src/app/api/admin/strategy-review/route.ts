@@ -1,36 +1,21 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { isAdmin } from "@/lib/admin";
+import { withAdminAuth } from "@/lib/api/withAdminAuth";
 
-export async function POST(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (!user || !isAdmin(user.email)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
-  }
-
-  const { id, action, review_note } = await request.json();
-  if (!id || !["approve", "reject"].includes(action)) {
+export const POST = withAdminAuth(async (body, admin) => {
+  const { id, action, review_note } = body;
+  if (!id || !["approve", "reject"].includes(action as string)) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  const admin = createAdminClient();
+  const update = action === "approve"
+    ? { status: "published", review_note: null }
+    : { status: "draft", review_note: (review_note as string) || "Needs changes before approval." };
 
-  if (action === "approve") {
-    const { error } = await admin
-      .from("strategies")
-      .update({ status: "published", review_note: null })
-      .eq("id", id);
-    if (error) return NextResponse.json({ error: "Update failed" }, { status: 500 });
-  } else {
-    const { error } = await admin
-      .from("strategies")
-      .update({ status: "draft", review_note: review_note || "Needs changes before approval." })
-      .eq("id", id);
-    if (error) return NextResponse.json({ error: "Update failed" }, { status: 500 });
+  const { error } = await admin.from("strategies").update(update).eq("id", id);
+
+  if (error) {
+    return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
   return NextResponse.json({ success: true });
-}
+});

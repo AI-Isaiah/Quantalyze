@@ -65,21 +65,31 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators 
 function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown>> }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleAction(id: string, status: "accepted" | "declined") {
     setLoading(id);
-    await fetch("/api/admin/intro-request", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, status }),
-    });
-    setLoading(null);
-    router.refresh();
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/intro-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, status }),
+      });
+      if (!res.ok) { setError("Action failed. Please try again."); return; }
+      router.refresh();
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoading(null);
+    }
   }
 
   if (requests.length === 0) {
     return <Card className="text-center py-8 text-text-muted">No intro requests yet.</Card>;
   }
+
+  const errorBanner = error ? <p className="text-sm text-negative mb-3">{error}</p> : null;
 
   return (
     <div className="space-y-3">
@@ -126,30 +136,37 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
   const [loading, setLoading] = useState<string | null>(null);
   const [rejectId, setRejectId] = useState<string | null>(null);
   const [rejectNote, setRejectNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   async function approve(id: string) {
     setLoading(id);
-    await fetch("/api/admin/strategy-review", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, action: "approve" }),
-    });
-    setLoading(null);
-    router.refresh();
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/strategy-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action: "approve" }),
+      });
+      if (!res.ok) { setError("Approval failed."); return; }
+      router.refresh();
+    } catch { setError("Network error."); } finally { setLoading(null); }
   }
 
   async function reject() {
     if (!rejectId) return;
     setLoading(rejectId);
-    await fetch("/api/admin/strategy-review", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: rejectId, action: "reject", review_note: rejectNote }),
-    });
-    setLoading(null);
-    setRejectId(null);
-    setRejectNote("");
-    router.refresh();
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/strategy-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: rejectId, action: "reject", review_note: rejectNote }),
+      });
+      if (!res.ok) { setError("Rejection failed."); return; }
+      setRejectId(null);
+      setRejectNote("");
+      router.refresh();
+    } catch { setError("Network error."); } finally { setLoading(null); }
   }
 
   if (strategies.length === 0) {
@@ -168,7 +185,7 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
                   <p className="text-sm font-medium text-text-primary">{s.name as string}</p>
                   <p className="text-xs text-text-muted">by {profile?.display_name ?? "Unknown"}</p>
                   <div className="flex gap-1 mt-1">
-                    {(s.strategy_types as string[]).map((t) => (
+                    {((s.strategy_types as string[]) ?? []).map((t) => (
                       <Badge key={t} label={t} />
                     ))}
                   </div>
@@ -208,16 +225,20 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
 function AllocatorsTab({ allocators }: { allocators: Array<Record<string, unknown>> }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function approve(id: string) {
     setLoading(id);
-    await fetch("/api/admin/allocator-approve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
-    setLoading(null);
-    router.refresh();
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/allocator-approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) { setError("Approval failed."); return; }
+      router.refresh();
+    } catch { setError("Network error."); } finally { setLoading(null); }
   }
 
   if (allocators.length === 0) {

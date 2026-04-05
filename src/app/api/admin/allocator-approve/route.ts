@@ -1,22 +1,12 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { isAdmin } from "@/lib/admin";
+import { withAdminAuth } from "@/lib/api/withAdminAuth";
 
-export async function POST(request: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (!user || !isAdmin(user.email)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
-  }
-
-  const { id } = await request.json();
+export const POST = withAdminAuth(async (body, admin) => {
+  const { id } = body;
   if (!id) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  const admin = createAdminClient();
   const { error } = await admin
     .from("profiles")
     .update({ allocator_status: "verified" })
@@ -27,4 +17,4 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ success: true });
-}
+});

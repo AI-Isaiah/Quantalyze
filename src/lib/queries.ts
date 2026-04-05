@@ -72,20 +72,14 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 
   const { data: strategy, error } = await supabase
     .from("strategies")
-    .select("*")
+    .select("*, strategy_analytics (*)")
     .eq("id", strategyId)
     .single();
 
   if (error || !strategy) return null;
 
-  const { data: analytics } = await supabase
-    .from("strategy_analytics")
-    .select("*")
-    .eq("strategy_id", strategyId)
-    .single();
-
   return {
     strategy,
-    analytics: analytics ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
+    analytics: strategy.strategy_analytics?.[0] ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
   };
 }

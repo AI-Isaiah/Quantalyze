@@ -48,10 +48,10 @@ def encrypt_credentials(
 
     return {
         "api_key_encrypted": encrypted_data.decode(),
-        "api_secret_encrypted": "",  # All credentials in single encrypted blob
+        "api_secret_encrypted": None,  # All credentials stored in api_key_encrypted blob
         "passphrase_encrypted": None,
         "dek_encrypted": encrypted_dek.decode(),
-        "nonce": "",  # Fernet handles nonce internally
+        "nonce": None,  # Fernet handles nonce internally
         "kek_version": get_kek_version(),
     }
 
