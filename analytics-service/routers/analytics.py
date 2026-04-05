@@ -28,10 +28,10 @@ async def compute_analytics(request: Request, req: ComputeRequest):
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     # Update status to computing
-    supabase.table("strategy_analytics").upsert({
-        "strategy_id": req.strategy_id,
-        "computation_status": "computing",
-    }).execute()
+    supabase.table("strategy_analytics").upsert(
+        {"strategy_id": req.strategy_id, "computation_status": "computing"},
+        on_conflict="strategy_id",
+    ).execute()
 
     try:
         # Fetch trades
@@ -41,22 +41,28 @@ async def compute_analytics(request: Request, req: ComputeRequest):
 
         trades = result.data
         if not trades or len(trades) < 2:
-            supabase.table("strategy_analytics").upsert({
-                "strategy_id": req.strategy_id,
-                "computation_status": "failed",
-                "computation_error": "Insufficient trade history. At least 2 trading days required.",
-            }).execute()
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": req.strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": "Insufficient trade history. At least 2 trading days required.",
+                },
+                on_conflict="strategy_id",
+            ).execute()
             raise HTTPException(status_code=400, detail="Insufficient trade history")
 
         # Transform trades to daily returns
         returns = trades_to_daily_returns(trades)
 
         if len(returns) < 2:
-            supabase.table("strategy_analytics").upsert({
-                "strategy_id": req.strategy_id,
-                "computation_status": "failed",
-                "computation_error": "Insufficient trading days after aggregation.",
-            }).execute()
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": req.strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": "Insufficient trading days after aggregation.",
+                },
+                on_conflict="strategy_id",
+            ).execute()
             raise HTTPException(status_code=400, detail="Insufficient trading days")
 
         # Fetch benchmark returns for BTC overlay
@@ -70,16 +76,15 @@ async def compute_analytics(request: Request, req: ComputeRequest):
         metrics = compute_all_metrics(returns, benchmark_rets)
 
         # Store results
-        supabase.table("strategy_analytics").upsert({
-            "strategy_id": req.strategy_id,
-            "computation_status": "complete",
-            "computation_error": None,
-            **metrics,
-        }).execute()
-
-        # NOTE: Auto-publish removed from HTTP endpoint for security.
-        # Strategy publishing should be handled by the frontend or an admin endpoint
-        # after verifying ownership.
+        supabase.table("strategy_analytics").upsert(
+            {
+                "strategy_id": req.strategy_id,
+                "computation_status": "complete",
+                "computation_error": None,
+                **metrics,
+            },
+            on_conflict="strategy_id",
+        ).execute()
 
         return {"status": "complete", "strategy_id": req.strategy_id}
 
@@ -87,9 +92,12 @@ async def compute_analytics(request: Request, req: ComputeRequest):
         raise
     except Exception as e:
         logger.error("Compute analytics failed for %s: %s", req.strategy_id, str(e))
-        supabase.table("strategy_analytics").upsert({
-            "strategy_id": req.strategy_id,
-            "computation_status": "failed",
-            "computation_error": "Analytics computation failed. Contact support if this persists.",
-        }).execute()
+        supabase.table("strategy_analytics").upsert(
+            {
+                "strategy_id": req.strategy_id,
+                "computation_status": "failed",
+                "computation_error": "Analytics computation failed. Contact support if this persists.",
+            },
+            on_conflict="strategy_id",
+        ).execute()
         raise HTTPException(status_code=500, detail="Analytics computation failed")

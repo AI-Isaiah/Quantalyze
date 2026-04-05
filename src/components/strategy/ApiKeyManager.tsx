@@ -81,9 +81,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
       if (insertError) throw new Error(insertError.message);
 
-      // Auto-link key to strategy
+      // Auto-link key to strategy and sync trades
       if (newKey) {
         await supabase.from("strategies").update({ api_key_id: newKey.id }).eq("id", strategyId);
+
+        // Auto-sync trades in background (don't block the UI)
+        fetch("/api/keys/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ strategy_id: strategyId }),
+        }).catch(() => {
+          // Non-critical: user can resync later
+        });
       }
 
       setShowForm(false);
