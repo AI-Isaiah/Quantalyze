@@ -194,7 +194,14 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
             </div>
             <div className="flex items-center gap-2">
               {key.id === currentKeyId ? (
-                <span className="text-xs text-accent font-medium">Connected</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => handleSyncTrades(key.id)}
+                  disabled={syncingKeyId === key.id}
+                >
+                  {syncingKeyId === key.id ? "Syncing..." : "Resync"}
+                </Button>
               ) : (
                 <Button
                   size="sm"
