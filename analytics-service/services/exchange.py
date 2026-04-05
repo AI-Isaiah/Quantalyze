@@ -118,9 +118,10 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
             from datetime import datetime, timezone
             all_bills: list[dict] = []
 
+            # Fetch bills across all instrument types, paginate for full history
             for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                 after_id = ""
-                max_pages = 50
+                max_pages = 100  # Up to 10,000 bills per type
 
                 for _ in range(max_pages):
                     params: dict[str, str] = {"instType": inst_type, "limit": "100"}
@@ -134,31 +135,61 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                         data = bills.get("data", [])
                         if not data:
                             break
-
                         all_bills.extend(data)
                         after_id = data[-1].get("billId", "")
-
                         if len(data) < 100:
                             break
                     except Exception:
                         break
 
-            for bill in all_bills:
-                pnl_val = float(bill.get("pnl", 0))
-                ts_raw = bill.get("ts", "")
-                ts_iso = ""
-                if ts_raw and ts_raw.isdigit():
-                    ts_iso = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc).isoformat()
+            # If no bills found via typed endpoints, try bills-archive for older history
+            if not all_bills:
+                for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
+                    after_id = ""
+                    for _ in range(100):
+                        params = {"instType": inst_type, "limit": "100"}
+                        if after_id:
+                            params["after"] = after_id
+                        try:
+                            bills = await exchange.private_get_account_bills_archive(params)
+                            data = bills.get("data", [])
+                            if not data:
+                                break
+                            all_bills.extend(data)
+                            after_id = data[-1].get("billId", "")
+                            if len(data) < 100:
+                                break
+                        except Exception:
+                            break
 
+            # Aggregate bills into daily PnL
+            from collections import defaultdict
+            daily_totals: dict[str, float] = defaultdict(float)
+
+            for bill in all_bills:
+                pnl_val = float(bill.get("pnl", 0)) + float(bill.get("fee", 0))
+                ts_raw = bill.get("ts", "")
+                if ts_raw and ts_raw.isdigit():
+                    dt = datetime.fromtimestamp(int(ts_raw) / 1000, tz=timezone.utc)
+                    day_key = dt.strftime("%Y-%m-%d")
+                    daily_totals[day_key] += pnl_val
+
+            import logging
+            logging.getLogger("quantalyze.analytics").info(
+                "OKX: fetched %d bills, aggregated to %d daily PnL entries",
+                len(all_bills), len(daily_totals)
+            )
+
+            for day, pnl in sorted(daily_totals.items()):
                 daily_pnl.append({
                     "exchange": "okx",
                     "symbol": "PORTFOLIO",
-                    "side": "buy" if pnl_val >= 0 else "sell",
-                    "price": abs(pnl_val),
+                    "side": "buy" if pnl >= 0 else "sell",
+                    "price": abs(pnl),
                     "quantity": 1,
-                    "fee": abs(float(bill.get("fee", 0))),
-                    "fee_currency": bill.get("ccy", "USDT"),
-                    "timestamp": ts_iso,
+                    "fee": 0,
+                    "fee_currency": "USDT",
+                    "timestamp": f"{day}T00:00:00+00:00",
                     "order_type": "daily_pnl",
                 })
 
