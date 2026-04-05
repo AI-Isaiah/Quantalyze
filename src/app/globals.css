@@ -1,26 +1,58 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  /* --- Colors (Institutional Light Mode) --- */
+  --color-page: #FAFAFA;
+  --color-surface: #FFFFFF;
+  --color-sidebar: #0F172A;
+  --color-sidebar-hover: #1E293B;
+  --color-sidebar-active: #334155;
+  --color-sidebar-text: #94A3B8;
+  --color-sidebar-text-active: #FFFFFF;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-text-primary: #1E293B;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748B;
+
+  --color-accent: #0D9488;
+  --color-accent-hover: #0F766E;
+  --color-positive: #059669;
+  --color-negative: #DC2626;
+
+  --color-border: #E2E8F0;
+  --color-border-focus: #0D9488;
+
+  /* Badge colors */
+  --color-badge-directional: #0D9488;
+  --color-badge-bidirectional: #6366F1;
+  --color-badge-market-neutral: #F59E0B;
+  --color-badge-delta-neutral: #8B5CF6;
+  --color-badge-arbitrage: #EC4899;
+  --color-badge-other: #6B7280;
+
+  /* Chart colors */
+  --color-chart-strategy: #0D9488;
+  --color-chart-benchmark: #94A3B8;
+
+  /* --- Typography --- */
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+
+  /* --- Spacing --- */
+  --spacing-sidebar: 260px;
+
+  /* --- Shadows --- */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-page);
+  color: var(--color-text-primary);
+}
+
+/* JetBrains Mono for all numeric values */
+.font-metric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }

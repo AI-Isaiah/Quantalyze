@@ -1,0 +1,31 @@
+export const STRATEGY_TYPES = [
+  "Directional",
+  "Bidirectional",
+  "Market Neutral",
+  "Delta Neutral",
+  "Arbitrage",
+  "Other",
+] as const;
+
+export const SUBTYPES = [
+  "Trend Following",
+  "Momentum",
+  "Breakout",
+  "Mean Reversion",
+  "Statistical Arbitrage",
+  "Market Making",
+  "Basis Trading",
+  "Funding Rate",
+] as const;
+
+export const MARKETS = ["Futures", "Spot"] as const;
+
+export const EXCHANGES = ["Binance", "OKX", "Bybit"] as const;
+
+export const DISCOVERY_CATEGORIES = [
+  { slug: "crypto-sma", name: "Crypto SMA", description: "Separately Managed Accounts for crypto quantitative strategies. Verified performance from exchange APIs." },
+  { slug: "cfd", name: "CFD", description: "Contract-for-difference strategies across major crypto pairs." },
+  { slug: "emerging-crypto", name: "Emerging Crypto", description: "Early-stage strategies on newer tokens and protocols." },
+  { slug: "crypto-decks", name: "Crypto Decks", description: "Curated bundles of crypto strategies for diversified allocation." },
+  { slug: "tradfi-decks", name: "TradFi Decks", description: "Traditional finance strategy bundles bridging TradFi and crypto." },
+] as const;
