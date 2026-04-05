@@ -4,7 +4,12 @@ from typing import Any
 
 
 def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
-    """Convert trade records to portfolio-level daily returns in USDT terms."""
+    """Convert trade/PnL records to portfolio-level daily returns.
+
+    Handles two data formats:
+    1. Daily PnL records (order_type='daily_pnl'): dollar P&L per day from exchange bills or CSV
+    2. Individual trades: buy/sell with price/quantity
+    """
     if not trades:
         return pd.Series(dtype=float)
 
@@ -12,30 +17,53 @@ def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df["date"] = df["timestamp"].dt.date
 
-    # Calculate PnL per trade: (price * quantity) with direction
-    df["notional"] = df["price"].astype(float) * df["quantity"].astype(float)
-    df.loc[df["side"] == "sell", "notional"] *= -1
+    # Check if this is daily PnL data (from exchange bills API or CSV upload)
+    is_daily_pnl = df["order_type"].iloc[0] == "daily_pnl" if "order_type" in df.columns else False
 
-    # Subtract fees (converted to USDT approximation)
-    df["fee_usd"] = df["fee"].fillna(0).astype(float)
+    if is_daily_pnl:
+        # Daily PnL: price field contains the dollar P&L for that day
+        # side='buy' means profit, side='sell' means loss
+        df["daily_pnl"] = df.apply(
+            lambda r: float(r["price"]) if r["side"] == "buy" else -float(r["price"]),
+            axis=1,
+        )
+        daily_pnl = df.groupby("date")["daily_pnl"].sum()
 
-    # Daily net PnL
-    daily_pnl = df.groupby("date").agg(
-        net_notional=("notional", "sum"),
-        total_fees=("fee_usd", "sum"),
-    )
-    daily_pnl["pnl"] = daily_pnl["net_notional"] - daily_pnl["total_fees"]
+        # Convert dollar PnL to percentage returns
+        # Estimate initial capital from the magnitude of PnL
+        # A reasonable assumption: daily PnL is roughly 0.5-2% of capital
+        # So initial capital ≈ max(|total PnL|, mean daily |PnL| * 100)
+        mean_abs_pnl = daily_pnl.abs().mean()
+        initial_capital = max(mean_abs_pnl * 100, abs(daily_pnl.sum()), 10000)
 
-    # Convert PnL to returns using running cumulative equity
-    initial_capital = abs(daily_pnl["net_notional"].iloc[0]) or 10000
-    equity = initial_capital + daily_pnl["pnl"].cumsum()
-    # Shift equity by one day so each day's return = pnl / previous day's equity
-    prev_equity = equity.shift(1).fillna(initial_capital)
-    daily_pnl["return"] = daily_pnl["pnl"] / prev_equity
+        # Build equity curve and compute returns
+        equity = initial_capital + daily_pnl.cumsum()
+        prev_equity = equity.shift(1).fillna(initial_capital)
+        # Avoid division by zero
+        prev_equity = prev_equity.replace(0, initial_capital)
+        returns_values = daily_pnl / prev_equity
+
+    else:
+        # Individual trades: original logic
+        df["notional"] = df["price"].astype(float) * df["quantity"].astype(float)
+        df.loc[df["side"] == "sell", "notional"] *= -1
+        df["fee_usd"] = df["fee"].fillna(0).astype(float)
+
+        daily_agg = df.groupby("date").agg(
+            net_notional=("notional", "sum"),
+            total_fees=("fee_usd", "sum"),
+        )
+        daily_agg["pnl"] = daily_agg["net_notional"] - daily_agg["total_fees"]
+
+        initial_capital = abs(daily_agg["net_notional"].iloc[0]) or 10000
+        equity = initial_capital + daily_agg["pnl"].cumsum()
+        prev_equity = equity.shift(1).fillna(initial_capital)
+        prev_equity = prev_equity.replace(0, initial_capital)
+        returns_values = daily_agg["pnl"] / prev_equity
 
     returns = pd.Series(
-        daily_pnl["return"].values,
-        index=pd.DatetimeIndex(daily_pnl.index),
+        returns_values.values,
+        index=pd.DatetimeIndex(returns_values.index),
         name="returns",
     )
 
