@@ -4,6 +4,7 @@ import { MetadataCards } from "@/components/strategy/MetadataCards";
 import { PerformanceReport } from "@/components/strategy/PerformanceReport";
 import { ComputeStatus } from "@/components/strategy/ComputeStatus";
 import { RequestIntroButton } from "@/components/strategy/RequestIntroButton";
+import { BookIntroCall } from "@/components/strategy/BookIntroCall";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
 import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -56,6 +57,7 @@ export default async function StrategyDetailPage({
           </a>
           <AddToPortfolio strategyId={strategy.id} />
           <ShareableLink strategyId={strategy.id} />
+          <BookIntroCall strategyName={strategy.name} />
           <RequestIntroButton strategyId={strategy.id} />
         </div>
       </div>

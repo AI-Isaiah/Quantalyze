@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { ProfileForm } from "@/components/auth/ProfileForm";
+import { ProfileTabs } from "@/components/auth/ProfileTabs";
 import { SignOutButton } from "@/components/auth/SignOutButton";
 import { redirect } from "next/navigation";
 
@@ -23,11 +23,11 @@ export default async function ProfilePage() {
   return (
     <>
       <PageHeader
-        title="Profile"
-        description="Manage your account settings."
+        title="Profile Settings"
+        description="Manage your account and organizations."
         actions={<SignOutButton />}
       />
-      <ProfileForm profile={profile} />
+      <ProfileTabs profile={profile} />
     </>
   );
 }
