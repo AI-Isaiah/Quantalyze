@@ -18,10 +18,11 @@ interface ApiKeyFormProps {
   onCancel: () => void;
   loading: boolean;
   error: string | null;
+  defaultExchange?: string;
 }
 
-export function ApiKeyForm({ onSubmit, onCancel, loading, error }: ApiKeyFormProps) {
-  const [exchange, setExchange] = useState("binance");
+export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange }: ApiKeyFormProps) {
+  const [exchange, setExchange] = useState(defaultExchange || "binance");
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");

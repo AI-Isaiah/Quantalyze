@@ -45,7 +45,7 @@ export default async function EditStrategyPage({
           <StrategyForm strategy={strategy} mode="edit" />
         </div>
         <div className="space-y-6">
-          <ApiKeyManager strategyId={strategy.id} currentKeyId={strategy.api_key_id} />
+          <ApiKeyManager strategyId={strategy.id} currentKeyId={strategy.api_key_id} defaultExchange={strategy.supported_exchanges?.[0]?.toLowerCase()} />
           <CsvUpload strategyId={strategy.id} />
         </div>
       </div>

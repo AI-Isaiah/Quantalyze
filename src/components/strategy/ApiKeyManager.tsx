@@ -12,9 +12,10 @@ import type { ApiKey } from "@/lib/types";
 interface ApiKeyManagerProps {
   strategyId: string;
   currentKeyId: string | null;
+  defaultExchange?: string;
 }
 
-export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) {
+export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -166,6 +167,7 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
           onCancel={() => { setShowForm(false); setError(null); }}
           loading={loading}
           error={error}
+          defaultExchange={defaultExchange}
         />
       )}
 
