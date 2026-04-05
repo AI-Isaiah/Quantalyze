@@ -88,19 +88,30 @@ async def fetch_trades(req: FetchTradesRequest):
 
     exchange = create_exchange(key_data["exchange"], api_key, api_secret, passphrase)
 
+    # Use last_sync_at to avoid re-fetching old trades
+    since_ms = None
+    if key_data.get("last_sync_at"):
+        from datetime import datetime
+        try:
+            dt = datetime.fromisoformat(key_data["last_sync_at"].replace("Z", "+00:00"))
+            since_ms = int(dt.timestamp() * 1000)
+        except Exception:
+            pass
+
     try:
-        trades = await fetch_all_trades(exchange)
+        trades = await fetch_all_trades(exchange, since_ms=since_ms)
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch trades from exchange")
     finally:
         await exchange.close()
 
-    # Store trades
+    # Store trades (upsert to avoid duplicates on re-sync)
     if trades:
         for batch_start in range(0, len(trades), 500):
             batch = trades[batch_start:batch_start + 500]
-            supabase.table("trades").insert(
-                [{"strategy_id": req.strategy_id, **t} for t in batch]
+            supabase.table("trades").upsert(
+                [{"strategy_id": req.strategy_id, **t} for t in batch],
+                on_conflict="strategy_id,exchange,symbol,timestamp,side",
             ).execute()
 
         supabase.table("api_keys").update({

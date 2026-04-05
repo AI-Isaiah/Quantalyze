@@ -10,11 +10,15 @@ interface ReturnHistogramProps {
 export function ReturnHistogram({ returns, bins = 20 }: ReturnHistogramProps) {
   if (!returns || returns.length < 10) return null;
 
-  const values = returns.map((r) => r.value - 1); // Convert cumulative to daily approx
-  const dailyReturns = values.slice(1).map((v, i) => (v - values[i]) / Math.max(Math.abs(values[i]), 0.001));
+  // Compute daily returns from cumulative equity: (equity[i+1] / equity[i]) - 1
+  const cumulative = returns.map((r) => r.value);
+  const dailyReturns = cumulative.slice(1).map((v, i) =>
+    cumulative[i] !== 0 ? (v / cumulative[i]) - 1 : 0
+  );
 
   const min = Math.min(...dailyReturns);
   const max = Math.max(...dailyReturns);
+  if (max === min) return null; // All identical returns, nothing to show
   const binWidth = (max - min) / bins;
 
   const histogram = Array.from({ length: bins }, (_, i) => {

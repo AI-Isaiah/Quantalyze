@@ -22,25 +22,37 @@ Deno.serve(async (req: Request) => {
   const body = await req.json();
   const { type, allocator_name, allocator_company, strategy_name, message, manager_name } = body;
 
+  // Escape HTML to prevent injection via user-supplied fields
+  function esc(str: string | undefined | null): string {
+    if (!str) return "";
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  const safeName = esc(allocator_name);
+  const safeCompany = esc(allocator_company);
+  const safeStrategy = esc(strategy_name);
+  const safeMessage = esc(message);
+  const safeManager = esc(manager_name);
+
   let subject: string;
   let html: string;
 
   if (type === "intro_request") {
-    subject = `New intro request: ${allocator_name} → ${strategy_name}`;
+    subject = `New intro request: ${safeName} → ${safeStrategy}`;
     html = `
       <div style="font-family: Inter, sans-serif; max-width: 500px;">
         <h2 style="color: #1E293B;">New Intro Request</h2>
-        <p><strong>${allocator_name}</strong>${allocator_company ? ` (${allocator_company})` : ""} wants an introduction to <strong>${strategy_name}</strong>.</p>
-        ${message ? `<p style="background: #F8FAFC; padding: 12px; border-radius: 8px; color: #475569;">${message}</p>` : ""}
+        <p><strong>${safeName}</strong>${safeCompany ? ` (${safeCompany})` : ""} wants an introduction to <strong>${safeStrategy}</strong>.</p>
+        ${safeMessage ? `<p style="background: #F8FAFC; padding: 12px; border-radius: 8px; color: #475569;">${safeMessage}</p>` : ""}
         <a href="${APP_URL}/login?redirect=/admin" style="display: inline-block; margin-top: 16px; padding: 10px 20px; background: #0D9488; color: white; border-radius: 8px; text-decoration: none;">Open Admin Dashboard</a>
       </div>
     `;
   } else if (type === "strategy_review") {
-    subject = `Strategy submitted for review: ${strategy_name}`;
+    subject = `Strategy submitted for review: ${safeStrategy}`;
     html = `
       <div style="font-family: Inter, sans-serif; max-width: 500px;">
         <h2 style="color: #1E293B;">Strategy Review Needed</h2>
-        <p><strong>${manager_name}</strong> submitted <strong>${strategy_name}</strong> for review.</p>
+        <p><strong>${safeManager}</strong> submitted <strong>${safeStrategy}</strong> for review.</p>
         <a href="${APP_URL}/login?redirect=/admin" style="display: inline-block; margin-top: 16px; padding: 10px 20px; background: #0D9488; color: white; border-radius: 8px; text-decoration: none;">Review Strategy</a>
       </div>
     `;

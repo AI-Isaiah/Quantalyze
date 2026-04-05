@@ -83,7 +83,9 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
 
     # Additional risk metrics
     try:
-        metrics_json["var_1m_99"] = float(qs.stats.value_at_risk(returns * np.sqrt(21), cutoff=0.01))
+        monthly_for_var = returns.resample("M").apply(lambda x: (1 + x).prod() - 1)
+        if len(monthly_for_var) > 0:
+            metrics_json["var_1m_99"] = float(np.percentile(monthly_for_var, 1))
     except Exception:
         pass
     try:

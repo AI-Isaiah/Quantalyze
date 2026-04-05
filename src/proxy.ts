@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
 const PUBLIC_ROUTES = ["/login", "/signup"];
-const ADMIN_ROUTES = ["/admin"];
+const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
 export async function proxy(request: NextRequest) {
@@ -44,8 +44,9 @@ export async function proxy(request: NextRequest) {
 
   if (session && isPublicRoute) {
     const redirect = request.nextUrl.searchParams.get("redirect");
+    const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
     const url = request.nextUrl.clone();
-    url.pathname = redirect ?? DEFAULT_AUTHENTICATED_ROUTE;
+    url.pathname = safePath;
     url.searchParams.delete("redirect");
     return NextResponse.redirect(url);
   }

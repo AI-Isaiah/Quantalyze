@@ -93,6 +93,7 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
 
   return (
     <div className="space-y-3">
+      {errorBanner}
       {requests.map((r) => {
         const profile = r.profiles as Record<string, string> | null;
         const strategy = r.strategies as Record<string, string> | null;
@@ -175,6 +176,7 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
 
   return (
     <>
+      {error && <p className="text-sm text-negative mb-3">{error}</p>}
       <div className="space-y-3">
         {strategies.map((s) => {
           const profile = s.profiles as Record<string, string> | null;
@@ -247,6 +249,7 @@ function AllocatorsTab({ allocators }: { allocators: Array<Record<string, unknow
 
   return (
     <div className="space-y-3">
+      {error && <p className="text-sm text-negative mb-3">{error}</p>}
       {allocators.map((a) => (
         <Card key={a.id as string}>
           <div className="flex items-center justify-between">
