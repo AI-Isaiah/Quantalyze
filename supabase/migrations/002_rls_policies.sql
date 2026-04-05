@@ -19,7 +19,7 @@ SELECT id, display_name, company, description, avatar_url, role, created_at
 FROM profiles;
 
 -- api_keys: owner only
-CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid());
+CREATE POLICY api_keys_owner ON api_keys FOR ALL USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
 
 -- discovery_categories: public read
 CREATE POLICY categories_public_read ON discovery_categories FOR SELECT USING (true);

@@ -69,7 +69,10 @@ export function ApiKeyManager({ strategyId, currentKeyId }: ApiKeyManagerProps) 
       // Step 3: Store encrypted key in Supabase (only DB columns, not validation fields)
       const { valid, read_only, ...dbFields } = encrypted;
       const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
       const { error: insertError } = await supabase.from("api_keys").insert({
+        user_id: user.id,
         exchange: data.exchange,
         label: data.label,
         ...dbFields,

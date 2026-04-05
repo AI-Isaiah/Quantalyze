@@ -83,7 +83,10 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       const { valid, read_only, ...dbFields } = encrypted;
 
       const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
       const { error: insertError } = await supabase.from("api_keys").insert({
+        user_id: user.id,
         exchange: apiExchange,
         label: `${apiExchange} key`,
         ...dbFields,
