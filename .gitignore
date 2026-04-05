@@ -45,8 +45,10 @@ __pycache__/
 .coverage
 *.venv/
 
-# playwright state
+# playwright
 .playwright-mcp/
+/test-results/
+/playwright-report/
 
 # screenshots and docs at repo root
 *.png
