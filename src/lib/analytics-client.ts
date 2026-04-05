@@ -1,15 +1,25 @@
-const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8000";
+const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
 async function analyticsRequest(path: string, body: Record<string, unknown>) {
-  const res = await fetch(`${ANALYTICS_URL}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
-    },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${ANALYTICS_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("Analytics service is not reachable. Please ensure it is running.");
+  }
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    throw new Error("Analytics service returned an unexpected response. Is it running on the correct port?");
+  }
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: res.statusText }));
