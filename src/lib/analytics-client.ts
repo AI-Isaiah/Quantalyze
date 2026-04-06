@@ -60,3 +60,21 @@ export async function encryptKey(exchange: string, apiKey: string, apiSecret: st
     passphrase: passphrase ?? null,
   });
 }
+
+export async function computePortfolioAnalytics(portfolioId: string) {
+  return analyticsRequest("/api/portfolio-analytics", { portfolio_id: portfolioId });
+}
+
+export async function runPortfolioOptimizer(portfolioId: string) {
+  return analyticsRequest("/api/portfolio-optimizer", { portfolio_id: portfolioId });
+}
+
+export async function verifyStrategy(data: {
+  email: string;
+  exchange: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string;
+}) {
+  return analyticsRequest("/api/verify-strategy", data);
+}

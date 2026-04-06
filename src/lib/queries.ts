@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount } from "./types";
+import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount, Portfolio, PortfolioAnalytics, PortfolioAlert, AllocationEvent } from "./types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
@@ -270,4 +270,81 @@ export async function getDecks(): Promise<DeckWithCount[]> {
     created_at: d.created_at,
     strategy_count: Array.isArray(d.deck_strategies) ? d.deck_strategies.length : 0,
   }));
+}
+
+export async function getPortfolioDetail(portfolioId: string) {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select("*")
+    .eq("id", portfolioId)
+    .single();
+  if (error) return null;
+  return data as Portfolio;
+}
+
+export async function getPortfolioStrategies(portfolioId: string) {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("portfolio_strategies")
+    .select(`
+      *, strategies (id, name, status, strategy_types, supported_exchanges, start_date, aum,
+        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, returns_series, daily_returns)
+      )
+    `)
+    .eq("portfolio_id", portfolioId)
+    .order("added_at", { ascending: false });
+  return data ?? [];
+}
+
+export async function getPortfolioAnalytics(portfolioId: string) {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("portfolio_analytics")
+    .select("*")
+    .eq("portfolio_id", portfolioId)
+    .order("computed_at", { ascending: false })
+    .limit(1)
+    .single();
+  return data as PortfolioAnalytics | null;
+}
+
+export async function getPortfolioAlerts(portfolioId: string) {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("portfolio_alerts")
+    .select("*")
+    .eq("portfolio_id", portfolioId)
+    .is("acknowledged_at", null)
+    .order("triggered_at", { ascending: false });
+  return (data ?? []) as PortfolioAlert[];
+}
+
+export async function getAllocationEvents(portfolioId: string) {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("allocation_events")
+    .select("*")
+    .eq("portfolio_id", portfolioId)
+    .order("event_date", { ascending: false });
+  return (data ?? []) as AllocationEvent[];
+}
+
+export async function getAllocatorAggregates(userId: string) {
+  const supabase = await createClient();
+  const { data: portfolios } = await supabase
+    .from("portfolios")
+    .select("id, name, description, created_at")
+    .eq("user_id", userId);
+
+  if (!portfolios?.length) return { portfolios: [], analytics: [] };
+
+  const portfolioIds = portfolios.map((p) => p.id);
+  const { data: analytics } = await supabase
+    .from("portfolio_analytics")
+    .select("*")
+    .in("portfolio_id", portfolioIds)
+    .order("computed_at", { ascending: false });
+
+  return { portfolios, analytics: (analytics ?? []) as PortfolioAnalytics[] };
 }
