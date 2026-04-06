@@ -5,7 +5,7 @@ Verified quantitative strategy marketplace. Asset managers publish strategies wi
 ## Prerequisites
 
 - Node.js 20.9+
-- Python 3.14+ (for analytics service)
+- Python 3.12+ (for analytics service)
 - A [Supabase](https://supabase.com) project
 
 ## Quick Start
@@ -52,7 +52,7 @@ quantalyze/
 | Frontend | Next.js 16, TypeScript, Tailwind CSS 4 |
 | Charts | Lightweight Charts, Recharts, @nivo/boxplot |
 | Database | Supabase (PostgreSQL + Auth + RLS) |
-| Analytics | FastAPI + quantstats + scipy + CCXT |
+| Analytics | FastAPI + quantstats + CCXT |
 | Deploy | Vercel (frontend), Railway (analytics) |
 
 ## npm Scripts
