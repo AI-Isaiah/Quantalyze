@@ -35,9 +35,9 @@ def find_improvement_candidates(
         new_sharpe = _compute_sharpe(new_port)
         new_avg_corr = _avg_corr(aligned)
         new_max_dd = _max_drawdown(new_port)
-        corr_with_portfolio = float(port_returns.reindex(c_returns.index).dropna().corr(
-            c_returns.reindex(port_returns.index).dropna()
-        )) if len(port_returns) > 10 else 0
+        # Use already-aligned frame to compute correlation with portfolio returns
+        port_aligned = (aligned[list(port_df.columns)] * w_arr).sum(axis=1)
+        corr_with_portfolio = float(port_aligned.corr(aligned[cid])) if len(aligned) > 10 else 0
         sharpe_lift = (new_sharpe - current_sharpe) if current_sharpe is not None and new_sharpe is not None else 0
         corr_reduction = (current_avg_corr - new_avg_corr) if current_avg_corr is not None and new_avg_corr is not None else 0
         dd_improvement = (current_max_dd - new_max_dd) if current_max_dd is not None and new_max_dd is not None else 0

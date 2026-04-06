@@ -29,6 +29,15 @@ router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
 limiter = Limiter(key_func=get_remote_address)
 
+
+def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
+    """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    dates = [r["date"] for r in raw]
+    vals = [r["value"] for r in raw]
+    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
+
 # Cron concurrency guard: allow at most 3 simultaneous portfolio computations.
 # NOTE: asyncio.Semaphore is process-local. Multi-worker/multi-pod deployments rely
 # on the DB-level in-flight row check instead. The semaphore limits within-process burst.
@@ -48,7 +57,6 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
     """
     supabase = get_supabase()
 
-    # 1. INSERT new row with status='computing' —————————————————————————————
     insert_result = supabase.table("portfolio_analytics").insert(
         {"portfolio_id": portfolio_id, "computation_status": "computing"}
     ).execute()
@@ -64,7 +72,6 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         ).eq("id", analytics_id).execute()
 
     try:
-        # 2. Fetch strategies in this portfolio ————————————————————————————
         ps_result = supabase.table("portfolio_strategies").select(
             "strategy_id, weight, strategies(id, name)"
         ).eq("portfolio_id", portfolio_id).execute()
@@ -89,7 +96,6 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             for row in portfolio_strategies
         }
 
-        # 3. Fetch returns_series for each strategy ————————————————————————
         sa_result = supabase.table("strategy_analytics").select(
             "strategy_id, returns_series, equity_curve, total_aum"
         ).in_("strategy_id", strategy_ids).execute()
@@ -103,25 +109,16 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
         for sid in strategy_ids:
             row = analytics_rows.get(sid)
-            if not row or not row.get("returns_series"):
+            if not row:
                 continue
 
-            raw = row["returns_series"]
-            # returns_series is stored as [{date, value}, ...]
-            if isinstance(raw, list) and raw:
-                dates = [r["date"] for r in raw]
-                vals = [r["value"] for r in raw]
-                s = pd.Series(vals, index=pd.DatetimeIndex(dates), name=sid)
+            s = _records_to_series(row.get("returns_series"), name=sid)
+            if s is not None:
                 strategy_returns[sid] = s
 
-                # Equity curve (used for TWR)
-                eq_raw = row.get("equity_curve") or []
-                if eq_raw:
-                    eq_dates = [p["date"] for p in eq_raw]
-                    eq_vals = [p["value"] for p in eq_raw]
-                    strategy_equity[sid] = pd.Series(
-                        eq_vals, index=pd.DatetimeIndex(eq_dates), name=sid
-                    )
+                eq = _records_to_series(row.get("equity_curve"), name=sid)
+                if eq is not None:
+                    strategy_equity[sid] = eq
 
             if row.get("total_aum"):
                 strategy_aum[sid] = float(row["total_aum"])
@@ -138,13 +135,13 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         total_available_w = sum(weights.values()) or 1.0
         weights = {sid: w / total_available_w for sid, w in weights.items()}
 
-        # 4. Compute TWR per strategy ——————————————————————————————————————
+        # Compute TWR per strategy
         for sid, eq in strategy_equity.items():
             twr = compute_twr(eq, [])
             if twr is not None:
                 strategy_twrs[sid] = twr
 
-        # 5. Build portfolio-level daily returns ——————————————————————————
+        # Build portfolio-level daily returns
         all_dates = sorted(
             set(d for s in strategy_returns.values() for d in s.index)
         )
@@ -171,12 +168,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         # Period returns
         period_returns = compute_period_returns(portfolio_returns_series)
 
-        # 6. Correlation matrix + rolling + avg pairwise ——————————————————
+        # Correlation matrix + rolling + avg pairwise
         corr_matrix = compute_correlation_matrix(dict(strategy_returns))
         rolling_corr = compute_rolling_correlation(dict(strategy_returns))
         avg_pairwise_corr = compute_avg_pairwise_correlation(corr_matrix)
 
-        # 7. Risk decomposition + attribution —————————————————————————————
+        # Risk decomposition + attribution
         ordered_sids = list(df.columns)
         ordered_weights = [weights.get(sid, 0) for sid in ordered_sids]
 
@@ -209,7 +206,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
                 "strategy_name": strategy_names.get(sid, sid),
             })
 
-        # 8. Benchmark comparison (BTC) ————————————————————————————————————
+        # Benchmark comparison (BTC)
         benchmark_comparison = None
         try:
             benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
@@ -229,28 +226,26 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         except Exception as exc:
             logger.warning("Benchmark fetch failed for portfolio %s: %s", portfolio_id, exc)
 
-        # 9. Portfolio equity curve ————————————————————————————————————————
+        # Portfolio equity curve
         cumulative = (1 + portfolio_returns_series).cumprod()
         portfolio_equity_curve = [
             {"date": d.isoformat(), "value": _safe_float(float(v))}
             for d, v in cumulative.items()
         ]
 
-        # 10. Total AUM ———————————————————————————————————————————————————
+        # Total AUM
         total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or None
 
-        # 11. Portfolio-level sharpe and volatility ————————————————————————
+        # Portfolio-level sharpe and volatility
         vol = portfolio_returns_series.std() * np.sqrt(252) if len(portfolio_returns_series) > 1 else None
         mean_ret = portfolio_returns_series.mean() * 252 if len(portfolio_returns_series) > 1 else None
         sharpe = _safe_float(mean_ret / vol) if vol and vol != 0 and mean_ret is not None else None
 
-        # Max drawdown
-        cum = (1 + portfolio_returns_series).cumprod()
-        running_max = cum.cummax()
-        drawdown = (cum - running_max) / running_max
+        running_max = cumulative.cummax()
+        drawdown = (cumulative - running_max) / running_max
         max_drawdown = _safe_float(float(drawdown.min()))
 
-        # 12. Build narrative ——————————————————————————————————————————————
+        # Narrative
         analytics_payload: dict = {
             "return_mtd": period_returns.get("return_mtd"),
             "avg_pairwise_correlation": avg_pairwise_corr,
@@ -259,7 +254,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         }
         narrative = generate_narrative(analytics_payload)
 
-        # 13. Persist results ——————————————————————————————————————————————
+        # Persist results
         update_payload = sanitize_metrics({
             "computation_status": "complete",
             "computation_error": None,
@@ -285,7 +280,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
             "id", analytics_id
         ).execute()
 
-        # 14. Generate drawdown / correlation alerts ———————————————————————
+        # Generate alerts
         _generate_alerts(supabase, portfolio_id, max_drawdown, avg_pairwise_corr)
 
         return {"analytics_id": analytics_id, **update_payload}
@@ -396,7 +391,6 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
-    # 1. Fetch current portfolio strategies + returns ———————————————————————
     ps_result = supabase.table("portfolio_strategies").select(
         "strategy_id, weight"
     ).eq("portfolio_id", req.portfolio_id).execute()
@@ -418,25 +412,19 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     if req.weights:
         weights.update(req.weights)
 
-    # 2. Fetch returns for strategies already in portfolio ————————————————
     sa_in_result = supabase.table("strategy_analytics").select(
         "strategy_id, returns_series"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
     for row in (sa_in_result.data or []):
-        raw = row.get("returns_series") or []
-        if isinstance(raw, list) and raw:
-            dates = [r["date"] for r in raw]
-            vals = [r["value"] for r in raw]
-            portfolio_returns[row["strategy_id"]] = pd.Series(
-                vals, index=pd.DatetimeIndex(dates), name=row["strategy_id"]
-            )
+        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+        if s is not None:
+            portfolio_returns[row["strategy_id"]] = s
 
     if not portfolio_returns:
         raise HTTPException(status_code=400, detail="No returns data available for portfolio strategies")
 
-    # 3. Fetch published strategies NOT in portfolio ——————————————————————
     all_published = supabase.table("strategies").select("id").eq(
         "is_published", True
     ).not_.in_("id", strategy_ids).execute()
@@ -450,18 +438,12 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in (sa_cand_result.data or []):
-            raw = row.get("returns_series") or []
-            if isinstance(raw, list) and raw:
-                dates = [r["date"] for r in raw]
-                vals = [r["value"] for r in raw]
-                candidate_returns[row["strategy_id"]] = pd.Series(
-                    vals, index=pd.DatetimeIndex(dates), name=row["strategy_id"]
-                )
+            s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+            if s is not None:
+                candidate_returns[row["strategy_id"]] = s
 
-    # 4. Run optimizer ————————————————————————————————————————————————————
     suggestions = find_improvement_candidates(portfolio_returns, candidate_returns, weights)
 
-    # 5. Persist to the latest portfolio_analytics row ————————————————————
     latest = supabase.table("portfolio_analytics").select("id").eq(
         "portfolio_id", req.portfolio_id
     ).eq("computation_status", "complete").order("computed_at", desc=True).limit(1).execute()
@@ -486,7 +468,6 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 @limiter.limit("5/hour")
 async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     """Verify a strategy from exchange API keys (landing page flow)."""
-    # 1. Validate exchange connection and key permissions —————————————————
     try:
         kek = get_kek()
     except RuntimeError:
@@ -513,12 +494,10 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     if validation.get("error"):
         raise HTTPException(status_code=400, detail=validation["error"])
 
-    # 2. Encrypt credentials for storage ——————————————————————————————————
     encrypted = encrypt_credentials(req.api_key, req.api_secret, req.passphrase, kek)
 
     supabase = get_supabase()
 
-    # 3. INSERT verification_request row with status='processing' ————————
     vr_insert = supabase.table("verification_requests").insert({
         "email": req.email,
         "exchange": req.exchange,
@@ -537,7 +516,6 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         ).eq("id", verification_id).execute()
 
     try:
-        # 4. Fetch trades + balance from exchange ————————————————————————————
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
         try:
             trades = await fetch_all_trades(exchange)
@@ -549,7 +527,6 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             _fail_vr("Insufficient trade history. At least 2 trades required for verification.")
             raise HTTPException(status_code=400, detail="Insufficient trade history")
 
-        # 5. Compute metrics on the trades ————————————————————————————————
         returns = trades_to_daily_returns(trades, account_balance=account_balance)
         if len(returns) < 2:
             _fail_vr("Insufficient trading days after aggregation.")
@@ -573,11 +550,10 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         mean_ret = returns.mean() * 252 if len(returns) > 1 else None
         sharpe = _safe_float(mean_ret / vol) if vol and vol != 0 and mean_ret is not None else None
 
-        # 6. Try to match against existing published strategies ——————————
         matched_strategy_id = None
         try:
             published_result = supabase.table("strategies").select("id").eq(
-                "is_published", True
+                "status", "published"
             ).limit(100).execute()
             published_ids = [row["id"] for row in (published_result.data or [])]
 
@@ -586,25 +562,25 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
                     "strategy_id, returns_series"
                 ).in_("strategy_id", published_ids).execute()
 
+                # Vectorized matching: build a DataFrame of all existing series and
+                # compute correlations in one call instead of per-strategy loop.
+                existing: dict[str, pd.Series] = {}
                 for row in (sa_result.data or []):
-                    raw = row.get("returns_series") or []
-                    if not isinstance(raw, list) or not raw:
-                        continue
-                    dates = [r["date"] for r in raw]
-                    vals = [r["value"] for r in raw]
-                    existing_series = pd.Series(vals, index=pd.DatetimeIndex(dates))
-                    aligned = returns.reindex(existing_series.index).dropna()
-                    existing_aligned = existing_series.reindex(aligned.index).dropna()
+                    s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+                    if s is not None:
+                        existing[row["strategy_id"]] = s
+
+                if existing:
+                    df = pd.DataFrame(existing)
+                    aligned = pd.concat([returns.rename("_target"), df], axis=1).dropna()
                     if len(aligned) >= 30:
-                        corr = float(aligned.corr(existing_aligned))
-                        if corr > 0.95:
-                            matched_strategy_id = row["strategy_id"]
-                            break
+                        corrs = aligned.drop(columns=["_target"]).corrwith(aligned["_target"])
+                        best = corrs.idxmax()
+                        if corrs[best] > 0.95:
+                            matched_strategy_id = best
         except Exception as exc:
             logger.warning("verify_strategy: strategy matching failed: %s", exc)
 
-        # 7. UPDATE verification_request with results ——————————————————————
-        # Schema: status, matched_strategy_id, error_message, results (JSONB)
         results_payload = sanitize_metrics({
             "twr": twr,
             "sharpe": sharpe,

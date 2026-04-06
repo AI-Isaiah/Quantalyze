@@ -3,6 +3,11 @@ import pandas as pd
 from typing import Optional
 from services.metrics import _safe_float
 
+# Rolling correlation is O(n²) in strategy count; skip beyond this threshold.
+MAX_STRATEGIES_FOR_ROLLING = 20
+# When many strategies exist, return only the most correlated pairs.
+MAX_ROLLING_PAIRS = 10
+
 
 def compute_correlation_matrix(strategy_returns: dict[str, pd.Series]) -> dict:
     ids = list(strategy_returns.keys())
@@ -17,8 +22,7 @@ def compute_correlation_matrix(strategy_returns: dict[str, pd.Series]) -> dict:
 
 def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: int = 30) -> dict:
     ids = list(strategy_returns.keys())
-    # Skip if n > 20 strategies (too many pairs)
-    if len(ids) < 2 or len(ids) > 20:
+    if len(ids) < 2 or len(ids) > MAX_STRATEGIES_FOR_ROLLING:
         return {}
     df = pd.DataFrame(strategy_returns).dropna()
     result = {}
@@ -28,8 +32,7 @@ def compute_rolling_correlation(strategy_returns: dict[str, pd.Series], window: 
             rolling = df[s1].rolling(window).corr(df[s2]).dropna()
             avg_corr = abs(float(rolling.mean())) if len(rolling) > 0 else 0
             pairs.append((f"{s1}:{s2}", rolling, avg_corr))
-    # Cap to top-10 most correlated pairs when n > 10
-    if len(ids) > 10:
+    if len(ids) > MAX_ROLLING_PAIRS:
         pairs.sort(key=lambda x: x[2], reverse=True)
         pairs = pairs[:10]
     for key, rolling, _ in pairs:

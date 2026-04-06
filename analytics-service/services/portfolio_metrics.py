@@ -238,8 +238,7 @@ def compute_period_returns(returns: pd.Series) -> dict[str, float | None]:
     idx = returns.index
     last_date = idx[-1]
 
-    # 24h: last available observation.
-    return_24h = _safe_float(float(returns.iloc[-1])) if len(returns) >= 1 else None
+    return_24h = _safe_float(float(returns.iloc[-1]))
 
     # MTD: compound from the first day of the current month.
     month_start = pd.Timestamp(last_date.year, last_date.month, 1)
