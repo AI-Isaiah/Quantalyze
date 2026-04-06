@@ -1,9 +1,9 @@
 # Portfolio Intelligence Platform — Design Spec
 
 **Date:** 2026-04-06
-**Status:** Design approved, pending implementation plan
-**Author:** Brainstorming session
-**Scope:** Portfolio management dashboard, advanced analytics engine, landing page strategy verification
+**Status:** Design approved (post-Grok adversarial review), pending implementation plan
+**Author:** Brainstorming session + Grok adversarial review
+**Scope:** Portfolio intelligence OS (dashboard, analytics, verification, relationship layer, migration)
 
 ## Problem Statement
 
@@ -17,13 +17,17 @@ Quantalyze's allocator clients face three interconnected problems:
 
 ## Solution Overview
 
-Three interlocking features that transform Quantalyze from a strategy marketplace into a portfolio intelligence platform:
+Five interlocking layers that transform Quantalyze from a strategy marketplace into the daily operating system for quant allocators:
 
 1. **Portfolio Management Dashboard (PMS)** — Allocators connect multiple API keys (one per strategy/manager), see aggregated and per-strategy performance with proper time-weighted returns, correlation analysis, attribution, and risk decomposition.
 
-2. **Advanced Analytics Engine** — TWR, MWR, correlation matrix, attribution analysis, risk decomposition, and portfolio optimization. Runs on the existing Python analytics service.
+2. **Advanced Analytics Engine** — TWR, MWR, correlation matrix, attribution analysis, risk decomposition, portfolio optimization, and templated narrative summaries. Runs on the existing Python analytics service.
 
 3. **Landing Page Strategy Verification** — Anonymous users upload a read-only API key on the landing page, get real-time performance analysis in 2-5 minutes. Captures email, feeds the strategy database, triggers manager outreach.
+
+4. **Relationship & Document Layer** — Per-strategy documents (contracts, founder notes, factsheets), relationship lifecycle tracking (connected/paused/exited), founder-in-the-loop annotations. Turns the PMS from a metrics viewer into a relationship OS.
+
+5. **Migration & Alerts** — "Claim legacy allocation" wizard for existing clients, email digest alerts (drawdown thresholds, correlation spikes), portfolio PDF export.
 
 ## Data Model
 
@@ -34,6 +38,30 @@ Each strategy manager gets their own exchange account or sub-account. The alloca
 ### New Database Tables
 
 ```sql
+-- Documents attached to portfolios or specific strategy allocations
+CREATE TABLE portfolio_documents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  portfolio_id UUID NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+  strategy_id UUID REFERENCES strategies(id),  -- NULL = portfolio-level doc
+  doc_type TEXT NOT NULL CHECK (doc_type IN ('contract', 'note', 'factsheet', 'founder_update', 'other')),
+  title TEXT NOT NULL,
+  file_path TEXT,                               -- Supabase storage path
+  content TEXT,                                 -- For text-only notes
+  uploaded_by UUID NOT NULL REFERENCES profiles(id),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Audit log for key operations (allocation events, key connections, document uploads)
+CREATE TABLE audit_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES profiles(id),
+  action TEXT NOT NULL,                         -- 'allocation_deposit', 'key_connected', 'doc_uploaded', etc.
+  entity_type TEXT NOT NULL,                    -- 'portfolio', 'strategy', 'api_key', 'document'
+  entity_id UUID NOT NULL,
+  metadata JSONB,                               -- Action-specific details
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Allocation events track deposits/withdrawals over time
 -- This is what makes TWR computation possible
 CREATE TABLE allocation_events (
@@ -77,9 +105,25 @@ CREATE TABLE portfolio_analytics (
   benchmark_comparison JSONB,      -- {btc: {alpha, beta, info_ratio}, eth: {...}}
   optimizer_suggestions JSONB,     -- [{strategy_id, corr_with_portfolio, sharpe_lift, dd_improvement}]
 
+  -- Narrative
+  narrative_summary TEXT,           -- Templated plain-English summary
+
   -- Time series
   portfolio_equity_curve JSONB,    -- [{date, value}]
   rolling_correlation JSONB        -- [{date, avg_correlation}]
+);
+
+-- Portfolio alerts (triggered by analytics computation)
+CREATE TABLE portfolio_alerts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  portfolio_id UUID NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+  alert_type TEXT NOT NULL CHECK (alert_type IN ('drawdown', 'correlation_spike', 'sync_failure', 'status_change', 'optimizer_suggestion')),
+  severity TEXT NOT NULL CHECK (severity IN ('high', 'medium', 'low')),
+  message TEXT NOT NULL,
+  metadata JSONB,                  -- {strategy_id, threshold, current_value, etc.}
+  triggered_at TIMESTAMPTZ DEFAULT NOW(),
+  acknowledged_at TIMESTAMPTZ,
+  emailed_at TIMESTAMPTZ
 );
 
 -- Landing page verification requests
@@ -113,13 +157,18 @@ CREATE TABLE verification_requests (
 
 The `portfolios` table already exists with `id, user_id, name, description, created_at`. No changes needed.
 
-The `portfolio_strategies` junction table (if it exists) needs allocation tracking:
+The `portfolio_strategies` junction table (existing, composite PK on portfolio_id + strategy_id) needs allocation tracking:
 
 ```sql
 -- Extend the portfolio-strategy relationship
 ALTER TABLE portfolio_strategies ADD COLUMN allocated_amount NUMERIC;
 ALTER TABLE portfolio_strategies ADD COLUMN allocated_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE portfolio_strategies ADD COLUMN current_weight NUMERIC;
+ALTER TABLE portfolio_strategies ADD COLUMN relationship_status TEXT DEFAULT 'connected'
+  CHECK (relationship_status IN ('connected', 'paused', 'exited'));
+ALTER TABLE portfolio_strategies ADD COLUMN founder_notes JSONB DEFAULT '[]'::jsonb;
+  -- Array of {date, author, text} for founder-in-the-loop annotations
+ALTER TABLE portfolio_strategies ADD COLUMN last_founder_contact TIMESTAMPTZ;
 ```
 
 ## Feature 1: Portfolio Management Dashboard
@@ -128,9 +177,22 @@ ALTER TABLE portfolio_strategies ADD COLUMN current_weight NUMERIC;
 
 | Route | Purpose |
 |-------|---------|
+| `/allocations` | **My Allocations Hub** — aggregate view across ALL portfolios (the "open every morning" screen) |
 | `/portfolios` | List all portfolios with summary metrics |
 | `/portfolios/[id]` | Main portfolio dashboard |
 | `/portfolios/[id]/manage` | Add/remove strategies, log allocation events |
+| `/portfolios/[id]/documents` | Documents tab — contracts, notes, factsheets per portfolio/strategy |
+
+### My Allocations Hub (`/allocations` — evolves the existing page)
+
+The top-level aggregate view. What allocators open every morning. Shows:
+- **Total AUM** across all portfolios
+- **Blended TWR/MWR** across everything
+- **Aggregate risk metrics** (portfolio-of-portfolios Sharpe, worst DD)
+- **Open founder notes** — recent annotations that need attention
+- **Active alerts** — strategies hitting thresholds
+- **Quick stats**: total strategies connected, avg correlation, document count
+- List of portfolios with sparklines and key metrics, click to drill into dashboard
 
 ### Dashboard Layout (`/portfolios/[id]`)
 
@@ -212,7 +274,25 @@ Recommendations from the Quantalyze strategy database. For each published strate
 - Calculate: Sharpe improvement, correlation reduction, max DD improvement
 - Rank by composite improvement score
 
-Show top 5 suggestions with [Request Introduction] button linking to existing contact request flow.
+Show top 5 suggestions with [Request Introduction] button pre-filled with portfolio context (e.g., "I'm building a diversified crypto portfolio, currently 5 strategies, avg Sharpe 1.6, looking for low-correlation additions").
+
+#### Founder Insights Card (per strategy row)
+
+Collapsible card in every strategy row showing:
+- Latest founder note with timestamp and author
+- "Add Note" button for founder annotations
+- AI narrative summary (templated, not LLM): "Alpha-7 contributed +7.56% to portfolio MTD. Correlation with Beta-3 increased from 0.15 to 0.41 over the last 30 days — monitor for convergence."
+- Relationship status badge (connected / paused / exited)
+- Last founder contact date
+
+#### Documents Tab (`/portfolios/[id]/documents`)
+
+Per-portfolio document repository. Replaces Google Drive + Telegram for allocator-manager relationship docs.
+- Upload: contracts, signed agreements, monthly updates, custom notes
+- Filter by: strategy, document type, date
+- Per-strategy grouping: click a strategy to see its documents
+- Auto-generated documents: portfolio factsheet PDF (latest), strategy factsheets
+- Supabase Storage for file uploads, metadata in `portfolio_documents` table
 
 ### Manage Allocations Page (`/portfolios/[id]/manage`)
 
@@ -221,6 +301,7 @@ Show top 5 suggestions with [Request Introduction] button linking to existing co
 - Log allocation events (deposit/withdrawal with date and amount)
 - Remove strategy from portfolio
 - Timeline view of all allocation events
+- **Migration wizard**: "Claim Legacy Allocation" — search for strategies you already know (by name, manager, exchange), import allocation history from CSV or manual entry, import notes from prior communications
 
 ## Feature 2: Analytics Engine
 
@@ -313,14 +394,54 @@ Fetch benchmark return series:
 
 Compute alpha, beta, information ratio, tracking error for portfolio vs each benchmark.
 
+### Narrative Summary (Templated)
+
+Simple template-driven narrative for each portfolio, generated during analytics computation. No LLM dependency. Examples:
+
+- "Your portfolio returned +4.8% MTD (TWR), driven primarily by Alpha-7 (+7.56% contribution). Average pairwise correlation is 0.18, which is well-diversified. Risk is concentrated in Alpha-7 (55% of portfolio volatility on 42% of capital)."
+- "Alert: Correlation between Beta-3 and Gamma-1 increased from 0.12 to 0.54 over the last 30 days. Consider whether this reflects structural convergence or temporary market conditions."
+- "Your allocation timing decisions added +2.3% vs equal-weight over this period (allocation effect)."
+
+Templates are parameterized strings filled from `portfolio_analytics` JSONB. Stored as `narrative_summary TEXT` in `portfolio_analytics`.
+
+### Alerts Engine (Email Digest)
+
+Event-driven alerts with daily email digest:
+
+| Alert Type | Trigger | Severity |
+|-----------|---------|----------|
+| Drawdown threshold | Strategy DD exceeds user-set threshold (default -15%) | High |
+| Correlation spike | Pairwise correlation rises above 0.6 (30-day rolling) | Medium |
+| Sync failure | Strategy data hasn't synced in 48+ hours | High |
+| Strategy status change | Published strategy goes to archived/draft | High |
+| New optimizer suggestion | A new strategy would improve Sharpe by > 0.2 | Low |
+
+User configures thresholds in portfolio settings. Alerts stored in a simple `portfolio_alerts` table (portfolio_id, alert_type, severity, message, triggered_at, acknowledged_at). Daily digest email via Resend (existing email infra).
+
+### Portfolio PDF Export
+
+Reuse the existing Puppeteer factsheet pipeline to generate portfolio-level PDF reports:
+- Portfolio KPIs + strategy breakdown table
+- Equity curve chart
+- Correlation matrix (static image)
+- Attribution table
+- AI narrative summary
+- Disclaimer footer: "Past performance is not indicative of future results. Data sourced from exchange APIs. Quantalyze does not provide investment advice."
+
+Triggered via "Export PDF" button on dashboard. Same pattern as existing strategy factsheet.
+
 ### New API Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/portfolio-analytics` | POST | Compute all portfolio analytics |
+| `/api/portfolio-analytics` | POST | Compute all portfolio analytics (TWR, correlation, attribution, risk, narrative) |
 | `/api/portfolio-optimizer` | POST | Run optimizer against strategy database |
+| `/api/portfolio-pdf` | POST | Generate portfolio PDF report |
 | `/api/verify-strategy` | POST | Landing page real-time analysis |
 | `/api/allocation-events` | GET/POST | CRUD for allocation events |
+| `/api/portfolio-documents` | GET/POST/DELETE | CRUD for portfolio documents |
+| `/api/portfolio-alerts` | GET/PATCH | List and acknowledge alerts |
+| `/api/founder-notes` | GET/POST | CRUD for founder annotations on portfolio strategies |
 
 ## Feature 3: Landing Page Strategy Verification
 
@@ -349,6 +470,7 @@ Compute alpha, beta, information ratio, tracking error for portfolio vs each ben
 8. **CTAs:**
    - "Download PDF Report" (emails to provided address)
    - "Create Free Account" (to track this strategy in a portfolio)
+   - If user IS logged in: "Add to My Portfolio" — direct flow to claim this strategy in an existing portfolio with pre-filled allocation event
 
 ### Backend Logic
 
@@ -406,12 +528,33 @@ Additionally: "When an allocator uploads a key linked to a strategy manager NOT 
 |----------|----------|
 | Strategy with < 30 days data | Show TWR with "Limited data" warning. Exclude from correlation/optimizer. |
 | Single strategy portfolio | Skip correlation matrix and optimizer. Show strategy-level metrics only. |
-| API key sync failure | Show last successful data with "Stale data" warning. Retry on next cron cycle. |
+| API key sync failure | Show last successful data with "Stale data" warning. Retry on next cron cycle. Trigger alert. |
 | Landing page key is invalid | Immediate error: "This key doesn't have the required permissions." |
-| Landing page key already on platform | Show: "This strategy is already verified on Quantalyze" with link to factsheet. |
+| Landing page key already on platform | Show: "This strategy is already verified on Quantalyze" with link to factsheet. Offer "Add to Portfolio." |
 | Allocator logs no allocation events | Fall back to simple returns (no TWR). Prompt to log events for accurate attribution. |
 | Correlation matrix with < 3 strategies | Show simplified view without heatmap. Note: "Add more strategies for correlation analysis." |
 | Optimizer finds no improvement candidates | Show: "Your portfolio is well-diversified. No significant improvements found." |
+| Document upload fails | Retry with exponential backoff. Show error with "Try again" button. |
+| Migration: strategy not on Quantalyze | Allow manual entry with name + exchange + allocation amount. Flag for future matching when manager joins. |
+| Alert storm (many triggers at once) | Batch into single daily digest. Never send more than 1 email per portfolio per day. |
+
+## Disclaimers & Compliance
+
+Every page showing performance data must include:
+- Footer: "Past performance is not indicative of future results."
+- Factsheet/PDF: "Data sourced directly from exchange APIs. Quantalyze does not provide investment advice. All metrics are computed from historical data and may not reflect future performance."
+- Optimizer suggestions: "These suggestions are based on historical correlation and return data. They are not investment recommendations."
+- Landing page verification: "This analysis is for informational purposes only."
+
+## Deferred (build on demand signal)
+
+These items were identified during adversarial review but deferred to future sprints:
+- Risk of Ruin curve / MAE-MFE analysis (FX Blue parity)
+- Interactive scenario sliders for optimizer
+- Custom benchmark upload
+- Full LLM-powered narrative generation (start with templates)
+- Mobile-first responsive audit
+- Stoic-style simulated execution preview
 
 ## Success Criteria
 
@@ -421,3 +564,7 @@ Additionally: "When an allocator uploads a key linked to a strategy manager NOT 
 4. Landing page verification delivers results in < 5 minutes for a typical 6-month history
 5. Landing page verification captures email and correctly identifies unknown strategy managers for outreach
 6. All analytics match manual calculation within 0.5% tolerance
+7. **Relationship OS**: Allocator can upload documents, add founder notes, and track relationship status without leaving the platform
+8. **Migration**: Existing client can claim legacy allocations and import history in < 10 minutes
+9. **Alerts**: Drawdown and correlation threshold alerts fire correctly and deliver via daily email digest
+10. **One-stop test**: Beta allocator says "this is now my single source of truth" in 1:1 call
