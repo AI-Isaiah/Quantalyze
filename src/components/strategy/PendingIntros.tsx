@@ -13,6 +13,7 @@ interface IntroRequest {
   message: string | null;
   created_at: string;
   strategy_id: string;
+  founder_notes: string | null;
   profiles: { display_name: string; company: string | null } | null;
   strategies: { name: string } | null;
 }
@@ -103,6 +104,11 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
                 {r.message && (
                   <p className="text-xs text-text-secondary mt-2 bg-page rounded p-2">
                     {r.message}
+                  </p>
+                )}
+                {r.founder_notes && (
+                  <p className="text-xs text-accent mt-1 bg-accent/5 rounded px-2 py-1 border border-accent/10">
+                    Founder note: {r.founder_notes}
                   </p>
                 )}
                 <p className="text-[10px] text-text-muted mt-1">

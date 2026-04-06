@@ -3,17 +3,30 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { EXCHANGES } from "@/lib/constants";
 
-async function getPublishedStrategyCount(): Promise<number> {
+async function getSocialProofStats() {
   try {
     const supabase = await createClient();
-    const { count } = await supabase
-      .from("strategies")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "published");
-    return count ?? 0;
+    const [{ count: strategyCount }, { count: introCount }, { data: aumData }] = await Promise.all([
+      supabase.from("strategies").select("*", { count: "exact", head: true }).eq("status", "published"),
+      supabase.from("contact_requests").select("*", { count: "exact", head: true }),
+      supabase.from("strategies").select("aum").eq("status", "published").not("aum", "is", null),
+    ]);
+    const totalAum = aumData?.reduce((sum, s) => sum + (s.aum ?? 0), 0) ?? 0;
+    return {
+      strategies: strategyCount ?? 0,
+      intros: introCount ?? 0,
+      aum: totalAum,
+    };
   } catch {
-    return 0;
+    return { strategies: 0, intros: 0, aum: 0 };
   }
+}
+
+function formatAum(value: number): string {
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
+  return value > 0 ? `$${value}` : "--";
 }
 
 export default async function Home() {
@@ -26,7 +39,7 @@ export default async function Home() {
     redirect("/discovery/crypto-sma");
   }
 
-  const strategyCount = await getPublishedStrategyCount();
+  const stats = await getSocialProofStats();
 
   return (
     <div className="min-h-full bg-white">
@@ -172,10 +185,10 @@ export default async function Home() {
       {/* Social Proof */}
       <section className="border-t border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
-          <div className="grid gap-8 text-center md:grid-cols-3">
+          <div className="grid gap-8 text-center md:grid-cols-4">
             <div>
               <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
-                {strategyCount > 0 ? strategyCount : "--"}
+                {stats.strategies > 0 ? `${stats.strategies}+` : "--"}
               </p>
               <p className="mt-1 text-sm text-text-muted">
                 Verified strategies
@@ -183,18 +196,26 @@ export default async function Home() {
             </div>
             <div>
               <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
-                {EXCHANGES.length}
+                {formatAum(stats.aum)}
               </p>
               <p className="mt-1 text-sm text-text-muted">
-                Supported exchanges
+                AUM tracked
               </p>
             </div>
             <div>
               <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
-                100%
+                {stats.intros > 0 ? `${stats.intros}+` : "--"}
               </p>
               <p className="mt-1 text-sm text-text-muted">
-                Exchange-verified data
+                Introductions made
+              </p>
+            </div>
+            <div>
+              <p className="text-3xl font-bold text-text-primary font-metric md:text-4xl">
+                {EXCHANGES.length}
+              </p>
+              <p className="mt-1 text-sm text-text-muted">
+                Exchanges supported
               </p>
             </div>
           </div>
