@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
+import { notifyManagerApproved } from "@/lib/email";
 
 export const POST = withAdminAuth(async (body, admin) => {
   const { id, action, review_note } = body;
@@ -7,7 +8,8 @@ export const POST = withAdminAuth(async (body, admin) => {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  // Data quality gate for approval (parallel queries to minimize latency)
+  let strategyData: { api_key_id: string | null; name: string; user_id: string } | null = null;
+
   if (action === "approve") {
     const [
       { data: strategy },
@@ -16,7 +18,7 @@ export const POST = withAdminAuth(async (body, admin) => {
       { data: latestTrade },
       { data: analytics },
     ] = await Promise.all([
-      admin.from("strategies").select("api_key_id").eq("id", id).single(),
+      admin.from("strategies").select("api_key_id, name, user_id").eq("id", id).single(),
       admin.from("trades").select("id", { count: "exact", head: true }).eq("strategy_id", id),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: true }).limit(1),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: false }).limit(1),
@@ -61,6 +63,8 @@ export const POST = withAdminAuth(async (body, admin) => {
         error: `Cannot approve: analytics computation is not complete.${detail}`,
       }, { status: 400 });
     }
+
+    strategyData = strategy as typeof strategyData;
   }
 
   const update = action === "approve"
@@ -71,6 +75,19 @@ export const POST = withAdminAuth(async (body, admin) => {
 
   if (error) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
+  }
+
+  if (action === "approve") {
+    const sd = strategyData!;
+    if (sd?.user_id) {
+      Promise.resolve(
+        admin.from("profiles").select("email").eq("id", sd.user_id).single()
+      ).then(({ data: profile }) => {
+        if (profile?.email) {
+          notifyManagerApproved(profile.email, sd.name, id as string);
+        }
+      }).catch(() => {});
+    }
   }
 
   return NextResponse.json({ success: true });

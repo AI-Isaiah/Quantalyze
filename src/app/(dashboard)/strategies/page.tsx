@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { StrategyActions } from "@/components/strategy/StrategyActions";
+import { ShareableLink } from "@/components/strategy/ShareableLink";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -72,6 +73,9 @@ export default async function StrategiesPage() {
                   )}
                 </div>
                 <div className="flex items-center gap-3 ml-4">
+                  {s.status === "published" && (
+                    <ShareableLink strategyId={s.id} />
+                  )}
                   <Badge label={s.status} type="status" />
                   <StrategyActions strategyId={s.id} status={s.status} hasApiKey={!!s.api_key_id} hasData={!!s.api_key_id} />
                   <span className="text-xs text-text-muted">
