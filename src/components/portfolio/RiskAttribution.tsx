@@ -1,9 +1,7 @@
 "use client";
 
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { formatPercent } from "@/lib/utils";
-
-const PALETTE = ["#1B6B5A", "#2563EB", "#D97706", "#7C3AED", "#DC2626", "#059669", "#DB2777", "#4338CA"];
+import { formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
 
 interface RiskAttributionProps {
   data: {
@@ -42,7 +40,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
             contentStyle={{ fontSize: 12, borderColor: "#E2E8F0", borderRadius: 6 }}
           />
           {data.map((d, i) => (
-            <Bar key={d.strategy_id} dataKey={d.strategy_name} stackId="risk" fill={PALETTE[i % PALETTE.length]} radius={0} />
+            <Bar key={d.strategy_id} dataKey={d.strategy_name} stackId="risk" fill={STRATEGY_PALETTE[i % STRATEGY_PALETTE.length]} radius={0} />
           ))}
         </BarChart>
       </ResponsiveContainer>
@@ -64,7 +62,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
               return (
                 <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
                   <td className="py-2 pr-4 flex items-center gap-2">
-                    <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PALETTE[i % PALETTE.length] }} />
+                    <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
                     <span className="text-text-primary">{d.strategy_name}</span>
                   </td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.weight_pct)}</td>

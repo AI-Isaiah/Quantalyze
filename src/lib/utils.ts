@@ -37,3 +37,9 @@ export function metricColor(value: number | null | undefined): string {
 export function cn(...classes: (string | false | undefined | null)[]): string {
   return classes.filter(Boolean).join(" ");
 }
+
+/** Multi-strategy chart color palette — design system approved. */
+export const STRATEGY_PALETTE = [
+  "#1B6B5A", "#2563EB", "#D97706", "#7C3AED",
+  "#DC2626", "#059669", "#DB2777", "#4338CA",
+] as const;

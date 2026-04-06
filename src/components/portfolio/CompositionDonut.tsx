@@ -1,9 +1,7 @@
 "use client";
 
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
-import { formatCurrency, formatNumber, formatPercent } from "@/lib/utils";
-
-const PALETTE = ["#1B6B5A", "#2563EB", "#D97706", "#7C3AED", "#DC2626", "#059669", "#DB2777", "#4338CA"];
+import { formatCurrency, formatNumber, formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
 
 interface CompositionDonutProps {
   strategies: {
@@ -45,7 +43,7 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
               stroke="#FFFFFF"
             >
               {chartData.map((_, i) => (
-                <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+                <Cell key={i} fill={STRATEGY_PALETTE[i % STRATEGY_PALETTE.length]} />
               ))}
             </Pie>
             <Tooltip
@@ -76,7 +74,7 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
             {strategies.map((s, i) => (
               <tr key={s.id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
                 <td className="py-2 pr-4 flex items-center gap-2">
-                  <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PALETTE[i % PALETTE.length] }} />
+                  <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: STRATEGY_PALETTE[i % STRATEGY_PALETTE.length] }} />
                   <span className="text-text-primary">{s.name}</span>
                 </td>
                 <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.amount)}</td>

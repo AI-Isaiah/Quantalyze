@@ -42,19 +42,25 @@ export default async function AllocationsPage() {
 
   const { portfolios, analytics: allAnalytics } = aggregates;
 
-  // Fetch alerts for user's portfolios (needs portfolio IDs from aggregates)
   const portfolioIds = portfolios.map((p) => p.id);
-  let activeAlerts: { id: string; portfolio_id: string; severity: string }[] = [];
-  if (portfolioIds.length > 0) {
-    const { data: alerts } = await supabase
-      .from("portfolio_alerts")
-      .select("id, portfolio_id, severity")
-      .is("acknowledged_at", null)
-      .in("portfolio_id", portfolioIds);
-    activeAlerts = alerts ?? [];
-  }
 
-  // Build a map: portfolio_id -> latest analytics snapshot
+  // Fetch alerts and strategy counts in parallel (both depend on portfolioIds)
+  const [{ data: alerts }, { data: strategyCounts }] = portfolioIds.length
+    ? await Promise.all([
+        supabase
+          .from("portfolio_alerts")
+          .select("id, portfolio_id, severity")
+          .is("acknowledged_at", null)
+          .in("portfolio_id", portfolioIds),
+        supabase
+          .from("portfolio_strategies")
+          .select("portfolio_id")
+          .in("portfolio_id", portfolioIds),
+      ])
+    : [{ data: [] as { id: string; portfolio_id: string; severity: string }[] }, { data: [] as { portfolio_id: string }[] }];
+
+  const activeAlerts = alerts ?? [];
+
   const analyticsMap = new Map<string, PortfolioAnalytics>();
   for (const a of allAnalytics) {
     if (!analyticsMap.has(a.portfolio_id)) {
@@ -62,12 +68,8 @@ export default async function AllocationsPage() {
     }
   }
 
-  // Cross-portfolio aggregate KPIs
-  const totalAum = allAnalytics.reduce(
-    (sum, a) => sum + (analyticsMap.get(a.portfolio_id) === a && a.total_aum ? a.total_aum : 0),
-    0,
-  );
   const latestSnapshots = Array.from(analyticsMap.values());
+  const totalAum = latestSnapshots.reduce((sum, a) => sum + (a.total_aum ?? 0), 0);
   const bestMtd = latestSnapshots.reduce(
     (best, a) => (a.return_mtd != null && (best == null || a.return_mtd > best) ? a.return_mtd : best),
     null as number | null,
@@ -78,13 +80,6 @@ export default async function AllocationsPage() {
         latestSnapshots.filter((a) => a.avg_pairwise_correlation != null).length || null
       : null;
 
-  // Portfolio strategy counts (from portfolio_strategies)
-  const { data: strategyCounts } = portfolioIds.length
-    ? await supabase
-        .from("portfolio_strategies")
-        .select("portfolio_id")
-        .in("portfolio_id", portfolioIds)
-    : { data: [] };
   const strategyCountMap = new Map<string, number>();
   for (const row of strategyCounts ?? []) {
     strategyCountMap.set(row.portfolio_id, (strategyCountMap.get(row.portfolio_id) ?? 0) + 1);

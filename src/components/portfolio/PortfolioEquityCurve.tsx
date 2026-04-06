@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi } from "lightweight-charts";
+import { STRATEGY_PALETTE } from "@/lib/utils";
 
 interface PortfolioEquityCurveProps {
   portfolioEquityCurve: { date: string; value: number }[] | null;
@@ -11,8 +12,6 @@ interface PortfolioEquityCurveProps {
     equityCurve: { date: string; value: number }[] | null;
   }[];
 }
-
-const PALETTE = ["#1B6B5A", "#2563EB", "#D97706", "#7C3AED", "#DC2626", "#059669", "#DB2777", "#4338CA"];
 
 const PNL_FORMATTER = (v: number) => `$${v.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 const RETURN_FORMATTER = (v: number) => `${((v - 1) * 100).toFixed(1)}%`;
@@ -55,7 +54,7 @@ export function PortfolioEquityCurve({ portfolioEquityCurve, strategies }: Portf
     // Strategy lines (thinner, from palette — skip index 0 reserved for portfolio)
     strategies.forEach((strategy, i) => {
       if (!strategy.equityCurve || strategy.equityCurve.length === 0) return;
-      const color = PALETTE[(i + 1) % PALETTE.length];
+      const color = STRATEGY_PALETTE[(i + 1) % STRATEGY_PALETTE.length];
       const series = chart.addSeries(LineSeries, {
         color,
         lineWidth: 1,
@@ -109,7 +108,7 @@ export function PortfolioEquityCurve({ portfolioEquityCurve, strategies }: Portf
               <span key={s.id} className="flex items-center gap-1.5 text-xs text-text-muted">
                 <span
                   className="inline-block w-3 rounded-full"
-                  style={{ height: 2, backgroundColor: PALETTE[(i + 1) % PALETTE.length] }}
+                  style={{ height: 2, backgroundColor: STRATEGY_PALETTE[(i + 1) % STRATEGY_PALETTE.length] }}
                 />
                 {s.name}
               </span>
