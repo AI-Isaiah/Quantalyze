@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from services.db import get_supabase
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance
+from services.exchange import create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -41,6 +41,30 @@ async def _sync_single_key(
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
 
         try:
+            # Re-validate key permissions before syncing
+            validation = await validate_key_permissions(exchange)
+            if not validation["valid"]:
+                # Key is no longer valid, flag the strategy
+                supabase = get_supabase()
+                if strategy_id:
+                    logger.warning(
+                        "cron_sync: key %s failed validation: %s",
+                        key_id,
+                        validation.get("error", "unknown"),
+                    )
+                    supabase.table("api_keys").update(
+                        {"is_active": False}
+                    ).eq("id", key_id).execute()
+                return {
+                    "key_id": key_id,
+                    "strategy_id": strategy_id,
+                    "exchange": exchange_name,
+                    "trades_fetched": 0,
+                    "duration_s": round(time.monotonic() - start, 2),
+                    "status": "key_revoked",
+                    "error": validation.get("error", "Key no longer valid"),
+                }
+
             since_ms = parse_since_ms(key_row.get("last_sync_at"))
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
             account_balance = await fetch_usdt_balance(exchange)
@@ -198,15 +222,17 @@ async def cron_sync():
     synced = sum(1 for r in all_results if r["status"] == "ok")
     failed = sum(1 for r in all_results if r["status"] == "error")
     timed_out = sum(1 for r in all_results if r["status"] == "timeout")
+    revoked = sum(1 for r in all_results if r["status"] == "key_revoked")
     total_trades = sum(r.get("trades_fetched", 0) for r in all_results)
     overall_duration = round(time.monotonic() - overall_start, 2)
 
     logger.info(
-        "cron_sync complete: %d synced, %d failed, %d timed out, "
+        "cron_sync complete: %d synced, %d failed, %d timed out, %d revoked, "
         "%d total trades, %.1fs total duration",
         synced,
         failed,
         timed_out,
+        revoked,
         total_trades,
         overall_duration,
     )
@@ -231,6 +257,7 @@ async def cron_sync():
         "synced": synced,
         "failed": failed,
         "timed_out": timed_out,
+        "revoked": revoked,
         "total_keys": len(keys),
         "total_trades": total_trades,
         "duration_s": overall_duration,
