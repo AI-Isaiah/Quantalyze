@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from services.db import get_supabase
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import create_exchange, fetch_all_trades
+from services.exchange import create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -38,38 +38,12 @@ async def _sync_single_key(
     try:
         # Decrypt credentials
         api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-
-        # Create exchange instance
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
 
         try:
-            # Determine since_ms from last_sync_at
-            since_ms = None
-            if key_row.get("last_sync_at"):
-                try:
-                    dt = datetime.fromisoformat(
-                        key_row["last_sync_at"].replace("Z", "+00:00")
-                    )
-                    since_ms = int(dt.timestamp() * 1000)
-                except Exception:
-                    pass
-
-            # Fetch trades
+            since_ms = parse_since_ms(key_row.get("last_sync_at"))
             trades = await fetch_all_trades(exchange, since_ms=since_ms)
-
-            # Fetch account balance
-            account_balance = None
-            try:
-                balance = await exchange.fetch_balance()
-                usdt_total = balance.get("total", {}).get("USDT", 0)
-                if usdt_total and float(usdt_total) > 0:
-                    account_balance = float(usdt_total)
-            except Exception as e:
-                logger.warning(
-                    "cron_sync: could not fetch balance for key %s: %s",
-                    key_id,
-                    str(e),
-                )
+            account_balance = await fetch_usdt_balance(exchange)
         finally:
             await exchange.close()
 

@@ -54,7 +54,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     } else if (status === "error") {
       setSyncingKeyId(null);
     }
-  }, [router]);
+  }, [router, loadKeys]);
 
   async function handleAddKey(data: {
     exchange: string;

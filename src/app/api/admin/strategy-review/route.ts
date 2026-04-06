@@ -7,19 +7,21 @@ export const POST = withAdminAuth(async (body, admin) => {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  // Data quality gate for approval
+  // Data quality gate for approval (parallel queries to minimize latency)
   if (action === "approve") {
-    const { data: strategy } = await admin
-      .from("strategies")
-      .select("api_key_id")
-      .eq("id", id)
-      .single();
-
-    // 1. Minimum trade count: require at least 5 trades
-    const { count: tradeCount } = await admin
-      .from("trades")
-      .select("id", { count: "exact", head: true })
-      .eq("strategy_id", id);
+    const [
+      { data: strategy },
+      { count: tradeCount },
+      { data: earliestTrade },
+      { data: latestTrade },
+      { data: analytics },
+    ] = await Promise.all([
+      admin.from("strategies").select("api_key_id").eq("id", id).single(),
+      admin.from("trades").select("id", { count: "exact", head: true }).eq("strategy_id", id),
+      admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: true }).limit(1),
+      admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: false }).limit(1),
+      admin.from("strategy_analytics").select("computation_status, computation_error").eq("strategy_id", id).single(),
+    ]);
 
     if (!strategy?.api_key_id && (!tradeCount || tradeCount === 0)) {
       return NextResponse.json({
@@ -33,24 +35,9 @@ export const POST = withAdminAuth(async (body, admin) => {
       }, { status: 400 });
     }
 
-    // 2. Date range: require trades spanning at least 7 days
-    const { data: dateRange } = await admin
-      .from("trades")
-      .select("timestamp")
-      .eq("strategy_id", id)
-      .order("timestamp", { ascending: true })
-      .limit(1);
-
-    const { data: dateRangeEnd } = await admin
-      .from("trades")
-      .select("timestamp")
-      .eq("strategy_id", id)
-      .order("timestamp", { ascending: false })
-      .limit(1);
-
-    if (dateRange?.length && dateRangeEnd?.length) {
-      const earliest = new Date(dateRange[0].timestamp);
-      const latest = new Date(dateRangeEnd[0].timestamp);
+    if (earliestTrade?.length && latestTrade?.length) {
+      const earliest = new Date(earliestTrade[0].timestamp);
+      const latest = new Date(latestTrade[0].timestamp);
       const spanDays = (latest.getTime() - earliest.getTime()) / (1000 * 60 * 60 * 24);
 
       if (spanDays < 7) {
@@ -59,13 +46,6 @@ export const POST = withAdminAuth(async (body, admin) => {
         }, { status: 400 });
       }
     }
-
-    // 3. Analytics must exist with computation_status = 'complete'
-    const { data: analytics } = await admin
-      .from("strategy_analytics")
-      .select("computation_status, computation_error")
-      .eq("strategy_id", id)
-      .single();
 
     if (!analytics) {
       return NextResponse.json({
