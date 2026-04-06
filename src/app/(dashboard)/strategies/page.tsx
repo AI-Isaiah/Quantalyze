@@ -25,7 +25,7 @@ export default async function StrategiesPage() {
   const { data: introRequests } = strategyIds.length > 0
     ? await supabase
         .from("contact_requests")
-        .select("id, status, message, created_at, strategy_id, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(name)")
+        .select("id, status, message, created_at, strategy_id, founder_notes, profiles!contact_requests_allocator_id_fkey(display_name, company), strategies!contact_requests_strategy_id_fkey(name)")
         .in("strategy_id", strategyIds)
         .order("created_at", { ascending: false })
     : { data: [] };

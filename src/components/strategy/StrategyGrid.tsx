@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { SyncBadge } from "./SyncBadge";
+import { HealthScore } from "./HealthScore";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -44,6 +45,7 @@ export function StrategyGrid({ strategies, categorySlug, basePath = "/discovery"
                 <h3 className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors leading-tight truncate min-w-0">
                   {s.name}
                 </h3>
+                <HealthScore analytics={s.analytics} startDate={s.start_date} className="shrink-0 mt-0.5" />
                 {s.api_key_id && <VerifiedBadge className="shrink-0 mt-0.5" />}
                 {s.is_example && (
                   <span className="shrink-0 mt-0.5 inline-flex items-center rounded-md bg-badge-other/10 text-badge-other px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider">
