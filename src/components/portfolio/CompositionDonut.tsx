@@ -57,7 +57,7 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
         {/* Center label */}
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
           <span className="text-xs text-text-muted">Total AUM</span>
-          <span className="text-lg font-semibold font-metric text-text">{formatCurrency(totalAUM)}</span>
+          <span className="text-lg font-semibold font-metric text-text-primary">{formatCurrency(totalAUM)}</span>
         </div>
       </div>
 
@@ -77,7 +77,7 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
               <tr key={s.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                 <td className="py-2 pr-4 flex items-center gap-2">
                   <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PALETTE[i % PALETTE.length] }} />
-                  <span className="text-text">{s.name}</span>
+                  <span className="text-text-primary">{s.name}</span>
                 </td>
                 <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.amount)}</td>
                 <td className="py-2 pr-4 text-right font-metric">{formatPercent(s.weight)}</td>

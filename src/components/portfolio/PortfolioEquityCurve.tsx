@@ -120,13 +120,13 @@ export function PortfolioEquityCurve({ portfolioEquityCurve, strategies }: Portf
         <div className="flex items-center gap-1 text-xs">
           <button
             onClick={() => setMode("return")}
-            className={`px-2 py-0.5 rounded transition-colors ${mode === "return" ? "bg-accent text-white" : "text-text-muted hover:text-text"}`}
+            className={`px-2 py-0.5 rounded transition-colors ${mode === "return" ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}
           >
             Return %
           </button>
           <button
             onClick={() => setMode("pnl")}
-            className={`px-2 py-0.5 rounded transition-colors ${mode === "pnl" ? "bg-accent text-white" : "text-text-muted hover:text-text"}`}
+            className={`px-2 py-0.5 rounded transition-colors ${mode === "pnl" ? "bg-accent text-white" : "text-text-muted hover:text-text-primary"}`}
           >
             PnL $
           </button>

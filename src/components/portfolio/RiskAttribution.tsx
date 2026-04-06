@@ -65,7 +65,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
                 <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                   <td className="py-2 pr-4 flex items-center gap-2">
                     <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PALETTE[i % PALETTE.length] }} />
-                    <span className="text-text">{d.strategy_name}</span>
+                    <span className="text-text-primary">{d.strategy_name}</span>
                   </td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.weight_pct)}</td>
                   <td className="py-2 pr-4 text-right font-metric">{formatPercent(d.marginal_risk_pct)}</td>
