@@ -1,15 +1,21 @@
 import type { Metadata } from "next";
 import Script from "next/script";
-import { Inter, JetBrains_Mono } from "next/font/google";
+import { DM_Sans, Instrument_Serif, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({
-  variable: "--font-inter",
+const dmSans = DM_Sans({
+  variable: "--font-dm-sans",
   subsets: ["latin"],
 });
 
-const jetbrainsMono = JetBrains_Mono({
-  variable: "--font-jetbrains-mono",
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  weight: "400",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
   subsets: ["latin"],
 });
 
@@ -28,7 +34,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${jetbrainsMono.variable} h-full`}
+      className={`${dmSans.variable} ${instrumentSerif.variable} ${geistMono.variable} h-full`}
     >
       <body className="h-full font-sans antialiased">
         {children}
@@ -36,7 +42,7 @@ export default function RootLayout({
           <Script
             defer
             data-domain={plausibleDomain}
-            src="https://plausible.io/js/script.js"
+            src="https://plausible.io/js/script.tagged-events.js"
             strategy="afterInteractive"
           />
         )}
