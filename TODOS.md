@@ -48,6 +48,10 @@
 - White-label verification API
 
 ## Completed (this session, 2026-04-06)
+- ~~Portfolio Intelligence Task 1: Database migration 010_portfolio_intelligence.sql~~ v0.0.1.0 (2026-04-06)
+- ~~Portfolio Intelligence Task 2: TypeScript types (src/lib/types.ts)~~ v0.0.1.0 (2026-04-06)
+- ~~Portfolio Intelligence Task 3: Pydantic schemas (analytics-service/models/schemas.py)~~ v0.0.1.0 (2026-04-06)
+- ~~Portfolio Intelligence Task 4: TWR/MWR computation module with TDD (analytics-service/services/portfolio_metrics.py + tests)~~ v0.0.1.0 (2026-04-06)
 - ~~Sprint 0: Plausible analytics, Sentry error tracking, legal disclaimers~~
 - ~~Sprint 1: Public discovery (/browse), email notifications (Resend), share factsheet button~~
 - ~~Phase 2: Trust badges (SyncBadge), discovery filters (exchange + track record), percentile ranks, sync progress UX, info hierarchy~~
