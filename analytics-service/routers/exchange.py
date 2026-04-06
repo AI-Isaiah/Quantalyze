@@ -143,9 +143,10 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
         }).execute()
         logger.info("Synced %s trades for strategy %s (atomic)", result.data, req.strategy_id)
 
-        update_data: dict = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
-        if account_balance is not None:
-            update_data["account_balance_usdt"] = account_balance
-        supabase.table("api_keys").update(update_data).eq("id", key_data["id"]).execute()
+    # Always advance the sync cursor (even when no new trades) to avoid re-fetching the same window
+    update_data: dict = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
+    if account_balance is not None:
+        update_data["account_balance_usdt"] = account_balance
+    supabase.table("api_keys").update(update_data).eq("id", key_data["id"]).execute()
 
     return {"trades_fetched": len(trades), "strategy_id": req.strategy_id}

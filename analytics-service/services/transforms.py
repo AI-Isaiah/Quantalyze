@@ -38,7 +38,10 @@ def trades_to_daily_returns(
         )
         daily_pnl = df.groupby("date")["daily_pnl"].sum()
 
-        if account_balance and account_balance > 0:
+        # Minimum balance threshold: ignore dust accounts (e.g., $0.50 after withdrawal)
+        # that would produce absurd percentage returns
+        min_balance = max(daily_pnl.abs().max() * 2, 100) if len(daily_pnl) > 0 else 100
+        if account_balance and account_balance > min_balance:
             # Derive starting balance from current balance and cumulative PnL.
             # current_balance = starting_balance + total_pnl, so:
             # starting_balance = current_balance - total_pnl
@@ -75,7 +78,8 @@ def trades_to_daily_returns(
         )
         daily_agg["pnl"] = daily_agg["net_notional"] - daily_agg["total_fees"]
 
-        if account_balance and account_balance > 0:
+        min_balance_t = max(daily_agg["pnl"].abs().max(), 100) if len(daily_agg) > 0 else 100
+        if account_balance and account_balance > min_balance_t:
             total_pnl = daily_agg["pnl"].sum()
             estimated_start = account_balance - total_pnl
             initial_capital = estimated_start if estimated_start > 0 else account_balance

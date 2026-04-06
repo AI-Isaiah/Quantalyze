@@ -193,6 +193,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     seen_ids.add(bid)
                     unique_bills.append(bill)
                 elif not bid:
+                    logger.warning("OKX bill missing billId, cannot deduplicate: %s", bill.get("ts", "unknown"))
                     unique_bills.append(bill)
             all_bills = unique_bills
 
