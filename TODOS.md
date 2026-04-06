@@ -1,77 +1,72 @@
 # TODOS
 
-## Discovery & Analytics
-- **P1** Correlation/overlap analysis for portfolios (quants.space has this)
-- **P1** Write E2E integration tests for full API key → sync → analytics → display chain
-- **P2** Real-time monitoring dashboard for strategies
-- **P2** Monte Carlo simulation chart
-- **P3** MAE/MFE analysis (FXBlue feature)
-- **P3** Visual gauge scales for metrics (TradeLink feature)
+## Next Up (high impact, ready to build)
 
-## API Key & Sync Flow
-- **P1** Show sync progress indicator (syncing/computing/complete) in real-time on edit page
-- **P1** OKX bills API: verify data coverage for Spot vs Futures accounts, test with different account types
-- **P1** Persist KEK securely (currently in .env.local, needs Supabase Vault or KMS for production)
-- **P2** Daily cron job to re-sync trades and recompute analytics automatically
-- **P2** API key periodic re-validation (check if permissions changed on exchange)
-- **P2** Handle OKX bills-archive API for history older than 3 months
+### P0 — GenieAI-Inspired: Allocator Portfolio Upload
+- **Allocator-side API key upload**: Let allocators connect THEIR exchange accounts to track all strategies they're invested in
+- When an allocator uploads a key linked to a strategy manager NOT on Quantalyze, the platform detects this and can reach out to that manager ("Your allocator is already tracking you")
+- This flips the acquisition model: allocators pull managers in, not the other way around
+- Unified portfolio dashboard across all connected strategies
+- Reference: genieai.tech (AI-powered fund operations)
+- **Run /office-hours to spec this out before building**
 
-## Organizations
-- **P1** Organizations feature: teams sharing strategies, API keys, portfolios
-  - `organizations`, `organization_members`, `organization_invites` tables (migration 006 drafted)
-  - Profile page "Organizations" tab with create/invite/accept UI
-  - Strategies become org-scoped
-  - Shared API keys within org
-- **P2** Organization billing/permissions tiers
+### P1 — Design Polish
+- [ ] Run /design-review on live site (http://localhost:3000) — visual audit + fix loop
+- [ ] Apply design system tokens to all remaining components (some pages still have old Inter/teal)
+- [ ] Compare live site against 3 HTML reference pages (landing, factsheet, discovery) at `~/.gstack/projects/AI-Isaiah-Quantalyze/designs/`
 
-## Strategy Management
-- **P1** Strategies without data should not be publishable (submission gate exists, but admin can still approve manually via DB)
-- **P2** Embeddable "Verified by Quantalyze" widget for external sites
-- **P2** Leaderboard / ratings system
-- **P3** Multi-account strategy aggregation
-- **P3** Automated accreditation checks (KYC/AML)
+### P1 — Operational
+- [ ] Founder-led migration of existing Telegram/email clients (manual, ~10-20 relationships)
+- [ ] OKX bills API: verify data coverage for Spot vs Futures accounts
+- [ ] Persist KEK securely (Supabase Vault or KMS for production, currently .env.local)
+- [ ] Handle OKX bills-archive API for history older than 3 months
 
-## Infrastructure & Security
-- **P1** Enable RLS on `benchmark_prices` table (prevents price data poisoning)
-- **P1** Benchmark data: Binance is geo-blocked from Railway, CoinGecko needs API key. Need reliable BTC price source.
-- **P2** Redis / BullMQ for heavy compute jobs (when compute >30s)
-- **P2** Billing / pricing tiers (free tier first, monetize after PMF)
-- **P3** Real-time WebSocket data sync
+## Deferred (build on demand signal)
 
-## Testing
-- **P1** E2E test: API key submission → validate → encrypt → store → link to strategy
-- **P1** E2E test: sync → fetch trades → compute analytics → display on page
-- **P1** Integration test: Supabase PostgREST returns analytics as object vs array
-- **P2** E2E test: CSV upload → trades inserted → analytics computed
-- **P2** E2E test: strategy lifecycle (create → add data → submit → admin approve → published with stats)
+### P1.5
+- Allocator preference weights (personalized ranking) — ship filters+presets first, build if >=3 allocators request different criteria weights
 
-## UX & Design
-- **P1** Dark mode toggle
-- **P1** Mobile strategy card layout fix (cramped on 375px)
-- **P2** /design-review visual polish pass
-- **P2** Accessibility audit (WCAG AA)
-- **P3** White-label verification API
-- **P3** Mobile app / PWA
+### P2
+- Organizations / teams (migration 006 drafted, don't build until customer asks)
+- Redis / BullMQ (premature, compute is 15-30s)
+- Billing / pricing tiers (needs pricing model defined with paying customers)
+- Leaderboard / ratings (incentive design needed)
+- Embeddable "Verified by Quantalyze" widget
+- Competitive analysis: quants.space, Darwinex, STRATS.io, TradeLink.pro, genieai.tech
+- Correlation/overlap analysis for portfolios
+- Monte Carlo simulation chart
+- Real-time monitoring dashboard
+- Dark mode (institutional = light mode)
+- WCAG AA accessibility audit
+- Aggregate social proof on landing page improvements (exchange logos, testimonials)
 
-## Marketing
-- **P2** Aggregate social proof stats on landing page ($X AUM, N+ teams)
-- **P2** Speed-to-allocation SLA messaging ("20 days avg")
-- **P3** Landing page / marketing site
+### P3
+- MAE/MFE analysis (FXBlue feature)
+- Visual gauge scales for metrics (TradeLink feature)
+- Multi-account strategy aggregation
+- Real-time WebSocket data sync
+- White-label verification API
 
-## Completed
-- ~~Deploy analytics service to Railway~~ (deployed at quantalyze-analytics-production.up.railway.app)
-- ~~Fix Supabase strategy_analytics returned as object not array~~ (extractAnalytics helper)
-- ~~Fix daily PnL to percentage returns conversion~~ (transforms.py)
-- ~~Fix OKX bills API instType parameter~~ (iterate SWAP/FUTURES/SPOT/MARGIN)
-- ~~Replace individual trade scanning with account-level PnL fetch~~ (200+ API calls → 4)
-- ~~Fix proxy redirecting authenticated API calls~~ (exclude /api/ from auth redirect)
-- ~~Fix API key encryption KEK persistence~~ (stored in .env.local and Railway)
-- ~~Fix signup trigger search_path~~ (handle_new_user SET search_path = public)
-- ~~Fix email confirmation auto-login~~ (exchange code for session on login page)
-- ~~Add anonymous strategy codenames~~ (36 fictional names dropdown)
-- ~~Add strategy types Long-Only/Short-Only/Long-Short~~ (replaced Directional/Bidirectional)
-- ~~Add data gate before strategy submission~~ (require API key or CSV)
-- ~~Add admin sidebar link~~ (visible only for ADMIN_EMAIL match)
-- ~~Add Resync button for connected keys~~
-- ~~Add auto-sync on API key connection~~
-- ~~Add default exchange from strategy to API key form~~
+## Completed (this session, 2026-04-06)
+- ~~Sprint 0: Plausible analytics, Sentry error tracking, legal disclaimers~~
+- ~~Sprint 1: Public discovery (/browse), email notifications (Resend), share factsheet button~~
+- ~~Phase 2: Trust badges (SyncBadge), discovery filters (exchange + track record), percentile ranks, sync progress UX, info hierarchy~~
+- ~~Phase 3: Health score, My Allocations hub (/allocations), My Investors hub (founder notes), social proof (real DB stats)~~
+- ~~Phase 5: API key re-validation on cron sync, PDF factsheet (Puppeteer), E2E tests (Playwright)~~
+- ~~Design: DESIGN.md created, design system applied (DM Sans + Instrument Serif + Geist Mono, muted teal #1B6B5A)~~
+- ~~Design: 3 production HTML reference pages generated (landing, factsheet, discovery)~~
+
+## Previously Completed
+- ~~Phase 1: Security hardening + data correctness~~
+- ~~Phase 3 (prior): Business loops — matching, landing page, cron sync~~
+- ~~Deploy analytics service to Railway~~
+- ~~Fix Supabase strategy_analytics returned as object not array~~
+- ~~Fix daily PnL to percentage returns conversion~~
+- ~~Fix OKX bills API instType parameter~~
+- ~~Replace individual trade scanning with account-level PnL fetch (200+ → 4 calls)~~
+- ~~Fix proxy redirecting authenticated API calls~~
+- ~~Fix API key encryption KEK persistence~~
+- ~~Fix signup trigger search_path~~
+- ~~Fix email confirmation auto-login~~
+- ~~Add anonymous strategy codenames, strategy types, data gate~~
+- ~~Add admin sidebar link, Resync button, auto-sync on API key connection~~
