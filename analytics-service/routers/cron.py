@@ -253,6 +253,22 @@ async def cron_sync():
             f" error={r['error']}" if r.get("error") else "",
         )
 
+    # Recompute analytics for portfolios affected by synced strategies
+    synced_strategy_ids = [r["strategy_id"] for r in all_results if r["status"] == "ok" and r.get("strategy_id")]
+    if synced_strategy_ids:
+        portfolio_rows = supabase.table("portfolio_strategies") \
+            .select("portfolio_id") \
+            .in_("strategy_id", synced_strategy_ids) \
+            .execute()
+        portfolio_ids = list(set(r["portfolio_id"] for r in (portfolio_rows.data or [])))
+
+        for pid in portfolio_ids:
+            try:
+                from routers.portfolio import _compute_portfolio_analytics
+                await _compute_portfolio_analytics(pid)
+            except Exception as e:
+                logger.error("Portfolio recompute failed for %s: %s", pid, e)
+
     return {
         "synced": synced,
         "failed": failed,
