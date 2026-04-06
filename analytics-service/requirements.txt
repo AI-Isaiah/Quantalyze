@@ -10,3 +10,4 @@ httpx==0.28.1
 slowapi==0.1.9
 supabase==2.15.1
 cryptography>=44.0
+sentry-sdk[fastapi]>=2.0

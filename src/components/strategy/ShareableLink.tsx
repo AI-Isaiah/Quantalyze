@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { Button } from "@/components/ui/Button";
+import { analytics } from "@/lib/analytics";
 
 interface ShareableLinkProps {
   strategyId: string;
@@ -11,10 +12,11 @@ export function ShareableLink({ strategyId }: ShareableLinkProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
-    const url = `${window.location.origin}/strategy/${strategyId}`;
+    const url = `${window.location.origin}/factsheet/${strategyId}`;
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
+      analytics.shareClick(strategyId);
       setTimeout(() => setCopied(false), 2000);
     } catch {
       // Fallback for older browsers
@@ -25,6 +27,7 @@ export function ShareableLink({ strategyId }: ShareableLinkProps) {
       document.execCommand("copy");
       document.body.removeChild(input);
       setCopied(true);
+      analytics.shareClick(strategyId);
       setTimeout(() => setCopied(false), 2000);
     }
   }, [strategyId]);
