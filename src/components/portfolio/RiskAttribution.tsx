@@ -18,7 +18,7 @@ interface RiskAttributionProps {
 export function RiskAttribution({ data }: RiskAttributionProps) {
   if (!data || data.length === 0) {
     return (
-      <div className="rounded-xl border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
+      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
         No risk attribution data available.
       </div>
     );

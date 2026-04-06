@@ -19,7 +19,7 @@ interface CompositionDonutProps {
 export function CompositionDonut({ strategies }: CompositionDonutProps) {
   if (!strategies || strategies.length === 0) {
     return (
-      <div className="rounded-xl border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
+      <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center text-text-muted text-sm">
         No composition data available.
       </div>
     );
