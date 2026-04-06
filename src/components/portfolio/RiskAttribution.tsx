@@ -62,7 +62,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
             {data.map((d, i) => {
               const overweight = d.marginal_risk_pct > d.weight_pct * 1.3;
               return (
-                <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                <tr key={d.strategy_id} className="border-b border-border/50 hover:bg-page/50 transition-colors">
                   <td className="py-2 pr-4 flex items-center gap-2">
                     <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PALETTE[i % PALETTE.length] }} />
                     <span className="text-text-primary">{d.strategy_name}</span>
