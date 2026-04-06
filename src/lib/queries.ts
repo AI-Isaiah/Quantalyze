@@ -3,6 +3,93 @@ import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount } f
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
+/** Metric keys we compute percentile ranks for */
+const PERCENTILE_METRICS = [
+  "cagr",
+  "sharpe",
+  "sortino",
+  "calmar",
+  "max_drawdown",
+  "volatility",
+  "cumulative_return",
+] as const;
+
+type PercentileMetric = (typeof PERCENTILE_METRICS)[number];
+
+/** Metrics where lower values are better — percentile is inverted */
+const LOWER_IS_BETTER: ReadonlySet<string> = new Set(["max_drawdown", "volatility"]);
+
+export type PercentileMap = Record<string, Record<PercentileMetric, number>>;
+
+/**
+ * Compute percentile ranks for each published strategy across key metrics.
+ * Returns null when fewer than 5 published strategies exist (not enough data).
+ *
+ * If categorySlug is provided, computes within that category only.
+ * Percentile formula: (count of values <= v) / N * 100
+ * For lower-is-better metrics: percentile = 100 - raw_percentile
+ */
+export async function getPercentiles(categorySlug?: string): Promise<PercentileMap | null> {
+  const supabase = await createClient();
+
+  const analyticsColumns = "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
+
+  const query = categorySlug
+    ? supabase
+        .from("strategies")
+        .select(`id, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`)
+        .eq("discovery_categories.slug", categorySlug)
+        .eq("status", "published")
+    : supabase
+        .from("strategies")
+        .select(`id, strategy_analytics (${analyticsColumns})`)
+        .eq("status", "published");
+
+  const { data: strategies, error } = await query;
+  if (error || !strategies) return null;
+  if (strategies.length < 5) return null;
+
+  // Extract analytics for each strategy
+  const rows: { id: string; analytics: Record<string, number | null> }[] = [];
+  for (const s of strategies) {
+    const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
+    if (!a) continue;
+    rows.push({ id: s.id, analytics: a as unknown as Record<string, number | null> });
+  }
+
+  if (rows.length < 5) return null;
+
+  const result: PercentileMap = {};
+
+  for (const metric of PERCENTILE_METRICS) {
+    // Collect non-null values for this metric
+    const values: { id: string; val: number }[] = [];
+    for (const row of rows) {
+      const v = row.analytics[metric];
+      if (v != null) values.push({ id: row.id, val: v });
+    }
+
+    const n = values.length;
+    if (n === 0) continue;
+
+    for (const entry of values) {
+      const countLessOrEqual = values.filter((x) => x.val <= entry.val).length;
+      let percentile = (countLessOrEqual / n) * 100;
+
+      if (LOWER_IS_BETTER.has(metric)) {
+        percentile = 100 - percentile;
+      }
+
+      if (!result[entry.id]) {
+        result[entry.id] = {} as Record<PercentileMetric, number>;
+      }
+      result[entry.id][metric] = Math.round(percentile);
+    }
+  }
+
+  return result;
+}
+
 // Supabase returns embedded relations as object (unique FK) or array
 export function extractAnalytics(raw: unknown): StrategyAnalytics | null {
   if (!raw) return null;

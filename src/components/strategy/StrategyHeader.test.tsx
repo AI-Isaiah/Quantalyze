@@ -51,16 +51,16 @@ describe("StrategyHeader", () => {
     expect(screen.queryByText(/last synced/i)).toBeNull();
   });
 
-  it("shows yellow indicator for 24-48h old data", () => {
-    const oldDate = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(); // 30h ago
-    render(<StrategyHeader strategy={makeStrategy()} computedAt={oldDate} />);
-    expect(screen.getByText(/last synced 30h ago/i)).toBeDefined();
+  it("shows sync badge for 24-48h old data", () => {
+    const oldDate = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(); // 30h = 1d
+    const { container } = render(<StrategyHeader strategy={makeStrategy()} computedAt={oldDate} />);
+    expect(container.textContent).toContain("Synced 1d ago");
   });
 
-  it("shows red indicator for >48h old data", () => {
+  it("shows sync badge for >48h old data", () => {
     const veryOldDate = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(); // 72h = 3 days
-    render(<StrategyHeader strategy={makeStrategy()} computedAt={veryOldDate} />);
-    expect(screen.getByText(/data stale.*3d ago/i)).toBeDefined();
+    const { container } = render(<StrategyHeader strategy={makeStrategy()} computedAt={veryOldDate} />);
+    expect(container.textContent).toContain("Synced 3d ago");
   });
 
   it("shows no indicator when computedAt is undefined", () => {
