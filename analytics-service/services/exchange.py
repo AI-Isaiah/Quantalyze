@@ -117,7 +117,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     try:
         if exchange.id == "okx":
             # OKX: fetch account bills (P&L history) with pagination for full history
-            from datetime import datetime, timezone
+            from datetime import datetime, timezone, timedelta
             all_bills: list[dict] = []
 
             # Fetch bills across all instrument types, paginate for full history
@@ -149,14 +149,22 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 if type_count > 0:
                     logger.info("OKX %s: fetched %d bills", inst_type, type_count)
 
-            # If no bills found, try bills-archive for older history
-            if not all_bills:
-                logger.info("OKX: no recent bills found, trying archive API...")
+            # Fetch bills-archive for older history (>3 months)
+            # Only fetch archive if we need data older than 90 days
+            archive_bills: list[dict] = []
+            three_months_ago_ms = int((datetime.now(timezone.utc) - timedelta(days=90)).timestamp() * 1000)
+            should_fetch_archive = since_ms is None or since_ms < three_months_ago_ms
+            if not should_fetch_archive:
+                logger.info("OKX: skipping archive API (since_ms is within 3 months)")
+            else:
+                logger.info("OKX: fetching archive API for older history...")
                 for inst_type in ["SWAP", "FUTURES", "SPOT", "MARGIN"]:
                     after_id = ""
                     type_count = 0
                     for page in range(100):
-                        params = {"instType": inst_type, "limit": "100"}
+                        params: dict[str, str] = {"instType": inst_type, "limit": "100"}
+                        if since_ms:
+                            params["begin"] = str(since_ms)
                         if after_id:
                             params["after"] = after_id
                         try:
@@ -164,7 +172,7 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                             data = bills.get("data", [])
                             if not data:
                                 break
-                            all_bills.extend(data)
+                            archive_bills.extend(data)
                             type_count += len(data)
                             after_id = data[-1].get("billId", "")
                             if len(data) < 100:
@@ -175,7 +183,24 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     if type_count > 0:
                         logger.info("OKX archive %s: fetched %d bills", inst_type, type_count)
 
-            logger.info("OKX total: %d bills fetched across all types", len(all_bills))
+            # Merge recent + archive and deduplicate by billId
+            merged_bills = all_bills + archive_bills
+            seen_ids: set[str] = set()
+            unique_bills: list[dict] = []
+            for bill in merged_bills:
+                bid = bill.get("billId", "")
+                if bid and bid not in seen_ids:
+                    seen_ids.add(bid)
+                    unique_bills.append(bill)
+                elif not bid:
+                    unique_bills.append(bill)
+            all_bills = unique_bills
+
+            logger.info(
+                "OKX total: %d bills (%d recent + %d archive, %d after dedup)",
+                len(all_bills), len(merged_bills) - len(archive_bills),
+                len(archive_bills), len(all_bills)
+            )
 
             # Aggregate bills into daily PnL
             from collections import defaultdict
@@ -189,9 +214,8 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     day_key = dt.strftime("%Y-%m-%d")
                     daily_totals[day_key] += pnl_val
 
-            import logging
-            logging.getLogger("quantalyze.analytics").info(
-                "OKX: fetched %d bills, aggregated to %d daily PnL entries",
+            logger.info(
+                "OKX: %d bills aggregated to %d daily PnL entries",
                 len(all_bills), len(daily_totals)
             )
 

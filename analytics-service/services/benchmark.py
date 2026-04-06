@@ -84,12 +84,18 @@ def prices_to_returns(prices: pd.Series) -> pd.Series:
     return prices.pct_change().dropna()
 
 
-async def get_benchmark_returns(symbol: str = "BTC", days: int = 1000) -> pd.Series:
-    """Get benchmark daily returns, using cache if available."""
+async def get_benchmark_returns(
+    symbol: str = "BTC", days: int = 1000
+) -> tuple[pd.Series | None, bool]:
+    """Get benchmark daily returns, using cache if available.
+
+    Returns (returns_series, is_stale) where is_stale=True means benchmark data
+    could not be refreshed and should be flagged in data_quality_flags.
+    """
     if symbol != "BTC":
         raise ValueError(f"Unsupported benchmark: {symbol}")
 
-    # Try cache first
+    # Try cache first (with freshness check)
     try:
         supabase = get_supabase()
         result = await db_execute(
@@ -99,29 +105,44 @@ async def get_benchmark_returns(symbol: str = "BTC", days: int = 1000) -> pd.Ser
         )
 
         if result.data and len(result.data) > 10:
-            df = pd.DataFrame(result.data)
-            prices = pd.Series(
-                df["close_price"].astype(float).values,
-                index=pd.DatetimeIndex(pd.to_datetime(df["date"])),
-                name=symbol,
-            ).sort_index()
-            return prices_to_returns(prices)
+            # Freshness check: reject cache older than 48 hours
+            most_recent_date = max(row["date"] for row in result.data)
+            most_recent = pd.Timestamp(most_recent_date)
+            staleness = datetime.now(timezone.utc) - most_recent.tz_localize(timezone.utc)
+
+            if staleness > timedelta(hours=48):
+                logger.warning(
+                    "Benchmark cache stale (most recent: %s, %s old). Fetching fresh data.",
+                    most_recent_date, staleness
+                )
+            else:
+                df = pd.DataFrame(result.data)
+                prices = pd.Series(
+                    df["close_price"].astype(float).values,
+                    index=pd.DatetimeIndex(pd.to_datetime(df["date"])),
+                    name=symbol,
+                ).sort_index()
+                return prices_to_returns(prices), False
     except Exception as e:
         logger.warning("Benchmark cache read failed: %s", str(e))
 
     # Fetch fresh
-    prices = await fetch_btc_daily_prices(days)
-    returns = prices_to_returns(prices)
-
-    # Cache for next time
     try:
-        supabase = get_supabase()
-        rows = [
-            {"date": d.strftime("%Y-%m-%d"), "symbol": symbol, "close_price": float(v)}
-            for d, v in prices.items()
-        ]
-        await db_execute(lambda: supabase.table("benchmark_prices").upsert(rows).execute())
-    except Exception as e:
-        logger.warning("Benchmark cache write failed: %s", str(e))
+        prices = await fetch_btc_daily_prices(days)
+        returns = prices_to_returns(prices)
 
-    return returns
+        # Cache for next time
+        try:
+            supabase = get_supabase()
+            rows = [
+                {"date": d.strftime("%Y-%m-%d"), "symbol": symbol, "close_price": float(v)}
+                for d, v in prices.items()
+            ]
+            await db_execute(lambda: supabase.table("benchmark_prices").upsert(rows).execute())
+        except Exception as e:
+            logger.warning("Benchmark cache write failed: %s", str(e))
+
+        return returns, False
+    except Exception as e:
+        logger.warning("All benchmark sources failed: %s. Returning None.", str(e))
+        return None, True

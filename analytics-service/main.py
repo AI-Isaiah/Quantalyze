@@ -70,6 +70,14 @@ app.include_router(analytics.router)
 app.include_router(exchange.router)
 
 
+@app.on_event("startup")
+async def startup_validation():
+    """Validate critical configuration on service startup."""
+    from services.encryption import validate_kek_on_startup
+    validate_kek_on_startup()
+    logger.info("Startup validation complete")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}

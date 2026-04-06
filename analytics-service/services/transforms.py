@@ -3,8 +3,17 @@ import numpy as np
 from typing import Any
 
 
-def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
+def trades_to_daily_returns(
+    trades: list[dict[str, Any]],
+    account_balance: float | None = None,
+) -> pd.Series:
     """Convert trade/PnL records to portfolio-level daily returns.
+
+    Args:
+        trades: Trade or daily PnL records from the exchange
+        account_balance: Actual account balance from exchange API (USDT).
+            When provided, used as initial capital for accurate percentage returns.
+            When None, falls back to heuristic estimation (less accurate).
 
     Handles two data formats:
     1. Daily PnL records (order_type='daily_pnl'): dollar P&L per day from exchange bills or CSV
@@ -29,12 +38,23 @@ def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
         )
         daily_pnl = df.groupby("date")["daily_pnl"].sum()
 
-        # Convert dollar PnL to percentage returns
-        # Estimate initial capital from the magnitude of PnL
-        # A reasonable assumption: daily PnL is roughly 0.5-2% of capital
-        # So initial capital ≈ max(|total PnL|, mean daily |PnL| * 100)
-        mean_abs_pnl = daily_pnl.abs().mean()
-        initial_capital = max(mean_abs_pnl * 100, abs(daily_pnl.sum()), 10000)
+        if account_balance and account_balance > 0:
+            # Derive starting balance from current balance and cumulative PnL.
+            # current_balance = starting_balance + total_pnl, so:
+            # starting_balance = current_balance - total_pnl
+            total_pnl = daily_pnl.sum()
+            estimated_start = account_balance - total_pnl
+            if estimated_start > 0:
+                initial_capital = estimated_start
+            else:
+                # Account gained more than its starting balance (e.g., 10x return).
+                # Use current balance as a reasonable upper bound.
+                initial_capital = account_balance
+        else:
+            # Fallback heuristic for CSV uploads where no balance is available.
+            # This can be off by 5-10x for volatile strategies.
+            mean_abs_pnl = daily_pnl.abs().mean()
+            initial_capital = max(mean_abs_pnl * 100, abs(daily_pnl.sum()), 10000)
 
         # Build equity curve and compute returns
         equity = initial_capital + daily_pnl.cumsum()
@@ -44,7 +64,7 @@ def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
         returns_values = daily_pnl / prev_equity
 
     else:
-        # Individual trades: original logic
+        # Individual trades: use account balance if available
         df["notional"] = df["price"].astype(float) * df["quantity"].astype(float)
         df.loc[df["side"] == "sell", "notional"] *= -1
         df["fee_usd"] = df["fee"].fillna(0).astype(float)
@@ -55,7 +75,12 @@ def trades_to_daily_returns(trades: list[dict[str, Any]]) -> pd.Series:
         )
         daily_agg["pnl"] = daily_agg["net_notional"] - daily_agg["total_fees"]
 
-        initial_capital = abs(daily_agg["net_notional"].iloc[0]) or 10000
+        if account_balance and account_balance > 0:
+            total_pnl = daily_agg["pnl"].sum()
+            estimated_start = account_balance - total_pnl
+            initial_capital = estimated_start if estimated_start > 0 else account_balance
+        else:
+            initial_capital = abs(daily_agg["net_notional"].iloc[0]) or 10000
         equity = initial_capital + daily_agg["pnl"].cumsum()
         prev_equity = equity.shift(1).fillna(initial_capital)
         prev_equity = prev_equity.replace(0, initial_capital)

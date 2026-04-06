@@ -1,6 +1,12 @@
 import os
 import json
-from cryptography.fernet import Fernet
+import logging
+from cryptography.fernet import Fernet, InvalidToken
+
+logger = logging.getLogger("quantalyze.analytics")
+
+# Canary plaintext used to verify KEK is functionally correct on startup
+_KEK_CANARY_PLAINTEXT = b"quantalyze-kek-canary-v1"
 
 
 def get_kek() -> bytes:
@@ -9,6 +15,31 @@ def get_kek() -> bytes:
     if not kek:
         raise RuntimeError("KEK environment variable is required for encryption")
     return kek.encode()
+
+
+def validate_kek_on_startup() -> None:
+    """Validate KEK is present, correctly formatted, and functionally correct.
+
+    Called once at service startup. Fails fast if KEK is missing, malformed,
+    or a different key than what was used to create the canary token.
+    """
+    kek = get_kek()
+
+    # Validate it's a valid Fernet key (base64-encoded, 32 bytes)
+    try:
+        cipher = Fernet(kek)
+    except (ValueError, Exception) as e:
+        raise RuntimeError(f"KEK is not a valid Fernet key: {e}") from e
+
+    # Functional test: encrypt and decrypt the canary
+    try:
+        token = cipher.encrypt(_KEK_CANARY_PLAINTEXT)
+        result = cipher.decrypt(token)
+        if result != _KEK_CANARY_PLAINTEXT:
+            raise RuntimeError("KEK canary decrypt produced wrong plaintext")
+        logger.info("KEK validation passed (version %d)", get_kek_version())
+    except InvalidToken as e:
+        raise RuntimeError(f"KEK canary decrypt failed: {e}") from e
 
 
 def get_kek_version() -> int:
