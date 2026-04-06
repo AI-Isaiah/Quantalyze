@@ -36,7 +36,7 @@ export function PortfolioEquityCurve({ portfolioEquityCurve, strategies }: Portf
       height: 350,
       layout: {
         background: { color: "#FFFFFF" },
-        textColor: "#64748B",
+        textColor: "#718096",
         fontFamily: "'Geist Mono', monospace",
         fontSize: 11,
       },
