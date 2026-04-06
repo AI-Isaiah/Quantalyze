@@ -26,7 +26,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Insert contact request via user's client (RLS enforced)
   const { error } = await supabase.from("contact_requests").insert({
     allocator_id: user.id,
     strategy_id,
@@ -43,48 +42,39 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Send email notifications (fire-and-forget, don't block response)
-  const admin = createAdminClient();
+  const userEmail = user.email;
+  const userId = user.id;
+  Promise.resolve().then(async () => {
+    try {
+      const admin = createAdminClient();
+      const [{ data: strategy }, { data: allocatorProfile }] = await Promise.all([
+        admin.from("strategies").select("name, user_id").eq("id", strategy_id).single(),
+        admin.from("profiles").select("display_name, company").eq("id", userId).single(),
+      ]);
 
-  const { data: strategy } = await admin
-    .from("strategies")
-    .select("name, user_id")
-    .eq("id", strategy_id)
-    .single();
+      if (!strategy) return;
 
-  if (strategy) {
-    const { data: allocatorProfile } = await admin
-      .from("profiles")
-      .select("display_name, company")
-      .eq("id", user.id)
-      .single();
+      const allocatorName =
+        allocatorProfile?.display_name ??
+        allocatorProfile?.company ??
+        userEmail ??
+        "An allocator";
 
-    const allocatorName =
-      allocatorProfile?.display_name ??
-      allocatorProfile?.company ??
-      user.email ??
-      "An allocator";
+      if (strategy.user_id) {
+        const { data: managerProfile } = await admin
+          .from("profiles")
+          .select("email")
+          .eq("id", strategy.user_id)
+          .single();
 
-    // Notify the strategy manager
-    if (strategy.user_id) {
-      const { data: managerProfile } = await admin
-        .from("profiles")
-        .select("email")
-        .eq("id", strategy.user_id)
-        .single();
-
-      if (managerProfile?.email) {
-        notifyManagerIntroRequest(
-          managerProfile.email,
-          allocatorName,
-          strategy.name,
-        ).catch(() => {});
+        if (managerProfile?.email) {
+          notifyManagerIntroRequest(managerProfile.email, allocatorName, strategy.name);
+        }
       }
-    }
 
-    // Notify the founder
-    notifyFounderIntroRequest(allocatorName, strategy.name).catch(() => {});
-  }
+      notifyFounderIntroRequest(allocatorName, strategy.name);
+    } catch { /* email failure is non-fatal */ }
+  });
 
   return NextResponse.json({ success: true });
 }

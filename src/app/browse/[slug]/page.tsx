@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
@@ -32,13 +33,12 @@ export default async function PublicCategoryPage({
 
   return (
     <>
-      <div className="flex items-center gap-2 text-sm text-text-muted mb-4">
-        <Link href="/browse" className="hover:text-text-primary transition-colors">
-          Browse
-        </Link>
-        <span>/</span>
-        <span className="text-text-primary">{meta.name}</span>
-      </div>
+      <Breadcrumb
+        items={[
+          { label: "Browse", href: "/browse" },
+          { label: meta.name },
+        ]}
+      />
 
       <h1 className="text-2xl font-bold tracking-tight text-text-primary mb-2">
         {meta.name}

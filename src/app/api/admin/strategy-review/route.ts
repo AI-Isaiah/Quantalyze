@@ -8,7 +8,8 @@ export const POST = withAdminAuth(async (body, admin) => {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  // Data quality gate for approval (parallel queries to minimize latency)
+  let strategyData: { api_key_id: string | null; name: string; user_id: string } | null = null;
+
   if (action === "approve") {
     const [
       { data: strategy },
@@ -17,7 +18,7 @@ export const POST = withAdminAuth(async (body, admin) => {
       { data: latestTrade },
       { data: analytics },
     ] = await Promise.all([
-      admin.from("strategies").select("api_key_id").eq("id", id).single(),
+      admin.from("strategies").select("api_key_id, name, user_id").eq("id", id).single(),
       admin.from("trades").select("id", { count: "exact", head: true }).eq("strategy_id", id),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: true }).limit(1),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: false }).limit(1),
@@ -62,6 +63,8 @@ export const POST = withAdminAuth(async (body, admin) => {
         error: `Cannot approve: analytics computation is not complete.${detail}`,
       }, { status: 400 });
     }
+
+    strategyData = strategy as typeof strategyData;
   }
 
   const update = action === "approve"
@@ -74,24 +77,16 @@ export const POST = withAdminAuth(async (body, admin) => {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  // Send email notification on approval (fire-and-forget)
   if (action === "approve") {
-    const { data: strategyData } = await admin
-      .from("strategies")
-      .select("name, user_id")
-      .eq("id", id)
-      .single();
-
-    if (strategyData?.user_id) {
-      const { data: profile } = await admin
-        .from("profiles")
-        .select("email")
-        .eq("id", strategyData.user_id)
-        .single();
-
-      if (profile?.email) {
-        notifyManagerApproved(profile.email, strategyData.name).catch(() => {});
-      }
+    const sd = strategyData!;
+    if (sd?.user_id) {
+      Promise.resolve(
+        admin.from("profiles").select("email").eq("id", sd.user_id).single()
+      ).then(({ data: profile }) => {
+        if (profile?.email) {
+          notifyManagerApproved(profile.email, sd.name, id as string);
+        }
+      }).catch(() => {});
     }
   }
 

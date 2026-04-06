@@ -28,24 +28,19 @@ export const POST = withAdminAuth(async (body, admin) => {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  // Send email to allocator on status change (fire-and-forget)
   if (status !== "pending") {
-    const { data: request } = await admin
-      .from("contact_requests")
-      .select("allocator_id, strategy_id")
-      .eq("id", id)
-      .single();
-
-    if (request) {
+    Promise.resolve(
+      admin.from("contact_requests").select("allocator_id, strategy_id").eq("id", id).single()
+    ).then(async ({ data: request }) => {
+      if (!request) return;
       const [{ data: allocator }, { data: strategy }] = await Promise.all([
         admin.from("profiles").select("email").eq("id", request.allocator_id).single(),
         admin.from("strategies").select("name").eq("id", request.strategy_id).single(),
       ]);
-
       if (allocator?.email && strategy?.name) {
-        notifyAllocatorIntroStatus(allocator.email, strategy.name, status as string).catch(() => {});
+        notifyAllocatorIntroStatus(allocator.email, strategy.name, status as string);
       }
-    }
+    }).catch(() => {});
   }
 
   return NextResponse.json({ success: true });

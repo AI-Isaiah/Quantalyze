@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
@@ -43,21 +45,13 @@ export default async function PublicStrategyDetailPage({
 
   return (
     <>
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-sm text-text-muted mb-6">
-        <Link href="/browse" className="hover:text-text-primary transition-colors">
-          Browse
-        </Link>
-        <span>/</span>
-        <Link
-          href={`/browse/${slug}`}
-          className="hover:text-text-primary transition-colors"
-        >
-          {cat?.name ?? slug}
-        </Link>
-        <span>/</span>
-        <span className="text-text-primary">{strategy.name}</span>
-      </div>
+      <Breadcrumb
+        items={[
+          { label: "Browse", href: "/browse" },
+          { label: cat?.name ?? slug, href: `/browse/${slug}` },
+          { label: strategy.name },
+        ]}
+      />
 
       {/* Header */}
       <div className="flex items-start justify-between mb-6">
@@ -67,11 +61,7 @@ export default async function PublicStrategyDetailPage({
               {strategy.name}
             </h1>
             {strategy.api_key_id && (
-              <span title="Verified via exchange API" className="text-accent">
-                <svg className="h-5 w-5" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M8 0a8 8 0 110 16A8 8 0 018 0zm3.78 5.22a.75.75 0 00-1.06 0L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25a.75.75 0 000-1.06z" />
-                </svg>
-              </span>
+              <VerifiedBadge className="text-accent" />
             )}
           </div>
           <div className="flex gap-1.5 mt-2">
