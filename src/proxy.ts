@@ -32,9 +32,9 @@ export async function proxy(request: NextRequest) {
     data: { session },
   } = await supabase.auth.getSession();
 
-  const isPublicRoute = PUBLIC_ROUTES.some((route) =>
-    request.nextUrl.pathname.startsWith(route)
-  );
+  const isPublicRoute =
+    request.nextUrl.pathname === "/" ||
+    PUBLIC_ROUTES.some((route) => request.nextUrl.pathname.startsWith(route));
 
   if (!session && !isPublicRoute) {
     const url = request.nextUrl.clone();

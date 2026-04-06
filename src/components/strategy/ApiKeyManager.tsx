@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
+import { SyncProgress, type SyncStatus } from "./SyncProgress";
 import type { ApiKey } from "@/lib/types";
 
 interface ApiKeyManagerProps {
@@ -21,6 +22,9 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncingKeyId, setSyncingKeyId] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const router = useRouter();
 
@@ -34,8 +38,23 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       .from("api_keys")
       .select("*")
       .order("created_at", { ascending: false });
-    if (data) setKeys(data);
+    if (data) {
+      setKeys(data);
+      const current = data.find((k) => k.id === currentKeyId);
+      if (current?.last_sync_at) setLastSyncAt(current.last_sync_at);
+    }
   }
+
+  const handleSyncStatusChange = useCallback((status: SyncStatus) => {
+    setSyncStatus(status);
+    if (status === "complete") {
+      setSyncingKeyId(null);
+      loadKeys();
+      router.refresh();
+    } else if (status === "error") {
+      setSyncingKeyId(null);
+    }
+  }, [router, loadKeys]);
 
   async function handleAddKey(data: {
     exchange: string;
@@ -125,6 +144,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   async function handleSyncTrades(keyId: string) {
     setSyncingKeyId(keyId);
+    setSyncStatus("syncing");
+    setSyncError(null);
+    setError(null);
+
     try {
       // Link key to strategy first
       await handleLinkKey(keyId);
@@ -145,10 +168,16 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         throw new Error("Analytics service unavailable. Ensure SUPABASE_SERVICE_ROLE_KEY is configured.");
       }
 
+      // API returned success -- analytics may still be computing.
+      // SyncProgress will poll strategy_analytics to track completion.
+      setSyncStatus("computing");
+      await loadKeys();
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sync failed");
-    } finally {
+      const message = err instanceof Error ? err.message : "Sync failed";
+      setSyncStatus("error");
+      setSyncError(message);
+      setError(message);
       setSyncingKeyId(null);
     }
   }
@@ -209,18 +238,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
-                  disabled={syncingKeyId === key.id}
+                  disabled={!!syncingKeyId}
                 >
-                  {syncingKeyId === key.id ? "Syncing..." : "Resync"}
+                  {syncingKeyId === key.id ? "Syncing\u2026" : "Resync"}
                 </Button>
               ) : (
                 <Button
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
-                  disabled={syncingKeyId === key.id}
+                  disabled={!!syncingKeyId}
                 >
-                  {syncingKeyId === key.id ? "Syncing..." : "Use & Sync"}
+                  {syncingKeyId === key.id ? "Syncing\u2026" : "Use & Sync"}
                 </Button>
               )}
               <Button
@@ -234,6 +263,18 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           </div>
         </Card>
       ))}
+
+      {/* Sync progress indicator */}
+      {syncStatus !== "idle" && (
+        <SyncProgress
+          strategyId={strategyId}
+          syncStatus={syncStatus}
+          lastSyncAt={lastSyncAt}
+          syncError={syncError}
+          onRetry={() => syncingKeyId && handleSyncTrades(syncingKeyId)}
+          onStatusChange={handleSyncStatusChange}
+        />
+      )}
 
       <Modal
         open={!!confirmDelete}
@@ -249,7 +290,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         </div>
       </Modal>
 
-      {error && !showForm && <p className="text-sm text-negative">{error}</p>}
+      {error && !showForm && syncStatus !== "error" && <p className="text-sm text-negative">{error}</p>}
     </div>
   );
 }

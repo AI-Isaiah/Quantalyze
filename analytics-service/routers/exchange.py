@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades
+from services.exchange import create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.db import get_supabase, db_execute
 from pydantic import BaseModel
@@ -103,30 +103,11 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
         raise HTTPException(status_code=500, detail="Failed to decrypt credentials")
 
     exchange = create_exchange(key_data["exchange"], api_key, api_secret, passphrase)
-
-    # Use last_sync_at to avoid re-fetching old trades
-    since_ms = None
-    if key_data.get("last_sync_at"):
-        try:
-            dt = datetime.fromisoformat(key_data["last_sync_at"].replace("Z", "+00:00"))
-            since_ms = int(dt.timestamp() * 1000)
-        except Exception:
-            pass
+    since_ms = parse_since_ms(key_data.get("last_sync_at"))
 
     try:
         trades = await fetch_all_trades(exchange, since_ms=since_ms)
-
-        # Fetch account balance for accurate capital estimation
-        account_balance = None
-        try:
-            balance = await exchange.fetch_balance()
-            # Get total USDT equivalent balance
-            usdt_total = balance.get("total", {}).get("USDT", 0)
-            if usdt_total and float(usdt_total) > 0:
-                account_balance = float(usdt_total)
-                logger.info("Fetched account balance: %.2f USDT", account_balance)
-        except Exception as e:
-            logger.warning("Could not fetch account balance: %s", str(e))
+        account_balance = await fetch_usdt_balance(exchange)
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch trades from exchange")
     finally:
