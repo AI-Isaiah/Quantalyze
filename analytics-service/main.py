@@ -25,7 +25,7 @@ if SENTRY_DSN:
     except ImportError:
         logging.getLogger("quantalyze.analytics").warning("SENTRY_DSN set but sentry-sdk not installed")
 
-from routers import analytics, exchange
+from routers import analytics, cron, exchange
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -67,6 +67,7 @@ async def verify_service_key(request: Request, call_next):
 
 
 app.include_router(analytics.router)
+app.include_router(cron.router)
 app.include_router(exchange.router)
 
 

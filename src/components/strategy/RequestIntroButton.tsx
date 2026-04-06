@@ -3,35 +3,51 @@
 import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
+import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
+
+type RequestStatus = "pending" | "intro_made" | "completed" | "declined";
+
+const STATUS_MESSAGES: Record<RequestStatus, string> = {
+  pending: "Pending review",
+  intro_made: "Introduction in progress",
+  completed: "Introduction completed",
+  declined: "Request declined",
+};
 
 export function RequestIntroButton({ strategyId }: { strategyId: string }) {
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState("");
-  const [status, setStatus] = useState<"idle" | "loading" | "sent" | "checking" | "error">("checking");
+  const [uiState, setUiState] = useState<"idle" | "loading" | "sent" | "checking" | "error">("checking");
+  const [requestStatus, setRequestStatus] = useState<RequestStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function checkExisting() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setStatus("idle"); return; }
+      if (!user) { setUiState("idle"); return; }
 
       const { data } = await supabase
         .from("contact_requests")
-        .select("id")
+        .select("id, status")
         .eq("allocator_id", user.id)
         .eq("strategy_id", strategyId)
         .maybeSingle();
 
-      setStatus(data ? "sent" : "idle");
+      if (data) {
+        setUiState("sent");
+        setRequestStatus(data.status as RequestStatus);
+      } else {
+        setUiState("idle");
+      }
     }
     checkExisting();
   }, [strategyId]);
 
   async function handleSubmit() {
-    setStatus("loading");
+    setUiState("loading");
     setError(null);
 
     const supabase = createClient();
@@ -39,7 +55,7 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
 
     if (!user) {
       setError("Please sign in to request an intro.");
-      setStatus("error");
+      setUiState("error");
       return;
     }
 
@@ -51,27 +67,41 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
 
     if (error) {
       if (error.code === "23505") {
-        setStatus("sent");
+        setUiState("sent");
+        setRequestStatus("pending");
         return;
       }
       setError("Failed to send request. Please try again.");
-      setStatus("error");
+      setUiState("error");
       return;
     }
 
-    setStatus("sent");
+    setUiState("sent");
+    setRequestStatus("pending");
+  }
+
+  // When a request exists, show status inline instead of just "Intro Requested"
+  if (uiState === "sent" && requestStatus) {
+    return (
+      <div className="flex items-center gap-2">
+        <Badge label={requestStatus} type="status" />
+        <span className="text-xs text-text-muted">
+          {STATUS_MESSAGES[requestStatus]}
+        </span>
+      </div>
+    );
   }
 
   return (
     <>
       <Button
         onClick={() => setOpen(true)}
-        disabled={status === "sent" || status === "checking"}
+        disabled={uiState === "checking"}
       >
-        {status === "checking" ? "..." : status === "sent" ? "Intro Requested" : "Request Intro"}
+        {uiState === "checking" ? "..." : "Request Intro"}
       </Button>
 
-      <Modal open={open && status !== "sent"} onClose={() => setOpen(false)} title="Request Introduction">
+      <Modal open={open && uiState !== "sent"} onClose={() => setOpen(false)} title="Request Introduction">
         <p className="text-sm text-text-secondary mb-4">
           The team will review your request and facilitate an introduction
           with the strategy manager.
@@ -88,8 +118,8 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
           <Button variant="secondary" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={status === "loading"}>
-            {status === "loading" ? "Sending..." : "Send Request"}
+          <Button onClick={handleSubmit} disabled={uiState === "loading"}>
+            {uiState === "loading" ? "Sending..." : "Send Request"}
           </Button>
         </div>
       </Modal>

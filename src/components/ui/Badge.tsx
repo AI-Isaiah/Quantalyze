@@ -15,6 +15,11 @@ const statusMap: Record<string, string> = {
   draft: "bg-badge-other/10 text-badge-other",
   pending_review: "bg-badge-market-neutral/10 text-badge-market-neutral",
   archived: "bg-badge-other/10 text-text-muted",
+  // contact_request statuses
+  pending: "bg-badge-market-neutral/10 text-badge-market-neutral",
+  intro_made: "bg-accent/10 text-accent",
+  completed: "bg-positive/10 text-positive",
+  declined: "bg-negative/10 text-negative",
 };
 
 const statusLabelMap: Record<string, string> = {
@@ -22,6 +27,11 @@ const statusLabelMap: Record<string, string> = {
   draft: "Draft",
   pending_review: "Pending Review",
   archived: "Archived",
+  // contact_request statuses
+  pending: "Pending",
+  intro_made: "Intro Made",
+  completed: "Completed",
+  declined: "Declined",
 };
 
 interface BadgeProps {

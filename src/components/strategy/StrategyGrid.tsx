@@ -34,12 +34,12 @@ export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
         >
           <Card
             padding="sm"
-            className="h-full transition-shadow hover:shadow-elevated group-hover:border-accent/30"
+            className="h-full transition-shadow hover:shadow-elevated group-hover:border-accent/30 max-[375px]:p-2.5"
           >
             {/* Header: name + badges */}
-            <div className="mb-3">
-              <div className="flex items-start gap-2">
-                <h3 className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors leading-tight">
+            <div className="mb-3 max-[375px]:mb-2">
+              <div className="flex items-start gap-2 min-h-[44px] max-[375px]:min-h-[44px]">
+                <h3 className="text-sm font-semibold text-text-primary group-hover:text-accent transition-colors leading-tight truncate min-w-0">
                   {s.name}
                 </h3>
                 {s.api_key_id && <VerifiedBadge className="shrink-0 mt-0.5" />}
@@ -49,7 +49,7 @@ export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
                   </span>
                 )}
               </div>
-              <div className="flex flex-wrap gap-1 mt-1.5">
+              <div className="flex flex-wrap gap-1 mt-1.5 max-[375px]:flex-col max-[375px]:gap-0.5">
                 {s.strategy_types.map((t) => (
                   <Badge key={t} label={t} />
                 ))}
@@ -57,7 +57,7 @@ export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
             </div>
 
             {/* AUM / Max Capacity */}
-            <div className="flex items-center gap-4 text-xs text-text-muted mb-3">
+            <div className="flex items-center gap-4 text-xs text-text-muted mb-3 max-[375px]:mb-2 max-[375px]:gap-2">
               <span>
                 AUM{" "}
                 <span className="text-text-secondary font-medium">
@@ -73,7 +73,7 @@ export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
             </div>
 
             {/* Sparkline */}
-            <div className="mb-3">
+            <div className="mb-3 max-[375px]:mb-2">
               <Sparkline
                 data={s.analytics.sparkline_returns ?? []}
                 width={240}
@@ -83,7 +83,7 @@ export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
             </div>
 
             {/* Footer metrics */}
-            <div className="flex items-center justify-between border-t border-border pt-2.5">
+            <div className="flex items-center justify-between border-t border-border pt-2.5 min-h-[44px]">
               <div className="text-xs">
                 <span className="text-text-muted">Return </span>
                 <span className={`font-metric font-medium ${metricColor(s.analytics.cumulative_return)}`}>
