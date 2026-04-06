@@ -24,7 +24,7 @@ export default async function AllocationsPage() {
   if (!user) redirect("/login");
 
   // Fetch portfolio aggregates and contact requests in parallel
-  const [aggregates, { data: requests }, { data: alerts }] = await Promise.all([
+  const [aggregates, { data: requests }] = await Promise.all([
     getAllocatorAggregates(user.id),
     supabase
       .from("contact_requests")
@@ -38,22 +38,21 @@ export default async function AllocationsPage() {
       .eq("allocator_id", user.id)
       .in("status", ["intro_made", "completed"])
       .order("created_at", { ascending: false }),
-    // Fetch alerts across all user's portfolios
-    supabase
-      .from("portfolio_alerts")
-      .select("id, portfolio_id, severity")
-      .is("acknowledged_at", null)
-      .in(
-        "portfolio_id",
-        supabase
-          .from("portfolios")
-          .select("id")
-          .eq("user_id", user.id)
-      ),
   ]);
 
   const { portfolios, analytics: allAnalytics } = aggregates;
-  const activeAlerts = alerts ?? [];
+
+  // Fetch alerts for user's portfolios (needs portfolio IDs from aggregates)
+  const portfolioIds = portfolios.map((p) => p.id);
+  let activeAlerts: { id: string; portfolio_id: string; severity: string }[] = [];
+  if (portfolioIds.length > 0) {
+    const { data: alerts } = await supabase
+      .from("portfolio_alerts")
+      .select("id, portfolio_id, severity")
+      .is("acknowledged_at", null)
+      .in("portfolio_id", portfolioIds);
+    activeAlerts = alerts ?? [];
+  }
 
   // Build a map: portfolio_id -> latest analytics snapshot
   const analyticsMap = new Map<string, PortfolioAnalytics>();
@@ -80,7 +79,6 @@ export default async function AllocationsPage() {
       : null;
 
   // Portfolio strategy counts (from portfolio_strategies)
-  const portfolioIds = portfolios.map((p) => p.id);
   const { data: strategyCounts } = portfolioIds.length
     ? await supabase
         .from("portfolio_strategies")
