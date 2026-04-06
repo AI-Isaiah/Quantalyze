@@ -19,9 +19,9 @@ interface FounderInsightsProps {
 }
 
 const statusStyles: Record<Strategy["relationship_status"], string> = {
-  connected: "bg-accent/10 text-accent",
-  paused: "bg-yellow-50 text-yellow-700",
-  exited: "bg-red-50 text-negative",
+  connected: "bg-positive/10 text-positive",
+  paused: "bg-badge-market-neutral/10 text-badge-market-neutral",
+  exited: "bg-negative/10 text-negative",
 };
 
 export function FounderInsights({ strategies, portfolioId }: FounderInsightsProps) {
