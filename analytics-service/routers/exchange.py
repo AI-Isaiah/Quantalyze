@@ -115,22 +115,38 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
 
     try:
         trades = await fetch_all_trades(exchange, since_ms=since_ms)
+
+        # Fetch account balance for accurate capital estimation
+        account_balance = None
+        try:
+            balance = await exchange.fetch_balance()
+            # Get total USDT equivalent balance
+            usdt_total = balance.get("total", {}).get("USDT", 0)
+            if usdt_total and float(usdt_total) > 0:
+                account_balance = float(usdt_total)
+                logger.info("Fetched account balance: %.2f USDT", account_balance)
+        except Exception as e:
+            logger.warning("Could not fetch account balance: %s", str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch trades from exchange")
     finally:
         await exchange.close()
 
-    # Store trades (delete old ones first to avoid duplicates on re-sync)
+    # Store trades atomically with advisory lock (prevents concurrent sync race)
     if trades:
-        supabase.table("trades").delete().eq("strategy_id", req.strategy_id).execute()
-        for batch_start in range(0, len(trades), 500):
-            batch = trades[batch_start:batch_start + 500]
-            supabase.table("trades").insert(
-                [{"strategy_id": req.strategy_id, **t} for t in batch]
-            ).execute()
+        import json as _json
+        trades_json = _json.dumps(trades, default=str)
 
-        supabase.table("api_keys").update({
-            "last_sync_at": datetime.now(timezone.utc).isoformat()
-        }).eq("id", key_data["id"]).execute()
+        result = supabase.rpc("sync_trades", {
+            "p_strategy_id": req.strategy_id,
+            "p_trades": trades_json,
+        }).execute()
+        logger.info("Synced %s trades for strategy %s (atomic)", result.data, req.strategy_id)
+
+    # Always advance the sync cursor (even when no new trades) to avoid re-fetching the same window
+    update_data: dict = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
+    if account_balance is not None:
+        update_data["account_balance_usdt"] = account_balance
+    supabase.table("api_keys").update(update_data).eq("id", key_data["id"]).execute()
 
     return {"trades_fetched": len(trades), "strategy_id": req.strategy_id}

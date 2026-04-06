@@ -51,8 +51,25 @@ async def compute_analytics(request: Request, req: ComputeRequest):
             ).execute()
             raise HTTPException(status_code=400, detail="Insufficient trade history")
 
+        # Fetch account balance for accurate capital estimation
+        # Link: strategies.api_key_id -> api_keys.id (api_keys has no strategy_id column)
+        account_balance = None
+        try:
+            strategy_with_key = supabase.table("strategies").select("api_key_id").eq(
+                "id", req.strategy_id
+            ).single().execute()
+            api_key_id = strategy_with_key.data.get("api_key_id") if strategy_with_key.data else None
+            if api_key_id:
+                key_result = supabase.table("api_keys").select("account_balance_usdt").eq(
+                    "id", api_key_id
+                ).single().execute()
+                if key_result.data and key_result.data.get("account_balance_usdt"):
+                    account_balance = float(key_result.data["account_balance_usdt"])
+        except Exception as e:
+            logger.warning("Could not fetch account balance for %s: %s", req.strategy_id, str(e))
+
         # Transform trades to daily returns
-        returns = trades_to_daily_returns(trades)
+        returns = trades_to_daily_returns(trades, account_balance=account_balance)
 
         if len(returns) < 2:
             supabase.table("strategy_analytics").upsert(
@@ -66,14 +83,22 @@ async def compute_analytics(request: Request, req: ComputeRequest):
             raise HTTPException(status_code=400, detail="Insufficient trading days")
 
         # Fetch benchmark returns for BTC overlay
+        benchmark_stale = False
         try:
-            benchmark_rets = await get_benchmark_returns("BTC")
+            benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
         except Exception as e:
             logger.warning("Benchmark fetch failed: %s", str(e))
             benchmark_rets = None
+            benchmark_stale = True
 
         # Compute all metrics
         metrics = compute_all_metrics(returns, benchmark_rets)
+
+        # Build data quality flags
+        data_quality_flags = {}
+        if benchmark_stale or benchmark_rets is None:
+            data_quality_flags["benchmark_unavailable"] = True
+            data_quality_flags["benchmark_note"] = "Benchmark data unavailable. Alpha, beta, and correlation not computed."
 
         # Store results
         supabase.table("strategy_analytics").upsert(
@@ -81,6 +106,7 @@ async def compute_analytics(request: Request, req: ComputeRequest):
                 "strategy_id": req.strategy_id,
                 "computation_status": "complete",
                 "computation_error": None,
+                "data_quality_flags": data_quality_flags if data_quality_flags else None,
                 **metrics,
             },
             on_conflict="strategy_id",

@@ -4,7 +4,7 @@ import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount } f
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
 // Supabase returns embedded relations as object (unique FK) or array
-function extractAnalytics(raw: unknown): StrategyAnalytics | null {
+export function extractAnalytics(raw: unknown): StrategyAnalytics | null {
   if (!raw) return null;
   if (Array.isArray(raw)) return raw[0] ?? null;
   if (typeof raw === "object") return raw as StrategyAnalytics;
