@@ -80,10 +80,10 @@ export default async function Home() {
             Exchange-verified performance data
           </div>
 
-          <h1 className="text-4xl font-bold tracking-tight text-text-primary md:text-5xl lg:text-6xl">
+          <h1 className="text-4xl tracking-tight text-text-primary md:text-5xl lg:text-6xl font-display">
             Exchange-Verified
             <br />
-            <span className="text-accent">Quant Strategies</span>
+            <span className="text-accent italic">Quant Strategies</span>
           </h1>
 
           <p className="mt-6 text-lg text-text-secondary md:text-xl leading-relaxed">

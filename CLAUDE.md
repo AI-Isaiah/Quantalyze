@@ -25,3 +25,5 @@ Key routing rules:
 - Architecture review → invoke plan-eng-review
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
+- Tech debt, "what should we refactor", "code health", refactoring priorities, maintenance backlog → invoke engineering:tech-debt
+- Architecture decision, ADR, "how should we architect", evaluate architecture, system design review → invoke engineering:architecture

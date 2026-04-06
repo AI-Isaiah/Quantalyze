@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 @theme inline {
-  /* --- Colors (Institutional Light Mode) --- */
-  --color-page: #FAFAFA;
+  /* --- Colors (Institutional Light Mode per DESIGN.md) --- */
+  --color-page: #F8F9FA;
   --color-surface: #FFFFFF;
   --color-sidebar: #0F172A;
   --color-sidebar-hover: #1E293B;
@@ -10,20 +10,20 @@
   --color-sidebar-text: #94A3B8;
   --color-sidebar-text-active: #FFFFFF;
 
-  --color-text-primary: #1E293B;
-  --color-text-secondary: #475569;
-  --color-text-muted: #64748B;
+  --color-text-primary: #1A1A2E;
+  --color-text-secondary: #4A5568;
+  --color-text-muted: #718096;
 
-  --color-accent: #0D9488;
-  --color-accent-hover: #0F766E;
-  --color-positive: #059669;
+  --color-accent: #1B6B5A;
+  --color-accent-hover: #155A4B;
+  --color-positive: #16A34A;
   --color-negative: #DC2626;
 
   --color-border: #E2E8F0;
-  --color-border-focus: #0D9488;
+  --color-border-focus: #1B6B5A;
 
   /* Badge colors */
-  --color-badge-directional: #0D9488;
+  --color-badge-directional: #1B6B5A;
   --color-badge-bidirectional: #6366F1;
   --color-badge-market-neutral: #F59E0B;
   --color-badge-delta-neutral: #8B5CF6;
@@ -31,19 +31,20 @@
   --color-badge-other: #6B7280;
 
   /* Chart colors */
-  --color-chart-strategy: #0D9488;
+  --color-chart-strategy: #1B6B5A;
   --color-chart-benchmark: #94A3B8;
 
-  /* --- Typography --- */
-  --font-sans: var(--font-inter);
-  --font-mono: var(--font-jetbrains-mono);
+  /* --- Typography (DESIGN.md: DM Sans body, Instrument Serif display, Geist Mono data) --- */
+  --font-sans: var(--font-dm-sans);
+  --font-serif: var(--font-instrument-serif);
+  --font-mono: var(--font-geist-mono);
 
   /* --- Spacing --- */
   --spacing-sidebar: 260px;
 
   /* --- Shadows --- */
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.06);
-  --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
 }
 
 body {
@@ -51,8 +52,14 @@ body {
   color: var(--color-text-primary);
 }
 
-/* JetBrains Mono for all numeric values */
+/* Geist Mono for all numeric values */
 .font-metric {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* Instrument Serif for display headings */
+.font-display {
+  font-family: var(--font-serif);
+  font-weight: 400;
 }
