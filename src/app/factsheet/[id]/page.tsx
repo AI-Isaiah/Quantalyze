@@ -155,10 +155,19 @@ export default async function FactsheetPage({
       {/* Footer */}
       <Disclaimer variant="factsheet" />
 
-      {/* Print button (hidden in print) */}
-      <div className="mt-6 text-center print:hidden">
+      {/* Actions (hidden in print) */}
+      <div className="mt-6 flex items-center justify-center gap-4 print:hidden">
+        <a
+          href={`/api/factsheet/${id}/pdf`}
+          target="_blank"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+        >
+          <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 10v3h10v-3M8 2v8M5 7l3 3 3-3" />
+          </svg>
+          Download PDF
+        </a>
         <PrintButton />
-        <p className="text-xs text-text-muted mt-2">Use your browser&apos;s &quot;Save as PDF&quot; option in the print dialog.</p>
       </div>
     </div>
   );
