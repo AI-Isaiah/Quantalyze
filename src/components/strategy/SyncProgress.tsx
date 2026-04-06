@@ -74,9 +74,56 @@ export function SyncProgress({
   onStatusChange,
 }: SyncProgressProps) {
   const [showWarnings, setShowWarnings] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [exchangeName, setExchangeName] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isActive = syncStatus === "syncing" || syncStatus === "computing";
+
+  // Fetch exchange name from the strategy's linked API key
+  useEffect(() => {
+    if (!isActive) return;
+    let cancelled = false;
+    async function fetchExchange() {
+      const supabase = createClient();
+      const { data: strategy } = await supabase
+        .from("strategies")
+        .select("api_key_id")
+        .eq("id", strategyId)
+        .single();
+      if (cancelled || !strategy?.api_key_id) return;
+      const { data: apiKey } = await supabase
+        .from("api_keys")
+        .select("exchange")
+        .eq("id", strategy.api_key_id)
+        .single();
+      if (!cancelled && apiKey?.exchange) {
+        setExchangeName(apiKey.exchange.charAt(0).toUpperCase() + apiKey.exchange.slice(1));
+      }
+    }
+    fetchExchange();
+    return () => { cancelled = true; };
+  }, [isActive, strategyId]);
+
+  // Elapsed time counter
+  useEffect(() => {
+    if (isActive) {
+      setElapsedSeconds(0);
+      timerRef.current = setInterval(() => {
+        setElapsedSeconds((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setElapsedSeconds(0);
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [isActive]);
 
   const pollStatus = useCallback(async () => {
     const supabase = createClient();
@@ -110,7 +157,21 @@ export function SyncProgress({
     };
   }, [isActive, pollStatus]);
 
+  // Step-based label for active states
+  function getActiveLabel(): string {
+    if (syncStatus === "syncing") {
+      return exchangeName
+        ? `Fetching trades from ${exchangeName}...`
+        : "Fetching trades...";
+    }
+    return "Computing analytics...";
+  }
+
   const config = STATUS_CONFIG[syncStatus];
+  const activeLabel = isActive ? getActiveLabel() : config.label;
+
+  // Step tracking: syncing = step 1-2, computing = step 3
+  const currentStep = syncStatus === "syncing" ? 1 : syncStatus === "computing" ? 3 : 0;
 
   return (
     <div className={`rounded-lg px-3 py-2.5 ${config.bgColor}`}>
@@ -118,9 +179,50 @@ export function SyncProgress({
       <div className="flex items-center gap-2">
         <span className={`shrink-0 ${config.color}`}>{config.icon}</span>
         <span className={`text-sm font-medium ${config.color}`}>
-          {config.label}
+          {activeLabel}
         </span>
+        {isActive && (
+          <span className="text-xs text-text-muted ml-auto tabular-nums">
+            {formatElapsed(elapsedSeconds)}
+          </span>
+        )}
       </div>
+
+      {/* Step indicators for active states */}
+      {isActive && (
+        <div className="mt-2 ml-6 space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <StepDot active={currentStep === 1} complete={currentStep > 1} />
+            <span className={`text-xs ${currentStep >= 1 ? "text-text-secondary" : "text-text-muted"}`}>
+              Fetching trades{exchangeName ? ` from ${exchangeName}` : ""}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <StepDot active={false} complete={currentStep > 2} />
+            <span className={`text-xs ${currentStep >= 2 ? "text-text-secondary" : "text-text-muted"}`}>
+              Processing trades
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <StepDot active={currentStep === 3} complete={false} />
+            <span className={`text-xs ${currentStep >= 3 ? "text-text-secondary" : "text-text-muted"}`}>
+              Computing analytics
+            </span>
+          </div>
+
+          {/* Hint text */}
+          <p className="text-xs text-text-muted mt-1">
+            Usually takes 15–30 seconds
+          </p>
+
+          {/* Slow sync warning */}
+          {elapsedSeconds > 60 && (
+            <p className="text-xs text-amber-500 mt-0.5">
+              This is taking longer than usual. Large accounts can take up to 2 minutes.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Last synced timestamp */}
       {syncStatus === "complete" && lastSyncAt && (
@@ -157,15 +259,6 @@ export function SyncProgress({
           </Button>
         </div>
       )}
-
-      {/* Step indicators for active states */}
-      {isActive && (
-        <div className="flex items-center gap-1.5 mt-2 ml-6">
-          <StepDot active={syncStatus === "syncing"} complete={syncStatus === "computing"} />
-          <div className="h-px w-4 bg-border" />
-          <StepDot active={syncStatus === "computing"} complete={false} />
-        </div>
-      )}
     </div>
   );
 }
@@ -200,6 +293,12 @@ function formatRelativeTime(dateStr: string): string {
   const diffDay = Math.floor(diffHr / 24);
   if (diffDay < 7) return `${diffDay}d ago`;
   return date.toLocaleDateString();
+}
+
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
 }
 
 // --- Icons ---

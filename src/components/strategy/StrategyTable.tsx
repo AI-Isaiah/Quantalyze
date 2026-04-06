@@ -14,6 +14,7 @@ import {
   type RangeFilter,
 } from "./StrategyFilters";
 import { StrategyGrid } from "./StrategyGrid";
+import { SyncBadge } from "./SyncBadge";
 import { formatPercent, formatNumber, formatCurrency, metricColor } from "@/lib/utils";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -146,6 +147,26 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
       );
     }
 
+    // Advanced: exchanges
+    if (advancedFilters.exchanges.length > 0) {
+      result = result.filter((s) =>
+        s.supported_exchanges.some((e) =>
+          advancedFilters.exchanges.some((f) => f.toLowerCase() === e.toLowerCase())
+        )
+      );
+    }
+
+    // Advanced: min track record
+    if (advancedFilters.minTrackRecord !== "") {
+      const minDays = parseInt(advancedFilters.minTrackRecord, 10);
+      result = result.filter((s) => {
+        if (!s.start_date) return false;
+        const start = new Date(s.start_date);
+        const daysSince = (Date.now() - start.getTime()) / (1000 * 60 * 60 * 24);
+        return daysSince >= minDays;
+      });
+    }
+
     // Advanced: capital ranges (raw dollar values)
     result = result.filter((s) => matchesRangeRaw(s.aum, advancedFilters.aum));
     result = result.filter((s) => matchesRangeRaw(s.max_capacity, advancedFilters.maxCapacity));
@@ -248,10 +269,13 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
                         </span>
                       )}
                     </div>
-                    <div className="flex gap-1 mt-1">
-                      {s.strategy_types.map((t) => (
-                        <Badge key={t} label={t} />
-                      ))}
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="flex gap-1">
+                        {s.strategy_types.map((t) => (
+                          <Badge key={t} label={t} />
+                        ))}
+                      </div>
+                      <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
                     </div>
                   </td>
                   <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.cumulative_return)}`}>

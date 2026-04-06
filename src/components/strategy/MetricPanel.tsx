@@ -9,8 +9,10 @@ interface MetricGroup {
   title: string;
   defaultOpen: boolean;
   hide?: boolean;
-  metrics: { label: string; value: string; colorClass?: string; qualKey?: string; qualValue?: number | null }[];
+  metrics: { label: string; value: string; colorClass?: string; qualKey?: string; qualValue?: number | null; percentileKey?: string }[];
 }
+
+export type Percentiles = Record<string, number> | null;
 
 function buildGroups(a: StrategyAnalytics): MetricGroup[] {
   const m = a.metrics_json as Record<string, number> | null;
@@ -21,13 +23,13 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
       title: "Main Metrics",
       defaultOpen: true,
       metrics: [
-        { label: "Cumulative Return", value: formatPercent(a.cumulative_return), colorClass: metricColor(a.cumulative_return) },
-        { label: "CAGR", value: formatPercent(a.cagr), colorClass: metricColor(a.cagr), qualKey: "cagr", qualValue: a.cagr },
-        { label: "Volatility", value: formatPercent(a.volatility), qualKey: "volatility", qualValue: a.volatility },
-        { label: "Sharpe", value: formatNumber(a.sharpe), colorClass: metricColor(a.sharpe), qualKey: "sharpe", qualValue: a.sharpe },
-        { label: "Sortino", value: formatNumber(a.sortino), colorClass: metricColor(a.sortino), qualKey: "sortino", qualValue: a.sortino },
-        { label: "Calmar", value: formatNumber(a.calmar), colorClass: metricColor(a.calmar), qualKey: "calmar", qualValue: a.calmar },
-        { label: "Max Drawdown", value: formatPercent(a.max_drawdown), colorClass: "text-negative", qualKey: "max_drawdown", qualValue: a.max_drawdown },
+        { label: "Cumulative Return", value: formatPercent(a.cumulative_return), colorClass: metricColor(a.cumulative_return), percentileKey: "cumulative_return" },
+        { label: "CAGR", value: formatPercent(a.cagr), colorClass: metricColor(a.cagr), qualKey: "cagr", qualValue: a.cagr, percentileKey: "cagr" },
+        { label: "Volatility", value: formatPercent(a.volatility), qualKey: "volatility", qualValue: a.volatility, percentileKey: "volatility" },
+        { label: "Sharpe", value: formatNumber(a.sharpe), colorClass: metricColor(a.sharpe), qualKey: "sharpe", qualValue: a.sharpe, percentileKey: "sharpe" },
+        { label: "Sortino", value: formatNumber(a.sortino), colorClass: metricColor(a.sortino), qualKey: "sortino", qualValue: a.sortino, percentileKey: "sortino" },
+        { label: "Calmar", value: formatNumber(a.calmar), colorClass: metricColor(a.calmar), qualKey: "calmar", qualValue: a.calmar, percentileKey: "calmar" },
+        { label: "Max Drawdown", value: formatPercent(a.max_drawdown), colorClass: "text-negative", qualKey: "max_drawdown", qualValue: a.max_drawdown, percentileKey: "max_drawdown" },
         { label: "DD Duration", value: a.max_drawdown_duration_days != null ? `${a.max_drawdown_duration_days}d` : "—" },
       ],
     },
@@ -111,19 +113,26 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
   ];
 }
 
-export function MetricPanel({ analytics }: { analytics: StrategyAnalytics }) {
+export function MetricPanel({ analytics, percentiles }: { analytics: StrategyAnalytics; percentiles?: Percentiles }) {
   const groups = buildGroups(analytics);
 
   return (
     <div className="sticky top-8 space-y-1 overflow-y-auto max-h-[calc(100vh-8rem)]">
       {groups.filter((g) => !g.hide).map((group) => (
-        <MetricAccordion key={group.title} group={group} />
+        <MetricAccordion key={group.title} group={group} percentiles={percentiles} />
       ))}
     </div>
   );
 }
 
-function MetricAccordion({ group }: { group: MetricGroup }) {
+function formatPercentileBadge(percentile: number): { text: string; isTop25: boolean } {
+  if (percentile >= 85) {
+    return { text: `Top ${100 - percentile}%`, isTop25: true };
+  }
+  return { text: `Better than ${percentile}%`, isTop25: percentile >= 75 };
+}
+
+function MetricAccordion({ group, percentiles }: { group: MetricGroup; percentiles?: Percentiles }) {
   const [open, setOpen] = useState(group.defaultOpen);
 
   return (
@@ -148,10 +157,17 @@ function MetricAccordion({ group }: { group: MetricGroup }) {
         <div className="px-4 pb-3 space-y-2">
           {group.metrics.map((m) => {
             const qual = m.qualKey ? getMetricLabel(m.qualKey, m.qualValue) : null;
+            const pctile = m.percentileKey && percentiles ? percentiles[m.percentileKey] : undefined;
+            const badge = pctile != null ? formatPercentileBadge(pctile) : null;
             return (
               <div key={m.label} className="flex items-center justify-between">
                 <span className="text-xs text-text-muted">{m.label}</span>
                 <div className="flex items-center gap-2">
+                  {badge && (
+                    <span className={cn("text-[10px] font-medium", badge.isTop25 ? "text-positive" : "text-text-muted")}>
+                      {badge.text}
+                    </span>
+                  )}
                   {qual && (
                     <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", LABEL_COLORS[qual.color])}>
                       {qual.label}

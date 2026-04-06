@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
+import { SyncBadge } from "./SyncBadge";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -56,6 +57,13 @@ export function StrategyGrid({ strategies, categorySlug, basePath = "/discovery"
                 ))}
               </div>
             </div>
+
+            {/* Sync freshness */}
+            <SyncBadge
+              computedAt={s.analytics.computed_at}
+              exchange={s.supported_exchanges?.[0]}
+              className="mb-2"
+            />
 
             {/* AUM / Max Capacity */}
             <div className="flex items-center gap-4 text-xs text-text-muted mb-3 max-[375px]:mb-2 max-[375px]:gap-2">

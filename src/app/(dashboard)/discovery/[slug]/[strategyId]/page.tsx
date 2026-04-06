@@ -9,7 +9,7 @@ import { ShareableLink } from "@/components/strategy/ShareableLink";
 import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { getStrategyDetail } from "@/lib/queries";
+import { getStrategyDetail, getPercentiles } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 
@@ -24,7 +24,10 @@ export default async function StrategyDetailPage({
 
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
-  const result = await getStrategyDetail(strategyId);
+  const [result, percentileMap] = await Promise.all([
+    getStrategyDetail(strategyId),
+    getPercentiles(slug),
+  ]);
 
   if (!result) {
     return (
@@ -35,6 +38,7 @@ export default async function StrategyDetailPage({
   }
 
   const { strategy, analytics } = result;
+  const percentiles = percentileMap?.[strategyId] ?? null;
 
   return (
     <>
@@ -62,13 +66,36 @@ export default async function StrategyDetailPage({
         </div>
       </div>
       <MetadataCards strategy={strategy} />
+
+      {/* Verified vs Self-Reported */}
+      {strategy.api_key_id && (
+        <div className="flex gap-4 mb-6 text-xs">
+          <div className="flex-1 rounded-lg border border-positive/20 bg-positive/5 px-4 py-3">
+            <p className="font-semibold text-positive mb-1">Verified (Exchange API)</p>
+            <p className="text-text-secondary">Trade history, PnL, returns, all analytics metrics, equity curve</p>
+          </div>
+          <div className="flex-1 rounded-lg border border-border bg-page px-4 py-3">
+            <p className="font-semibold text-text-primary mb-1">Self-Reported</p>
+            <p className="text-text-secondary">Strategy description, AUM, capacity, leverage, strategy type</p>
+          </div>
+        </div>
+      )}
+
       {analytics.computation_status !== "complete" && (
         <div className="mb-6">
           <ComputeStatus status={analytics.computation_status} error={analytics.computation_error} />
         </div>
       )}
-      <PerformanceReport analytics={analytics} />
+      <PerformanceReport analytics={analytics} percentiles={percentiles} />
       <Disclaimer variant="strategy" />
+
+      {/* Sticky Request Intro CTA */}
+      <div className="fixed bottom-0 left-0 right-0 md:left-[260px] z-10 border-t border-border bg-white/95 backdrop-blur-sm px-6 py-3 flex items-center justify-between">
+        <p className="text-sm text-text-secondary hidden sm:block">
+          Interested in <span className="font-medium text-text-primary">{strategy.name}</span>?
+        </p>
+        <RequestIntroButton strategyId={strategy.id} />
+      </div>
     </>
   );
 }

@@ -12,13 +12,14 @@ import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
 import { RiskOfRuin } from "@/components/charts/RiskOfRuin";
 import { YearlyReturns } from "@/components/charts/YearlyReturns";
 import { MetricPanel } from "./MetricPanel";
+import type { Percentiles } from "./MetricPanel";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
 import type { StrategyAnalytics } from "@/lib/types";
 
 const TABS = ["Overview", "Returns", "Risk"] as const;
 type Tab = (typeof TABS)[number];
 
-export function PerformanceReport({ analytics }: { analytics: StrategyAnalytics }) {
+export function PerformanceReport({ analytics, percentiles }: { analytics: StrategyAnalytics; percentiles?: Percentiles }) {
   const [tab, setTab] = useState<Tab>("Overview");
 
   const benchmarkSeries = useMemo(() => {
@@ -116,7 +117,7 @@ export function PerformanceReport({ analytics }: { analytics: StrategyAnalytics 
 
         <div className="flex-[35] min-w-0">
           <Card padding="sm">
-            <MetricPanel analytics={analytics} />
+            <MetricPanel analytics={analytics} percentiles={percentiles} />
           </Card>
         </div>
       </div>

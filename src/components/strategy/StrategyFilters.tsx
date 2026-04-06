@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { STRATEGY_TYPES, SUBTYPES, MARKETS } from "@/lib/constants";
+import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 
@@ -28,6 +28,8 @@ export interface AdvancedFilters {
   types: string[];
   subtypes: string[];
   markets: string[];
+  exchanges: string[];
+  minTrackRecord: string;
   aum: RangeFilter;
   maxCapacity: RangeFilter;
   cumulativeReturn: RangeFilter;
@@ -44,6 +46,8 @@ export const EMPTY_ADVANCED_FILTERS: AdvancedFilters = {
   types: [],
   subtypes: [],
   markets: [],
+  exchanges: [],
+  minTrackRecord: "",
   aum: { from: "", to: "" },
   maxCapacity: { from: "", to: "" },
   cumulativeReturn: { from: "", to: "" },
@@ -110,6 +114,8 @@ function hasActiveAdvancedFilters(f: AdvancedFilters): boolean {
   if (f.types.length > 0) return true;
   if (f.subtypes.length > 0) return true;
   if (f.markets.length > 0) return true;
+  if (f.exchanges.length > 0) return true;
+  if (f.minTrackRecord !== "") return true;
   const ranges: RangeFilter[] = [
     f.aum, f.maxCapacity, f.cumulativeReturn, f.cagr,
     f.maxDrawdown, f.volatility, f.sharpe, f.sixMonth,
@@ -119,7 +125,8 @@ function hasActiveAdvancedFilters(f: AdvancedFilters): boolean {
 }
 
 function countActiveFilters(f: AdvancedFilters): number {
-  let count = f.types.length + f.subtypes.length + f.markets.length;
+  let count = f.types.length + f.subtypes.length + f.markets.length + f.exchanges.length;
+  if (f.minTrackRecord !== "") count++;
   const ranges: RangeFilter[] = [
     f.aum, f.maxCapacity, f.cumulativeReturn, f.cagr,
     f.maxDrawdown, f.volatility, f.sharpe, f.sixMonth,
@@ -439,6 +446,33 @@ export function StrategyFilters({
                 selected={draft.markets}
                 onChange={(markets) => setDraft({ ...draft, markets })}
               />
+
+              {/* Exchanges */}
+              <CheckboxGroup
+                label="Exchanges"
+                options={EXCHANGES}
+                selected={draft.exchanges}
+                onChange={(exchanges) => setDraft({ ...draft, exchanges })}
+              />
+
+              {/* Track Record */}
+              <div>
+                <p className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">
+                  Min Track Record
+                </p>
+                <select
+                  value={draft.minTrackRecord}
+                  onChange={(e) => setDraft({ ...draft, minTrackRecord: e.target.value })}
+                  className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary w-full"
+                >
+                  <option value="">Any</option>
+                  <option value="30">1 month+</option>
+                  <option value="90">3 months+</option>
+                  <option value="180">6 months+</option>
+                  <option value="365">1 year+</option>
+                  <option value="730">2 years+</option>
+                </select>
+              </div>
 
               {/* Capital Metrics */}
               <div>
