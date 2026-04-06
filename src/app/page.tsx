@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { EXCHANGES } from "@/lib/constants";
+import { VerificationSection } from "@/components/landing/VerificationSection";
 
 async function getSocialProofStats() {
   try {
@@ -180,6 +181,20 @@ export default async function Home() {
             ))}
           </div>
         </div>
+      </section>
+
+      {/* Verify Your Strategy */}
+      <section className="mx-auto max-w-6xl px-6 py-20" id="verify">
+        <div className="mx-auto max-w-2xl text-center mb-12">
+          <h2 className="text-3xl font-display tracking-tight text-text-primary">
+            Verify Your Performance
+          </h2>
+          <p className="mt-4 text-text-secondary">
+            Connect your exchange API key (read-only) and get an instant performance report.
+            See how your strategy stacks up.
+          </p>
+        </div>
+        <VerificationSection />
       </section>
 
       {/* Social Proof */}
