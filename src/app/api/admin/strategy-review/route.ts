@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
+import { notifyManagerApproved } from "@/lib/email";
 
 export const POST = withAdminAuth(async (body, admin) => {
   const { id, action, review_note } = body;
@@ -71,6 +72,27 @@ export const POST = withAdminAuth(async (body, admin) => {
 
   if (error) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
+  }
+
+  // Send email notification on approval (fire-and-forget)
+  if (action === "approve") {
+    const { data: strategyData } = await admin
+      .from("strategies")
+      .select("name, user_id")
+      .eq("id", id)
+      .single();
+
+    if (strategyData?.user_id) {
+      const { data: profile } = await admin
+        .from("profiles")
+        .select("email")
+        .eq("id", strategyData.user_id)
+        .single();
+
+      if (profile?.email) {
+        notifyManagerApproved(profile.email, strategyData.name).catch(() => {});
+      }
+    }
   }
 
   return NextResponse.json({ success: true });

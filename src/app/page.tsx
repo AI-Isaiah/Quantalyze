@@ -80,7 +80,7 @@ export default async function Home() {
 
           <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
             <Link
-              href="/signup"
+              href="/browse"
               className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-6 py-3 text-base font-medium text-white hover:bg-accent-hover transition-colors sm:w-auto"
             >
               Browse Strategies

@@ -50,34 +50,32 @@ export function RequestIntroButton({ strategyId }: { strategyId: string }) {
     setUiState("loading");
     setError(null);
 
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    try {
+      const res = await fetch("/api/intro", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId, message: message || null }),
+      });
 
-    if (!user) {
-      setError("Please sign in to request an intro.");
-      setUiState("error");
-      return;
-    }
-
-    const { error } = await supabase.from("contact_requests").insert({
-      allocator_id: user.id,
-      strategy_id: strategyId,
-      message: message || null,
-    });
-
-    if (error) {
-      if (error.code === "23505") {
+      if (res.status === 409) {
         setUiState("sent");
         setRequestStatus("pending");
         return;
       }
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? "Failed to send request. Please try again.");
+        setUiState("error");
+        return;
+      }
+
+      setUiState("sent");
+      setRequestStatus("pending");
+    } catch {
       setError("Failed to send request. Please try again.");
       setUiState("error");
-      return;
     }
-
-    setUiState("sent");
-    setRequestStatus("pending");
   }
 
   // When a request exists, show status inline instead of just "Intro Requested"

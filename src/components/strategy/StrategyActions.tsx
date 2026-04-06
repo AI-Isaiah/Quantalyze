@@ -31,12 +31,18 @@ export function StrategyActions({ strategyId, status, hasApiKey, hasData }: Stra
     if (!error) router.refresh();
   }
 
-  function handleSubmitForReview() {
+  async function handleSubmitForReview() {
     if (!hasData && !hasApiKey) {
       setShowDataGate(true);
       return;
     }
-    updateStatus("pending_review");
+    await updateStatus("pending_review");
+    // Notify founder (fire-and-forget)
+    fetch("/api/admin/notify-submission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy_id: strategyId }),
+    }).catch(() => {});
   }
 
   if (status === "draft") {

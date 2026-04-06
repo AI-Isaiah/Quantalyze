@@ -37,6 +37,7 @@ const PAGE_SIZE = 20;
 interface StrategyTableProps {
   strategies: StrategyWithAnalytics[];
   categorySlug: string;
+  basePath?: string;
 }
 
 // --- Range filter helper ---
@@ -75,7 +76,7 @@ function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | str
   }
 }
 
-export function StrategyTable({ strategies, categorySlug }: StrategyTableProps) {
+export function StrategyTable({ strategies, categorySlug, basePath = "/discovery" }: StrategyTableProps) {
   const [search, setSearch] = useState("");
   const [showExamples, setShowExamples] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("sharpe");
@@ -234,7 +235,7 @@ export function StrategyTable({ strategies, categorySlug }: StrategyTableProps) 
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">
                       <Link
-                        href={`/discovery/${categorySlug}/${s.id}`}
+                        href={`${basePath}/${categorySlug}/${s.id}`}
                         className="font-medium text-text-primary hover:text-accent transition-colors"
                       >
                         {s.name}
@@ -297,7 +298,7 @@ export function StrategyTable({ strategies, categorySlug }: StrategyTableProps) 
           </table>
         </div>
       ) : (
-        <StrategyGrid strategies={paged} categorySlug={categorySlug} />
+        <StrategyGrid strategies={paged} categorySlug={categorySlug} basePath={basePath} />
       )}
 
       {totalPages > 1 && (

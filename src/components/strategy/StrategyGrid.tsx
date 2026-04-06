@@ -13,9 +13,10 @@ type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 interface StrategyGridProps {
   strategies: StrategyWithAnalytics[];
   categorySlug: string;
+  basePath?: string;
 }
 
-export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
+export function StrategyGrid({ strategies, categorySlug, basePath = "/discovery" }: StrategyGridProps) {
   if (strategies.length === 0) {
     return (
       <div className="text-center py-12 text-text-muted text-sm">
@@ -29,7 +30,7 @@ export function StrategyGrid({ strategies, categorySlug }: StrategyGridProps) {
       {strategies.map((s) => (
         <Link
           key={s.id}
-          href={`/discovery/${categorySlug}/${s.id}`}
+          href={`${basePath}/${categorySlug}/${s.id}`}
           className="block group"
         >
           <Card

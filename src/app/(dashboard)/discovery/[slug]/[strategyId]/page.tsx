@@ -48,6 +48,7 @@ export default async function StrategyDetailPage({
       <div className="flex items-start justify-between mb-6">
         <StrategyHeader strategy={strategy} computedAt={analytics.computed_at} />
         <div className="flex items-center gap-3">
+          <ShareableLink strategyId={strategy.id} variant="primary" />
           <a
             href={`/factsheet/${strategy.id}`}
             target="_blank"
@@ -56,7 +57,6 @@ export default async function StrategyDetailPage({
             Factsheet
           </a>
           <AddToPortfolio strategyId={strategy.id} />
-          <ShareableLink strategyId={strategy.id} />
           <BookIntroCall strategyName={strategy.name} />
           <RequestIntroButton strategyId={strategy.id} />
         </div>
