@@ -126,3 +126,89 @@ export interface Deck {
 export interface DeckWithCount extends Deck {
   strategy_count: number;
 }
+
+export interface AllocationEvent {
+  id: string;
+  portfolio_id: string;
+  strategy_id: string;
+  event_type: "deposit" | "withdrawal";
+  amount: number;
+  event_date: string;
+  notes: string | null;
+  source: "auto" | "manual";
+  created_at: string;
+}
+
+export interface PortfolioAnalytics {
+  id: string;
+  portfolio_id: string;
+  computed_at: string;
+  computation_status: "pending" | "computing" | "complete" | "failed";
+  computation_error: string | null;
+  total_aum: number | null;
+  total_return_twr: number | null;
+  total_return_mwr: number | null;
+  portfolio_sharpe: number | null;
+  portfolio_volatility: number | null;
+  portfolio_max_drawdown: number | null;
+  avg_pairwise_correlation: number | null;
+  return_24h: number | null;
+  return_mtd: number | null;
+  return_ytd: number | null;
+  narrative_summary: string | null;
+  correlation_matrix: Record<string, Record<string, number>> | null;
+  attribution_breakdown: { strategy_id: string; weight: number; twr: number; mwr: number; contribution: number }[] | null;
+  risk_decomposition: { strategy_id: string; marginal_risk: number; component_var: number; standalone_vol: number }[] | null;
+  benchmark_comparison: Record<string, { alpha: number; beta: number; info_ratio: number; tracking_error: number }> | null;
+  optimizer_suggestions: { strategy_id: string; strategy_name: string; corr_with_portfolio: number; sharpe_lift: number; dd_improvement: number; score: number }[] | null;
+  portfolio_equity_curve: { date: string; value: number }[] | null;
+  rolling_correlation: { date: string; value: number }[] | null;
+}
+
+export interface PortfolioStrategy {
+  portfolio_id: string;
+  strategy_id: string;
+  added_at: string;
+  allocated_amount: number | null;
+  allocated_at: string | null;
+  current_weight: number | null;
+  relationship_status: "connected" | "paused" | "exited";
+  founder_notes: { date: string; author: string; text: string }[];
+  last_founder_contact: string | null;
+}
+
+export interface PortfolioDocument {
+  id: string;
+  portfolio_id: string;
+  strategy_id: string | null;
+  doc_type: "contract" | "note" | "factsheet" | "founder_update" | "other";
+  title: string;
+  file_path: string | null;
+  content: string | null;
+  uploaded_by: string;
+  created_at: string;
+}
+
+export interface PortfolioAlert {
+  id: string;
+  portfolio_id: string;
+  alert_type: "drawdown" | "correlation_spike" | "sync_failure" | "status_change" | "optimizer_suggestion";
+  severity: "high" | "medium" | "low";
+  message: string;
+  metadata: Record<string, unknown> | null;
+  triggered_at: string;
+  acknowledged_at: string | null;
+  emailed_at: string | null;
+}
+
+export interface VerificationRequest {
+  id: string;
+  email: string;
+  exchange: "binance" | "okx" | "bybit";
+  status: "pending" | "processing" | "complete" | "failed";
+  error_message: string | null;
+  results: Record<string, unknown> | null;
+  matched_strategy_id: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
