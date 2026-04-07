@@ -45,13 +45,24 @@
 - [ ] Founder-led migration of existing Telegram/email clients (manual, ~10-20 relationships)
 - [ ] OKX bills API: verify data coverage for Spot vs Futures accounts
 - [ ] Handle OKX bills-archive API for history older than 3 months
+- [ ] **Schedule the match engine cron** (`POST /api/match/cron-recompute`) — currently defined but nothing triggers it. Options: Vercel cron block in `vercel.json`, Supabase pg_cron, GitHub Actions workflow, or an external scheduler hitting Railway. The plan explicitly deferred this to post-v1 (manual "Recompute now" works for week 1). Pick one once the founder starts using the queue daily.
+- [ ] **Reconcile the proxy admin gate with `isAdminUser()`** — `src/proxy.ts` still bounces based on email-only (`ADMIN_EMAIL`). A future admin granted via `profiles.is_admin = true` but with a different email would be 307'd before the DAL check runs. Fix by either (a) adding a JWT custom claim that encodes `is_admin`, or (b) removing the proxy's admin check entirely and relying on per-route `isAdminUser()`. Safe to defer until there's a second admin. Referenced in the match engine adversarial review.
 
 ## Deferred (build on demand signal)
 
 ### P1.5
+- **Allocator-facing /recommendations page** (perfect-match v2). The v1 founder-amplifier ships in this branch. Graduation criteria for v2: founder shipped 20+ algorithm-suggested intros from the Match Queue + 5+ converted to actual allocations + algorithm hit rate >40% over a rolling 4-week window. Until then, the algorithm stays admin-only. Originally drafted as Approach B in `docs/superpowers/plans/2026-04-07-perfect-match-engine.md`, deferred at the premise gate after both Codex and Claude subagent reviews independently flagged that exposing the algorithm directly to allocators would substitute for the founder-as-trust-layer moat instead of amplifying it.
+- **Save / dismiss / "show me more like this" feedback loop on the allocator side** (perfect-match v2). Same graduation criteria. The founder records the same signal (thumbs up/down) on the admin side via `match_decisions` from day 1 — that IS the ground truth.
+- **Match score column on Discovery** (perfect-match v2). Same graduation criteria.
+- **PerfectMatchPanel widget on portfolio dashboard** (perfect-match v2). Same graduation criteria.
 - Allocator preference weights (personalized ranking) — ship filters+presets first, build if >=3 allocators request different criteria weights
 
 ### P2
+- **Email notifications when a new high-score match appears** (perfect-match feature) — needs delivery infrastructure decision (email vs in-app vs both). Defer pending allocator usage data on the v1 admin queue.
+- **Manager-side "who was I recommended to" dashboard** — privacy-by-default in v1; revisit if managers ask.
+- **Custom benchmark per allocator** (vs the BTC default) for the match engine — defer until allocators ask.
+- **ML collaborative filtering for matching** — needs >500 historical intro requests to be useful. Until then, the rule-based engine + founder ground truth is correct. Re-evaluate when `match_decisions` has >500 rows.
+- **Drop the email-based admin gate** in `lib/admin.ts` and `withAdminAuth.ts` once `is_admin` is fully populated and verified across all admin pages. Currently runs as OR for backward compatibility (Phase 1 Task 1.5 of perfect-match plan).
 - Organizations / teams (migration 006 drafted, don't build until customer asks)
 - Redis / BullMQ (premature, compute is 15-30s)
 - Billing / pricing tiers (needs pricing model defined with paying customers)
