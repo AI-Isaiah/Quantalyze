@@ -4,13 +4,13 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { PortfolioKPIRow } from "@/components/portfolio/PortfolioKPIRow";
 import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdownTable";
+import { AlertsList } from "@/components/portfolio/AlertsList";
 import {
   getPortfolioDetail,
   getPortfolioStrategies,
   getPortfolioAnalytics,
   getPortfolioAlerts,
 } from "@/lib/queries";
-import { cn } from "@/lib/utils";
 import Link from "next/link";
 import type { PortfolioAnalytics, PortfolioAlert } from "@/lib/types";
 
@@ -81,38 +81,6 @@ function StaleWarning({ error }: { error: string | null }) {
   );
 }
 
-/* ---------- Alert severity badges ---------- */
-
-const severityStyles: Record<string, string> = {
-  high: "bg-negative/10 text-negative",
-  medium: "bg-badge-market-neutral/10 text-badge-market-neutral",
-  low: "bg-accent/10 text-accent",
-};
-
-function AlertsBanner({ alerts }: { alerts: PortfolioAlert[] }) {
-  if (alerts.length === 0) return null;
-  return (
-    <div className="space-y-2 mb-6">
-      {alerts.map((alert) => (
-        <div
-          key={alert.id}
-          className="flex items-start gap-3 rounded-lg border border-border bg-surface px-4 py-3"
-        >
-          <span
-            className={cn(
-              "inline-flex items-center rounded px-2 py-0.5 text-[10px] uppercase tracking-wider font-medium",
-              severityStyles[alert.severity] ?? severityStyles.low,
-            )}
-          >
-            {alert.severity}
-          </span>
-          <p className="text-sm text-text-secondary">{alert.message}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /* ---------- Dashboard content (complete/stale states) ---------- */
 
 function DashboardContent({
@@ -141,7 +109,7 @@ function DashboardContent({
       )}
 
       {/* Alerts */}
-      <AlertsBanner alerts={alerts} />
+      {alerts.length > 0 && <AlertsList alerts={alerts} />}
 
       {/* KPI row */}
       <PortfolioKPIRow analytics={analytics} />
