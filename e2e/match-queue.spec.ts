@@ -43,20 +43,28 @@ test.describe("Match Queue — admin gate", () => {
     await expect(page).toHaveURL(/\/(login|discovery)/, { timeout: 10000 });
   });
 
-  test("non-admin allocator hitting /admin/match/eval is redirected", async ({
-    page,
-  }) => {
+  test("/admin/match/eval is admin-only", async ({ page }) => {
     await login(page);
     await page.goto("/admin/match/eval");
-    // Either the page renders (if test user is admin) or we land somewhere safe
+    // The contract: either you ARE admin (and the page renders) or you are
+    // NOT admin (and you cannot reach the URL). The previous version of
+    // this test asserted (isAdmin || urlIncludes('/discovery' OR '/login'))
+    // which was always true because login lands at /discovery/crypto-sma.
+    // The new assertion is XOR: exactly one of (admin sees page) and
+    // (non-admin bounced) must be true, and we verify by URL not by a
+    // permissive substring match.
     const isAdmin = await page
       .locator("text=Match engine eval")
       .isVisible()
       .catch(() => false);
-    const isRedirected =
-      page.url().includes("/discovery") ||
-      page.url().includes("/login");
-    expect(isAdmin || isRedirected).toBeTruthy();
+    const url = page.url();
+    if (isAdmin) {
+      // Admin path: must actually be on the eval URL
+      expect(url).toContain("/admin/match/eval");
+    } else {
+      // Non-admin path: must NOT be on the eval URL (proxy or DAL bounced)
+      expect(url).not.toContain("/admin/match/eval");
+    }
   });
 });
 
@@ -127,43 +135,72 @@ test.describe("Match Queue — admin UI (graceful degradation)", () => {
     await login(page);
   });
 
-  test("admin can open match queue index OR is redirected", async ({
+  test("admin opens match queue, non-admin gets bounced to discovery", async ({
     page,
   }) => {
+    // Branches by URL after navigation, NOT by a permissive disjunction.
+    // Old version asserted (hasQueue || isRedirected) where one or the
+    // other is always true after login — vacuous. New version distinguishes
+    // the two paths and asserts something concrete in each.
     await page.goto("/admin/match");
-    const hasQueue = await page
-      .locator("text=Match queue")
-      .isVisible()
-      .catch(() => false);
-    const isRedirected = page.url().includes("/discovery");
-    expect(hasQueue || isRedirected).toBeTruthy();
-  });
+    const url = page.url();
 
-  test("match queue index has filter chips and search if visible", async ({
-    page,
-  }) => {
-    await page.goto("/admin/match");
-    const hasQueue = await page
-      .locator("text=Match queue")
-      .isVisible()
-      .catch(() => false);
-
-    if (hasQueue) {
-      // Filter chip row should have all four filters
+    if (url.endsWith("/admin/match")) {
+      // Admin path: page must render with a real anchor that does NOT
+      // exist in the error or empty state — the filter chip row.
       await expect(
         page.locator('button:has-text("Needs attention")'),
       ).toBeVisible();
-      await expect(
-        page.locator('button:has-text("New candidates")'),
-      ).toBeVisible();
-      await expect(page.locator('button:has-text("All")')).toBeVisible();
-      // Search input
-      await expect(
-        page.locator('input[placeholder*="Search allocators"]'),
-      ).toBeVisible();
-      // Engine status pill (ON or OFF)
-      await expect(page.locator("text=/Engine:/")).toBeVisible();
+    } else {
+      // Non-admin path: must land on the discovery page exactly, not just
+      // somewhere containing the substring "/discovery".
+      expect(url).toContain("/discovery/crypto-sma");
+      expect(url).not.toContain("/admin/match");
     }
+  });
+
+  test("match queue index renders filter chips, search, and engine pill (admin only)", async ({
+    page,
+  }) => {
+    // The previous version gated on `text=Match queue` (the page header,
+    // which renders even in error mode after migration 011 fix in 3aadcd5).
+    // That meant: if the test user IS admin AND migration 011 isn't applied,
+    // hasQueue=true triggers the inner assertions, but the filter chips
+    // aren't in the DOM, and the test times out. Two failure modes hidden
+    // in one assertion.
+    //
+    // The fix: gate on a more specific anchor (the Needs attention chip
+    // itself) and ALSO assert that the migration-error card is NOT visible.
+    // This makes the test loud about the actual deployment state instead
+    // of silently passing or silently failing.
+    await page.goto("/admin/match");
+    const url = page.url();
+    if (!url.endsWith("/admin/match")) {
+      // Non-admin: this test is admin-only, skip the body. The other tests
+      // in this describe cover the non-admin redirect path.
+      return;
+    }
+
+    // Loud failure if the migration isn't applied — the page would show
+    // the error card from MatchQueueIndex.tsx instead of the filter chips.
+    await expect(
+      page.locator("text=/Match engine schema not found/"),
+    ).not.toBeVisible();
+
+    // All four filter chips
+    await expect(
+      page.locator('button:has-text("Needs attention")'),
+    ).toBeVisible();
+    await expect(
+      page.locator('button:has-text("New candidates")'),
+    ).toBeVisible();
+    await expect(page.locator('button:has-text("All")')).toBeVisible();
+    // Search input
+    await expect(
+      page.locator('input[placeholder*="Search allocators"]'),
+    ).toBeVisible();
+    // Engine status pill (ON or OFF)
+    await expect(page.locator("text=/Engine:/")).toBeVisible();
   });
 
   test("eval dashboard renders 4 KPIs if visible", async ({ page }) => {
