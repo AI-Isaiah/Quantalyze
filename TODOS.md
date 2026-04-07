@@ -1,8 +1,33 @@
 # TODOS
 
-> **Goal for the next session:** Finalize the product so it can be demoed to (a) an
-> allocator, (b) a strategy team, and (c) a capital introduction team. Scope stays
-> roughly where it is — fill the gaps, polish the rough edges, no new features.
+> **Goal:** Finalize the product so it can be demoed to allocators, strategy teams, and capital
+> introduction firms. The 8-week MVP plan was refined via /autoplan v2 (4-voice adversarial
+> review) and lives at `~/.claude/plans/rosy-cuddling-teacup.md`. The North Star reframed:
+> by week 6, one real allocator records a 90-second testimonial. The cap-intro partner demo
+> in week 8 opens with that clip — the proof artifact, not the polished UI walkthrough.
+
+## Pre-Sprint 0 — Founder qualification + before-metric capture
+
+**Status:** Templates delivered. Founder actions pending. Both must complete before Sprint 1.
+
+- [x] **Templates committed** — `docs/pitch/partner-qualification-script.md`,
+  `docs/pitch/partner-qualification-notes.template.md`,
+  `docs/demos/before-metric.template.md` (filled-in versions are gitignored to keep
+  partner-sensitive info out of the public repo).
+- [ ] **T0.1 — Founder runs the partner qualification call (~2 hours).** Both adversarial CEO
+  voices in the autoplan review converged on this as the single highest-leverage act before any
+  8-week build. Script: `docs/pitch/partner-qualification-script.md`. Output:
+  `docs/pitch/partner-qualification-notes.md` (gitignored — copy from `.template.md` first).
+  - **PROCEED** outcome → start Sprint 1 with T1.0 (fix `src/app/api/admin/match/send-intro` —
+    currently sends NO email)
+  - **PIVOT** outcome → edit `~/.claude/plans/rosy-cuddling-teacup.md` directly + re-run /autoplan
+  - **REWRITE** outcome → stop the 8-week build, start a new plan around LP outbound
+- [ ] **T0.4 — Founder runs old workflow on 2 allocators end-to-end + times it.** Template:
+  `docs/demos/before-metric.template.md`. Output: `docs/demos/before-metric.md` (gitignored).
+  This is the NUMERATOR of the before/after metric — the "after" half gets captured in Sprint 6
+  once the new admin queue runs on staging. Does NOT depend on any new code.
+
+---
 
 ## Demo Readiness — three audiences, three end-to-end paths
 

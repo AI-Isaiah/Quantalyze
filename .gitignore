@@ -39,6 +39,13 @@ yarn-error.log*
 # gstack security reports and local state
 .gstack/
 
+# Filled-in pitch / demo templates contain sensitive partner + allocator info.
+# Templates are committed as *.template.md; the bare .md is the filled-in copy
+# the founder edits locally and never commits to a public repo.
+docs/pitch/partner-qualification-notes.md
+docs/demos/before-metric.md
+docs/demos/before-after.md
+
 # python
 __pycache__/
 *.pyc
