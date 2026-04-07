@@ -110,3 +110,64 @@ export async function notifyFounderIntroRequest(
      <p><a href="${APP_URL}/admin" style="color:#0D9488;">Manage in admin dashboard</a></p>`,
   );
 }
+
+// --- Portfolio alert digest ---
+
+export interface AlertDigestEntry {
+  alert_type: string;
+  severity: "high" | "medium" | "low";
+  message: string;
+  triggered_at: string;
+}
+
+export async function sendAlertDigest(
+  email: string,
+  portfolioName: string,
+  alerts: AlertDigestEntry[],
+) {
+  if (alerts.length === 0) return;
+
+  const subject = `${alerts.length} alert${alerts.length > 1 ? "s" : ""} for ${portfolioName}`;
+
+  const severityColor = (s: string) =>
+    s === "high" ? "#DC2626" : s === "medium" ? "#D97706" : "#0D9488";
+
+  const alertsHtml = alerts
+    .map(
+      (a) => `
+    <tr>
+      <td style="padding:12px;border-bottom:1px solid #E2E8F0;">
+        <span style="display:inline-block;padding:2px 8px;background:${severityColor(a.severity)};color:#fff;font-size:11px;text-transform:uppercase;border-radius:4px;">
+          ${a.severity}
+        </span>
+      </td>
+      <td style="padding:12px;border-bottom:1px solid #E2E8F0;color:#1A1A2E;">
+        ${a.message}
+      </td>
+    </tr>
+  `,
+    )
+    .join("");
+
+  await send(
+    email,
+    subject,
+    `
+    <div style="font-family:'DM Sans',sans-serif;max-width:600px;margin:0 auto;">
+      <h2 style="color:#1A1A2E;font-size:20px;margin-bottom:8px;">Portfolio Alerts</h2>
+      <p style="color:#4A5568;margin-bottom:16px;">
+        The following alerts triggered for <strong>${portfolioName}</strong>:
+      </p>
+      <table style="width:100%;border-collapse:collapse;">
+        ${alertsHtml}
+      </table>
+      <p style="margin-top:24px;">
+        <a href="${APP_URL}/portfolios" style="color:#0D9488;font-weight:500;">
+          View in dashboard →
+        </a>
+      </p>
+      <p style="color:#666;font-size:13px;margin-top:16px;">— Quantalyze</p>
+    </div>
+  `,
+  );
+}
