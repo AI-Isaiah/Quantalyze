@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { AllocationEventForm } from "@/components/portfolio/AllocationEventForm";
 import { AllocationTimeline } from "@/components/portfolio/AllocationTimeline";
+import { MigrationWizardButton } from "@/components/portfolio/MigrationWizard";
 import { getPortfolioDetail, getPortfolioStrategies, getAllocationEvents } from "@/lib/queries";
 import { formatCurrency } from "@/lib/utils";
 
@@ -49,7 +50,10 @@ export default async function ManagePortfolioPage({ params }: { params: Promise<
       <section className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-base font-semibold text-text-primary">Strategies</h2>
-          <Link href="/discovery/crypto-sma" className="text-sm font-medium text-accent hover:text-accent-hover transition-colors">+ Add Strategy</Link>
+          <div className="flex items-center gap-3">
+            <MigrationWizardButton portfolioId={id} />
+            <Link href="/discovery/crypto-sma" className="text-sm font-medium text-accent hover:text-accent-hover transition-colors">+ Add Strategy</Link>
+          </div>
         </div>
         {strategies.length === 0 ? (
           <Card className="text-center py-8"><p className="text-sm text-text-muted">No strategies in this portfolio yet.</p></Card>
