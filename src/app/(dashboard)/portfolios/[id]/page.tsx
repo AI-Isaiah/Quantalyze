@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/Card";
 import { PortfolioKPIRow } from "@/components/portfolio/PortfolioKPIRow";
 import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdownTable";
 import { AlertsList } from "@/components/portfolio/AlertsList";
+import { Disclaimer } from "@/components/ui/Disclaimer";
 import {
   getPortfolioDetail,
   getPortfolioStrategies,
@@ -225,6 +226,7 @@ export default async function PortfolioDashboardPage({
           portfolioId={id}
         />
       )}
+      <Disclaimer />
     </>
   );
 }
