@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractAnalytics, EMPTY_ANALYTICS } from "@/lib/queries";
+import { extractAnalytics, EMPTY_ANALYTICS } from "@/lib/utils";
 import type { StrategyAnalytics } from "@/lib/types";
 
 /**

@@ -1,0 +1,75 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { assertPortfolioOwnership, getPortfolioDetail } from "@/lib/queries";
+
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const { id } = await params;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!(await assertPortfolioOwnership(id, user.id))) {
+    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+  }
+
+  const portfolio = await getPortfolioDetail(id);
+  if (!portfolio) {
+    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+  }
+
+  // Dynamic import to avoid bundling puppeteer in client code
+  const puppeteer = await import("puppeteer");
+  let browser: Awaited<ReturnType<typeof puppeteer.default.launch>> | null = null;
+
+  try {
+    browser = await puppeteer.default.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 800, height: 1100 });
+
+    // The printable page reads data via the admin client, no auth required
+    await page.goto(`${APP_URL}/portfolio-pdf/${id}`, {
+      waitUntil: "networkidle0",
+      timeout: 15000,
+    });
+
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
+    });
+
+    return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `inline; filename="${portfolio.name}-portfolio.pdf"`,
+        "Cache-Control": "private, max-age=0, no-store",
+      },
+    });
+  } catch (err) {
+    console.error("[portfolio-pdf] Generation failed:", err);
+    return NextResponse.json(
+      { error: "PDF generation failed" },
+      { status: 500 },
+    );
+  } finally {
+    if (browser) {
+      await browser.close().catch((closeErr) => {
+        console.error("[portfolio-pdf] Browser close failed:", closeErr);
+      });
+    }
+  }
+}

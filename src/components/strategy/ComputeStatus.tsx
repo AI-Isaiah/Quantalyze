@@ -29,16 +29,17 @@ export function ComputeStatus({ status, error }: ComputeStatusProps) {
   const isComputing = status === "computing";
 
   useEffect(() => {
+    // Defer reset to next tick to avoid sync setState-in-effect lint warning
+    const resetId = setTimeout(() => setElapsedSeconds(0), 0);
+
     if (isComputing) {
-      setElapsedSeconds(0);
       timerRef.current = setInterval(() => {
         setElapsedSeconds((prev) => prev + 1);
       }, 1000);
-    } else {
-      setElapsedSeconds(0);
     }
 
     return () => {
+      clearTimeout(resetId);
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;

@@ -19,6 +19,7 @@ function buildNavSections(populatedSlugs?: string[], isAdmin?: boolean): NavSect
       heading: "MY WORKSPACE",
       items: [
         { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+        { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
         { label: "Allocations", href: "/allocations", icon: PortfolioIcon },
       ],
     },
@@ -112,6 +113,15 @@ function UserIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="8" cy="5" r="2.5" />
       <path d="M3 14a5 5 0 0110 0" />
+    </svg>
+  );
+}
+
+function PieChartIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 2v6l4.24 4.24" />
     </svg>
   );
 }

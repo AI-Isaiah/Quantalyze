@@ -2,14 +2,6 @@
 
 ## Next Up (high impact, ready to build)
 
-### P0 — GenieAI-Inspired: Allocator Portfolio Upload
-- **Allocator-side API key upload**: Let allocators connect THEIR exchange accounts to track all strategies they're invested in
-- When an allocator uploads a key linked to a strategy manager NOT on Quantalyze, the platform detects this and can reach out to that manager ("Your allocator is already tracking you")
-- This flips the acquisition model: allocators pull managers in, not the other way around
-- Unified portfolio dashboard across all connected strategies
-- Reference: genieai.tech (AI-powered fund operations)
-- **Run /office-hours to spec this out before building**
-
 ### P1 — Design Polish
 - [ ] Run /design-review on live site (http://localhost:3000) — visual audit + fix loop
 - [ ] Apply design system tokens to all remaining components (some pages still have old Inter/teal)
@@ -47,7 +39,10 @@
 - Real-time WebSocket data sync
 - White-label verification API
 
-## Completed (this session, 2026-04-06)
+## Completed (this session, 2026-04-07)
+- ~~**Portfolio Intelligence Platform** (25 tasks, 5 phases): allocator-side portfolio dashboard with TWR/MWR analytics, correlation matrix, risk decomposition, attribution, optimizer, narrative summaries, allocation events, alerts, documents tab, PDF export, migration wizard, landing-page exchange verification flow. Implements the GenieAI-inspired vision: allocators connect their exchange API keys, the platform auto-builds a unified dashboard across all their strategies. Migration 010 + 7 new analytics modules + 16 new frontend components + 7 new API routes. Branch: feat/portfolio-intelligence~~
+
+## Completed (prior session, 2026-04-06)
 - ~~Sprint 0: Plausible analytics, Sentry error tracking, legal disclaimers~~
 - ~~Sprint 1: Public discovery (/browse), email notifications (Resend), share factsheet button~~
 - ~~Phase 2: Trust badges (SyncBadge), discovery filters (exchange + track record), percentile ranks, sync progress UX, info hierarchy~~

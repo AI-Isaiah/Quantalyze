@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
@@ -33,11 +33,7 @@ export function OrganizationTab() {
   const [inviteEmail, setInviteEmail] = useState("");
   const router = useRouter();
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     const supabase = createClient();
     const { data: memberData } = await supabase
       .from("organization_members")
@@ -53,7 +49,13 @@ export function OrganizationTab() {
         .eq("status", "pending");
       if (inviteData) setInvites(inviteData as unknown as Invite[]);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    // Defer to next tick to avoid sync setState-in-effect lint warning
+    const id = setTimeout(() => { void loadData(); }, 0);
+    return () => clearTimeout(id);
+  }, [loadData]);
 
   async function createOrg() {
     if (!orgName.trim()) return;
@@ -151,7 +153,7 @@ export function OrganizationTab() {
           <div className="text-center py-6">
             <p className="text-sm text-text-muted mb-1">No invitations yet</p>
             <p className="text-xs text-text-muted mb-4">
-              You haven't received any invitations to join an organization yet.
+              You haven&apos;t received any invitations to join an organization yet.
               You can wait for an invite, or create your own organization.
             </p>
             <Button variant="secondary" size="sm" onClick={() => setShowCreate(true)}>
@@ -220,7 +222,7 @@ export function OrganizationTab() {
       <Modal open={!!showInvite} onClose={() => setShowInvite(null)} title="Invite Team Member">
         <div className="space-y-4">
           <Input label="Email Address" type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="colleague@team.com" required />
-          <p className="text-xs text-text-muted">They'll see the invitation on their Profile page when they sign up or log in.</p>
+          <p className="text-xs text-text-muted">They&apos;ll see the invitation on their Profile page when they sign up or log in.</p>
           <div className="flex gap-3">
             <Button variant="secondary" onClick={() => setShowInvite(null)}>Cancel</Button>
             <Button onClick={() => showInvite && handleInvite(showInvite)} disabled={loading || !inviteEmail.trim()}>
