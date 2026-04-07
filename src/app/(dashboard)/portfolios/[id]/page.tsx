@@ -191,12 +191,22 @@ export default async function PortfolioDashboardPage({
         description={portfolio.description ?? undefined}
         actions={
           state === "complete" || state === "stale" ? (
-            <Link
-              href={`/portfolios/${id}/manage`}
-              className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-            >
-              Manage
-            </Link>
+            <div className="flex items-center gap-2">
+              <a
+                href={`/api/portfolio-pdf/${id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center rounded-md border border-border bg-white px-4 py-2 text-sm font-medium text-text-primary hover:bg-page transition-colors"
+              >
+                Export PDF
+              </a>
+              <Link
+                href={`/portfolios/${id}/manage`}
+                className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+              >
+                Manage
+              </Link>
+            </div>
           ) : undefined
         }
       />
