@@ -24,7 +24,7 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
 
   const { data, error } = await supabase
     .from("relationship_documents")
-    .select("id, file_url, file_type, file_name, created_at, portfolio_id")
+    .select("id, title, doc_type, file_url, file_path, file_name, strategy_id, created_at, portfolio_id")
     .eq("portfolio_id", portfolioId)
     .order("created_at", { ascending: false });
 
@@ -36,11 +36,12 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
-  const { portfolio_id, title, doc_type, file_path } = body as {
+  const { portfolio_id, title, doc_type, file_path, strategy_id } = body as {
     portfolio_id?: string;
     title?: string;
     doc_type?: string;
     file_path?: string;
+    strategy_id?: string | null;
   };
 
   if (!portfolio_id || !title || !doc_type || !file_path) {
@@ -75,8 +76,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .from("relationship_documents")
     .insert({
       portfolio_id,
+      strategy_id: strategy_id || null,
+      title,
+      doc_type,
+      file_path,
       file_url: publicUrl.publicUrl,
-      file_type: doc_type,
       file_name: title,
       uploaded_by: user.id,
     })

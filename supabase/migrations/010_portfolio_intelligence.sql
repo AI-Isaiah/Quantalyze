@@ -111,12 +111,18 @@ ALTER TABLE portfolio_strategies ADD COLUMN IF NOT EXISTS founder_notes JSONB DE
 ALTER TABLE portfolio_strategies ADD COLUMN IF NOT EXISTS last_founder_contact TIMESTAMPTZ;
 
 -- relationship_documents: make contact_request_id nullable (portfolio docs don't have one)
--- then add portfolio_id foreign key
+-- then add portfolio_id and other portfolio-doc fields
 ALTER TABLE relationship_documents
   ALTER COLUMN contact_request_id DROP NOT NULL;
 
 ALTER TABLE relationship_documents
-  ADD COLUMN IF NOT EXISTS portfolio_id UUID REFERENCES portfolios(id) ON DELETE CASCADE;
+  ADD COLUMN IF NOT EXISTS portfolio_id UUID REFERENCES portfolios(id) ON DELETE CASCADE,
+  ADD COLUMN IF NOT EXISTS strategy_id UUID REFERENCES strategies(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS title TEXT,
+  ADD COLUMN IF NOT EXISTS doc_type TEXT
+    CHECK (doc_type IN ('contract', 'note', 'factsheet', 'founder_update', 'other')),
+  ADD COLUMN IF NOT EXISTS file_path TEXT,
+  ADD COLUMN IF NOT EXISTS content TEXT;
 
 -- ============================================================
 -- 3. INDEXES

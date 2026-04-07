@@ -24,7 +24,7 @@ export default async function PortfolioDocumentsPage({
     getPortfolioStrategies(id),
     supabase
       .from("relationship_documents")
-      .select("id, file_url, file_type, file_name, created_at, portfolio_id")
+      .select("id, title, doc_type, file_url, file_name, strategy_id, created_at, portfolio_id")
       .eq("portfolio_id", id)
       .order("created_at", { ascending: false }),
   ]);
@@ -41,8 +41,8 @@ export default async function PortfolioDocumentsPage({
 
   const documents = (docRows ?? []).map((d) => ({
     id: d.id,
-    title: d.file_name ?? "Untitled",
-    doc_type: d.file_type,
+    title: d.title ?? d.file_name ?? "Untitled",
+    doc_type: d.doc_type ?? "other",
     file_url: d.file_url,
     file_name: d.file_name,
     created_at: d.created_at,
