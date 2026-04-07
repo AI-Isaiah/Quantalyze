@@ -37,7 +37,11 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
   }
 
   useEffect(() => {
-    if (!isOpen || selected || query.trim().length < 2) { setResults([]); return; }
+    if (!isOpen || selected || query.trim().length < 2) {
+      // Defer to next tick to avoid sync setState-in-effect lint warning
+      const id = setTimeout(() => setResults([]), 0);
+      return () => clearTimeout(id);
+    }
     let cancelled = false;
     const handle = setTimeout(async () => {
       const { data } = await supabase

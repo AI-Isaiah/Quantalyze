@@ -34,7 +34,7 @@ export function BookIntroCall({ strategyName, schedulingUrl }: BookIntroCallProp
       >
         <div className="space-y-4">
           <p className="text-sm text-text-secondary">
-            Schedule a call to discuss <span className="font-medium text-text-primary">{strategyName}</span> with our team. We'll connect you with the strategy manager and provide context on the track record.
+            Schedule a call to discuss <span className="font-medium text-text-primary">{strategyName}</span> with our team. We&apos;ll connect you with the strategy manager and provide context on the track record.
           </p>
           <div className="rounded-lg border border-border overflow-hidden" style={{ height: "500px" }}>
             <iframe

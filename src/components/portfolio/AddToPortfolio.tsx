@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 
@@ -101,12 +102,12 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
           ) : portfolios.length === 0 ? (
             <div className="px-4 py-3 text-sm text-text-muted text-center">
               No portfolios yet.
-              <a
+              <Link
                 href="/portfolios"
                 className="block mt-1 text-accent hover:underline"
               >
                 Create one
-              </a>
+              </Link>
             </div>
           ) : (
             <div className="py-1">

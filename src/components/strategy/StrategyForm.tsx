@@ -300,7 +300,7 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       <Modal open={showNoApiWarning} onClose={() => setShowNoApiWarning(false)} title="Connect Your Data">
         <div className="space-y-4">
           <p className="text-sm text-text-secondary">
-            You haven't connected an API key. Strategies with verified exchange data get significantly more attention from allocators.
+            You haven&apos;t connected an API key. Strategies with verified exchange data get significantly more attention from allocators.
           </p>
           <div className="rounded-lg border border-accent/30 bg-accent/5 p-4">
             <p className="text-sm font-medium text-text-primary mb-1">

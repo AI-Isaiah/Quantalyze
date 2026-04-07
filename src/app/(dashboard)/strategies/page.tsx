@@ -42,7 +42,7 @@ export default async function StrategiesPage() {
       />
 
       {introRequests && introRequests.length > 0 && (
-        <PendingIntros requests={introRequests as any} />
+        <PendingIntros requests={introRequests as Parameters<typeof PendingIntros>[0]["requests"]} />
       )}
 
       {(!strategies || strategies.length === 0) ? (

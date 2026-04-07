@@ -90,6 +90,9 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
   const [tableSortKey, setTableSortKey] = useState<TableSortKey>("sharpe");
   const [tableSortDir, setTableSortDir] = useState<SortDir>("desc");
 
+  // Capture wall-clock time at mount for the track-record filter (stable across renders)
+  const [mountedAtMs] = useState(() => Date.now());
+
   function handleColumnSort(key: TableSortKey) {
     if (tableSortKey === key) {
       setTableSortDir(tableSortDir === "asc" ? "desc" : "asc");
@@ -162,7 +165,7 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
       result = result.filter((s) => {
         if (!s.start_date) return false;
         const start = new Date(s.start_date);
-        const daysSince = (Date.now() - start.getTime()) / (1000 * 60 * 60 * 24);
+        const daysSince = (mountedAtMs - start.getTime()) / (1000 * 60 * 60 * 24);
         return daysSince >= minDays;
       });
     }
@@ -204,7 +207,7 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
     });
 
     return result;
-  }, [strategies, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, viewMode]);
+  }, [strategies, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, viewMode, mountedAtMs]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
