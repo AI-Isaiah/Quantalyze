@@ -1,11 +1,11 @@
 # Quantalyze
 
-Verified quantitative strategy marketplace. Asset managers publish strategies with exchange-verified performance data. Allocators discover, compare, and request introductions.
+Portfolio intelligence platform for quant allocators. Connect exchange API keys, get a unified dashboard across all your strategies with TWR/MWR analytics, correlation matrix, risk decomposition, attribution, and a relationship/document layer. Asset managers publish exchange-verified strategies; allocators discover, compare, allocate, and track.
 
 ## Prerequisites
 
 - Node.js 20.9+
-- Python 3.12+ (for analytics service)
+- Python 3.14+ (for analytics service)
 - A [Supabase](https://supabase.com) project
 
 ## Quick Start
@@ -21,9 +21,10 @@ cp .env.example .env.local
 # Edit .env.local with your Supabase project URL and anon key
 
 # 3. Run database migrations
-# In Supabase SQL Editor, run:
+# In Supabase SQL Editor, run all files in order:
 #   supabase/migrations/001_initial_schema.sql
-#   supabase/migrations/002_rls_policies.sql
+#   ...
+#   supabase/migrations/010_portfolio_intelligence.sql
 
 # 4. Start the dev server
 npm run dev
@@ -38,11 +39,15 @@ quantalyze/
   src/
     app/              # Next.js App Router pages
       (auth)/         # Login, signup, onboarding
-      (dashboard)/    # Authenticated pages (discovery, strategies, profile)
-    components/       # React components (ui/, layout/, charts/, strategy/, auth/)
-    lib/              # Utilities, types, Supabase clients, mock data
-  analytics-service/  # FastAPI backend (Python)
-  supabase/           # Database migrations
+      (dashboard)/    # Authenticated pages (discovery, strategies, portfolios, allocations, profile)
+        portfolios/   # Portfolio dashboard, management, documents
+      api/            # API routes (verify-strategy, portfolio-*, alert-digest)
+    components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, landing/, auth/)
+    lib/              # Utilities, types, Supabase clients, queries
+  analytics-service/  # FastAPI backend (Python) — strategy + portfolio analytics
+    services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer
+    routers/          # analytics, cron, exchange, portfolio
+  supabase/           # Database migrations (010 = portfolio intelligence)
 ```
 
 ## Tech Stack
@@ -51,8 +56,10 @@ quantalyze/
 |-------|-----------|
 | Frontend | Next.js 16, TypeScript, Tailwind CSS 4 |
 | Charts | Lightweight Charts, Recharts, @nivo/boxplot |
-| Database | Supabase (PostgreSQL + Auth + RLS) |
-| Analytics | FastAPI + quantstats + CCXT |
+| Database | Supabase (PostgreSQL + Auth + RLS + Storage) |
+| Analytics | FastAPI + quantstats + numpy + pandas + scipy + CCXT |
+| Email | Resend |
+| PDF | Puppeteer |
 | Deploy | Vercel (frontend), Railway (analytics) |
 
 ## npm Scripts
@@ -64,6 +71,7 @@ quantalyze/
 | `npm run lint` | Run ESLint |
 | `npm run typecheck` | Run TypeScript type checker |
 | `npm test` | Run Vitest tests |
+| `npm run test:e2e` | Run Playwright E2E tests |
 
 ## Analytics Service (Optional)
 
