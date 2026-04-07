@@ -58,14 +58,26 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
   if (error) {
     console.error("[api/preferences] upsert error:", error);
+    // Surface the schema-not-applied case explicitly so the founder knows what to do
+    if (error.code === "PGRST205") {
+      return NextResponse.json(
+        { error: "Preferences are not available yet. Migration 011 needs to be applied to the database." },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
   }
 
-  // Mark on profile so we can show "preferences set" indicators
-  await supabase
+  // Mark on profile so we can show "preferences set" indicators.
+  // The preferences_updated_at column is added by migration 011 — silently
+  // skip the profile update if the column doesn't exist yet.
+  const { error: profileErr } = await supabase
     .from("profiles")
     .update({ preferences_updated_at: new Date().toISOString() })
     .eq("id", user.id);
+  if (profileErr && profileErr.code !== "42703") {
+    console.error("[api/preferences] profile update error:", profileErr);
+  }
 
   return NextResponse.json({ success: true });
 }

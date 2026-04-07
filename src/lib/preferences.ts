@@ -144,7 +144,13 @@ export function validateAdminEditableInput(input: Partial<AllocatorPreferences>)
   return null;
 }
 
-/** Read the current user's preferences. Returns null if no row exists. */
+/**
+ * Read the current user's preferences. Returns null if no row exists OR if the
+ * `allocator_preferences` table doesn't exist yet (migration 011 not applied).
+ *
+ * The schema-missing path is treated as "no preferences yet" so the page can
+ * render the empty form instead of crashing with a 500. Other errors still throw.
+ */
 export async function getOwnPreferences(
   supabase: SupabaseClient,
   userId: string,
@@ -154,6 +160,15 @@ export async function getOwnPreferences(
     .select("*")
     .eq("user_id", userId)
     .maybeSingle();
-  if (error) throw error;
+  if (error) {
+    // PGRST205 = table not in schema cache (migration 011 not applied yet)
+    if (error.code === "PGRST205") {
+      console.warn(
+        "[preferences] allocator_preferences table missing — apply migration 011",
+      );
+      return null;
+    }
+    throw error;
+  }
   return data as AllocatorPreferences | null;
 }
