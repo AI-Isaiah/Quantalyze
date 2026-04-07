@@ -3,6 +3,7 @@ import { MobileNav } from "@/components/layout/MobileNav";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { getPopulatedCategorySlugs } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
+import { isAdminUser } from "@/lib/admin";
 
 export default async function DashboardLayout({
   children,
@@ -21,8 +22,7 @@ export default async function DashboardLayout({
   try {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
-    const adminEmail = process.env.ADMIN_EMAIL ?? "";
-    isAdmin = !!user?.email && user.email.toLowerCase() === adminEmail.toLowerCase();
+    isAdmin = await isAdminUser(supabase, user);
   } catch {
     // Not admin
   }
