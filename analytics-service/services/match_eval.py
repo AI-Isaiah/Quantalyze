@@ -144,7 +144,7 @@ def _find_strategy_rank_in_latest_batch_before(
         .eq("batch_id", batch_id)
         .eq("strategy_id", strategy_id)
         .is_("exclusion_reason", None)
-        .maybeSingle()
+        .maybe_single()
         .execute()
     )
     if not cand_result.data:

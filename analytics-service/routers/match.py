@@ -66,7 +66,7 @@ def _kill_switch_enabled() -> bool:
     try:
         result = supabase.table("system_flags").select("enabled").eq(
             "key", "match_engine_enabled"
-        ).maybeSingle().execute()
+        ).maybe_single().execute()
         if not result.data:
             return True  # No row = default enabled
         return bool(result.data.get("enabled", True))
@@ -166,7 +166,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     # Preferences
     prefs_result = supabase.table("allocator_preferences").select("*").eq(
         "user_id", allocator_id
-    ).maybeSingle().execute()
+    ).maybe_single().execute()
     preferences = prefs_result.data
 
     # Portfolio strategies + weights. Iterate all portfolios owned by this allocator.
