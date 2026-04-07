@@ -13,11 +13,22 @@ export async function GET(): Promise<NextResponse> {
   }
 
   const admin = createAdminClient();
-  const { data } = await admin
+  const { data, error } = await admin
     .from("system_flags")
     .select("enabled, updated_at, updated_by")
     .eq("key", "match_engine_enabled")
     .maybeSingle();
+
+  // Surface infrastructure errors instead of silently defaulting to enabled=true.
+  // If system_flags doesn't exist (migration 011 not applied) the founder needs to
+  // know that the engine isn't actually deployed — not see a misleading green pill.
+  if (error) {
+    console.error("[api/admin/match/kill-switch] read error:", error);
+    return NextResponse.json(
+      { error: "Match engine schema not found. Apply migration 011 to your Supabase project." },
+      { status: 503 },
+    );
+  }
 
   return NextResponse.json({
     enabled: data?.enabled ?? true,

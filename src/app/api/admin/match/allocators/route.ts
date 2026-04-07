@@ -20,10 +20,29 @@ export async function GET(): Promise<NextResponse> {
   const admin = createAdminClient();
 
   // Load all allocators (role IN ('allocator', 'both'))
-  const { data: profiles } = await admin
+  // The profiles table is from migration 001 — if THIS query fails, surface the error.
+  const { data: profiles, error: profilesErr } = await admin
     .from("profiles")
     .select("id, display_name, company, email, role, preferences_updated_at")
     .in("role", ["allocator", "both"]);
+
+  if (profilesErr) {
+    console.error("[api/admin/match/allocators] profiles error:", profilesErr);
+    // 'preferences_updated_at' is added by migration 011. If it's missing, the
+    // founder hasn't applied the migration yet — surface that explicitly.
+    const isSchemaError =
+      profilesErr.code === "PGRST205" ||
+      profilesErr.message?.includes("preferences_updated_at") ||
+      profilesErr.message?.includes("schema cache");
+    return NextResponse.json(
+      {
+        error: isSchemaError
+          ? "Match engine schema not found. Apply migration 011 to your Supabase project."
+          : "Failed to load allocators",
+      },
+      { status: isSchemaError ? 503 : 500 },
+    );
+  }
 
   const allocators = profiles ?? [];
   const allocatorIds = allocators.map((a) => a.id);
@@ -33,13 +52,26 @@ export async function GET(): Promise<NextResponse> {
   }
 
   // Latest batch per allocator
-  const { data: batchRows } = await admin
+  const { data: batchRows, error: batchErr } = await admin
     .from("match_batches")
     .select(
       "id, allocator_id, computed_at, mode, candidate_count, filter_relaxed",
     )
     .in("allocator_id", allocatorIds)
     .order("computed_at", { ascending: false });
+
+  if (batchErr) {
+    console.error("[api/admin/match/allocators] match_batches error:", batchErr);
+    const isSchemaError = batchErr.code === "PGRST205";
+    return NextResponse.json(
+      {
+        error: isSchemaError
+          ? "Match engine schema not found. Apply migration 011 to your Supabase project."
+          : "Failed to load match data",
+      },
+      { status: isSchemaError ? 503 : 500 },
+    );
+  }
 
   const latestBatchByAllocator = new Map<string, {
     id: string;

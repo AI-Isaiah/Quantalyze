@@ -50,8 +50,23 @@ export function MatchQueueIndex() {
         fetch("/api/admin/match/allocators"),
         fetch("/api/admin/match/kill-switch"),
       ]);
-      if (!allocatorsRes.ok) throw new Error("Failed to load allocators");
-      if (!killSwitchRes.ok) throw new Error("Failed to load kill switch");
+      // Surface a helpful migration-not-applied error if either endpoint reports 503
+      if (allocatorsRes.status === 503 || killSwitchRes.status === 503) {
+        const failed = allocatorsRes.status === 503 ? allocatorsRes : killSwitchRes;
+        const body = await failed.json().catch(() => ({}));
+        throw new Error(
+          body.error ||
+            "Match engine schema not found. Apply migration 011 to your Supabase project.",
+        );
+      }
+      if (!allocatorsRes.ok) {
+        const body = await allocatorsRes.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to load allocators");
+      }
+      if (!killSwitchRes.ok) {
+        const body = await killSwitchRes.json().catch(() => ({}));
+        throw new Error(body.error || "Failed to load kill switch");
+      }
       const { allocators: rows } = await allocatorsRes.json();
       const { enabled } = await killSwitchRes.json();
       setAllocators(rows ?? []);

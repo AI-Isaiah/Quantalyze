@@ -66,7 +66,9 @@ test.describe("Match Queue — API admin gate", () => {
   }) => {
     const res = await request.get("/api/admin/match/allocators");
     // 403 or 401 depending on auth state
-    expect([401, 403]).toContain(res.status());
+    // Unauthenticated requests are redirected by the proxy (307); authenticated
+    // non-admin requests get a 401/403 from withAdminAuth.
+    expect([307, 401, 403]).toContain(res.status());
   });
 
   test("POST /api/admin/match/recompute requires admin", async ({
@@ -75,7 +77,9 @@ test.describe("Match Queue — API admin gate", () => {
     const res = await request.post("/api/admin/match/recompute", {
       data: { allocator_id: "00000000-0000-0000-0000-000000000000" },
     });
-    expect([401, 403]).toContain(res.status());
+    // Unauthenticated requests are redirected by the proxy (307); authenticated
+    // non-admin requests get a 401/403 from withAdminAuth.
+    expect([307, 401, 403]).toContain(res.status());
   });
 
   test("POST /api/admin/match/send-intro requires admin", async ({
@@ -88,14 +92,18 @@ test.describe("Match Queue — API admin gate", () => {
         admin_note: "test",
       },
     });
-    expect([401, 403]).toContain(res.status());
+    // Unauthenticated requests are redirected by the proxy (307); authenticated
+    // non-admin requests get a 401/403 from withAdminAuth.
+    expect([307, 401, 403]).toContain(res.status());
   });
 
   test("GET /api/admin/match/kill-switch requires admin", async ({
     request,
   }) => {
     const res = await request.get("/api/admin/match/kill-switch");
-    expect([401, 403]).toContain(res.status());
+    // Unauthenticated requests are redirected by the proxy (307); authenticated
+    // non-admin requests get a 401/403 from withAdminAuth.
+    expect([307, 401, 403]).toContain(res.status());
   });
 
   test("POST /api/admin/match/decisions requires admin", async ({
@@ -108,7 +116,9 @@ test.describe("Match Queue — API admin gate", () => {
         decision: "thumbs_up",
       },
     });
-    expect([401, 403]).toContain(res.status());
+    // Unauthenticated requests are redirected by the proxy (307); authenticated
+    // non-admin requests get a 401/403 from withAdminAuth.
+    expect([307, 401, 403]).toContain(res.status());
   });
 });
 
