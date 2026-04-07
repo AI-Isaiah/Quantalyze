@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount, Portfolio, PortfolioAnalytics, PortfolioAlert, AllocationEvent } from "./types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
@@ -90,41 +91,8 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   return result;
 }
 
-// Supabase returns embedded relations as object (unique FK) or array
-export function extractAnalytics(raw: unknown): StrategyAnalytics | null {
-  if (!raw) return null;
-  if (Array.isArray(raw)) return raw[0] ?? null;
-  if (typeof raw === "object") return raw as StrategyAnalytics;
-  return null;
-}
-
-export const EMPTY_ANALYTICS: StrategyAnalytics = {
-  id: "",
-  strategy_id: "",
-  computed_at: "",
-  computation_status: "pending",
-  computation_error: null,
-  benchmark: null,
-  cumulative_return: null,
-  cagr: null,
-  volatility: null,
-  sharpe: null,
-  sortino: null,
-  calmar: null,
-  max_drawdown: null,
-  max_drawdown_duration_days: null,
-  six_month_return: null,
-  sparkline_returns: null,
-  sparkline_drawdown: null,
-  metrics_json: null,
-  returns_series: null,
-  drawdown_series: null,
-  monthly_returns: null,
-  daily_returns: null,
-  rolling_metrics: null,
-  return_quantiles: null,
-  trade_metrics: null,
-};
+// Re-export client-safe helpers for backwards compat
+export { extractAnalytics, EMPTY_ANALYTICS };
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<StrategyWithAnalytics[]> {
   const supabase = await createClient();

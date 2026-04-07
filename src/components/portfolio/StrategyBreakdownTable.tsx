@@ -2,8 +2,7 @@
 
 import { useState, useMemo } from "react";
 import Link from "next/link";
-import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
-import { extractAnalytics } from "@/lib/queries";
+import { formatPercent, formatNumber, metricColor, extractAnalytics } from "@/lib/utils";
 import type { StrategyAnalytics } from "@/lib/types";
 
 type SortKey = "name" | "weight" | "twr" | "sharpe" | "max_dd" | "contribution";
