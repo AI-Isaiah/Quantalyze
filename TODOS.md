@@ -1,81 +1,146 @@
 # TODOS
 
-## Next Up (high impact, ready to build)
+> **Goal for the next session:** Finalize the product so it can be demoed to (a) an
+> allocator, (b) a strategy team, and (c) a capital introduction team. Scope stays
+> roughly where it is — fill the gaps, polish the rough edges, no new features.
 
-### P0 — Portfolio Intelligence: Post-Merge Verification (carry-over from 2026-04-07 ship)
-- [ ] **Apply migration 010 to staging Supabase** — `supabase/migrations/010_portfolio_intelligence.sql`. Creates 5 new tables (allocation_events, portfolio_analytics, portfolio_alerts, audit_log, verification_requests), extends portfolio_strategies + relationship_documents, RLS policies, and the `portfolio-documents` storage bucket.
-- [ ] **End-to-end smoke test with real Binance read-only API key** via the landing page verification form (submit → poll → results). Verify the form returns `verification_id` (was a critical bug caught by /qa).
-- [ ] **Trigger sample portfolio analytics computation end-to-end** on a portfolio with 2+ strategies. Verify TWR/MWR/correlation/attribution all populate correctly and the dashboard renders without errors.
-- [ ] **Verify portfolio PDF export** generates a valid A4 PDF via `/api/portfolio-pdf/[id]` (Puppeteer route).
-- [ ] **Verify cron-triggered alert digest** by setting `CRON_SECRET` env var and POSTing to `/api/alert-digest`.
-- [ ] **Test the migration wizard** end-to-end: search for a published strategy, claim it with amount + date + notes, verify rows land in portfolio_strategies + allocation_events + relationship_documents.
+## Demo Readiness — three audiences, three end-to-end paths
 
-### P0 — CI Coverage Gate (chronic, fix or relax)
-- [ ] **Fix or relax the Python CI coverage gate** (`pytest --cov-fail-under=80`). Main has been failing this gate on every push for 5+ commits because `benchmark.py` (15%), `db.py` (54%), `encryption.py` (61%), and `exchange.py` (66%) are all under-tested. Total coverage is 74% after the portfolio intelligence branch (was 70% before). Either:
-  - Lower the gate to 70% temporarily and create P1 TODOs for the under-tested modules, OR
-  - Add tests for the 4 under-tested modules to bring total above 80%
-  - Reference: `.github/workflows/ci.yml` (or wherever the python check is defined)
+The match engine + portfolio intelligence + verified strategy directory all exist
+in code. The gap is operational: nothing is wired up against real data, the cron
+isn't scheduled, and there's no demo script. Everything in this section blocks
+the next demo.
 
-### P1 — Portfolio Intelligence: Production Hardening (carry-over)
-- [ ] **Wire optimizer suggestions into the dashboard UI** — the `/api/portfolio-optimizer` endpoint computes `optimizer_suggestions` and stores them in `portfolio_analytics.optimizer_suggestions`, but no frontend component renders them yet. Build a `PortfolioOptimizer` panel showing the top 5 candidate strategies with corr/sharpe-lift/score metrics.
-- [ ] **Wire `runPortfolioOptimizer` into the dashboard** — there's a "Run Optimizer" button somewhere obvious that POSTs to `/api/portfolio-optimizer`.
+### P0 — Block the demo entirely
+
+- [ ] **Apply migration 011 to staging Supabase** — `supabase/migrations/011_perfect_match.sql`. The runbook has the exact SQL: set `app.admin_email` first, then run the migration. Without this, the founder sees clean "Apply migration 011" error messages everywhere and the match queue cannot function. (Discovered during /qa, ISSUE-002.)
+  - Verify after apply: `SELECT id, is_admin FROM profiles WHERE email = 'matratzentester24@gmail.com'` returns `is_admin = true`. If not, run the manual UPDATE from the runbook.
+  - Verify the 5 new tables exist: `system_flags`, `allocator_preferences`, `match_batches`, `match_candidates`, `match_decisions`.
+- [ ] **Apply migration 010 to staging Supabase** (also a P0 carry-over from the portfolio intelligence ship). Same Supabase instance — both 010 and 011 must be applied together so the portfolio dashboard and the match queue both work.
+- [ ] **Seed demo data so the three audience paths actually have something to look at.** Without this, the match queue is permanently empty and the eval dashboard has 0 intros.
+  - **Allocator path:** at least 2 allocator-role profiles (one cold-start with no portfolio, one with 2-3 strategies in a portfolio so personalized scoring works). Set a mandate archetype on each via the admin preferences editor.
+  - **Strategy team path:** at least 5-8 published strategies with verified API keys + computed analytics + 3+ months of returns. The current example strategies (Stellar, Nebula, etc.) probably suffice if their data is fresh.
+  - **Capital intro team path:** at least 1 historical `match_decisions` row with `decision='sent_as_intro'` AND an existing `contact_requests` row, so the eval dashboard's hit-rate calculation has at least one data point and the decision history collapsible isn't empty.
+- [ ] **Trigger the first cron-recompute manually.** Hit `POST /api/admin/match/recompute` from the admin queue's "Recompute now" button for each seeded allocator. Verify each gets a `match_batches` row + 5-30 candidates. Take a screenshot of the queue with real data — this is the demo state.
+
+### P0 — Deployment plumbing the demo depends on
+
+- [ ] **Schedule the match engine cron.** Pick one of: Vercel cron block in `vercel.json`, Supabase pg_cron, or a GitHub Actions workflow that hits `POST /api/match/cron-recompute` daily at 01:00 UTC. Without this, the queue's "Computed Xh ago" timestamps go stale and the demo looks dead.
+- [ ] **Verify the analytics service is reachable from the deployed Next.js.** `ANALYTICS_SERVICE_URL` and `ANALYTICS_SERVICE_KEY` must be set in Vercel env. Curl `/api/admin/match/eval` from production and confirm it returns a 200 or a clean schema-error 503, not a 502 / "Analytics service is not reachable."
+- [ ] **Verify Puppeteer in production** for the existing factsheet PDF and the new portfolio PDF (`/api/portfolio-pdf/[id]`). Vercel doesn't ship Chromium by default; if it breaks, switch to `@sparticuz/chromium`. (Carry-over from portfolio intelligence ship.)
+
+### P0 — Verification end-to-end
+
+These are the smoke tests for each demo audience. Everything below has unit-test
+coverage already; this is real-data verification on the deployed site.
+
+- [ ] **Allocator path smoke test.** As a seeded allocator: log in → `/discovery/crypto-sma` → click into a strategy → click "Request intro" → submit → verify `contact_requests` row exists. Then visit `/preferences`, fill in mandate + ticket size, save, see the success state. Then visit the portfolio dashboard if the allocator has one.
+- [ ] **Strategy team path smoke test.** As a seeded manager: log in → `/strategies` → click into one → see analytics + sync badge + verified state. Receive an intro request notification (the Founder triggers one from the admin queue against this manager). Verify the email arrives.
+- [ ] **Capital intro team path smoke test (the founder's flow).** As admin: open `/admin/match` → see allocator list with triage signals → open one allocator → see two-pane queue with ranked candidates → click KEEP / SKIP to record decisions → click "Send intro →" on a candidate → submit the slide-out → verify both `contact_requests` AND `match_decisions` rows are created atomically → reload, verify the row shows SENT and grays out → open `/admin/match/eval` and confirm 1 intro shipped, 1 hit (or miss) recorded.
+- [ ] **Run the Playwright suite on the deployed site:** `npm run test:e2e -- match-queue`. The 13 tests should all pass now that migration 011 is applied. (Carry-over from /ship; deferred until staging was ready.)
+
+### P0 — Demo script + handoff materials
+
+- [ ] **Write a 1-page demo script** for each of the three audiences. ~5 minutes per demo. Steps to click, talking points, what to emphasize, what NOT to show. Live in `docs/demos/` so anyone presenting (you, a sales person, an investor) has the same playbook. **DEFERRED BY USER until next session — flagged here so it doesn't slip.**
+- [ ] **Capture a "before/after" screenshot pair** for the founder workflow: time-on-task with the old Telegram-driven matching vs. the new admin queue. Even rough numbers — "Sunday 30 minutes per allocator vs. Monday 5 minutes per allocator." This is the single most powerful number for the capital intro team demo.
+
+### P1 — Polish that affects how the demo *looks*
+
+These don't block the demo but they're the things an LP will notice in the first 30 seconds.
+
+- [ ] **`/admin/match/[allocator_id]` mobile/tablet check.** Plan says "best on desktop" but founders often demo from a tablet. Verify the two-pane collapses cleanly to single-column at 768-1023px and the read-only mode renders below 768px.
+- [ ] **Eval dashboard empty state polish.** Right now, with 0 historical intros, the dashboard shows "No intros shipped in the last 28 days." Add the founder onboarding tutorial card here too: "Once you ship 5+ intros from the queue, this dashboard will show your hit rate against the algorithm." Currently the page looks broken when empty.
+- [ ] **Match queue index skeleton/loading state.** When the API is computing a recompute, the page should show a spinner or shimmer, not blank. Verify the loading state from Task 10.5 actually triggers in practice.
+- [ ] **3 deferred design polish items from the 2026-04-07 audit:**
+  - `PortfolioEquityCurve.tsx:14` — palette includes `#7C3AED` (purple, anti-pattern per DESIGN.md). Replace with the muted teal or a neutral.
+  - `BenchmarkComparison.tsx:25,43` + `FounderInsights.tsx:44` — H3 uses `text-lg` (18px) instead of spec's 16px. Snap to spec.
+  - `Sidebar.tsx:56` — "Quantalyze" logo text uses `font-bold` instead of `font-display` (Instrument Serif). Use the display font.
+- [ ] **Apply DESIGN.md tokens to any remaining stragglers.** The dashboard had old Inter/teal in a few places before; the perfect-match UI used the new tokens but a fresh sweep with `/design-review` on the live site after migration 011 is applied would catch anything that drifted.
+- [ ] **Mobile responsive check on all the portfolio intelligence pages** — only the landing page got tested at 375×812 in the prior /qa pass. Test: portfolio dashboard, management, documents, allocations hub, match queue index (desktop-only is OK on the detail page).
+
+### P1 — Founder workflow improvements that pay off in the demo
+
+- [ ] **Founder-led migration of existing Telegram/email clients** — the ~10-20 paying allocators the founder has today should have profile rows seeded so the demo isn't stretched on synthetic users. Even minimal (display_name, company, email, role='allocator', mandate_archetype) is fine; the founder can fill in `founder_notes` over time via the admin CRM editor.
+- [ ] **Wire optimizer suggestions into the dashboard UI** — the `/api/portfolio-optimizer` endpoint already computes `optimizer_suggestions` and stores them in `portfolio_analytics.optimizer_suggestions`, but no frontend renders them. Build a `PortfolioOptimizer` panel showing the top 5 candidate strategies. **This is the allocator-facing complement to the founder-side match queue**, and it's already 80% built — just needs the React panel. High-leverage demo candy. (Carry-over from portfolio intelligence ship.)
+- [ ] **"Run Optimizer" button in the dashboard** that POSTs to `/api/portfolio-optimizer`.
+
+---
+
+## User-deferred (DEFERRED BY YOU at decision points in this session)
+
+These were live decisions you made — kept here so you can revisit them once the demo
+is in front of real allocators.
+
+- [ ] **Allocator-facing `/recommendations` page** (Approach B from the perfect-match plan). DEFERRED BY YOU at the autoplan premise gate when both Codex and the Claude subagent independently warned that exposing the algorithm directly would substitute for your founder-trust moat instead of amplifying it. You chose Approach D (founder-amplifier). Graduation criteria for revisiting: 20+ founder-shipped intros from the Match Queue + 5+ converted to actual allocations + algorithm hit rate > 40% over a rolling 4-week window.
+- [ ] **`PerfectMatchPanel` widget on the portfolio dashboard** — same Approach B deferral. DEFERRED BY YOU.
+- [ ] **Match score column on Discovery** — same Approach B deferral. DEFERRED BY YOU.
+- [ ] **Save / dismiss / "show me more like this" feedback loop on the allocator side** — same Approach B deferral. DEFERRED BY YOU. Founder's thumbs up/down on the admin side is the v1 ground-truth signal.
+
+## Carry-over from Portfolio Intelligence ship (P1)
+
 - [ ] **Convert MigrationWizard 3-step DB write into a server transaction** — currently the wizard does 3 sequential client-side writes (portfolio_strategies upsert, allocation_events insert, relationship_documents insert). On partial failure the portfolio is left in an inconsistent state. Move to a single API route doing an RPC/transaction.
-- [ ] **Generate target_weight column for portfolio_strategies** — migration 010 adds `current_weight` but the spec also envisioned `target_weight` for rebalancing. Decide if we need it before alerts can fire on rebalance drift.
-- [ ] **Auto-populate allocation_events from exchange API transfer history** — autoplan fix #4 said "Exchange as primary source of truth: Auto-detect deposits/withdrawals from exchange API transfer history. allocation_events are auto-populated, with manual entry as override only." The schema has the `source TEXT CHECK ('auto', 'manual')` column but the auto-detection logic in cron.py is not built yet.
-- [ ] **Persist KEK securely** (Supabase Vault or KMS for production, currently .env.local)
-- [ ] **Test puppeteer in production** — Vercel doesn't ship Chromium by default; verify the existing factsheet PDF and new portfolio PDF actually work in deployed env, or switch to `@sparticuz/chromium` + Vercel function.
-- [ ] **Strategy_id column for relationship_documents was added in migration 010** but the API route doesn't accept/persist it explicitly through the upload form (DocumentUpload sends it, the API route accepts it). Verify end-to-end after migration applies.
+- [ ] **Generate target_weight column for portfolio_strategies** — migration 010 adds `current_weight` but the spec also envisioned `target_weight` for rebalancing. Decide if needed before alerts can fire on rebalance drift.
+- [ ] **Auto-populate allocation_events from exchange API transfer history** — schema has the `source TEXT CHECK ('auto', 'manual')` column but the auto-detection logic in cron.py is not built yet.
+- [ ] **Persist KEK securely** (Supabase Vault or KMS for production, currently `.env.local`).
+- [ ] **`strategy_id` column for relationship_documents** — added in migration 010 but verify end-to-end via DocumentUpload after migration applies.
+- [ ] **End-to-end smoke test with real Binance read-only API key** via the landing page verification form (submit → poll → results). Verify the form returns `verification_id`.
+- [ ] **Trigger sample portfolio analytics computation end-to-end** on a portfolio with 2+ strategies. Verify TWR/MWR/correlation/attribution all populate correctly.
+- [ ] **Verify cron-triggered alert digest** by setting `CRON_SECRET` env var and POSTing to `/api/alert-digest`.
+- [ ] **Test the migration wizard** end-to-end after migration 010 is applied.
 
-### P1 — Tech Debt from /qa pass (2026-04-07)
-- [ ] **14 ESLint warnings** remaining in pre-existing files (unused vars, missing useEffect deps, useCallback deps). Most are in `MobileNav`, `ApiKeyManager`, `OrganizationTab`, `RiskAttribution`, `StrategyHeader.test`. Clean up next time touching those files.
+## Tech debt (P1, fix when touching the file)
+
+- [ ] **Raise Python CI coverage from 84% toward 90%.** The 80% gate cleared during the perfect-match merge with 18 smart tests. Remaining gaps are mostly in `services/exchange.py` (66%, would need ccxt mock harness extensions) and `services/portfolio_metrics.py` (78%). Optional next-pass items: `services/benchmark.py` 48-hour cache freshness gate, the CoinGecko fallback parser, and the `validate_key_permissions` per-exchange permission branches in `exchange.py`.
+- [ ] **Wire the 5 SOLID Playwright `Match Queue — API admin gate` tests + `e2e/auth.spec.ts` + `e2e/smoke.spec.ts` into CI** as a separate job. Needs no auth, no DB, no migration 011. Roughly: `npx playwright install --with-deps chromium`, start `next start` against placeholder Supabase env vars, `npx playwright test --grep "API admin gate" e2e/auth.spec.ts e2e/smoke.spec.ts`. Skip the rest of `match-queue.spec.ts` until there's a seeded staging Supabase. Recommended in plan-eng-review's e2e investigation.
+- [ ] **Tighten `validate_kek_on_startup` exception classification.** `services/encryption.py:31` catches `(ValueError, Exception)` which is just `Exception`. Replace with `cryptography.fernet.InvalidToken | ValueError | binascii.Error` so the error message points at the actual failure mode. Code smell, not a bug.
+- [ ] **Add input validation to `compute_hit_rate_metrics`.** `services/match_eval.py:62-65` reads `intro["allocator_id"]`, `intro["strategy_id"]`, `intro["created_at"]` without defensive parsing — a malformed row from the DB raises `KeyError` and crashes the eval endpoint. Wrap with a try/except per intro and skip malformed rows with a structured log warning.
+- [ ] **Document `cryptography.fernet` correctly.** The plan + service docstrings call this "AES-256-GCM" but Fernet is AES-128-CBC + HMAC-SHA256 (still authenticated, still cryptographically sound). Worth correcting in any compliance review or security audit. Not a security bug.
+- [ ] **14 ESLint warnings** in pre-existing files (unused vars, missing useEffect deps, useCallback deps). Most are in `MobileNav`, `ApiKeyManager`, `OrganizationTab`, `RiskAttribution`, `StrategyHeader.test`. Clean up next time touching those files.
 - [ ] **Move pre-existing factsheet PDF route to use `assertPortfolioOwnership`-style helper** — the factsheet route still has inlined ownership checks. Standardize on the helper introduced in /simplify pass.
-- [ ] **The `redteam` adversarial review subagent agent type was attempted in /simplify** — only 2 of 3 review agents completed (one hit a 529 overload error). Re-run /simplify on portfolio intelligence code if more issues emerge.
-- [ ] **Verify mobile responsive design** on all new portfolio pages (only landing page was screenshot-tested at 375×812 during /qa). Test: portfolio dashboard, management page, documents page, allocations hub.
-
-### P1 — Design Polish
-- [ ] Run /design-review on live site (http://localhost:3000) — visual audit + fix loop
-- [ ] Apply design system tokens to all remaining components (some pages still have old Inter/teal)
-- [ ] Compare live site against 3 HTML reference pages (landing, factsheet, discovery) at `~/.gstack/projects/AI-Isaiah-Quantalyze/designs/`
-- [ ] **9 design findings from 2026-04-07 audit** — 6 high/medium were auto-fixed during /design-review. 3 polish items deferred:
-  - PortfolioEquityCurve.tsx:14 — palette includes `#7C3AED` (purple/violet, borderline anti-pattern per DESIGN.md)
-  - BenchmarkComparison.tsx:25,43 + FounderInsights.tsx:44 — H3 uses `text-lg` (18px) instead of spec's 16px
-  - Sidebar.tsx:56 — "Quantalyze" logo text uses `font-bold` instead of `font-display` (Instrument Serif)
-
-### P1 — Operational
-- [ ] Founder-led migration of existing Telegram/email clients (manual, ~10-20 relationships)
-- [ ] OKX bills API: verify data coverage for Spot vs Futures accounts
-- [ ] Handle OKX bills-archive API for history older than 3 months
+- [ ] **Re-run /simplify on portfolio intelligence code** if more issues emerge (the redteam adversarial review only got 2 of 3 agents in the last pass — one hit a 529 overload).
+- [ ] **Reconcile the proxy admin gate with `isAdminUser()`** — `src/proxy.ts` still bounces based on email-only (`ADMIN_EMAIL`). A future admin granted via `profiles.is_admin = true` but with a different email would be 307'd before the DAL check runs. Fix by either (a) JWT custom claim that encodes `is_admin`, or (b) removing the proxy's admin check entirely and relying on per-route `isAdminUser()`. Safe to defer until there's a second admin.
+- [ ] **Drop the email-based admin gate** in `lib/admin.ts` and `withAdminAuth.ts` once `is_admin` is fully populated and verified across all admin pages. Currently runs as OR for backward compatibility (perfect-match plan Task 1.5).
+- [ ] **OKX bills API:** verify data coverage for Spot vs Futures accounts.
+- [ ] **Handle OKX bills-archive API** for history older than 3 months.
 
 ## Deferred (build on demand signal)
 
 ### P1.5
-- Allocator preference weights (personalized ranking) — ship filters+presets first, build if >=3 allocators request different criteria weights
+- Allocator preference weights (personalized ranking) — ship filters+presets first, build if >=3 allocators request different criteria weights.
 
 ### P2
-- Organizations / teams (migration 006 drafted, don't build until customer asks)
-- Redis / BullMQ (premature, compute is 15-30s)
-- Billing / pricing tiers (needs pricing model defined with paying customers)
-- Leaderboard / ratings (incentive design needed)
-- Embeddable "Verified by Quantalyze" widget
-- Competitive analysis: quants.space, Darwinex, STRATS.io, TradeLink.pro, genieai.tech
-- Correlation/overlap analysis for portfolios
-- Monte Carlo simulation chart
-- Real-time monitoring dashboard
-- Dark mode (institutional = light mode)
-- WCAG AA accessibility audit
-- Aggregate social proof on landing page improvements (exchange logos, testimonials)
+- **Email notifications when a new high-score match appears** — needs delivery infrastructure decision (email vs in-app vs both). Defer pending allocator usage data on the v1 admin queue.
+- **Manager-side "who was I recommended to" dashboard** — privacy-by-default in v1; revisit if managers ask.
+- **Custom benchmark per allocator** (vs the BTC default) for the match engine — defer until allocators ask.
+- **ML collaborative filtering for matching** — needs >500 historical intro requests to be useful. Until then, the rule-based engine + founder ground truth is correct. Re-evaluate when `match_decisions` has >500 rows.
+- Organizations / teams (migration 006 drafted, don't build until customer asks).
+- Redis / BullMQ (premature, compute is 15-30s).
+- Billing / pricing tiers (needs pricing model defined with paying customers).
+- Leaderboard / ratings (incentive design needed).
+- Embeddable "Verified by Quantalyze" widget.
+- Competitive analysis: quants.space, Darwinex, STRATS.io, TradeLink.pro, genieai.tech.
+- Correlation/overlap analysis for portfolios.
+- Monte Carlo simulation chart.
+- Real-time monitoring dashboard.
+- Dark mode (institutional = light mode).
+- WCAG AA accessibility audit.
+- Aggregate social proof on landing page improvements (exchange logos, testimonials).
 
 ### P3
-- MAE/MFE analysis (FXBlue feature)
-- Visual gauge scales for metrics (TradeLink feature)
-- Multi-account strategy aggregation
-- Real-time WebSocket data sync
-- White-label verification API
+- MAE/MFE analysis (FXBlue feature).
+- Visual gauge scales for metrics (TradeLink feature).
+- Multi-account strategy aggregation.
+- Real-time WebSocket data sync.
+- White-label verification API.
 
 ## Completed (this session, 2026-04-07)
-- ~~**Portfolio Intelligence Platform** (25 tasks, 5 phases): allocator-side portfolio dashboard with TWR/MWR analytics, correlation matrix, risk decomposition, attribution, optimizer, narrative summaries, allocation events, alerts, documents tab, PDF export, migration wizard, landing-page exchange verification flow. Implements the GenieAI-inspired vision: allocators connect their exchange API keys, the platform auto-builds a unified dashboard across all their strategies. Migration 010 + 7 new analytics modules + 16 new frontend components + 7 new API routes. Branch: feat/portfolio-intelligence~~
+
+- ~~**Perfect Match Engine v1** (founder-amplifier): admin-only Match Queue with triage list, two-pane detail (shortlist strip + ranked candidates + sticky detail pane), keyboard shortcuts (j/k/s/u/d/r), Send Intro slide-out with idempotent SECURITY DEFINER RPC, kill switch, eval dashboard. Migration 011 + Python `match_engine.py` + 24 unit tests + 8 Next.js admin API routes + 5 React components + runbook + Playwright E2E suite. Branch: `feat/perfect-match-engine`. PR: #10. Plan + full review trail at `docs/superpowers/plans/2026-04-07-perfect-match-engine.md`.~~
+- ~~**3 critical bugs caught and fixed during /qa** on the same branch: kill-switch silent fallback when migration 011 missing (ISSUE-003), preferences server component crash when migration 011 missing (ISSUE-004), E2E test status code mismatch with proxy 307 redirect (ISSUE-001).~~
 
 ## Completed (prior session, 2026-04-06)
+
+- ~~**Portfolio Intelligence Platform** (25 tasks, 5 phases): allocator-side portfolio dashboard with TWR/MWR analytics, correlation matrix, risk decomposition, attribution, optimizer, narrative summaries, allocation events, alerts, documents tab, PDF export, migration wizard, landing-page exchange verification flow. Migration 010 + 7 new analytics modules + 16 new frontend components + 7 new API routes. Branch: `feat/portfolio-intelligence`.~~
 - ~~Sprint 0: Plausible analytics, Sentry error tracking, legal disclaimers~~
 - ~~Sprint 1: Public discovery (/browse), email notifications (Resend), share factsheet button~~
 - ~~Phase 2: Trust badges (SyncBadge), discovery filters (exchange + track record), percentile ranks, sync progress UX, info hierarchy~~
@@ -85,6 +150,7 @@
 - ~~Design: 3 production HTML reference pages generated (landing, factsheet, discovery)~~
 
 ## Previously Completed
+
 - ~~Phase 1: Security hardening + data correctness~~
 - ~~Phase 3 (prior): Business loops — matching, landing page, cron sync~~
 - ~~Deploy analytics service to Railway~~

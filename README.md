@@ -24,7 +24,11 @@ cp .env.example .env.local
 # In Supabase SQL Editor, run all files in order:
 #   supabase/migrations/001_initial_schema.sql
 #   ...
-#   supabase/migrations/010_portfolio_intelligence.sql
+#   supabase/migrations/011_perfect_match.sql
+#
+# For 011 specifically, set the admin email ahead of the migration so is_admin
+# backfills automatically:
+#   ALTER DATABASE postgres SET app.admin_email = 'you@example.com';
 
 # 4. Start the dev server
 npm run dev
@@ -39,15 +43,20 @@ quantalyze/
   src/
     app/              # Next.js App Router pages
       (auth)/         # Login, signup, onboarding
-      (dashboard)/    # Authenticated pages (discovery, strategies, portfolios, allocations, profile)
+      (dashboard)/    # Authenticated pages (discovery, strategies, portfolios, allocations, profile, preferences)
+        admin/match/  # Founder-only Match Queue (triage + detail + eval dashboard)
         portfolios/   # Portfolio dashboard, management, documents
-      api/            # API routes (verify-strategy, portfolio-*, alert-digest)
-    components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, landing/, auth/)
-    lib/              # Utilities, types, Supabase clients, queries
-  analytics-service/  # FastAPI backend (Python) — strategy + portfolio analytics
-    services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer
-    routers/          # analytics, cron, exchange, portfolio
-  supabase/           # Database migrations (010 = portfolio intelligence)
+      api/            # API routes (verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences)
+    components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, admin/, preferences/, landing/, auth/)
+    hooks/            # Reusable React hooks (useKeyboardShortcuts)
+    lib/              # Utilities, types, Supabase clients, queries, preferences
+  analytics-service/  # FastAPI backend (Python) — strategy + portfolio + match analytics
+    services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer, match_engine, match_eval
+    routers/          # analytics, cron, exchange, portfolio, match
+  supabase/           # Database migrations (011 = perfect match engine)
+  docs/
+    runbooks/         # Operational runbooks (match-engine.md)
+    superpowers/plans/ # Design + implementation plans from /autoplan
 ```
 
 ## Tech Stack

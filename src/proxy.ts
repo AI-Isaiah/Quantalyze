@@ -52,7 +52,14 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Admin route protection (optimistic check by email from JWT)
+  // Admin route protection: optimistic email check from JWT (can't query DB cheaply here).
+  // This is a fast-path that bounces non-admin users early. The authoritative check uses
+  // isAdminUser() at the page/API handler level (DAL pattern), which ALSO checks
+  // profiles.is_admin = true. As of migration 011 the only admin is the founder whose
+  // email matches ADMIN_EMAIL AND who has is_admin = true after backfill, so the cheap
+  // proxy check is sufficient. When a 2nd admin is added with is_admin = true but a
+  // different email, this proxy check needs a JWT custom claim or a session cache.
+  // Tracked in TODOS.md (P2: drop email-based gate).
   const isAdminRoute = ADMIN_ROUTES.some((route) =>
     request.nextUrl.pathname.startsWith(route)
   );

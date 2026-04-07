@@ -78,3 +78,10 @@ export async function verifyStrategy(data: {
 }) {
   return analyticsRequest("/api/verify-strategy", data);
 }
+
+export async function recomputeMatch(allocatorId: string, force = false) {
+  return analyticsRequest("/api/match/recompute", {
+    allocator_id: allocatorId,
+    force,
+  });
+}

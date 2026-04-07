@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { isAdmin } from "@/lib/admin";
+import { isAdminUser } from "@/lib/admin";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 type AdminHandler = (
@@ -14,7 +14,7 @@ export function withAdminAuth(handler: AdminHandler) {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
 
-    if (!user || !isAdmin(user.email)) {
+    if (!(await isAdminUser(supabase, user))) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
