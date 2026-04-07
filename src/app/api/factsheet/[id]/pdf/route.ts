@@ -31,10 +31,12 @@ export async function GET(
     );
   }
 
+  // Dynamic import to avoid bundling puppeteer in client code
+  const puppeteer = await import("puppeteer");
+  let browser: Awaited<ReturnType<typeof puppeteer.default.launch>> | null = null;
+
   try {
-    // Dynamic import to avoid bundling puppeteer in client code
-    const puppeteer = await import("puppeteer");
-    const browser = await puppeteer.default.launch({
+    browser = await puppeteer.default.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
@@ -42,7 +44,6 @@ export async function GET(
     const page = await browser.newPage();
     await page.setViewport({ width: 800, height: 1100 });
 
-    // Navigate to the HTML factsheet page (reuse existing factsheet rendering)
     await page.goto(`${APP_URL}/factsheet/${id}`, {
       waitUntil: "networkidle0",
       timeout: 15000,
@@ -60,8 +61,6 @@ export async function GET(
       margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
     });
 
-    await browser.close();
-
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",
@@ -75,5 +74,11 @@ export async function GET(
       { error: "PDF generation failed" },
       { status: 500 },
     );
+  } finally {
+    if (browser) {
+      await browser.close().catch((closeErr) => {
+        console.error("[pdf] Browser close failed:", closeErr);
+      });
+    }
   }
 }

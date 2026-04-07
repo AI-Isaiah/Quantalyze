@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { assertPortfolioOwnership, getPortfolioDetail } from "@/lib/queries";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -10,7 +10,6 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  // Auth check — only the owner can export their portfolio
   const supabase = await createClient();
   const {
     data: { user },
@@ -19,22 +18,21 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Verify ownership via admin client (RLS-safe)
-  const admin = createAdminClient();
-  const { data: portfolio, error } = await admin
-    .from("portfolios")
-    .select("id, name, user_id")
-    .eq("id", id)
-    .single();
-
-  if (error || !portfolio || portfolio.user_id !== user.id) {
+  if (!(await assertPortfolioOwnership(id, user.id))) {
     return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
   }
 
+  const portfolio = await getPortfolioDetail(id);
+  if (!portfolio) {
+    return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+  }
+
+  // Dynamic import to avoid bundling puppeteer in client code
+  const puppeteer = await import("puppeteer");
+  let browser: Awaited<ReturnType<typeof puppeteer.default.launch>> | null = null;
+
   try {
-    // Dynamic import to avoid bundling puppeteer in client code
-    const puppeteer = await import("puppeteer");
-    const browser = await puppeteer.default.launch({
+    browser = await puppeteer.default.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
@@ -54,8 +52,6 @@ export async function GET(
       margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
     });
 
-    await browser.close();
-
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",
@@ -69,5 +65,11 @@ export async function GET(
       { error: "PDF generation failed" },
       { status: 500 },
     );
+  } finally {
+    if (browser) {
+      await browser.close().catch((closeErr) => {
+        console.error("[portfolio-pdf] Browser close failed:", closeErr);
+      });
+    }
   }
 }

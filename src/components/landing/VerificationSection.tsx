@@ -20,18 +20,21 @@ interface VerificationResultData {
 
 type Phase = "form" | "progress" | "results";
 
+const POLL_INITIAL_MS = 3000;
+const POLL_MAX_MS = 30000;
+const POLL_BACKOFF_FACTOR = 1.5;
+const POLL_MAX_DURATION_MS = 5 * 60 * 1000; // 5 minutes hard cap
+
 export function VerificationSection() {
   const [phase, setPhase] = useState<Phase>("form");
   const [status, setStatus] = useState<Status>("pending");
   const [results, setResults] = useState<VerificationResultData | null>(null);
-  const [matchedStrategyId, setMatchedStrategyId] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const tokenRef = useRef<{ public_token: string; verification_id: string } | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
     }
   }, []);
 
@@ -39,15 +42,24 @@ export function VerificationSection() {
     return () => stopPolling();
   }, [stopPolling]);
 
-  function pollStatus(verificationId: string, publicToken: string) {
-    pollRef.current = setInterval(async () => {
+  function schedulePoll(
+    verificationId: string,
+    publicToken: string,
+    delay: number,
+    startedAt: number,
+  ) {
+    pollTimeoutRef.current = setTimeout(async () => {
+      if (Date.now() - startedAt > POLL_MAX_DURATION_MS) {
+        setStatus("failed");
+        return;
+      }
+
       try {
         const res = await fetch(
           `/api/verify-strategy/${verificationId}/status?token=${publicToken}`,
         );
         if (!res.ok) {
           setStatus("failed");
-          stopPolling();
           return;
         }
 
@@ -56,25 +68,25 @@ export function VerificationSection() {
         setStatus(newStatus);
 
         if (newStatus === "complete" && data.results) {
-          stopPolling();
           setResults(data.results);
-          setMatchedStrategyId(data.results.matched_strategy_id ?? null);
           setPhase("results");
-        } else if (newStatus === "failed") {
-          stopPolling();
+          return;
         }
+        if (newStatus === "failed") return;
+
+        // Continue polling with exponential backoff
+        const nextDelay = Math.min(delay * POLL_BACKOFF_FACTOR, POLL_MAX_MS);
+        schedulePoll(verificationId, publicToken, nextDelay, startedAt);
       } catch {
         setStatus("failed");
-        stopPolling();
       }
-    }, 3000);
+    }, delay);
   }
 
   function handleResult(result: { public_token: string; verification_id: string }) {
-    tokenRef.current = result;
     setPhase("progress");
     setStatus("pending");
-    pollStatus(result.verification_id, result.public_token);
+    schedulePoll(result.verification_id, result.public_token, POLL_INITIAL_MS, Date.now());
   }
 
   function handleRetry() {
@@ -82,7 +94,6 @@ export function VerificationSection() {
     setPhase("form");
     setStatus("pending");
     setResults(null);
-    setMatchedStrategyId(null);
   }
 
   if (phase === "form") {
@@ -111,7 +122,7 @@ export function VerificationSection() {
     return (
       <VerificationResults
         results={results}
-        matchedStrategyId={matchedStrategyId}
+        matchedStrategyId={results.matched_strategy_id ?? null}
       />
     );
   }

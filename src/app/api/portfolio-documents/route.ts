@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
+import { assertPortfolioOwnership, DOC_TYPES } from "@/lib/queries";
 import type { User } from "@supabase/supabase-js";
-
-const VALID_DOC_TYPES = ["contract", "note", "factsheet", "founder_update", "other"];
 
 export const GET = withAuth(async (req: NextRequest, user: User) => {
   const portfolioId = new URL(req.url).searchParams.get("portfolio_id");
@@ -11,17 +10,11 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing portfolio_id" }, { status: 400 });
   }
 
-  const supabase = await createClient();
-  const { data: portfolio } = await supabase
-    .from("portfolios")
-    .select("id")
-    .eq("id", portfolioId)
-    .eq("user_id", user.id)
-    .single();
-  if (!portfolio) {
+  if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
     return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
   }
 
+  const supabase = await createClient();
   const { data, error } = await supabase
     .from("relationship_documents")
     .select("id, title, doc_type, file_url, file_path, file_name, strategy_id, created_at, portfolio_id")
@@ -50,24 +43,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { status: 400 },
     );
   }
-  if (!VALID_DOC_TYPES.includes(doc_type)) {
+  if (!DOC_TYPES.includes(doc_type as (typeof DOC_TYPES)[number])) {
     return NextResponse.json(
-      { error: `Invalid doc_type. Must be one of: ${VALID_DOC_TYPES.join(", ")}` },
+      { error: `Invalid doc_type. Must be one of: ${DOC_TYPES.join(", ")}` },
       { status: 400 },
     );
   }
 
-  const supabase = await createClient();
-  const { data: portfolio } = await supabase
-    .from("portfolios")
-    .select("id")
-    .eq("id", portfolio_id)
-    .eq("user_id", user.id)
-    .single();
-  if (!portfolio) {
+  if (!(await assertPortfolioOwnership(portfolio_id, user.id))) {
     return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
   }
 
+  const supabase = await createClient();
   const { data: publicUrl } = supabase.storage
     .from("portfolio-documents")
     .getPublicUrl(file_path);

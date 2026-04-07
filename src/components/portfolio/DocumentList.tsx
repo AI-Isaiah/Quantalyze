@@ -1,5 +1,6 @@
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { DOC_TYPES } from "@/lib/queries";
 
 interface DocumentListProps {
   documents: {
@@ -22,7 +23,7 @@ const TYPE_LABELS: Record<string, string> = {
   other: "Other",
 };
 
-const TYPE_ORDER = ["contract", "factsheet", "founder_update", "note", "other"];
+const TYPE_ORDER: readonly string[] = DOC_TYPES;
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", {

@@ -4,31 +4,34 @@ import { useState } from "react";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
+import { SUPPORTED_EXCHANGES } from "@/lib/queries";
 
 interface VerificationFormProps {
   onResult: (result: { public_token: string; verification_id: string }) => void;
 }
 
-type FormState = "idle" | "submitting" | "error";
-
-const EXCHANGE_OPTIONS = [
-  { value: "binance", label: "Binance" },
-  { value: "okx", label: "OKX" },
-  { value: "bybit", label: "Bybit" },
-];
+const EXCHANGE_LABELS: Record<string, string> = {
+  binance: "Binance",
+  okx: "OKX",
+  bybit: "Bybit",
+};
+const EXCHANGE_OPTIONS = SUPPORTED_EXCHANGES.map((value) => ({
+  value,
+  label: EXCHANGE_LABELS[value],
+}));
 
 export function VerificationForm({ onResult }: VerificationFormProps) {
-  const [exchange, setExchange] = useState("binance");
+  const [exchange, setExchange] = useState<string>(SUPPORTED_EXCHANGES[0]);
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [email, setEmail] = useState("");
-  const [state, setState] = useState<FormState>("idle");
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setState("submitting");
+    setSubmitting(true);
     setError(null);
 
     try {
@@ -50,13 +53,18 @@ export function VerificationForm({ onResult }: VerificationFormProps) {
         throw new Error(data.error ?? "Verification failed");
       }
 
+      if (!data.verification_id || !data.public_token) {
+        throw new Error("Verification service returned an invalid response");
+      }
+
       onResult({
         public_token: data.public_token,
-        verification_id: data.verification_id ?? "",
+        verification_id: data.verification_id,
       });
     } catch (err) {
-      setState("error");
       setError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -121,9 +129,9 @@ export function VerificationForm({ onResult }: VerificationFormProps) {
         type="submit"
         size="lg"
         className="mt-6 w-full"
-        disabled={state === "submitting"}
+        disabled={submitting}
       >
-        {state === "submitting" ? "Verifying..." : "Verify My Strategy"}
+        {submitting ? "Verifying..." : "Verify My Strategy"}
       </Button>
 
       <p className="mt-3 text-center text-xs text-text-muted">

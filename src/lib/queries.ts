@@ -283,6 +283,30 @@ export async function getPortfolioDetail(portfolioId: string) {
   return data as Portfolio;
 }
 
+/**
+ * Verify the user owns the portfolio. Returns true if owned, false otherwise.
+ * Use in API routes after auth check.
+ */
+export async function assertPortfolioOwnership(
+  portfolioId: string,
+  userId: string,
+): Promise<boolean> {
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("portfolios")
+    .select("id")
+    .eq("id", portfolioId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  return data !== null;
+}
+
+export const DOC_TYPES = ["contract", "note", "factsheet", "founder_update", "other"] as const;
+export type DocType = (typeof DOC_TYPES)[number];
+
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit"] as const;
+export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
+
 export async function getPortfolioStrategies(portfolioId: string) {
   const supabase = await createClient();
   const { data } = await supabase

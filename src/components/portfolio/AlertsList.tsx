@@ -1,20 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
-import { cn } from "@/lib/utils";
+import { cn, SEVERITY_STYLES } from "@/lib/utils";
 import type { PortfolioAlert } from "@/lib/types";
 
 interface AlertsListProps {
   alerts: PortfolioAlert[];
 }
-
-const severityStyles: Record<PortfolioAlert["severity"], string> = {
-  high: "bg-negative/10 text-negative",
-  medium: "bg-badge-market-neutral/10 text-badge-market-neutral",
-  low: "bg-accent/10 text-accent",
-};
 
 function formatTimestamp(iso: string): string {
   return new Date(iso).toLocaleString("en-US", {
@@ -25,14 +18,18 @@ function formatTimestamp(iso: string): string {
   });
 }
 
-export function AlertsList({ alerts }: AlertsListProps) {
-  const router = useRouter();
+export function AlertsList({ alerts: initialAlerts }: AlertsListProps) {
+  const [alerts, setAlerts] = useState(initialAlerts);
   const [dismissingId, setDismissingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function handleDismiss(alertId: string) {
     setDismissingId(alertId);
     setError(null);
+
+    // Optimistic removal
+    const previous = alerts;
+    setAlerts((prev) => prev.filter((a) => a.id !== alertId));
 
     const res = await fetch("/api/portfolio-alerts", {
       method: "PATCH",
@@ -42,12 +39,9 @@ export function AlertsList({ alerts }: AlertsListProps) {
 
     if (!res.ok) {
       setError("Failed to dismiss alert.");
-      setDismissingId(null);
-      return;
+      setAlerts(previous);
     }
-
     setDismissingId(null);
-    router.refresh();
   }
 
   if (alerts.length === 0) {
@@ -69,7 +63,7 @@ export function AlertsList({ alerts }: AlertsListProps) {
           <span
             className={cn(
               "inline-flex items-center rounded px-2 py-0.5 text-[10px] uppercase tracking-wider font-medium",
-              severityStyles[alert.severity] ?? severityStyles.low,
+              SEVERITY_STYLES[alert.severity],
             )}
           >
             {alert.severity}

@@ -1,53 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
+import { assertPortfolioOwnership } from "@/lib/queries";
 import type { User } from "@supabase/supabase-js";
 
 export const GET = withAuth(async (req: NextRequest, user: User) => {
   const portfolioId = new URL(req.url).searchParams.get("portfolio_id");
   const supabase = await createClient();
 
-  if (portfolioId) {
-    const { data: portfolio } = await supabase
-      .from("portfolios")
-      .select("id")
-      .eq("id", portfolioId)
-      .eq("user_id", user.id)
-      .single();
-    if (!portfolio) {
-      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
-    }
-
-    const { data, error } = await supabase
-      .from("portfolio_alerts")
-      .select("*")
-      .eq("portfolio_id", portfolioId)
-      .is("acknowledged_at", null)
-      .order("triggered_at", { ascending: false });
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-    return NextResponse.json({ alerts: data ?? [] });
-  }
-
-  const { data: portfolios } = await supabase
-    .from("portfolios")
-    .select("id")
-    .eq("user_id", user.id);
-
-  const portfolioIds = (portfolios ?? []).map((p) => p.id);
-  if (portfolioIds.length === 0) {
-    return NextResponse.json({ alerts: [] });
-  }
-
-  const { data, error } = await supabase
+  let query = supabase
     .from("portfolio_alerts")
     .select("*")
-    .in("portfolio_id", portfolioIds)
     .is("acknowledged_at", null)
     .order("triggered_at", { ascending: false });
 
+  if (portfolioId) {
+    if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
+      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    }
+    query = query.eq("portfolio_id", portfolioId);
+  } else {
+    const { data: portfolios } = await supabase
+      .from("portfolios")
+      .select("id")
+      .eq("user_id", user.id);
+    const portfolioIds = (portfolios ?? []).map((p) => p.id);
+    if (portfolioIds.length === 0) {
+      return NextResponse.json({ alerts: [] });
+    }
+    query = query.in("portfolio_id", portfolioIds);
+  }
+
+  const { data, error } = await query;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -62,33 +46,30 @@ export const PATCH = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing alert_id" }, { status: 400 });
   }
 
+  // Single UPDATE with subquery for ownership check (no TOCTOU window)
   const supabase = await createClient();
-  const { data: alert } = await supabase
-    .from("portfolio_alerts")
-    .select("id, portfolio_id")
-    .eq("id", alert_id)
-    .single();
-  if (!alert) {
-    return NextResponse.json({ error: "Alert not found" }, { status: 404 });
-  }
-
-  const { data: portfolio } = await supabase
+  const { data: portfolios } = await supabase
     .from("portfolios")
     .select("id")
-    .eq("id", alert.portfolio_id)
-    .eq("user_id", user.id)
-    .single();
-  if (!portfolio) {
+    .eq("user_id", user.id);
+  const portfolioIds = (portfolios ?? []).map((p) => p.id);
+
+  if (portfolioIds.length === 0) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("portfolio_alerts")
     .update({ acknowledged_at: new Date().toISOString() })
-    .eq("id", alert_id);
+    .eq("id", alert_id)
+    .in("portfolio_id", portfolioIds)
+    .select("id");
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  if (!data || data.length === 0) {
+    return NextResponse.json({ error: "Alert not found or forbidden" }, { status: 404 });
   }
   return NextResponse.json({ success: true });
 });

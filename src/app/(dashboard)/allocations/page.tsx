@@ -4,17 +4,11 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import { HealthScore } from "@/components/strategy/HealthScore";
-import { formatPercent, formatNumber, formatCurrency, metricColor } from "@/lib/utils";
+import { formatPercent, formatNumber, formatCurrency, metricColor, SEVERITY_STYLES } from "@/lib/utils";
 import { extractAnalytics, EMPTY_ANALYTICS, getAllocatorAggregates } from "@/lib/queries";
 import type { PortfolioAnalytics } from "@/lib/types";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-
-const severityStyles: Record<string, string> = {
-  high: "bg-negative/10 text-negative",
-  medium: "bg-badge-market-neutral/10 text-badge-market-neutral",
-  low: "bg-badge-other/10 text-badge-other",
-};
 
 export default async function AllocationsPage() {
   const supabase = await createClient();
@@ -236,17 +230,17 @@ export default async function AllocationsPage() {
               </p>
               <div className="flex items-center gap-2">
                 {alertCounts.high > 0 && (
-                  <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${severityStyles.high}`}>
+                  <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${SEVERITY_STYLES.high}`}>
                     {alertCounts.high} High
                   </span>
                 )}
                 {alertCounts.medium > 0 && (
-                  <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${severityStyles.medium}`}>
+                  <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${SEVERITY_STYLES.medium}`}>
                     {alertCounts.medium} Medium
                   </span>
                 )}
                 {alertCounts.low > 0 && (
-                  <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${severityStyles.low}`}>
+                  <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${SEVERITY_STYLES.low}`}>
                     {alertCounts.low} Low
                   </span>
                 )}

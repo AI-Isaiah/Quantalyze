@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/ui/Modal";
 import { Input } from "@/components/ui/Input";
@@ -17,6 +17,7 @@ type StrategyOption = { id: string; name: string };
 
 export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProps) {
   const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
   const [isOpen, setIsOpen] = useState(false);
   const [step, setStep] = useState<Step>("select");
   const [query, setQuery] = useState("");
@@ -37,7 +38,7 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
 
   useEffect(() => {
     if (!isOpen || selected || query.trim().length < 2) { setResults([]); return; }
-    const supabase = createClient();
+    let cancelled = false;
     const handle = setTimeout(async () => {
       const { data } = await supabase
         .from("strategies")
@@ -45,17 +46,22 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
         .ilike("name", `%${query.trim()}%`)
         .eq("status", "published")
         .limit(10);
-      setResults(data ?? []);
+      if (!cancelled) setResults(data ?? []);
     }, 250);
-    return () => clearTimeout(handle);
-  }, [query, selected, isOpen]);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [query, selected, isOpen, supabase]);
 
   async function handleSubmit() {
     if (!selected) return;
-    const parsed = parseFloat(amount);
-    if (isNaN(parsed) || parsed <= 0) { setError("Amount must be a positive number"); return; }
+    const parsed = Number(amount);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setError("Amount must be a positive number");
+      return;
+    }
     setStep("saving"); setError(null);
-    const supabase = createClient();
 
     const { error: psError } = await supabase.from("portfolio_strategies").upsert({
       portfolio_id: portfolioId, strategy_id: selected.id,
@@ -145,7 +151,7 @@ export function MigrationWizardButton({ portfolioId }: MigrationWizardButtonProp
             {step === "select" ? "Cancel" : "Back"}
           </Button>
           {step === "select" && <Button onClick={() => setStep("details")} disabled={!selected}>Next</Button>}
-          {step === "details" && <Button onClick={() => setStep("notes")} disabled={!amount || parseFloat(amount) <= 0 || !eventDate}>Next</Button>}
+          {step === "details" && <Button onClick={() => setStep("notes")} disabled={!Number.isFinite(Number(amount)) || Number(amount) <= 0 || !eventDate}>Next</Button>}
           {step === "notes" && <Button onClick={handleSubmit}>Claim Allocation</Button>}
         </div>
       </Modal>

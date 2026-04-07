@@ -2,14 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyStrategy } from "@/lib/analytics-client";
+import { SUPPORTED_EXCHANGES } from "@/lib/queries";
 
 const MAX_REQUESTS_PER_DAY = 5;
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
-
-const SUPPORTED_EXCHANGES = ["binance", "bybit", "okx", "bitget", "coinbase"];
 
 export async function POST(req: NextRequest) {
   let body: Record<string, unknown>;
@@ -27,7 +26,6 @@ export async function POST(req: NextRequest) {
     passphrase?: string;
   };
 
-  // --- Validate required fields ---
   if (!email || !exchange || !api_key || !api_secret) {
     return NextResponse.json(
       { error: "Missing required fields: email, exchange, api_key, api_secret" },
@@ -39,14 +37,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
   }
 
-  if (!SUPPORTED_EXCHANGES.includes(exchange)) {
+  if (!SUPPORTED_EXCHANGES.includes(exchange as (typeof SUPPORTED_EXCHANGES)[number])) {
     return NextResponse.json(
       { error: `Unsupported exchange. Supported: ${SUPPORTED_EXCHANGES.join(", ")}` },
       { status: 400 },
     );
   }
 
-  // --- Rate limit: max 5 requests per email per 24h ---
+  // Rate limit: max 5 requests per email per 24h
   const admin = createAdminClient();
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
@@ -68,7 +66,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // --- Forward to analytics service ---
   let analyticsResult: { verification_id?: string };
   try {
     analyticsResult = await verifyStrategy({
@@ -92,7 +89,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // --- Generate capability token and set expiry ---
   const publicToken = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
@@ -106,5 +102,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Failed to finalize verification" }, { status: 500 });
   }
 
-  return NextResponse.json({ public_token: publicToken });
+  return NextResponse.json({ verification_id: verificationId, public_token: publicToken });
 }

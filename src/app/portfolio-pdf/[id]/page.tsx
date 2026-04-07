@@ -46,12 +46,25 @@ export default async function PortfolioPdfPage({
   const { id } = await params;
   const admin = createAdminClient();
 
-  const { data: portfolio } = await admin
-    .from("portfolios")
-    .select("*")
-    .eq("id", id)
-    .single();
+  const [portfolioRes, analyticsRes, strategiesRes] = await Promise.all([
+    admin.from("portfolios").select("*").eq("id", id).single(),
+    admin
+      .from("portfolio_analytics")
+      .select("*")
+      .eq("portfolio_id", id)
+      .order("computed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    admin
+      .from("portfolio_strategies")
+      .select(
+        `*, strategies (id, name, strategy_analytics (cagr, sharpe, max_drawdown, volatility))`,
+      )
+      .eq("portfolio_id", id)
+      .order("added_at", { ascending: false }),
+  ]);
 
+  const { data: portfolio } = portfolioRes;
   if (!portfolio) {
     return (
       <div className="p-8 text-center text-text-muted">
@@ -60,23 +73,8 @@ export default async function PortfolioPdfPage({
     );
   }
 
-  const { data: analyticsRow } = await admin
-    .from("portfolio_analytics")
-    .select("*")
-    .eq("portfolio_id", id)
-    .order("computed_at", { ascending: false })
-    .limit(1)
-    .single();
-
-  const analytics = analyticsRow as PortfolioAnalytics | null;
-
-  const { data: strategiesRaw } = await admin
-    .from("portfolio_strategies")
-    .select(
-      `*, strategies (id, name, strategy_analytics (cagr, sharpe, max_drawdown, volatility))`,
-    )
-    .eq("portfolio_id", id)
-    .order("added_at", { ascending: false });
+  const analytics = analyticsRes.data as PortfolioAnalytics | null;
+  const strategiesRaw = strategiesRes.data;
 
   const strategyList = (strategiesRaw ?? []) as Array<{
     strategy_id: string;
@@ -137,7 +135,6 @@ export default async function PortfolioPdfPage({
 
   return (
     <div className="max-w-[800px] mx-auto p-8 bg-white print:p-4">
-      {/* Header */}
       <div className="flex items-center justify-between border-b border-border pb-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-text-primary">{p.name}</h1>
@@ -153,7 +150,6 @@ export default async function PortfolioPdfPage({
         </div>
       </div>
 
-      {/* KPI grid */}
       <div className="grid grid-cols-3 gap-4 mb-6">
         {kpis.map((kpi) => (
           <div
@@ -170,7 +166,6 @@ export default async function PortfolioPdfPage({
         ))}
       </div>
 
-      {/* Narrative summary */}
       {analytics?.narrative_summary && (
         <div className="mb-6">
           <h2 className="text-sm font-semibold text-text-primary mb-2">
@@ -182,7 +177,6 @@ export default async function PortfolioPdfPage({
         </div>
       )}
 
-      {/* Strategy table */}
       <div className="mb-6">
         <h2 className="text-sm font-semibold text-text-primary mb-2">
           Strategy Breakdown
@@ -248,7 +242,6 @@ export default async function PortfolioPdfPage({
         )}
       </div>
 
-      {/* Correlation matrix */}
       {correlationMatrix && correlationKeys.length > 0 && (
         <div className="mb-6">
           <h2 className="text-sm font-semibold text-text-primary mb-2">
@@ -294,7 +287,6 @@ export default async function PortfolioPdfPage({
         </div>
       )}
 
-      {/* Disclaimer */}
       <Disclaimer variant="factsheet" />
     </div>
   );

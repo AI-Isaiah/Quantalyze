@@ -81,35 +81,41 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Cache user emails so we only look each user up once
-  const emailCache = new Map<string, string | null>();
+  // Resolve all unique user emails in parallel
+  const uniqueUserIds = Array.from(new Set(Array.from(groups.values()).map((g) => g.userId)));
+  const emailLookups = await Promise.all(
+    uniqueUserIds.map(async (userId) => {
+      const { data, error } = await admin.auth.admin.getUserById(userId);
+      if (error) {
+        console.error("[alert-digest] Failed to fetch user", userId, error);
+        return [userId, null] as const;
+      }
+      return [userId, data.user?.email ?? null] as const;
+    }),
+  );
+  const emailMap = new Map(emailLookups);
+
+  // Send all digests in parallel
+  const sendResults = await Promise.allSettled(
+    Array.from(groups.values()).map(async (group) => {
+      const email = emailMap.get(group.userId);
+      if (!email) return null;
+      await sendAlertDigest(email, group.portfolioName, group.entries);
+      return group;
+    }),
+  );
+
   const usersNotified = new Set<string>();
   let alertsSent = 0;
   const sentAlertIds: string[] = [];
-
-  for (const group of groups.values()) {
-    let email = emailCache.get(group.userId);
-    if (email === undefined) {
-      const { data, error } = await admin.auth.admin.getUserById(group.userId);
-      if (error) {
-        console.error(
-          "[alert-digest] Failed to fetch user",
-          group.userId,
-          error,
-        );
-        emailCache.set(group.userId, null);
-        continue;
-      }
-      email = data.user?.email ?? null;
-      emailCache.set(group.userId, email);
+  for (const result of sendResults) {
+    if (result.status === "fulfilled" && result.value) {
+      usersNotified.add(result.value.userId);
+      alertsSent += result.value.entries.length;
+      sentAlertIds.push(...result.value.alertIds);
+    } else if (result.status === "rejected") {
+      console.error("[alert-digest] Send failed:", result.reason);
     }
-
-    if (!email) continue;
-
-    await sendAlertDigest(email, group.portfolioName, group.entries);
-    usersNotified.add(group.userId);
-    alertsSent += group.entries.length;
-    sentAlertIds.push(...group.alertIds);
   }
 
   // Mark sent alerts as emailed

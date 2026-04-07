@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import { SEVERITY_HEX } from "./utils";
 
 const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
@@ -129,15 +130,12 @@ export async function sendAlertDigest(
 
   const subject = `${alerts.length} alert${alerts.length > 1 ? "s" : ""} for ${portfolioName}`;
 
-  const severityColor = (s: string) =>
-    s === "high" ? "#DC2626" : s === "medium" ? "#D97706" : "#0D9488";
-
   const alertsHtml = alerts
     .map(
       (a) => `
     <tr>
       <td style="padding:12px;border-bottom:1px solid #E2E8F0;">
-        <span style="display:inline-block;padding:2px 8px;background:${severityColor(a.severity)};color:#fff;font-size:11px;text-transform:uppercase;border-radius:4px;">
+        <span style="display:inline-block;padding:2px 8px;background:${SEVERITY_HEX[a.severity]};color:#fff;font-size:11px;text-transform:uppercase;border-radius:4px;">
           ${a.severity}
         </span>
       </td>
