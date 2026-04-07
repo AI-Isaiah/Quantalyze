@@ -301,12 +301,6 @@ export async function assertPortfolioOwnership(
   return data !== null;
 }
 
-export const DOC_TYPES = ["contract", "note", "factsheet", "founder_update", "other"] as const;
-export type DocType = (typeof DOC_TYPES)[number];
-
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit"] as const;
-export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
-
 export async function getPortfolioStrategies(portfolioId: string) {
   const supabase = await createClient();
   const { data } = await supabase

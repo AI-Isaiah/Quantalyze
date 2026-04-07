@@ -7,7 +7,7 @@ import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
-import { DOC_TYPES } from "@/lib/queries";
+import { DOC_TYPES } from "@/lib/utils";
 
 interface DocumentUploadProps {
   portfolioId: string;

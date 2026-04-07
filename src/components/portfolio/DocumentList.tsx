@@ -1,6 +1,6 @@
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
-import { DOC_TYPES } from "@/lib/queries";
+import { DOC_TYPES } from "@/lib/utils";
 
 interface DocumentListProps {
   documents: {

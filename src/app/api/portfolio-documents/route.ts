@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
-import { assertPortfolioOwnership, DOC_TYPES } from "@/lib/queries";
+import { assertPortfolioOwnership } from "@/lib/queries";
+import { DOC_TYPES } from "@/lib/utils";
 import type { User } from "@supabase/supabase-js";
 
 export const GET = withAuth(async (req: NextRequest, user: User) => {

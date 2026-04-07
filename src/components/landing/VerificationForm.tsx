@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Button } from "@/components/ui/Button";
-import { SUPPORTED_EXCHANGES } from "@/lib/queries";
+import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 
 interface VerificationFormProps {
   onResult: (result: { public_token: string; verification_id: string }) => void;

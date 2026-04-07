@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyStrategy } from "@/lib/analytics-client";
-import { SUPPORTED_EXCHANGES } from "@/lib/queries";
+import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 
 const MAX_REQUESTS_PER_DAY = 5;
 

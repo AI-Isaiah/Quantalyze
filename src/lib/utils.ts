@@ -57,3 +57,11 @@ export const SEVERITY_HEX: Record<"high" | "medium" | "low", string> = {
   medium: "#D97706",
   low: "#0D9488",
 };
+
+/** Document types for portfolio relationship_documents. */
+export const DOC_TYPES = ["contract", "note", "factsheet", "founder_update", "other"] as const;
+export type DocType = (typeof DOC_TYPES)[number];
+
+/** Supported exchanges for verification + analytics. Must match the Python schema check. */
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit"] as const;
+export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
