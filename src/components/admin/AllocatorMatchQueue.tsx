@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
+import type { DisclosureTier } from "@/lib/types";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
 import { SendIntroPanel } from "@/components/admin/SendIntroPanel";
@@ -71,9 +72,9 @@ export interface CandidateRow {
   exclusion_provenance: string | null;
   strategies: {
     id: string;
-    name: string;
+    name: string | null;
     codename: string | null;
-    disclosure_tier: "institutional" | "exploratory" | null;
+    disclosure_tier: DisclosureTier | null;
     strategy_types: string[] | null;
     supported_exchanges: string[] | null;
     aum: number | null;
@@ -142,9 +143,9 @@ interface Decision {
   created_at: string;
   strategies?: {
     id: string;
-    name: string;
+    name: string | null;
     codename: string | null;
-    disclosure_tier: "institutional" | "exploratory" | null;
+    disclosure_tier: DisclosureTier | null;
   } | null;
 }
 
@@ -683,7 +684,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                         {d.decision.replace("_", " ")}
                       </td>
                       <td className="px-4 py-2 text-sm text-text-primary">
-                        {d.strategy_id}
+                        {displayStrategyName(d.strategies)}
                       </td>
                       <td className="px-4 py-2 text-xs text-text-secondary max-w-[320px] truncate">
                         {d.founder_note || "—"}
