@@ -2,9 +2,159 @@
 
 > **Goal:** Finalize the product so it can be demoed to allocators, strategy teams, and capital
 > introduction firms. The 8-week MVP plan was refined via /autoplan v2 (4-voice adversarial
-> review) and lives at `~/.claude/plans/rosy-cuddling-teacup.md`. The North Star reframed:
-> by week 6, one real allocator records a 90-second testimonial. The cap-intro partner demo
-> in week 8 opens with that clip — the proof artifact, not the polished UI walkthrough.
+> review) and lives at `~/.claude/plans/rosy-cuddling-teacup.md`.
+>
+> **2026-04-08 reframe (post Steps 3-5 walkthrough):** Sprints 1-5 are now code-complete
+> on staging. The constraint is no longer code velocity — it's validation velocity. With
+> CC+gstack giving ~14x code compression, the plan's 8-week arc can collapse to ~4 weeks
+> IF the founder-action gates close on time. The first of those gates (Pre-Sprint 0 T0.1
+> partner qualification call) just turned into a "show a working product" meeting rather
+> than a "describe intent" meeting — a qualitatively different conversation that could
+> make the cap-intro partner a distribution channel in week 1-2, not a closing gate in
+> week 8. See `### Tomorrow` block below for the immediate ship list.
+
+## Tomorrow — Cap-intro friend meeting sprint (2026-04-09)
+
+**Context:** First live demo of the working product to a capital-intro friend. Qualification
+call stakes, not the formal partnership close — but this meeting decides whether the plan
+continues as-is or pivots around the friend's feedback. Bar: nothing breaks, one clear "wow"
+moment (the partner-pilot CSV upload), and a structured set of 5 qualification questions.
+
+**Plan for the session:** Land P0 batch first (demo cannot break), then stack P1 items in
+order. If P1 items slip, P0 alone is already a strong meeting. Hard stop at 11pm — a rested
+founder demoing a simpler product outperforms a tired founder demoing a fancier one.
+
+### P0 — Tomorrow demo cannot break without these (~90 min CC time)
+
+- [ ] **T-0.1 Disclosure tier render guard.** Create `src/lib/strategy-display.ts` with a
+  `displayStrategyName(strategy)` helper: return `codename` if present, else `name` if
+  `disclosure_tier='institutional'`, else `'Strategy #' + id.slice(0,8)`. Replace every
+  `codename || name` fallback: `AllocatorMatchQueue.tsx:538,621,896`,
+  `CandidateDetail.tsx:41`, `SendIntroPanel.tsx:78`. **DONE criteria:** every seeded
+  exploratory strategy (Helios, Orion, Pulsar, Quasar) shows a pseudonym in the admin queue.
+  Verified by click-through.
+- [ ] **T-0.2 Backfill codename on 4 seeded exploratory strategies.** In
+  `scripts/seed-demo-data.ts`, set `codename` on the insert for Helios → `'Strategy H-42'`,
+  Orion → `'Strategy O-17'`, Pulsar → `'Strategy P-88'`, Quasar → `'Strategy Q-03'`. Re-run
+  seed with `SEED_CONFIRM_STAGING=true`. **DONE criteria:** REST probe
+  `/strategies?select=name,codename&is_example=eq.true` shows 4 rows with codename populated.
+- [ ] **T-0.3 Persist `app.admin_email` on staging.** Run once in Supabase dashboard SQL
+  editor: `ALTER DATABASE postgres SET app.admin_email = 'matratzentester24@gmail.com';`
+  **DONE criteria:** dashboard returns `ALTER DATABASE`. No code change, just future-proofs
+  migration 011's backfill for any DB restore.
+- [ ] **T-0.4 Fix `_load_allocator_context` latent bugs in analytics match engine.**
+  `analytics-service/routers/match.py:185-212`. Change `.select("strategy_id, weight,
+  portfolio_id")` to `.select("strategy_id, current_weight, portfolio_id, allocated_amount")`.
+  Replace `row.get("weight")` with `row.get("current_weight")`. Replace the
+  `strategy_analytics.total_aum` sum with summing `portfolio_strategies.allocated_amount`
+  from ps_rows directly. Redeploy Railway. **DONE criteria:** manual curl to
+  `/api/match/recompute` with an allocator that has a portfolio returns 200 not 500.
+  Requires T-0.5 to exist first for testing.
+- [ ] **T-0.5 Seed one portfolio for ALLOCATOR_ACTIVE.** Add to `scripts/seed-demo-data.ts`
+  after the strategy insert: create a `portfolios` row for `ALLOCATOR_ACTIVE` plus 3
+  `portfolio_strategies` rows linking to 3 of the seeded institutional strategies (Alice,
+  Marcus, Aurora), with `current_weight` and `allocated_amount` populated. Unblocks T-0.4
+  testing AND turns the Active Allocator demo into a "here's personalized scoring" story
+  instead of generic screening. **DONE criteria:** admin match queue for Active Allocator
+  shows `mode='portfolio'` not `'screening'`, candidates ordered by correlation-with-portfolio.
+- [ ] **T-0.6 Schedule pg_cron (T1.5 from the plan).** Add `supabase/migrations/015_schedule_match_cron.sql`:
+  first verify `pg_net` and `pg_cron` extensions enabled in Supabase dashboard → Database →
+  Extensions, then `SELECT cron.schedule('match_engine_cron', '0 * * * *', $$ SELECT
+  net.http_post('https://quantalyze-analytics-production.up.railway.app/api/match/cron-recompute',
+  '{}', 'application/json', ARRAY[('X-Service-Key', '<key>')]::http_header[]) $$);`. Push via
+  `supabase db push`. **DONE criteria:** `cron_runs` table has a fresh row from the hourly
+  tick by demo time tomorrow.
+- [ ] **T-0.7 Force-refresh all 3 allocator match batches right before sleep.** Curl POST
+  `/api/match/recompute` with `{"allocator_id":"...","force":true}` for each of the 3 seeded
+  allocators. Sets `computed_at = now()` so tomorrow's demo shows "Computed <12h ago" not
+  "Computed 36h ago — stale." **DONE criteria:** admin queue shows fresh timestamps across
+  all 3 allocators.
+
+### P1 — The wow moments (~4-5 hrs CC time)
+
+Each of these can ship independently. If a P1 item hits a wall, drop it and move to the
+next. P0.1-0.7 + P1.1 alone is a stronger meeting than most founders bring.
+
+- [ ] **T-1.1 Shareable public demo URL at `/demo`.** **This is the single most important
+  deliverable after the P0s.** New route `src/app/demo/page.tsx` — server component loading
+  ALLOCATOR_ACTIVE's seeded state (portfolio + recommendations + matches) via hard-coded UUID
+  instead of `auth.uid()`. Renders a simplified combined `/recommendations` + `/portfolios/[id]`
+  view. No accredited gate, no auth. Top banner: "Live demo — simulated data. [Sign up to
+  build your own →]". Second route `src/app/demo/admin/page.tsx` loading the match queue for
+  ALLOCATOR_ACTIVE, read-only, clearly labeled as founder view. Add both to `PUBLIC_ROUTES`
+  in `src/proxy.ts`. **DONE criteria:** open `https://quantalyze.vercel.app/demo` and
+  `/demo/admin` in an incognito window with no cookies, see the full flow with zero clicks.
+  Send URL to yourself on Telegram, open on phone, must work. The friend meeting ends with
+  "send me that link" — you already have the link.
+- [ ] **T-1.2 Revenue simulator page at `/admin/partner-roi`.** One screen, four inputs:
+  `partner_allocators` (default 50), `partner_managers` (default 200), `avg_ticket_size_usd`
+  (default 5_000_000), `take_rate_pct` (default 15). Output: estimated intros/month =
+  `allocators * 0.3 * hit_rate`, where hit_rate pulls from the eval dashboard math (or fake
+  at 0.4 with a note if real data insufficient). Projected partner revenue = `intros *
+  avg_ticket_size * 0.015 * take_rate_pct/100` (1.5% management fee assumption). Pure
+  client-side math, no backend. **DONE criteria:** change the allocator count live during
+  the meeting and the partner sees the revenue number update in real time.
+- [ ] **T-1.3 Partner pilot flow — minimum viable sketch.** Do NOT build the full white-label.
+  Build the STORY so the friend can visualize it:
+  - New migration `016_partner_tag.sql` adding `partner_tag TEXT` nullable column to
+    `profiles`, `strategies`, `contact_requests`, `match_batches`.
+  - `src/app/admin/partner-import/page.tsx` — CSV upload form accepting rows of
+    `(manager_email, strategy_name, disclosure_tier)` and `(allocator_email, mandate_archetype,
+    ticket_size_usd)`.
+  - `src/app/api/admin/partner-import/route.ts` — parses CSV, creates auth users via admin
+    API, upserts profiles + (empty) strategies, tags all rows with the supplied `partner_tag`.
+  - `src/app/admin/partner-pilot/[partner_tag]/page.tsx` — filters match queue + eval
+    dashboard + contact_requests by partner_tag. Reuses existing components with a
+    `?filter=partner_tag` query param.
+  - **DONE criteria:** during the meeting, invent a sample CSV (3 managers, 5 allocators,
+    5 strategies), upload it, and within 60 seconds the friend sees a filtered version of
+    the match queue running against "their" data. This is the "I signed on Tuesday and had
+    something to show my LPs by Friday" proof of CC velocity.
+
+### P2 — Only if everything above lands with time to spare (~2-3 hrs)
+
+- [ ] **T-2.1 One real dry run with you as the allocator.** 30 min of your time. Create a
+  throwaway account on staging. Walk through: sign in → accredited gate → `/discovery` →
+  click into a seeded institutional strategy → open tear sheet → request intro → verify
+  email lands in your inbox. Every friction point becomes a 5-minute CC fix.
+- [ ] **T-2.2 Backup static tour.** 6 annotated screenshots of the demo flow saved to
+  `docs/demos/friend-meeting-backup.md`. Fallback if analytics service 502s mid-demo. Not
+  for the primary demo — for the "if the internet dies, here's what you would have seen"
+  recovery.
+- [ ] **T-2.3 Meeting opener + qualification script.** Not code. `docs/demos/friend-meeting-script.md`
+  with 3 possible opening lines (e.g., "I'm going to show you a working product for 10
+  minutes, then ask you 5 questions. The questions are the point — the product is the
+  context.") plus the 5 Pre-Sprint 0 T0.1 qualification questions verbatim from
+  `~/.claude/plans/rosy-cuddling-teacup.md` §P-9: (1) What would you need to see to partner
+  with us? (2) What's your typical deal structure? (3) What are you getting from your
+  existing tech vendors today? (4) What would make you walk away from this meeting saying
+  "not interested"? (5) Can you credibly direct $10M+ of LP capital into Quantalyze in the
+  next 12 months?
+
+### Hard rules for tomorrow's session
+
+- P0 batch (T-0.1 through T-0.7) must land first. No exceptions. Broken demo > simpler demo.
+- Every feature ships through `/ship` or at least tests + review. Do not shortcut the review
+  loop to "save time." Time saved on review is time lost to mid-demo bugs.
+- After each P1 item, redo end-to-end dry run. Fresh incognito window, real browser, real
+  network.
+- Deploy early, deploy often. Each P0/P1 is its own PR so broken deploys surface before
+  stacked work builds on top.
+- If any P1 item hits a wall, drop it and move on.
+- Hard stop at 11pm or whenever head stops working.
+
+### What the meeting looks like if everything above lands
+
+1. A live, working, bug-free demo on staging with pg_cron ticking hourly.
+2. A URL you send to the friend's Telegram BEFORE the meeting so they arrive with context.
+3. A live revenue simulator where you type their actual allocator count and show them the
+   math in real time.
+4. A CSV upload flow where you say "give me 5 of your strategies and 5 of your allocators"
+   and you do it in the meeting in under 2 minutes.
+5. A backup story if any component breaks.
+6. 5 structured questions that turn the meeting from pitch to qualification.
+
+---
 
 ## Pre-Sprint 0 — Founder qualification + before-metric capture
 
