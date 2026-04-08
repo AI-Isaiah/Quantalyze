@@ -31,7 +31,7 @@ export function FounderInsights({ strategies, portfolioId }: FounderInsightsProp
   if (!strategies.length) {
     return (
       <Card padding="md">
-        <h3 className="font-display text-lg text-text-primary mb-2">
+        <h3 className="font-display text-base text-text-primary mb-2">
           Founder Insights
         </h3>
         <p className="text-sm text-text-muted">No strategies in this portfolio yet.</p>
@@ -41,7 +41,7 @@ export function FounderInsights({ strategies, portfolioId }: FounderInsightsProp
 
   return (
     <div className="space-y-3">
-      <h3 className="font-display text-lg text-text-primary">Founder Insights</h3>
+      <h3 className="font-display text-base text-text-primary">Founder Insights</h3>
 
       {strategies.map((s) => {
         const expanded = openId === s.strategy_id;

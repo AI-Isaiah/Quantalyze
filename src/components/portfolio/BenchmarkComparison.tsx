@@ -22,7 +22,7 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
   if (!benchmarkComparison) {
     return (
       <Card padding="md">
-        <h3 className="font-display text-lg text-text-primary mb-2">
+        <h3 className="font-display text-base text-text-primary mb-2">
           Benchmark Comparison
         </h3>
         <p className="text-sm text-text-muted">Benchmark data unavailable.</p>
@@ -39,7 +39,7 @@ export function BenchmarkComparison({ benchmarkComparison }: BenchmarkComparison
   return (
     <Card padding="md">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="font-display text-lg text-text-primary">
+        <h3 className="font-display text-base text-text-primary">
           vs {symbol}
         </h3>
         {stale && (

@@ -83,7 +83,7 @@ export function Sidebar({
   return (
     <aside className="fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text">
       <div className="flex h-16 items-center px-6">
-        <Link href="/" className="text-lg font-bold text-white tracking-tight">
+        <Link href="/" className="text-lg font-display text-white tracking-tight">
           Quantalyze
         </Link>
       </div>

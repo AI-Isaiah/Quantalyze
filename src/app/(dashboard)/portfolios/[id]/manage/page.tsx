@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { AllocationEventForm } from "@/components/portfolio/AllocationEventForm";
 import { AllocationTimeline } from "@/components/portfolio/AllocationTimeline";
 import { MigrationWizardButton } from "@/components/portfolio/MigrationWizard";
+import { RemoveStrategyButton } from "@/components/portfolio/RemoveStrategyButton";
 import { getPortfolioDetail, getPortfolioStrategies, getAllocationEvents } from "@/lib/queries";
 import { formatCurrency } from "@/lib/utils";
 
@@ -74,7 +75,12 @@ export default async function ManagePortfolioPage({ params }: { params: Promise<
                     <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${statusStyles[ps.relationship_status] ?? ""}`}>
                       {ps.relationship_status}
                     </span>
-                    {/* TODO: add client RemoveStrategyButton for soft exit */}
+                    <RemoveStrategyButton
+                      portfolioId={id}
+                      portfolioName={portfolio.name}
+                      strategyId={ps.strategy_id}
+                      strategyName={s?.name ?? ps.strategy_id}
+                    />
                   </div>
                 </Card>
               );

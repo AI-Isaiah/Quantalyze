@@ -40,9 +40,10 @@ export function cn(...classes: (string | false | undefined | null)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
-/** Multi-strategy chart color palette — design system approved. */
+/** Multi-strategy chart color palette — design system approved.
+ *  No purples/violets per DESIGN.md anti-patterns. */
 export const STRATEGY_PALETTE = [
-  "#1B6B5A", "#2563EB", "#D97706", "#7C3AED",
+  "#1B6B5A", "#2563EB", "#D97706", "#0F766E",
   "#DC2626", "#059669", "#DB2777", "#4338CA",
 ] as const;
 
