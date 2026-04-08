@@ -1,18 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Browser } from "puppeteer-core";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { extractAnalytics } from "@/lib/queries";
 import { launchBrowser } from "@/lib/puppeteer";
+import { extractAnalytics } from "@/lib/queries";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
+/**
+ * GET /api/factsheet/[id]/tearsheet.pdf
+ *
+ * Optional PDF wrapper around the HTML tear sheet at /factsheet/[id]/tearsheet.
+ * The HTML page is the canonical surface — the founder can always
+ * `window.print()` on it if the PDF generation fails. Uses the shared
+ * `launchBrowser()` helper so it works on both Vercel and local dev.
+ *
+ * Listed in `PUBLIC_ROUTES` via /api/factsheet in src/proxy.ts so a cap-intro
+ * partner can open a tear sheet URL without a login redirect.
+ */
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
-) {
+): Promise<NextResponse> {
   const { id } = await params;
 
-  // Verify strategy exists and is published
   const admin = createAdminClient();
   const { data: strategy, error } = await admin
     .from("strategies")
@@ -37,36 +47,29 @@ export async function GET(
 
   try {
     browser = await launchBrowser();
-
     const page = await browser.newPage();
-    await page.setViewport({ width: 800, height: 1100 });
+    await page.setViewport({ width: 816, height: 1056 }); // 8.5 × 11 @ 96 DPI
 
-    await page.goto(`${APP_URL}/factsheet/${id}`, {
+    await page.goto(`${APP_URL}/factsheet/${id}/tearsheet`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
 
-    // Hide the print button before generating PDF
-    await page.evaluate(() => {
-      const printSection = document.querySelector(".print\\:hidden");
-      if (printSection) (printSection as HTMLElement).style.display = "none";
-    });
-
     const pdfBuffer = await page.pdf({
-      format: "A4",
+      format: "Letter",
       printBackground: true,
-      margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
+      margin: { top: "0.75in", bottom: "0.75in", left: "0.75in", right: "0.75in" },
     });
 
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${strategy.name}-factsheet.pdf"`,
-        "Cache-Control": "public, max-age=86400",
+        "Content-Disposition": `inline; filename="${strategy.name}-tearsheet.pdf"`,
+        "Cache-Control": "public, max-age=3600",
       },
     });
   } catch (err) {
-    console.error("[pdf] Generation failed:", err);
+    console.error("[tearsheet-pdf] Generation failed:", err);
     return NextResponse.json(
       { error: "PDF generation failed" },
       { status: 500 },
@@ -74,7 +77,7 @@ export async function GET(
   } finally {
     if (browser) {
       await browser.close().catch((closeErr) => {
-        console.error("[pdf] Browser close failed:", closeErr);
+        console.error("[tearsheet-pdf] Browser close failed:", closeErr);
       });
     }
   }

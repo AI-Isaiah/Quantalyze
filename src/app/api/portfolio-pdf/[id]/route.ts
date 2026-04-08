@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Browser } from "puppeteer-core";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership, getPortfolioDetail } from "@/lib/queries";
+import { launchBrowser } from "@/lib/puppeteer";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -27,15 +29,10 @@ export async function GET(
     return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
   }
 
-  // Dynamic import to avoid bundling puppeteer in client code
-  const puppeteer = await import("puppeteer");
-  let browser: Awaited<ReturnType<typeof puppeteer.default.launch>> | null = null;
+  let browser: Browser | null = null;
 
   try {
-    browser = await puppeteer.default.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
+    browser = await launchBrowser();
 
     const page = await browser.newPage();
     await page.setViewport({ width: 800, height: 1100 });
@@ -43,7 +40,7 @@ export async function GET(
     // The printable page reads data via the admin client, no auth required
     await page.goto(`${APP_URL}/portfolio-pdf/${id}`, {
       waitUntil: "networkidle0",
-      timeout: 15000,
+      timeout: 25000,
     });
 
     const pdfBuffer = await page.pdf({

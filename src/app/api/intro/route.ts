@@ -4,7 +4,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   notifyManagerIntroRequest,
   notifyFounderIntroRequest,
+  notifyAllocatorOfIntroRequest,
+  type ManagerIdentityBlock,
 } from "@/lib/email";
+import type { DisclosureTier } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -48,7 +51,11 @@ export async function POST(req: NextRequest) {
     try {
       const admin = createAdminClient();
       const [{ data: strategy }, { data: allocatorProfile }] = await Promise.all([
-        admin.from("strategies").select("name, user_id").eq("id", strategy_id).single(),
+        admin
+          .from("strategies")
+          .select("id, name, user_id, disclosure_tier")
+          .eq("id", strategy_id)
+          .single(),
         admin.from("profiles").select("display_name, company").eq("id", userId).single(),
       ]);
 
@@ -60,16 +67,52 @@ export async function POST(req: NextRequest) {
         userEmail ??
         "An allocator";
 
+      const disclosureTier: DisclosureTier =
+        (strategy as { disclosure_tier?: DisclosureTier }).disclosure_tier ??
+        "exploratory";
+
+      // Manager identity block is only assembled for institutional-tier strategies.
+      // Exploratory-tier allocator emails get a redacted "disclosed on acceptance" copy.
+      let managerBlock: ManagerIdentityBlock | null = null;
       if (strategy.user_id) {
         const { data: managerProfile } = await admin
           .from("profiles")
-          .select("email")
+          .select(
+            "email, display_name, company, bio, years_trading, aum_range, linkedin",
+          )
           .eq("id", strategy.user_id)
           .single();
 
         if (managerProfile?.email) {
           notifyManagerIntroRequest(managerProfile.email, allocatorName, strategy.name);
         }
+
+        if (managerProfile && disclosureTier === "institutional") {
+          const managerName =
+            managerProfile.display_name ??
+            managerProfile.company ??
+            "the manager";
+          managerBlock = {
+            name: managerName,
+            bio: (managerProfile as { bio?: string | null }).bio ?? null,
+            yearsTrading:
+              (managerProfile as { years_trading?: number | null }).years_trading ?? null,
+            aumRange:
+              (managerProfile as { aum_range?: string | null }).aum_range ?? null,
+            linkedinUrl:
+              (managerProfile as { linkedin?: string | null }).linkedin ?? null,
+            disclosureTier,
+          };
+        }
+      }
+
+      if (userEmail) {
+        notifyAllocatorOfIntroRequest(
+          userEmail,
+          strategy.name,
+          strategy.id,
+          managerBlock,
+        );
       }
 
       notifyFounderIntroRequest(allocatorName, strategy.name);
