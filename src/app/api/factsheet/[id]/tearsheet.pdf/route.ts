@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Browser } from "puppeteer-core";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { launchBrowser } from "@/lib/puppeteer";
+import {
+  launchBrowser,
+  acquirePdfSlot,
+  PDF_QUEUE_TIMEOUT_MESSAGE,
+} from "@/lib/puppeteer";
 import { extractAnalytics } from "@/lib/queries";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
@@ -44,10 +48,14 @@ export async function GET(
   }
 
   let browser: Browser | null = null;
+  let release: (() => void) | null = null;
 
   try {
+    release = await acquirePdfSlot();
     browser = await launchBrowser();
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(15_000);
+    page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 816, height: 1056 }); // 8.5 × 11 @ 96 DPI
 
     await page.goto(`${APP_URL}/factsheet/${id}/tearsheet`, {
@@ -65,10 +73,19 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${strategy.name}-tearsheet.pdf"`,
-        "Cache-Control": "public, max-age=3600",
+        // Public route (accessible to cap-intro partners without auth) — let
+        // Vercel's CDN cache hot tearsheets so a newsletter blast doesn't
+        // launch a fresh Chromium per click.
+        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
       },
     });
   } catch (err) {
+    if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
+      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
+        status: 503,
+        headers: { "Retry-After": "10" },
+      });
+    }
     console.error("[tearsheet-pdf] Generation failed:", err);
     return NextResponse.json(
       { error: "PDF generation failed" },
@@ -80,5 +97,6 @@ export async function GET(
         console.error("[tearsheet-pdf] Browser close failed:", closeErr);
       });
     }
+    if (release) release();
   }
 }

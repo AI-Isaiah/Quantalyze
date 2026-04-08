@@ -1,6 +1,6 @@
 "use client";
 
-import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatPercent, STRATEGY_PALETTE } from "@/lib/utils";
 
 interface RiskAttributionProps {
@@ -24,7 +24,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
 
   const chartData = [
     data.reduce(
-      (acc, d, i) => ({ ...acc, [d.strategy_name]: d.marginal_risk_pct }),
+      (acc, d) => ({ ...acc, [d.strategy_name]: d.marginal_risk_pct }),
       { label: "Risk %" } as Record<string, string | number>,
     ),
   ];

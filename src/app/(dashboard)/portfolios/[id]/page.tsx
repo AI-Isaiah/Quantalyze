@@ -39,7 +39,7 @@ const PortfolioOptimizer = dynamic(
 
 /* ---------- State sub-components ---------- */
 
-function EmptyState({ portfolioId }: { portfolioId: string }) {
+function EmptyState() {
   return (
     <Card className="text-center py-12">
       <p className="text-text-muted mb-2">This portfolio has no strategies yet.</p>
@@ -295,7 +295,7 @@ export default async function PortfolioDashboardPage({
         }
       />
 
-      {state === "empty" && <EmptyState portfolioId={id} />}
+      {state === "empty" && <EmptyState />}
       {state === "pending" && <PendingState />}
       {state === "computing" && <ComputingState />}
       {state === "stale" && analytics && (

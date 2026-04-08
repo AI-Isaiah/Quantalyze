@@ -16,6 +16,20 @@ interface ApiKeyManagerProps {
   defaultExchange?: string;
 }
 
+/**
+ * Strip the non-DB fields (`valid`, `read_only`) that come back from the
+ * validate-and-encrypt endpoint. Kept as a standalone helper so both the
+ * strategy form and the key manager consume the response identically.
+ */
+function stripValidationFields(
+  response: Record<string, unknown>,
+): Record<string, unknown> {
+  const copy = { ...response };
+  delete copy.valid;
+  delete copy.read_only;
+  return copy;
+}
+
 export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -28,11 +42,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const router = useRouter();
 
-  useEffect(() => {
-    loadKeys();
-  }, []);
-
-  async function loadKeys() {
+  const loadKeys = useCallback(async () => {
     const supabase = createClient();
     const { data } = await supabase
       .from("api_keys")
@@ -43,7 +53,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       const current = data.find((k) => k.id === currentKeyId);
       if (current?.last_sync_at) setLastSyncAt(current.last_sync_at);
     }
-  }
+  }, [currentKeyId]);
+
+  useEffect(() => {
+    loadKeys();
+  }, [loadKeys]);
 
   const handleSyncStatusChange = useCallback((status: SyncStatus) => {
     setSyncStatus(status);
@@ -86,8 +100,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
       const encrypted = await res.json();
 
-      // Step 3: Store encrypted key in Supabase (only DB columns, not validation fields)
-      const { valid, read_only, ...dbFields } = encrypted;
+      // Step 3: Store encrypted key in Supabase (only DB columns, not validation fields).
+      // The response includes `valid` + `read_only` for UI signalling but they
+      // don't belong in the `api_keys` row, so we strip them before insert.
+      const dbFields = stripValidationFields(encrypted);
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");

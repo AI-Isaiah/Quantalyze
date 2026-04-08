@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 
 // Test the proxy routing logic that caused the 307 redirect bug
 describe("API route proxy behavior", () => {

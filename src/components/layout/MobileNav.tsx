@@ -54,13 +54,6 @@ function BarChartIcon({ className }: { className?: string }) {
   );
 }
 
-function FolderIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 6a2 2 0 012-2h3l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2V6z" />
-    </svg>
-  );
-}
 
 function UserIcon({ className }: { className?: string }) {
   return (

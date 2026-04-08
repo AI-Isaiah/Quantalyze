@@ -25,17 +25,32 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
   const [categoryId, setCategoryId] = useState<string>(strategy?.category_id ?? "");
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
 
+  // Load the category list once on mount. We intentionally DON'T auto-pick
+  // the first category inside this effect — doing so required referencing
+  // `categoryId` and the exhaustive-deps rule would flag it, creating a
+  // re-run hazard where the user's manual selection could be clobbered.
+  // Instead, we auto-seed the selection below via a separate effect that
+  // only fires when `categories` changes from empty → populated.
   useEffect(() => {
-    async function loadCategories() {
+    let cancelled = false;
+    (async () => {
       const supabase = createClient();
-      const { data } = await supabase.from("discovery_categories").select("id, name").order("sort_order");
-      if (data) {
-        setCategories(data);
-        if (!categoryId && data.length > 0) setCategoryId(data[0].id);
-      }
-    }
-    loadCategories();
+      const { data } = await supabase
+        .from("discovery_categories")
+        .select("id, name")
+        .order("sort_order");
+      if (!cancelled && data) setCategories(data);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    if (!categoryId && categories.length > 0) {
+      setCategoryId(categories[0].id);
+    }
+  }, [categories, categoryId]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(strategy?.strategy_types ?? []);
   const [selectedSubtypes, setSelectedSubtypes] = useState<string[]>(strategy?.subtypes ?? []);
   const [selectedMarkets, setSelectedMarkets] = useState<string[]>(strategy?.markets ?? []);
@@ -80,7 +95,9 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         throw new Error(err.error || "Key validation failed");
       }
       const encrypted = await res.json();
-      const { valid, read_only, ...dbFields } = encrypted;
+      const dbFields = { ...encrypted };
+      delete dbFields.valid;
+      delete dbFields.read_only;
 
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();

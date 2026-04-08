@@ -39,7 +39,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     req.headers.get("x-real-ip") ??
     null;
 
-  const { error } = await supabase
+  // Upsert without ignoreDuplicates so Supabase reliably returns a row. On a
+  // first-time attestation this writes the new row; on a repeat attestation
+  // it overwrites `attested_at` to "now" which we want anyway (the user has
+  // re-affirmed). `.select().single()` is safe here because the upsert
+  // always produces exactly one row — before the fix, ignoreDuplicates:true
+  // meant the duplicate-skip path returned no rows, which would crash any
+  // caller that added `.select().single()` naively.
+  const { data: attestation, error } = await supabase
     .from("investor_attestations")
     .upsert(
       {
@@ -48,8 +55,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         version: ATTESTATION_VERSION,
         ip_address: ipAddress,
       },
-      { onConflict: "user_id", ignoreDuplicates: true },
-    );
+      { onConflict: "user_id" },
+    )
+    .select("user_id, attested_at, version")
+    .single();
 
   if (error) {
     console.error("[api/attestation] Insert failed:", error);
@@ -59,5 +68,5 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, attestation });
 }

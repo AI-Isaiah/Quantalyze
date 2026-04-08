@@ -200,6 +200,45 @@ def test_compute_hit_rate_missed_list_capped_at_50():
     assert len(result["missed"]) == 50
 
 
+def test_compute_hit_rate_skips_malformed_intro_rows():
+    """A single malformed match_decisions row (missing created_at) used to
+    crash the eval endpoint with a KeyError, taking down /admin/match/eval.
+    After the PR 1 input-validation fix, the malformed row is logged +
+    skipped and the metrics still compute over the valid rows.
+    """
+    intros = [
+        _make_intro("a1", "s1"),
+        {"allocator_id": "a2", "strategy_id": "s2"},  # missing created_at
+        _make_intro("a3", "s3"),
+    ]
+    sb = _make_intros_supabase_mock(intros)
+    with patch("services.db.get_supabase", return_value=sb), patch(
+        "services.match_eval._find_strategy_rank_in_latest_batch_before",
+        return_value=1,
+    ):
+        result = compute_hit_rate_metrics(lookback_days=28)
+
+    # Only the two valid intros should be counted — the malformed row is
+    # skipped, not counted as a miss and not counted in the denominator.
+    assert result["intros_shipped"] == 2
+    assert result["hits_top_3"] == 2
+    assert result["hit_rate_top_3"] == pytest.approx(1.0)
+
+
+def test_compute_hit_rate_returns_empty_when_all_rows_malformed():
+    """If every row is malformed we should return empty metrics instead of
+    crashing with a ZeroDivisionError on the hit_rate numerator."""
+    intros = [
+        {"allocator_id": "a1"},  # missing strategy_id + created_at
+        {"strategy_id": "s1"},  # missing allocator_id + created_at
+    ]
+    sb = _make_intros_supabase_mock(intros)
+    with patch("services.db.get_supabase", return_value=sb):
+        result = compute_hit_rate_metrics(lookback_days=28)
+
+    assert result == _empty_metrics(28)
+
+
 # ─── _find_strategy_rank_in_latest_batch_before tests ──────────────────
 
 
