@@ -311,9 +311,10 @@ async function main() {
   const supabase = createClient(url, serviceKey);
 
   console.log("[seed] Wiping existing demo portfolio for ALLOCATOR_ACTIVE ...");
-  // Delete the demo portfolio first so the cascade from the strategy wipe doesn't
-  // leave a stranded portfolio_strategies row. Idempotent — no-op if portfolio
-  // does not yet exist.
+  // The strategy wipe below cascades into portfolio_strategies (FK), but the
+  // portfolio shell itself is not owned by any strategy, so it survives.
+  // Delete the shell first so re-runs don't accumulate stale demo portfolios.
+  // Idempotent — no-op if portfolio does not yet exist.
   const { error: portWipeErr } = await supabase
     .from("portfolios")
     .delete()
@@ -509,11 +510,10 @@ async function main() {
   }
 
   console.log("[seed] Creating portfolio for Active Allocator...");
-  // Idempotent: upsert the portfolio, then upsert the 3 strategy memberships.
-  // Links 3 institutional strategies (Stellar, Nebula, Aurora) so the match
-  // engine's personalized path has data to score against. Without this, the
-  // Active Allocator demo falls back to mode='screening' — the match engine
-  // fix (T-0.4) cannot be verified without this seed.
+  // Idempotent: upsert the portfolio, then upsert the 3 strategy memberships in
+  // a single bulk call. Links 3 institutional strategies (Stellar, Nebula,
+  // Aurora) so the match engine's personalized path has data to score against.
+  // Without this, the Active Allocator demo falls back to mode='screening'.
   const { error: portErr } = await supabase
     .from("portfolios")
     .upsert(
@@ -527,21 +527,17 @@ async function main() {
     );
   if (portErr) throw portErr;
 
+  // Target allocation sums to 1.0; allocated_amount sums to $10M (= portfolio_aum).
   const portfolioMemberships = [
     { strategy_id: STRATEGY_UUIDS[0], current_weight: 0.40, allocated_amount: 4_000_000 },
     { strategy_id: STRATEGY_UUIDS[1], current_weight: 0.35, allocated_amount: 3_500_000 },
     { strategy_id: STRATEGY_UUIDS[2], current_weight: 0.25, allocated_amount: 2_500_000 },
   ];
-  for (const ps of portfolioMemberships) {
-    const { error: psErr } = await supabase.from("portfolio_strategies").upsert(
-      {
-        portfolio_id: ACTIVE_PORTFOLIO_ID,
-        ...ps,
-      },
-      { onConflict: "portfolio_id,strategy_id" },
-    );
-    if (psErr) throw psErr;
-  }
+  const { error: psErr } = await supabase.from("portfolio_strategies").upsert(
+    portfolioMemberships.map((ps) => ({ portfolio_id: ACTIVE_PORTFOLIO_ID, ...ps })),
+    { onConflict: "portfolio_id,strategy_id" },
+  );
+  if (psErr) throw psErr;
 
   console.log("[seed] Inserting 1 historical match_decision + contact_request ...");
   const { data: existingCR } = await supabase

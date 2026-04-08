@@ -1,4 +1,5 @@
 import { getFactsheetDetail } from "@/lib/queries";
+import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { getMetricLabel } from "@/lib/metric-labels";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -15,7 +16,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { id } = await params;
   const result = await getFactsheetDetail(id);
-  const name = result?.strategy.name ?? "Strategy";
+  const name = result ? displayStrategyName(result.strategy) : "Strategy";
   return {
     title: `${name} — Quantalyze Factsheet`,
     robots: "noindex",
@@ -62,7 +63,7 @@ export default async function FactsheetPage({
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border pb-4 mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">{strategy.name}</h1>
+          <h1 className="text-2xl font-bold text-text-primary">{displayStrategyName(strategy)}</h1>
           <p className="text-sm text-text-muted mt-1">
             {strategy.strategy_types?.join(", ")} · {strategy.markets?.join(", ")}
           </p>

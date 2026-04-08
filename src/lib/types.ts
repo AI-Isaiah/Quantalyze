@@ -46,6 +46,12 @@ export interface Strategy {
   created_at: string;
   /** Added in migration 012. "exploratory" is the safe default for legacy rows. */
   disclosure_tier?: DisclosureTier;
+  /**
+   * Added in migration 014. Pseudonym displayed for exploratory-tier strategies.
+   * When set, `displayStrategyName()` returns this instead of `name` regardless
+   * of tier, so managers can opt into a codename even on institutional tier.
+   */
+  codename?: string | null;
   /** Optional relay email on the strategy itself. Nullable; falls back to manager profile email. */
   public_contact_email?: string | null;
   /** Nullable for whitelabel v1 (migration 012). Null means the default Quantalyze tenant. */

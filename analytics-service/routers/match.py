@@ -207,6 +207,12 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                 sid = row["strategy_id"]
                 if sid not in portfolio_weights:
                     portfolio_strategies.append({"strategy_id": sid})
+                    # NULL current_weight defaults to 1.0 as a cold-start placeholder.
+                    # match_engine.score_candidates re-normalizes the weights dict to
+                    # sum=1.0 before scoring, so a single NULL row won't break the
+                    # math — but a portfolio with mixed NULL and filled rows will
+                    # still skew toward the NULL row. Seeded data always fills weights;
+                    # this path is for user-created portfolios with partial data.
                     portfolio_weights[sid] = float(row.get("current_weight") or 1.0)
                     sa = analytics_by_sid.get(sid, {})
                     returns = _records_to_series(sa.get("returns_series"), name=sid)

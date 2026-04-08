@@ -11,6 +11,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail, getPercentiles } from "@/lib/queries";
+import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 
@@ -40,6 +41,7 @@ export default async function StrategyDetailPage({
 
   const { strategy, analytics, manager, disclosureTier } = result;
   const percentiles = percentileMap?.[strategyId] ?? null;
+  const displayName = displayStrategyName(strategy);
 
   return (
     <>
@@ -47,7 +49,7 @@ export default async function StrategyDetailPage({
         items={[
           { label: "Discovery", href: "/discovery/crypto-sma" },
           { label: cat?.name ?? slug, href: `/discovery/${slug}` },
-          { label: strategy.name },
+          { label: displayName },
         ]}
       />
       <div className="flex items-start justify-between mb-6">
@@ -71,7 +73,7 @@ export default async function StrategyDetailPage({
             </a>
           )}
           <AddToPortfolio strategyId={strategy.id} />
-          <BookIntroCall strategyName={strategy.name} />
+          <BookIntroCall strategyName={displayName} />
           <RequestIntroButton strategyId={strategy.id} />
         </div>
       </div>
@@ -81,7 +83,7 @@ export default async function StrategyDetailPage({
         <ManagerIdentityPanel
           disclosureTier={disclosureTier}
           manager={manager}
-          strategyCodename={strategy.name}
+          strategyCodename={displayName}
         />
       </div>
 
@@ -112,7 +114,7 @@ export default async function StrategyDetailPage({
       {/* Sticky Request Intro CTA */}
       <div className="fixed bottom-0 left-0 right-0 md:left-[260px] z-10 border-t border-border bg-white/95 backdrop-blur-sm px-6 py-3 flex items-center justify-between">
         <p className="text-sm text-text-secondary hidden sm:block">
-          Interested in <span className="font-medium text-text-primary">{strategy.name}</span>?
+          Interested in <span className="font-medium text-text-primary">{displayName}</span>?
         </p>
         <RequestIntroButton strategyId={strategy.id} />
       </div>

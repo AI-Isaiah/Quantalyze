@@ -23,6 +23,8 @@ const makeStrategy = (overrides?: Partial<Strategy>): Strategy => ({
   is_example: false,
   benchmark: "BTC",
   created_at: new Date().toISOString(),
+  disclosure_tier: "institutional",
+  codename: null,
   ...overrides,
 });
 

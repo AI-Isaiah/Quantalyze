@@ -8,6 +8,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getPublicStrategyDetail } from "@/lib/queries";
+import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
 import type { Metadata } from "next";
 
@@ -18,7 +19,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { strategyId } = await params;
   const result = await getPublicStrategyDetail(strategyId);
-  const name = result?.strategy.name ?? "Strategy";
+  const name = result ? displayStrategyName(result.strategy) : "Strategy";
   return {
     title: `${name} — Quantalyze`,
     description: `Exchange-verified performance data for ${name}.`,
@@ -43,6 +44,7 @@ export default async function PublicStrategyDetailPage({
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
+  const displayName = displayStrategyName(strategy);
 
   return (
     <>
@@ -50,7 +52,7 @@ export default async function PublicStrategyDetailPage({
         items={[
           { label: "Browse", href: "/browse" },
           { label: cat?.name ?? slug, href: `/browse/${slug}` },
-          { label: strategy.name },
+          { label: displayName },
         ]}
       />
 
@@ -59,7 +61,7 @@ export default async function PublicStrategyDetailPage({
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-bold text-text-primary">
-              {strategy.name}
+              {displayName}
             </h1>
             {strategy.api_key_id && (
               <VerifiedBadge className="text-accent" />
@@ -82,7 +84,7 @@ export default async function PublicStrategyDetailPage({
         <ManagerIdentityPanel
           disclosureTier={disclosureTier}
           manager={manager}
-          strategyCodename={strategy.name}
+          strategyCodename={displayName}
         />
       </div>
 
