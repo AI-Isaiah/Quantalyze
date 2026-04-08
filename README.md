@@ -24,11 +24,16 @@ cp .env.example .env.local
 # In Supabase SQL Editor, run all files in order:
 #   supabase/migrations/001_initial_schema.sql
 #   ...
-#   supabase/migrations/011_perfect_match.sql
+#   supabase/migrations/014_strategy_codename.sql
 #
 # For 011 specifically, set the admin email ahead of the migration so is_admin
-# backfills automatically:
+# backfills automatically (persist it at the DB level so future restores stay
+# consistent):
 #   ALTER DATABASE postgres SET app.admin_email = 'you@example.com';
+#
+# Migration 014 adds the nullable strategies.codename column that the match
+# engine and admin match queue depend on — apply it before running the seed
+# script or recomputing matches.
 
 # 4. Start the dev server
 npm run dev
@@ -53,7 +58,7 @@ quantalyze/
   analytics-service/  # FastAPI backend (Python) — strategy + portfolio + match analytics
     services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer, match_engine, match_eval
     routers/          # analytics, cron, exchange, portfolio, match
-  supabase/           # Database migrations (011 = perfect match engine)
+  supabase/           # Database migrations (011 = perfect match engine, 014 = strategies.codename)
   docs/
     runbooks/         # Operational runbooks (match-engine.md)
     superpowers/plans/ # Design + implementation plans from /autoplan
