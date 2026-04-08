@@ -20,6 +20,12 @@ export interface Profile {
   manager_status: "newbie" | "pending" | "verified";
   allocator_status: "newbie" | "pending" | "verified";
   created_at: string;
+  /**
+   * Added in migration 016. Optional tag scoping this profile to a partner
+   * pilot. NULL = native Quantalyze user; any string = member of that pilot.
+   * Set by /api/admin/partner-import.
+   */
+  partner_tag?: string | null;
 }
 
 export type DisclosureTier = "institutional" | "exploratory";
@@ -56,6 +62,11 @@ export interface Strategy {
   public_contact_email?: string | null;
   /** Nullable for whitelabel v1 (migration 012). Null means the default Quantalyze tenant. */
   tenant_id?: string | null;
+  /**
+   * Added in migration 016. Optional tag scoping this strategy to a partner
+   * pilot. Set by /api/admin/partner-import.
+   */
+  partner_tag?: string | null;
 }
 
 /**

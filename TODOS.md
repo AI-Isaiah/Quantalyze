@@ -101,22 +101,27 @@ next. P0.1-0.7 + P1.1 alone is a stronger meeting than most founders bring.
   avg_ticket_size * 0.015 * take_rate_pct/100` (1.5% management fee assumption). Pure
   client-side math, no backend. **DONE criteria:** change the allocator count live during
   the meeting and the partner sees the revenue number update in real time.
-- [ ] **T-1.3 Partner pilot flow — minimum viable sketch.** Do NOT build the full white-label.
+- [x] **T-1.3 Partner pilot flow — minimum viable sketch.** Do NOT build the full white-label.
   Build the STORY so the friend can visualize it:
   - New migration `016_partner_tag.sql` adding `partner_tag TEXT` nullable column to
-    `profiles`, `strategies`, `contact_requests`, `match_batches`.
-  - `src/app/admin/partner-import/page.tsx` — CSV upload form accepting rows of
-    `(manager_email, strategy_name, disclosure_tier)` and `(allocator_email, mandate_archetype,
-    ticket_size_usd)`.
-  - `src/app/api/admin/partner-import/route.ts` — parses CSV, creates auth users via admin
-    API, upserts profiles + (empty) strategies, tags all rows with the supplied `partner_tag`.
-  - `src/app/admin/partner-pilot/[partner_tag]/page.tsx` — filters match queue + eval
-    dashboard + contact_requests by partner_tag. Reuses existing components with a
-    `?filter=partner_tag` query param.
+    `profiles`, `strategies`, `contact_requests`, `match_batches`. ✅
+  - `src/app/(dashboard)/admin/partner-import/page.tsx` — CSV upload form with
+    partner_tag input, managers CSV, allocators CSV, and "Reset to sample" buttons. ✅
+  - `src/app/api/admin/partner-import/route.ts` — parses CSVs, creates auth users via
+    admin API with fall-through to profiles-by-email lookup on existing users
+    (never silently skips), upserts profiles + strategies + allocator_preferences
+    tagged with `partner_tag`. ✅
+  - `src/app/(dashboard)/admin/partner-pilot/[partner_tag]/page.tsx` — filtered view
+    with forward-looking pipeline framing (`allocators × strategies = potential
+    intros`, never "0 intros") + prominent "Open filtered eval dashboard" button. ✅
+  - `/admin/match/eval` now accepts `?partner_tag=` and renders a prominent filtered
+    banner (`border-l-4 border-accent bg-accent/5`, `font-display`) when scoped,
+    or an equally prominent neutral banner when unfiltered. Python
+    `compute_hit_rate_metrics` scopes intros to profiles with matching partner_tag. ✅
   - **DONE criteria:** during the meeting, invent a sample CSV (3 managers, 5 allocators,
     5 strategies), upload it, and within 60 seconds the friend sees a filtered version of
     the match queue running against "their" data. This is the "I signed on Tuesday and had
-    something to show my LPs by Friday" proof of CC velocity.
+    something to show my LPs by Friday" proof of CC velocity. ✅
 
 ### P2 — Only if everything above lands with time to spare (~2-3 hrs)
 
