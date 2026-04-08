@@ -8,6 +8,7 @@ import { BookIntroCall } from "@/components/strategy/BookIntroCall";
 import { ShareableLink } from "@/components/strategy/ShareableLink";
 import { AddToPortfolio } from "@/components/portfolio/AddToPortfolio";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail, getPercentiles } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
@@ -37,7 +38,7 @@ export default async function StrategyDetailPage({
     );
   }
 
-  const { strategy, analytics } = result;
+  const { strategy, analytics, manager, disclosureTier } = result;
   const percentiles = percentileMap?.[strategyId] ?? null;
 
   return (
@@ -60,12 +61,31 @@ export default async function StrategyDetailPage({
           >
             Factsheet
           </a>
+          {disclosureTier === "institutional" && (
+            <a
+              href={`/factsheet/${strategy.id}/tearsheet`}
+              target="_blank"
+              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-page transition-colors"
+            >
+              Tear Sheet
+            </a>
+          )}
           <AddToPortfolio strategyId={strategy.id} />
           <BookIntroCall strategyName={strategy.name} />
           <RequestIntroButton strategyId={strategy.id} />
         </div>
       </div>
       <MetadataCards strategy={strategy} />
+
+      <div className="mb-6">
+        <ManagerIdentityPanel
+          disclosureTier={disclosureTier}
+          manager={manager}
+          strategyCodename={strategy.name}
+        />
+      </div>
+
+      <Disclaimer variant="custody" className="mb-6" />
 
       {/* Verified vs Self-Reported */}
       {strategy.api_key_id && (

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { LegalFooter } from "@/components/legal/LegalFooter";
 
 export default function BrowseLayout({
   children,
@@ -38,6 +39,7 @@ export default function BrowseLayout({
         {children}
         <Disclaimer variant="footer" />
       </main>
+      <LegalFooter />
     </div>
   );
 }
