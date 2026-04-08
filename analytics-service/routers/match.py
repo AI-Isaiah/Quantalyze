@@ -187,7 +187,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     if portfolio_ids:
         ps_result = (
             supabase.table("portfolio_strategies")
-            .select("strategy_id, weight, portfolio_id")
+            .select("strategy_id, current_weight, portfolio_id, allocated_amount")
             .in_("portfolio_id", portfolio_ids)
             .execute()
         )
@@ -196,7 +196,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         strategy_ids = list({row["strategy_id"] for row in ps_rows})
         sa_result = (
             supabase.table("strategy_analytics")
-            .select("strategy_id, returns_series, total_aum")
+            .select("strategy_id, returns_series")
             .in_("strategy_id", strategy_ids)
             .execute()
         ) if strategy_ids else None
@@ -207,13 +207,14 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                 sid = row["strategy_id"]
                 if sid not in portfolio_weights:
                     portfolio_strategies.append({"strategy_id": sid})
-                    portfolio_weights[sid] = float(row.get("weight") or 1.0)
+                    portfolio_weights[sid] = float(row.get("current_weight") or 1.0)
                     sa = analytics_by_sid.get(sid, {})
                     returns = _records_to_series(sa.get("returns_series"), name=sid)
                     if returns is not None:
                         portfolio_returns[sid] = returns
-                    if sa.get("total_aum"):
-                        portfolio_aum += float(sa["total_aum"])
+                    allocated = row.get("allocated_amount")
+                    if allocated:
+                        portfolio_aum += float(allocated)
 
     # Thumbs-down history
     td_result = (
