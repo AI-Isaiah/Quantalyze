@@ -1,21 +1,20 @@
+import type { DisclosureTier } from "@/lib/types";
+
 /**
- * Display name resolver for strategies, honoring disclosure tier.
+ * Resolve a strategy display label without leaking identity on exploratory
+ * rows. Codename wins at any tier; otherwise the real name is returned only for
+ * institutional disclosure; exploratory rows missing a codename fall back to a
+ * synthetic `Strategy #<id-prefix>` that can never leak a manager name.
  *
- * Logic (in priority order):
- *   1. codename if set — respects manager's pseudonym choice at any tier
- *   2. name if disclosure_tier === 'institutional' — full disclosure is the contract
- *   3. 'Strategy #' + id.slice(0, 8) — synthetic fallback; never leaks a real name
- *
- * Used everywhere strategy names are rendered in UI surfaces that may include
- * exploratory-tier strategies (Match Queue, Send Intro, Candidate Detail,
- * Decision History). Institutional-only surfaces (Discovery, Tear Sheet, Factsheet)
- * already fetch full identity via the DAL and do not need this guard.
+ * Use on any surface that may render exploratory strategies (Match Queue, Send
+ * Intro, Candidate Detail, Decision History). Tear sheet / discovery / factsheet
+ * already fetch full identity via the DAL and do not need the guard.
  */
 export interface DisplayableStrategy {
   id: string;
   name?: string | null;
   codename?: string | null;
-  disclosure_tier?: "institutional" | "exploratory" | null;
+  disclosure_tier?: DisclosureTier | null;
 }
 
 export function displayStrategyName(

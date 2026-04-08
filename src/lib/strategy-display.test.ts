@@ -49,4 +49,30 @@ describe("displayStrategyName", () => {
   it("returns '(strategy)' for null input", () => {
     expect(displayStrategyName(null)).toBe("(strategy)");
   });
+
+  it("returns '(strategy)' for undefined input", () => {
+    expect(displayStrategyName(undefined)).toBe("(strategy)");
+  });
+
+  it("prefers codename over name even when tier is institutional", () => {
+    expect(
+      displayStrategyName({
+        id: "abcdef1234567890",
+        name: "Stellar Neutral Alpha",
+        codename: "Strategy S-01",
+        disclosure_tier: "institutional",
+      }),
+    ).toBe("Strategy S-01");
+  });
+
+  it("falls back to synthetic placeholder when disclosure_tier is null", () => {
+    expect(
+      displayStrategyName({
+        id: "abcdef1234567890",
+        name: "Legacy Strategy Row",
+        codename: null,
+        disclosure_tier: null,
+      }),
+    ).toBe("Strategy #abcdef12");
+  });
 });
