@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
-const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal", "/demo", "/api/demo"];
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
@@ -32,9 +32,13 @@ export async function proxy(request: NextRequest) {
     data: { session },
   } = await supabase.auth.getSession();
 
+  // Strict route matching: `path === route` handles exact matches and
+  // `startsWith(route + "/")` handles nested routes. This prevents false
+  // positives where `/demo` would accidentally match `/demonstration`.
+  const path = request.nextUrl.pathname;
   const isPublicRoute =
-    request.nextUrl.pathname === "/" ||
-    PUBLIC_ROUTES.some((route) => request.nextUrl.pathname.startsWith(route));
+    path === "/" ||
+    PUBLIC_ROUTES.some((route) => path === route || path.startsWith(route + "/"));
 
   if (!session && !isPublicRoute) {
     const url = request.nextUrl.clone();
@@ -42,8 +46,12 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  const isApiRoute = request.nextUrl.pathname.startsWith("/api/");
-  if (session && isPublicRoute && !isApiRoute) {
+  const isApiRoute = path.startsWith("/api/");
+  // Exclude `/demo/*` from the logged-in redirect branch so admins/founders
+  // viewing the public demo while signed in stay on the demo page instead of
+  // being bounced to the dashboard.
+  const isDemoRoute = path === "/demo" || path.startsWith("/demo/");
+  if (session && isPublicRoute && !isApiRoute && !isDemoRoute) {
     const redirect = request.nextUrl.searchParams.get("redirect");
     const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
     const url = request.nextUrl.clone();

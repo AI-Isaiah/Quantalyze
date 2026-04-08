@@ -161,7 +161,31 @@ interface QueueData {
 
 // ─── Component ──────────────────────────────────────────────────────────
 
-export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
+/**
+ * Match queue for a single allocator.
+ *
+ * Two optional props allow this same component to back both the real
+ * founder-facing `/admin/match/[allocator_id]` page and the public
+ * read-only `/demo/founder-view` page:
+ *
+ *   - `forceReadOnly` — hides action buttons, disables the slide-out opener
+ *     AND short-circuits every keyboard shortcut so pressing `s`/`u`/`d`/`r`
+ *     on the public demo doesn't fire action handlers.
+ *   - `sourceApiPath` — swaps the GET source between `/api/admin/match`
+ *     (default, auth-gated) and `/api/demo/match` (public, UUID-locked).
+ *
+ * Both default to backward-compatible values so the existing admin page
+ * continues to work unchanged.
+ */
+export function AllocatorMatchQueue({
+  allocatorId,
+  forceReadOnly = false,
+  sourceApiPath = "/api/admin/match",
+}: {
+  allocatorId: string;
+  forceReadOnly?: boolean;
+  sourceApiPath?: string;
+}) {
   const [data, setData] = useState<QueueData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -190,7 +214,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/admin/match/${allocatorId}`);
+      const res = await fetch(`${sourceApiPath}/${allocatorId}`);
       if (loadIdRef.current !== thisLoadId) return; // A newer load is in flight
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -207,7 +231,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
         setLoading(false);
       }
     }
-  }, [allocatorId]);
+  }, [allocatorId, sourceApiPath]);
 
   useEffect(() => {
     load();
@@ -269,10 +293,16 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
   // Keyboard shortcuts — only active at lg+ (1024+) per Sprint 4 T10.1.
   // Each handler short-circuits via the isLg check; we still register the
   // hook unconditionally so the listener doesn't churn on viewport changes.
+  //
+  // `forceReadOnly` is checked at the top of EVERY handler (not just on the
+  // visible buttons) because the public /demo/founder-view page still mounts
+  // this component; we don't want `s`/`u`/`d`/`r` to fire admin actions
+  // against /api/admin even though the UI buttons are hidden.
   useKeyboardShortcuts([
     {
       key: "j",
       handler: () => {
+        if (forceReadOnly) return;
         if (!isLg || !data?.candidates.length) return;
         setSelectedIdx((i) => Math.min(i + 1, data.candidates.length - 1));
       },
@@ -280,6 +310,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     {
       key: "k",
       handler: () => {
+        if (forceReadOnly) return;
         if (!isLg) return;
         setSelectedIdx((i) => Math.max(i - 1, 0));
       },
@@ -287,6 +318,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     {
       key: "s",
       handler: () => {
+        if (forceReadOnly) return;
         if (!isLg) return;
         if (selectedCandidate) setSendIntroFor(selectedCandidate);
       },
@@ -294,6 +326,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     {
       key: "u",
       handler: () => {
+        if (forceReadOnly) return;
         if (!isLg) return;
         if (selectedCandidate) {
           handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id);
@@ -303,6 +336,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     {
       key: "d",
       handler: () => {
+        if (forceReadOnly) return;
         if (!isLg) return;
         if (selectedCandidate) {
           handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id);
@@ -312,6 +346,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     {
       key: "r",
       handler: () => {
+        if (forceReadOnly) return;
         if (!isLg) return;
         handleRecompute();
       },
@@ -323,8 +358,11 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
   // user has nothing focused — body. This excludes the case where a
   // slide-out panel is open and focus has moved into it. Esc closes the
   // modal via the native <dialog> behavior.
+  //
+  // Suppressed in read-only mode — the keyboard shortcuts themselves are
+  // disabled on /demo/founder-view, so advertising them would be a lie.
   useEffect(() => {
-    if (!isLg) return;
+    if (!isLg || forceReadOnly) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "?") return;
       // Strict body check: only fire on the bare page, not over an open
@@ -336,7 +374,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isLg]);
+  }, [isLg, forceReadOnly]);
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -371,27 +409,45 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
 
   return (
     <div className="space-y-6">
-      {/* Breadcrumb */}
-      <nav className="flex items-center gap-2 text-sm text-text-muted">
-        <Link href="/admin/match" className="hover:text-text-primary">
-          Match queue
-        </Link>
-        <span>/</span>
-        <span className="text-text-primary">
-          {profile.display_name || profile.email}
-        </span>
-      </nav>
+      {/* Public demo read-only banner — only on /demo/founder-view. Takes
+          precedence over the mobile banner because it applies at every
+          viewport, not just <md. */}
+      {forceReadOnly && (
+        <div className="border-l-4 border-accent bg-accent/5 px-4 py-3 mb-4">
+          <p className="text-sm text-text-primary font-medium">
+            Read-only preview — actions disabled on the public demo.
+          </p>
+        </div>
+      )}
+
+      {/* Breadcrumb — hidden on the public demo because /admin/match requires
+          auth and 404s under the public layout. */}
+      {!forceReadOnly && (
+        <nav className="flex items-center gap-2 text-sm text-text-muted">
+          <Link href="/admin/match" className="hover:text-text-primary">
+            Match queue
+          </Link>
+          <span>/</span>
+          <span className="text-text-primary">
+            {profile.display_name || profile.email}
+          </span>
+        </nav>
+      )}
 
       {/* Read-only mobile banner: below the md breakpoint (768px) the queue
           hides all KEEP/SKIP/SENT actions so a founder accidentally demoing
-          from their phone doesn't record a decision with the wrong intent. */}
-      <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
-        <p className="text-sm text-text-primary">
-          <strong className="font-semibold">Read-only on mobile.</strong>{" "}
-          Open on a desktop or tablet (1024px+) to use keyboard shortcuts
-          and record KEEP / SKIP / Send Intro decisions.
-        </p>
-      </div>
+          from their phone doesn't record a decision with the wrong intent.
+          Suppressed on the public demo because the top banner already says
+          "read-only" at every viewport. */}
+      {!forceReadOnly && (
+        <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
+          <p className="text-sm text-text-primary">
+            <strong className="font-semibold">Read-only on mobile.</strong>{" "}
+            Open on a desktop or tablet (1024px+) to use keyboard shortcuts
+            and record KEEP / SKIP / Send Intro decisions.
+          </p>
+        </div>
+      )}
 
       {/* Header strip */}
       <Card>
@@ -426,23 +482,28 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
           </div>
         </div>
 
-        {/* Action bar */}
+        {/* Action bar — hidden entirely in read-only mode so the demo page
+            doesn't render dead buttons. Stats line stays. */}
         <div className="mt-4 flex items-center gap-2 flex-wrap">
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={handleRecompute}
-            disabled={recomputing}
-          >
-            {recomputing ? "Computing..." : "Recompute now"}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setShowPreferencesPanel(true)}
-          >
-            Edit preferences
-          </Button>
+          {!forceReadOnly && (
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleRecompute}
+                disabled={recomputing}
+              >
+                {recomputing ? "Computing..." : "Recompute now"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowPreferencesPanel(true)}
+              >
+                Edit preferences
+              </Button>
+            </>
+          )}
           {batch && (
             <span className="ml-auto text-[11px] text-text-muted font-mono tabular-nums">
               {candidates.length} candidates ·{" "}
@@ -468,9 +529,11 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
           <p className="text-sm text-text-secondary mb-4">
             No candidates yet for this allocator.
           </p>
-          <Button variant="primary" size="sm" onClick={handleRecompute} disabled={recomputing}>
-            {recomputing ? "Computing..." : "Recompute now"}
-          </Button>
+          {!forceReadOnly && (
+            <Button variant="primary" size="sm" onClick={handleRecompute} disabled={recomputing}>
+              {recomputing ? "Computing..." : "Recompute now"}
+            </Button>
+          )}
         </Card>
       )}
       {batch && candidates.length === 0 && (
@@ -494,8 +557,12 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                 candidate={cand}
                 selected={selectedIdx === i}
                 alreadySent={sentStrategyIds.has(cand.strategy_id)}
+                readOnly={forceReadOnly}
                 onSelect={() => setSelectedIdx(i)}
-                onSendIntro={() => setSendIntroFor(cand)}
+                onSendIntro={() => {
+                  if (forceReadOnly) return;
+                  setSendIntroFor(cand);
+                }}
               />
             ))}
           </div>
@@ -581,13 +648,19 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                 alreadySent={sentStrategyIds.has(selectedCandidate.strategy_id)}
                 isKept={thumbsUpIds.has(selectedCandidate.strategy_id)}
                 isSkipped={thumbsDownIds.has(selectedCandidate.strategy_id)}
-                onSendIntro={() => setSendIntroFor(selectedCandidate)}
-                onKeep={() =>
-                  handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id)
-                }
-                onSkip={() =>
-                  handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id)
-                }
+                isReadOnly={forceReadOnly}
+                onSendIntro={() => {
+                  if (forceReadOnly) return;
+                  setSendIntroFor(selectedCandidate);
+                }}
+                onKeep={() => {
+                  if (forceReadOnly) return;
+                  handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id);
+                }}
+                onSkip={() => {
+                  if (forceReadOnly) return;
+                  handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id);
+                }}
               />
             )}
           </div>
@@ -869,12 +942,14 @@ function ShortlistCard({
   candidate,
   selected,
   alreadySent,
+  readOnly = false,
   onSelect,
   onSendIntro,
 }: {
   candidate: CandidateRow;
   selected: boolean;
   alreadySent: boolean;
+  readOnly?: boolean;
   onSelect: () => void;
   onSendIntro: () => void;
 }) {
@@ -930,19 +1005,26 @@ function ShortlistCard({
         <span className="text-[10px] font-mono uppercase tracking-wider text-text-muted">
           Rank {candidate.rank}
         </span>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!alreadySent) onSendIntro();
-          }}
-          disabled={alreadySent}
-          className={`inline-flex items-center text-xs font-medium ${
-            alreadySent ? "text-text-muted" : "text-accent hover:text-accent-hover cursor-pointer"
-          }`}
-        >
-          {alreadySent ? "Sent" : "Send intro →"}
-        </button>
+        {!readOnly && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!alreadySent) onSendIntro();
+            }}
+            disabled={alreadySent}
+            className={`inline-flex items-center text-xs font-medium ${
+              alreadySent ? "text-text-muted" : "text-accent hover:text-accent-hover cursor-pointer"
+            }`}
+          >
+            {alreadySent ? "Sent" : "Send intro →"}
+          </button>
+        )}
+        {readOnly && alreadySent && (
+          <span className="inline-flex items-center text-xs font-medium text-text-muted">
+            Sent
+          </span>
+        )}
       </div>
     </div>
   );

@@ -76,17 +76,23 @@ founder demoing a simpler product outperforms a tired founder demoing a fancier 
 Each of these can ship independently. If a P1 item hits a wall, drop it and move to the
 next. P0.1-0.7 + P1.1 alone is a stronger meeting than most founders bring.
 
-- [ ] **T-1.1 Shareable public demo URL at `/demo`.** **This is the single most important
-  deliverable after the P0s.** New route `src/app/demo/page.tsx` — server component loading
-  ALLOCATOR_ACTIVE's seeded state (portfolio + recommendations + matches) via hard-coded UUID
-  instead of `auth.uid()`. Renders a simplified combined `/recommendations` + `/portfolios/[id]`
-  view. No accredited gate, no auth. Top banner: "Live demo — simulated data. [Sign up to
-  build your own →]". Second route `src/app/demo/admin/page.tsx` loading the match queue for
-  ALLOCATOR_ACTIVE, read-only, clearly labeled as founder view. Add both to `PUBLIC_ROUTES`
-  in `src/proxy.ts`. **DONE criteria:** open `https://quantalyze.vercel.app/demo` and
-  `/demo/admin` in an incognito window with no cookies, see the full flow with zero clicks.
-  Send URL to yourself on Telegram, open on phone, must work. The friend meeting ends with
-  "send me that link" — you already have the link.
+- [x] **T-1.1 Shareable public demo URL at `/demo`.** **This is the single most important
+  deliverable after the P0s.** Shipped PR #__ 2026-04-08 — new routes:
+  `src/app/demo/layout.tsx` (minimal public shell + "Sign up" banner),
+  `src/app/demo/page.tsx` (server component loading ALLOCATOR_ACTIVE's seeded portfolio + top-3
+  matches via hard-coded UUID, with a "latest batch → previous batch → portfolio-only"
+  fallback chain so the empty state never dead-ends on "refresh in 1 minute"),
+  `src/app/demo/founder-view/page.tsx` (renamed from `/demo/admin` per design review —
+  "admin" in a public URL is a trust-collapse signal). `AllocatorMatchQueue` gained
+  `forceReadOnly` + `sourceApiPath` props (backward-compatible); keyboard shortcuts,
+  slide-out openers, and action buttons all gated. New public endpoint
+  `src/app/api/demo/match/[allocator_id]/route.ts` hard-asserts the Active Allocator UUID
+  (403 for any other). `src/proxy.ts` public-route matcher tightened to strict equality
+  or prefix-slash (so `/demo` can't accidentally match `/demonstration`) and `/demo/*` is
+  excluded from the logged-in redirect so admins viewing the demo stay on the demo page.
+  **DONE criteria (post-merge ops):** open `https://quantalyze.vercel.app/demo` and
+  `/demo/founder-view` in an incognito window with no cookies; send URL to yourself on
+  Telegram; open on phone — must work.
 - [ ] **T-1.2 Revenue simulator page at `/admin/partner-roi`.** One screen, four inputs:
   `partner_allocators` (default 50), `partner_managers` (default 200), `avg_ticket_size_usd`
   (default 5_000_000), `take_rate_pct` (default 15). Output: estimated intros/month =
