@@ -1,6 +1,76 @@
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
-import type { Strategy, StrategyAnalytics, PortfolioWithCount, DeckWithCount, Portfolio, PortfolioAnalytics, PortfolioAlert, AllocationEvent } from "./types";
+import type {
+  Strategy,
+  StrategyAnalytics,
+  PortfolioWithCount,
+  DeckWithCount,
+  Portfolio,
+  PortfolioAnalytics,
+  PortfolioAlert,
+  AllocationEvent,
+  DisclosureTier,
+  ManagerIdentity,
+} from "./types";
+
+/**
+ * Load + redact the manager identity for a strategy.
+ *
+ * Why this helper exists
+ *   The disclosure tier system has TWO security gates:
+ *
+ *     1. The bio/years_trading/aum_range columns on `profiles` had column-level
+ *        SELECT REVOKE'd from anon + authenticated in migration 012, so a
+ *        client with a session token cannot read them at all — bypassing the
+ *        legacy `profiles_read_public USING (true)` policy that would
+ *        otherwise leak the institutional manager identity to anyone holding
+ *        a user_id.
+ *
+ *     2. This server-side predicate: only fetch + return manager identity for
+ *        `disclosure_tier='institutional'` strategies. Exploratory strategies
+ *        get `null` and the profile is never queried.
+ *
+ *   Because of (1), this fetch MUST use `createAdminClient()` (service_role).
+ *   The user-scoped `createClient()` would be denied at the column level.
+ *
+ *   Centralizing this logic in one place means future ManagerIdentity field
+ *   additions only need to touch one select statement and one cast block.
+ */
+async function loadManagerIdentity(
+  strategy: { user_id?: string | null },
+  disclosureTier: DisclosureTier,
+): Promise<ManagerIdentity | null> {
+  if (!strategy.user_id || disclosureTier !== "institutional") {
+    return null;
+  }
+
+  const admin = createAdminClient();
+  const { data: managerRow } = await admin
+    .from("profiles")
+    .select("display_name, company, bio, years_trading, aum_range, linkedin")
+    .eq("id", strategy.user_id)
+    .single();
+
+  if (!managerRow) return null;
+
+  return {
+    display_name: managerRow.display_name ?? null,
+    company: managerRow.company ?? null,
+    bio: (managerRow as { bio?: string | null }).bio ?? null,
+    years_trading:
+      (managerRow as { years_trading?: number | null }).years_trading ?? null,
+    aum_range: (managerRow as { aum_range?: string | null }).aum_range ?? null,
+    linkedin: managerRow.linkedin ?? null,
+  };
+}
+
+function readDisclosureTier(strategy: unknown): DisclosureTier {
+  return (
+    (strategy as { disclosure_tier?: DisclosureTier }).disclosure_tier ??
+    "exploratory"
+  );
+}
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
@@ -91,7 +161,9 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   return result;
 }
 
-// Re-export client-safe helpers for backwards compat
+// Convenience re-export so callers that already pull from `@/lib/queries` for
+// server-side reads don't need a second import line just for these helpers.
+// Both helpers are pure and have no Supabase dependency — they live in utils.
 export { extractAnalytics, EMPTY_ANALYTICS };
 
 export async function getStrategiesByCategory(categorySlug: string): Promise<StrategyWithAnalytics[]> {
@@ -141,7 +213,12 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
 
 const PUBLIC_ANALYTICS_COLUMNS = "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
 
-export async function getPublicStrategyDetail(strategyId: string) {
+export async function getPublicStrategyDetail(strategyId: string): Promise<{
+  strategy: Strategy;
+  analytics: ReturnType<typeof extractAnalytics>;
+  manager: ManagerIdentity | null;
+  disclosureTier: DisclosureTier;
+} | null> {
   const supabase = await createClient();
 
   const { data: strategy, error } = await supabase
@@ -153,33 +230,55 @@ export async function getPublicStrategyDetail(strategyId: string) {
 
   if (error || !strategy) return null;
 
+  const disclosureTier = readDisclosureTier(strategy);
+  const manager = await loadManagerIdentity(strategy, disclosureTier);
+
   return {
     strategy,
     analytics: extractAnalytics(strategy.strategy_analytics),
+    manager,
+    disclosureTier,
   };
 }
 
-export async function getFactsheetDetail(strategyId: string) {
+export async function getFactsheetDetail(strategyId: string): Promise<{
+  strategy: Strategy & { discovery_categories?: { slug: string } | null };
+  analytics: StrategyAnalytics;
+  manager: ManagerIdentity | null;
+  disclosureTier: DisclosureTier;
+} | null> {
   const supabase = await createClient();
 
   const { data: strategy, error } = await supabase
     .from("strategies")
-    .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json)`)
+    .select(
+      `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}, monthly_returns, metrics_json), discovery_categories (slug)`,
+    )
     .eq("id", strategyId)
     .eq("status", "published")
     .single();
 
   if (error || !strategy) return null;
 
+  const analytics = extractAnalytics(strategy.strategy_analytics);
+  if (!analytics) return null;
+
+  const disclosureTier = readDisclosureTier(strategy);
+  const manager = await loadManagerIdentity(strategy, disclosureTier);
+
   return {
     strategy,
-    analytics: extractAnalytics(strategy.strategy_analytics),
+    analytics,
+    manager,
+    disclosureTier,
   };
 }
 
 export async function getStrategyDetail(strategyId: string): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;
+  manager: ManagerIdentity | null;
+  disclosureTier: DisclosureTier;
 } | null> {
   const supabase = await createClient();
 
@@ -191,9 +290,14 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 
   if (error || !strategy) return null;
 
+  const disclosureTier = readDisclosureTier(strategy);
+  const manager = await loadManagerIdentity(strategy, disclosureTier);
+
   return {
     strategy,
     analytics: extractAnalytics(strategy.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
+    manager,
+    disclosureTier,
   };
 }
 
