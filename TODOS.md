@@ -101,6 +101,104 @@ is in front of real allocators.
 - [ ] **Match score column on Discovery** — same Approach B deferral. DEFERRED BY YOU.
 - [ ] **Save / dismiss / "show me more like this" feedback loop on the allocator side** — same Approach B deferral. DEFERRED BY YOU. Founder's thumbs up/down on the admin side is the v1 ground-truth signal.
 
+## Carry-over from Sprint 1-3 demo-ready ship (P1)
+
+These items were either user-deferred or security/maintainability findings flagged
+during the /ship pre-landing review on 2026-04-08. The critical items were fixed
+inline before merging; these are the follow-ups.
+
+### Sprint 1-3 plan items NOT DONE (user-deferred at /ship time)
+
+- [ ] **T4.2 — Strategy edit form: Manager Profile section + disclosure_tier dropdown**.
+  Currently managers cannot set their own bio/years/aum/linkedin or pick the
+  institutional vs exploratory tier from the UI — only via the seed script or
+  direct Supabase admin. Demo workaround: founder seeds via T2.6 script. Real
+  managers signing up post-demo will hit this gap immediately.
+- [ ] **T5.6 — Per-strategy risk disclosure block on factsheet**: leverage, max
+  drawdown, lockup, minimum-allocation, "past performance does not guarantee
+  future results". The general Disclaimer + custody variant cover the platform
+  shell, but per-strategy risk language is needed for the LP-facing pages.
+- [ ] **T6.5 — Playwright visual regression for tearsheet**: dense + sparse
+  strategies, fail build on >0.5% pixel diff. Sprint 7 test coverage track.
+- [ ] **T7.4 — Sentry alert when an `is_example=true` strategy crosses into stale**.
+  Demo integrity guardrail — without it the seeded data can drift mid-demo.
+
+### Security follow-ups from Sprint 1-3 review (P1)
+
+- [ ] **Rate-limit /api/attestation and /api/account/deletion-request**. Both
+  POST routes have zero throttling — a logged-in user can spam 10k requests
+  and (for deletion) trigger 10k founder emails, exhausting the Resend quota
+  for the entire platform. Add Upstash rate limit (5 req/min/user) + DB-level
+  guard ("don't insert duplicate pending deletion in the last 24h").
+- [ ] **Rate-limit + dedup the public PDF routes**: `/api/factsheet/[id]/pdf`,
+  `/api/factsheet/[id]/tearsheet.pdf`, `/api/portfolio-pdf/[id]`. Each call
+  spawns ~150-200MB of Chromium with no concurrency cap. First newsletter
+  with a tearsheet link OOMs the Vercel function. Add Upstash 5 req/min/IP +
+  Vercel KV cache keyed by strategy_id + last computed_at.
+- [ ] **Persisted email dispatch audit trail**. The send-intro Promise.allSettled
+  fix (this PR) logs failures to console but there's no DB row recording
+  whether the allocator/manager actually received the intro email. On a
+  flaky Resend day the queue says "sent" and nobody knows the email never
+  landed. Add `notification_dispatches` table written by `send()` with
+  status/error/recipient columns.
+- [ ] **Recommendations admin client defense-in-depth**. The recommendations
+  page reads `match_candidates` via the service-role admin client filtered
+  only by `batch.id`. The batch_id was loaded with `eq("allocator_id", user.id)`
+  so today this is safe, but a future PR introducing shared batches or a debug
+  param could leak another allocator's recommendations. Move to a SECURITY
+  DEFINER function `get_allocator_recommendations(uuid)` that enforces the
+  allocator scope in SQL, not TypeScript.
+- [ ] **CSRF Origin/Referer checks** on `/api/attestation` and
+  `/api/account/deletion-request`. Both rely on Supabase's SameSite=Lax cookie
+  for CSRF protection; add Origin/Referer header validation as defense in
+  depth at the top of each POST handler.
+- [ ] **Puppeteer launch + page-default timeouts**. Wrap `browser.launch()` in
+  a 10s `Promise.race` and call `page.setDefaultNavigationTimeout(15000)` +
+  `page.setDefaultTimeout(15000)` in `lib/puppeteer.ts::launchBrowser()`. If
+  Chrome cold-start hangs, the function currently hangs the entire Vercel
+  lambda until the platform kills it.
+- [ ] **Attestation upsert latent footgun**. `/api/attestation` uses
+  `upsert(..., { onConflict: 'user_id', ignoreDuplicates: true })` without
+  `.select().single()`. Adding `.select()` later would crash with
+  "no rows returned" on the duplicate-skip path. Switch to explicit
+  `.upsert(...).select('user_id, attested_at, version').single()` and add a
+  test that double-POSTs.
+- [ ] **Pre-existing `email` and `linkedin` exposure on profiles**. Migration 002
+  policy `profiles_read_public USING (true)` makes `email` and `linkedin`
+  globally readable to anyone with the anon key — pre-existing leak, not
+  introduced by Sprint 1-3 (which fixed the new bio/years/aum/linkedin
+  columns via column-level REVOKE). Apply the same column-level REVOKE
+  pattern to `email` (and possibly `linkedin`) and migrate the few callers
+  that select them to use the admin client.
+- [ ] **Investor attestations CASCADE → archive-then-delete**. Today
+  `investor_attestations.user_id` has `ON DELETE CASCADE`. In v1 the founder
+  processes deletion requests manually and never hard-DELETEs profiles, so
+  the cascade never fires — but the moment automatic deletion ships, the
+  compliance audit trail (date/version/IP) vanishes. Add a separate
+  `investor_attestations_archive` table and an archive-then-delete trigger,
+  or change the FK to RESTRICT and document the manual archive step.
+
+### Maintainability follow-ups from Sprint 1-3 review (P1)
+
+- [ ] **Unify `ManagerIdentity` and `ManagerIdentityBlock` types**. Two parallel
+  shapes with mismatched naming (snake_case vs camelCase, `linkedin` vs
+  `linkedinUrl`). Pick one — likely drop `ManagerIdentityBlock` entirely and
+  have email helpers consume `ManagerIdentity` directly.
+- [ ] **Extract `loadManagerIdentityBlock(admin, strategyUserId)` into
+  `lib/manager-identity.ts`**. The admin send-intro route + self-serve intro
+  route both rebuild the same select+cast pattern. The new
+  `loadManagerIdentity` helper in queries.ts already does this for the
+  rendering surfaces — promote it to a shared module both API routes can
+  consume.
+- [ ] **Drop the `ManagerIdentityPanelForTearSheet` no-op wrapper** at
+  `src/app/factsheet/[id]/tearsheet/page.tsx:361`. It forwards all props
+  unchanged with no padding override despite the comment claiming otherwise.
+  Either delete it or make it actually adjust the print-mode padding.
+- [ ] **Recommendations match-candidate row cast**. The page mapping uses
+  `Record<string, unknown>` + 8 `as Type` casts to work around Supabase's
+  typed-query inference. Move the fetch into `lib/queries.ts` as
+  `getRecommendationCandidatesForBatch(batchId)` with proper interfaces.
+
 ## Carry-over from Portfolio Intelligence ship (P1)
 
 - [ ] **Convert MigrationWizard 3-step DB write into a server transaction** — currently the wizard does 3 sequential client-side writes (portfolio_strategies upsert, allocation_events insert, relationship_documents insert). On partial failure the portfolio is left in an inconsistent state. Move to a single API route doing an RPC/transaction.
@@ -158,7 +256,15 @@ is in front of real allocators.
 - Real-time WebSocket data sync.
 - White-label verification API.
 
-## Completed (this session, 2026-04-07)
+## Completed (2026-04-08, Sprint 1-3 demo-ready ship)
+
+- ~~**Sprint 1 plumbing** (T1.0 send-intro email dispatch with Promise.allSettled + email format validation, T1.5a migration 013 cron heartbeat + fail-loud schedule with secret resolved at execution time, T1.6 shared `lib/puppeteer.ts::launchBrowser()` across all 3 PDF routes via puppeteer-core + sparticuz/chromium, T1.8 `/api/factsheet` PUBLIC_ROUTES, T1.9 unified email domain to quantalyze.com with PLATFORM_NAME templating, T2.6 deterministic seed-demo-data.ts).~~
+- ~~**Sprint 2 disclosure tier + compliance shell + tenancy pre-pay** (migration 012 with bio/years_trading/aum_range on profiles, disclosure_tier CHECK on strategies, nullable tenant_id on 5 tables, investor_attestations + data_deletion_requests tables; column-level REVOKE on the new sensitive columns from anon/authenticated to fix the legacy `profiles_read_public USING (true)` leak; manager identity dedup'd into `loadManagerIdentity()` helper using admin client; ManagerIdentityPanel + AccreditedInvestorGate + LegalFooter + DeleteAccountButton + custody Disclaimer variant; legal pages; force-dynamic + fail-closed try/catch on the discovery + recommendations gates).~~
+- ~~**Sprint 3 tear sheet + freshness + percentile + Approach B stripped** (HTML tearsheet print-styled at `/factsheet/[id]/tearsheet`, PDF tearsheet route, shared `lib/freshness.ts::computeFreshness` with fresh<12h/warm<48h/stale≥48h plus clock-skew clamping, FreshnessBadge, PercentileRankBadge, `/recommendations` server component reading top-3 from match_batches with reasoning text, sidebar link).~~
+- ~~**Pre-landing review fixes**: HTML escaping applied to all legacy email helpers (notifyManagerIntroRequest/notifyManagerApproved/notifyAllocatorIntroStatus/notifyFounderNewStrategy/notifyFounderIntroRequest/sendAlertDigest), `safeSubject()` strips CR/LF from subject lines, deletion-request route escapes user.email before founder notification, latest_cron_success() restricted to admin/service_role only, X-Service-Key resolved at cron execution time so the secret never lands in cron.job.command, queries.ts manager fetches use createAdminClient() so the column REVOKE doesn't break server-side reads, profile/page.tsx self-read uses admin client.~~
+- ~~**29 new vitest tests**: 19 freshness boundary + clock-skew tests, 5 disclosure-tier redaction tests asserting profiles is queried via admin client only for institutional strategies and never queried for exploratory.~~
+
+## Completed (2026-04-07)
 
 - ~~**Perfect Match Engine v1** (founder-amplifier): admin-only Match Queue with triage list, two-pane detail (shortlist strip + ranked candidates + sticky detail pane), keyboard shortcuts (j/k/s/u/d/r), Send Intro slide-out with idempotent SECURITY DEFINER RPC, kill switch, eval dashboard. Migration 011 + Python `match_engine.py` + 24 unit tests + 8 Next.js admin API routes + 5 React components + runbook + Playwright E2E suite. Branch: `feat/perfect-match-engine`. PR: #10. Plan + full review trail at `docs/superpowers/plans/2026-04-07-perfect-match-engine.md`.~~
 - ~~**3 critical bugs caught and fixed during /qa** on the same branch: kill-switch silent fallback when migration 011 missing (ISSUE-003), preferences server component crash when migration 011 missing (ISSUE-004), E2E test status code mismatch with proxy 307 redirect (ISSUE-001).~~
