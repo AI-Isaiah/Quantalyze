@@ -22,6 +22,8 @@ export interface Profile {
   created_at: string;
 }
 
+export type DisclosureTier = "institutional" | "exploratory";
+
 export interface Strategy {
   id: string;
   user_id: string;
@@ -42,6 +44,26 @@ export interface Strategy {
   is_example: boolean;
   benchmark: string;
   created_at: string;
+  /** Added in migration 012. "exploratory" is the safe default for legacy rows. */
+  disclosure_tier?: DisclosureTier;
+  /** Optional relay email on the strategy itself. Nullable; falls back to manager profile email. */
+  public_contact_email?: string | null;
+  /** Nullable for whitelabel v1 (migration 012). Null means the default Quantalyze tenant. */
+  tenant_id?: string | null;
+}
+
+/**
+ * Subset of the manager's profile used for display on institutional-tier
+ * strategies. Exploratory-tier strategies receive a redacted version with
+ * everything but the codename nulled out — see `getStrategyDetail()`.
+ */
+export interface ManagerIdentity {
+  display_name: string | null;
+  company: string | null;
+  bio: string | null;
+  years_trading: number | null;
+  aum_range: string | null;
+  linkedin: string | null;
 }
 
 export interface StrategyAnalytics {

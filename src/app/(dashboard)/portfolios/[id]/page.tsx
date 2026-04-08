@@ -6,12 +6,15 @@ import { PortfolioKPIRow } from "@/components/portfolio/PortfolioKPIRow";
 import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdownTable";
 import { AlertsList } from "@/components/portfolio/AlertsList";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import {
   getPortfolioDetail,
   getPortfolioStrategies,
   getPortfolioAnalytics,
   getPortfolioAlerts,
 } from "@/lib/queries";
+import { computeFreshness } from "@/lib/freshness";
+import { extractAnalytics } from "@/lib/utils";
 import Link from "next/link";
 import type { PortfolioAnalytics, PortfolioAlert } from "@/lib/types";
 
@@ -75,6 +78,30 @@ function StaleWarning({ error }: { error: string | null }) {
           <p className="text-sm font-medium text-negative">Analytics sync failed</p>
           <p className="mt-0.5 text-xs text-text-secondary">
             Showing last-good data.{error ? ` Error: ${error}` : ""}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StaleConstituentWarning({ staleNames }: { staleNames: string[] }) {
+  if (staleNames.length === 0) return null;
+  const display =
+    staleNames.length <= 2
+      ? staleNames.join(" and ")
+      : `${staleNames.slice(0, 2).join(", ")} +${staleNames.length - 2} more`;
+  return (
+    <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+      <div className="flex items-start gap-2">
+        <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1a7 7 0 110 14A7 7 0 018 1zm0 3a.75.75 0 00-.75.75v3.5a.75.75 0 001.5 0v-3.5A.75.75 0 008 4zm0 7a.75.75 0 100-1.5.75.75 0 000 1.5z" />
+        </svg>
+        <div>
+          <p className="text-sm font-medium text-amber-800">Stale constituent data</p>
+          <p className="mt-0.5 text-xs text-text-secondary">
+            Portfolio includes {display} whose analytics are more than 48 hours old.
+            Results may not reflect current performance.
           </p>
         </div>
       </div>
@@ -185,11 +212,34 @@ export default async function PortfolioDashboardPage({
             ? "stale"
             : "complete";
 
+  // Surface any constituent strategy whose analytics are stale so the allocator
+  // knows the portfolio view may be out of date at the source.
+  const staleConstituents: string[] = [];
+  for (const ps of strategies) {
+    const strategy = (ps as { strategies?: { name?: string; strategy_analytics?: unknown } })
+      .strategies;
+    if (!strategy) continue;
+    const sAnalytics = extractAnalytics(strategy.strategy_analytics);
+    if (!sAnalytics) continue;
+    if (computeFreshness(sAnalytics.computed_at) === "stale") {
+      staleConstituents.push(strategy.name ?? "unknown");
+    }
+  }
+
   return (
     <>
       <PageHeader
         title={portfolio.name}
         description={portfolio.description ?? undefined}
+        meta={
+          analytics?.computed_at ? (
+            <FreshnessBadge
+              computedAt={analytics.computed_at}
+              label="Analytics"
+              variant="pill"
+            />
+          ) : undefined
+        }
         actions={
           state === "complete" || state === "stale" ? (
             <div className="flex items-center gap-2">
@@ -217,6 +267,9 @@ export default async function PortfolioDashboardPage({
       {state === "computing" && <ComputingState />}
       {state === "stale" && analytics && (
         <StaleWarning error={analytics.computation_error} />
+      )}
+      {(state === "complete" || state === "stale") && (
+        <StaleConstituentWarning staleNames={staleConstituents} />
       )}
       {(state === "complete" || state === "stale") && analytics && (
         <DashboardContent

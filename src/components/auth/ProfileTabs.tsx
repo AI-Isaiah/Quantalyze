@@ -3,12 +3,14 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { ProfileForm } from "./ProfileForm";
+import { DeleteAccountButton } from "./DeleteAccountButton";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
 import type { Profile } from "@/lib/types";
 
 const TABS = [
   { key: "personal", label: "Personal Info" },
   { key: "organizations", label: "Organizations" },
+  { key: "account", label: "Account" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -37,6 +39,11 @@ export function ProfileTabs({ profile }: { profile: Profile }) {
 
       {activeTab === "personal" && <ProfileForm profile={profile} />}
       {activeTab === "organizations" && <OrganizationTab />}
+      {activeTab === "account" && (
+        <div className="max-w-xl">
+          <DeleteAccountButton />
+        </div>
+      )}
     </div>
   );
 }

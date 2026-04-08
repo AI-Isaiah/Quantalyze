@@ -152,6 +152,46 @@ export default async function FactsheetPage({
         </div>
       )}
 
+      {/* Custody statement */}
+      <div className="mb-6">
+        <Disclaimer variant="custody" />
+      </div>
+
+      {/* Risk disclosure block */}
+      <div className="mb-6 rounded-lg border border-border p-4">
+        <h2 className="text-sm font-semibold text-text-primary mb-3">Risk Disclosure</h2>
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+          <div className="flex justify-between">
+            <dt className="text-text-muted">Leverage</dt>
+            <dd className="font-medium text-text-primary">
+              {strategy.leverage_range ?? "Not disclosed"}
+            </dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-text-muted">Max Drawdown</dt>
+            <dd className="font-metric text-text-primary">
+              {formatPercent(analytics.max_drawdown)}
+            </dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-text-muted">Minimum Allocation</dt>
+            <dd className="font-medium text-text-primary">
+              {strategy.aum ? `$${Math.round(strategy.aum).toLocaleString()}` : "Negotiable"}
+            </dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-text-muted">Lockup</dt>
+            <dd className="font-medium text-text-primary">None (read-only API)</dd>
+          </div>
+        </dl>
+        <p className="mt-3 border-t border-border pt-3 text-[10px] text-text-muted leading-relaxed">
+          Past performance does not guarantee future results. Cryptocurrency
+          trading involves substantial risk of total loss. This factsheet is
+          for informational purposes only and does not constitute investment
+          advice.
+        </p>
+      </div>
+
       {/* Footer */}
       <Disclaimer variant="factsheet" />
 

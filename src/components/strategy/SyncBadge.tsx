@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { computeFreshness, FRESHNESS_COLORS } from "@/lib/freshness";
 
 interface SyncBadgeProps {
   computedAt: string | null;
@@ -17,13 +18,6 @@ function timeAgo(date: Date): string {
   return `${days}d ago`;
 }
 
-function freshnessColor(date: Date): string {
-  const hours = (Date.now() - date.getTime()) / (1000 * 60 * 60);
-  if (hours < 24) return "bg-positive";
-  if (hours < 48) return "bg-yellow-400";
-  return "bg-negative";
-}
-
 const EXCHANGE_LABELS: Record<string, string> = {
   binance: "Binance",
   okx: "OKX",
@@ -34,7 +28,8 @@ export function SyncBadge({ computedAt, exchange, className }: SyncBadgeProps) {
   if (!computedAt) return null;
 
   const date = new Date(computedAt);
-  const dotColor = freshnessColor(date);
+  const freshness = computeFreshness(date);
+  const dotColor = FRESHNESS_COLORS[freshness].dot;
   const exchangeLabel = exchange
     ? EXCHANGE_LABELS[exchange.toLowerCase()] ?? exchange
     : null;

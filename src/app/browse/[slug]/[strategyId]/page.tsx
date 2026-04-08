@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getPublicStrategyDetail } from "@/lib/queries";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
@@ -41,7 +42,7 @@ export default async function PublicStrategyDetailPage({
     );
   }
 
-  const { strategy, analytics } = result;
+  const { strategy, analytics, manager, disclosureTier } = result;
 
   return (
     <>
@@ -76,6 +77,16 @@ export default async function PublicStrategyDetailPage({
           )}
         </div>
       </div>
+
+      <div className="mb-6">
+        <ManagerIdentityPanel
+          disclosureTier={disclosureTier}
+          manager={manager}
+          strategyCodename={strategy.name}
+        />
+      </div>
+
+      <Disclaimer variant="custody" className="mb-6" />
 
       {/* Hero metrics */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

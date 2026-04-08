@@ -52,6 +52,46 @@ body {
   color: var(--color-text-primary);
 }
 
+/* Typography for the /legal/* routes — avoids a full @tailwindcss/typography
+   dependency for three static pages. */
+.legal-article h1 {
+  margin-top: 0;
+}
+.legal-article h2 {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+  color: var(--color-text-primary);
+  font-weight: 600;
+  font-size: 1.125rem;
+}
+.legal-article p,
+.legal-article ul,
+.legal-article ol {
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.legal-article ul,
+.legal-article ol {
+  padding-left: 1.25rem;
+}
+.legal-article ul {
+  list-style: disc;
+}
+.legal-article ol {
+  list-style: decimal;
+}
+.legal-article li {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.legal-article a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.legal-article a:hover {
+  color: var(--color-accent-hover);
+}
+
 /* Geist Mono for all numeric values */
 .font-metric {
   font-family: var(--font-mono);

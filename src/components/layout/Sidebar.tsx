@@ -9,19 +9,35 @@ type IconComponent = ({ className }: { className?: string }) => React.JSX.Elemen
 interface NavItem { label: string; href: string; icon: IconComponent }
 interface NavSection { heading: string; items: NavItem[] }
 
-function buildNavSections(populatedSlugs?: string[], isAdmin?: boolean): NavSection[] {
+function buildNavSections(
+  populatedSlugs?: string[],
+  isAdmin?: boolean,
+  isAllocator?: boolean,
+): NavSection[] {
   const categories = populatedSlugs
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
     : DISCOVERY_CATEGORIES;
 
+  const workspaceItems: NavItem[] = [
+    { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+    { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
+    { label: "Allocations", href: "/allocations", icon: PortfolioIcon },
+  ];
+
+  // Allocator-facing recommendations surface — hidden from managers and
+  // from the founder (who has the admin Match Queue instead).
+  if (isAllocator && !isAdmin) {
+    workspaceItems.push({
+      label: "Recommendations",
+      href: "/recommendations",
+      icon: RecommendIcon,
+    });
+  }
+
   return [
     {
       heading: "MY WORKSPACE",
-      items: [
-        { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-        { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
-        { label: "Allocations", href: "/allocations", icon: PortfolioIcon },
-      ],
+      items: workspaceItems,
     },
     ...(categories.length > 0
       ? [{
@@ -49,9 +65,20 @@ function buildNavSections(populatedSlugs?: string[], isAdmin?: boolean): NavSect
   ];
 }
 
-export function Sidebar({ populatedSlugs, isAdmin }: { populatedSlugs?: string[]; isAdmin?: boolean } = {}) {
+export function Sidebar({
+  populatedSlugs,
+  isAdmin,
+  isAllocator,
+}: {
+  populatedSlugs?: string[];
+  isAdmin?: boolean;
+  isAllocator?: boolean;
+} = {}) {
   const pathname = usePathname();
-  const sections = useMemo(() => buildNavSections(populatedSlugs, isAdmin), [populatedSlugs, isAdmin]);
+  const sections = useMemo(
+    () => buildNavSections(populatedSlugs, isAdmin, isAllocator),
+    [populatedSlugs, isAdmin, isAllocator],
+  );
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text">
@@ -142,8 +169,16 @@ function PortfolioIcon({ className }: { className?: string }) {
 function MatchIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z" />
+      <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H9zM9 9h4v4H9z" />
       <path d="M7 5h2M7 11h2M5 7v2M11 7v2" />
+    </svg>
+  );
+}
+
+function RecommendIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 1l1.8 4.2 4.7.4-3.6 3 1.1 4.6L8 10.8 3.9 13.2l1.1-4.6-3.6-3 4.7-.4L8 1z" />
     </svg>
   );
 }
