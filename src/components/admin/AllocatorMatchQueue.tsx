@@ -1,14 +1,44 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { computeFreshness } from "@/lib/freshness";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
 import { SendIntroPanel } from "@/components/admin/SendIntroPanel";
 import { PreferencesPanel } from "@/components/admin/PreferencesPanel";
+
+/**
+ * Reactive media-query hook. Returns true when the query matches.
+ *
+ * Used to gate keyboard shortcuts to lg+ viewports without forcing a
+ * separate mobile component tree. Implemented with useSyncExternalStore
+ * so we don't fall into the "setState inside useEffect" anti-pattern
+ * the React compiler (rightly) complains about. The SSR snapshot is
+ * `false` so the read-only mobile UI hydrates first — flipping the
+ * other way would briefly expose write actions before JS classifies
+ * the viewport.
+ */
+function useMediaQuery(query: string): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (typeof window === "undefined") return () => {};
+      const mql = window.matchMedia(query);
+      mql.addEventListener("change", onChange);
+      return () => mql.removeEventListener("change", onChange);
+    },
+    [query],
+  );
+  const getSnapshot = useCallback(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(query).matches;
+  }, [query]);
+  const getServerSnapshot = useCallback(() => false, []);
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -108,6 +138,7 @@ interface Decision {
   founder_note: string | null;
   contact_request_id: string | null;
   created_at: string;
+  strategies?: { id: string; name: string; codename: string | null } | null;
 }
 
 interface QueueData {
@@ -132,6 +163,14 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
   const [showPreferencesPanel, setShowPreferencesPanel] = useState(false);
   const [showExcluded, setShowExcluded] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
+
+  // Viewport classification.
+  //   lg+ (1024+): keyboard shortcuts on, two-pane layout, full write mode
+  //   below lg: single-column stacked layout (list on top, detail below)
+  //   below md (768): read-only banner rendered above the list; the action
+  //     buttons still exist but a visible warning discourages use.
+  const isLg = useMediaQuery("(min-width: 1024px)");
 
   // Track in-flight load requests to prevent a stale response from overwriting
   // a newer one. Incremented on each load(); responses only apply if they match
@@ -219,30 +258,35 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     [allocatorId, load],
   );
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts — only active at lg+ (1024+) per Sprint 4 T10.1.
+  // Each handler short-circuits via the isLg check; we still register the
+  // hook unconditionally so the listener doesn't churn on viewport changes.
   useKeyboardShortcuts([
     {
       key: "j",
       handler: () => {
-        if (!data?.candidates.length) return;
+        if (!isLg || !data?.candidates.length) return;
         setSelectedIdx((i) => Math.min(i + 1, data.candidates.length - 1));
       },
     },
     {
       key: "k",
       handler: () => {
+        if (!isLg) return;
         setSelectedIdx((i) => Math.max(i - 1, 0));
       },
     },
     {
       key: "s",
       handler: () => {
+        if (!isLg) return;
         if (selectedCandidate) setSendIntroFor(selectedCandidate);
       },
     },
     {
       key: "u",
       handler: () => {
+        if (!isLg) return;
         if (selectedCandidate) {
           handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id);
         }
@@ -251,22 +295,45 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
     {
       key: "d",
       handler: () => {
+        if (!isLg) return;
         if (selectedCandidate) {
           handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id);
         }
       },
     },
-    { key: "r", handler: handleRecompute },
+    {
+      key: "r",
+      handler: () => {
+        if (!isLg) return;
+        handleRecompute();
+      },
+    },
   ]);
+
+  // Shortcut help overlay: bound to "?" (Shift+/). Stricter than the
+  // useKeyboardShortcuts hook because we want it to fire ONLY when the
+  // user has nothing focused — body. This excludes the case where a
+  // slide-out panel is open and focus has moved into it. Esc closes the
+  // modal via the native <dialog> behavior.
+  useEffect(() => {
+    if (!isLg) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "?") return;
+      // Strict body check: only fire on the bare page, not over an open
+      // modal/slide-out/input. document.body is the activeElement when
+      // nothing is focused.
+      if (document.activeElement !== document.body) return;
+      e.preventDefault();
+      setShowShortcutHelp(true);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isLg]);
 
   // ─── Render ─────────────────────────────────────────────────────────
 
   if (loading) {
-    return (
-      <Card className="text-center py-12">
-        <p className="text-sm text-text-muted">Loading match queue...</p>
-      </Card>
-    );
+    return <MatchQueueSkeleton />;
   }
   if (error || !data) {
     return (
@@ -306,6 +373,17 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
           {profile.display_name || profile.email}
         </span>
       </nav>
+
+      {/* Read-only mobile banner: below the md breakpoint (768px) the queue
+          hides all KEEP/SKIP/SENT actions so a founder accidentally demoing
+          from their phone doesn't record a decision with the wrong intent. */}
+      <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
+        <p className="text-sm text-text-primary">
+          <strong className="font-semibold">Read-only on mobile.</strong>{" "}
+          Open on a desktop or tablet (1024px+) to use keyboard shortcuts
+          and record KEEP / SKIP / Send Intro decisions.
+        </p>
+      </div>
 
       {/* Header strip */}
       <Card>
@@ -639,6 +717,11 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
           onRecomputeRequested={handleRecompute}
         />
       )}
+
+      {/* Keyboard shortcut help modal (opened by `?`) */}
+      {showShortcutHelp && (
+        <ShortcutHelpModal onClose={() => setShowShortcutHelp(false)} />
+      )}
     </div>
   );
 }
@@ -676,6 +759,101 @@ function ScoreCell({ score }: { score: number }) {
         <div className="h-full bg-accent" style={{ width: `${pct * 100}%` }} />
       </div>
     </div>
+  );
+}
+
+/**
+ * Shimmer skeleton shown while the queue data is loading. Matches the rough
+ * shape of the real layout (header strip + shortlist strip + two-pane list
+ * + sticky detail) so there's no jarring reflow when data arrives.
+ */
+function MatchQueueSkeleton() {
+  return (
+    <div className="space-y-4 animate-pulse">
+      <div className="h-4 w-48 bg-border rounded" />
+      <Card>
+        <div className="h-6 w-64 bg-border rounded" />
+        <div className="mt-2 h-3 w-40 bg-border/60 rounded" />
+        <div className="mt-4 flex gap-2">
+          <div className="h-8 w-32 bg-border rounded" />
+          <div className="h-8 w-32 bg-border/60 rounded" />
+        </div>
+      </Card>
+      <div>
+        <div className="mb-2 h-3 w-20 bg-border/60 rounded" />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="rounded-lg border border-border bg-surface p-4 space-y-3">
+              <div className="h-4 w-3/4 bg-border rounded" />
+              <div className="h-3 w-full bg-border/60 rounded" />
+              <div className="h-2 w-full bg-border/40 rounded" />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[2fr_3fr] gap-4">
+        <Card className="p-0">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div
+              key={i}
+              className="border-b border-border px-4 py-3 space-y-2 last:border-b-0"
+            >
+              <div className="h-3 w-2/3 bg-border rounded" />
+              <div className="h-2 w-1/2 bg-border/60 rounded" />
+            </div>
+          ))}
+        </Card>
+        <Card className="min-h-[320px] space-y-3">
+          <div className="h-5 w-48 bg-border rounded" />
+          <div className="h-3 w-full bg-border/60 rounded" />
+          <div className="h-3 w-5/6 bg-border/60 rounded" />
+          <div className="h-3 w-4/6 bg-border/60 rounded" />
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/** Keyboard shortcut hint modal triggered by `?`. */
+function ShortcutHelpModal({ onClose }: { onClose: () => void }) {
+  const shortcuts: Array<{ keys: string[]; label: string }> = [
+    { keys: ["j"], label: "Next candidate" },
+    { keys: ["k"], label: "Previous candidate" },
+    { keys: ["s"], label: "Open Send Intro panel" },
+    { keys: ["u"], label: "Mark as keep (thumbs up)" },
+    { keys: ["d"], label: "Mark as skip (thumbs down)" },
+    { keys: ["r"], label: "Recompute now" },
+    { keys: ["?"], label: "Show this help" },
+    { keys: ["Esc"], label: "Close open panel" },
+  ];
+  return (
+    <Modal open onClose={onClose} title="Keyboard shortcuts">
+      <p className="text-sm text-text-secondary mb-4">
+        Shortcuts only fire on the match-queue page and only on desktop
+        (1024px+). They&rsquo;re suppressed whenever a modal or input has
+        focus.
+      </p>
+      <dl className="space-y-2">
+        {shortcuts.map((shortcut) => (
+          <div
+            key={shortcut.label}
+            className="flex items-center justify-between border-b border-border pb-2 last:border-b-0"
+          >
+            <dt className="text-sm text-text-primary">{shortcut.label}</dt>
+            <dd className="flex items-center gap-1">
+              {shortcut.keys.map((k) => (
+                <kbd
+                  key={k}
+                  className="inline-flex items-center rounded border border-border bg-page px-2 py-0.5 font-mono text-[11px] text-text-primary"
+                >
+                  {k}
+                </kbd>
+              ))}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Modal>
   );
 }
 

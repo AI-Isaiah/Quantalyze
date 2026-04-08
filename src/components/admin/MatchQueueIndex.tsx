@@ -40,6 +40,7 @@ export function MatchQueueIndex() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("needs_attention");
+  const [mandateFilter, setMandateFilter] = useState<string>("all");
   const [killSwitch, setKillSwitch] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
@@ -94,6 +95,9 @@ export function MatchQueueIndex() {
       // Placeholder: snoozed = no recent batch and no recent intro
       rows = rows.filter((r) => !r.needs_attention);
     }
+    if (mandateFilter !== "all") {
+      rows = rows.filter((r) => r.mandate_archetype === mandateFilter);
+    }
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       rows = rows.filter(
@@ -105,12 +109,21 @@ export function MatchQueueIndex() {
       );
     }
     return rows;
-  }, [allocators, filter, search]);
+  }, [allocators, filter, mandateFilter, search]);
 
   const attentionCount = useMemo(
     () => allocators.filter((r) => r.needs_attention).length,
     [allocators],
   );
+
+  // Unique mandate archetypes present in the current allocator list, sorted.
+  const mandateArchetypes = useMemo(() => {
+    const set = new Set<string>();
+    for (const row of allocators) {
+      if (row.mandate_archetype) set.add(row.mandate_archetype);
+    }
+    return Array.from(set).sort();
+  }, [allocators]);
 
   // ─── Render ───────────────────────────────────────────────────────────
 
@@ -170,12 +183,24 @@ export function MatchQueueIndex() {
             count={allocators.length}
           />
         </div>
+        <select
+          value={mandateFilter}
+          onChange={(e) => setMandateFilter(e.target.value)}
+          className="ml-auto rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+        >
+          <option value="all">All mandates</option>
+          {mandateArchetypes.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
         <input
           type="text"
-          placeholder="Search allocators..."
+          placeholder="Search name or company..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="ml-auto w-[260px] rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+          className="w-[260px] rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
         />
         <EngineStatusPill
           enabled={killSwitch}
