@@ -14,10 +14,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   const url = new URL(req.url);
   const lookback = url.searchParams.get("lookback_days") || "28";
+  const partnerTag = url.searchParams.get("partner_tag");
+
+  // Build the upstream query string. partner_tag is optional — only forward
+  // when present so unscoped callers stay on the existing code path.
+  const upstreamParams = new URLSearchParams({ lookback_days: lookback });
+  if (partnerTag) {
+    upstreamParams.set("partner_tag", partnerTag);
+  }
 
   try {
     const upstream = await fetch(
-      `${ANALYTICS_URL}/api/match/eval?lookback_days=${encodeURIComponent(lookback)}`,
+      `${ANALYTICS_URL}/api/match/eval?${upstreamParams.toString()}`,
       {
         headers: {
           ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),

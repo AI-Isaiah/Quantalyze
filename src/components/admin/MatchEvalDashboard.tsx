@@ -33,7 +33,17 @@ interface EvalMetrics {
   missed: MissedRow[];
 }
 
-export function MatchEvalDashboard() {
+interface MatchEvalDashboardProps {
+  /**
+   * When set, scopes all metrics queries to allocators tagged into the
+   * given partner pilot (migration 016). The dashboard also renders a
+   * prominent teal-accented filter banner so the founder can never
+   * accidentally demo unfiltered data that appears filtered.
+   */
+  partnerTag?: string;
+}
+
+export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {}) {
   const [metrics, setMetrics] = useState<EvalMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +53,9 @@ export function MatchEvalDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/admin/match/eval?lookback_days=${lookback}`);
+      const params = new URLSearchParams({ lookback_days: String(lookback) });
+      if (partnerTag) params.set("partner_tag", partnerTag);
+      const res = await fetch(`/api/admin/match/eval?${params.toString()}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || "Failed to load metrics");
@@ -54,7 +66,7 @@ export function MatchEvalDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [lookback]);
+  }, [lookback, partnerTag]);
 
   useEffect(() => {
     load();
@@ -81,6 +93,51 @@ export function MatchEvalDashboard() {
 
   return (
     <div className="space-y-6">
+      {/* Filter banner — always rendered so the founder can never confuse a
+          filtered and an unfiltered view. When scoped to a partner pilot we
+          use the accent-teal left border; otherwise we render an equally
+          prominent neutral banner confirming "no filter". Trust breakage is
+          catastrophic if we ever ship a subtle text-only version of this. */}
+      {partnerTag ? (
+        <div
+          className="border-l-4 border-accent bg-accent/5 px-4 py-3"
+          role="status"
+          aria-live="polite"
+        >
+          <p className="font-display text-base text-text-primary">
+            Filtered to partner pilot:{" "}
+            <span className="font-mono text-accent">{partnerTag}</span>
+          </p>
+          <p className="mt-0.5 text-xs text-text-muted">
+            Hit rate scoped to allocators tagged{" "}
+            <span className="font-mono">{partnerTag}</span>. Intros shipped:{" "}
+            <span className="font-metric tabular-nums text-text-primary">
+              {metrics.intros_shipped}
+            </span>
+          </p>
+        </div>
+      ) : (
+        <div
+          className="border-l-4 border-border bg-surface px-4 py-3"
+          role="status"
+          aria-live="polite"
+        >
+          <p className="font-display text-base text-text-primary">
+            Showing all allocators (no filter)
+          </p>
+          <p className="mt-0.5 text-xs text-text-muted">
+            Unscoped view. Use{" "}
+            <Link
+              href="/admin/partner-import"
+              className="text-accent hover:text-accent-hover"
+            >
+              partner import
+            </Link>{" "}
+            to spin up a pilot and scope this dashboard.
+          </p>
+        </div>
+      )}
+
       {/* Nav breadcrumb */}
       <nav className="flex items-center gap-2 text-sm text-text-muted">
         <Link href="/admin/match" className="hover:text-text-primary">
