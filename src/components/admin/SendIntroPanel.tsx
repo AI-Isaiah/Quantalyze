@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Textarea } from "@/components/ui/Textarea";
+import { displayStrategyName } from "@/lib/strategy-display";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 interface Props {
@@ -75,7 +76,7 @@ export function SendIntroPanel({
               Send intro
             </p>
             <h2 className="mt-0.5 text-lg font-display text-text-primary">
-              {candidate.strategies?.codename || candidate.strategies?.name || "(strategy)"}
+              {displayStrategyName(candidate.strategies)}
             </h2>
           </div>
           <button

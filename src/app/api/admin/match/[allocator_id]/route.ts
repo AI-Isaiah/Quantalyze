@@ -62,7 +62,7 @@ export async function GET(
       .from("match_decisions")
       .select(
         "id, strategy_id, decision, founder_note, contact_request_id, created_at, " +
-          "strategies!match_decisions_strategy_id_fkey(id, name, codename)",
+          "strategies!match_decisions_strategy_id_fkey(id, name, codename, disclosure_tier)",
       )
       .eq("allocator_id", allocator_id)
       .order("created_at", { ascending: false })
@@ -91,7 +91,7 @@ export async function GET(
       .from("match_candidates")
       .select(
         "id, strategy_id, score, score_breakdown, reasons, rank, exclusion_reason, exclusion_provenance, " +
-          "strategies!match_candidates_strategy_id_fkey(id, name, codename, " +
+          "strategies!match_candidates_strategy_id_fkey(id, name, codename, disclosure_tier, " +
           "strategy_types, supported_exchanges, aum, max_capacity, user_id)",
       )
       .eq("batch_id", batchRow.id as string)

@@ -77,6 +77,7 @@ interface StrategyProfile {
   name: string;
   user_id: string;
   disclosure_tier: "institutional" | "exploratory";
+  codename?: string | null;
   strategy_types: string[];
   description: string;
   aum: number;
@@ -147,6 +148,7 @@ const STRATEGY_PROFILES: StrategyProfile[] = [
     name: "Helios L/S Stat Arb",
     user_id: MANAGER_EXPLORATORY_A,
     disclosure_tier: "exploratory",
+    codename: "Strategy H-42",
     strategy_types: ["market_neutral"],
     description: "Long/short pair-trading with ML-driven signal generation.",
     aum: 2_500_000,
@@ -160,6 +162,7 @@ const STRATEGY_PROFILES: StrategyProfile[] = [
     name: "Orion Grid Bot",
     user_id: MANAGER_EXPLORATORY_A,
     disclosure_tier: "exploratory",
+    codename: "Strategy O-17",
     strategy_types: ["market_making"],
     description: "Classic grid bot on ETH/USDT with adaptive spreads.",
     aum: 1_200_000,
@@ -173,6 +176,7 @@ const STRATEGY_PROFILES: StrategyProfile[] = [
     name: "Pulsar Trend Follow",
     user_id: MANAGER_EXPLORATORY_B,
     disclosure_tier: "exploratory",
+    codename: "Strategy P-88",
     strategy_types: ["directional"],
     description: "Long-only trend-following on weekly BTC and ETH closes.",
     aum: 3_500_000,
@@ -186,6 +190,7 @@ const STRATEGY_PROFILES: StrategyProfile[] = [
     name: "Quasar Mean Reversion",
     user_id: MANAGER_EXPLORATORY_B,
     disclosure_tier: "exploratory",
+    codename: "Strategy Q-03",
     strategy_types: ["market_neutral"],
     description: "Short-horizon mean reversion on the top 10 perp pairs by volume.",
     aum: 4_000_000,
@@ -469,6 +474,7 @@ async function main() {
       is_example: true,
       benchmark: "BTC",
       disclosure_tier: profile.disclosure_tier,
+      codename: profile.codename ?? null,
     });
     if (sErr) throw sErr;
 
