@@ -18,8 +18,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
-def compute_hit_rate_metrics(lookback_days: int = 28) -> dict[str, Any]:
+def compute_hit_rate_metrics(
+    lookback_days: int = 28,
+    partner_tag: str | None = None,
+) -> dict[str, Any]:
     """Compute hit rate metrics over the last lookback_days.
+
+    When `partner_tag` is provided, scope the metrics to intros shipped to
+    allocators whose profile has that partner_tag — used by the cap-intro demo
+    sprint's partner pilot flow (T-1.3). Unscoped calls continue to include
+    every allocator.
 
     Returns:
     {
@@ -37,14 +45,29 @@ def compute_hit_rate_metrics(lookback_days: int = 28) -> dict[str, Any]:
     supabase = get_supabase()
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
+    filtered_allocator_ids: list[str] | None = None
+    if partner_tag:
+        allocators_result = (
+            supabase.table("profiles")
+            .select("id")
+            .eq("partner_tag", partner_tag)
+            .in_("role", ["allocator", "both"])
+            .execute()
+        )
+        filtered_allocator_ids = [p["id"] for p in (allocators_result.data or [])]
+        if not filtered_allocator_ids:
+            return _empty_metrics(lookback_days)
+
     # All sent_as_intro decisions in the window
-    intros_result = (
+    intros_query = (
         supabase.table("match_decisions")
         .select("allocator_id, strategy_id, created_at, candidate_id")
         .eq("decision", "sent_as_intro")
         .gte("created_at", cutoff.isoformat())
-        .execute()
     )
+    if filtered_allocator_ids is not None:
+        intros_query = intros_query.in_("allocator_id", filtered_allocator_ids)
+    intros_result = intros_query.execute()
     intros = intros_result.data or []
 
     if not intros:

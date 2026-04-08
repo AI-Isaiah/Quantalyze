@@ -426,12 +426,21 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
 
 
 @router.get("/eval")
-async def eval_metrics(lookback_days: int = 28) -> dict[str, Any]:
-    """Compute hit-rate metrics for the /admin/match/eval dashboard."""
+async def eval_metrics(
+    lookback_days: int = 28,
+    partner_tag: str | None = None,
+) -> dict[str, Any]:
+    """Compute hit-rate metrics for the /admin/match/eval dashboard.
+
+    Optional `partner_tag` query param scopes the metrics to allocators tagged
+    into a partner pilot (see migration 016 + /admin/partner-import).
+    """
     if lookback_days < 1 or lookback_days > 365:
         raise HTTPException(status_code=400, detail="lookback_days must be between 1 and 365")
     try:
-        return await asyncio.to_thread(compute_hit_rate_metrics, lookback_days)
+        return await asyncio.to_thread(
+            compute_hit_rate_metrics, lookback_days, partner_tag
+        )
     except Exception as err:
         logger.exception("match_engine eval failed")
         raise HTTPException(status_code=500, detail=f"Eval failed: {err}") from err
