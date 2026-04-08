@@ -38,15 +38,15 @@ the next demo.
 
 ### P0 — Block the demo entirely
 
-- [ ] **Apply migration 011 to staging Supabase** — `supabase/migrations/011_perfect_match.sql`. The runbook has the exact SQL: set `app.admin_email` first, then run the migration. Without this, the founder sees clean "Apply migration 011" error messages everywhere and the match queue cannot function. (Discovered during /qa, ISSUE-002.)
-  - Verify after apply: `SELECT id, is_admin FROM profiles WHERE email = 'matratzentester24@gmail.com'` returns `is_admin = true`. If not, run the manual UPDATE from the runbook.
-  - Verify the 5 new tables exist: `system_flags`, `allocator_preferences`, `match_batches`, `match_candidates`, `match_decisions`.
-- [ ] **Apply migration 010 to staging Supabase** (also a P0 carry-over from the portfolio intelligence ship). Same Supabase instance — both 010 and 011 must be applied together so the portfolio dashboard and the match queue both work.
-- [ ] **Seed demo data so the three audience paths actually have something to look at.** Without this, the match queue is permanently empty and the eval dashboard has 0 intros.
-  - **Allocator path:** at least 2 allocator-role profiles (one cold-start with no portfolio, one with 2-3 strategies in a portfolio so personalized scoring works). Set a mandate archetype on each via the admin preferences editor.
-  - **Strategy team path:** at least 5-8 published strategies with verified API keys + computed analytics + 3+ months of returns. The current example strategies (Stellar, Nebula, etc.) probably suffice if their data is fresh.
-  - **Capital intro team path:** at least 1 historical `match_decisions` row with `decision='sent_as_intro'` AND an existing `contact_requests` row, so the eval dashboard's hit-rate calculation has at least one data point and the decision history collapsible isn't empty.
-- [ ] **Trigger the first cron-recompute manually.** Hit `POST /api/admin/match/recompute` from the admin queue's "Recompute now" button for each seeded allocator. Verify each gets a `match_batches` row + 5-30 candidates. Take a screenshot of the queue with real data — this is the demo state.
+- [x] **Apply migration 011 to staging Supabase** — applied via `supabase db push` 2026-04-08. All 5 match-engine tables present. Founder `is_admin = true` set manually via REST PATCH (migration's `app.admin_email` backfill requires `ALTER DATABASE postgres SET app.admin_email = 'matratzentester24@gmail.com';` before the push — not run yet, see P0 below).
+- [x] **Apply migration 010 to staging Supabase** — applied via `supabase db push` 2026-04-08. Portfolio intelligence tables present.
+- [x] **Seed demo data so the three audience paths actually have something to look at** — `scripts/seed-demo-data.ts` ran successfully 2026-04-08 against staging. Seeded: 7 auth users + 7 profiles (3 allocators: Cold Start Capital / Active Allocator LP / Stalled Diligence Fund, 4 managers: Alice Chen / Marcus Okafor / Helios Research / Pulsar Labs), 8 example strategies (4 institutional + 4 exploratory) with analytics, 1 historical match_decision + contact_request.
+- [x] **Trigger the first cron-recompute manually** — all 3 allocators recomputed 2026-04-08. Each got a fresh `match_batches` row + 13 candidates in `match_candidates`, mode=screening, ~315ms per recompute.
+
+### P0 — Discovered during Steps 3-5 demo staging (2026-04-08)
+
+- [ ] **Disclosure tier data exposure: exploratory strategies leak real names.** Migration 012 defaults `strategies.disclosure_tier = 'exploratory'` for all new rows, and the shipped UI (`AllocatorMatchQueue`, `CandidateDetail`, `SendIntroPanel`, admin API joins) renders `codename || name`. Migration 014 now adds the `codename` column (nullable), but there is no backfill and no render-side guard: every pre-existing exploratory strategy with `codename IS NULL` shows its real name, defeating the disclosure_tier contract. Fix options: (a) backfill `codename` for existing exploratory strategies (`'Strategy ' || substring(id::text, 1, 8)` or similar), (b) change UI fallback to `codename ?? 'Strategy <short-id>'` when tier=exploratory, (c) change 012's default to `institutional` (new migration + backfill). Recommended: (b) + (a). Currently only the founder has real data on staging so impact is latent, but this must fix before any real manager publishes an exploratory strategy.
+- [ ] **Persist `ALTER DATABASE postgres SET app.admin_email = '…';` on staging.** Migration 011's `is_admin` backfill was not run during the `db push` because `app.admin_email` was unset. Founder profile was patched manually via REST API (`is_admin = true`). For DB restore resilience, run this once in the Supabase SQL editor so any future migration replay or restore correctly flags admin: `ALTER DATABASE postgres SET app.admin_email = 'matratzentester24@gmail.com';`
 
 ### P0 — Deployment plumbing the demo depends on
 
@@ -82,6 +82,12 @@ These don't block the demo but they're the things an LP will notice in the first
   - `Sidebar.tsx:56` — "Quantalyze" logo text uses `font-bold` instead of `font-display` (Instrument Serif). Use the display font.
 - [ ] **Apply DESIGN.md tokens to any remaining stragglers.** The dashboard had old Inter/teal in a few places before; the perfect-match UI used the new tokens but a fresh sweep with `/design-review` on the live site after migration 011 is applied would catch anything that drifted.
 - [ ] **Mobile responsive check on all the portfolio intelligence pages** — only the landing page got tested at 375×812 in the prior /qa pass. Test: portfolio dashboard, management, documents, allocations hub, match queue index (desktop-only is OK on the detail page).
+
+### P1 — Analytics match engine cleanup (discovered during 2026-04-08 staging)
+
+- [ ] **Fix `_load_allocator_context` latent bugs in `analytics-service/routers/match.py` (lines 185-212).** Same root-cause class as the two bugs we shipped fixes for: (a) selects `portfolio_strategies.weight` but the actual column is `current_weight` (renamed in migration 010); (b) sums `strategy_analytics.total_aum` to compute `portfolio_aum`, but `total_aum` lives on `portfolio_analytics`, not `strategy_analytics` — and the right source is `portfolio_strategies.allocated_amount`. Only manifests when an allocator owns a portfolio (none of the 3 demo allocators do), so it's latent and not a demo blocker. Will 500 the moment an allocator with portfolios hits the match engine.
+- [ ] **Chunk unbounded `strategy_ids` list in match engine SELECT.** `analytics-service/routers/match.py` `_load_candidate_universe` passes an unbounded list to `.in_("strategy_id", strategy_ids)`. PostgREST has a ~URL-length limit; at a few hundred strategies the request will silently truncate or 414, zeroing analytics for missed strategies and producing wrong match scores without any error. Chunk in batches of ~100 and merge the dicts.
+- [ ] **Log swallowed datetime parse errors.** `analytics-service/routers/match.py` line 132 has `except (ValueError, AttributeError): pass` around the `start_date` → `track_record_days` parse. A malformed date silently zeros track record and biases the match engine toward low-track-record penalties. Add `logger.warning("match_engine: failed to parse start_date %s for strategy %s", ..., sid)` so it shows up in Railway logs.
 
 ### P1 — Founder workflow improvements that pay off in the demo
 
