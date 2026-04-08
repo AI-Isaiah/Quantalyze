@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import dynamic from "next/dynamic";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { PortfolioKPIRow } from "@/components/portfolio/PortfolioKPIRow";
@@ -7,6 +8,7 @@ import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdown
 import { AlertsList } from "@/components/portfolio/AlertsList";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
+import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
 import {
   getPortfolioDetail,
   getPortfolioStrategies,
@@ -17,6 +19,20 @@ import { computeFreshness } from "@/lib/freshness";
 import { extractAnalytics } from "@/lib/utils";
 import Link from "next/link";
 import type { PortfolioAnalytics, PortfolioAlert } from "@/lib/types";
+import type { OptimizerSuggestion } from "@/components/portfolio/PortfolioOptimizer";
+
+const PortfolioOptimizer = dynamic(
+  () => import("@/components/portfolio/PortfolioOptimizer"),
+  {
+    ssr: false,
+    loading: () => (
+      <Card>
+        <Skeleton className="h-5 w-1/3 mb-4" />
+        <SkeletonText lines={3} />
+      </Card>
+    ),
+  },
+);
 
 /* ---------- State sub-components ---------- */
 
@@ -116,11 +132,17 @@ function DashboardContent({
   strategies,
   alerts,
   portfolioId,
+  optimizerSuggestions,
+  optimizerComputedAt,
+  optimizerStatus,
 }: {
   analytics: PortfolioAnalytics;
   strategies: Awaited<ReturnType<typeof getPortfolioStrategies>>;
   alerts: PortfolioAlert[];
   portfolioId: string;
+  optimizerSuggestions: OptimizerSuggestion[] | null;
+  optimizerComputedAt: string | null;
+  optimizerStatus: "pending" | "computing" | "complete" | "failed" | null;
 }) {
   return (
     <div className="space-y-6">
@@ -173,6 +195,14 @@ function DashboardContent({
           portfolioId={portfolioId}
         />
       </div>
+
+      {/* Diversification optimizer (lazy loaded, below the fold) */}
+      <PortfolioOptimizer
+        portfolioId={portfolioId}
+        initialSuggestions={optimizerSuggestions}
+        computedAt={optimizerComputedAt}
+        computationStatus={optimizerStatus}
+      />
     </div>
   );
 }
@@ -277,6 +307,12 @@ export default async function PortfolioDashboardPage({
           strategies={strategies}
           alerts={alerts}
           portfolioId={id}
+          optimizerSuggestions={
+            (analytics.optimizer_suggestions as OptimizerSuggestion[] | null) ??
+            null
+          }
+          optimizerComputedAt={analytics.computed_at ?? null}
+          optimizerStatus={null}
         />
       )}
       <Disclaimer />
