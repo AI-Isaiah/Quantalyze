@@ -105,7 +105,7 @@ def _load_candidate_universe() -> dict[str, Any]:
         supabase.table("strategy_analytics")
         .select(
             "strategy_id, returns_series, sharpe, max_drawdown, "
-            "total_aum, cumulative_return, cagr, volatility"
+            "cumulative_return, cagr, volatility"
         )
         .in_("strategy_id", strategy_ids)
         .execute()
@@ -119,11 +119,15 @@ def _load_candidate_universe() -> dict[str, Any]:
         sid = strategy["id"]
         analytics = analytics_by_sid.get(sid, {})
 
-        # Track record days from start_date
+        # Track record days from start_date. start_date is a DATE column,
+        # so fromisoformat returns a naive datetime — promote to UTC before
+        # subtracting from the aware now().
         track_record_days = 0
         if strategy.get("start_date"):
             try:
                 start = datetime.fromisoformat(strategy["start_date"].replace("Z", "+00:00"))
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
                 track_record_days = (datetime.now(timezone.utc) - start).days
             except (ValueError, AttributeError):
                 pass

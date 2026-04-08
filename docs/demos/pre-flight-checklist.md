@@ -15,9 +15,13 @@ wrong mid-demo.
       SELECT COUNT(*) FROM investor_attestations;
       SELECT COUNT(*) FROM cron_runs;
       SELECT COUNT(*) FROM match_batches;
+      SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'strategies' AND column_name = 'codename';
       ```
-      Expected: migrations 010, 011, 012, 013 all applied. Counts ≥ 1
-      (backfilled for 012, seeded for 011, scheduled for 013).
+      Expected: migrations 010, 011, 012, 013, 014 all applied. Counts ≥ 1
+      (backfilled for 012, seeded for 011, scheduled for 013). The final
+      query must return one row — without `strategies.codename` the match
+      engine recompute 500s.
 
 - [ ] **Cron freshness.** Check that match_engine_cron has run in the
       last 36 hours:

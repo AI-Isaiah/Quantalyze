@@ -17,9 +17,13 @@ implementation plan at `docs/superpowers/plans/2026-04-07-perfect-match-engine.m
 ## Deploy checklist
 
 1. Migration 011 applied to staging:
-   - `ALTER DATABASE postgres SET app.admin_email = 'founder@quantalyze.io';`
+   - `ALTER DATABASE postgres SET app.admin_email = 'founder@quantalyze.io';` (persist via `ALTER DATABASE` so restores remain idempotent)
    - Run `011_perfect_match.sql`
    - Verify: `SELECT id, is_admin FROM profiles WHERE email = 'founder@...';` → is_admin = true
+1a. Migration 014 applied to staging:
+   - Run `014_strategy_codename.sql` (adds nullable `strategies.codename`).
+   - Verify: `SELECT column_name FROM information_schema.columns WHERE table_name = 'strategies' AND column_name = 'codename';` → returns one row.
+   - Without this column the match engine recompute 500s with `column strategies.codename does not exist` and `/admin/match/[allocator_id]` returns 500.
 2. Python service deployed with the new `routers/match.py` registered in `main.py`
 3. Next.js deployed with the new admin API routes
 4. Environment variables confirmed: `ADMIN_EMAIL`, `ANALYTICS_SERVICE_URL`, `ANALYTICS_SERVICE_KEY`

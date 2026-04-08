@@ -12,13 +12,16 @@
  * `is_example=true` are the "demo set" — we never touch non-example rows.
  *
  * Usage (from repo root):
+ *   SEED_CONFIRM_STAGING=true \
  *   NEXT_PUBLIC_SUPABASE_URL=... \
  *   SUPABASE_SERVICE_ROLE_KEY=... \
  *   npx tsx scripts/seed-demo-data.ts
  *
  * Prerequisites:
- *   - Migrations 010, 011, 012 must be applied to the target Supabase instance
- *   - Service role key is REQUIRED (writes RLS-protected tables)
+ *   - Migrations 010, 011, 012, 014 must be applied to the target Supabase instance
+ *   - Service role key is REQUIRED (writes RLS-protected tables + creates auth.users)
+ *   - SEED_CONFIRM_STAGING=true is REQUIRED as a safety interlock
+ *   - The target URL must not look production-flavored (hard-rejected)
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -282,6 +285,22 @@ async function main() {
     );
   }
 
+  // Hard guard against running against production. The script wipes
+  // is_example=true strategies and creates 7 confirmed auth users — an
+  // accidental run against a prod URL is catastrophic. Require an explicit
+  // opt-in env var AND reject any URL that looks production-flavored.
+  if (/\b(prod|production)\b/i.test(url)) {
+    throw new Error(
+      `[seed] Refusing to run against production-flavored URL: ${url}`,
+    );
+  }
+  if (process.env.SEED_CONFIRM_STAGING !== "true") {
+    throw new Error(
+      "[seed] Refusing to run without SEED_CONFIRM_STAGING=true. " +
+        `Target URL: ${url}. Set SEED_CONFIRM_STAGING=true to confirm this is a staging instance.`,
+    );
+  }
+
   const supabase = createClient(url, serviceKey);
 
   console.log("[seed] Wiping existing is_example=true rows ...");
@@ -293,6 +312,35 @@ async function main() {
     .delete()
     .eq("is_example", true);
   if (wipeErr) throw wipeErr;
+
+  console.log("[seed] Ensuring auth.users for demo UUIDs ...");
+  // profiles.id has a FK to auth.users(id). We must create auth users with
+  // the hard-coded UUIDs before upserting profiles. Uses the admin API,
+  // which allows specifying id + email. Idempotent: only swallows the
+  // specific "already exists" conflicts Supabase returns (status 422 with
+  // a known code). Anything else is a real error and must surface.
+  const authUsers = [
+    { id: ALLOCATOR_COLD, email: "demo-cold@example.com" },
+    { id: ALLOCATOR_ACTIVE, email: "demo-active@example.com" },
+    { id: ALLOCATOR_STALLED, email: "demo-stalled@example.com" },
+    { id: MANAGER_INSTITUTIONAL_A, email: "alice@example-stellar.com" },
+    { id: MANAGER_INSTITUTIONAL_B, email: "marcus@example-aurora.com" },
+    { id: MANAGER_EXPLORATORY_A, email: "helios@example-demo.com" },
+    { id: MANAGER_EXPLORATORY_B, email: "pulsar@example-demo.com" },
+  ];
+  const KNOWN_CONFLICT_CODES = /^(email_exists|user_already_exists|phone_exists)$/;
+  for (const u of authUsers) {
+    const { error } = await supabase.auth.admin.createUser({
+      id: u.id,
+      email: u.email,
+      email_confirm: true,
+    });
+    if (!error) continue;
+    const status = (error as { status?: number }).status;
+    const code = (error as { code?: string }).code ?? "";
+    if (status === 422 && KNOWN_CONFLICT_CODES.test(code)) continue;
+    throw error;
+  }
 
   console.log("[seed] Upserting profiles (3 allocators + 4 managers) ...");
   const profileRows = [
