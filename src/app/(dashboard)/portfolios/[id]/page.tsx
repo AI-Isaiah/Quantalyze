@@ -21,10 +21,13 @@ import Link from "next/link";
 import type { PortfolioAnalytics, PortfolioAlert } from "@/lib/types";
 import type { OptimizerSuggestion } from "@/components/portfolio/PortfolioOptimizer";
 
+// Next.js 16 forbids `ssr: false` on `next/dynamic` in Server Components.
+// PortfolioOptimizer is a `"use client"` component so it will hydrate on
+// the client regardless, and removing `ssr: false` just lets the empty-
+// state SSR render on first paint without the extra loading blip.
 const PortfolioOptimizer = dynamic(
   () => import("@/components/portfolio/PortfolioOptimizer"),
   {
-    ssr: false,
     loading: () => (
       <Card>
         <Skeleton className="h-5 w-1/3 mb-4" />
