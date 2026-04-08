@@ -9,7 +9,15 @@ import { NextRequest } from "next/server";
  * PR 1 removes `ignoreDuplicates` and adds `.select(...).single()`. This
  * test simulates a double POST (first insert, then overwrite) and verifies
  * that the second call returns 200 with the upserted row, never 500.
+ *
+ * PR 3 adds CSRF Origin/Referer header validation. All happy-path POSTs
+ * here include `origin: http://localhost:3000` so they pass the CSRF check
+ * (NODE_ENV defaults to "test" / "development" in vitest, which trusts
+ * localhost). The bottom of the file adds dedicated CSRF integration tests
+ * covering missing/wrong-origin rejection.
  */
+
+const VALID_ORIGIN = { origin: "http://localhost:3000" };
 
 const authUser = vi.hoisted(() => ({
   id: "00000000-0000-0000-0000-000000000001",
@@ -54,8 +62,9 @@ describe("POST /api/attestation", () => {
 
   it("returns 200 + attestation on first-time insert", async () => {
     const { POST } = await import("./route");
-    const req = new NextRequest("http://localhost/api/attestation", {
+    const req = new NextRequest("http://localhost:3000/api/attestation", {
       method: "POST",
+      headers: VALID_ORIGIN,
       body: JSON.stringify({ accepted: true }),
     });
     const res = await POST(req);
@@ -74,8 +83,9 @@ describe("POST /api/attestation", () => {
     const { POST } = await import("./route");
 
     // First call: insert.
-    const req1 = new NextRequest("http://localhost/api/attestation", {
+    const req1 = new NextRequest("http://localhost:3000/api/attestation", {
       method: "POST",
+      headers: VALID_ORIGIN,
       body: JSON.stringify({ accepted: true }),
     });
     const res1 = await POST(req1);
@@ -84,8 +94,9 @@ describe("POST /api/attestation", () => {
     // Second call: the old code path (with ignoreDuplicates + .select.single)
     // would have crashed here with "no rows returned". The fix must return
     // 200 with the existing row.
-    const req2 = new NextRequest("http://localhost/api/attestation", {
+    const req2 = new NextRequest("http://localhost:3000/api/attestation", {
       method: "POST",
+      headers: VALID_ORIGIN,
       body: JSON.stringify({ accepted: true }),
     });
     const res2 = await POST(req2);
@@ -103,11 +114,54 @@ describe("POST /api/attestation", () => {
 
   it("returns 400 when accepted is not explicitly true", async () => {
     const { POST } = await import("./route");
-    const req = new NextRequest("http://localhost/api/attestation", {
+    const req = new NextRequest("http://localhost:3000/api/attestation", {
       method: "POST",
+      headers: VALID_ORIGIN,
       body: JSON.stringify({ accepted: false }),
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+  });
+
+  // PR 3 — CSRF Origin/Referer integration coverage on this route. The unit
+  // tests for the helper itself live in src/lib/csrf.test.ts; these tests
+  // confirm the helper is wired up at the very top of the handler (before
+  // auth + rate limit) and that callCount stays at 0 on rejection — i.e.
+  // we never even open a Supabase client for a bad-origin request.
+  describe("CSRF Origin/Referer enforcement", () => {
+    it("returns 403 when no Origin or Referer header is present", async () => {
+      const { POST } = await import("./route");
+      const req = new NextRequest("http://localhost:3000/api/attestation", {
+        method: "POST",
+        body: JSON.stringify({ accepted: true }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(403);
+      expect(supabaseState.callCount).toBe(0);
+    });
+
+    it("returns 403 when Origin host is not in allowlist", async () => {
+      const { POST } = await import("./route");
+      const req = new NextRequest("http://localhost:3000/api/attestation", {
+        method: "POST",
+        headers: { origin: "https://evil.example.com" },
+        body: JSON.stringify({ accepted: true }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(403);
+      expect(supabaseState.callCount).toBe(0);
+    });
+
+    it("proceeds past CSRF check with a valid Origin", async () => {
+      const { POST } = await import("./route");
+      const req = new NextRequest("http://localhost:3000/api/attestation", {
+        method: "POST",
+        headers: VALID_ORIGIN,
+        body: JSON.stringify({ accepted: true }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(200);
+      expect(supabaseState.callCount).toBe(1);
+    });
   });
 });

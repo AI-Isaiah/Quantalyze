@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { escapeHtml, notifyFounderGeneric } from "@/lib/email";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { assertSameOrigin } from "@/lib/csrf";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
@@ -13,7 +14,12 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
  * 30-day SLA documented in the privacy policy. This route does NOT destroy
  * any user data on its own.
  */
-export async function POST(): Promise<NextResponse> {
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  // CSRF defense-in-depth: reject before any auth/Upstash work so a bad
+  // origin never costs us a Supabase round-trip or rate-limit token.
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },
