@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { computeFreshness } from "@/lib/freshness";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
 import { SendIntroPanel } from "@/components/admin/SendIntroPanel";
@@ -290,7 +291,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
   const hoursAgo = batch?.computed_at
     ? Math.floor((Date.now() - Date.parse(batch.computed_at)) / 3_600_000)
     : null;
-  const isStale = hoursAgo !== null && hoursAgo > 48;
+  const isStale = computeFreshness(batch?.computed_at ?? null) === "stale";
   const topThree = candidates.slice(0, 3);
 
   return (
