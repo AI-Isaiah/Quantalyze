@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Browser } from "puppeteer-core";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { extractAnalytics } from "@/lib/queries";
-import { launchBrowser } from "@/lib/puppeteer";
+import {
+  launchBrowser,
+  acquirePdfSlot,
+  PDF_QUEUE_TIMEOUT_MESSAGE,
+} from "@/lib/puppeteer";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -34,11 +38,15 @@ export async function GET(
   }
 
   let browser: Browser | null = null;
+  let release: (() => void) | null = null;
 
   try {
+    release = await acquirePdfSlot();
     browser = await launchBrowser();
 
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(15_000);
+    page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
     await page.goto(`${APP_URL}/factsheet/${id}`, {
@@ -62,10 +70,18 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${strategy.name}-factsheet.pdf"`,
-        "Cache-Control": "public, max-age=86400",
+        // Auth-gated route — keep browser caching on for the same viewer but
+        // do not let the shared CDN hold onto it.
+        "Cache-Control": "private, max-age=86400",
       },
     });
   } catch (err) {
+    if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
+      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
+        status: 503,
+        headers: { "Retry-After": "10" },
+      });
+    }
     console.error("[pdf] Generation failed:", err);
     return NextResponse.json(
       { error: "PDF generation failed" },
@@ -77,5 +93,6 @@ export async function GET(
         console.error("[pdf] Browser close failed:", closeErr);
       });
     }
+    if (release) release();
   }
 }

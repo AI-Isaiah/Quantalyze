@@ -9,7 +9,6 @@ import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { PrintButton } from "@/components/ui/PrintButton";
-import type { DisclosureTier, ManagerIdentity } from "@/lib/types";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -119,7 +118,7 @@ export default async function TearSheetPage({
 
       {/* Manager identity */}
       <section className="mb-6">
-        <ManagerIdentityPanelForTearSheet
+        <ManagerIdentityPanel
           disclosureTier={disclosureTier}
           manager={manager}
           strategyCodename={displayName}
@@ -356,24 +355,3 @@ function TermRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-/**
- * Tearsheet-specific wrapper around ManagerIdentityPanel to avoid the Card
- * component's default large padding on a print-constrained page.
- */
-function ManagerIdentityPanelForTearSheet({
-  disclosureTier,
-  manager,
-  strategyCodename,
-}: {
-  disclosureTier: DisclosureTier;
-  manager: ManagerIdentity | null;
-  strategyCodename: string;
-}) {
-  return (
-    <ManagerIdentityPanel
-      disclosureTier={disclosureTier}
-      manager={manager}
-      strategyCodename={strategyCodename}
-    />
-  );
-}

@@ -3,45 +3,32 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { displayStrategyName } from "@/lib/strategy-display";
-import type { DisclosureTier } from "@/lib/types";
+import {
+  formatPercent,
+  formatNumber,
+  formatCurrency,
+  extractAnalytics,
+} from "@/lib/utils";
+import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
-// Never cache: the demo banner and the underlying seeded data are shared
-// across everyone who clicks the Telegram link, but we still want the latest
-// batch to render on every view so a recompute run while the friend is still
-// on the page shows up on refresh.
+// Never cache — the friend clicking the Telegram link should see a fresh
+// batch on every visit so a background recompute shows up immediately.
+// The multi-step fallback (latest → previous batch → portfolio-only) is
+// intentional: design review flagged the "Refresh in 1 minute" empty state
+// as a demo-killer.
 export const dynamic = "force-dynamic";
 
-/**
- * Public, unauthenticated demo landing page.
- *
- * Renders ALLOCATOR_ACTIVE's seeded state (portfolio + top-3 recommendations)
- * using the admin client, because the underlying match_* and portfolio_*
- * tables are RLS-locked and this route is public. The allocator UUID is
- * hard-coded so this can't be pointed at a real allocator.
- *
- * Empty state fallback chain (intentional — design review caught the
- * "Refresh in 1 minute" dead-end as a demo-killer):
- *   1. Latest match_batch with candidates → render recommendations.
- *   2. Previous match_batch (offset 1) with candidates → render those.
- *   3. No batches at all → render only the portfolio as last-known-good.
- *   4. No portfolio either → render a short explanatory card (only in the
- *      theoretical case where the seed didn't run).
- */
 const ALLOCATOR_ACTIVE_ID = "aaaaaaaa-0001-4000-8000-000000000002";
 
-interface StrategySummary {
-  id: string;
-  name: string | null;
-  codename: string | null;
-  disclosure_tier: DisclosureTier | null;
-  description: string | null;
-}
+type StrategySummary = Pick<
+  Strategy,
+  "id" | "name" | "codename" | "disclosure_tier" | "description"
+>;
 
-interface AnalyticsSummary {
-  cagr: number | null;
-  sharpe: number | null;
-  max_drawdown: number | null;
-}
+type AnalyticsSummary = Pick<
+  StrategyAnalytics,
+  "cagr" | "sharpe" | "max_drawdown"
+>;
 
 interface RecommendationRow {
   id: string;
@@ -60,15 +47,13 @@ interface PortfolioHoldingRow {
   analytics: AnalyticsSummary | null;
 }
 
-function extractAnalyticsRow(raw: unknown): AnalyticsSummary | null {
-  if (!raw) return null;
-  const row = Array.isArray(raw) ? raw[0] : raw;
-  if (!row || typeof row !== "object") return null;
-  const r = row as Record<string, unknown>;
+function toAnalyticsSummary(raw: unknown): AnalyticsSummary | null {
+  const analytics = extractAnalytics(raw);
+  if (!analytics) return null;
   return {
-    cagr: (r.cagr as number | null) ?? null,
-    sharpe: (r.sharpe as number | null) ?? null,
-    max_drawdown: (r.max_drawdown as number | null) ?? null,
+    cagr: analytics.cagr,
+    sharpe: analytics.sharpe,
+    max_drawdown: analytics.max_drawdown,
   };
 }
 
@@ -79,9 +64,10 @@ function extractStrategy(raw: unknown): StrategySummary | null {
   const r = row as Record<string, unknown>;
   return {
     id: r.id as string,
-    name: (r.name as string | null) ?? null,
+    name: (r.name as string) ?? "",
     codename: (r.codename as string | null) ?? null,
-    disclosure_tier: (r.disclosure_tier as DisclosureTier | null) ?? null,
+    disclosure_tier:
+      (r.disclosure_tier as StrategySummary["disclosure_tier"]) ?? undefined,
     description: (r.description as string | null) ?? null,
   };
 }
@@ -108,7 +94,7 @@ async function fetchCandidatesForBatch(
   return (rows ?? []).map((row: Record<string, unknown>) => {
     const strategyRaw = row.strategies;
     const strategy = extractStrategy(strategyRaw);
-    const analytics = extractAnalyticsRow(
+    const analytics = toAnalyticsSummary(
       strategy
         ? ((strategyRaw as Record<string, unknown>).strategy_analytics as unknown)
         : null,
@@ -120,9 +106,9 @@ async function fetchCandidatesForBatch(
       reasons: (row.reasons as string[] | null) ?? [],
       strategy: strategy ?? {
         id: row.strategy_id as string,
-        name: null,
+        name: "",
         codename: null,
-        disclosure_tier: null,
+        disclosure_tier: undefined,
         description: null,
       },
       analytics,
@@ -197,7 +183,7 @@ export default async function DemoPage() {
     holdings = ((holdingRows ?? []) as Array<Record<string, unknown>>).map((row) => {
       const strategyRaw = row.strategies;
       const strategy = extractStrategy(strategyRaw);
-      const analytics = extractAnalyticsRow(
+      const analytics = toAnalyticsSummary(
         strategy
           ? ((strategyRaw as Record<string, unknown>).strategy_analytics as unknown)
           : null,
@@ -208,9 +194,9 @@ export default async function DemoPage() {
         allocated_amount: (row.allocated_amount as number | null) ?? null,
         strategy: strategy ?? {
           id: row.strategy_id as string,
-          name: null,
+          name: "",
           codename: null,
-          disclosure_tier: null,
+          disclosure_tier: undefined,
           description: null,
         },
         analytics,
@@ -277,7 +263,7 @@ export default async function DemoPage() {
                   Total allocated
                 </p>
                 <p className="font-metric tabular-nums text-xl text-text-primary">
-                  {formatUsdCompact(totalAllocated)}
+                  {totalAllocated > 0 ? formatCurrency(totalAllocated) : "—"}
                 </p>
               </div>
             </div>
@@ -300,15 +286,15 @@ export default async function DemoPage() {
                     <div className="mt-2 flex flex-wrap items-center gap-4 text-xs">
                       <Metric
                         label="CAGR"
-                        value={formatPct(h.analytics?.cagr)}
+                        value={formatPercent(h.analytics?.cagr)}
                       />
                       <Metric
                         label="Sharpe"
-                        value={formatNum(h.analytics?.sharpe)}
+                        value={formatNumber(h.analytics?.sharpe)}
                       />
                       <Metric
                         label="Max DD"
-                        value={formatPct(h.analytics?.max_drawdown)}
+                        value={formatPercent(h.analytics?.max_drawdown)}
                         negative
                       />
                     </div>
@@ -320,7 +306,9 @@ export default async function DemoPage() {
                         : "—"}
                     </p>
                     <p className="font-metric tabular-nums text-xs text-text-muted">
-                      {formatUsdCompact(h.allocated_amount)}
+                      {h.allocated_amount != null && h.allocated_amount > 0
+                        ? formatCurrency(h.allocated_amount)
+                        : "—"}
                     </p>
                   </div>
                 </li>
@@ -367,30 +355,28 @@ export default async function DemoPage() {
 
       {/* Secondary CTA — a second touchpoint to /signup for readers who
           scrolled past the banner. */}
-      <Card className="mt-10 p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h3 className="text-base font-semibold text-text-primary">
-              See how the founder reviews this queue.
-            </h3>
-            <p className="mt-1 text-sm text-text-secondary">
-              Open the read-only founder view to watch the match workflow.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Link
-              href="/demo/founder-view"
-              className="inline-flex items-center rounded-md border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent hover:text-accent"
-            >
-              Founder view →
-            </Link>
-            <Link
-              href="/signup"
-              className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
-            >
-              Sign up
-            </Link>
-          </div>
+      <Card className="mt-10 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h3 className="text-base font-semibold text-text-primary">
+            See how the founder reviews this queue.
+          </h3>
+          <p className="mt-1 text-sm text-text-secondary">
+            Open the read-only founder view to watch the match workflow.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/demo/founder-view"
+            className="inline-flex items-center rounded-md border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent hover:text-accent"
+          >
+            Founder view →
+          </Link>
+          <Link
+            href="/signup"
+            className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+          >
+            Sign up
+          </Link>
         </div>
       </Card>
     </>
@@ -420,11 +406,11 @@ function RecommendationCard({ rec }: { rec: RecommendationRow }) {
             </p>
           )}
           <div className="mt-3 flex flex-wrap items-center gap-4 text-xs">
-            <Metric label="CAGR" value={formatPct(rec.analytics?.cagr)} />
-            <Metric label="Sharpe" value={formatNum(rec.analytics?.sharpe)} />
+            <Metric label="CAGR" value={formatPercent(rec.analytics?.cagr)} />
+            <Metric label="Sharpe" value={formatNumber(rec.analytics?.sharpe)} />
             <Metric
               label="Max DD"
-              value={formatPct(rec.analytics?.max_drawdown)}
+              value={formatPercent(rec.analytics?.max_drawdown)}
               negative
             />
           </div>
@@ -465,22 +451,4 @@ function Metric({
       </span>
     </div>
   );
-}
-
-function formatPct(value: number | null | undefined): string {
-  if (value == null) return "—";
-  const sign = value >= 0 ? "+" : "";
-  return `${sign}${(value * 100).toFixed(1)}%`;
-}
-
-function formatNum(value: number | null | undefined): string {
-  if (value == null) return "—";
-  return value.toFixed(2);
-}
-
-function formatUsdCompact(value: number | null | undefined): string {
-  if (value == null || value === 0) return "—";
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
-  return `$${value.toFixed(0)}`;
 }

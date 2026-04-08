@@ -46,9 +46,7 @@ describe("StrategyHeader", () => {
 
   it("shows no stale indicator for fresh data", () => {
     const recentDate = new Date().toISOString();
-    const { container } = render(
-      <StrategyHeader strategy={makeStrategy()} computedAt={recentDate} />,
-    );
+    render(<StrategyHeader strategy={makeStrategy()} computedAt={recentDate} />);
     expect(screen.queryByText(/stale/i)).toBeNull();
     expect(screen.queryByText(/last synced/i)).toBeNull();
   });

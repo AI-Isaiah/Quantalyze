@@ -13,9 +13,12 @@ Used by /api/match/eval via the Python router. The admin dashboard at /admin/mat
 reads this.
 """
 
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def compute_hit_rate_metrics(
@@ -82,34 +85,57 @@ def compute_hit_rate_metrics(
     )
     missed: list[dict[str, Any]] = []
 
+    # Skipped-row counter — we don't penalise the hit-rate denominator for
+    # malformed rows, we just count + log them so a single bad match_decisions
+    # row can't take down the whole /admin/match/eval dashboard.
+    skipped = 0
+
     for intro in intros:
-        allocator_id = intro["allocator_id"]
-        strategy_id = intro["strategy_id"]
-        created_at = intro["created_at"]
+        try:
+            allocator_id = intro.get("allocator_id")
+            strategy_id = intro.get("strategy_id")
+            created_at = intro.get("created_at")
+            if not (allocator_id and strategy_id and created_at):
+                logger.warning(
+                    "compute_hit_rate_metrics: skipping malformed intro (missing required fields): %s",
+                    intro,
+                )
+                skipped += 1
+                continue
 
-        rank = _find_strategy_rank_in_latest_batch_before(
-            supabase, allocator_id, strategy_id, created_at
-        )
+            rank = _find_strategy_rank_in_latest_batch_before(
+                supabase, allocator_id, strategy_id, created_at
+            )
 
-        week_start = _week_start_iso(created_at)
-        weekly_agg[week_start]["intros"] += 1
+            week_start = _week_start_iso(created_at)
+            weekly_agg[week_start]["intros"] += 1
 
-        if rank is not None and rank <= 3:
-            hits_top_3 += 1
-            weekly_agg[week_start]["hits_top_3"] += 1
-        if rank is not None and rank <= 10:
-            hits_top_10 += 1
-            weekly_agg[week_start]["hits_top_10"] += 1
-        if rank is None or rank > 3:
-            missed.append({
-                "allocator_id": allocator_id,
-                "strategy_id": strategy_id,
-                "created_at": created_at,
-                "rank_if_any": rank,
-                "reason": "not_in_top_3" if rank is not None else "no_prior_batch",
-            })
+            if rank is not None and rank <= 3:
+                hits_top_3 += 1
+                weekly_agg[week_start]["hits_top_3"] += 1
+            if rank is not None and rank <= 10:
+                hits_top_10 += 1
+                weekly_agg[week_start]["hits_top_10"] += 1
+            if rank is None or rank > 3:
+                missed.append({
+                    "allocator_id": allocator_id,
+                    "strategy_id": strategy_id,
+                    "created_at": created_at,
+                    "rank_if_any": rank,
+                    "reason": "not_in_top_3" if rank is not None else "no_prior_batch",
+                })
+        except Exception:
+            logger.exception(
+                "compute_hit_rate_metrics: intro processing failed, skipping: %s",
+                intro,
+            )
+            skipped += 1
+            continue
 
-    total = len(intros)
+    total = len(intros) - skipped
+    if total <= 0:
+        return _empty_metrics(lookback_days)
+
     weekly = sorted(
         [
             {

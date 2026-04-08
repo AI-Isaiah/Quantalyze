@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Browser } from "puppeteer-core";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership, getPortfolioDetail } from "@/lib/queries";
-import { launchBrowser } from "@/lib/puppeteer";
+import {
+  launchBrowser,
+  acquirePdfSlot,
+  PDF_QUEUE_TIMEOUT_MESSAGE,
+} from "@/lib/puppeteer";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -30,11 +34,15 @@ export async function GET(
   }
 
   let browser: Browser | null = null;
+  let release: (() => void) | null = null;
 
   try {
+    release = await acquirePdfSlot();
     browser = await launchBrowser();
 
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(15_000);
+    page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
     // The printable page reads data via the admin client, no auth required
@@ -53,10 +61,19 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${portfolio.name}-portfolio.pdf"`,
-        "Cache-Control": "private, max-age=0, no-store",
+        // Semi-public share surface — allow shared-CDN caching of the rendered
+        // PDF for an hour, but keep stale-while-revalidate short since
+        // portfolio contents can drift under the owner's feet.
+        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
       },
     });
   } catch (err) {
+    if (err instanceof Error && err.message === PDF_QUEUE_TIMEOUT_MESSAGE) {
+      return new NextResponse("PDF generation queue full, retry in 10 seconds", {
+        status: 503,
+        headers: { "Retry-After": "10" },
+      });
+    }
     console.error("[portfolio-pdf] Generation failed:", err);
     return NextResponse.json(
       { error: "PDF generation failed" },
@@ -68,5 +85,6 @@ export async function GET(
         console.error("[portfolio-pdf] Browser close failed:", closeErr);
       });
     }
+    if (release) release();
   }
 }

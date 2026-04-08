@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useId, useState, type ChangeEvent } from "react";
+import { useEffect, useId, useRef, useState, type ChangeEvent } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
+import { formatCurrency } from "@/lib/utils";
 
 /**
  * /admin/partner-roi
@@ -112,7 +113,7 @@ export default function PartnerRoiPage() {
               label="Partner revenue / month"
               value={
                 <span className="font-metric tabular-nums text-xl text-text-primary">
-                  {formatDollars(partnerRevenuePerMonth)}
+                  {formatCurrency(partnerRevenuePerMonth)}
                 </span>
               }
             />
@@ -127,7 +128,7 @@ export default function PartnerRoiPage() {
                 </p>
               ) : (
                 <p className="mt-2 font-display text-3xl text-accent tabular-nums">
-                  {formatDollars(animatedYearly)}
+                  {formatCurrency(animatedYearly)}
                 </p>
               )}
             </div>
@@ -284,42 +285,58 @@ function OutputRow({ label, value, hint }: OutputRowProps) {
  * Tween a number toward a target over `durationMs` using requestAnimationFrame.
  * Keeps the headline counting up (or down) smoothly instead of snapping, so
  * the partner sees the revenue grow in real time as they type.
+ *
+ * BUGFIX: the previous version closed over `display` as its tween start but
+ * only re-ran on `target` changes. On rapid keystrokes (which we very much
+ * want — the whole point is type-and-see), `display` was stale by the time
+ * the effect captured it, so every new target restarted the tween from a
+ * value that was already one frame behind. The result looked like a hard
+ * snap. Keeping the current value in a ref lets us read it without
+ * subscribing the effect to it.
  */
 function useAnimatedNumber(target: number, durationMs = 300): number {
   const [display, setDisplay] = useState(target);
+  const displayRef = useRef(target);
+  const animationRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const start = display;
+    if (animationRef.current !== null) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+    }
+    const start = displayRef.current;
     const delta = target - start;
-    if (delta === 0) return;
-
+    if (Math.abs(delta) < 0.01) {
+      // Already at target — skip starting a new RAF. We don't need to call
+      // setDisplay here because React's own state bailout handles the
+      // same-value case, and calling it synchronously inside the effect
+      // body trips react-hooks/set-state-in-effect under React 19.
+      displayRef.current = target;
+      return;
+    }
     const startTime = performance.now();
-    let rafId = 0;
-
     const tick = (now: number) => {
       const elapsed = now - startTime;
       const progress = Math.min(1, elapsed / durationMs);
       // ease-out cubic
       const eased = 1 - Math.pow(1 - progress, 3);
-      setDisplay(start + delta * eased);
+      const next = start + delta * eased;
+      displayRef.current = next;
+      setDisplay(next);
       if (progress < 1) {
-        rafId = requestAnimationFrame(tick);
+        animationRef.current = requestAnimationFrame(tick);
       } else {
-        setDisplay(target);
+        animationRef.current = null;
       }
     };
-
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-    // Intentionally depend only on target/duration — `display` is the live
-    // value we're tweening from, not a trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    animationRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (animationRef.current !== null) {
+        cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      }
+    };
   }, [target, durationMs]);
 
   return display;
-}
-
-function formatDollars(value: number): string {
-  const rounded = Math.round(value);
-  return `$${rounded.toLocaleString()}`;
 }
