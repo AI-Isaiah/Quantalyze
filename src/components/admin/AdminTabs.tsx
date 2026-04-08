@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
 import { cn } from "@/lib/utils";
+import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 
 const TABS = ["Intro Requests", "Strategy Review", "Allocators"] as const;
 type Tab = (typeof TABS)[number];
@@ -148,7 +149,7 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
         <div className="space-y-3">
           {filtered.map((r) => {
             const profile = r.profiles as Record<string, string> | null;
-            const strategy = r.strategies as Record<string, string> | null;
+            const strategy = r.strategies as DisplayableStrategy | null;
             const status = r.status as string;
             return (
               <Card key={r.id as string}>
@@ -158,7 +159,7 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
                       {profile?.display_name ?? "Unknown"} {profile?.company ? `(${profile.company})` : ""}
                     </p>
                     <p className="text-xs text-text-muted mt-0.5">
-                      wants intro to <span className="font-medium text-text-secondary">{strategy?.name ?? "Unknown strategy"}</span>
+                      wants intro to <span className="font-medium text-text-secondary">{displayStrategyName(strategy)}</span>
                     </p>
                     {typeof r.message === "string" && r.message && (
                       <p className="text-xs text-text-secondary mt-2 bg-page rounded p-2">{r.message}</p>

@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/Badge";
 import { SyncBadge } from "./SyncBadge";
+import { displayStrategyName } from "@/lib/strategy-display";
 import type { Strategy } from "@/lib/types";
 
 export function StrategyHeader({
@@ -13,7 +14,7 @@ export function StrategyHeader({
     <div>
       <div className="flex items-center gap-3 mb-2">
         <h1 className="text-[32px] font-bold tracking-tight text-text-primary">
-          {strategy.name}
+          {displayStrategyName(strategy)}
         </h1>
         <Badge label={strategy.status} type="status" />
       </div>

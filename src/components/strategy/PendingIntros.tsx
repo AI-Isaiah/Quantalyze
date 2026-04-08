@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 
 interface IntroRequest {
   id: string;
@@ -15,7 +16,7 @@ interface IntroRequest {
   strategy_id: string;
   founder_notes: string | null;
   profiles: { display_name: string; company: string | null } | null;
-  strategies: { name: string } | null;
+  strategies: DisplayableStrategy | null;
 }
 
 export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
@@ -98,7 +99,7 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
                 <p className="text-xs text-text-muted mt-0.5">
                   Interested in{" "}
                   <span className="font-medium text-text-secondary">
-                    {r.strategies?.name ?? "Unknown strategy"}
+                    {displayStrategyName(r.strategies)}
                   </span>
                 </p>
                 {r.message && (

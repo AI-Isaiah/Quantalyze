@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getFactsheetDetail, getPercentiles } from "@/lib/queries";
+import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -20,7 +21,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { id } = await params;
   const result = await getFactsheetDetail(id);
-  const name = result?.strategy.name ?? "Strategy";
+  const name = result ? displayStrategyName(result.strategy) : "Strategy";
   return {
     title: `${name} — Institutional Tear Sheet`,
     robots: "noindex",
@@ -51,6 +52,7 @@ export default async function TearSheetPage({
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
+  const displayName = displayStrategyName(strategy);
   const categorySlug: string | undefined =
     (strategy as { discovery_categories?: { slug?: string } | null }).discovery_categories?.slug ??
     undefined;
@@ -92,7 +94,7 @@ export default async function TearSheetPage({
             {PLATFORM_NAME} · Institutional Tear Sheet
           </p>
           <h1 className="mt-1 font-display text-3xl leading-tight text-text-primary">
-            {strategy.name}
+            {displayName}
           </h1>
           <p className="mt-1 text-xs text-text-muted">
             {strategy.strategy_types?.join(" · ")} · {strategy.markets?.join(", ")}
@@ -120,7 +122,7 @@ export default async function TearSheetPage({
         <ManagerIdentityPanelForTearSheet
           disclosureTier={disclosureTier}
           manager={manager}
-          strategyCodename={strategy.name}
+          strategyCodename={displayName}
         />
       </section>
 
@@ -280,7 +282,7 @@ export default async function TearSheetPage({
       {/* Contact CTA */}
       <section className="mb-2 rounded-lg border border-accent/30 bg-accent/5 p-4 text-center">
         <p className="text-sm font-semibold text-text-primary">
-          Interested in {strategy.name}?
+          Interested in {displayName}?
         </p>
         <p className="mt-1 text-xs text-text-secondary">
           Request an introduction through {PLATFORM_NAME}. The manager will be
