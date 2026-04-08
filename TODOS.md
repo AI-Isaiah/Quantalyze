@@ -66,7 +66,7 @@ coverage already; this is real-data verification on the deployed site.
 
 ### P0 — Demo script + handoff materials
 
-- [ ] **Write a 1-page demo script** for each of the three audiences. ~5 minutes per demo. Steps to click, talking points, what to emphasize, what NOT to show. Live in `docs/demos/` so anyone presenting (you, a sales person, an investor) has the same playbook. **DEFERRED BY USER until next session — flagged here so it doesn't slip.**
+- [x] **Write a 1-page demo script** for each of the three audiences. ~5 minutes per demo. Steps to click, talking points, what to emphasize, what NOT to show. Live in `docs/demos/` so anyone presenting (you, a sales person, an investor) has the same playbook. ✅ DONE (Sprint 6 Track 17) — 4 scripts: `docs/demos/capintro-partner-script.md`, `allocator-script.md`, `strategy-team-script.md`, `pre-flight-checklist.md`.
 - [ ] **Capture a "before/after" screenshot pair** for the founder workflow: time-on-task with the old Telegram-driven matching vs. the new admin queue. Even rough numbers — "Sunday 30 minutes per allocator vs. Monday 5 minutes per allocator." This is the single most powerful number for the capital intro team demo.
 
 ### P1 — Polish that affects how the demo *looks*
@@ -90,6 +90,75 @@ These don't block the demo but they're the things an LP will notice in the first
 - [ ] **"Run Optimizer" button in the dashboard** that POSTs to `/api/portfolio-optimizer`.
 
 ---
+
+## Sprint 4-6 founder action items (P0/P1 — cannot be done by AI)
+
+These require founder action on a live staging environment, a Zoom call, a
+phone, or human judgment. Code has shipped for everything else in Sprint 4-6.
+
+### Sprint 4 Track 11 — First allocator onboarding (forcing function, P0)
+
+- [ ] **T11.1** — Pick 1 allocator from your Telegram network who has a real
+  mandate and is willing to be a design partner. Before-metric template:
+  `docs/demos/before-metric.template.md`.
+- [ ] **T11.2** — Schedule a 30-min Zoom: "I want to walk you through this
+  in exchange for a recorded testimonial if you find it useful."
+- [ ] **T11.3** — Allocator signs up on staging, hits the accredited gate,
+  browses the institutional lane, opens a tear sheet, requests an intro on
+  a seeded strategy. Use `docs/demos/allocator-script.md` as your script.
+- [ ] **T11.4** — Record the session. Watch the recording. Note every friction
+  point → create new P1 tasks for Sprint 5 fixes.
+- [ ] **T11.5** — **EARLY WARNING SIGNAL:** if the allocator says "this doesn't
+  save me time," STOP. Do NOT continue building Sprint 5. Rethink the product
+  with the allocator's feedback before writing any more code.
+
+### Sprint 4 Track 12 — E2E viewports (P1)
+
+- [ ] **T12.1** — Run `npx playwright test match-queue.spec.ts` at viewports
+  375, 768, 1024, 1280 on the deployed staging site. Commit any new
+  responsive selectors the test finds.
+
+### Sprint 5 Track 14 — Manual polish (P1)
+
+- [ ] **T14.1** — Mobile responsive sweep on portfolio dashboard, management,
+  documents, allocations. Use Chrome devtools device emulator + the browse
+  skill for automated screenshots. Flag anything that breaks below 768px.
+- [ ] **T14.2** — Convert MigrationWizard 3-step client write into a single
+  API route with transaction. Carry-over from portfolio intelligence ship.
+- [ ] **T14.7** — Run `/design-review` (or equivalent visual audit) on the
+  live site after all Sprint 4-5 changes land. Target DESIGN.md compliance
+  + 0 purples + correct typography everywhere.
+
+### Sprint 6 Track 15 — Testimonial capture (THE NORTH STAR, P0)
+
+- [ ] **T15.1** — Schedule 1-2 additional allocator sessions with Telegram
+  contacts fitting different mandate archetypes.
+- [ ] **T15.2** — Structured session: 10-min walkthrough (use allocator-script.md) →
+  10-min allocator-driven exploration → 5-min testimonial interview.
+  Prompts:
+    1. What were you expecting before you saw this today?
+    2. What surprised you — good or bad?
+    3. Describe Quantalyze in one sentence to another allocator.
+    4. Did this save you time vs. your current manager evaluation flow?
+       If yes, how much?
+    5. Would you want to keep using it?
+- [ ] **T15.3** — Edit the best 90 seconds. Save to
+  `docs/demos/allocator-testimonial.mp4` + transcript.
+- [ ] **T15.4** — BACKUP: if no allocator agrees to a testimonial, capture
+  a session recording (with permission) and pull written quotes for
+  `docs/pitch/one-pager.md`. The video is the ceiling; written quotes are
+  the floor.
+
+### Sprint 6 Track 16 — Before/after metric finalization (P0)
+
+- [ ] **T16.1** — Founder runs the "new workflow" (admin queue) on the same
+  2 allocators from Pre-Sprint 0 T0.4. Times it. Screenshots it.
+- [ ] **T16.2** — Result: `docs/demos/before-after.md` with both screenshots
+  + headline number + narrative. Target: "30 min → 5 min per allocator, 6×
+  speedup."
+- [ ] **T16.3** — The before/after slide is the SECOND artifact in the
+  cap-intro-partner demo (right after the testimonial video). See
+  `docs/demos/capintro-partner-script.md` §2:00-4:00.
 
 ## User-deferred (DEFERRED BY YOU at decision points in this session)
 
@@ -255,6 +324,53 @@ inline before merging; these are the follow-ups.
 - Multi-account strategy aggregation.
 - Real-time WebSocket data sync.
 - White-label verification API.
+
+## Completed (2026-04-08, Sprint 4-6 demo-ready polish + docs)
+
+- ~~**Sprint 4 Track 10 match queue polish**: drawer responsive Option B
+  (read-only banner below md, existing two-pane layout below lg still
+  usable), shimmer skeleton loading state replacing the text placeholder,
+  eval dashboard onboarding card empty state with intros shipped counter
+  + open-queue CTA, `?` keyboard shortcut hint modal (gated to body
+  activeElement + isLg check), match queue index mandate-archetype
+  dropdown filter alongside the existing search + status chips,
+  DashboardChrome client wrapper that hides the sidebar on
+  `/admin/match/[allocator_id]` for full-bleed usage. Decision history
+  timeline was already present in the allocator detail pane and is
+  unchanged.~~
+- ~~**Sprint 5 Track 13 portfolio optimizer (service + UI)**: new
+  `POST /api/portfolio-optimizer` route with ownership check, 60s
+  AbortSignal timeout, 503/504 error mapping; analytics-service/routers/
+  portfolio.py contract repair (`weight` → `current_weight` in 3 places,
+  `is_published` → `status='published'`, strategy name hydration so the
+  UI doesn't need a second round-trip); `PortfolioOptimizer.tsx` with
+  all 5 states (empty, computing, empty-after-compute, stale banner,
+  failed, success), Run Optimizer button that POSTs + router.refresh(),
+  Add to Portfolio CTA linking to manage?add=X, lazy-loaded via
+  `next/dynamic` below the fold of `portfolios/[id]/page.tsx`.~~
+- ~~**Sprint 5 Track 14 polish**: RemoveStrategyButton on
+  `portfolio/[id]/manage` with confirm modal + inline error handling;
+  purple `#7C3AED` replaced with deeper teal `#0F766E` at the source
+  in `lib/utils.ts::STRATEGY_PALETTE` (inherited by PortfolioEquityCurve,
+  RiskAttribution, CompositionDonut); H3 sizes fixed from `text-lg`
+  to `text-base` in BenchmarkComparison (2 places) and FounderInsights
+  (2 places); Sidebar logo switched from `font-bold` to `font-display`
+  (Instrument Serif) per DESIGN.md.~~
+- ~~**Sprint 6 Track 17 demo scripts**: 4 markdown files in
+  `docs/demos/` — capintro-partner-script (15 min, opens with
+  testimonial video), allocator-script (6 min, ends with testimonial
+  capture prompts), strategy-team-script (4 min manager onboarding),
+  pre-flight-checklist (1-hour-before-demo verification flow with
+  infrastructure + demo data + materials + environment sections).~~
+- ~~**Sprint 6 Track 18 pitch artifacts**: 4 markdown files in
+  `docs/pitch/` — term-sheet-draft (1-page partnership term sheet
+  anchoring the partner conversation, with revenue share + attribution
+  + 180-day window + no-exclusivity v1 + open questions), one-pager
+  (problem/solution/why-now/proof-artifact/business-model/traction/ask),
+  competitive-landscape (4 categories: prime desks, boutique cap-intros,
+  direct LP channels, retail-quant platforms; positioning statement at
+  the end), objection-handling (top 10 objections with answers, evidence,
+  and dodge-to-watch-for lines).~~
 
 ## Completed (2026-04-08, Sprint 1-3 demo-ready ship)
 

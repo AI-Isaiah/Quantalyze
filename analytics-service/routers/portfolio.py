@@ -73,7 +73,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
     try:
         ps_result = supabase.table("portfolio_strategies").select(
-            "strategy_id, weight, strategies(id, name)"
+            "strategy_id, current_weight, strategies(id, name)"
         ).eq("portfolio_id", portfolio_id).execute()
 
         portfolio_strategies = ps_result.data or []
@@ -85,7 +85,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
 
         # Build weight map (default equal weight if not set)
         raw_weights = {
-            row["strategy_id"]: float(row["weight"]) if row.get("weight") else 1.0
+            row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
             for row in portfolio_strategies
         }
         total_w = sum(raw_weights.values()) or 1.0
@@ -392,7 +392,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
     ps_result = supabase.table("portfolio_strategies").select(
-        "strategy_id, weight"
+        "strategy_id, current_weight"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
     portfolio_strategies = ps_result.data or []
@@ -402,7 +402,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
 
     raw_weights = {
-        row["strategy_id"]: float(row["weight"]) if row.get("weight") else 1.0
+        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
         for row in portfolio_strategies
     }
     total_w = sum(raw_weights.values()) or 1.0
@@ -425,11 +425,13 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     if not portfolio_returns:
         raise HTTPException(status_code=400, detail="No returns data available for portfolio strategies")
 
-    all_published = supabase.table("strategies").select("id").eq(
-        "is_published", True
+    all_published = supabase.table("strategies").select("id, name").eq(
+        "status", "published"
     ).not_.in_("id", strategy_ids).execute()
 
-    candidate_ids = [row["id"] for row in (all_published.data or [])]
+    candidate_rows = all_published.data or []
+    candidate_ids = [row["id"] for row in candidate_rows]
+    candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
 
     candidate_returns: dict[str, pd.Series] = {}
     if candidate_ids:
@@ -443,6 +445,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
                 candidate_returns[row["strategy_id"]] = s
 
     suggestions = find_improvement_candidates(portfolio_returns, candidate_returns, weights)
+    # Hydrate suggestions with strategy names so the UI can render them without an extra round-trip.
+    for s in suggestions:
+        s["strategy_name"] = candidate_names.get(s["strategy_id"], s["strategy_id"])
 
     latest = supabase.table("portfolio_analytics").select("id").eq(
         "portfolio_id", req.portfolio_id

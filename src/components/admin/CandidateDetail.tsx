@@ -9,6 +9,7 @@ export function CandidateDetail({
   alreadySent,
   isKept,
   isSkipped,
+  isReadOnly = false,
   onSendIntro,
   onKeep,
   onSkip,
@@ -17,6 +18,8 @@ export function CandidateDetail({
   alreadySent: boolean;
   isKept: boolean;
   isSkipped: boolean;
+  /** When true, hide all decision/intro action buttons (mobile read-only). */
+  isReadOnly?: boolean;
   onSendIntro: () => void;
   onKeep: () => void;
   onSkip: () => void;
@@ -127,39 +130,43 @@ export function CandidateDetail({
         </div>
       </div>
 
-      {/* Action bar */}
-      <div className="mt-6 border-t border-border pt-4 flex items-center gap-2 flex-wrap">
-        {alreadySent ? (
-          <div className="flex-1 text-sm text-text-muted">Intro already sent to this strategy.</div>
-        ) : (
-          <>
-            <Button variant="primary" size="sm" onClick={onSendIntro}>
-              Send intro →
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onKeep}
-              disabled={isKept}
-            >
-              {isKept ? "KEPT ✓" : "KEEP"}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onSkip}
-              disabled={isSkipped}
-            >
-              {isSkipped ? "SKIPPED" : "SKIP"}
-            </Button>
-          </>
-        )}
-      </div>
+      {/* Action bar — hidden in read-only mode (mobile <md). */}
+      {!isReadOnly && (
+        <div className="mt-6 border-t border-border pt-4 flex items-center gap-2 flex-wrap">
+          {alreadySent ? (
+            <div className="flex-1 text-sm text-text-muted">Intro already sent to this strategy.</div>
+          ) : (
+            <>
+              <Button variant="primary" size="sm" onClick={onSendIntro}>
+                Send intro →
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onKeep}
+                disabled={isKept}
+              >
+                {isKept ? "KEPT ✓" : "KEEP"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onSkip}
+                disabled={isSkipped}
+              >
+                {isSkipped ? "SKIPPED" : "SKIP"}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
 
-      {/* Keyboard hint */}
-      <div className="mt-4 pt-3 border-t border-border text-[10px] font-mono uppercase tracking-wider text-text-muted">
-        Keyboard: j/k move · s send intro · u keep · d skip · r recompute
-      </div>
+      {/* Keyboard hint — only on lg+ where shortcuts actually fire. */}
+      {!isReadOnly && (
+        <div className="mt-4 pt-3 border-t border-border text-[10px] font-mono uppercase tracking-wider text-text-muted hidden lg:block">
+          Keyboard: j/k move · s send intro · u keep · d skip · r recompute · ? help
+        </div>
+      )}
     </Card>
   );
 }

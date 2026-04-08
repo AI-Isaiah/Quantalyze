@@ -236,13 +236,29 @@ export function MatchEvalDashboard() {
 
       {metrics.intros_shipped === 0 && (
         <Card className="text-center py-10">
-          <p className="text-sm text-text-secondary">
-            No intros shipped in the last {metrics.window_days} days.
+          <h3 className="text-base font-semibold text-text-primary">
+            Your hit-rate dashboard isn&rsquo;t ready yet
+          </h3>
+          <p className="mt-2 text-sm text-text-secondary max-w-lg mx-auto">
+            Ship 5+ introductions from the Match Queue and this view will
+            compare the algorithm&rsquo;s ranking to the intros you actually
+            sent — so you can see where the signal holds up and where the
+            model is blind.
           </p>
           <p className="mt-1 text-xs text-text-muted">
-            Once you start using the match queue to ship intros, this dashboard
-            will show your hit rate against the algorithm.
+            Intros shipped in the last {metrics.window_days} days:{" "}
+            <span className="font-mono tabular-nums text-text-primary">
+              {metrics.intros_shipped}
+            </span>
           </p>
+          <div className="mt-4">
+            <Link
+              href="/admin/match"
+              className="inline-flex items-center text-sm font-medium text-accent hover:text-accent-hover"
+            >
+              Open the Match Queue →
+            </Link>
+          </div>
         </Card>
       )}
     </div>
