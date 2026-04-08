@@ -7,6 +7,7 @@ import {
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
 import { extractAnalytics } from "@/lib/queries";
+import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -22,9 +23,23 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
  * partner can open a tear sheet URL without a login redirect.
  */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
+  // Cross-lambda IP rate limit. Returns 429 BEFORE we touch the
+  // acquirePdfSlot semaphore or any DB query — so a scraper hammering this
+  // surface can't burn the in-memory queue or generate Supabase load.
+  // Cache hits served from Vercel's CDN bypass this entirely, which is the
+  // correct behavior for a public IP-based limiter.
+  const ip = getClientIp(req.headers);
+  const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
+  if (!rl.success) {
+    return new NextResponse("Rate limit exceeded", {
+      status: 429,
+      headers: { "Retry-After": String(rl.retryAfter) },
+    });
+  }
+
   const { id } = await params;
 
   const admin = createAdminClient();

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 const ATTESTATION_VERSION = "2026-04-07";
 
@@ -18,6 +19,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Cross-lambda rate limit on sensitive identity-write actions. Falls open
+  // when Upstash env vars are missing (local dev). See src/lib/ratelimit.ts.
+  const rl = await checkLimit(userActionLimiter, `attestation:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
   }
 
   let body: { accepted?: boolean };

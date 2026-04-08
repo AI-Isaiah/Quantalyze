@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { escapeHtml, notifyFounderGeneric } from "@/lib/email";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
@@ -20,6 +21,50 @@ export async function POST(): Promise<NextResponse> {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Cross-lambda rate limit so a runaway client cannot spam the founder's
+  // inbox via the deletion-request notification path.
+  const rl = await checkLimit(userActionLimiter, `deletion:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
+  }
+
+  // DB-level dedup: if this user already has a pending deletion request from
+  // the last 24 hours, return that one instead of inserting a duplicate row.
+  // The rate limit above stops abusive bursts, but a single legitimate user
+  // who clicks the button twice should not generate two founder emails.
+  //
+  // Schema reminder (migration 012): there is no `status` column — pending
+  // means `completed_at IS NULL` — and there is no `created_at` — the
+  // canonical timestamp is `requested_at`.
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data: existing } = await supabase
+    .from("data_deletion_requests")
+    .select("id, requested_at")
+    .eq("user_id", user.id)
+    .is("completed_at", null)
+    .gte("requested_at", oneDayAgo)
+    .order("requested_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existing) {
+    return NextResponse.json(
+      {
+        ok: true,
+        request_id: existing.id,
+        requested_at: existing.requested_at,
+        message: "Deletion request already pending",
+      },
+      { status: 200 },
+    );
   }
 
   const { data: inserted, error } = await supabase
