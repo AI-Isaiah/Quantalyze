@@ -57,6 +57,8 @@ quantalyze/
   docs/
     runbooks/         # Operational runbooks (match-engine.md)
     superpowers/plans/ # Design + implementation plans from /autoplan
+    pitch/            # Cap-intro partner pitch artifacts (qualification script, term sheet, one-pager)
+    demos/            # Demo scripts + before/after metric capture for the partner demo
 ```
 
 ## Tech Stack
