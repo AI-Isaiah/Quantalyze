@@ -26,22 +26,23 @@ founder demoing a simpler product outperforms a tired founder demoing a fancier 
 
 ### P0 — Tomorrow demo cannot break without these (~90 min CC time)
 
-- [ ] **T-0.1 Disclosure tier render guard.** Create `src/lib/strategy-display.ts` with a
+- [x] **T-0.1 Disclosure tier render guard.** Create `src/lib/strategy-display.ts` with a
   `displayStrategyName(strategy)` helper: return `codename` if present, else `name` if
   `disclosure_tier='institutional'`, else `'Strategy #' + id.slice(0,8)`. Replace every
   `codename || name` fallback: `AllocatorMatchQueue.tsx:538,621,896`,
   `CandidateDetail.tsx:41`, `SendIntroPanel.tsx:78`. **DONE criteria:** every seeded
   exploratory strategy (Helios, Orion, Pulsar, Quasar) shows a pseudonym in the admin queue.
-  Verified by click-through.
-- [ ] **T-0.2 Backfill codename on 4 seeded exploratory strategies.** In
+  Verified by click-through. **Shipped PR #__ 2026-04-08 — helper + test + 5 call sites + API route `disclosure_tier` select.**
+- [x] **T-0.2 Backfill codename on 4 seeded exploratory strategies.** In
   `scripts/seed-demo-data.ts`, set `codename` on the insert for Helios → `'Strategy H-42'`,
   Orion → `'Strategy O-17'`, Pulsar → `'Strategy P-88'`, Quasar → `'Strategy Q-03'`. Re-run
   seed with `SEED_CONFIRM_STAGING=true`. **DONE criteria:** REST probe
   `/strategies?select=name,codename&is_example=eq.true` shows 4 rows with codename populated.
+  **Code shipped PR #__ 2026-04-08 — seed re-run is the ops follow-up.**
 - [ ] **T-0.3 Persist `app.admin_email` on staging.** Run once in Supabase dashboard SQL
   editor: `ALTER DATABASE postgres SET app.admin_email = 'matratzentester24@gmail.com';`
   **DONE criteria:** dashboard returns `ALTER DATABASE`. No code change, just future-proofs
-  migration 011's backfill for any DB restore.
+  migration 011's backfill for any DB restore. **Documented in PR #__ body 2026-04-08 as ops action required post-merge.**
 - [ ] **T-0.4 Fix `_load_allocator_context` latent bugs in analytics match engine.**
   `analytics-service/routers/match.py:185-212`. Change `.select("strategy_id, weight,
   portfolio_id")` to `.select("strategy_id, current_weight, portfolio_id, allocated_amount")`.

@@ -2,6 +2,7 @@
 
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { displayStrategyName } from "@/lib/strategy-display";
 import type { CandidateRow } from "@/components/admin/AllocatorMatchQueue";
 
 export function CandidateDetail({
@@ -38,7 +39,7 @@ export function CandidateDetail({
             Rank {candidate.rank}
           </p>
           <h2 className="text-[20px] font-display text-text-primary">
-            {strategy?.codename || strategy?.name || candidate.strategy_id}
+            {displayStrategyName(strategy)}
           </h2>
           {strategy?.strategy_types && strategy.strategy_types.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">

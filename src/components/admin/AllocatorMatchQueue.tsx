@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { computeFreshness } from "@/lib/freshness";
+import { displayStrategyName } from "@/lib/strategy-display";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
 import { SendIntroPanel } from "@/components/admin/SendIntroPanel";
@@ -72,6 +73,7 @@ export interface CandidateRow {
     id: string;
     name: string;
     codename: string | null;
+    disclosure_tier: "institutional" | "exploratory" | null;
     strategy_types: string[] | null;
     supported_exchanges: string[] | null;
     aum: number | null;
@@ -138,7 +140,12 @@ interface Decision {
   founder_note: string | null;
   contact_request_id: string | null;
   created_at: string;
-  strategies?: { id: string; name: string; codename: string | null } | null;
+  strategies?: {
+    id: string;
+    name: string;
+    codename: string | null;
+    disclosure_tier: "institutional" | "exploratory" | null;
+  } | null;
 }
 
 interface QueueData {
@@ -535,7 +542,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                       <td className="px-3 py-2">
                         <div>
                           <p className="text-sm font-medium text-text-primary">
-                            {cand.strategies?.codename || cand.strategies?.name || cand.strategy_id}
+                            {displayStrategyName(cand.strategies)}
                           </p>
                           {cand.reasons[0] && (
                             <p className="text-xs text-text-secondary truncate max-w-[260px]">
@@ -618,7 +625,7 @@ export function AllocatorMatchQueue({ allocatorId }: { allocatorId: string }) {
                   {excluded.map((exc) => (
                     <tr key={exc.id} className="border-b border-border">
                       <td className="px-4 py-2 text-sm text-text-primary">
-                        {exc.strategies?.codename || exc.strategies?.name || exc.strategy_id}
+                        {displayStrategyName(exc.strategies)}
                       </td>
                       <td className="px-4 py-2 text-sm text-text-secondary">
                         {exc.exclusion_reason}
@@ -893,7 +900,7 @@ function ShortlistCard({
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold text-text-primary truncate">
-            {candidate.strategies?.codename || candidate.strategies?.name || candidate.strategy_id}
+            {displayStrategyName(candidate.strategies)}
           </p>
           {candidate.reasons[0] && (
             <p className="mt-1 text-xs text-text-secondary line-clamp-2">
