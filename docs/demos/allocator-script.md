@@ -1,0 +1,211 @@
+# Allocator Demo Script
+
+**Duration:** 6 minutes.
+**Audience:** a live allocator, typically one of the founder's existing
+Telegram contacts being onboarded onto Quantalyze during Sprint 4-6.
+**Goal:** the allocator completes a full end-to-end flow (sign in →
+accredited gate → browse → tear sheet → intro request) AND is comfortable
+enough to record a 90-second testimonial at the end.
+
+**Prerequisite:** allocator has been pre-seeded on staging with a profile,
+role=`allocator`, mandate set, and ideally a matching batch already
+computed. See `scripts/seed-demo-data.ts`.
+
+---
+
+## 0:00-0:30 — Warm open
+
+"Thanks for giving me 20 minutes. I'm going to show you Quantalyze — the
+thing I built because I was tired of spending 30 minutes per manager
+pulling together Sharpe ratios from screenshots. I'd love for you to
+click around yourself after I walk you through the 5 main surfaces,
+and then — if you find it useful — I'll ask you for 90 seconds on camera
+about what you saw. No pressure, just honest feedback."
+
+**Set expectations:** "You'll sign up, hit a disclosure gate because
+this is an accredited-investor platform, browse strategies, open one
+tear sheet, and request an introduction. Total time: 6 minutes."
+
+---
+
+## 0:30-1:30 — Sign in + accredited gate
+
+- Navigate to `https://quantalyze.com` (or staging URL).
+- Click "Sign up" or "Sign in" with the pre-seeded email.
+- Land on `/discovery/crypto-sma` (redirected by the accredited gate).
+- See the AccreditedInvestorGate form.
+
+**Explain:** "We're an accredited-investor platform. This gate is a
+one-time self-attestation — you're telling us you meet the SEC's
+accredited investor definition. The form captures your attestation
+date + version + IP so we have an audit trail. This is NOT investment
+advice, and the gate is intentionally soft — the legal pages at
+`/legal/privacy`, `/legal/terms`, `/legal/disclaimer` spell out what
+we are and what we're not."
+
+Click the attest button. Page reloads into the discovery surface.
+
+---
+
+## 1:30-3:00 — Browse the institutional lane
+
+Land on `/discovery/crypto-sma`.
+
+**Explain the surface:**
+- Left: category filters
+- Center: strategies in the institutional disclosure tier (real manager
+  names, verified exchange-API data)
+- Each card: codename + real name, Sharpe percentile, freshness badge
+- Right: quick filters (ticket size, track record length)
+
+**Click into one institutional strategy.**
+
+Walk through the strategy detail page:
+- **ManagerIdentityPanel** (top right): real name, bio, years trading,
+  AUM range, LinkedIn
+- **FreshnessBadge**: "Fresh · last computed 3 hours ago"
+- **PercentileRankBadge**: "Sharpe: 78th percentile in Crypto SMA"
+- **Equity curve + monthly returns heatmap**
+- **Custody disclaimer**: "Strategy monitored via [Exchange] API.
+  Manager retains asset custody. Quantalyze provides analytics only.
+  No pooling, no fund administration."
+
+**Transition line:** "Imagine you're working through a shortlist of 10
+managers. Without Quantalyze, you're opening Excel files for each one.
+Here, every strategy looks the same shape — same metrics, same freshness,
+same disclosure tier. Compare 10 managers in the time it used to take
+to verify 1."
+
+---
+
+## 3:00-4:00 — The tear sheet
+
+Click "Download Tear Sheet" on the strategy detail page.
+
+**Two outputs to show:**
+1. `/factsheet/[id]/tearsheet` — the HTML print view (opens in a new tab).
+2. `/api/factsheet/[id]/tearsheet.pdf` — the PDF if the allocator wants
+   to send it to their IC.
+
+"This is the artifact you'd send to your investment committee. Clean
+8.5x11 print layout, all the metrics, the manager identity, the custody
+disclaimer, the risk block. No PowerPoint polish — just the numbers
+and who stands behind them."
+
+---
+
+## 4:00-5:00 — Request intro
+
+Back on the strategy detail, click "Request intro."
+
+Fill in the allocator's self-intro note (a one-liner about why they're
+interested).
+
+Submit.
+
+**Show what happens:**
+- The allocator sees a confirmation: "Intro request received."
+- The founder (you) gets an email in their inbox.
+- The manager gets an email with the allocator's mandate.
+- The allocator sees the confirmation email in THEIR inbox with the
+  manager identity block (if institutional tier) or the redacted block
+  (if exploratory).
+
+**Explain the three-way thread:** "From here it's a normal email
+conversation. I'm CC'd on both sides so I can nudge if it stalls.
+Nobody is locked into a product — the value is in the introduction
+itself."
+
+---
+
+## 5:00-6:00 — `/recommendations`
+
+Navigate to `/recommendations`.
+
+"This is the surface that closes the loop for you as an allocator.
+The matching engine runs daily and surfaces the top 3 strategies for
+your mandate — with reasoning text explaining WHY each one fit. If
+your mandate is 'Market Neutral, $2M-$10M ticket,' this page tells you
+exactly which 3 strategies the algorithm thinks match, plus the
+reasoning."
+
+**Point at the reasoning column:** "This text is generated by the
+matching engine from the strategy's metrics relative to your mandate.
+It's not a marketing pitch — it's a literal 'here's why this scored
+high for you' explanation."
+
+---
+
+## 6:00 — The testimonial ask
+
+"OK — that was the flow. Honest reaction: is this something that
+would save you time? Is there anything that felt obviously missing,
+or wrong, or surprising?"
+
+**Listen. Do not sell.**
+
+After the reaction, if the allocator seems positive:
+
+"If you were comfortable, I'd love 90 seconds on camera — not
+scripted, just 'what did you see and did it solve a problem for you?'
+The clip goes to a capital introduction partner I'm meeting with in
+two weeks as the proof that Quantalyze actually saves real allocators
+real time. I'll delete the clip if you change your mind, and nothing
+about your identity or portfolio goes out without your sign-off."
+
+If yes: open Zoom recording, ask the prompts below.
+If not now: "Totally fair. Thank you for the honest feedback. Can I
+follow up next week with 2-3 fix ideas based on what you flagged?"
+
+---
+
+## Testimonial prompts (if yes)
+
+Ask each one, let them answer in their own words. Don't re-ask.
+
+1. "What were you expecting before you saw this today?"
+2. "What surprised you — good or bad?"
+3. "If you had to describe Quantalyze to another allocator in one
+   sentence, what would you say?"
+4. "Did this save you time compared to how you normally evaluate a
+   manager? If yes, roughly how much?"
+5. "Would you want to keep using it?"
+
+Stop recording. Thank them. Send the confirmation email within an hour
+that the clip will ONLY be used with their explicit written approval
+per use.
+
+---
+
+## What NOT to show
+
+- The admin Match Queue (`/admin/match`) — this is the founder's
+  workspace, not the allocator's. Showing it breaks the "I am the
+  customer, not the operator" frame.
+- The optimizer panel on the portfolio dashboard — only show if the
+  allocator has a portfolio with 2+ strategies and specifically asks
+  about diversification.
+- The legal pages — only show if the allocator specifically asks about
+  compliance.
+- The analytics service / Python internals / anything engineering.
+
+---
+
+## If things go wrong
+
+- **Allocator is cold on the institutional lane:** pivot to the
+  portfolio dashboard and show what an existing portfolio looks like.
+  Skip the tear sheet, skip the intro request.
+- **Allocator finds a real bug:** capture it on the spot in a Linear
+  issue or TODO, thank them warmly, and promise a fix within 48 hours.
+  Bugs found by real users are gold.
+- **Allocator declines the testimonial:** absolutely fine. Ask if you
+  can quote them anonymously in the pitch deck ("one allocator told me
+  that Quantalyze reduced their diligence time from X to Y"). Written
+  quotes are the floor; the video is the ceiling.
+- **Allocator wants to commit capital on the spot:** this is a fantastic
+  problem. Tell them "let me make sure the strategy you saw is currently
+  accepting new allocations — I'll come back to you in 48 hours with
+  the manager's minimums, lockup, and subscription flow." Do NOT rush
+  the subscription. The first committed allocation matters more than
+  the speed of it.
