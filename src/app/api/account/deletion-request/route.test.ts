@@ -1,24 +1,35 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextRequest } from "next/server";
 
 /**
  * Tests for the GDPR Art. 17 deletion-request intake.
  *
- * The route now (PR 2):
- *   1. Rejects unauthenticated callers with 401.
- *   2. Applies a per-user Upstash rate limit (5/min). Falls open in tests
+ * The route now (PR 2 + PR 3):
+ *   1. Rejects requests without a same-origin Origin/Referer header (CSRF).
+ *   2. Rejects unauthenticated callers with 401.
+ *   3. Applies a per-user Upstash rate limit (5/min). Falls open in tests
  *      because no UPSTASH_REDIS_REST_URL is set, so we don't have to mock
  *      the limiter directly — we exercise the real graceful-degradation
  *      path that ships to local dev.
- *   3. Dedups against `data_deletion_requests` rows from the same user in
+ *   4. Dedups against `data_deletion_requests` rows from the same user in
  *      the last 24 hours where `completed_at IS NULL`. If one exists,
  *      returns 200 with the EXISTING row's id and never inserts a new row
  *      and never sends a duplicate founder email.
  *
- * The tests assert (3) by recording every `.from(...).insert(...)` call on
+ * The tests assert (4) by recording every `.from(...).insert(...)` call on
  * the supabase stub. Test 1 ("first POST") must call insert once. Test 2
  * ("second POST within dedup window") must call insert ZERO additional
  * times — i.e. the existing row short-circuits the insert path.
  */
+
+function makeRequest(
+  headers: Record<string, string> = { origin: "http://localhost:3000" },
+): NextRequest {
+  return new NextRequest("http://localhost:3000/api/account/deletion-request", {
+    method: "POST",
+    headers,
+  });
+}
 
 const authUser = vi.hoisted(() => ({
   id: "00000000-0000-0000-0000-000000000001",
@@ -143,7 +154,7 @@ describe("POST /api/account/deletion-request", () => {
 
   it("inserts on the first request and returns the new row", async () => {
     const { POST } = await import("./route");
-    const res = await POST();
+    const res = await POST(makeRequest());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
@@ -156,14 +167,14 @@ describe("POST /api/account/deletion-request", () => {
     const { POST } = await import("./route");
 
     // First call inserts.
-    const firstRes = await POST();
+    const firstRes = await POST(makeRequest());
     expect(firstRes.status).toBe(200);
     const firstBody = await firstRes.json();
     expect(firstBody.request_id).toBe("req-1");
     expect(supabaseState.insertCalls).toBe(1);
 
     // Second call must short-circuit on the existing pending row.
-    const secondRes = await POST();
+    const secondRes = await POST(makeRequest());
     expect(secondRes.status).toBe(200);
     const secondBody = await secondRes.json();
     expect(secondBody.ok).toBe(true);
@@ -177,7 +188,7 @@ describe("POST /api/account/deletion-request", () => {
 
   it("inserts again once the previous row is marked completed", async () => {
     const { POST } = await import("./route");
-    await POST(); // creates req-1
+    await POST(makeRequest()); // creates req-1
     expect(supabaseState.insertCalls).toBe(1);
 
     // Mark the existing row as completed (simulating the founder finishing
@@ -185,11 +196,42 @@ describe("POST /api/account/deletion-request", () => {
     // therefore should write a brand new row.
     supabaseState.rows[0].completed_at = new Date().toISOString();
 
-    const res = await POST();
+    const res = await POST(makeRequest());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.request_id).toBe("req-2");
     expect(supabaseState.insertCalls).toBe(2);
     expect(supabaseState.rows).toHaveLength(2);
+  });
+
+  // PR 3 — CSRF Origin/Referer integration coverage. Each rejection asserts
+  // that no insert call was made, proving the CSRF check fires before any
+  // Supabase work. The unit tests for the helper itself live in
+  // src/lib/csrf.test.ts.
+  describe("CSRF Origin/Referer enforcement", () => {
+    it("returns 403 when no Origin or Referer header is present", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({}));
+      expect(res.status).toBe(403);
+      expect(supabaseState.insertCalls).toBe(0);
+      expect(supabaseState.selectCalls).toBe(0);
+    });
+
+    it("returns 403 when Origin host is not in allowlist", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({ origin: "https://evil.example.com" }),
+      );
+      expect(res.status).toBe(403);
+      expect(supabaseState.insertCalls).toBe(0);
+      expect(supabaseState.selectCalls).toBe(0);
+    });
+
+    it("proceeds past CSRF check with a valid Origin", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({ origin: "http://localhost:3000" }));
+      expect(res.status).toBe(200);
+      expect(supabaseState.insertCalls).toBe(1);
+    });
   });
 });

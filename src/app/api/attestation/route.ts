@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { assertSameOrigin } from "@/lib/csrf";
 
 const ATTESTATION_VERSION = "2026-04-07";
 
@@ -12,6 +13,11 @@ const ATTESTATION_VERSION = "2026-04-07";
  * Invoked by `AccreditedInvestorGate.tsx` on form submission.
  */
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // CSRF defense-in-depth: reject before any auth/Upstash work so a bad
+  // origin never costs us a Supabase round-trip or rate-limit token.
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },
