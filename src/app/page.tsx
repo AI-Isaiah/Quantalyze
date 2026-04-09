@@ -136,7 +136,7 @@ export default async function Home() {
       {/* How It Works */}
       <section className="border-t border-border bg-page">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
-          <h2 className="text-center text-2xl font-bold tracking-tight text-text-primary md:text-3xl">
+          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
             How It Works
           </h2>
           <p className="mt-3 text-center text-text-secondary">
@@ -186,7 +186,7 @@ export default async function Home() {
       {/* Verify Your Strategy */}
       <section className="mx-auto max-w-6xl px-6 py-20" id="verify">
         <div className="mx-auto max-w-2xl text-center mb-12">
-          <h2 className="text-3xl font-display tracking-tight text-text-primary">
+          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
             Verify Your Performance
           </h2>
           <p className="mt-4 text-text-secondary">
@@ -240,7 +240,7 @@ export default async function Home() {
       {/* CTA */}
       <section className="border-t border-border bg-page">
         <div className="mx-auto max-w-6xl px-6 py-20 text-center md:py-24">
-          <h2 className="text-2xl font-bold tracking-tight text-text-primary md:text-3xl">
+          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
             Ready to see verified performance?
           </h2>
           <p className="mt-3 text-text-secondary">
