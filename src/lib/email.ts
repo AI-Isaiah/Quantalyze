@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { SEVERITY_HEX } from "./utils";
 
 const resend = process.env.RESEND_API_KEY
@@ -15,19 +16,169 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 const BRAND_COLOR = "#1B6B5A"; // muted teal, per DESIGN.md
 const SIGNATURE = `<p style="color:#666;font-size:13px;">— ${PLATFORM_NAME}</p>`;
 
+/**
+ * Low-level send primitive. Writes an audit row to `notification_dispatches`
+ * (migration 018), calls Resend, and best-effort updates the row with the
+ * outcome. Failures in either the audit write or the Resend call are
+ * swallowed — the public `notify*` helpers should never crash their callers.
+ *
+ * The `notificationType` parameter is required so operators can filter the
+ * audit trail by category (e.g., "manager_intro_request" vs "alert_digest").
+ */
 async function send(
   to: string,
   subject: string,
   html: string,
+  notificationType: string,
   cc?: string | string[],
-) {
-  if (!resend) return;
+): Promise<void> {
   if (!to) return;
 
+  // Lazy-instantiate the admin client so importing email.ts in environments
+  // without SUPABASE_SERVICE_ROLE_KEY (e.g., build-time) doesn't throw.
+  let admin: ReturnType<typeof createAdminClient> | null = null;
   try {
-    await resend.emails.send({ from: FROM, to, cc, subject, html });
+    admin = createAdminClient();
   } catch (err) {
-    console.error("[email] Failed to send:", subject, err);
+    console.warn(
+      "[email] admin client unavailable, dispatch audit disabled (non-blocking):",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  const dispatchRow = {
+    notification_type: notificationType,
+    recipient_email: to,
+    subject,
+    status: "queued" as const,
+    metadata: cc ? { cc } : null,
+  };
+
+  let dispatchId: string | undefined;
+  if (admin) {
+    try {
+      const { data, error: insertErr } = await admin
+        .from("notification_dispatches")
+        .insert(dispatchRow)
+        .select("id")
+        .single();
+      if (insertErr) {
+        console.warn(
+          "[email] notification_dispatches insert failed (non-blocking):",
+          insertErr.message,
+        );
+      } else {
+        dispatchId = data?.id;
+      }
+    } catch (err) {
+      console.warn(
+        "[email] notification_dispatches insert threw (non-blocking):",
+        err,
+      );
+    }
+  }
+
+  if (!resend) {
+    console.warn("[email] Resend not configured — skipping send to", to);
+    await markDispatch(admin, dispatchId, {
+      status: "failed",
+      error: "Resend not configured",
+    });
+    return;
+  }
+
+  // Only the Resend call itself should count as "send failed" for the
+  // audit trail. An exception from the post-send dispatch update would
+  // otherwise mark a successfully-delivered email as failed, which is
+  // a misleading operator signal.
+  let sendError: unknown = null;
+  try {
+    const result = await resend.emails.send({
+      from: FROM,
+      to,
+      cc,
+      subject,
+      html,
+    });
+    if (result.error) {
+      sendError = result.error;
+    }
+  } catch (err) {
+    sendError = err;
+  }
+
+  if (sendError) {
+    console.error("[email] Failed to send:", subject, sendError);
+    await markDispatch(admin, dispatchId, {
+      status: "failed",
+      error: errorMessage(sendError),
+    });
+    // Swallow — per the existing pattern, email failures shouldn't crash
+    // the caller. The dispatch row records the failure for observability.
+    return;
+  }
+
+  // Happy path: Resend accepted the message. Best-effort update to 'sent';
+  // a failure here does NOT mark the email as failed — it was sent. The
+  // row will stay in 'queued' state, and operators can spot stuck rows
+  // via the queued + age > threshold query.
+  await markDispatch(admin, dispatchId, {
+    status: "sent",
+    sent_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * Best-effort update of a notification_dispatches row. Never throws — a
+ * failed audit update must not corrupt the caller's control flow.
+ */
+async function markDispatch(
+  admin: ReturnType<typeof createAdminClient> | null,
+  dispatchId: string | undefined,
+  patch: { status: "sent" | "failed"; error?: string; sent_at?: string },
+): Promise<void> {
+  if (!admin || !dispatchId) return;
+  try {
+    const { error: updateErr } = await admin
+      .from("notification_dispatches")
+      .update(patch)
+      .eq("id", dispatchId);
+    if (updateErr) {
+      console.warn(
+        "[email] notification_dispatches update failed (non-blocking):",
+        updateErr.message,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "[email] notification_dispatches update threw (non-blocking):",
+      err,
+    );
+  }
+}
+
+/**
+ * Extract a human-readable message from any thrown value. Handles:
+ *   - Error instances (err.message)
+ *   - Resend's error shape: { message: string, name: string }
+ *   - Primitive strings
+ *   - Anything else (falls back to JSON.stringify, then String())
+ *
+ * Without this helper, throwing a plain object like `{ message: "Rate limit" }`
+ * would persist as "[object Object]" in the audit trail, which is useless
+ * for operators trying to diagnose a flaky send.
+ */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) {
+    const m = (err as { message: unknown }).message;
+    if (typeof m === "string") return m;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
   }
 }
 
@@ -78,6 +229,7 @@ export async function notifyManagerIntroRequest(
      <p><strong>${safeAllocator}</strong> has requested an introduction to your strategy <strong>${safeStrategy}</strong> on ${PLATFORM_NAME}.</p>
      <p>The ${PLATFORM_NAME} team will review and facilitate this introduction shortly.</p>
      ${SIGNATURE}`,
+    "manager_intro_request",
   );
 }
 
@@ -95,6 +247,7 @@ export async function notifyManagerApproved(
      <p>Share your verified factsheet to attract allocators:</p>
      <p><a href="${APP_URL}/factsheet/${strategyId}" style="color:${BRAND_COLOR};">View your factsheet</a></p>
      ${SIGNATURE}`,
+    "manager_approved",
   );
 }
 
@@ -125,6 +278,7 @@ export async function notifyAllocatorIntroStatus(
      <p>${message}</p>
      <p><a href="${APP_URL}/login" style="color:${BRAND_COLOR};">Log in to ${PLATFORM_NAME}</a> to view details.</p>
      ${SIGNATURE}`,
+    "allocator_intro_status",
   );
 }
 
@@ -144,6 +298,7 @@ export async function notifyFounderNewStrategy(
      <p><strong>Strategy:</strong> ${safeStrategy}<br/>
      <strong>Manager:</strong> ${safeManager}</p>
      <p><a href="${APP_URL}/admin" style="color:${BRAND_COLOR};">Review in admin dashboard</a></p>`,
+    "founder_new_strategy",
   );
 }
 
@@ -161,6 +316,7 @@ export async function notifyFounderIntroRequest(
      <p><strong>Allocator:</strong> ${safeAllocator}<br/>
      <strong>Strategy:</strong> ${safeStrategy}</p>
      <p><a href="${APP_URL}/admin" style="color:${BRAND_COLOR};">Manage in admin dashboard</a></p>`,
+    "founder_intro_request",
   );
 }
 
@@ -193,6 +349,7 @@ export async function notifyAllocatorOfIntroRequest(
        <p><a href="${APP_URL}/factsheet/${strategyId}" style="color:${BRAND_COLOR};">View the factsheet →</a></p>
        ${SIGNATURE}
      </div>`,
+    "allocator_intro_request",
   );
 }
 
@@ -250,6 +407,7 @@ export async function notifyAllocatorOfAdminIntro(
        <p>Reply to this email and we'll coordinate a conversation.</p>
        ${SIGNATURE}
      </div>`,
+    "allocator_admin_intro",
     cc,
   );
 }
@@ -275,6 +433,7 @@ export async function notifyManagerOfAdminIntro(
        <p>Feel free to reply-all to start the conversation. I'll step out once you're connected.</p>
        ${SIGNATURE}
      </div>`,
+    "manager_admin_intro",
     cc,
   );
 }
@@ -337,6 +496,7 @@ export async function sendAlertDigest(
       ${SIGNATURE}
     </div>
   `,
+    "alert_digest",
   );
 }
 
@@ -353,5 +513,6 @@ export async function notifyFounderGeneric(subject: string, bodyHtml: string) {
     FOUNDER_EMAIL,
     safeSubject(subject),
     `<div style="font-family:'DM Sans',sans-serif;max-width:600px;">${bodyHtml}${SIGNATURE}</div>`,
+    "founder_generic",
   );
 }
