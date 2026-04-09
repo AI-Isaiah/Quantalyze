@@ -69,21 +69,31 @@ describe("<InsightStrip>", () => {
     ).toBeInTheDocument();
   });
 
-  it("respects the max prop", () => {
+  it("respects the max prop AND keeps the highest-severity insight", () => {
+    // Regression test for PR 6 I4: max={1} must drop the lower-severity
+    // underperformance insight and keep the high-severity drawdown.
     render(
       <InsightStrip
         analytics={buildAnalytics({
-          portfolio_max_drawdown: -0.2,
+          // high severity — drawdown rule fires
+          portfolio_max_drawdown: -0.25,
+          // medium severity — underperformance rule fires
           attribution_breakdown: [
             { strategy_id: "a", strategy_name: "Alpha", contribution: 0.05, allocation_effect: 0 },
             { strategy_id: "b", strategy_name: "Beta", contribution: -0.04, allocation_effect: 0 },
+            { strategy_id: "c", strategy_name: "Gamma", contribution: 0.03, allocation_effect: 0 },
           ],
         })}
         max={1}
       />,
     );
     const list = screen.getByRole("list");
-    expect(list.querySelectorAll("li")).toHaveLength(1);
+    const items = list.querySelectorAll("li");
+    expect(items).toHaveLength(1);
+    // The retained item should be the high-severity drawdown sentence,
+    // not the medium-severity underperformance one.
+    expect(items[0].textContent).toMatch(/below peak/);
+    expect(screen.getByText("High severity:")).toBeInTheDocument();
   });
 
   it("renders null analytics gracefully", () => {
