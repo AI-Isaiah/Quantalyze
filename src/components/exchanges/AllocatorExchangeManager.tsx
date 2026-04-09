@@ -40,13 +40,18 @@ interface Props {
   initialKeys: ExchangeConnection[];
 }
 
-const EXCHANGE_ICONS: Record<string, string> = {
-  binance: "🟡",
-  okx: "⚫",
-  bybit: "🟠",
-  kraken: "🟣",
-  deribit: "🔵",
-  coinbase: "🔷",
+// Exchange tag: 3-letter code, tier-colored. No emoji in the UI per
+// DESIGN.md. Colors pull from the app's accent + neutral palette.
+const EXCHANGE_TAGS: Record<
+  string,
+  { label: string; bg: string; fg: string }
+> = {
+  binance: { label: "BNB", bg: "#FEF3C7", fg: "#92400E" },
+  okx: { label: "OKX", bg: "#1F2937", fg: "#F9FAFB" },
+  bybit: { label: "BYB", bg: "#FFE4D6", fg: "#C2410C" },
+  kraken: { label: "KRK", bg: "#EDE9FE", fg: "#5B21B6" },
+  deribit: { label: "DRB", bg: "#DBEAFE", fg: "#1E3A8A" },
+  coinbase: { label: "CBS", bg: "#DBEAFE", fg: "#1D4ED8" },
 };
 
 function formatRelative(iso: string | null): string {
@@ -211,40 +216,51 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           </div>
         ) : (
           <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
-            {keys.map((key) => (
-              <div
-                key={key.id}
-                className="flex items-center gap-4 bg-surface px-4 py-3"
-              >
-                <div className="text-2xl">
-                  {EXCHANGE_ICONS[key.exchange] ?? "🔗"}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-text-primary truncate">
-                    {key.label}
-                  </p>
-                  <p className="text-[10px] text-text-muted uppercase tracking-wider mt-0.5">
-                    {key.exchange} · Read-only · Balance{" "}
-                    {formatUsd(key.account_balance_usdt)}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Last sync
-                  </p>
-                  <p className="text-xs text-text-secondary font-metric mt-0.5">
-                    {formatRelative(key.last_sync_at)}
-                  </p>
-                </div>
-                <Button
-                  variant="secondary"
-                  onClick={() => handleSync(key.id)}
-                  disabled={syncingId === key.id}
+            {keys.map((key) => {
+              const tag = EXCHANGE_TAGS[key.exchange] ?? {
+                label: key.exchange.slice(0, 3).toUpperCase(),
+                bg: "#F1F5F9",
+                fg: "#475569",
+              };
+              return (
+                <div
+                  key={key.id}
+                  className="flex items-center gap-4 bg-surface px-4 py-3"
                 >
-                  {syncingId === key.id ? "Syncing…" : "Sync now"}
-                </Button>
-              </div>
-            ))}
+                  <div
+                    className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
+                    style={{ backgroundColor: tag.bg, color: tag.fg }}
+                    aria-label={key.exchange}
+                  >
+                    {tag.label}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-text-primary truncate">
+                      {key.label}
+                    </p>
+                    <p className="text-[10px] text-text-muted uppercase tracking-wider mt-0.5">
+                      {key.exchange} · Read-only · Balance{" "}
+                      {formatUsd(key.account_balance_usdt)}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                      Last sync
+                    </p>
+                    <p className="text-xs text-text-secondary font-metric mt-0.5">
+                      {formatRelative(key.last_sync_at)}
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => handleSync(key.id)}
+                    disabled={syncingId === key.id}
+                  >
+                    {syncingId === key.id ? "Syncing…" : "Sync now"}
+                  </Button>
+                </div>
+              );
+            })}
           </div>
         )}
       </Card>

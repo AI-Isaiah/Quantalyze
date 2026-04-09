@@ -83,6 +83,11 @@ interface ComputedMetrics {
 function computeScenario(
   strategies: StrategyForBuilder[],
   state: ScenarioState,
+  // Pre-built lookup Map per strategy id → (date → daily return).
+  // Built once per strategies change and reused across every recompute so
+  // toggling a checkbox or scrubbing a weight input doesn't reallocate 15
+  // Maps of ~1000 entries each.
+  dateMapCache: Map<string, Map<string, number>>,
 ): ComputedMetrics {
   const activeIds = strategies
     .map((s) => s.id)
@@ -113,35 +118,35 @@ function computeScenario(
   const normWeight = (id: string) =>
     totalWeight > 0 ? (state.weights[id] ?? 0) / totalWeight : 0;
 
-  // Union of dates that appear in any active strategy AND are >= that
-  // strategy's startDate. We take the latest "include from" date across
-  // the active set as the scenario start, so every point on the curve
-  // has contribution from at least one active strategy.
-  const effectiveStarts = activeStrategies.map(
-    (s) => state.startDates[s.id] ?? s.start_date ?? "2022-01-01",
-  );
-  const scenarioStart = effectiveStarts.reduce(
-    (a, b) => (a > b ? a : b),
-    "2022-01-01",
-  );
+  // Per-strategy "include from" dates are now HONORED per strategy, not
+  // reduced to a global max. Build the merged date axis as the UNION of
+  // every active strategy's dates >= its own configured start date. On
+  // days where a strategy isn't yet active, its return is zero-filled so
+  // it contributes nothing to the weighted sum for that day.
+  //
+  // This fixes two bugs:
+  //   (a) Previously, setting an earlier "Include from" date on one
+  //       strategy was a no-op — the scenarioStart was always the LATEST
+  //       across the set, so the earliest control was ignored.
+  //   (b) Previously, toggling on a late-inception strategy silently
+  //       shrank the scenario window to the overlap, discarding years
+  //       of history from the earlier strategies.
+  const strategyStart = new Map<string, string>();
+  for (const s of activeStrategies) {
+    const chosen = state.startDates[s.id] ?? s.start_date ?? "2022-01-01";
+    strategyStart.set(s.id, chosen);
+  }
 
-  // Build a merged date axis as intersection of strategy date arrays
-  // where each strategy's date is >= scenarioStart.
-  const dateSets = activeStrategies.map(
-    (s) =>
-      new Set(
-        s.daily_returns
-          .filter((d) => d.date >= scenarioStart)
-          .map((d) => d.date),
-      ),
-  );
-  const commonDates: string[] = [];
-  if (dateSets.length > 0) {
-    const base = Array.from(dateSets[0]).sort();
-    for (const d of base) {
-      if (dateSets.every((set) => set.has(d))) commonDates.push(d);
+  // Union of all dates that appear in ANY active strategy AFTER its own
+  // include-from. Sorted chronologically.
+  const allDateSet = new Set<string>();
+  for (const s of activeStrategies) {
+    const from = strategyStart.get(s.id)!;
+    for (const d of s.daily_returns) {
+      if (d.date >= from) allDateSet.add(d.date);
     }
   }
+  const commonDates = Array.from(allDateSet).sort();
   const n = commonDates.length;
   if (n < 10) {
     return {
@@ -161,21 +166,37 @@ function computeScenario(
     };
   }
 
-  // Build per-strategy daily return vectors aligned to commonDates
+  // Per-strategy daily return vector, zero-filled on days before that
+  // strategy's include-from date. `dateMapCache` is keyed by strategy id
+  // so repeated toggles against the same strategies reuse the same Map
+  // instead of rebuilding it on every recompute (hot-path perf fix).
   const strategyReturns: Record<string, number[]> = {};
   for (const s of activeStrategies) {
-    const map = new Map(s.daily_returns.map((d) => [d.date, d.value]));
-    strategyReturns[s.id] = commonDates.map((d) => map.get(d) ?? 0);
+    const map = dateMapCache.get(s.id)!;
+    const from = strategyStart.get(s.id)!;
+    strategyReturns[s.id] = commonDates.map((d) =>
+      d >= from ? (map.get(d) ?? 0) : 0,
+    );
   }
 
-  // Portfolio daily returns = weighted sum
+  // Portfolio daily returns = weighted sum. For days where a strategy
+  // isn't active yet, its zero-fill means it simply doesn't contribute,
+  // and the remaining active strategies are re-normalised to still sum
+  // to 1 so we don't silently shrink the portfolio on early days.
   const portDaily: number[] = new Array(n);
   for (let i = 0; i < n; i++) {
     let r = 0;
+    let activeWeightSum = 0;
     for (const s of activeStrategies) {
-      r += normWeight(s.id) * strategyReturns[s.id][i];
+      const from = strategyStart.get(s.id)!;
+      if (commonDates[i] < from) continue;
+      const w = normWeight(s.id);
+      r += w * strategyReturns[s.id][i];
+      activeWeightSum += w;
     }
-    portDaily[i] = r;
+    // Renormalize to the active weight subset on days where some
+    // strategies haven't started yet.
+    portDaily[i] = activeWeightSum > 0 ? r / activeWeightSum : 0;
   }
 
   // Cumulative + equity curve (downsampled to every 5 points for payload)
@@ -189,7 +210,7 @@ function computeScenario(
   const years = n / 252;
   const cagr = years > 0 ? Math.pow(1 + twr, 1 / years) - 1 : null;
 
-  // Vol, Sharpe, Sortino
+  // Vol (sample std), Sharpe (rf=0), Sortino (rf=0)
   const meanR = portDaily.reduce((s, r) => s + r, 0) / n;
   const variance =
     portDaily.reduce((s, r) => s + (r - meanR) * (r - meanR), 0) / (n - 1);
@@ -197,11 +218,14 @@ function computeScenario(
   const volatility = volDaily * Math.sqrt(252);
   const sharpe = volatility > 0 ? (meanR * 252) / volatility : null;
 
-  const downsides = portDaily.filter((r) => r < 0);
-  const downsideVar =
-    downsides.length > 0
-      ? downsides.reduce((s, r) => s + r * r, 0) / downsides.length
-      : 0;
+  // Sortino: downside RMS divides by TOTAL observations (n), not by the
+  // count of negative days. Dividing by downsides.length artificially
+  // inflates Sortino during calm periods.
+  const downsideSumSq = portDaily.reduce(
+    (s, r) => s + (r < 0 ? r * r : 0),
+    0,
+  );
+  const downsideVar = downsideSumSq / n;
   const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(252);
   const sortino = downsideVol > 0 ? (meanR * 252) / downsideVol : (sharpe ?? 0);
 
@@ -222,44 +246,64 @@ function computeScenario(
     if (currentDuration > maxDuration) maxDuration = currentDuration;
   }
 
-  // Correlation matrix (Pearson on daily returns of each active strategy)
+  // Correlation matrix (Pearson on daily returns of each active strategy).
+  // Uses sample covariance (n-1) to stay consistent with the sample-std
+  // used for portfolio volatility above. Precompute each strategy's mean
+  // and stdev once to avoid O(N² × T) recomputation of per-strategy stats.
+  const strategyStats = new Map<
+    string,
+    { mean: number; std: number; demeaned: number[] }
+  >();
+  for (const s of activeStrategies) {
+    const vec = strategyReturns[s.id];
+    const mean = vec.reduce((sum, v) => sum + v, 0) / vec.length;
+    const demeaned = vec.map((v) => v - mean);
+    const sampleVar =
+      vec.length > 1
+        ? demeaned.reduce((sum, d) => sum + d * d, 0) / (vec.length - 1)
+        : 0;
+    strategyStats.set(s.id, {
+      mean,
+      std: Math.sqrt(sampleVar),
+      demeaned,
+    });
+  }
+
   const correlation_matrix: Record<string, Record<string, number>> = {};
-  let corrSum = 0;
+  let absCorrSum = 0;
   let corrCount = 0;
   for (let i = 0; i < activeStrategies.length; i++) {
     const idA = activeStrategies[i].id;
     correlation_matrix[idA] = {};
-    const a = strategyReturns[idA];
-    const meanA = a.reduce((s, v) => s + v, 0) / a.length;
-    const varA =
-      a.reduce((s, v) => s + (v - meanA) * (v - meanA), 0) / a.length;
-    const stdA = Math.sqrt(varA);
+    const statA = strategyStats.get(idA)!;
     for (let j = 0; j < activeStrategies.length; j++) {
       const idB = activeStrategies[j].id;
       if (i === j) {
         correlation_matrix[idA][idB] = 1;
         continue;
       }
-      const b = strategyReturns[idB];
-      const meanB = b.reduce((s, v) => s + v, 0) / b.length;
-      const varB =
-        b.reduce((s, v) => s + (v - meanB) * (v - meanB), 0) / b.length;
-      const stdB = Math.sqrt(varB);
+      const statB = strategyStats.get(idB)!;
+      const T = statA.demeaned.length;
       let cov = 0;
-      for (let k = 0; k < a.length; k++) {
-        cov += (a[k] - meanA) * (b[k] - meanB);
+      for (let k = 0; k < T; k++) {
+        cov += statA.demeaned[k] * statB.demeaned[k];
       }
-      cov /= a.length;
-      const corr = stdA > 0 && stdB > 0 ? cov / (stdA * stdB) : 0;
+      // Sample covariance to match the sample-std denominator above.
+      cov = T > 1 ? cov / (T - 1) : 0;
+      const corr =
+        statA.std > 0 && statB.std > 0 ? cov / (statA.std * statB.std) : 0;
       correlation_matrix[idA][idB] = Number(corr.toFixed(3));
       if (j > i) {
-        corrSum += corr;
+        // The KPI is labelled "Avg |corr|" — accumulate absolute values to
+        // match. A signed average masks a book that's half strongly
+        // positive and half strongly negative as "diversified".
+        absCorrSum += Math.abs(corr);
         corrCount += 1;
       }
     }
   }
   const avg_pairwise_correlation =
-    corrCount > 0 ? Number((corrSum / corrCount).toFixed(3)) : null;
+    corrCount > 0 ? Number((absCorrSum / corrCount).toFixed(3)) : null;
 
   // Equity curve downsampled to weekly (every 5 business days)
   const equity_curve: Array<{ date: string; value: number }> = [];
@@ -413,7 +457,9 @@ function EquityCurveChart({
 
 export function ScenarioBuilder({ strategies }: Props) {
   // Default state: all strategies selected, equal-weighted, start from each
-  // strategy's inception date.
+  // strategy's inception date. weightInputs is a PARALLEL string-state for
+  // the weight number inputs so typing "0." or ".5" doesn't get coerced to
+  // 0 mid-keystroke and force a full recompute with a wrong value.
   const [state, setState] = useState<ScenarioState>(() => {
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
@@ -425,10 +471,29 @@ export function ScenarioBuilder({ strategies }: Props) {
     }
     return { selected, weights, startDates };
   });
+  const [weightInputs, setWeightInputs] = useState<Record<string, string>>(
+    () => {
+      const out: Record<string, string> = {};
+      for (const s of strategies) out[s.id] = "1";
+      return out;
+    },
+  );
+
+  // Build once per strategies change — avoids reallocating 15 Maps on
+  // every toggle/weight/date change.
+  const dateMapCache = useMemo(() => {
+    const cache = new Map<string, Map<string, number>>();
+    for (const s of strategies) {
+      const m = new Map<string, number>();
+      for (const d of s.daily_returns) m.set(d.date, d.value);
+      cache.set(s.id, m);
+    }
+    return cache;
+  }, [strategies]);
 
   const metrics = useMemo(
-    () => computeScenario(strategies, state),
-    [strategies, state],
+    () => computeScenario(strategies, state, dateMapCache),
+    [strategies, state, dateMapCache],
   );
 
   const strategyNames = useMemo(() => {
@@ -445,11 +510,20 @@ export function ScenarioBuilder({ strategies }: Props) {
       selected: { ...prev.selected, [id]: !prev.selected[id] },
     }));
   }
-  function setWeight(id: string, w: number) {
-    setState((prev) => ({
-      ...prev,
-      weights: { ...prev.weights, [id]: Math.max(0, w) },
-    }));
+  function setWeightInput(id: string, raw: string) {
+    // Keep the raw string in a parallel state so the user can type "0."
+    // and ".5" without the parseFloat coercion zeroing it mid-keystroke.
+    // Only commit to `state.weights` when the string parses to a valid
+    // non-negative number. Partial inputs (empty, "-", ".") are held in
+    // weightInputs but leave the numeric weight at its last good value.
+    setWeightInputs((prev) => ({ ...prev, [id]: raw }));
+    const parsed = parseFloat(raw);
+    if (!Number.isNaN(parsed) && parsed >= 0) {
+      setState((prev) => ({
+        ...prev,
+        weights: { ...prev.weights, [id]: parsed },
+      }));
+    }
   }
   function setStartDate(id: string, d: string) {
     setState((prev) => ({
@@ -477,6 +551,9 @@ export function ScenarioBuilder({ strategies }: Props) {
       for (const s of strategies) w[s.id] = 1;
       return { ...prev, weights: w };
     });
+    const ins: Record<string, string> = {};
+    for (const s of strategies) ins[s.id] = "1";
+    setWeightInputs(ins);
   }
 
   return (
@@ -614,10 +691,8 @@ export function ScenarioBuilder({ strategies }: Props) {
                         type="number"
                         min={0}
                         step={0.1}
-                        value={state.weights[s.id] ?? 1}
-                        onChange={(e) =>
-                          setWeight(s.id, parseFloat(e.target.value) || 0)
-                        }
+                        value={weightInputs[s.id] ?? ""}
+                        onChange={(e) => setWeightInput(s.id, e.target.value)}
                         className="mt-0.5 w-full rounded border border-border px-1.5 py-0.5 text-xs font-metric"
                       />
                     </label>
