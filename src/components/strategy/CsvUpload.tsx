@@ -4,6 +4,7 @@ import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { parseCsv } from "@/lib/csv";
 
 interface CsvUploadProps {
   strategyId: string;
@@ -32,48 +33,18 @@ function matchColumn(header: string): string | null {
   return null;
 }
 
-function sanitizeCsvValue(val: string): string {
-  // Prevent CSV injection: strip leading formula characters
-  return val.replace(/^[=+\-@\t\r]+/, "").trim();
-}
-
-function parseCsvLine(line: string): string[] {
-  const fields: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"' && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else if (ch === '"') {
-        inQuotes = false;
-      } else {
-        current += ch;
-      }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ",") {
-      fields.push(sanitizeCsvValue(current.trim()));
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  fields.push(sanitizeCsvValue(current.trim()));
-  return fields;
-}
-
-function parseCsv(text: string): { headers: string[]; rows: string[][] } {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length < 2) return { headers: [], rows: [] };
-
-  const headers = parseCsvLine(lines[0]);
-  const rows = lines.slice(1).map((line) => parseCsvLine(line));
-
-  return { headers, rows };
+/**
+ * Split CSV text into a header row + data rows using the shared
+ * `@/lib/csv` parser. Returns empty arrays if there are fewer than 2
+ * non-blank lines (i.e. no data rows beneath the header).
+ */
+function parseCsvWithHeaders(text: string): {
+  headers: string[];
+  rows: string[][];
+} {
+  const all = parseCsv(text);
+  if (all.length < 2) return { headers: [], rows: [] };
+  return { headers: all[0], rows: all.slice(1) };
 }
 
 export function CsvUpload({ strategyId }: CsvUploadProps) {
@@ -104,7 +75,7 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
     const reader = new FileReader();
     reader.onload = (evt) => {
       const text = evt.target?.result as string;
-      const { headers, rows } = parseCsv(text);
+      const { headers, rows } = parseCsvWithHeaders(text);
 
       if (headers.length === 0 || rows.length === 0) {
         setError("CSV file is empty or has no data rows.");
@@ -138,7 +109,7 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
 
     try {
       const text = await file.text();
-      const { rows } = parseCsv(text);
+      const { rows } = parseCsvWithHeaders(text);
       const { mapping } = preview;
 
       // Transform rows to daily PnL records
