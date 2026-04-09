@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
 
 const ATTESTATION_VERSION = "2026-04-07";
@@ -54,10 +54,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const ipAddress =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    req.headers.get("x-real-ip") ??
-    null;
+  // Reuse the ratelimit module's header parser so there's one source of
+  // truth for client-IP extraction across attestation, deletion-request,
+  // and the PDF routes. `getClientIp` returns `"unknown"` for a missing
+  // header; we coerce that to null because `investor_attestations.ip_address`
+  // is nullable and `"unknown"` would be a misleading audit row.
+  const extractedIp = getClientIp(req.headers);
+  const ipAddress = extractedIp === "unknown" ? null : extractedIp;
 
   // Upsert without ignoreDuplicates so Supabase reliably returns a row. On a
   // first-time attestation this writes the new row; on a repeat attestation

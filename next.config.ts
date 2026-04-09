@@ -1,7 +1,26 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  async headers() {
+    return [
+      {
+        // CDN-cache the public /demo pages for 60 seconds with 5-minute
+        // stale-while-revalidate. The page is `force-dynamic` (ISR prerenders
+        // at build time, which crashes CI without SUPABASE_SERVICE_ROLE_KEY),
+        // but response-level Cache-Control still lets Vercel's edge CDN
+        // absorb viral traffic without hitting Supabase on every request.
+        // /demo/founder-view inherits the same policy since it's the
+        // founder-side read-only twin of /demo.
+        source: "/demo/:path*",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "public, s-maxage=60, stale-while-revalidate=300",
+          },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

@@ -118,36 +118,36 @@ export async function getAllocatorMatchPayload(
       .eq("allocator_id", allocatorId),
   ]);
 
+  // Surface errors from every fan-out query consistently. Previously only
+  // batch + preferences were error-checked; profile/decisions/contact-requests
+  // silently coerced their errors into null/[], which would render a
+  // "profile unknown, no history" UI state that looks like real data but is
+  // actually a network or schema drift failure. Throw on any real error so
+  // the UI gets a 500 rather than a misleading empty state.
   if (batchRes.error) throw batchRes.error;
-  const batchRow = (batchRes.data as Record<string, unknown> | null) ?? null;
-
-  // Preferences — explicit column enumeration (see the top of this file for
-  // the rationale). The column list is a shared constant so any UI change
-  // only needs to touch one place.
-  //
-  // Error handling: `.maybeSingle()` returns `{data: null, error: null}` when
-  // the row legitimately does not exist (allocator never set prefs). An
-  // actual error (e.g., a schema drift where one of the enumerated columns
-  // went missing) is surfaced here so the UI gets a 500 instead of silently
-  // showing "no preferences" — the latter would look like a real state but
-  // would actually be data corruption.
   if (preferencesRes.error) throw preferencesRes.error;
-  const preferences = preferencesRes.data;
+  if (profileRes.error) throw profileRes.error;
+  if (decisionsRes.error) throw decisionsRes.error;
+  if (existingContactRequestsRes.error) throw existingContactRequestsRes.error;
 
+  const batchRow = (batchRes.data as Record<string, unknown> | null) ?? null;
+  const preferences = preferencesRes.data;
   const profile = profileRes.data;
   const decisions = decisionsRes.data;
   const existingContactRequests = existingContactRequestsRes.data;
 
   if (!batchRow) {
     return {
-      profile: (profile as Record<string, unknown> | null) ?? null,
-      preferences: (preferences as Record<string, unknown> | null) ?? null,
+      profile: (profile as unknown as Record<string, unknown> | null) ?? null,
+      preferences:
+        (preferences as unknown as Record<string, unknown> | null) ?? null,
       batch: null,
       candidates: [],
       excluded: [],
-      decisions: (decisions as Array<Record<string, unknown>> | null) ?? [],
+      decisions:
+        (decisions as unknown as Array<Record<string, unknown>> | null) ?? [],
       existing_contact_requests:
-        (existingContactRequests as Array<{
+        (existingContactRequests as unknown as Array<{
           strategy_id: string;
           created_at: string;
           status: string;
@@ -168,10 +168,11 @@ export async function getAllocatorMatchPayload(
   if (candErr) throw candErr;
 
   // Supabase's generated row types for Postgres select strings with inline
-  // joins don't flatten cleanly into Record<string, unknown> (the generic
-  // error type leaks through). Cast via unknown so the rest of this helper
-  // can treat the row as a plain JSON object — the consumers own the narrow
-  // typing in AllocatorMatchQueue.tsx / CandidateRow.
+  // joins don't flatten cleanly into Record<string, unknown> — the generic
+  // `GenericStringError` type leaks through and TypeScript refuses the
+  // direct cast. Double-cast through unknown as TypeScript explicitly
+  // suggests. The consuming React components in AllocatorMatchQueue.tsx
+  // own the narrow CandidateRow type.
   const candidateRowsArr =
     (candidateRows as unknown as Array<Record<string, unknown>> | null) ?? [];
 
@@ -206,14 +207,16 @@ export async function getAllocatorMatchPayload(
     }));
 
   return {
-    profile: (profile as Record<string, unknown> | null) ?? null,
-    preferences: (preferences as Record<string, unknown> | null) ?? null,
+    profile: (profile as unknown as Record<string, unknown> | null) ?? null,
+    preferences:
+      (preferences as unknown as Record<string, unknown> | null) ?? null,
     batch: batchRow,
     candidates: enrichWithAnalytics(candidates),
     excluded: enrichWithAnalytics(excluded),
-    decisions: (decisions as Array<Record<string, unknown>> | null) ?? [],
+    decisions:
+      (decisions as unknown as Array<Record<string, unknown>> | null) ?? [],
     existing_contact_requests:
-      (existingContactRequests as Array<{
+      (existingContactRequests as unknown as Array<{
         strategy_id: string;
         created_at: string;
         status: string;
