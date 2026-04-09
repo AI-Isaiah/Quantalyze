@@ -148,6 +148,14 @@ export interface Portfolio {
   name: string;
   description: string | null;
   created_at: string;
+  /**
+   * Added in migration 023. False for the allocator's single real
+   * invested book (shown on My Allocation). The partial unique index
+   * portfolios_one_real_per_user enforces at most one is_test=false row
+   * per user_id. The v0.4.0 pivot dropped the Test Portfolios surface,
+   * but the column stays — the invariant is still valuable.
+   */
+  is_test: boolean;
 }
 
 export interface PortfolioWithCount extends Portfolio {

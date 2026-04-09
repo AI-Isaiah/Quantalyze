@@ -18,30 +18,36 @@ function buildNavSections(
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
     : DISCOVERY_CATEGORIES;
 
-  const workspaceItems: NavItem[] = [
-    { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-    { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
-    { label: "Allocations", href: "/allocations", icon: PortfolioIcon },
-  ];
-
-  // Allocator-facing recommendations surface — hidden from managers and
-  // from the founder (who has the admin Match Queue instead).
+  // v0.4.0 pivot: allocator workspace and manager/crypto-team workspace
+  // are distinct now.
+  //
+  // Allocators see: My Allocation → Connections → Scenarios → Recommendations.
+  // No Strategies (that's the manager surface), no Test Portfolios
+  // (Scenarios replaces the what-if exploration concept), no Exchanges
+  // (inline API key management lives on My Allocation now).
+  //
+  // Managers / crypto teams see: Strategies, Portfolios (the legacy
+  // collection view). They're the ones publishing strategies for
+  // allocators to discover.
+  const workspaceItems: NavItem[] = [];
   if (isAllocator && !isAdmin) {
-    workspaceItems.push({
-      label: "Recommendations",
-      href: "/recommendations",
-      icon: RecommendIcon,
-    });
-    workspaceItems.push({
-      label: "Scenarios",
-      href: "/scenarios",
-      icon: BarChartIcon,
-    });
-    workspaceItems.push({
-      label: "Exchanges",
-      href: "/exchanges",
-      icon: BarChartIcon,
-    });
+    workspaceItems.push(
+      { label: "My Allocation", href: "/allocations", icon: PortfolioIcon },
+      { label: "Connections", href: "/connections", icon: LinkIcon },
+      { label: "Scenarios", href: "/scenarios", icon: BarChartIcon },
+      {
+        label: "Recommendations",
+        href: "/recommendations",
+        icon: RecommendIcon,
+      },
+    );
+  } else {
+    // Non-allocator view (managers + admins): Strategies is their
+    // publishing surface, Portfolios is their collection view.
+    workspaceItems.push(
+      { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
+    );
   }
 
   return [
@@ -189,6 +195,15 @@ function RecommendIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8 1l1.8 4.2 4.7.4-3.6 3 1.1 4.6L8 10.8 3.9 13.2l1.1-4.6-3.6-3 4.7-.4L8 1z" />
+    </svg>
+  );
+}
+
+function LinkIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 9a3 3 0 004.24 0l2-2a3 3 0 00-4.24-4.24l-1 1" />
+      <path d="M9 7a3 3 0 00-4.24 0l-2 2a3 3 0 004.24 4.24l1-1" />
     </svg>
   );
 }

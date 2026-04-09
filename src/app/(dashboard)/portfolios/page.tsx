@@ -6,6 +6,16 @@ import { CreatePortfolioForm } from "@/components/portfolio/CreatePortfolioForm"
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+/**
+ * /portfolios — generic portfolios browser.
+ *
+ * The v0.4.0 pivot dropped the "Test Portfolios" rename. Allocators no
+ * longer use this page directly (it's removed from their sidebar —
+ * their real book lives on /allocations, their what-if exploration
+ * lives on /scenarios). The route is kept for managers and for any
+ * deep links that still point here. CreatePortfolioForm is still
+ * available for manual portfolio creation.
+ */
 export default async function PortfoliosPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();

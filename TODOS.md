@@ -12,42 +12,55 @@
 
 ---
 
-## 🔴 HIGHEST PRIORITY — unblocked the moment the B1+B2 seed branch merges
+## 🔴 HIGHEST PRIORITY
 
-### Multistrategy Dashboard (allocator overview page)
+(Previous HIGHEST PRIORITY entry — the "Multistrategy Dashboard (allocator
+overview page)" idea — shipped in v0.4.0.0 as the My Allocation restructure.
+It evolved during /plan-design-review: instead of a new `/overview` page, the
+existing `/allocations` was renamed to "My Allocation" and refocused on the
+allocator's single real portfolio. The scope toggle became a Favorites panel
+with a dashed "+ Favorites" overlay curve, and saved favorite combinations
+land in the renamed "Test Portfolios" section. See CHANGELOG.md and the plan
+file at `~/.claude/plans/adaptive-puzzling-yao.md`.)
 
-Top-level `/overview` page (new sidebar entry above `/portfolios`) that gives
-the allocator a **fund-level** view across ALL strategies in ALL their
-portfolios — the thing a multi-portfolio allocator actually opens first.
+### Follow-ups from the My Allocation restructure (v0.4.0.0)
 
-Modelled after the FundLogic / Everysk "Multistrategy Dashboard" pattern:
+These were flagged during `/plan-design-review` and `/plan-eng-review` but
+intentionally deferred out of the restructure PR to keep scope tight:
 
-- **YTD PnL by Strategy** — overlaid line chart, one line per strategy,
-  distinct colors + hoverable legend. Reads directly from the seeded
-  `strategy_analytics.daily_returns`. Same client-side SVG approach as the
-  scenario builder.
-- **MTD PnL by Strategy** — horizontal bar chart, teal (positive) / orange
-  (negative), compound of the last ~21 trading days per strategy.
-- **Fund-level KPI strip** — 4 cards:
-  - Fund AUM (sum of `portfolio_strategies.allocated_amount` across all
-    portfolios owned by the allocator)
-  - Fund 24h Return (weighted by current allocation)
-  - Fund MTD Return
-  - Fund YTD Return
-- **Scope toggle** — "All strategies" vs "Active Allocation only" so the
-  real book and scenario portfolios don't muddy the chart together.
-- Each legend entry on the line chart is a deep link to the strategy detail
-  page so the allocator can drill from the overview directly.
-
-Everything needed to build this (daily_returns series per strategy,
-allocated_amount per holding, portfolio ownership) is already seeded by
-`scripts/seed-full-app-demo.ts`. Estimated 45-90 minutes of pure client-side
-code, no backend.
-
-Placement: new sidebar entry `"Overview"` with a chart/bar icon, positioned
-above `"Strategies"` in the `MY WORKSPACE` group. Make it the allocator's
-default landing page after login (redirect from `/` to `/overview` when
-`profile.role === 'allocator'`).
+- **STRATEGY_PALETTE colorblind + WCAG AA audit.** Pulled forward by the
+  multi-line YTD chart on My Allocation, which makes palette quality more
+  visible than the single-portfolio chart on `/portfolios/[id]`. Same concern
+  the existing correlation heatmap has. File a tracking issue, audit the
+  current palette against colorblind simulators + AA contrast against white.
+- **Refactor `PortfolioKPIRow` to the shared-panel pattern.** It currently
+  renders four separate `Card` components with centered content on
+  `/portfolios/[id]` — the exact "3+ cards in a row" anti-pattern DESIGN.md
+  rejects. The new `FundKPIStrip` in the portfolio components folder is the
+  reference implementation. Refactor needs design sign-off on the detail
+  page visual change.
+- **Replace the hardcoded 10% "favorites sleeve"** in
+  `computeFavoritesOverlayCurve` with the portfolio optimizer. The optimizer
+  already exists (`/api/portfolio-optimizer`) but uses a different input
+  shape — wire it through.
+- **Favorites sorting/grouping** — v1 is `created_at DESC`. Tags, priority,
+  Sharpe-sort, or category groups are all reasonable next moves.
+- **Bulk toggle in the Favorites panel** — "toggle all on", "toggle all off".
+- **Narrative tooltips on each KPI strip cell** — two sentences each: what
+  it means, why it matters. Removes the need for the founder to narrate
+  every metric by memory during the demo.
+- **Partial unique index integration test** (real Postgres) — proves a
+  second real-portfolio insert for the same user hits 23505. Currently
+  covered only by the self-verifying `DO $$` block in migration 023 at
+  migration time. Same for the `user_favorites` RLS policies.
+- **`PortfolioEquityCurve` overlay regression test** — lightweight-charts
+  mocking is non-trivial but the `overlayCurve` prop deserves a real test
+  that asserts the dashed series is added when non-null and not added when
+  null. Today it's protected by TypeScript defaults + lint.
+- **Full e2e walkthrough** — `e2e/my-allocation.spec.ts` (Playwright) that
+  logs in, lands on My Allocation, toggles a favorite, saves as test
+  portfolio, verifies Test Portfolios picks it up, verifies /connections
+  still works.
 
 ---
 

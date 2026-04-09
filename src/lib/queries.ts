@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
@@ -303,6 +304,7 @@ export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
     name: p.name,
     description: p.description,
     created_at: p.created_at,
+    is_test: p.is_test ?? false,
     strategy_count: Array.isArray(p.portfolio_strategies) ? p.portfolio_strategies.length : 0,
   }));
 }
@@ -462,3 +464,208 @@ export async function getAllocatorAggregates(userId: string) {
 
   return { portfolios, analytics: (analytics ?? []) as PortfolioAnalytics[] };
 }
+
+// =========================================================================
+// My Allocation (migrations 023, 025)
+// =========================================================================
+//
+// v0.4.0 pivot: My Allocation is a Scenarios-style live view of the
+// allocator's ACTUAL investments — each row is an investment they made
+// by giving a team a read-only API key on their exchange account. The
+// page reuses the scenario math library (src/lib/scenario.ts) to render
+// the composite curve, KPI strip, and per-strategy list from real
+// data. No Test Portfolios, no Favorites panel, no Save-as-Test. The
+// what-if exploration surface is /scenarios.
+
+/**
+ * Fetch the single real portfolio for the given user — the one row with
+ * `is_test = false`. Migration 023 enforces at most one real portfolio
+ * per user via a partial unique index, so this query is guaranteed to
+ * return either exactly one row or null. Wrapped in React.cache() so
+ * multiple server components in the same render tree deduplicate to
+ * one DB call per request.
+ */
+export const getRealPortfolio = cache(
+  async (userId: string): Promise<Portfolio | null> => {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("portfolios")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("is_test", false)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data as Portfolio;
+  },
+);
+
+/**
+ * Everything the My Allocation page needs, fetched in one parallel
+ * round of Supabase queries. `strategies` rows carry the
+ * allocator-provided `alias` from migration 025 (nullable — UI falls
+ * back to the canonical strategy name when unset) plus raw
+ * `daily_returns` for the scenario math. `apiKeys` drives the
+ * inline "Add Investment" / "Connected exchanges" section.
+ */
+export interface MyAllocationDashboardPayload {
+  portfolio: Portfolio | null;
+  analytics: PortfolioAnalytics | null;
+  strategies: Array<{
+    strategy_id: string;
+    current_weight: number | null;
+    allocated_amount: number | null;
+    alias: string | null;
+    strategy: {
+      id: string;
+      name: string;
+      codename: string | null;
+      disclosure_tier: DisclosureTier;
+      strategy_types: string[];
+      markets: string[];
+      start_date: string | null;
+      strategy_analytics: Pick<
+        StrategyAnalytics,
+        "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
+      > | null;
+    };
+  }>;
+  apiKeys: Array<{
+    id: string;
+    exchange: string;
+    label: string;
+    is_active: boolean;
+    sync_status: string | null;
+    last_sync_at: string | null;
+    account_balance_usdt: number | null;
+    created_at: string;
+  }>;
+  alertCount: { high: number; medium: number; low: number; total: number };
+}
+
+export const getMyAllocationDashboard = cache(
+  async (userId: string): Promise<MyAllocationDashboardPayload> => {
+    const supabase = await createClient();
+    const admin = createAdminClient();
+
+    // Step 1: the real portfolio anchors everything else.
+    const portfolio = await getRealPortfolio(userId);
+    if (!portfolio) {
+      // No real portfolio yet — still fetch api_keys so the page can
+      // prompt the user to connect their first exchange.
+      const { data: keyRows } = await admin
+        .from("api_keys")
+        .select(
+          "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at",
+        )
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+      return {
+        portfolio: null,
+        analytics: null,
+        strategies: [],
+        apiKeys: (keyRows ?? []) as MyAllocationDashboardPayload["apiKeys"],
+        alertCount: { high: 0, medium: 0, low: 0, total: 0 },
+      };
+    }
+
+    // Step 2: parallel fetch everything. Uses the admin client for
+    // strategy_analytics because the analytics daily_returns are only
+    // exposed to service role (migration 010 revokes SELECT on that
+    // column from anon/authenticated for column-level privacy).
+    const [analyticsRes, strategiesRes, apiKeysRes, alertsRes] =
+      await Promise.all([
+        admin
+          .from("portfolio_analytics")
+          .select("*")
+          .eq("portfolio_id", portfolio.id)
+          .order("computed_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        admin
+          .from("portfolio_strategies")
+          .select(
+            `
+          strategy_id,
+          current_weight,
+          allocated_amount,
+          alias,
+          strategy:strategies!inner (
+            id,
+            name,
+            codename,
+            disclosure_tier,
+            strategy_types,
+            markets,
+            start_date,
+            strategy_analytics (
+              daily_returns,
+              cagr,
+              sharpe,
+              volatility,
+              max_drawdown
+            )
+          )
+          `,
+          )
+          .eq("portfolio_id", portfolio.id)
+          .order("current_weight", { ascending: false }),
+        admin
+          .from("api_keys")
+          .select(
+            "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at",
+          )
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("portfolio_alerts")
+          .select("id, severity")
+          .eq("portfolio_id", portfolio.id)
+          .is("acknowledged_at", null),
+      ]);
+
+    // Normalize the strategies join: Supabase returns the embedded
+    // strategy as either an object or an array depending on the embed
+    // inference. Same normalization pattern the old allocations page
+    // used. Alias + current_weight + allocated_amount carry through
+    // from the join row.
+    const strategies = (strategiesRes.data ?? []).map((row) => {
+      const rawStrategy = (row as unknown as { strategy: unknown }).strategy;
+      const strategy = (
+        Array.isArray(rawStrategy) ? rawStrategy[0] : rawStrategy
+      ) as MyAllocationDashboardPayload["strategies"][number]["strategy"];
+      const rawAnalytics = (strategy as unknown as { strategy_analytics: unknown })
+        ?.strategy_analytics;
+      const analytics = Array.isArray(rawAnalytics)
+        ? rawAnalytics[0]
+        : rawAnalytics;
+      return {
+        strategy_id: row.strategy_id,
+        current_weight: row.current_weight,
+        allocated_amount: row.allocated_amount,
+        alias: (row as unknown as { alias: string | null }).alias ?? null,
+        strategy: {
+          ...strategy,
+          strategy_analytics: (analytics ?? null) as
+            | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"],
+        },
+      };
+    });
+
+    const alertCounts = { high: 0, medium: 0, low: 0, total: 0 };
+    for (const a of alertsRes.data ?? []) {
+      const sev = (a as { severity: string }).severity;
+      if (sev === "high") alertCounts.high++;
+      else if (sev === "medium") alertCounts.medium++;
+      else if (sev === "low") alertCounts.low++;
+      alertCounts.total++;
+    }
+
+    return {
+      portfolio,
+      analytics: (analyticsRes.data ?? null) as PortfolioAnalytics | null,
+      strategies,
+      apiKeys: (apiKeysRes.data ?? []) as MyAllocationDashboardPayload["apiKeys"],
+      alertCount: alertCounts,
+    };
+  },
+);
