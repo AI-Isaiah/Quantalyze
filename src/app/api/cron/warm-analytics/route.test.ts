@@ -59,14 +59,17 @@ describe.each([
     expect(res.status).toBe(401);
   });
 
-  it("returns a success body when ANALYTICS_SERVICE_URL is unset (silent no-op)", async () => {
+  it("returns 500 when ANALYTICS_SERVICE_URL is unset (so Vercel Cron alerts fire)", async () => {
     delete process.env.ANALYTICS_SERVICE_URL;
     const res = await handler(
       makeReq({
         authorization: `Bearer ${process.env.CRON_SECRET}`,
       }),
     );
-    expect(res.status).toBe(200);
+    // Regression fix: a misconfig that returned HTTP 200 with `{ok: false}`
+    // would produce a green cron history while the warmer was completely
+    // broken. Returning 500 makes the Vercel dashboard light up red.
+    expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.reason).toContain("ANALYTICS_SERVICE_URL");
@@ -93,16 +96,33 @@ describe.each([
     expect(typeof body.elapsed_ms).toBe("number");
   });
 
-  it("returns ok:false when the health fetch errors", async () => {
+  it("returns 504 when the health fetch throws (timeout / network)", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
     const res = await handler(
       makeReq({
         authorization: `Bearer ${process.env.CRON_SECRET}`,
       }),
     );
-    expect(res.status).toBe(200);
+    // Regression fix: propagate the failure as a 5xx so Vercel Cron's
+    // failure alerts fire. Previously always 200 regardless of upstream.
+    expect(res.status).toBe(504);
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.reason).toContain("network down");
+  });
+
+  it("returns 502 when the upstream /health responds with 500", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 500 }),
+    );
+    const res = await handler(
+      makeReq({
+        authorization: `Bearer ${process.env.CRON_SECRET}`,
+      }),
+    );
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.status).toBe(500);
   });
 });

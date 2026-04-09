@@ -17,6 +17,11 @@ import { timingSafeEqual } from "crypto";
  * Schedule + secret: see `vercel.json`.
  */
 
+// Force dynamic. This route reads req.headers, but being explicit keeps
+// Next.js from ever static-optimising a future variant and silently
+// stripping the auth check.
+export const dynamic = "force-dynamic";
+
 /**
  * Constant-time Bearer token compare so an attacker can't probe
  * CRON_SECRET via timing differences on a public cron endpoint. JS `!==`
@@ -38,7 +43,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   const url = process.env.ANALYTICS_SERVICE_URL;
   if (!url) {
-    return NextResponse.json({ ok: false, reason: "ANALYTICS_SERVICE_URL not set" });
+    // Vercel Cron only alerts on non-2xx, so a misconfig that returned
+    // HTTP 200 with `{ok: false}` would produce a green cron history
+    // while the warmer is completely broken. Return 500 so the cron
+    // dashboard lights up red.
+    return NextResponse.json(
+      { ok: false, reason: "ANALYTICS_SERVICE_URL not set" },
+      { status: 500 },
+    );
   }
 
   const start = Date.now();
@@ -50,17 +62,29 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       cache: "no-store",
       signal: controller.signal,
     });
-    return NextResponse.json({
-      ok: res.ok,
-      status: res.status,
-      elapsed_ms: Date.now() - start,
-    });
+    // Propagate the upstream health status as the route's HTTP status.
+    // If the analytics service is returning 500s, the warmup route
+    // should return 500 too so Vercel Cron's built-in failure alerts
+    // fire. Previously this route always returned 200 regardless of
+    // upstream health, so a persistently-failing analytics service
+    // produced a green cron history that masked the outage.
+    return NextResponse.json(
+      {
+        ok: res.ok,
+        status: res.status,
+        elapsed_ms: Date.now() - start,
+      },
+      { status: res.ok ? 200 : 502 },
+    );
   } catch (err) {
-    return NextResponse.json({
-      ok: false,
-      reason: err instanceof Error ? err.message : "unknown",
-      elapsed_ms: Date.now() - start,
-    });
+    return NextResponse.json(
+      {
+        ok: false,
+        reason: err instanceof Error ? err.message : "unknown",
+        elapsed_ms: Date.now() - start,
+      },
+      { status: 504 },
+    );
   } finally {
     clearTimeout(timeout);
   }

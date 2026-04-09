@@ -53,11 +53,18 @@ export async function GET(
   }
 
   const admin = createAdminClient();
-  const { data: portfolio } = await admin
+  const { data: portfolio, error: portfolioErr } = await admin
     .from("portfolios")
     .select("id, name")
     .eq("id", id)
     .single();
+  if (portfolioErr) {
+    // Surface transient Supabase errors (network, connection refused,
+    // query timeout) as 500 rather than silently masking them as 404.
+    // A 404 masks real outages from the error-monitoring dashboards.
+    console.error("[demo-portfolio-pdf] portfolios fetch failed:", portfolioErr);
+    return NextResponse.json({ error: "Portfolio lookup failed" }, { status: 500 });
+  }
   if (!portfolio) {
     // Should be unreachable given the allowlist check above, but defensive.
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -87,7 +94,19 @@ export async function GET(
       margin: { top: "20mm", bottom: "20mm", left: "15mm", right: "15mm" },
     });
 
-    const portfolioName = (portfolio as { name?: string } | null)?.name ?? "Portfolio";
+    const rawName = (portfolio as { name?: string } | null)?.name ?? "Portfolio";
+    // Strip anything that could break the Content-Disposition header
+    // (quote, backslash, CR/LF inject a new header, non-ASCII breaks
+    // RFC 2183). The portfolio allowlist means this name comes from a
+    // DB row we control today, but the sanitizer prevents a latent
+    // header-injection footgun if any user-editable name ever flows
+    // through this route. Also cap length to 80 chars to avoid an
+    // unreasonable Content-Disposition value.
+    const portfolioName = rawName
+      .replace(/[\r\n"\\]/g, "")
+      .replace(/[^\x20-\x7E]/g, "")
+      .trim()
+      .slice(0, 80) || "Portfolio";
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",

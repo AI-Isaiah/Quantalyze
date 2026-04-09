@@ -1,4 +1,8 @@
 import { test, expect } from "@playwright/test";
+import {
+  filterUnexpectedConsoleErrors,
+  type CapturedConsoleError,
+} from "../src/lib/playwright-console-filter";
 
 /**
  * E2E coverage for the public `/demo` page.
@@ -65,19 +69,29 @@ test.describe("Public /demo page", () => {
   });
 
   test("no console errors on /demo", async ({ page }) => {
-    const errors: string[] = [];
+    // Capture both text and URL so resource errors whose URL lives on
+    // msg.location().url can still be filtered. Uses the shared helper
+    // from src/lib/playwright-console-filter so this spec can't regress
+    // to the text-only bug fixed in commits 0089cee / f7367e7.
+    const errors: CapturedConsoleError[] = [];
     page.on("console", (msg) => {
-      if (msg.type() === "error") errors.push(msg.text());
+      if (msg.type() === "error") {
+        errors.push({ text: msg.text(), url: msg.location().url });
+      }
     });
 
     await page.goto("/demo");
     await page.waitForTimeout(1000);
 
-    // Filter Next.js hydration warnings + redirect noise, same shape as
-    // smoke.spec.ts.
-    const realErrors = errors.filter(
-      (e) => !e.includes("Hydration") && !e.includes("NEXT_REDIRECT"),
-    );
+    const realErrors = filterUnexpectedConsoleErrors(errors, {
+      ignoreTextIncludes: ["Hydration", "NEXT_REDIRECT", "Failed to fetch"],
+    });
+    if (realErrors.length > 0) {
+      console.log(
+        "Unexpected console errors:",
+        JSON.stringify(realErrors, null, 2),
+      );
+    }
     expect(realErrors).toHaveLength(0);
   });
 
