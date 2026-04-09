@@ -8,6 +8,7 @@ import {
   formatPercent,
   formatNumber,
   metricColor,
+  STRATEGY_PALETTE,
 } from "@/lib/utils";
 import {
   buildDateMapCache,
@@ -32,14 +33,15 @@ import Link from "next/link";
  * correlation matrix are structurally identical to the what-if lab,
  * just fed with REAL data instead of hypothetical toggles.
  *
- * What's different from /scenarios:
- *  - No toggles. These are real investments, not optional what-ifs.
- *  - Each row has an editable alias (the allocator's name for this
- *    investment, stored in portfolio_strategies.alias). Falls back to
- *    the strategy's canonical display name when null.
- *  - An inline "Exchange connections" section below the dashboard
- *    reuses AllocatorExchangeManager so the allocator can add more
- *    investments without leaving the page.
+ * Interactive bits on top of the scenarios layer:
+ *  - Timeframe selector (1DTD … All) that re-windows every metric and
+ *    both the composite + per-strategy curves.
+ *  - Legend under the chart — click a strategy chip to hide/show its
+ *    line. Hidden strategies drop out of the composite and every KPI.
+ *  - Allocation pie — AUM share per strategy, clickable to toggle.
+ *  - Editable alias per row (pencil icon), stored in
+ *    portfolio_strategies.alias. Falls back to the strategy's codename
+ *    or canonical name.
  */
 
 interface StrategyRow {
@@ -116,9 +118,6 @@ function normalizeDailyReturns(raw: unknown): DailyPoint[] {
     } else if (v && typeof v === "object") {
       for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
         if (typeof vv === "number") {
-          // If the inner key is already a full ISO date, use it. If it's
-          // a month-day ("01-02" or "1-2"), pad both components and
-          // prefix with the outer year key.
           if (kk.length === 10) {
             out.push({ date: kk, value: vv });
           } else {
@@ -148,68 +147,217 @@ function displayName(row: StrategyRow): string {
 }
 
 // =========================================================================
-// Pure-SVG equity curve — identical style to ScenarioBuilder's chart
+// Timeframe
 // =========================================================================
 
-function EquityCurveChart({
-  points,
+const TIMEFRAMES = [
+  { key: "1DTD", label: "1D" },
+  { key: "1WTD", label: "1W" },
+  { key: "1MTD", label: "1M" },
+  { key: "1QTD", label: "1Q" },
+  { key: "1YTD", label: "YTD" },
+  { key: "3YTD", label: "3Y" },
+  { key: "ALL", label: "All" },
+] as const;
+
+type TimeframeKey = (typeof TIMEFRAMES)[number]["key"];
+
+function isoDate(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Compute the timeframe's start date (ISO YYYY-MM-DD) from the
+ * reference "today" date. The reference is the most recent date in
+ * the data — not wall-clock today — so the window lines up with
+ * whatever the analytics pipeline last synced.
+ */
+function getTimeframeStart(
+  timeframe: TimeframeKey,
+  lastDataDate: string | null,
+  portfolioInceptionDate: string,
+): string {
+  if (timeframe === "ALL" || !lastDataDate) return portfolioInceptionDate;
+
+  const [y, m, d] = lastDataDate.split("-").map((x) => parseInt(x, 10));
+  const ref = new Date(Date.UTC(y, m - 1, d));
+
+  switch (timeframe) {
+    case "1DTD": {
+      const start = new Date(ref);
+      start.setUTCDate(start.getUTCDate() - 1);
+      return isoDate(start);
+    }
+    case "1WTD": {
+      // Monday of the week containing ref (UTC)
+      const start = new Date(ref);
+      const dow = start.getUTCDay(); // 0 = Sun
+      const delta = dow === 0 ? 6 : dow - 1;
+      start.setUTCDate(start.getUTCDate() - delta);
+      return isoDate(start);
+    }
+    case "1MTD": {
+      return isoDate(new Date(Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), 1)));
+    }
+    case "1QTD": {
+      const qStartMonth = Math.floor(ref.getUTCMonth() / 3) * 3;
+      return isoDate(new Date(Date.UTC(ref.getUTCFullYear(), qStartMonth, 1)));
+    }
+    case "1YTD": {
+      return isoDate(new Date(Date.UTC(ref.getUTCFullYear(), 0, 1)));
+    }
+    case "3YTD": {
+      const start = new Date(ref);
+      start.setUTCFullYear(start.getUTCFullYear() - 3);
+      return isoDate(start);
+    }
+    default:
+      return portfolioInceptionDate;
+  }
+}
+
+function TimeframeSelector({
+  value,
+  onChange,
+}: {
+  value: TimeframeKey;
+  onChange: (next: TimeframeKey) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Timeframe"
+      className="inline-flex items-center rounded-lg border border-border bg-surface p-0.5 gap-0.5"
+    >
+      {TIMEFRAMES.map((t) => {
+        const active = value === t.key;
+        return (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(t.key)}
+            className={`px-2.5 py-1 text-xs font-medium tabular-nums rounded-md transition-colors ${
+              active
+                ? "bg-accent text-white"
+                : "text-text-secondary hover:text-text-primary hover:bg-bg-secondary"
+            }`}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// =========================================================================
+// Multi-line equity curve (composite + per-strategy)
+// =========================================================================
+
+interface StrategySeries {
+  id: string;
+  name: string;
+  color: string;
+  points: DailyPoint[];
+}
+
+function MultiLineEquityChart({
+  composite,
+  strategies,
   emptyMessage,
 }: {
-  points: Array<{ date: string; value: number }>;
+  composite: DailyPoint[];
+  strategies: StrategySeries[];
   emptyMessage: string;
 }) {
-  if (points.length < 2) {
+  const hasAnything =
+    composite.length >= 2 || strategies.some((s) => s.points.length >= 2);
+  if (!hasAnything) {
     return (
       <div className="flex h-64 items-center justify-center rounded-lg border border-border bg-bg-secondary text-sm text-text-muted">
         {emptyMessage}
       </div>
     );
   }
+
   const width = 800;
-  const height = 260;
+  const height = 280;
   const padding = { top: 12, right: 16, bottom: 28, left: 48 };
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
 
-  const values = points.map((p) => p.value);
-  const minV = Math.min(0, ...values);
-  const maxV = Math.max(0, ...values);
+  // Build the union date axis from the composite (it's the densest).
+  // Fallback to the longest strategy if no composite.
+  const axis =
+    composite.length > 0
+      ? composite.map((p) => p.date)
+      : [...strategies].sort((a, b) => b.points.length - a.points.length)[0]
+          ?.points.map((p) => p.date) ?? [];
+  if (axis.length < 2) {
+    return (
+      <div className="flex h-64 items-center justify-center rounded-lg border border-border bg-bg-secondary text-sm text-text-muted">
+        {emptyMessage}
+      </div>
+    );
+  }
+
+  const axisIndex = new Map(axis.map((d, i) => [d, i]));
+
+  // Gather every value to compute the Y range across composite + strategies
+  const allValues: number[] = [];
+  for (const p of composite) allValues.push(p.value);
+  for (const s of strategies) for (const p of s.points) allValues.push(p.value);
+  const minV = Math.min(0, ...allValues);
+  const maxV = Math.max(0, ...allValues);
   const range = maxV - minV || 1;
 
   const xFor = (i: number) =>
-    padding.left + (i / (points.length - 1)) * innerW;
+    padding.left + (i / (axis.length - 1)) * innerW;
   const yFor = (v: number) =>
     padding.top + innerH - ((v - minV) / range) * innerH;
 
-  const path = points
-    .map(
-      (p, i) => `${i === 0 ? "M" : "L"} ${xFor(i).toFixed(2)} ${yFor(p.value).toFixed(2)}`,
-    )
-    .join(" ");
+  const pointsToPath = (pts: DailyPoint[]): string => {
+    if (pts.length === 0) return "";
+    const segs: string[] = [];
+    let started = false;
+    for (const p of pts) {
+      const i = axisIndex.get(p.date);
+      if (i === undefined) continue;
+      segs.push(`${started ? "L" : "M"} ${xFor(i).toFixed(2)} ${yFor(p.value).toFixed(2)}`);
+      started = true;
+    }
+    return segs.join(" ");
+  };
 
-  const areaPath =
-    path +
-    ` L ${xFor(points.length - 1).toFixed(2)} ${yFor(0).toFixed(2)}` +
-    ` L ${xFor(0).toFixed(2)} ${yFor(0).toFixed(2)} Z`;
+  const compositePath = pointsToPath(composite);
+  const compositeArea =
+    composite.length > 0
+      ? compositePath +
+        ` L ${xFor(axis.length - 1).toFixed(2)} ${yFor(0).toFixed(2)}` +
+        ` L ${xFor(0).toFixed(2)} ${yFor(0).toFixed(2)} Z`
+      : "";
 
-  const yTicks = [minV, 0, maxV].filter(
-    (v, i, arr) => arr.indexOf(v) === i,
+  const yTicks = Array.from(
+    new Set([minV, 0, maxV].map((v) => Math.round(v * 1000) / 1000)),
   );
 
   return (
     <div className="rounded-lg border border-border bg-bg-secondary p-3">
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="w-full h-64"
-        aria-label="My Allocation equity curve"
+        className="w-full h-72"
+        aria-label="Allocation equity curve, portfolio composite plus per-strategy lines"
         role="img"
       >
         <defs>
           <linearGradient id="my-allocation-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#1B6B5A" stopOpacity="0.35" />
-            <stop offset="100%" stopColor="#1B6B5A" stopOpacity="0.05" />
+            <stop offset="0%" stopColor="#1B6B5A" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="#1B6B5A" stopOpacity="0.02" />
           </linearGradient>
         </defs>
+
         {yTicks.map((v) => (
           <g key={v}>
             <line
@@ -231,22 +379,42 @@ function EquityCurveChart({
             </text>
           </g>
         ))}
-        <path d={areaPath} fill="url(#my-allocation-grad)" stroke="none" />
-        <path
-          d={path}
-          stroke="#1B6B5A"
-          strokeWidth="2"
-          fill="none"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <text
-          x={padding.left}
-          y={height - 8}
-          fontSize="10"
-          fill="#64748B"
-        >
-          {points[0].date}
+
+        {/* Per-strategy lines first so the composite sits on top */}
+        {strategies.map((s) => {
+          const d = pointsToPath(s.points);
+          if (!d) return null;
+          return (
+            <path
+              key={s.id}
+              d={d}
+              stroke={s.color}
+              strokeWidth="1.5"
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.85"
+            />
+          );
+        })}
+
+        {/* Composite area + line */}
+        {compositeArea ? (
+          <path d={compositeArea} fill="url(#my-allocation-grad)" stroke="none" />
+        ) : null}
+        {compositePath ? (
+          <path
+            d={compositePath}
+            stroke="#1B6B5A"
+            strokeWidth="2.5"
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null}
+
+        <text x={padding.left} y={height - 8} fontSize="10" fill="#64748B">
+          {axis[0]}
         </text>
         <text
           x={width - padding.right}
@@ -255,9 +423,186 @@ function EquityCurveChart({
           textAnchor="end"
           fill="#64748B"
         >
-          {points[points.length - 1].date}
+          {axis[axis.length - 1]}
         </text>
       </svg>
+    </div>
+  );
+}
+
+// =========================================================================
+// Legend — clickable chips that toggle strategy visibility
+// =========================================================================
+
+function StrategyLegend({
+  items,
+  hiddenIds,
+  onToggle,
+}: {
+  items: { id: string; name: string; color: string }[];
+  hiddenIds: Set<string>;
+  onToggle: (id: string) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="inline-flex items-center gap-1.5 rounded-md bg-bg-secondary px-2 py-1">
+        <span
+          className="inline-block h-0.5 w-3 rounded"
+          style={{ background: "#1B6B5A" }}
+          aria-hidden="true"
+        />
+        <span className="text-[11px] font-medium text-text-primary">
+          Portfolio
+        </span>
+      </div>
+      {items.map((it) => {
+        const hidden = hiddenIds.has(it.id);
+        return (
+          <button
+            key={it.id}
+            type="button"
+            onClick={() => onToggle(it.id)}
+            aria-pressed={!hidden}
+            className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 border transition-colors ${
+              hidden
+                ? "border-border bg-surface text-text-muted"
+                : "border-transparent bg-bg-secondary text-text-primary hover:bg-border"
+            }`}
+            title={hidden ? `Show ${it.name}` : `Hide ${it.name}`}
+          >
+            <span
+              className="inline-block h-0.5 w-3 rounded"
+              style={{ background: hidden ? "#CBD5E1" : it.color }}
+              aria-hidden="true"
+            />
+            <span className="text-[11px] font-medium">{it.name}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// =========================================================================
+// Allocation pie — AUM share per strategy
+// =========================================================================
+
+function AllocationPie({
+  slices,
+  hiddenIds,
+  onToggle,
+}: {
+  slices: {
+    id: string;
+    name: string;
+    color: string;
+    amount: number;
+  }[];
+  hiddenIds: Set<string>;
+  onToggle: (id: string) => void;
+}) {
+  const visible = slices.filter((s) => !hiddenIds.has(s.id));
+  const total = visible.reduce((sum, s) => sum + s.amount, 0);
+  if (total <= 0) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-lg border border-border bg-bg-secondary text-sm text-text-muted">
+        Allocation data unavailable.
+      </div>
+    );
+  }
+
+  const cx = 90;
+  const cy = 90;
+  const r = 80;
+
+  // Build SVG arc paths. Pre-compute start angles as a cumulative sum so
+  // the render-time closure never mutates state.
+  const startAngles: number[] = [];
+  {
+    let running = -Math.PI / 2; // start at 12 o'clock
+    for (const s of visible) {
+      startAngles.push(running);
+      running += (s.amount / total) * Math.PI * 2;
+    }
+  }
+  const paths = visible.map((s, i) => {
+    const angle = startAngles[i];
+    const sweep = (s.amount / total) * Math.PI * 2;
+    const x1 = cx + Math.cos(angle) * r;
+    const y1 = cy + Math.sin(angle) * r;
+    const x2 = cx + Math.cos(angle + sweep) * r;
+    const y2 = cy + Math.sin(angle + sweep) * r;
+    const largeArc = sweep > Math.PI ? 1 : 0;
+    // Full-circle edge case: draw a tiny gap so the path still renders
+    const d =
+      sweep >= Math.PI * 2 - 1e-6
+        ? `M ${cx} ${cy - r} A ${r} ${r} 0 1 1 ${cx - 0.01} ${cy - r} Z`
+        : `M ${cx} ${cy} L ${x1.toFixed(3)} ${y1.toFixed(3)} A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(3)} ${y2.toFixed(3)} Z`;
+    return {
+      id: s.id,
+      name: s.name,
+      color: s.color,
+      d,
+      pct: s.amount / total,
+    };
+  });
+
+  return (
+    <div className="flex flex-col items-start gap-3 md:flex-row md:items-center md:gap-6">
+      <svg
+        viewBox="0 0 180 180"
+        className="w-44 h-44 shrink-0"
+        aria-label="Allocation share per strategy"
+        role="img"
+      >
+        {paths.map((p) => (
+          <path
+            key={p.id}
+            d={p.d}
+            fill={p.color}
+            stroke="#F8FAFC"
+            strokeWidth="1.5"
+          />
+        ))}
+      </svg>
+      <ul className="min-w-0 flex-1 space-y-1.5">
+        {slices.map((s) => {
+          const hidden = hiddenIds.has(s.id);
+          const pct = hidden ? 0 : s.amount / total;
+          return (
+            <li key={s.id}>
+              <button
+                type="button"
+                onClick={() => onToggle(s.id)}
+                aria-pressed={!hidden}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors ${
+                  hidden
+                    ? "text-text-muted hover:bg-bg-secondary"
+                    : "text-text-primary hover:bg-bg-secondary"
+                }`}
+              >
+                <span
+                  className="inline-block h-3 w-3 rounded-sm shrink-0"
+                  style={{
+                    background: hidden ? "#E2E8F0" : s.color,
+                  }}
+                  aria-hidden="true"
+                />
+                <span className="flex-1 truncate text-[12px] font-medium">
+                  {s.name}
+                </span>
+                <span className="shrink-0 text-[11px] font-metric tabular-nums text-text-muted">
+                  {hidden ? "—" : `${(pct * 100).toFixed(1)}%`}
+                </span>
+                <span className="shrink-0 w-16 text-right text-[11px] font-metric tabular-nums">
+                  {formatCurrency(s.amount)}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -462,31 +807,198 @@ export function MyAllocationClient({
     [strategies],
   );
 
+  // Build a stable strategy_id → palette color map in the order the
+  // strategies appear in the allocation list.
+  const colorById = useMemo(() => {
+    const m = new Map<string, string>();
+    strategiesForBuilder.forEach((s, i) => {
+      m.set(s.id, STRATEGY_PALETTE[i % STRATEGY_PALETTE.length]);
+    });
+    return m;
+  }, [strategiesForBuilder]);
+
   // Pre-build the date-map cache so the scenario recompute is fast.
   const dateMapCache = useMemo(
     () => buildDateMapCache(strategiesForBuilder),
     [strategiesForBuilder],
   );
 
-  // Scenario state: all strategies active, weighted by their
-  // current_weight from portfolio_strategies, starting from each
-  // strategy's own start_date (or the seed default).
+  // The last date in the data (union of all strategies' daily_returns).
+  const lastDataDate = useMemo(() => {
+    let latest: string | null = null;
+    for (const s of strategiesForBuilder) {
+      const tail = s.daily_returns[s.daily_returns.length - 1]?.date;
+      if (tail && (!latest || tail > latest)) latest = tail;
+    }
+    return latest;
+  }, [strategiesForBuilder]);
+
+  const inceptionDate =
+    portfolio.created_at?.slice(0, 10) ?? "2022-01-01";
+
+  const [timeframe, setTimeframe] = useState<TimeframeKey>("1YTD");
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+
+  const timeframeStart = useMemo(
+    () => getTimeframeStart(timeframe, lastDataDate, inceptionDate),
+    [timeframe, lastDataDate, inceptionDate],
+  );
+
+  // Scenario state: hidden → inactive; per-strategy start clamped to
+  // max(timeframeStart, own start_date).
   const scenarioState = useMemo<ScenarioState>(() => {
     const selected: Record<string, boolean> = {};
     const weights: Record<string, number> = {};
     const startDates: Record<string, string> = {};
     for (const row of strategies) {
-      selected[row.strategy_id] = true;
+      const ownStart = row.strategy.start_date ?? inceptionDate;
+      const clampedStart = timeframeStart > ownStart ? timeframeStart : ownStart;
+      selected[row.strategy_id] = !hiddenIds.has(row.strategy_id);
       weights[row.strategy_id] = row.current_weight ?? 0;
-      startDates[row.strategy_id] = row.strategy.start_date ?? "2022-01-01";
+      startDates[row.strategy_id] = clampedStart;
     }
     return { selected, weights, startDates };
-  }, [strategies]);
+  }, [strategies, hiddenIds, timeframeStart, inceptionDate]);
 
   const metrics = useMemo(
     () => computeScenario(strategiesForBuilder, scenarioState, dateMapCache),
     [strategiesForBuilder, scenarioState, dateMapCache],
   );
+
+  // Scenario math returns null metrics + empty equity_curve when the
+  // common-date window has fewer than 10 days. For short timeframes
+  // (1D / 1W / 1M) that's most of the time. Compute a simple weighted
+  // composite curve manually so the chart still has a portfolio line
+  // and the TWR + Max DD KPIs still populate. Sharpe / Sortino / CAGR
+  // stay null for small n because they're statistically noisy.
+  const fallback = useMemo(() => {
+    if (metrics.equity_curve.length > 0) {
+      return { compositeCurve: null, twr: null, max_drawdown: null };
+    }
+    const visible = strategiesForBuilder.filter(
+      (s) => scenarioState.selected[s.id],
+    );
+    if (visible.length === 0)
+      return { compositeCurve: null, twr: null, max_drawdown: null };
+
+    const allDates = new Set<string>();
+    for (const s of visible) {
+      const from = scenarioState.startDates[s.id];
+      for (const p of s.daily_returns) {
+        if (p.date >= from) allDates.add(p.date);
+      }
+    }
+    const dates = Array.from(allDates).sort();
+    if (dates.length < 2)
+      return { compositeCurve: null, twr: null, max_drawdown: null };
+
+    const totalWeight = visible.reduce(
+      (sum, s) => sum + (scenarioState.weights[s.id] ?? 0),
+      0,
+    );
+    if (totalWeight <= 0)
+      return { compositeCurve: null, twr: null, max_drawdown: null };
+
+    const compositeCurve: DailyPoint[] = [];
+    let wealth = 1;
+    for (const d of dates) {
+      let activeWeight = 0;
+      let weightedReturn = 0;
+      for (const s of visible) {
+        const from = scenarioState.startDates[s.id];
+        if (d < from) continue;
+        const point = s.daily_returns.find((p) => p.date === d);
+        if (!point) continue;
+        const w = scenarioState.weights[s.id] ?? 0;
+        activeWeight += w;
+        weightedReturn += w * point.value;
+      }
+      if (activeWeight > 0) {
+        wealth *= 1 + weightedReturn / activeWeight;
+      }
+      compositeCurve.push({ date: d, value: wealth - 1 });
+    }
+
+    if (compositeCurve.length < 2)
+      return { compositeCurve: null, twr: null, max_drawdown: null };
+
+    const twr =
+      compositeCurve[compositeCurve.length - 1].value - compositeCurve[0].value;
+
+    let peak = compositeCurve[0].value;
+    let maxDD = 0;
+    for (const p of compositeCurve) {
+      if (p.value > peak) peak = p.value;
+      const dd = (p.value - peak) / (1 + peak);
+      if (dd < maxDD) maxDD = dd;
+    }
+
+    return { compositeCurve, twr, max_drawdown: maxDD };
+  }, [metrics.equity_curve.length, strategiesForBuilder, scenarioState]);
+
+  const displayTwr = metrics.twr ?? fallback.twr;
+  const displayMaxDD = metrics.max_drawdown ?? fallback.max_drawdown;
+  const displayComposite = metrics.equity_curve.length > 0
+    ? metrics.equity_curve
+    : fallback.compositeCurve ?? [];
+
+  // Per-strategy curves for the multi-line chart. Each is the cumulative
+  // growth of that strategy from the timeframe start, normalized so the
+  // first visible point is 0% (matches the composite's scale).
+  const strategySeries = useMemo<StrategySeries[]>(() => {
+    return strategiesForBuilder
+      .map((s) => {
+        if (hiddenIds.has(s.id)) return null;
+        const window = s.daily_returns.filter((p) => p.date >= timeframeStart);
+        if (window.length < 2) return null;
+        let cum = 1;
+        const points: DailyPoint[] = new Array(window.length);
+        for (let i = 0; i < window.length; i++) {
+          cum *= 1 + window[i].value;
+          points[i] = { date: window[i].date, value: cum - 1 };
+        }
+        return {
+          id: s.id,
+          name: s.name,
+          color: colorById.get(s.id) ?? "#64748B",
+          points,
+        };
+      })
+      .filter((s): s is StrategySeries => s !== null);
+  }, [strategiesForBuilder, hiddenIds, timeframeStart, colorById]);
+
+  const legendItems = strategiesForBuilder.map((s) => ({
+    id: s.id,
+    name: s.name,
+    color: colorById.get(s.id) ?? "#64748B",
+  }));
+
+  const toggleStrategy = (id: string) => {
+    setHiddenIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Allocation pie slices — use allocated_amount when present, fall back
+  // to current_weight as a share, skipping zero-amount rows.
+  const pieSlices = strategies
+    .map((row) => {
+      const amount =
+        row.allocated_amount ??
+        (row.current_weight != null && analytics?.total_aum != null
+          ? analytics.total_aum * row.current_weight
+          : 0);
+      return {
+        id: row.strategy_id,
+        name: displayName(row),
+        color: colorById.get(row.strategy_id) ?? "#64748B",
+        amount,
+      };
+    })
+    .filter((s) => s.amount > 0);
 
   const totalAllocated = strategies.reduce(
     (sum, row) => sum + (row.allocated_amount ?? 0),
@@ -528,23 +1040,24 @@ export function MyAllocationClient({
             ) : null}
           </p>
         </div>
+        <TimeframeSelector value={timeframe} onChange={setTimeframe} />
       </header>
 
-      {/* KPI strip (scenario-style) */}
+      {/* KPI strip (scenario-style, windowed by timeframe) */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
         <MetricCard
           label="TWR"
-          value={formatPercent(metrics.twr)}
-          positive={metrics.twr != null && metrics.twr > 0}
-          negative={metrics.twr != null && metrics.twr < 0}
+          value={formatPercent(displayTwr)}
+          positive={displayTwr != null && displayTwr > 0}
+          negative={displayTwr != null && displayTwr < 0}
         />
         <MetricCard label="CAGR" value={formatPercent(metrics.cagr)} />
         <MetricCard label="Sharpe" value={formatNumber(metrics.sharpe)} />
         <MetricCard label="Sortino" value={formatNumber(metrics.sortino)} />
         <MetricCard
           label="Max DD"
-          value={formatPercent(metrics.max_drawdown)}
-          negative={metrics.max_drawdown != null && metrics.max_drawdown < 0}
+          value={formatPercent(displayMaxDD)}
+          negative={displayMaxDD != null && displayMaxDD < 0}
         />
         <MetricCard
           label="Avg |corr|"
@@ -552,32 +1065,61 @@ export function MyAllocationClient({
         />
       </div>
 
-      {/* Equity curve */}
+      {/* Equity curve (multi-line) */}
       <Card className="mb-6">
-        <div className="mb-3">
-          <h2 className="text-sm font-semibold text-text-primary">
-            Allocation equity curve
-          </h2>
-          <p className="text-xs text-text-muted mt-0.5">
-            {strategiesForBuilder.length} active investments
-            {metrics.effective_start && metrics.effective_end ? (
-              <>
-                {" "}
-                · {metrics.effective_start} → {metrics.effective_end} ·{" "}
-                {metrics.n} days
-              </>
-            ) : null}
-          </p>
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">
+              Allocation equity curve
+            </h2>
+            <p className="text-xs text-text-muted mt-0.5">
+              {strategiesForBuilder.length - hiddenIds.size} of{" "}
+              {strategiesForBuilder.length} active
+              {metrics.effective_start && metrics.effective_end ? (
+                <>
+                  {" "}
+                  · {metrics.effective_start} → {metrics.effective_end} ·{" "}
+                  {metrics.n} days
+                </>
+              ) : null}
+            </p>
+          </div>
         </div>
-        <EquityCurveChart
-          points={metrics.equity_curve}
+        <MultiLineEquityChart
+          composite={displayComposite}
+          strategies={strategySeries}
           emptyMessage={
             strategies.length === 0
               ? "Connect an exchange below to start tracking your real investments."
-              : "Waiting for analytics to compute — check back after the next sync."
+              : "No data in the selected timeframe."
           }
         />
+        <StrategyLegend
+          items={legendItems}
+          hiddenIds={hiddenIds}
+          onToggle={toggleStrategy}
+        />
       </Card>
+
+      {/* Allocation pie */}
+      {pieSlices.length > 0 ? (
+        <Card className="mb-6">
+          <div className="mb-3">
+            <h2 className="text-sm font-semibold text-text-primary">
+              Allocation share
+            </h2>
+            <p className="text-xs text-text-muted mt-0.5">
+              AUM split across your connected investments. Click a row to
+              hide it from the chart and KPIs above.
+            </p>
+          </div>
+          <AllocationPie
+            slices={pieSlices}
+            hiddenIds={hiddenIds}
+            onToggle={toggleStrategy}
+          />
+        </Card>
+      ) : null}
 
       {/* Investments list */}
       <Card className="mb-6">
