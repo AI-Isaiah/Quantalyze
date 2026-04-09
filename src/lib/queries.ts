@@ -533,6 +533,152 @@ export const getTestPortfolios = cache(
 );
 
 /**
+ * Fetch everything the My Allocation dashboard needs in one parallel
+ * call. Returns the single real portfolio + its analytics + its
+ * strategies (with raw daily_returns for the chart composite math) +
+ * the user's favorites (with the same daily_returns shape so the
+ * Favorites panel's overlay math is symmetric with the baseline).
+ *
+ * Wrapped in React.cache() so Suspense-segmented server components in
+ * the same render tree (FundKPIStrip → chart → MTD bars → table) that
+ * each call this helper deduplicate to ONE round of Supabase queries
+ * per request. No 'use cache' directive: cacheComponents isn't enabled
+ * in next.config.ts (force-dynamic + per-request dedup only).
+ *
+ * Returns `null` portfolio field if the user has no real book yet. The
+ * page component renders an empty state in that case.
+ */
+export interface MyAllocationDashboardPayload {
+  portfolio: Portfolio | null;
+  analytics: PortfolioAnalytics | null;
+  strategies: Array<{
+    strategy_id: string;
+    current_weight: number | null;
+    allocated_amount: number | null;
+    strategy: {
+      id: string;
+      name: string;
+      codename: string | null;
+      disclosure_tier: string;
+      strategy_types: string[];
+      markets: string[];
+      start_date: string | null;
+      strategy_analytics: Pick<
+        StrategyAnalytics,
+        "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
+      > | null;
+    };
+  }>;
+  favorites: UserFavoriteWithStrategy[];
+  alertCount: { high: number; medium: number; low: number; total: number };
+}
+
+export const getMyAllocationDashboard = cache(
+  async (userId: string): Promise<MyAllocationDashboardPayload> => {
+    const supabase = await createClient();
+
+    // Step 1: find the real portfolio. Everything else depends on its id.
+    const portfolio = await getRealPortfolio(userId);
+    if (!portfolio) {
+      return {
+        portfolio: null,
+        analytics: null,
+        strategies: [],
+        favorites: [],
+        alertCount: { high: 0, medium: 0, low: 0, total: 0 },
+      };
+    }
+
+    // Step 2: parallel fetch everything keyed on the portfolio_id, plus
+    // the user's favorites (keyed on user_id).
+    const [analyticsRes, strategiesRes, favorites, alertsRes] = await Promise.all([
+      supabase
+        .from("portfolio_analytics")
+        .select("*")
+        .eq("portfolio_id", portfolio.id)
+        .order("computed_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("portfolio_strategies")
+        .select(
+          `
+          strategy_id,
+          current_weight,
+          allocated_amount,
+          strategy:strategies!inner (
+            id,
+            name,
+            codename,
+            disclosure_tier,
+            strategy_types,
+            markets,
+            start_date,
+            strategy_analytics (
+              daily_returns,
+              cagr,
+              sharpe,
+              volatility,
+              max_drawdown
+            )
+          )
+          `,
+        )
+        .eq("portfolio_id", portfolio.id)
+        .order("current_weight", { ascending: false }),
+      getUserFavorites(userId),
+      supabase
+        .from("portfolio_alerts")
+        .select("id, severity")
+        .eq("portfolio_id", portfolio.id)
+        .is("acknowledged_at", null),
+    ]);
+
+    // Normalize the strategies join: Supabase returns strategy as an
+    // array when the embed isn't marked many-to-one. Same pattern the
+    // allocations page already uses.
+    const strategies = (strategiesRes.data ?? []).map((row) => {
+      const rawStrategy = (row as unknown as { strategy: unknown }).strategy;
+      const strategy = (
+        Array.isArray(rawStrategy) ? rawStrategy[0] : rawStrategy
+      ) as MyAllocationDashboardPayload["strategies"][number]["strategy"];
+      const rawAnalytics = (strategy as unknown as { strategy_analytics: unknown })
+        ?.strategy_analytics;
+      const analytics = Array.isArray(rawAnalytics)
+        ? rawAnalytics[0]
+        : rawAnalytics;
+      return {
+        strategy_id: row.strategy_id,
+        current_weight: row.current_weight,
+        allocated_amount: row.allocated_amount,
+        strategy: {
+          ...strategy,
+          strategy_analytics: (analytics ?? null) as
+            | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"],
+        },
+      };
+    });
+
+    const alertCounts = { high: 0, medium: 0, low: 0, total: 0 };
+    for (const a of alertsRes.data ?? []) {
+      const sev = (a as { severity: string }).severity;
+      if (sev === "high") alertCounts.high++;
+      else if (sev === "medium") alertCounts.medium++;
+      else if (sev === "low") alertCounts.low++;
+      alertCounts.total++;
+    }
+
+    return {
+      portfolio,
+      analytics: (analyticsRes.data ?? null) as PortfolioAnalytics | null,
+      strategies,
+      favorites,
+      alertCount: alertCounts,
+    };
+  },
+);
+
+/**
  * Fetch the user's favorite strategies with the subset of strategy +
  * strategy_analytics fields the Favorites panel needs:
  *   - metadata for the list row (name, codename, type, markets, tier)

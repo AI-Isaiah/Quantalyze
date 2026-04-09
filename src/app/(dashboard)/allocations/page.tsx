@@ -1,27 +1,30 @@
 import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
-import { getRealPortfolio } from "@/lib/queries";
+import { getMyAllocationDashboard } from "@/lib/queries";
+import { MyAllocationClient } from "./MyAllocationClient";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
 /**
- * My Allocation — the allocator's single real invested book.
+ * My Allocation — the allocator's single real invested book, visualized
+ * as a multi-strategy dashboard.
  *
- * PR 2 of the My Allocation restructure: the old cross-portfolio
- * scaffolding (4 aggregate KPI cards, portfolio list, alerts aggregate,
- * Active Connections) has been stripped. Connections now live at
- * /connections (lifted verbatim in this PR). The KPI row + portfolio list
- * are obsolete now that each allocator has exactly one real portfolio.
+ * Top-level server component for the route. Calls
+ * getMyAllocationDashboard (wrapped in React.cache) to fetch the real
+ * portfolio + analytics + strategies-with-daily-returns + favorites +
+ * alert counts in one parallel round of Supabase queries, then hands
+ * the payload off to MyAllocationClient to render the interactive
+ * chart + KPI strip + bars + table.
  *
- * PR 3 of the restructure fills this page with the full multi-strategy
- * dashboard: Fund KPI strip, YTD PnL by Strategy chart, MTD bars, and
- * strategy breakdown table. PR 4 wires the Favorites panel + Save-as-Test
- * modal on top.
+ * No 'use cache' directive: the project does not enable Cache Components
+ * in next.config.ts. The page is effectively dynamic (createClient reads
+ * cookies for auth) and each load gets a fresh DB read, with React.cache
+ * in queries.ts deduplicating per-request.
  *
- * For the interim commit between PR 2 and PR 3 this page renders a
- * minimal "coming soon" shell so navigation still works and the route
- * doesn't crash.
+ * The Favorites panel is NOT wired here — that lands in the next commit
+ * on this branch (PR 4). The header button is a disabled stub until
+ * then.
  */
 export default async function MyAllocationPage() {
   const supabase = await createClient();
@@ -30,7 +33,8 @@ export default async function MyAllocationPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const portfolio = await getRealPortfolio(user.id);
+  const { portfolio, analytics, strategies, alertCount } =
+    await getMyAllocationDashboard(user.id);
 
   if (!portfolio) {
     return (
@@ -38,7 +42,8 @@ export default async function MyAllocationPage() {
         <PageHeader title="My Allocation" />
         <Card className="text-center py-12">
           <p className="text-text-muted mb-4">
-            Your book is empty. Browse strategies to add your first allocation.
+            Your book is empty. Browse strategies to add your first
+            allocation.
           </p>
           <Link
             href="/strategies"
@@ -52,16 +57,11 @@ export default async function MyAllocationPage() {
   }
 
   return (
-    <>
-      <PageHeader
-        title="My Allocation"
-        description={portfolio.name}
-      />
-      <Card className="text-center py-12">
-        <p className="text-text-muted">
-          Multi-strategy dashboard loading in the next commit on this branch.
-        </p>
-      </Card>
-    </>
+    <MyAllocationClient
+      portfolio={portfolio}
+      analytics={analytics}
+      strategies={strategies}
+      alertCount={alertCount}
+    />
   );
 }
