@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { isValidPartnerTag } from "@/lib/partner";
+import { parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
 import type { DisclosureTier } from "@/lib/types";
 
@@ -11,7 +12,8 @@ import type { DisclosureTier } from "@/lib/types";
 // T-1.3 from the cap-intro demo sprint. Spins up a white-label pilot from 2
 // pasted CSVs — managers (3+ strategies) and allocators (3+ LPs). This is a
 // sketch for the first partner meeting, not a fully-baked tenant model:
-//   * No quoted-field CSV parser, just line.split(",").
+//   * Uses the shared quote-aware CSV parser from `@/lib/csv` so pasted
+//     fields with embedded commas / quotes don't blow up the import.
 //   * Upserts everything idempotently so the founder can re-run during a demo.
 //   * On `user_already_exists` we MUST fall through to a profiles-by-email
 //     lookup and continue — silently skipping a row would kill the demo by
@@ -33,47 +35,40 @@ interface AllocatorRow {
   ticket_size_usd: number;
 }
 
-function parseCsvLines(raw: string): string[][] {
-  return raw
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => line.split(",").map((cell) => cell.trim()));
+function parseManagerRows(raw: string): ManagerRow[] {
+  return parseCsvWithSchema(
+    raw,
+    ["manager_email", "strategy_name", "disclosure_tier"],
+    (row) => {
+      if (!row.manager_email || !row.strategy_name) return null;
+      const tier = row.disclosure_tier.toLowerCase();
+      const disclosure_tier: DisclosureTier =
+        tier === "institutional" ? "institutional" : "exploratory";
+      return {
+        manager_email: row.manager_email,
+        strategy_name: row.strategy_name,
+        disclosure_tier,
+      };
+    },
+  );
 }
 
-function parseManagersCsv(raw: string): ManagerRow[] {
-  const rows = parseCsvLines(raw);
-  if (rows.length === 0) return [];
-  // Skip header row if present.
-  const dataRows = rows[0][0]?.toLowerCase() === "manager_email" ? rows.slice(1) : rows;
-  const out: ManagerRow[] = [];
-  for (const cells of dataRows) {
-    const [manager_email, strategy_name, disclosure_tierRaw] = cells;
-    if (!manager_email || !strategy_name) continue;
-    const tier = (disclosure_tierRaw || "exploratory").toLowerCase();
-    const disclosure_tier: DisclosureTier =
-      tier === "institutional" ? "institutional" : "exploratory";
-    out.push({ manager_email, strategy_name, disclosure_tier });
-  }
-  return out;
-}
-
-function parseAllocatorsCsv(raw: string): AllocatorRow[] {
-  const rows = parseCsvLines(raw);
-  if (rows.length === 0) return [];
-  const dataRows = rows[0][0]?.toLowerCase() === "allocator_email" ? rows.slice(1) : rows;
-  const out: AllocatorRow[] = [];
-  for (const cells of dataRows) {
-    const [allocator_email, mandate_archetype, ticket_raw] = cells;
-    if (!allocator_email || !mandate_archetype) continue;
-    const ticket_size_usd = Number.parseFloat((ticket_raw || "0").replace(/[,_$]/g, ""));
-    out.push({
-      allocator_email,
-      mandate_archetype,
-      ticket_size_usd: Number.isFinite(ticket_size_usd) ? ticket_size_usd : 0,
-    });
-  }
-  return out;
+function parseAllocatorRows(raw: string): AllocatorRow[] {
+  return parseCsvWithSchema(
+    raw,
+    ["allocator_email", "mandate_archetype", "ticket_size_usd"],
+    (row) => {
+      if (!row.allocator_email || !row.mandate_archetype) return null;
+      const ticket_size_usd = Number.parseFloat(
+        (row.ticket_size_usd || "0").replace(/[,_$]/g, ""),
+      );
+      return {
+        allocator_email: row.allocator_email,
+        mandate_archetype: row.mandate_archetype,
+        ticket_size_usd: Number.isFinite(ticket_size_usd) ? ticket_size_usd : 0,
+      };
+    },
+  );
 }
 
 function displayNameFromEmail(email: string): string {
@@ -112,8 +107,17 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  const managers = parseManagersCsv(managersCsv);
-  const allocators = parseAllocatorsCsv(allocatorsCsv);
+  let managers: ManagerRow[];
+  let allocators: AllocatorRow[];
+  try {
+    managers = parseManagerRows(managersCsv);
+    allocators = parseAllocatorRows(allocatorsCsv);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Invalid CSV" },
+      { status: 400 },
+    );
+  }
 
   if (managers.length === 0 && allocators.length === 0) {
     return NextResponse.json(
