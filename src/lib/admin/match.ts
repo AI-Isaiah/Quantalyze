@@ -59,20 +59,67 @@ export async function getAllocatorMatchPayload(
   admin: SupabaseClient,
   allocatorId: string,
 ): Promise<AllocatorMatchPayload> {
-  // Latest batch for this allocator
-  const { data: batchRowRaw, error: batchErr } = await admin
-    .from("match_batches")
-    .select(
-      "id, computed_at, mode, filter_relaxed, candidate_count, excluded_count, " +
-        "engine_version, weights_version, effective_preferences, " +
-        "effective_thresholds, source_strategy_count, latency_ms",
-    )
-    .eq("allocator_id", allocatorId)
-    .order("computed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (batchErr) throw batchErr;
-  const batchRow = (batchRowRaw as Record<string, unknown> | null) ?? null;
+  // ── Parallel fan-out ───────────────────────────────────────────────
+  // These five queries are mutually independent: none references a field
+  // from any of the others. Firing them sequentially used to cost ~5 ×
+  // (one Supabase RTT) ≈ 200-400ms on a cold queue load. Fan them out in
+  // parallel so the total latency drops to roughly one RTT.
+  //
+  // The ONLY dependency is from `match_batches` → `match_candidates`
+  // (we need batch.id to filter candidates), so the candidates fetch
+  // stays sequential after the fan-out resolves.
+  //
+  // Error handling: `allocator_preferences` uses `.maybeSingle()` whose
+  // null/no-row path is legitimate — but a real error (e.g., a dropped
+  // column due to schema drift) must still bubble up as a 500. We keep
+  // the same pair of (data, error) checks as the sequential version.
+  const [
+    batchRes,
+    preferencesRes,
+    profileRes,
+    decisionsRes,
+    existingContactRequestsRes,
+  ] = await Promise.all([
+    admin
+      .from("match_batches")
+      .select(
+        "id, computed_at, mode, filter_relaxed, candidate_count, excluded_count, " +
+          "engine_version, weights_version, effective_preferences, " +
+          "effective_thresholds, source_strategy_count, latency_ms",
+      )
+      .eq("allocator_id", allocatorId)
+      .order("computed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    admin
+      .from("allocator_preferences")
+      .select(ALLOCATOR_PREFERENCES_COLUMNS)
+      .eq("user_id", allocatorId)
+      .maybeSingle(),
+    admin
+      .from("profiles")
+      .select(
+        "id, display_name, company, email, role, allocator_status, preferences_updated_at",
+      )
+      .eq("id", allocatorId)
+      .single(),
+    admin
+      .from("match_decisions")
+      .select(
+        "id, strategy_id, decision, founder_note, contact_request_id, created_at, " +
+          "strategies!match_decisions_strategy_id_fkey(id, name, codename, disclosure_tier)",
+      )
+      .eq("allocator_id", allocatorId)
+      .order("created_at", { ascending: false })
+      .limit(50),
+    admin
+      .from("contact_requests")
+      .select("strategy_id, created_at, status")
+      .eq("allocator_id", allocatorId),
+  ]);
+
+  if (batchRes.error) throw batchRes.error;
+  const batchRow = (batchRes.data as Record<string, unknown> | null) ?? null;
 
   // Preferences — explicit column enumeration (see the top of this file for
   // the rationale). The column list is a shared constant so any UI change
@@ -84,39 +131,12 @@ export async function getAllocatorMatchPayload(
   // went missing) is surfaced here so the UI gets a 500 instead of silently
   // showing "no preferences" — the latter would look like a real state but
   // would actually be data corruption.
-  const { data: preferences, error: prefsErr } = await admin
-    .from("allocator_preferences")
-    .select(ALLOCATOR_PREFERENCES_COLUMNS)
-    .eq("user_id", allocatorId)
-    .maybeSingle();
-  if (prefsErr) throw prefsErr;
+  if (preferencesRes.error) throw preferencesRes.error;
+  const preferences = preferencesRes.data;
 
-  // Allocator profile
-  const { data: profile } = await admin
-    .from("profiles")
-    .select(
-      "id, display_name, company, email, role, allocator_status, preferences_updated_at",
-    )
-    .eq("id", allocatorId)
-    .single();
-
-  // Recent decisions (last 50)
-  const { data: decisions } = await admin
-    .from("match_decisions")
-    .select(
-      "id, strategy_id, decision, founder_note, contact_request_id, created_at, " +
-        "strategies!match_decisions_strategy_id_fkey(id, name, codename, disclosure_tier)",
-    )
-    .eq("allocator_id", allocatorId)
-    .order("created_at", { ascending: false })
-    .limit(50);
-
-  // Already-sent contact requests (so the Send Intro modal can show the
-  // already-sent state before submission)
-  const { data: existingContactRequests } = await admin
-    .from("contact_requests")
-    .select("strategy_id, created_at, status")
-    .eq("allocator_id", allocatorId);
+  const profile = profileRes.data;
+  const decisions = decisionsRes.data;
+  const existingContactRequests = existingContactRequestsRes.data;
 
   if (!batchRow) {
     return {
