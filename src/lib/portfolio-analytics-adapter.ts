@@ -204,22 +204,26 @@ export function adaptPortfolioAnalytics(raw: Json): PortfolioAnalytics | null {
     return null;
   }
 
+  // `Array.prototype.filter()` always returns an array (possibly empty),
+  // so the subsequent `|| null` branch previously appended was dead code.
+  // The downstream length guard (below) is the one that actually collapses
+  // an empty/all-invalid array to `null`.
   const attribution_breakdown = Array.isArray(raw.attribution_breakdown)
-    ? (raw.attribution_breakdown
+    ? raw.attribution_breakdown
         .map(parseAttributionRow)
-        .filter((r): r is AttributionRow => r !== null) || null)
+        .filter((r): r is AttributionRow => r !== null)
     : null;
 
   const risk_decomposition = Array.isArray(raw.risk_decomposition)
-    ? (raw.risk_decomposition
+    ? raw.risk_decomposition
         .map(parseRiskDecompositionRow)
-        .filter((r): r is RiskDecompositionRow => r !== null) || null)
+        .filter((r): r is RiskDecompositionRow => r !== null)
     : null;
 
   const optimizer_suggestions = Array.isArray(raw.optimizer_suggestions)
-    ? (raw.optimizer_suggestions
+    ? raw.optimizer_suggestions
         .map(parseOptimizerSuggestionRow)
-        .filter((r): r is OptimizerSuggestionRow => r !== null) || null)
+        .filter((r): r is OptimizerSuggestionRow => r !== null)
     : null;
 
   const portfolio_equity_curve = Array.isArray(raw.portfolio_equity_curve)

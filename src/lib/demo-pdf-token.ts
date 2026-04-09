@@ -45,12 +45,21 @@ export function signDemoPdfToken(portfolioId: string): string {
   return `${exp}.${sig}`;
 }
 
+const HEX_64_CHAR = /^[0-9a-f]{64}$/;
+
 /**
  * Verify a token against `portfolioId`. Returns true on success, false on
  * any failure (missing secret, malformed token, expired, signature mismatch).
  *
  * Uses constant-time comparison to avoid timing attacks. NEVER returns the
  * specific failure reason — callers should respond with a single 401.
+ *
+ * Hex validation: the signature portion MUST match `/^[0-9a-f]{64}$/` before
+ * we try to `Buffer.from(sig, 'hex')` — without this, Node silently skips
+ * invalid hex chars and produces a truncated buffer, which then either
+ * length-mismatches (safe) or confuses future maintainers about whether
+ * the length guard is load-bearing. Explicit validation makes the contract
+ * obvious.
  */
 export function verifyDemoPdfToken(
   portfolioId: string,
@@ -69,13 +78,18 @@ export function verifyDemoPdfToken(
   const expStr = token.slice(0, idx);
   const sig = token.slice(idx + 1);
 
+  // Signature MUST be a 64-char lowercase hex string (SHA-256 hex digest).
+  // Reject anything else before touching Buffer.from.
+  if (!HEX_64_CHAR.test(sig)) return false;
+
   const exp = Number(expStr);
   if (!Number.isFinite(exp) || exp <= 0) return false;
   if (Math.floor(Date.now() / 1000) > exp) return false;
 
   const payload = `${portfolioId}.${exp}`;
   const expected = sign(payload, secret);
-  if (sig.length !== expected.length) return false;
+  // After the hex regex both buffers are guaranteed to be 32 bytes, so the
+  // timingSafeEqual call is safe to reach without a length guard.
   try {
     return timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
   } catch {

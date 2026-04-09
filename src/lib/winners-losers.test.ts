@@ -66,13 +66,38 @@ describe("computeWinnersLosers", () => {
     expect(result.losers[0].strategy_name).toBe("Gamma");
   });
 
-  it("breaks ties deterministically by strategy_id", () => {
+  it("breaks winner ties deterministically by strategy_id ascending", () => {
     const result = computeWinnersLosers([
       row("z", "Zeta", 0.04),
       row("a", "Alpha", 0.04),
       row("m", "Mu", 0.04),
     ]);
     expect(result.winners.map((w) => w.strategy_id)).toEqual(["a", "m", "z"]);
+  });
+
+  it("breaks loser ties deterministically by strategy_id ascending", () => {
+    // Regression test for PR 3 review: the previous impl sorted globally
+    // descending, sliced the tail, and reversed, which inverted the
+    // tie-break for losers. Expected: within a batch of equally-negative
+    // contributions, strategy_id ascending comes first.
+    const result = computeWinnersLosers([
+      row("z", "Zeta", -0.04),
+      row("a", "Alpha", -0.04),
+      row("m", "Mu", -0.04),
+    ]);
+    expect(result.losers.map((l) => l.strategy_id)).toEqual(["a", "m", "z"]);
+  });
+
+  it("puts the most-negative loser first, independent of tie-break order", () => {
+    const result = computeWinnersLosers(
+      [
+        row("z", "Zeta", -0.05),
+        row("a", "Alpha", -0.04),
+        row("m", "Mu", -0.04),
+      ],
+      { count: 3 },
+    );
+    expect(result.losers.map((l) => l.strategy_id)).toEqual(["z", "a", "m"]);
   });
 
   it("returns fewer than `count` when fewer positives exist", () => {

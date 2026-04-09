@@ -17,13 +17,17 @@ describe("<CounterfactualStrip>", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders the comparison sentence with default period", () => {
+  it("renders the comparison sentence with default period as an aside landmark", () => {
     render(
       <CounterfactualStrip portfolioTwr={0.18} benchmarkTwr={0.12} />,
     );
-    expect(screen.getByText(/Had you allocated 12 months ago/)).toBeInTheDocument();
-    expect(screen.getByText(/portfolio \+18.00%/)).toBeInTheDocument();
-    expect(screen.getByText(/BTC \+12.00%/)).toBeInTheDocument();
+    const aside = screen.getByRole("complementary", {
+      name: "Counterfactual comparison",
+    });
+    expect(aside).toBeInTheDocument();
+    expect(aside).toHaveTextContent(/Had you allocated 12 months ago/);
+    expect(aside).toHaveTextContent(/portfolio \+18.00%/);
+    expect(aside).toHaveTextContent(/BTC \+12.00%/);
   });
 
   it("supports custom period and benchmark label", () => {

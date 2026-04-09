@@ -218,6 +218,18 @@ describe("adaptPortfolioAnalytics", () => {
     expect((proto as Record<string, unknown>).evil).toBeUndefined();
   });
 
+  it("collapses an empty correlation_matrix object to null", () => {
+    // Regression test for PR 0 review: the empty-object path for
+    // correlation_matrix was covered only by the all-null fixture (which
+    // sets it to null). Verify `{}` also collapses to null so downstream
+    // `<CorrelationHeatmap>` shows the empty-state card, not a zero-row grid.
+    const parsed = adaptPortfolioAnalytics({
+      ...allNull,
+      correlation_matrix: {},
+    });
+    expect(parsed?.correlation_matrix).toBeNull();
+  });
+
   it("strips dangerous keys from rolling correlation", () => {
     const parsed = adaptPortfolioAnalytics({
       ...allNull,

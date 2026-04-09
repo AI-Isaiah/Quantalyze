@@ -27,11 +27,9 @@ export function CounterfactualStrip({
 }: CounterfactualStripProps) {
   if (portfolioTwr == null || benchmarkTwr == null) return null;
   return (
-    <p
-      className={cn(
-        "text-sm sm:text-base text-text-secondary",
-        className,
-      )}
+    <aside
+      aria-label="Counterfactual comparison"
+      className={cn("text-sm sm:text-base text-text-secondary", className)}
     >
       Had you allocated {period}:{" "}
       <span className="font-metric tabular-nums text-text-primary">
@@ -42,6 +40,6 @@ export function CounterfactualStrip({
         {benchmarkLabel} {formatPercent(benchmarkTwr)}
       </span>
       .
-    </p>
+    </aside>
   );
 }

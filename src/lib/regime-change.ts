@@ -35,11 +35,17 @@ export interface RegimeChangeOptions {
 }
 
 /**
- * Average a list of `TimeSeriesPoint` values. Returns null when empty.
+ * Average a list of `TimeSeriesPoint` values, rejecting non-finite values
+ * (NaN, Infinity, null) before the reduce. Returns null when nothing
+ * finite remains — a single NaN in the series would otherwise poison the
+ * delta to NaN and silently suppress the shift detection branch.
  */
 function avg(points: TimeSeriesPoint[]): number | null {
-  if (points.length === 0) return null;
-  return points.reduce((s, p) => s + p.value, 0) / points.length;
+  const finite = points
+    .map((p) => p.value)
+    .filter((v) => Number.isFinite(v));
+  if (finite.length === 0) return null;
+  return finite.reduce((s, v) => s + v, 0) / finite.length;
 }
 
 /**
@@ -52,7 +58,9 @@ export function computeRegimeChange(
   options: RegimeChangeOptions = {},
 ): RegimeChangeResult | null {
   const window = options.window ?? 30;
-  const minDelta = options.minDelta ?? 0.1;
+  // Default noise floor matches the plan spec (Moment 2: ">0.15 delta").
+  // Tests that want a tighter threshold pass it explicitly.
+  const minDelta = options.minDelta ?? 0.15;
   if (!analytics?.rolling_correlation) return null;
 
   const recentValues: number[] = [];

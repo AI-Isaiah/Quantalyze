@@ -53,7 +53,7 @@ describe("<EditorialHero>", () => {
     expect(container.querySelector("dl")).toBeNull();
   });
 
-  it("shows '—' for individual missing values", () => {
+  it("shows '—' for individual missing values in the correct dd cells", () => {
     render(
       <EditorialHero
         headline="x"
@@ -65,8 +65,32 @@ describe("<EditorialHero>", () => {
         }}
       />,
     );
-    const dashes = screen.getAllByText("—");
-    expect(dashes.length).toBeGreaterThanOrEqual(2);
+    // Verify the specific null-filled cells rather than a global count,
+    // so adding a new "—" elsewhere won't silently pass this assertion.
+    const btcTwrLabel = screen.getByText("BTC TWR");
+    expect(btcTwrLabel.nextSibling?.textContent).toBe("—");
+    const btcDdLabel = screen.getByText("BTC drawdown");
+    expect(btcDdLabel.nextSibling?.textContent).toBe("—");
+  });
+
+  it("uses a <dl>/<dt>/<dd> structure so the hero numbers form a term list", () => {
+    render(
+      <EditorialHero
+        headline="x"
+        numbers={{
+          portfolioTwr: 0.18,
+          benchmarkTwr: 0.12,
+          portfolioMaxDrawdown: -0.05,
+          benchmarkMaxDrawdown: -0.22,
+        }}
+      />,
+    );
+    // 4 labels → 4 <dt> elements, 4 values → 4 <dd> elements inside one <dl>
+    const section = screen.getByRole("region");
+    const dl = section.querySelector("dl");
+    expect(dl).not.toBeNull();
+    expect(dl?.querySelectorAll("dt").length).toBe(4);
+    expect(dl?.querySelectorAll("dd").length).toBe(4);
   });
 
   it("renders the descriptor when provided", () => {

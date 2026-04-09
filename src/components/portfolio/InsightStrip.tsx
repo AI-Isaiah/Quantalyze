@@ -24,6 +24,12 @@ const SEVERITY_DOT: Record<"high" | "medium" | "low", string> = {
   low: "bg-text-muted",
 };
 
+const SEVERITY_LABEL: Record<"high" | "medium" | "low", string> = {
+  high: "High severity",
+  medium: "Medium severity",
+  low: "Low severity",
+};
+
 export function InsightStrip({
   analytics,
   max = 3,
@@ -57,6 +63,7 @@ export function InsightStrip({
                   SEVERITY_DOT[insight.severity],
                 )}
               />
+              <span className="sr-only">{SEVERITY_LABEL[insight.severity]}:</span>
               <span>{insight.sentence}</span>
             </li>
           ))}

@@ -48,13 +48,32 @@ describe("computeBiggestRisk", () => {
     expect(computeBiggestRisk(buildAnalytics())).toBeNull();
   });
 
-  it("flags drawdown when below -15%", () => {
+  it("flags drawdown when below -15% and portfolio has multiple strategies", () => {
     const insight = computeBiggestRisk(
-      buildAnalytics({ portfolio_max_drawdown: -0.18 }),
+      buildAnalytics({
+        portfolio_max_drawdown: -0.18,
+        attribution_breakdown: [
+          { strategy_id: "a", strategy_name: "A", contribution: 0.05, allocation_effect: 0 },
+          { strategy_id: "b", strategy_name: "B", contribution: 0.03, allocation_effect: 0 },
+        ],
+      }),
     );
     expect(insight?.key).toBe("biggest_risk_drawdown");
     expect(insight?.severity).toBe("high");
     expect(insight?.sentence).toContain("18% below peak");
+  });
+
+  it("does NOT fire drawdown insight on a single-strategy portfolio", () => {
+    // The "top contributor" sentence is nonsensical with one strategy.
+    const insight = computeBiggestRisk(
+      buildAnalytics({
+        portfolio_max_drawdown: -0.18,
+        attribution_breakdown: [
+          { strategy_id: "a", strategy_name: "Solo", contribution: -0.18, allocation_effect: 0 },
+        ],
+      }),
+    );
+    expect(insight).toBeNull();
   });
 
   it("flags concentration when top risk dwarfs top weight", () => {
@@ -99,6 +118,10 @@ describe("computeBiggestRisk", () => {
       buildAnalytics({
         portfolio_max_drawdown: -0.2,
         avg_pairwise_correlation: 0.7,
+        attribution_breakdown: [
+          { strategy_id: "a", strategy_name: "Alpha", contribution: 0.05, allocation_effect: 0 },
+          { strategy_id: "b", strategy_name: "Beta", contribution: 0.03, allocation_effect: 0 },
+        ],
         risk_decomposition: [
           {
             strategy_id: "a",
@@ -108,10 +131,50 @@ describe("computeBiggestRisk", () => {
             standalone_vol: 0,
             component_var: 0,
           },
+          {
+            strategy_id: "b",
+            strategy_name: "Beta",
+            marginal_risk_pct: 20,
+            weight_pct: 90,
+            standalone_vol: 0,
+            component_var: 0,
+          },
         ],
       }),
     );
     expect(insight?.key).toBe("biggest_risk_drawdown");
+  });
+
+  it("prioritizes concentration over correlation when drawdown does not fire", () => {
+    const insight = computeBiggestRisk(
+      buildAnalytics({
+        // No drawdown signal
+        portfolio_max_drawdown: -0.05,
+        // Correlation rule would fire on its own
+        avg_pairwise_correlation: 0.7,
+        // Concentration rule should win
+        risk_decomposition: [
+          {
+            strategy_id: "a",
+            strategy_name: "Alpha",
+            marginal_risk_pct: 70,
+            weight_pct: 30,
+            standalone_vol: 0,
+            component_var: 0,
+          },
+          {
+            strategy_id: "b",
+            strategy_name: "Beta",
+            marginal_risk_pct: 30,
+            weight_pct: 70,
+            standalone_vol: 0,
+            component_var: 0,
+          },
+        ],
+      }),
+    );
+    expect(insight?.key).toBe("biggest_risk_concentration");
+    expect(insight?.sentence).toContain("Alpha");
   });
 
   it("does not fire concentration when top risk is below threshold", () => {
@@ -225,8 +288,27 @@ describe("computeUnderperformance", () => {
         ],
       }),
     );
+    // Average contribution = (0.05 + -0.04 + 0.03) / 3 = 0.0133...
+    // Trail distance for Beta = 0.0133 - (-0.04) = 0.0533 → formats to "5.33%"
     expect(insight?.sentence).toContain("Beta");
-    expect(insight?.sentence).toContain("4.00%");
+    expect(insight?.sentence).toContain("trailed the portfolio baseline");
+    expect(insight?.sentence).toContain("5.33%");
+  });
+
+  it("uses the standalone vol band as the trail threshold when present", () => {
+    // Beta trails by 0.05 but its vol band is 0.10 → should NOT fire
+    const insight = computeUnderperformance(
+      buildAnalytics({
+        attribution_breakdown: [
+          { strategy_id: "a", strategy_name: "Alpha", contribution: 0.05, allocation_effect: 0 },
+          { strategy_id: "b", strategy_name: "Beta",  contribution: 0.0, allocation_effect: 0 },
+        ],
+        risk_decomposition: [
+          { strategy_id: "b", strategy_name: "Beta", marginal_risk_pct: 0, weight_pct: 0, standalone_vol: 0.10, component_var: 0 },
+        ],
+      }),
+    );
+    expect(insight).toBeNull();
   });
 
   it("does not single out a worst strategy when 2 are tied", () => {
@@ -235,6 +317,17 @@ describe("computeUnderperformance", () => {
         attribution_breakdown: [
           { strategy_id: "a", strategy_name: "Alpha", contribution: -0.04, allocation_effect: 0 },
           { strategy_id: "b", strategy_name: "Beta",  contribution: -0.04, allocation_effect: 0 },
+        ],
+      }),
+    );
+    expect(insight).toBeNull();
+  });
+
+  it("never fires with fewer than 2 strategies", () => {
+    const insight = computeUnderperformance(
+      buildAnalytics({
+        attribution_breakdown: [
+          { strategy_id: "a", strategy_name: "Solo", contribution: -0.1, allocation_effect: 0 },
         ],
       }),
     );
@@ -295,6 +388,12 @@ describe("computeAllInsights", () => {
       buildAnalytics({
         portfolio_max_drawdown: -0.2,
         avg_pairwise_correlation: 0.6,
+        // Provide multi-strategy attribution so the drawdown rule is
+        // allowed to fire (the 1-strategy guard blocks it otherwise).
+        attribution_breakdown: [
+          { strategy_id: "a", strategy_name: "Alpha", contribution: 0.04, allocation_effect: 0 },
+          { strategy_id: "b", strategy_name: "Beta", contribution: 0.02, allocation_effect: 0 },
+        ],
       }),
     );
     expect(insights[0].severity).toBe("high");

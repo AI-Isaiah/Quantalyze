@@ -53,6 +53,11 @@ describe("<InsightStrip>", () => {
         analytics={buildAnalytics({
           portfolio_max_drawdown: -0.2,
           avg_pairwise_correlation: 0.6,
+          // Multi-strategy attribution so the drawdown rule is eligible.
+          attribution_breakdown: [
+            { strategy_id: "a", strategy_name: "Alpha", contribution: 0.04, allocation_effect: 0 },
+            { strategy_id: "b", strategy_name: "Beta", contribution: 0.02, allocation_effect: 0 },
+          ],
         })}
       />,
     );
@@ -86,5 +91,24 @@ describe("<InsightStrip>", () => {
     expect(
       screen.getByText("No unusual activity in the trailing window."),
     ).toBeInTheDocument();
+  });
+
+  it("exposes severity to screen readers via an sr-only label", () => {
+    // Regression test for PR 6 review finding I1: the colored dot carries
+    // severity visually but is aria-hidden, so a VoiceOver user would
+    // previously hear only the sentence with no severity context.
+    render(
+      <InsightStrip
+        analytics={buildAnalytics({
+          portfolio_max_drawdown: -0.25,
+          attribution_breakdown: [
+            { strategy_id: "a", strategy_name: "Alpha", contribution: 0.05, allocation_effect: 0 },
+            { strategy_id: "b", strategy_name: "Beta", contribution: 0.03, allocation_effect: 0 },
+          ],
+        })}
+      />,
+    );
+    // High severity drawdown insight should carry the sr-only label.
+    expect(screen.getByText("High severity:")).toBeInTheDocument();
   });
 });

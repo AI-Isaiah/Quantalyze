@@ -52,4 +52,29 @@ describe("<WhatWedDoCard>", () => {
     );
     expect(screen.getByText(/diversify the portfolio/)).toBeInTheDocument();
   });
+
+  it("hides the card entirely when sharpe_lift is negative", () => {
+    // A negative sharpe_lift recommendation would make the portfolio worse;
+    // the card should not render it.
+    const { container } = render(
+      <WhatWedDoCard suggestions={[suggestion({ sharpe_lift: -0.1 })]} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("hides the card when the optimizer score is NaN", () => {
+    const { container } = render(
+      <WhatWedDoCard suggestions={[suggestion({ score: Number.NaN })]} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("hides the card when sharpe_lift is non-finite", () => {
+    const { container } = render(
+      <WhatWedDoCard
+        suggestions={[suggestion({ sharpe_lift: Number.POSITIVE_INFINITY })]}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
 });

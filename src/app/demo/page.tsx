@@ -107,6 +107,21 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
       .maybeSingle(),
   ]);
 
+  // Log any Supabase .error fields from Phase 1 so a service-key expiry,
+  // RLS misconfiguration, or network partition is visible in the logs
+  // instead of silently falling through to the "Demo data is loading"
+  // empty state. We still render the page — the admin client path is
+  // never supposed to fail, so an error here is operationally severe.
+  if (profileRes.error) {
+    console.error("[demo] profile fetch failed:", profileRes.error);
+  }
+  if (batchesRes.error) {
+    console.error("[demo] batches fetch failed:", batchesRes.error);
+  }
+  if (portfolioRes.error) {
+    console.error("[demo] portfolio fetch failed:", portfolioRes.error);
+  }
+
   const profile = profileRes.data;
   const batches = (batchesRes.data ?? []) as Array<{
     id: string;
@@ -408,6 +423,9 @@ function adaptHoldings(rows: unknown): PortfolioHoldingRow[] {
 }
 
 function PersonaSwitcher({ current }: { current: PersonaKey }) {
+  // Touch target sizing: min-h-[44px] + min-w-[44px] meets WCAG 2.5.5
+  // Target Size Level AAA AND the iOS HIG 44pt minimum. The text remains
+  // text-xs for visual density; padding takes up the rest.
   return (
     <nav
       aria-label="Demo persona"
@@ -420,8 +438,8 @@ function PersonaSwitcher({ current }: { current: PersonaKey }) {
           aria-current={key === current ? "page" : undefined}
           className={
             key === current
-              ? "rounded-md bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent"
-              : "rounded-md px-3 py-1.5 text-xs font-medium text-text-muted hover:text-text-primary"
+              ? "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md bg-accent/10 px-4 text-xs font-medium text-accent"
+              : "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md px-4 text-xs font-medium text-text-muted hover:text-text-primary"
           }
         >
           {PERSONA_LABELS[key]}

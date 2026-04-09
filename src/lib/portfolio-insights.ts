@@ -41,9 +41,14 @@ export function computeBiggestRisk(
 ): PortfolioInsight | null {
   if (!analytics) return null;
 
-  // Rule 1: drawdown still significant relative to peak.
+  // Rule 1: drawdown still significant relative to peak. Only fire when
+  // there are multiple strategies — the "top contributor" sentence is
+  // nonsensical for a single-holding portfolio (it IS the top contributor).
   const dd = analytics.portfolio_max_drawdown;
-  if (dd != null && dd < -0.15) {
+  const hasMultipleStrategies =
+    (analytics.attribution_breakdown?.length ?? 0) > 1 ||
+    (analytics.risk_decomposition?.length ?? 0) > 1;
+  if (dd != null && dd < -0.15 && hasMultipleStrategies) {
     return {
       key: "biggest_risk_drawdown",
       severity: "high",
@@ -126,27 +131,54 @@ export function computeRegimeChange(
 }
 
 /**
- * Detect underperformance: a strategy whose contribution is materially
- * negative relative to the rest of the portfolio. Heuristic: contribution
- * < -1% AND it's the worst contributor by at least 0.5% margin.
+ * Detect underperformance: a strategy whose contribution to portfolio
+ * return has trailed the portfolio-wide contribution baseline by more
+ * than its own standalone vol band.
+ *
+ * The plan spec says: "a strategy that has trailed its own annualized
+ * vol band by >1 std over the last 8 weeks." The analytics service does
+ * not expose per-strategy 8-week trailing vol separately, so the seed
+ * contract uses the strategy's standalone vol from `risk_decomposition`
+ * as the band width proxy. A strategy is underperforming when its
+ * contribution is more than 1 standalone-vol worse than the portfolio
+ * average contribution AND at least 0.5% absolute margin over the next
+ * worst, so we never single out near-ties.
  */
 export function computeUnderperformance(
   analytics: PortfolioAnalytics | null,
 ): PortfolioInsight | null {
   const attribution = analytics?.attribution_breakdown;
-  if (!attribution || attribution.length === 0) return null;
+  if (!attribution || attribution.length < 2) return null;
+
+  // Build a quick strategy_id → standalone_vol lookup from risk_decomposition.
+  const volByStrategy = new Map<string, number>();
+  for (const r of analytics?.risk_decomposition ?? []) {
+    volByStrategy.set(r.strategy_id, r.standalone_vol);
+  }
+
+  const avgContribution =
+    attribution.reduce((s, r) => s + r.contribution, 0) / attribution.length;
   const sorted = [...attribution].sort((a, b) => a.contribution - b.contribution);
   const worst = sorted[0];
-  if (worst.contribution >= -0.01) return null;
+  const band = volByStrategy.get(worst.strategy_id);
+  const trailDistance = avgContribution - worst.contribution;
+
+  // Only fire when the worst contributor trails the portfolio average by
+  // more than one standalone vol band. If we don't have a vol band (no
+  // risk_decomposition for this strategy), fall back to a 1% absolute trail.
+  const threshold = band != null && band > 0 ? band : 0.01;
+  if (trailDistance < threshold) return null;
+
   const second = sorted[1];
   if (second && second.contribution - worst.contribution < 0.005) {
     // Multiple strategies are roughly tied for worst — don't single one out.
     return null;
   }
+
   return {
     key: "underperformance",
     severity: "medium",
-    sentence: `${worst.strategy_name} has dragged the portfolio by ${PCT_2(Math.abs(worst.contribution))} over the trailing window.`,
+    sentence: `${worst.strategy_name} has trailed the portfolio baseline by ${PCT_2(Math.abs(trailDistance))} over the trailing window.`,
   };
 }
 

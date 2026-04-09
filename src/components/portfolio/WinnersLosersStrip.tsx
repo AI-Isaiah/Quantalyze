@@ -45,8 +45,10 @@ export function WinnersLosersStrip({
   className,
 }: WinnersLosersStripProps) {
   const { winners, losers } = computeWinnersLosers(attribution, { count: 3 });
-  const hasAny = winners.length > 0 || losers.length > 0;
-  if (!hasAny) return null;
+  // Editorial /demo policy: strips NEVER unmount, only their content does.
+  // Returning null used to cause layout shift when attribution was null or
+  // all-zero; the strip now always renders with fallback copy in both
+  // columns so the page height is stable across reloads.
 
   return (
     <section
@@ -68,7 +70,11 @@ export function WinnersLosersStrip({
             ))}
           </ul>
         ) : (
-          <p className="text-sm text-text-muted">No positive contributors yet.</p>
+          <p className="text-sm text-text-muted">
+            {attribution == null || attribution.length === 0
+              ? "Waiting for the first attribution run."
+              : "No positive contributors yet."}
+          </p>
         )}
       </div>
       <div>
@@ -86,7 +92,11 @@ export function WinnersLosersStrip({
             ))}
           </ul>
         ) : (
-          <p className="text-sm text-text-muted">No detractors this period.</p>
+          <p className="text-sm text-text-muted">
+            {attribution == null || attribution.length === 0
+              ? "Waiting for the first attribution run."
+              : "No detractors this period."}
+          </p>
         )}
       </div>
     </section>

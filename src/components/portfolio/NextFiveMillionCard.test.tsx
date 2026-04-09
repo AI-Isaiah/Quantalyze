@@ -75,4 +75,17 @@ describe("<NextFiveMillionCard>", () => {
       screen.getByText(/Where would the next \$1.0M go/),
     ).toBeInTheDocument();
   });
+
+  it("allocates 100% of the amount to a single suggestion", () => {
+    // Missing 10th test called out by PR 7 review: with a single positive
+    // suggestion, the entire amount should flow to that row.
+    render(
+      <NextFiveMillionCard
+        amount={3_000_000}
+        suggestions={[suggestion("a", "Solo", 0.9)]}
+      />,
+    );
+    expect(screen.getByText("Solo")).toBeInTheDocument();
+    expect(screen.getByText("$3.0M")).toBeInTheDocument();
+  });
 });

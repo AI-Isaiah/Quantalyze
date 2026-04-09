@@ -13,11 +13,16 @@ describe("<MorningBriefing>", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders the card variant by default", () => {
+  it("renders the card variant by default with a real heading", () => {
     render(
       <MorningBriefing narrative="Your portfolio returned +2.3% MTD." />,
     );
-    expect(screen.getByText("Morning Briefing")).toBeInTheDocument();
+    // The "Morning Briefing" label MUST be a heading element (not a <p>)
+    // so screen readers can navigate to it via heading keyboard nav and
+    // the section landmark gets a correct accessible name.
+    expect(
+      screen.getByRole("heading", { name: "Morning Briefing" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("Your portfolio returned +2.3% MTD."),
     ).toBeInTheDocument();

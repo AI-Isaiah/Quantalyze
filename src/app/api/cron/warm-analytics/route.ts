@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 
 /**
  * Vercel Cron — pings the Python analytics service /health every 5 minutes
@@ -16,10 +17,22 @@ import { NextRequest, NextResponse } from "next/server";
  * Schedule + secret: see `vercel.json`.
  */
 
+/**
+ * Constant-time Bearer token compare so an attacker can't probe
+ * CRON_SECRET via timing differences on a public cron endpoint. JS `!==`
+ * short-circuits at the first differing byte, leaking length + prefix.
+ */
+function safeCompare(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 async function handle(req: NextRequest) {
-  const auth = req.headers.get("authorization");
+  const auth = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.CRON_SECRET}`;
-  if (!process.env.CRON_SECRET || auth !== expected) {
+  if (!process.env.CRON_SECRET || !safeCompare(auth, expected)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

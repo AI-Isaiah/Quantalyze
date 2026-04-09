@@ -18,6 +18,17 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
   if (!suggestions || suggestions.length === 0) return null;
   const top = suggestions[0];
 
+  // Don't recommend a strategy that would make the portfolio worse. A
+  // negative sharpe_lift OR a non-finite score means the optimizer has
+  // nothing useful to say — hide the entire card rather than render a
+  // contradictory sentence.
+  if (!Number.isFinite(top.score) || !Number.isFinite(top.sharpe_lift)) {
+    return null;
+  }
+  if (top.sharpe_lift < 0) {
+    return null;
+  }
+
   // Order of operations: Sharpe lift is the primary win; corr reduction is
   // the diversification framing; dd improvement is the safety framing.
   const sharpeLine =

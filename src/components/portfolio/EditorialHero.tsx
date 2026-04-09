@@ -42,12 +42,15 @@ function MetricCell({
   value: number | null;
   negative?: boolean;
 }) {
+  // Using <dt>/<dd> inside the parent <dl> so the element set is valid
+  // HTML and screen readers expose this as a term/description pair. A
+  // <div> wrapper is allowed inside <dl> per the HTML spec.
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+      <dt className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
         {label}
-      </p>
-      <p
+      </dt>
+      <dd
         className={cn(
           "mt-1 font-metric tabular-nums text-2xl sm:text-3xl",
           value == null
@@ -58,7 +61,7 @@ function MetricCell({
         )}
       >
         {formatPercent(value)}
-      </p>
+      </dd>
     </div>
   );
 }

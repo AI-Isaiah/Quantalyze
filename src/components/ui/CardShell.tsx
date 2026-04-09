@@ -73,13 +73,15 @@ export function CardShell({
       )}
 
       {status === "loading" && (
-        <div
-          aria-hidden="true"
-          className="flex-1 space-y-2"
-        >
-          <div className="h-4 w-3/4 rounded bg-page" />
-          <div className="h-4 w-1/2 rounded bg-page" />
-        </div>
+        <>
+          <p role="status" aria-live="polite" className="sr-only">
+            Loading {title ?? "content"}…
+          </p>
+          <div aria-hidden="true" className="flex-1 space-y-2">
+            <div className="h-4 w-3/4 rounded bg-page" />
+            <div className="h-4 w-1/2 rounded bg-page" />
+          </div>
+        </>
       )}
 
       {status === "unavailable" && (

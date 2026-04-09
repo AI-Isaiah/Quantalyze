@@ -118,6 +118,12 @@ export async function fetchCandidatesForBatch(
  * with that batch ID. If empty, fall back to the previous batch (so the
  * friend's forwarded URL never lands on an empty appendix). Returns
  * `usedBatchId === null` when no batch produced candidates.
+ *
+ * Sequential by design, not parallel: the common case is that the latest
+ * batch produced candidates, so we only hit Supabase once. Firing both
+ * queries in parallel would double the Supabase request budget per demo
+ * page load to save ~50ms on the rare fallback path. If the latest batch
+ * miss rate ever rises above ~20%, revisit.
  */
 export interface ResolveRecommendationsArgs {
   admin: AdminClient;

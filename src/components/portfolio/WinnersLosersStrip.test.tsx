@@ -12,23 +12,35 @@ function row(
 }
 
 describe("<WinnersLosersStrip>", () => {
-  it("returns null when attribution is empty", () => {
-    const { container } = render(
-      <WinnersLosersStrip attribution={null} />,
+  it("never unmounts — renders fallback copy when attribution is null", () => {
+    // Editorial /demo policy: cards never vanish, only their content does.
+    // A null-attribution reload must keep the strip present so layout is
+    // stable across refreshes. Regression test for PR 6 review finding C1.
+    render(<WinnersLosersStrip attribution={null} />);
+    expect(
+      screen.getByRole("region", { name: "Winners and losers" }),
+    ).toBeInTheDocument();
+    const fallbacks = screen.getAllByText(
+      /Waiting for the first attribution run/,
     );
-    expect(container.firstChild).toBeNull();
+    expect(fallbacks).toHaveLength(2);
   });
 
-  it("returns null when all contributions are zero", () => {
-    const { container } = render(
+  it("renders content fallback copy when all contributions are zero", () => {
+    render(
       <WinnersLosersStrip
-        attribution={[
-          row("a", "Alpha", 0),
-          row("b", "Beta", 0),
-        ]}
+        attribution={[row("a", "Alpha", 0), row("b", "Beta", 0)]}
       />,
     );
-    expect(container.firstChild).toBeNull();
+    expect(
+      screen.getByRole("region", { name: "Winners and losers" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("No positive contributors yet."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("No detractors this period."),
+    ).toBeInTheDocument();
   });
 
   it("renders winners and losers in two columns", () => {

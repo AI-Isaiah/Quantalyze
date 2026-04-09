@@ -50,12 +50,12 @@ export function MorningBriefing({
       aria-labelledby="morning-briefing-title"
       className={cn(CARD_CLASS, className)}
     >
-      <p
+      <h2
         id="morning-briefing-title"
         className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2"
       >
         Morning Briefing
-      </p>
+      </h2>
       <p className="text-sm text-text-secondary leading-relaxed">{narrative}</p>
     </section>
   );

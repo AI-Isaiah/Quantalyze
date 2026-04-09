@@ -39,6 +39,28 @@ describe("demo-pdf-token", () => {
     expect(verifyDemoPdfToken("portfolio-1", ".")).toBe(false);
   });
 
+  it("rejects signatures that are not 64-character lowercase hex", () => {
+    // Regression test for PR 9 review: a non-hex sig used to pass the
+    // length guard and then silently decode to a shorter buffer.
+    const exp = Math.floor(Date.now() / 1000) + 60;
+    // 64 chars but contains a non-hex letter
+    expect(
+      verifyDemoPdfToken("portfolio-1", `${exp}.g${"0".repeat(63)}`),
+    ).toBe(false);
+    // 63 chars (too short)
+    expect(verifyDemoPdfToken("portfolio-1", `${exp}.${"0".repeat(63)}`)).toBe(
+      false,
+    );
+    // 65 chars (too long)
+    expect(verifyDemoPdfToken("portfolio-1", `${exp}.${"0".repeat(65)}`)).toBe(
+      false,
+    );
+    // Uppercase hex — we intentionally require lowercase to match `digest("hex")` output
+    expect(
+      verifyDemoPdfToken("portfolio-1", `${exp}.${"A".repeat(64)}`),
+    ).toBe(false);
+  });
+
   it("rejects an expired token", () => {
     // Build a token with exp = 1 (1970), then verify
     const past = "1.deadbeef";

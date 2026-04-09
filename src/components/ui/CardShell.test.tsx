@@ -24,6 +24,15 @@ describe("<CardShell>", () => {
     expect(skeletons.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("exposes a screen-reader-only loading announcement in the loading state", () => {
+    render(<CardShell status="loading" title="Sharpe" />);
+    // Screen readers must hear "Loading Sharpe…" when a cell first mounts,
+    // otherwise a VoiceOver user lands on an unlabeled container.
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/Loading Sharpe/);
+    expect(status).toHaveAttribute("aria-live", "polite");
+  });
+
   it("renders unavailable copy in the unavailable state", () => {
     render(<CardShell status="unavailable" title="Big number" />);
     expect(screen.getByText(/Data unavailable/i)).toBeInTheDocument();

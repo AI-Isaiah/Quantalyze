@@ -15,7 +15,12 @@ function shiftSeries(
   recent: number,
 ): TimeSeriesPoint[] {
   // First half = prior value, second half = recent value.
-  const mid = Math.floor(n / 2);
+  // Precondition: n MUST be `window * 2` (even number) for the split to
+  // align cleanly with `slice(-window)` / `slice(-window * 2, -window)`.
+  if (n % 2 !== 0) {
+    throw new Error(`shiftSeries expects even n, got ${n}`);
+  }
+  const mid = n / 2;
   return Array.from({ length: n }, (_, i) => ({
     date: `2026-01-${String(i + 1).padStart(2, "0")}`,
     value: i < mid ? prior : recent,
@@ -115,5 +120,61 @@ describe("computeRegimeChange", () => {
       { window: 10, minDelta: 0.1 },
     );
     expect(result?.shiftDetected).toBe(false);
+  });
+
+  it("uses a default noise floor of 0.15 (plan spec)", () => {
+    // 0.12 delta should NOT fire under the default threshold.
+    const result = computeRegimeChange({
+      rolling_correlation: {
+        "a:b": shiftSeries(60, 0.2, 0.32),
+      },
+    });
+    expect(result).not.toBeNull();
+    expect(result?.shiftDetected).toBe(false);
+  });
+
+  it("does fire at the plan default threshold when delta >= 0.15", () => {
+    const result = computeRegimeChange({
+      rolling_correlation: {
+        "a:b": shiftSeries(60, 0.1, 0.3),
+      },
+    });
+    expect(result?.shiftDetected).toBe(true);
+  });
+
+  it("handles NaN and Infinity values in the series without poisoning the delta", () => {
+    // Regression: a single NaN in a pair series used to propagate through
+    // the mean and set delta to NaN, which always failed the |delta| >=
+    // minDelta check silently. The avg() helper now filters non-finite.
+    const goodPair = shiftSeries(20, 0.1, 0.5);
+    // Corrupt one point in the recent window
+    goodPair[15] = { date: "2026-01-16", value: Number.NaN };
+    goodPair[17] = { date: "2026-01-18", value: Number.POSITIVE_INFINITY };
+    const result = computeRegimeChange(
+      {
+        rolling_correlation: {
+          "a:b": goodPair,
+        },
+      },
+      { window: 10, minDelta: 0.2 },
+    );
+    expect(result).not.toBeNull();
+    expect(Number.isFinite(result?.delta ?? Number.NaN)).toBe(true);
+    // Two of the 10 recent points are non-finite and filtered; mean of the
+    // remaining 8 should still be close to 0.5.
+    expect(result?.recentAvg).toBeCloseTo(0.5);
+    expect(result?.shiftDetected).toBe(true);
+  });
+
+  it("returns null when every value in the series is non-finite", () => {
+    const pair: TimeSeriesPoint[] = Array.from({ length: 20 }, (_, i) => ({
+      date: `2026-01-${String(i + 1).padStart(2, "0")}`,
+      value: Number.NaN,
+    }));
+    const result = computeRegimeChange(
+      { rolling_correlation: { "a:b": pair } },
+      { window: 10, minDelta: 0.1 },
+    );
+    expect(result).toBeNull();
   });
 });

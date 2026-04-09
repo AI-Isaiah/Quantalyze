@@ -35,13 +35,34 @@ function sortByContribution(rows: AttributionRow[]): AttributionRow[] {
 }
 
 /**
+ * Sort attribution rows by contribution ascending (most negative first).
+ * Ties broken by strategy_id ascending for determinism. Used by the losers
+ * branch so the tie-break is applied independently of the winners branch.
+ */
+function sortByContributionAscending(rows: AttributionRow[]): AttributionRow[] {
+  return [...rows].sort((a, b) => {
+    if (a.contribution === b.contribution) {
+      return a.strategy_id.localeCompare(b.strategy_id);
+    }
+    return a.contribution - b.contribution;
+  });
+}
+
+/**
  * Compute winners and losers from an attribution breakdown.
  *
  * - `winners` = top N positive contributors (descending by contribution)
- * - `losers`  = bottom N negative contributors (ascending by contribution)
+ * - `losers`  = bottom N negative contributors (ascending by contribution
+ *   so the worst detractor is at index 0)
  *
  * Strategies with zero contribution are excluded entirely. If fewer than N
  * positive or negative strategies exist, the returned array is shorter.
+ *
+ * Tie-breaking is by `strategy_id` ascending, applied independently to
+ * each sub-list so the order is stable regardless of which side of the
+ * scale a tied pair lives on. Fix for PR 3 review finding: the previous
+ * implementation sorted globally descending then sliced the tail and
+ * reversed, which inverted the tie-break for losers relative to winners.
  *
  * Returns empty arrays when input is null or empty — never throws.
  */
@@ -54,13 +75,9 @@ export function computeWinnersLosers(
     return { winners: [], losers: [] };
   }
 
-  const sorted = sortByContribution(attribution);
-  const winners = sorted.filter((r) => r.contribution > 0).slice(0, count);
-  // Losers: pull from the end of the sorted (positive→negative) list, then
-  // reverse so the worst is first.
-  const losers = sorted
-    .filter((r) => r.contribution < 0)
-    .slice(-count)
-    .reverse();
+  const positives = attribution.filter((r) => r.contribution > 0);
+  const negatives = attribution.filter((r) => r.contribution < 0);
+  const winners = sortByContribution(positives).slice(0, count);
+  const losers = sortByContributionAscending(negatives).slice(0, count);
   return { winners, losers };
 }
