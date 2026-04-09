@@ -76,8 +76,162 @@ def compute_hit_rate_metrics(
     if not intros:
         return _empty_metrics(lookback_days)
 
-    # For each intro, find the closest prior match_batch for that allocator
-    # and check the rank of the strategy.
+    # ── Batched lookups ───────────────────────────────────────────────
+    # The legacy path called `_find_strategy_rank_in_latest_batch_before`
+    # per intro, which fires 2 sequential Supabase round-trips each. At
+    # 100 intros that's ~200 RTTs ≈ 20s on a 100ms link.
+    #
+    # The batched path issues AT MOST two queries regardless of fan-out:
+    #   1. One `match_batches` fetch for every allocator referenced by
+    #      any valid intro in the window (`.in_("allocator_id", ...)`).
+    #   2. One `match_candidates` fetch across every relevant batch id
+    #      (`.in_("batch_id", ...)`).
+    # The per-intro "most recent batch before this timestamp" + rank
+    # lookup then runs entirely in-memory against the pre-fetched maps.
+    #
+    # The helper `_find_strategy_rank_in_latest_batch_before` is kept as
+    # a public API surface for tests that patch it directly.
+    valid_intros: list[dict[str, Any]] = []
+    skipped = 0
+    for intro in intros:
+        allocator_id = intro.get("allocator_id") if isinstance(intro, dict) else None
+        strategy_id = intro.get("strategy_id") if isinstance(intro, dict) else None
+        created_at = intro.get("created_at") if isinstance(intro, dict) else None
+        if not (allocator_id and strategy_id and created_at):
+            logger.warning(
+                "compute_hit_rate_metrics: skipping malformed intro (missing required fields): %s",
+                intro,
+            )
+            skipped += 1
+            continue
+        valid_intros.append(intro)
+
+    if not valid_intros:
+        return _empty_metrics(lookback_days)
+
+    allocator_ids = sorted({i["allocator_id"] for i in valid_intros})
+
+    # batches_by_allocator: allocator_id -> list of {id, computed_at}.
+    # Paginated fetch over `match_batches` filtered to the relevant
+    # allocators. We do NOT wrap this in a try/except: if PostgREST errors
+    # here, the caller (analytics-service match router) should see the 500
+    # — silently fabricating "no_prior_batch" misses for every intro would
+    # corrupt the hit-rate metric with no signal.
+    #
+    # Why paginate instead of a single `.limit(N)`: PostgREST has an
+    # admin-configurable `db-max-rows` ceiling and a hard per-response
+    # limit, and a single `.limit(50000)` would silently drop any rows
+    # beyond that page. Pagination keeps us correct at every scale.
+    batches_by_allocator: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _paginated_select(
+        supabase.table("match_batches")
+        .select("id, allocator_id, computed_at")
+        .in_("allocator_id", allocator_ids),
+        order_by="id",
+    ):
+        aid = row.get("allocator_id")
+        if aid:
+            batches_by_allocator[aid].append(row)
+
+    # We did NOT use a server-side ORDER BY because the pagination helper
+    # slices by row index; global ordering across pages would require a
+    # stable sort column that doesn't tie, which we don't have. Sort each
+    # allocator's batches most-recent-first in-memory. The per-intro
+    # comparison below parses each timestamp via datetime.fromisoformat so
+    # the chosen batch is always chronologically correct regardless of
+    # string format.
+    def _sort_key(row: dict[str, Any]) -> datetime:
+        ts = row.get("computed_at")
+        if not ts:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    for aid in batches_by_allocator:
+        batches_by_allocator[aid].sort(key=_sort_key, reverse=True)
+
+    # Resolve the "latest batch BEFORE intro timestamp" per intro in-memory.
+    # Also collect the set of batch ids we'll need candidates for.
+    #
+    # Timestamps come from PostgREST as ISO 8601 strings with explicit zone
+    # (e.g. "2026-04-06T00:00:00+00:00"). Parse both sides via
+    # datetime.fromisoformat so the comparison is chronological instead of
+    # lexicographic — matches how the rest of this module handles ISO strings
+    # (see _week_start_iso) and is resilient to "Z" vs "+00:00" drift.
+    def _to_dt(ts: str) -> datetime:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+    intro_to_batch_id: dict[int, str | None] = {}
+    needed_batch_ids: set[str] = set()
+    for idx, intro in enumerate(valid_intros):
+        allocator_id = intro["allocator_id"]
+        try:
+            created_at_dt = _to_dt(intro["created_at"])
+        except (TypeError, ValueError):
+            logger.warning(
+                "compute_hit_rate_metrics: unparseable created_at, treating as no_prior_batch: %s",
+                intro.get("created_at"),
+            )
+            intro_to_batch_id[idx] = None
+            continue
+        chosen: str | None = None
+        for batch in batches_by_allocator.get(allocator_id, []):
+            computed_at = batch.get("computed_at")
+            if not computed_at:
+                continue
+            try:
+                computed_at_dt = _to_dt(computed_at)
+            except (TypeError, ValueError):
+                continue
+            if computed_at_dt < created_at_dt:
+                chosen = batch.get("id")
+                break
+        intro_to_batch_id[idx] = chosen
+        if chosen:
+            needed_batch_ids.add(chosen)
+
+    # candidates_by_batch_and_strategy: (batch_id, strategy_id) -> rank (int)
+    # Only eligible candidates (exclusion_reason IS NULL) are included —
+    # this matches the legacy helper which filtered with `.is_("exclusion_reason", None)`.
+    # As with the batches fetch, a PostgREST error here propagates — we do
+    # not silently mark every intro as no_prior_batch. Paginated so we
+    # never silently truncate at large scale.
+    # `match_candidates` has no UNIQUE (batch_id, strategy_id) constraint,
+    # so in principle a bad writer could insert duplicates. The legacy
+    # `_find_strategy_rank_in_latest_batch_before` used `.maybe_single()`
+    # which would throw on that case. Preserve equivalent signal here: if
+    # we ever see the same (batch_id, strategy_id) twice in the rank map,
+    # log a warning so the next operator sees the corruption.
+    candidates_by_batch_and_strategy: dict[tuple[str, str], int | None] = {}
+    if needed_batch_ids:
+        for row in _paginated_select(
+            supabase.table("match_candidates")
+            .select("batch_id, strategy_id, rank, exclusion_reason")
+            .in_("batch_id", sorted(needed_batch_ids)),
+            order_by="id",
+        ):
+            if row.get("exclusion_reason") is not None:
+                continue
+            batch_id = row.get("batch_id")
+            strategy_id = row.get("strategy_id")
+            if not (batch_id and strategy_id):
+                continue
+            key = (batch_id, strategy_id)
+            if key in candidates_by_batch_and_strategy:
+                logger.warning(
+                    "compute_hit_rate_metrics: duplicate match_candidates row for "
+                    "batch_id=%s strategy_id=%s — keeping first rank %s, ignoring %s",
+                    batch_id,
+                    strategy_id,
+                    candidates_by_batch_and_strategy[key],
+                    row.get("rank"),
+                )
+                continue
+            candidates_by_batch_and_strategy[key] = row.get("rank")
+
+    # Per-intro aggregation, now purely in-memory.
     hits_top_3 = 0
     hits_top_10 = 0
     weekly_agg: dict[str, dict[str, int]] = defaultdict(
@@ -85,27 +239,18 @@ def compute_hit_rate_metrics(
     )
     missed: list[dict[str, Any]] = []
 
-    # Skipped-row counter — we don't penalise the hit-rate denominator for
-    # malformed rows, we just count + log them so a single bad match_decisions
-    # row can't take down the whole /admin/match/eval dashboard.
-    skipped = 0
-
-    for intro in intros:
+    for idx, intro in enumerate(valid_intros):
         try:
-            allocator_id = intro.get("allocator_id")
-            strategy_id = intro.get("strategy_id")
-            created_at = intro.get("created_at")
-            if not (allocator_id and strategy_id and created_at):
-                logger.warning(
-                    "compute_hit_rate_metrics: skipping malformed intro (missing required fields): %s",
-                    intro,
-                )
-                skipped += 1
-                continue
+            allocator_id = intro["allocator_id"]
+            strategy_id = intro["strategy_id"]
+            created_at = intro["created_at"]
 
-            rank = _find_strategy_rank_in_latest_batch_before(
-                supabase, allocator_id, strategy_id, created_at
-            )
+            batch_id = intro_to_batch_id.get(idx)
+            rank: int | None
+            if batch_id is None:
+                rank = None
+            else:
+                rank = candidates_by_batch_and_strategy.get((batch_id, strategy_id))
 
             week_start = _week_start_iso(created_at)
             weekly_agg[week_start]["intros"] += 1
@@ -199,6 +344,50 @@ def _find_strategy_rank_in_latest_batch_before(
     if not cand_result.data:
         return None
     return cand_result.data.get("rank")
+
+
+def _paginated_select(
+    builder,
+    order_by: str,
+    page_size: int = 1000,
+    hard_cap_pages: int = 1000,
+) -> list[dict[str, Any]]:
+    """Drain a PostgREST SELECT in fixed-size pages via `.range(start, end)`.
+
+    The batched hit-rate path filters `match_batches` / `match_candidates`
+    by lists of ids, and at real production scale either result set can
+    exceed PostgREST's per-response limit (1000 rows by default on
+    Supabase hosted, sometimes lower). A single `.limit(N)` would silently
+    truncate beyond that ceiling — pagination keeps us correct at every
+    scale.
+
+    `order_by` is REQUIRED: Postgres makes no guarantee about row order
+    without an explicit ORDER BY, so paginating without it can skip or
+    duplicate rows across pages. Callers must pass a stable sort key
+    (typically the primary key) so every page is evaluated against the
+    same ordering.
+
+    `hard_cap_pages` is a sanity belt: 1000 pages × 1000 rows = 1M rows
+    per query, well above any realistic working set. If we ever hit it we
+    log a warning and stop, so an unbounded query can't wedge the
+    analytics service.
+    """
+    rows: list[dict[str, Any]] = []
+    ordered = builder.order(order_by)
+    for page in range(hard_cap_pages):
+        start = page * page_size
+        end = start + page_size - 1
+        result = ordered.range(start, end).execute()
+        chunk = result.data or []
+        rows.extend(chunk)
+        if len(chunk) < page_size:
+            return rows
+    logger.warning(
+        "_paginated_select: hit hard cap of %d pages × %d rows — stopping early",
+        hard_cap_pages,
+        page_size,
+    )
+    return rows
 
 
 def _week_start_iso(timestamp_str: str) -> str:
