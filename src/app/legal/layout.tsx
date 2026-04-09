@@ -17,13 +17,20 @@ export default function LegalLayout({ children }: { children: React.ReactNode })
   return (
     <div className="min-h-screen bg-page">
       <header className="border-b border-border bg-surface">
-        <div className="mx-auto max-w-4xl px-6 py-4 flex items-center justify-between">
-          <Link href="/" className="font-display text-xl text-text-primary">
+        <div className="mx-auto flex h-16 max-w-4xl items-center justify-between px-6">
+          <Link
+            href="/"
+            className="inline-flex items-center py-2 font-display text-xl text-text-primary"
+          >
             {PLATFORM_NAME}
           </Link>
-          <nav className="flex items-center gap-5 text-xs text-text-secondary">
+          <nav className="flex items-center gap-1 text-xs text-text-secondary">
             {TABS.map((tab) => (
-              <Link key={tab.href} href={tab.href} className="hover:text-text-primary">
+              <Link
+                key={tab.href}
+                href={tab.href}
+                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
+              >
                 {tab.label}
               </Link>
             ))}

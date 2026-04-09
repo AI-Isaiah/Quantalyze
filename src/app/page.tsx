@@ -47,19 +47,22 @@ export default async function Home() {
       {/* Nav */}
       <header className="border-b border-border bg-white">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-          <Link href="/" className="text-lg font-bold tracking-tight text-text-primary">
+          <Link
+            href="/"
+            className="inline-flex items-center py-2 font-display text-lg tracking-tight text-text-primary"
+          >
             Quantalyze
           </Link>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
             <Link
               href="/login"
-              className="text-sm font-medium text-text-secondary hover:text-text-primary transition-colors"
+              className="inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-medium text-text-secondary hover:bg-page hover:text-text-primary transition-colors"
             >
               Log in
             </Link>
             <Link
               href="/signup"
-              className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+              className="inline-flex min-h-[44px] items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
             >
               Get Started
             </Link>
@@ -262,20 +265,26 @@ export default async function Home() {
       {/* Footer */}
       <footer className="border-t border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-10">
-          <div className="flex flex-col items-center justify-between gap-6 md:flex-row">
+          <div className="flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
             <div>
-              <span className="text-sm font-bold tracking-tight text-text-primary">
+              <span className="font-display text-base text-text-primary">
                 Quantalyze
               </span>
               <p className="mt-1 text-xs text-text-muted">
                 Exchange-verified quant strategy marketplace
               </p>
             </div>
-            <div className="flex gap-6 text-sm text-text-muted">
-              <Link href="/login" className="hover:text-text-primary transition-colors">
+            <div className="flex items-center gap-2 text-sm text-text-muted">
+              <Link
+                href="/login"
+                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
+              >
                 Log in
               </Link>
-              <Link href="/signup" className="hover:text-text-primary transition-colors">
+              <Link
+                href="/signup"
+                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
+              >
                 Sign up
               </Link>
             </div>
