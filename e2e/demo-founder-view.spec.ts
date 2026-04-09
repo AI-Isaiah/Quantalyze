@@ -35,9 +35,19 @@ test.describe("Public /demo/founder-view page", () => {
   });
 
   test("no console errors on /demo/founder-view", async ({ page }) => {
-    const errors: string[] = [];
+    // Capture BOTH the text and the source URL of every console error.
+    // Chrome's browser-level resource errors (e.g. 500 on a fetch) emit
+    // the line `Failed to load resource: the server responded with a
+    // status of 500 (...)`, and the offending URL is on
+    // `msg.location().url`, NOT in `msg.text()`. Filtering only on text
+    // made the `/api/demo/match` exclusion a no-op for exactly the case
+    // it needed to catch — the /api/demo/match route returns 500 under
+    // placeholder Supabase env.
+    const errors: Array<{ text: string; url: string }> = [];
     page.on("console", (msg) => {
-      if (msg.type() === "error") errors.push(msg.text());
+      if (msg.type() === "error") {
+        errors.push({ text: msg.text(), url: msg.location().url });
+      }
     });
 
     await page.goto("/demo/founder-view");
@@ -45,15 +55,20 @@ test.describe("Public /demo/founder-view page", () => {
 
     // Filter Next.js hydration warnings + redirect noise, same shape as
     // smoke.spec.ts. The AllocatorMatchQueue will fail its /api/demo/match
-    // fetch against placeholder env; filter that expected network noise
-    // too — the spec only cares about structural errors.
+    // fetch against placeholder env; match that on the source URL.
     const realErrors = errors.filter(
-      (e) =>
-        !e.includes("Hydration") &&
-        !e.includes("NEXT_REDIRECT") &&
-        !e.includes("Failed to fetch") &&
-        !e.includes("/api/demo/match"),
+      ({ text, url }) =>
+        !text.includes("Hydration") &&
+        !text.includes("NEXT_REDIRECT") &&
+        !text.includes("Failed to fetch") &&
+        !url.includes("/api/demo/match") &&
+        !text.includes("/api/demo/match"),
     );
+    if (realErrors.length > 0) {
+      // Surface the full context in CI logs when this fires so the next
+      // debugger doesn't have to repro locally.
+      console.log("Unexpected console errors:", JSON.stringify(realErrors, null, 2));
+    }
     expect(realErrors).toHaveLength(0);
   });
 
