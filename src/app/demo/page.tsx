@@ -1,209 +1,151 @@
+// SECURITY BOUNDARY:
+// All Supabase reads on this page MUST be parameterized by a value in
+// `PERSONAS` (src/lib/personas.ts). The admin client is used because /demo
+// is a public route — never add a query that reads an arbitrary `user_id`
+// or `allocator_id` from `searchParams`. The persona enum lookup is the
+// only sanctioned input transform.
+
 import Link from "next/link";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { PageHeader } from "@/components/layout/PageHeader";
-import { Card } from "@/components/ui/Card";
 import { displayStrategyName } from "@/lib/strategy-display";
 import {
-  formatPercent,
-  formatNumber,
   formatCurrency,
-  extractAnalytics,
+  formatNumber,
+  formatPercent,
 } from "@/lib/utils";
-import { ALLOCATOR_ACTIVE_ID } from "@/lib/demo";
+import { getPersona, type PersonaKey } from "@/lib/personas";
+import { warmupAnalytics } from "@/lib/warmup-analytics";
+import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
+import {
+  resolveDemoRecommendations,
+  type RecommendationRow,
+} from "@/lib/demo-recommendations";
+import { signDemoPdfToken } from "@/lib/demo-pdf-token";
+import { ACTIVE_PORTFOLIO_ID } from "@/lib/demo";
+import { EditorialHero } from "@/components/portfolio/EditorialHero";
+import { CounterfactualStrip } from "@/components/portfolio/CounterfactualStrip";
+import { MorningBriefing } from "@/components/portfolio/MorningBriefing";
+import { WinnersLosersStrip } from "@/components/portfolio/WinnersLosersStrip";
+import { InsightStrip } from "@/components/portfolio/InsightStrip";
+import { WhatWedDoCard } from "@/components/portfolio/WhatWedDoCard";
+import { NextFiveMillionCard } from "@/components/portfolio/NextFiveMillionCard";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
-// Force dynamic rendering. The demo is hard-locked to a single seeded
-// allocator (ALLOCATOR_ACTIVE_ID) so ISR would be ideal for reducing hot-path
-// cost on a Telegram/link-viral scenario — BUT ISR prerenders the page at
-// build time, which calls createAdminClient() before any env vars are
-// available in CI, crashing the build. Revisit with a build-time guard when
-// we add a ratelimit-aware canary in PR-post-sprint. For now: per-request
-// render (matches pre-2026-04-09 behavior).
+// Force dynamic rendering. The demo is parameterized by a `?persona=` query
+// param so we can't ISR-cache without per-persona variants. The page is
+// cheap (5 parallel reads + 0 transforms) so per-request render is fine
+// for the friend-meeting traffic profile.
 export const dynamic = "force-dynamic";
-
-type StrategySummary = Pick<
-  Strategy,
-  "id" | "name" | "codename" | "disclosure_tier" | "description"
->;
-
-type AnalyticsSummary = Pick<
-  StrategyAnalytics,
-  "cagr" | "sharpe" | "max_drawdown"
->;
-
-interface RecommendationRow {
-  id: string;
-  rank: number | null;
-  score: number;
-  reasons: string[];
-  strategy: StrategySummary;
-  analytics: AnalyticsSummary | null;
-}
 
 interface PortfolioHoldingRow {
   strategy_id: string;
   current_weight: number | null;
   allocated_amount: number | null;
-  strategy: StrategySummary;
-  analytics: AnalyticsSummary | null;
+  strategy: Pick<
+    Strategy,
+    "id" | "name" | "codename" | "disclosure_tier" | "description"
+  >;
+  analytics: Pick<StrategyAnalytics, "cagr" | "sharpe" | "max_drawdown"> | null;
 }
 
-function toAnalyticsSummary(raw: unknown): AnalyticsSummary | null {
-  const analytics = extractAnalytics(raw);
-  if (!analytics) return null;
-  return {
-    cagr: analytics.cagr,
-    sharpe: analytics.sharpe,
-    max_drawdown: analytics.max_drawdown,
-  };
+const PERSONA_HEADLINES: Record<PersonaKey, string> = {
+  active: "Beat BTC on the way up. And on the way down.",
+  cold: "Diversified, but is it earning its weight?",
+  stalled: "Concentrated. Confident. One drawdown away from a problem.",
+};
+
+const PERSONA_DESCRIPTORS: Record<PersonaKey, string> = {
+  active:
+    "Exchange-verified allocator portfolio review with manager recommendations and IC-ready reporting.",
+  cold:
+    "Six strategies, low correlation, mediocre return. The over-diversification trap.",
+  stalled:
+    "Two strategies carrying the book. Sharpe is great until it isn't.",
+};
+
+const PERSONA_LABELS: Record<PersonaKey, string> = {
+  active: "Active",
+  cold: "Cold",
+  stalled: "Stalled",
+};
+
+const PERSONA_KEYS: PersonaKey[] = ["active", "cold", "stalled"];
+
+interface DemoPageProps {
+  searchParams: Promise<{ persona?: string | string[] }>;
 }
 
-function extractStrategy(raw: unknown): StrategySummary | null {
-  if (!raw) return null;
-  const row = Array.isArray(raw) ? raw[0] : raw;
-  if (!row || typeof row !== "object") return null;
-  const r = row as Record<string, unknown>;
-  return {
-    id: r.id as string,
-    name: (r.name as string) ?? "",
-    codename: (r.codename as string | null) ?? null,
-    disclosure_tier:
-      (r.disclosure_tier as StrategySummary["disclosure_tier"]) ?? undefined,
-    description: (r.description as string | null) ?? null,
-  };
-}
+export default async function DemoPage({ searchParams }: DemoPageProps) {
+  // Side-effect only: keep the analytics service warm for whatever the
+  // friend's colleague clicks next. Never blocks render.
+  warmupAnalytics();
 
-async function fetchCandidatesForBatch(
-  admin: ReturnType<typeof createAdminClient>,
-  batchId: string,
-): Promise<RecommendationRow[]> {
-  const { data: rows } = await admin
-    .from("match_candidates")
-    .select(
-      `id, rank, score, reasons, exclusion_reason,
-       strategies!inner (
-         id, name, codename, disclosure_tier, description,
-         strategy_analytics (cagr, sharpe, max_drawdown)
-       )`,
-    )
-    .eq("batch_id", batchId)
-    .is("exclusion_reason", null)
-    .not("rank", "is", null)
-    .order("rank", { ascending: true })
-    .limit(3);
+  const params = await searchParams;
+  const { key: personaKey, allocatorId } = getPersona(params.persona);
 
-  return (rows ?? []).map((row: Record<string, unknown>) => {
-    const strategyRaw = row.strategies;
-    const strategy = extractStrategy(strategyRaw);
-    const analytics = toAnalyticsSummary(
-      strategy
-        ? ((strategyRaw as Record<string, unknown>).strategy_analytics as unknown)
-        : null,
-    );
-    return {
-      id: row.id as string,
-      rank: (row.rank as number | null) ?? null,
-      score: (row.score as number) ?? 0,
-      reasons: (row.reasons as string[] | null) ?? [],
-      strategy: strategy ?? {
-        id: row.strategy_id as string,
-        name: "",
-        codename: null,
-        disclosure_tier: undefined,
-        description: null,
-      },
-      analytics,
-    };
-  });
-}
-
-export default async function DemoPage() {
   const admin = createAdminClient();
 
-  // 1. Fetch allocator profile + latest two batches + portfolio in parallel.
-  // We grab TWO batches so we can fall back to the previous one if the
-  // latest is empty (design review fallback chain).
+  // Phase 1: parallel reads that don't depend on each other.
   const [profileRes, batchesRes, portfolioRes] = await Promise.all([
     admin
       .from("profiles")
       .select("id, display_name, company")
-      .eq("id", ALLOCATOR_ACTIVE_ID)
+      .eq("id", allocatorId)
       .maybeSingle(),
     admin
       .from("match_batches")
-      .select("id, computed_at, mode, candidate_count")
-      .eq("allocator_id", ALLOCATOR_ACTIVE_ID)
+      .select("id, computed_at")
+      .eq("allocator_id", allocatorId)
       .order("computed_at", { ascending: false })
       .limit(2),
     admin
       .from("portfolios")
       .select("id, name, description")
-      .eq("user_id", ALLOCATOR_ACTIVE_ID)
+      .eq("user_id", allocatorId)
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle(),
   ]);
 
   const profile = profileRes.data;
-  const batches = (batchesRes.data ?? []) as Array<{ id: string; computed_at: string }>;
+  const batches = (batchesRes.data ?? []) as Array<{
+    id: string;
+    computed_at: string;
+  }>;
   const portfolio = portfolioRes.data;
 
-  // 2. Fallback chain: latest batch → previous batch.
-  let recommendations: RecommendationRow[] = [];
-  let usedBatchId: string | null = null;
-  if (batches[0]) {
-    recommendations = await fetchCandidatesForBatch(admin, batches[0].id);
-    if (recommendations.length > 0) {
-      usedBatchId = batches[0].id;
-    } else if (batches[1]) {
-      // The latest batch has zero candidates — fall back to the previous
-      // batch so the friend doesn't land on an empty page.
-      recommendations = await fetchCandidatesForBatch(admin, batches[1].id);
-      if (recommendations.length > 0) {
-        usedBatchId = batches[1].id;
-      }
-    }
-  }
+  // Phase 2: depends on portfolio.id. Fetch holdings + analytics +
+  // recommendations in parallel; the recommendation resolver runs
+  // independently against the batches list.
+  const [holdingsRes, analyticsRes, recommendationsRes] = await Promise.all([
+    portfolio?.id
+      ? admin
+          .from("portfolio_strategies")
+          .select(
+            `strategy_id, current_weight, allocated_amount,
+             strategies (
+               id, name, codename, disclosure_tier, description,
+               strategy_analytics (cagr, sharpe, max_drawdown)
+             )`,
+          )
+          .eq("portfolio_id", portfolio.id)
+          .order("current_weight", { ascending: false })
+      : Promise.resolve({ data: null }),
+    portfolio?.id
+      ? admin
+          .from("portfolio_analytics")
+          .select("*")
+          .eq("portfolio_id", portfolio.id)
+          .order("computed_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+    resolveDemoRecommendations({ admin, batches }),
+  ]);
 
-  // 3. Fetch portfolio holdings (always, so we have last-known-good even
-  // if the match engine produced nothing yet).
-  let holdings: PortfolioHoldingRow[] = [];
-  if (portfolio?.id) {
-    const { data: holdingRows } = await admin
-      .from("portfolio_strategies")
-      .select(
-        `strategy_id, current_weight, allocated_amount,
-         strategies (
-           id, name, codename, disclosure_tier, description,
-           strategy_analytics (cagr, sharpe, max_drawdown)
-         )`,
-      )
-      .eq("portfolio_id", portfolio.id)
-      .order("current_weight", { ascending: false });
-
-    holdings = ((holdingRows ?? []) as Array<Record<string, unknown>>).map((row) => {
-      const strategyRaw = row.strategies;
-      const strategy = extractStrategy(strategyRaw);
-      const analytics = toAnalyticsSummary(
-        strategy
-          ? ((strategyRaw as Record<string, unknown>).strategy_analytics as unknown)
-          : null,
-      );
-      return {
-        strategy_id: row.strategy_id as string,
-        current_weight: (row.current_weight as number | null) ?? null,
-        allocated_amount: (row.allocated_amount as number | null) ?? null,
-        strategy: strategy ?? {
-          id: row.strategy_id as string,
-          name: "",
-          codename: null,
-          disclosure_tier: undefined,
-          description: null,
-        },
-        analytics,
-      };
-    });
-  }
+  const holdings = adaptHoldings(holdingsRes.data ?? null);
+  const analytics = adaptPortfolioAnalytics(analyticsRes.data);
+  const { recommendations, fellBackToPrevious } = recommendationsRes;
 
   const hasPortfolio = holdings.length > 0;
   const hasRecommendations = recommendations.length > 0;
@@ -212,123 +154,162 @@ export default async function DemoPage() {
     0,
   );
 
+  // Build the editorial hero numbers from the (parsed) portfolio_analytics row.
+  const benchmarkLabel = analytics?.benchmark_comparison?.symbol ?? "BTC";
+  const heroNumbers = {
+    portfolioTwr: analytics?.total_return_twr ?? null,
+    benchmarkTwr: analytics?.benchmark_comparison?.benchmark_twr ?? null,
+    portfolioMaxDrawdown: analytics?.portfolio_max_drawdown ?? null,
+    benchmarkMaxDrawdown:
+      // Benchmark drawdown isn't persisted today (analytics-service only
+      // computes portfolio drawdown). The friend meeting plan defers a
+      // BTC drawdown column until the multi-horizon attribution PR.
+      null as number | null,
+    benchmarkLabel,
+  };
+
+  // Sign the PDF download token at request time so the link in the page is
+  // bound to the active persona's portfolio.
+  let pdfHref: string | null = null;
+  try {
+    const portfolioIdForPdf = portfolio?.id ?? ACTIVE_PORTFOLIO_ID;
+    const token = signDemoPdfToken(portfolioIdForPdf);
+    pdfHref = `/api/demo/portfolio-pdf/${portfolioIdForPdf}?token=${token}`;
+  } catch {
+    // DEMO_PDF_SECRET not configured (local dev). Hide the CTA rather than
+    // crashing the page — the friend's environment always has the secret.
+    pdfHref = null;
+  }
+
   return (
     <>
-      <PageHeader
-        title={
-          profile?.company || profile?.display_name
-            ? `${profile.company || profile.display_name}`
-            : "Active Allocator LP"
+      <PersonaSwitcher current={personaKey} />
+
+      <EditorialHero
+        className="mt-2 sm:mt-6"
+        headline={PERSONA_HEADLINES[personaKey]}
+        descriptor={PERSONA_DESCRIPTORS[personaKey]}
+        numbers={heroNumbers}
+        cta={
+          pdfHref ? (
+            <a
+              href={pdfHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex h-11 items-center rounded-md bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover focus:outline-none focus:ring-2 focus:ring-accent/50"
+            >
+              Download IC Report
+            </a>
+          ) : null
         }
-        description="Live view of an allocator's portfolio and top matches."
       />
 
-      {/* When the match engine has NEVER produced a batch AND there's no
-          seeded portfolio, show a short explanatory card. In practice the
-          seed script always creates both, so this path is defensive only. */}
-      {!hasPortfolio && !hasRecommendations && (
-        <Card className="p-8 text-center">
-          <h2 className="text-base font-semibold text-text-primary">
-            Demo data is loading
-          </h2>
-          <p className="mx-auto mt-2 max-w-md text-sm text-text-secondary">
-            The simulated allocator state is being seeded. Check back in a
-            moment — or{" "}
-            <Link href="/signup" className="underline hover:text-text-primary">
-              sign up
-            </Link>{" "}
-            to build your own.
-          </p>
-        </Card>
-      )}
+      <CounterfactualStrip
+        className="mt-4"
+        portfolioTwr={heroNumbers.portfolioTwr}
+        benchmarkTwr={heroNumbers.benchmarkTwr}
+        benchmarkLabel={benchmarkLabel}
+      />
 
-      {/* Portfolio card — always first. Serves as last-known-good if the
-          match engine produced nothing usable. */}
+      {/* Verdict / Evidence divider */}
+      <div className="my-10 border-t border-border" />
+
+      {/* EVIDENCE BLOCK */}
+      <MorningBriefing
+        narrative={analytics?.narrative_summary}
+        variant="dek"
+      />
+
       {hasPortfolio && (
-        <section className="mb-8">
-          <h2 className="mb-3 text-base font-semibold text-text-primary">
-            Current portfolio
-          </h2>
-          <Card>
-            <div className="flex items-baseline justify-between gap-4 border-b border-border pb-4">
-              <div>
-                <p className="text-xs uppercase tracking-wider text-text-muted">
-                  {portfolio?.name || "Active Allocator Portfolio"}
-                </p>
-                <p className="mt-1 text-sm text-text-secondary">
-                  {holdings.length} strategies · seeded demo data
-                </p>
-              </div>
-              <div className="text-right">
-                <p className="text-xs uppercase tracking-wider text-text-muted">
-                  Total allocated
-                </p>
-                <p className="font-metric tabular-nums text-xl text-text-primary">
-                  {totalAllocated > 0 ? formatCurrency(totalAllocated) : "—"}
-                </p>
-              </div>
-            </div>
-
-            <ul className="divide-y divide-border">
-              {holdings.map((h) => (
-                <li
-                  key={h.strategy_id}
-                  className="flex items-center justify-between gap-4 py-4"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="font-display text-base text-text-primary">
-                      {displayStrategyName(h.strategy)}
+        <section className="mt-8">
+          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-3">
+            {profile?.company || profile?.display_name || "Active Allocator LP"}
+            {totalAllocated > 0 && (
+              <>
+                {" · "}
+                {formatCurrency(totalAllocated)} allocated
+              </>
+            )}
+          </p>
+          <ul className="divide-y divide-border">
+            {holdings.map((h) => (
+              <li
+                key={h.strategy_id}
+                className="flex items-center justify-between gap-4 py-4"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="font-display text-base text-text-primary">
+                    {displayStrategyName(h.strategy)}
+                  </p>
+                  {h.strategy.description && (
+                    <p className="mt-1 line-clamp-2 text-xs text-text-muted">
+                      {h.strategy.description}
                     </p>
-                    {h.strategy.description && (
-                      <p className="mt-1 line-clamp-2 text-xs text-text-muted">
-                        {h.strategy.description}
-                      </p>
-                    )}
-                    <div className="mt-2 flex flex-wrap items-center gap-4 text-xs">
-                      <Metric
-                        label="CAGR"
-                        value={formatPercent(h.analytics?.cagr)}
-                      />
-                      <Metric
-                        label="Sharpe"
-                        value={formatNumber(h.analytics?.sharpe)}
-                      />
-                      <Metric
-                        label="Max DD"
-                        value={formatPercent(h.analytics?.max_drawdown)}
-                        negative
-                      />
-                    </div>
+                  )}
+                  <div className="mt-2 flex flex-wrap items-center gap-4 text-xs">
+                    <Metric
+                      label="CAGR"
+                      value={formatPercent(h.analytics?.cagr)}
+                    />
+                    <Metric
+                      label="Sharpe"
+                      value={formatNumber(h.analytics?.sharpe)}
+                    />
+                    <Metric
+                      label="Max DD"
+                      value={formatPercent(h.analytics?.max_drawdown)}
+                      negative
+                    />
                   </div>
-                  <div className="shrink-0 text-right">
-                    <p className="font-metric tabular-nums text-base text-text-primary">
-                      {h.current_weight != null
-                        ? `${(h.current_weight * 100).toFixed(0)}%`
-                        : "—"}
-                    </p>
-                    <p className="font-metric tabular-nums text-xs text-text-muted">
-                      {h.allocated_amount != null && h.allocated_amount > 0
-                        ? formatCurrency(h.allocated_amount)
-                        : "—"}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </Card>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="font-metric tabular-nums text-base text-text-primary">
+                    {h.current_weight != null
+                      ? `${(h.current_weight * 100).toFixed(0)}%`
+                      : "—"}
+                  </p>
+                  <p className="font-metric tabular-nums text-xs text-text-muted">
+                    {h.allocated_amount != null && h.allocated_amount > 0
+                      ? formatCurrency(h.allocated_amount)
+                      : "—"}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
         </section>
       )}
 
-      {/* Recommendations — top 3 candidates from the latest (or fallback)
-          batch. If there's truly nothing, suppress the section heading so
-          the portfolio card still reads as a complete page. */}
+      <WinnersLosersStrip
+        className="mt-10"
+        attribution={analytics?.attribution_breakdown ?? null}
+      />
+
+      <InsightStrip className="mt-10" analytics={analytics} />
+
+      {/* Evidence / Action divider */}
+      <div className="my-10 border-t border-border" />
+
+      {/* ACTION BLOCK */}
+      <WhatWedDoCard
+        suggestions={analytics?.optimizer_suggestions ?? null}
+      />
+      <NextFiveMillionCard
+        className="mt-8"
+        suggestions={analytics?.optimizer_suggestions ?? null}
+      />
+
+      {/* Action / Appendix divider */}
+      <div className="my-10 border-t border-border" />
+
+      {/* APPENDIX — top matches and explainers */}
       {hasRecommendations && (
         <section className="mb-8">
           <div className="mb-3 flex items-baseline justify-between gap-4">
             <h2 className="text-base font-semibold text-text-primary">
               Top matches for this mandate
             </h2>
-            {usedBatchId && batches[0] && usedBatchId !== batches[0].id && (
+            {fellBackToPrevious && (
               <span className="text-xs text-text-muted">
                 Showing previous batch (latest computing)
               </span>
@@ -344,50 +325,112 @@ export default async function DemoPage() {
         </section>
       )}
 
-      {/* Recommendations fall-back note — only when we HAVE a portfolio but
-          the match engine produced nothing. Never "Refresh in 1 minute". */}
       {hasPortfolio && !hasRecommendations && (
-        <Card className="p-6">
-          <p className="text-sm text-text-secondary">
-            Recommendations computing — showing current portfolio composition.
-          </p>
-        </Card>
+        <p className="text-sm text-text-secondary">
+          Recommendations computing — showing current portfolio composition.
+        </p>
       )}
 
-      {/* Secondary CTA — a second touchpoint to /signup for readers who
-          scrolled past the banner. */}
-      <Card className="mt-10 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h3 className="text-base font-semibold text-text-primary">
-            See how the founder reviews this queue.
-          </h3>
-          <p className="mt-1 text-sm text-text-secondary">
-            Open the read-only founder view to watch the match workflow.
+      {!hasPortfolio && !hasRecommendations && (
+        <div className="rounded-lg border border-border bg-surface p-8 text-center">
+          <h2 className="text-base font-semibold text-text-primary">
+            Demo data is loading
+          </h2>
+          <p className="mx-auto mt-2 max-w-md text-sm text-text-secondary">
+            The simulated allocator state is being seeded. Check back in a
+            moment — or{" "}
+            <Link href="/signup" className="underline hover:text-text-primary">
+              sign up
+            </Link>{" "}
+            to build your own.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <Link
-            href="/demo/founder-view"
-            className="inline-flex items-center rounded-md border border-border bg-surface px-4 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent hover:text-accent"
-          >
-            Founder view →
-          </Link>
-          <Link
-            href="/signup"
-            className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
-          >
-            Sign up
-          </Link>
-        </div>
-      </Card>
+      )}
+
+      {/* Footer secondary CTAs only — primary CTA is the IC Report. */}
+      <footer className="mt-12 flex flex-wrap items-center gap-6 border-t border-border pt-6 text-xs text-text-muted">
+        <Link
+          href="/demo/founder-view"
+          className="hover:text-accent"
+        >
+          Founder view →
+        </Link>
+        <Link href="/signup" className="hover:text-accent">
+          Sign up
+        </Link>
+      </footer>
     </>
   );
 }
 
-function RecommendationCard({ rec }: { rec: RecommendationRow }) {
-  const primaryReason = rec.reasons[0] ?? "Strong fit for this allocator's mandate.";
+function adaptHoldings(rows: unknown): PortfolioHoldingRow[] {
+  if (!Array.isArray(rows)) return [];
+  return (rows as Array<Record<string, unknown>>).map((row) => {
+    const strategyRaw = row.strategies;
+    const strategyObj =
+      strategyRaw && typeof strategyRaw === "object" && !Array.isArray(strategyRaw)
+        ? (strategyRaw as Record<string, unknown>)
+        : null;
+    const analyticsRaw = strategyObj?.strategy_analytics;
+    const analyticsObj =
+      analyticsRaw && typeof analyticsRaw === "object"
+        ? (Array.isArray(analyticsRaw)
+            ? (analyticsRaw[0] as Record<string, unknown> | undefined)
+            : (analyticsRaw as Record<string, unknown>))
+        : null;
+    return {
+      strategy_id: row.strategy_id as string,
+      current_weight: (row.current_weight as number | null) ?? null,
+      allocated_amount: (row.allocated_amount as number | null) ?? null,
+      strategy: {
+        id: (strategyObj?.id as string) ?? (row.strategy_id as string),
+        name: (strategyObj?.name as string) ?? "",
+        codename: (strategyObj?.codename as string | null) ?? null,
+        disclosure_tier:
+          (strategyObj?.disclosure_tier as PortfolioHoldingRow["strategy"]["disclosure_tier"]) ??
+          undefined,
+        description: (strategyObj?.description as string | null) ?? null,
+      },
+      analytics: analyticsObj
+        ? {
+            cagr: (analyticsObj.cagr as number | null) ?? null,
+            sharpe: (analyticsObj.sharpe as number | null) ?? null,
+            max_drawdown: (analyticsObj.max_drawdown as number | null) ?? null,
+          }
+        : null,
+    };
+  });
+}
+
+function PersonaSwitcher({ current }: { current: PersonaKey }) {
   return (
-    <Card>
+    <nav
+      aria-label="Demo persona"
+      className="flex items-center gap-1 self-end"
+    >
+      {PERSONA_KEYS.map((key) => (
+        <Link
+          key={key}
+          href={`/demo?persona=${key}`}
+          aria-current={key === current ? "page" : undefined}
+          className={
+            key === current
+              ? "rounded-md bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent"
+              : "rounded-md px-3 py-1.5 text-xs font-medium text-text-muted hover:text-text-primary"
+          }
+        >
+          {PERSONA_LABELS[key]}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+function RecommendationCard({ rec }: { rec: RecommendationRow }) {
+  const primaryReason =
+    rec.reasons[0] ?? "Strong fit for this allocator's mandate.";
+  return (
+    <div className="rounded-lg border border-border bg-surface p-6">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3">
@@ -425,7 +468,7 @@ function RecommendationCard({ rec }: { rec: RecommendationRow }) {
           </p>
         </div>
       </div>
-    </Card>
+    </div>
   );
 }
 

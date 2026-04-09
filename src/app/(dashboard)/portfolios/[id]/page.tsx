@@ -6,25 +6,65 @@ import { Card } from "@/components/ui/Card";
 import { PortfolioKPIRow } from "@/components/portfolio/PortfolioKPIRow";
 import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdownTable";
 import { AlertsList } from "@/components/portfolio/AlertsList";
+import { MorningBriefing } from "@/components/portfolio/MorningBriefing";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
 import {
   getPortfolioDetail,
   getPortfolioStrategies,
-  getPortfolioAnalytics,
+  getPortfolioAnalyticsWithFallback,
   getPortfolioAlerts,
+  type PortfolioAnalyticsWithFallback,
 } from "@/lib/queries";
+import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { computeFreshness } from "@/lib/freshness";
 import { extractAnalytics } from "@/lib/utils";
 import Link from "next/link";
-import type { PortfolioAnalytics, PortfolioAlert } from "@/lib/types";
+import type {
+  PortfolioAnalytics,
+  PortfolioAlert,
+} from "@/lib/types";
 import type { OptimizerSuggestion } from "@/components/portfolio/PortfolioOptimizer";
 
-// Next.js 16 forbids `ssr: false` on `next/dynamic` in Server Components.
-// PortfolioOptimizer is a `"use client"` component so it will hydrate on
-// the client regardless, and removing `ssr: false` just lets the empty-
-// state SSR render on first paint without the extra loading blip.
+// Eagerly mount the small charts (above the fold). The heavy ones below the
+// fold are lazy-loaded via next/dynamic to keep the dashboard's initial JS
+// bundle in line with what /portfolios used to ship before the wiring PR.
+import { PortfolioEquityCurve } from "@/components/portfolio/PortfolioEquityCurve";
+import { CorrelationHeatmap } from "@/components/portfolio/CorrelationHeatmap";
+import { AttributionBar } from "@/components/portfolio/AttributionBar";
+import { BenchmarkComparison } from "@/components/portfolio/BenchmarkComparison";
+
+const CompositionDonut = dynamic(
+  () =>
+    import("@/components/portfolio/CompositionDonut").then((m) => ({
+      default: m.CompositionDonut,
+    })),
+  {
+    loading: () => (
+      <Card>
+        <Skeleton className="h-5 w-1/3 mb-4" />
+        <Skeleton className="h-40 w-full" />
+      </Card>
+    ),
+  },
+);
+
+const RiskAttribution = dynamic(
+  () =>
+    import("@/components/portfolio/RiskAttribution").then((m) => ({
+      default: m.RiskAttribution,
+    })),
+  {
+    loading: () => (
+      <Card>
+        <Skeleton className="h-5 w-1/3 mb-4" />
+        <SkeletonText lines={4} />
+      </Card>
+    ),
+  },
+);
+
 const PortfolioOptimizer = dynamic(
   () => import("@/components/portfolio/PortfolioOptimizer"),
   {
@@ -130,6 +170,61 @@ function StaleConstituentWarning({ staleNames }: { staleNames: string[] }) {
 
 /* ---------- Dashboard content (complete/stale states) ---------- */
 
+interface PortfolioStrategyRow {
+  strategy_id: string;
+  current_weight: number | null;
+  allocated_amount: number | null;
+  strategies?: {
+    id: string;
+    name: string;
+    strategy_analytics?: unknown;
+  } | null;
+}
+
+function buildCompositionRows(
+  strategies: PortfolioStrategyRow[],
+  attribution: PortfolioAnalytics["attribution_breakdown"],
+) {
+  return strategies
+    .map((ps) => {
+      const s = ps.strategies;
+      if (!s) return null;
+      const a = extractAnalytics(s.strategy_analytics);
+      const attr = attribution?.find((x) => x.strategy_id === ps.strategy_id);
+      return {
+        id: s.id,
+        name: s.name,
+        weight: ps.current_weight ?? 0,
+        amount: ps.allocated_amount,
+        twr: attr?.contribution ?? a?.cagr ?? null,
+        sharpe: a?.sharpe ?? null,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+}
+
+function buildEquityCurveSeries(
+  strategies: PortfolioStrategyRow[],
+): { id: string; name: string; equityCurve: { date: string; value: number }[] | null }[] {
+  // Per-strategy equity curves come from `strategy_analytics.returns_series`
+  // (cumulative-product transform). The wired chart receives an empty curve
+  // when the underlying data is missing — this matches the existing behavior
+  // before the wiring PR.
+  return strategies
+    .map((ps) => {
+      if (!ps.strategies) return null;
+      return {
+        id: ps.strategies.id,
+        name: ps.strategies.name,
+        // Returns_series is not selected in the existing query (would balloon
+        // the response). The chart still renders the portfolio composite line
+        // by itself; per-strategy lines remain a future enhancement.
+        equityCurve: null as { date: string; value: number }[] | null,
+      };
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+}
+
 function DashboardContent({
   analytics,
   strategies,
@@ -140,25 +235,49 @@ function DashboardContent({
   optimizerStatus,
 }: {
   analytics: PortfolioAnalytics;
-  strategies: Awaited<ReturnType<typeof getPortfolioStrategies>>;
+  strategies: PortfolioStrategyRow[];
   alerts: PortfolioAlert[];
   portfolioId: string;
   optimizerSuggestions: OptimizerSuggestion[] | null;
   optimizerComputedAt: string | null;
   optimizerStatus: "pending" | "computing" | "complete" | "failed" | null;
 }) {
+  // Defensive: re-parse the persisted JSONB through the adapter so the wired
+  // charts always receive the strict shape (rather than the legacy DB types).
+  const parsed = adaptPortfolioAnalytics(analytics);
+  const attribution = parsed?.attribution_breakdown ?? null;
+  const correlationMatrix = parsed?.correlation_matrix ?? null;
+  const benchmarkComparison = parsed?.benchmark_comparison ?? null;
+  const riskDecomposition = parsed?.risk_decomposition ?? null;
+  const equityCurve = parsed?.portfolio_equity_curve ?? null;
+
+  const compositionRows = buildCompositionRows(strategies, attribution);
+  const equitySeries = buildEquityCurveSeries(strategies);
+  const strategyNames = Object.fromEntries(
+    strategies
+      .filter((s): s is PortfolioStrategyRow & { strategies: NonNullable<PortfolioStrategyRow["strategies"]> } => s.strategies !== null && s.strategies !== undefined)
+      .map((s) => [s.strategy_id, s.strategies.name]),
+  );
+
+  // The CorrelationHeatmap component is typed to require non-nullable cell
+  // values. Replace nulls with 0 for rendering — accurate-enough for the UI,
+  // and the heatmap visually distinguishes "no data" via its own check.
+  const heatmapMatrix = correlationMatrix
+    ? Object.fromEntries(
+        Object.entries(correlationMatrix).map(([rowKey, row]) => [
+          rowKey,
+          Object.fromEntries(
+            Object.entries(row).map(([colKey, val]) => [colKey, val ?? 0]),
+          ),
+        ]),
+      )
+    : null;
+
   return (
     <div className="space-y-6">
       {/* Morning briefing zone */}
       {analytics.narrative_summary && (
-        <Card>
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
-            Morning Briefing
-          </p>
-          <p className="text-sm text-text-secondary leading-relaxed">
-            {analytics.narrative_summary}
-          </p>
-        </Card>
+        <MorningBriefing narrative={analytics.narrative_summary} />
       )}
 
       {/* Alerts */}
@@ -167,26 +286,37 @@ function DashboardContent({
       {/* KPI row */}
       <PortfolioKPIRow analytics={analytics} />
 
-      {/* Chart placeholders -- 2-col above 1024px, single below 768px */}
+      {/* Equity curve + correlation — primary evidence panel */}
       <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6">
-        {/* Left: charts (60%) */}
-        <div className="space-y-6">
-          <Card className="min-h-[280px] flex items-center justify-center">
-            <p className="text-sm text-text-muted">Equity curve chart (Task 11)</p>
-          </Card>
-          <Card className="min-h-[280px] flex items-center justify-center">
-            <p className="text-sm text-text-muted">Attribution chart (Task 13)</p>
-          </Card>
-        </div>
-        {/* Right: tables/heatmap (40%) */}
-        <div className="space-y-6">
-          <Card className="min-h-[280px] flex items-center justify-center">
-            <p className="text-sm text-text-muted">Correlation heatmap (Task 12)</p>
-          </Card>
-          <Card className="min-h-[280px] flex items-center justify-center">
-            <p className="text-sm text-text-muted">Benchmark comparison (Task 14)</p>
-          </Card>
-        </div>
+        <Card>
+          <h3 className="text-base font-semibold text-text-primary mb-3">
+            Equity curve
+          </h3>
+          <PortfolioEquityCurve
+            portfolioEquityCurve={equityCurve}
+            strategies={equitySeries}
+          />
+        </Card>
+        <Card>
+          <h3 className="text-base font-semibold text-text-primary mb-3">
+            Correlation
+          </h3>
+          <CorrelationHeatmap
+            correlationMatrix={heatmapMatrix}
+            strategyNames={strategyNames}
+          />
+        </Card>
+      </div>
+
+      {/* Attribution + benchmark */}
+      <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6">
+        <Card>
+          <h3 className="text-base font-semibold text-text-primary mb-3">
+            Return attribution
+          </h3>
+          <AttributionBar data={attribution} />
+        </Card>
+        <BenchmarkComparison benchmarkComparison={benchmarkComparison} />
       </div>
 
       {/* Strategy breakdown table */}
@@ -194,9 +324,25 @@ function DashboardContent({
         <h2 className="text-base font-semibold text-text-primary mb-3">Strategy Breakdown</h2>
         <StrategyBreakdownTable
           strategies={strategies as Parameters<typeof StrategyBreakdownTable>[0]["strategies"]}
-          attribution={analytics.attribution_breakdown}
+          attribution={attribution}
           portfolioId={portfolioId}
         />
+      </div>
+
+      {/* Below-the-fold lazy-loaded charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card>
+          <h3 className="text-base font-semibold text-text-primary mb-3">
+            Composition
+          </h3>
+          <CompositionDonut strategies={compositionRows} />
+        </Card>
+        <Card>
+          <h3 className="text-base font-semibold text-text-primary mb-3">
+            Risk decomposition
+          </h3>
+          <RiskAttribution data={riskDecomposition} />
+        </Card>
       </div>
 
       {/* Diversification optimizer (lazy loaded, below the fold) */}
@@ -227,11 +373,13 @@ export default async function PortfolioDashboardPage({
   const portfolio = await getPortfolioDetail(id);
   if (!portfolio) redirect("/portfolios");
 
-  const [strategies, analytics, alerts] = await Promise.all([
+  const [strategies, analyticsBundle, alerts] = await Promise.all([
     getPortfolioStrategies(id),
-    getPortfolioAnalytics(id),
+    getPortfolioAnalyticsWithFallback(id),
     getPortfolioAlerts(id),
   ]);
+
+  const analytics = chooseAnalytics(analyticsBundle);
 
   // DashboardShell state machine: empty | pending | computing | stale | complete
   const state =
@@ -321,4 +469,30 @@ export default async function PortfolioDashboardPage({
       <Disclaimer />
     </>
   );
+}
+
+/**
+ * Choose between the latest analytics row and the last successful one. If
+ * the latest is in a failed state but a prior complete row exists, return
+ * that one with the failed-status flag preserved so the dashboard still
+ * shows a stale badge.
+ */
+function chooseAnalytics(
+  bundle: PortfolioAnalyticsWithFallback,
+): PortfolioAnalytics | null {
+  const { latest, lastGood } = bundle;
+  if (!latest) return null;
+  if (latest.computation_status === "complete") return latest;
+  if (latest.computation_status === "failed" && lastGood) {
+    return {
+      ...lastGood,
+      // Preserve the failed-status signal so the dashboard renders a stale
+      // badge instead of letting the user think the data is fresh.
+      computation_status: "failed",
+      computation_error:
+        latest.computation_error ??
+        "Latest computation failed; showing last-good values.",
+    };
+  }
+  return latest;
 }
