@@ -19,23 +19,28 @@
 -- scenario. Any other pre-existing rows default to real and the partial
 -- unique index catches collisions.
 
+-- Idempotent: every ALTER TABLE / CREATE INDEX uses IF NOT EXISTS so
+-- re-running the migration (which can happen on fresh staging pulls or
+-- a partially-applied CI run) does not crash. Matches the convention in
+-- migrations 009, 012, 014, 016.
 ALTER TABLE public.portfolios
-  ADD COLUMN is_test BOOLEAN NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT false;
 
 COMMENT ON COLUMN public.portfolios.is_test IS
-  'True for saved hypothetical test portfolios (shown in /portfolios, the Test Portfolios page). False for the allocator''s single real invested book (shown in /allocations, the My Allocation page). A partial unique index (portfolios_one_real_per_user) enforces at most one is_test=false portfolio per user_id.';
+  'Kept for future use. v0.4.0 pivoted away from a Test Portfolios surface (Scenarios replaces what-if exploration), but the partial unique index portfolios_one_real_per_user is still valuable: it enforces at most one real portfolio per user_id at the DB level, which is the My Allocation invariant.';
 
 -- Backfill: seed convention is "Active Allocation" = real,
 -- "What-if: ..." = test. Case-insensitive match to be kind to future
--- typos in hand-created rows.
+-- typos in hand-created rows. WHERE is_test = false guard keeps this
+-- idempotent on re-run (UPDATE becomes a no-op once backfilled).
 UPDATE public.portfolios
    SET is_test = true
- WHERE name ILIKE 'what-if%';
+ WHERE name ILIKE 'what-if%'
+   AND is_test = false;
 
 -- Enforce "at most one REAL portfolio per user" at the DB level.
--- Partial unique index only applies to is_test = false rows, so users can
--- still have any number of test portfolios.
-CREATE UNIQUE INDEX portfolios_one_real_per_user
+-- Partial unique index only applies to is_test = false rows.
+CREATE UNIQUE INDEX IF NOT EXISTS portfolios_one_real_per_user
   ON public.portfolios (user_id)
   WHERE is_test = false;
 

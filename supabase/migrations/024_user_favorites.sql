@@ -23,7 +23,10 @@
 -- RLS: allocators only ever touch their own favorites. Four policies
 -- (SELECT / INSERT / UPDATE / DELETE) all keyed on auth.uid() = user_id.
 
-CREATE TABLE public.user_favorites (
+-- Idempotent: every CREATE uses IF NOT EXISTS and CREATE POLICY is
+-- wrapped in a DO block that catches duplicate_object. Matches the
+-- convention in prior migrations.
+CREATE TABLE IF NOT EXISTS public.user_favorites (
   user_id     UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   strategy_id UUID NOT NULL REFERENCES public.strategies(id) ON DELETE CASCADE,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -32,28 +35,44 @@ CREATE TABLE public.user_favorites (
 );
 
 COMMENT ON TABLE public.user_favorites IS
-  'Allocator watchlist of strategies they are considering but have not allocated to. Drives the Favorites panel in /allocations (My Allocation) that overlays a historical backfill on the real portfolio curve when strategies are toggled on. Saved toggle combinations become test portfolios via the Save-as-Test flow.';
+  'Allocator watchlist of strategies they are considering but have not allocated to. Table persists for future watchlist/discovery features; no UI ships against it in v0.4.0 after the Scenarios-replaces-Test-Portfolios pivot.';
 
 ALTER TABLE public.user_favorites ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "users see own favorites"
-  ON public.user_favorites FOR SELECT
-  USING (auth.uid() = user_id);
+DO $$
+BEGIN
+  CREATE POLICY "users see own favorites"
+    ON public.user_favorites FOR SELECT
+    USING (auth.uid() = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY "users insert own favorites"
-  ON public.user_favorites FOR INSERT
-  WITH CHECK (auth.uid() = user_id);
+DO $$
+BEGIN
+  CREATE POLICY "users insert own favorites"
+    ON public.user_favorites FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY "users update own favorites"
-  ON public.user_favorites FOR UPDATE
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
+DO $$
+BEGIN
+  CREATE POLICY "users update own favorites"
+    ON public.user_favorites FOR UPDATE
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY "users delete own favorites"
-  ON public.user_favorites FOR DELETE
-  USING (auth.uid() = user_id);
+DO $$
+BEGIN
+  CREATE POLICY "users delete own favorites"
+    ON public.user_favorites FOR DELETE
+    USING (auth.uid() = user_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE INDEX user_favorites_user_id_created_at
+CREATE INDEX IF NOT EXISTS user_favorites_user_id_created_at
   ON public.user_favorites (user_id, created_at DESC);
 
 -- Self-verifying assertion: RLS enabled + all four policies present.

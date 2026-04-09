@@ -1,70 +1,52 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
 import {
   formatCurrency,
   formatPercent,
   formatNumber,
   metricColor,
 } from "@/lib/utils";
-import { FundKPIStrip } from "@/components/portfolio/FundKPIStrip";
-import { StrategyMtdBars } from "@/components/portfolio/StrategyMtdBars";
-import { FavoritesPanel } from "@/components/portfolio/FavoritesPanel";
 import {
   buildDateMapCache,
-  computeCompositeCurve,
-  computeFavoritesOverlayCurve,
-  computeStrategyCurve,
+  computeScenario,
   type StrategyForBuilder,
   type DailyPoint,
+  type ScenarioState,
 } from "@/lib/scenario";
-import type {
-  PortfolioAnalytics,
-  Portfolio,
-  UserFavoriteWithStrategy,
-} from "@/lib/types";
+import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchangeManager";
+import type { Portfolio, PortfolioAnalytics } from "@/lib/types";
 import Link from "next/link";
 
 /**
- * My Allocation client shell.
+ * My Allocation — Scenario-Builder-style live view of the allocator's
+ * actual investments.
  *
- * Takes the server-fetched payload from getMyAllocationDashboard and
- * renders the full multi-strategy view: Fund KPI strip, YTD PnL chart
- * (multi-line overlay, one per strategy + portfolio composite), MTD
- * return bars, and strategy breakdown table.
+ * Each row is a real investment they made by giving an external team
+ * read-only API key access to their exchange account. Data comes from
+ * the analytics-service sync pipeline (trade pulls → portfolio_strategies
+ * + allocation_events). The page uses the same scenario math library
+ * the /scenarios page uses so the KPI strip, equity curve, and
+ * correlation matrix are structurally identical to the what-if lab,
+ * just fed with REAL data instead of hypothetical toggles.
  *
- * This is a client component because PortfolioEquityCurve (lightweight-
- * charts) is client-only. The server component (page.tsx) passes
- * pre-fetched data as props — no further fetches happen here.
- *
- * PR 4 adds the Favorites panel wiring on top: a right-side slide-out
- * panel whose toggles feed into computeCompositeCurve to produce the
- * dashed "+ Favorites" overlay line on the chart. The Favorites button
- * in the header is stubbed as a no-op in PR 3 and fully wired in PR 4.
+ * What's different from /scenarios:
+ *  - No toggles. These are real investments, not optional what-ifs.
+ *  - Each row has an editable alias (the allocator's name for this
+ *    investment, stored in portfolio_strategies.alias). Falls back to
+ *    the strategy's canonical display name when null.
+ *  - An inline "Exchange connections" section below the dashboard
+ *    reuses AllocatorExchangeManager so the allocator can add more
+ *    investments without leaving the page.
  */
-
-// Lazy-load the equity curve — lightweight-charts is a ~200KB client
-// dependency and isn't needed for above-the-fold rendering.
-const PortfolioEquityCurve = dynamic(
-  () =>
-    import("@/components/portfolio/PortfolioEquityCurve").then(
-      (m) => m.PortfolioEquityCurve,
-    ),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="h-[350px] bg-bg-secondary rounded-lg animate-pulse" />
-    ),
-  },
-);
 
 interface StrategyRow {
   strategy_id: string;
   current_weight: number | null;
   allocated_amount: number | null;
+  alias: string | null;
   strategy: {
     id: string;
     name: string;
@@ -86,26 +68,34 @@ interface StrategyRow {
   };
 }
 
+interface ApiKeyRow {
+  id: string;
+  exchange: string;
+  label: string;
+  is_active: boolean;
+  sync_status: string | null;
+  last_sync_at: string | null;
+  account_balance_usdt: number | null;
+  created_at: string;
+}
+
 interface MyAllocationClientProps {
   portfolio: Portfolio;
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
-  favorites: UserFavoriteWithStrategy[];
-  alertCount: { high: number; medium: number; low: number; total: number };
+  apiKeys: ApiKeyRow[];
 }
 
 /**
- * Coerce the strategy_analytics.daily_returns JSONB into a flat
- * { date, value }[] series. The analytics-service writer stores this as
- * an array of daily points but older rows may have a dict-of-dicts
- * shape — this normalizer handles both without assuming one.
+ * Normalize the analytics.daily_returns JSONB into a flat
+ * { date, value }[] series. Handles three real-world shapes: already
+ * an array, a flat {date: value} dict, and a nested {year: {MM-DD: value}}
+ * dict. The nested case zero-pads MM-DD components so lexicographic
+ * sorting aligns with every other strategy's dates.
  */
-function normalizeDailyReturns(
-  raw: unknown,
-): DailyPoint[] {
+function normalizeDailyReturns(raw: unknown): DailyPoint[] {
   if (!raw) return [];
   if (Array.isArray(raw)) {
-    // Already in the expected shape.
     return raw
       .filter(
         (p): p is DailyPoint =>
@@ -118,8 +108,6 @@ function normalizeDailyReturns(
       )
       .sort((a, b) => a.date.localeCompare(b.date));
   }
-  // Dict-of-dicts fallback: { "2024": { "01-02": 0.003, ... } } or
-  // { "2024-01-02": 0.003, ... } — we handle both because it's cheap.
   const out: DailyPoint[] = [];
   const obj = raw as Record<string, unknown>;
   for (const [k, v] of Object.entries(obj)) {
@@ -128,8 +116,17 @@ function normalizeDailyReturns(
     } else if (v && typeof v === "object") {
       for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
         if (typeof vv === "number") {
-          const date = kk.length === 10 ? kk : `${k}-${kk}`;
-          out.push({ date, value: vv });
+          // If the inner key is already a full ISO date, use it. If it's
+          // a month-day ("01-02" or "1-2"), pad both components and
+          // prefix with the outer year key.
+          if (kk.length === 10) {
+            out.push({ date: kk, value: vv });
+          } else {
+            const [mm = "", dd = ""] = kk.split("-");
+            const paddedMm = mm.padStart(2, "0");
+            const paddedDd = dd.padStart(2, "0");
+            out.push({ date: `${k}-${paddedMm}-${paddedDd}`, value: vv });
+          }
         }
       }
     }
@@ -137,23 +134,307 @@ function normalizeDailyReturns(
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
+/**
+ * Pick the display name for an investment row. The allocator-provided
+ * alias takes priority; otherwise the strategy's codename (for
+ * exploratory-tier) or canonical name.
+ */
+function displayName(row: StrategyRow): string {
+  if (row.alias && row.alias.trim()) return row.alias.trim();
+  if (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) {
+    return row.strategy.codename;
+  }
+  return row.strategy.name;
+}
+
+// =========================================================================
+// Pure-SVG equity curve — identical style to ScenarioBuilder's chart
+// =========================================================================
+
+function EquityCurveChart({
+  points,
+  emptyMessage,
+}: {
+  points: Array<{ date: string; value: number }>;
+  emptyMessage: string;
+}) {
+  if (points.length < 2) {
+    return (
+      <div className="flex h-64 items-center justify-center rounded-lg border border-border bg-bg-secondary text-sm text-text-muted">
+        {emptyMessage}
+      </div>
+    );
+  }
+  const width = 800;
+  const height = 260;
+  const padding = { top: 12, right: 16, bottom: 28, left: 48 };
+  const innerW = width - padding.left - padding.right;
+  const innerH = height - padding.top - padding.bottom;
+
+  const values = points.map((p) => p.value);
+  const minV = Math.min(0, ...values);
+  const maxV = Math.max(0, ...values);
+  const range = maxV - minV || 1;
+
+  const xFor = (i: number) =>
+    padding.left + (i / (points.length - 1)) * innerW;
+  const yFor = (v: number) =>
+    padding.top + innerH - ((v - minV) / range) * innerH;
+
+  const path = points
+    .map(
+      (p, i) => `${i === 0 ? "M" : "L"} ${xFor(i).toFixed(2)} ${yFor(p.value).toFixed(2)}`,
+    )
+    .join(" ");
+
+  const areaPath =
+    path +
+    ` L ${xFor(points.length - 1).toFixed(2)} ${yFor(0).toFixed(2)}` +
+    ` L ${xFor(0).toFixed(2)} ${yFor(0).toFixed(2)} Z`;
+
+  const yTicks = [minV, 0, maxV].filter(
+    (v, i, arr) => arr.indexOf(v) === i,
+  );
+
+  return (
+    <div className="rounded-lg border border-border bg-bg-secondary p-3">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-full h-64"
+        aria-label="My Allocation equity curve"
+        role="img"
+      >
+        <defs>
+          <linearGradient id="my-allocation-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#1B6B5A" stopOpacity="0.35" />
+            <stop offset="100%" stopColor="#1B6B5A" stopOpacity="0.05" />
+          </linearGradient>
+        </defs>
+        {yTicks.map((v) => (
+          <g key={v}>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={yFor(v)}
+              y2={yFor(v)}
+              stroke="#E2E8F0"
+              strokeDasharray="3 3"
+            />
+            <text
+              x={padding.left - 6}
+              y={yFor(v) + 4}
+              fontSize="10"
+              textAnchor="end"
+              fill="#64748B"
+            >
+              {(v * 100).toFixed(0)}%
+            </text>
+          </g>
+        ))}
+        <path d={areaPath} fill="url(#my-allocation-grad)" stroke="none" />
+        <path
+          d={path}
+          stroke="#1B6B5A"
+          strokeWidth="2"
+          fill="none"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <text
+          x={padding.left}
+          y={height - 8}
+          fontSize="10"
+          fill="#64748B"
+        >
+          {points[0].date}
+        </text>
+        <text
+          x={width - padding.right}
+          y={height - 8}
+          fontSize="10"
+          textAnchor="end"
+          fill="#64748B"
+        >
+          {points[points.length - 1].date}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+// =========================================================================
+// KPI metric card — same visual as ScenarioBuilder's MetricCard
+// =========================================================================
+
+function MetricCard({
+  label,
+  value,
+  positive,
+  negative,
+}: {
+  label: string;
+  value: string;
+  positive?: boolean;
+  negative?: boolean;
+}) {
+  const color = positive
+    ? "text-positive"
+    : negative
+      ? "text-negative"
+      : "text-text-primary";
+  return (
+    <div className="rounded-lg border border-border bg-surface p-3">
+      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+        {label}
+      </p>
+      <p
+        className={`mt-1 text-xl font-bold font-metric tabular-nums ${color}`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+// =========================================================================
+// Inline alias editor — pencil icon flips the row into edit mode
+// =========================================================================
+
+function AliasEditor({
+  row,
+  portfolioId,
+  initial,
+  canonical,
+}: {
+  row: StrategyRow;
+  portfolioId: string;
+  initial: string | null;
+  canonical: string;
+}) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(initial ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/portfolio-strategies/alias", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          portfolio_id: portfolioId,
+          strategy_id: row.strategy_id,
+          alias: value.trim() || null,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `Save failed (${res.status})`);
+      }
+      setEditing(false);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function cancel() {
+    setValue(initial ?? "");
+    setEditing(false);
+    setError(null);
+  }
+
+  if (!editing) {
+    const shown = initial?.trim() || canonical;
+    return (
+      <div className="flex items-center gap-2 min-w-0">
+        <Link
+          href={`/strategies/${row.strategy.id}`}
+          className="font-medium text-text-primary hover:text-accent transition-colors truncate"
+          title={canonical}
+        >
+          {shown}
+        </Link>
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="shrink-0 text-text-muted hover:text-accent transition-colors"
+          aria-label={`Rename ${shown}`}
+          title="Rename this investment"
+        >
+          <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="w-3.5 h-3.5"
+            aria-hidden="true"
+          >
+            <path d="M11.5 2.5l2 2L6 12l-3 .5L3.5 9.5z" />
+          </svg>
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 min-w-0">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") cancel();
+        }}
+        placeholder={canonical}
+        autoFocus
+        maxLength={120}
+        disabled={saving}
+        className="flex-1 min-w-0 rounded-md border border-border px-2 py-1 text-sm font-medium bg-surface focus:outline-none focus:border-accent"
+      />
+      <button
+        type="button"
+        onClick={save}
+        disabled={saving}
+        className="text-xs px-2 py-1 rounded border border-accent bg-accent text-white hover:bg-accent-hover disabled:opacity-60"
+      >
+        {saving ? "…" : "Save"}
+      </button>
+      <button
+        type="button"
+        onClick={cancel}
+        disabled={saving}
+        className="text-xs px-2 py-1 rounded border border-border text-text-secondary hover:text-text-primary"
+      >
+        Cancel
+      </button>
+      {error && <span className="text-[10px] text-negative">{error}</span>}
+    </div>
+  );
+}
+
+// =========================================================================
+// Main client component
+// =========================================================================
+
 export function MyAllocationClient({
   portfolio,
   analytics,
   strategies,
-  favorites,
-  alertCount,
+  apiKeys,
 }: MyAllocationClientProps) {
-  // Panel open/close state — driven by the "View Favorites" button.
-  const [panelOpen, setPanelOpen] = useState(false);
-  // Active favorite strategy ids — driven by toggles inside the panel.
-  // When non-empty, we compute a "+ Favorites" overlay curve and pass it
-  // to PortfolioEquityCurve as the dashed overlay line.
-  const [activeFavoriteIds, setActiveFavoriteIds] = useState<string[]>([]);
-
-  // Build the StrategyForBuilder shapes the scenario math consumes,
-  // once per render. Strategies without daily_returns drop out of the
-  // chart but stay in the breakdown table.
+  // Build StrategyForBuilder rows the scenario math consumes. Rows
+  // without daily_returns drop out of the chart/metric computation
+  // but stay in the investment list below.
   const strategiesForBuilder = useMemo<StrategyForBuilder[]>(
     () =>
       strategies
@@ -162,10 +443,10 @@ export function MyAllocationClient({
             row.strategy.strategy_analytics?.daily_returns,
           );
           return {
-            id: row.strategy.id,
-            name: row.strategy.name,
-            codename: row.strategy.codename,
-            disclosure_tier: row.strategy.disclosure_tier,
+            id: row.strategy_id,
+            name: displayName(row),
+            codename: row.strategy.codename ?? null,
+            disclosure_tier: row.strategy.disclosure_tier ?? "exploratory",
             strategy_types: row.strategy.strategy_types,
             markets: row.strategy.markets,
             start_date: row.strategy.start_date,
@@ -181,126 +462,40 @@ export function MyAllocationClient({
     [strategies],
   );
 
-  const weightsById = useMemo(() => {
-    const out: Record<string, number> = {};
-    for (const row of strategies) {
-      out[row.strategy_id] = row.current_weight ?? 0;
-    }
-    return out;
-  }, [strategies]);
-
-  const inceptionDate = portfolio.created_at.slice(0, 10);
-
-  // Build per-strategy cumulative curves for the chart's strategies prop.
-  const strategyCurves = useMemo(
-    () =>
-      strategiesForBuilder.map((s) => ({
-        id: s.id,
-        name: s.name,
-        equityCurve: computeStrategyCurve(s.daily_returns),
-      })),
-    [strategiesForBuilder],
-  );
-
-  // Build the portfolio composite curve from the real strategies +
-  // current weights. This is what draws as the bold accent line on the
-  // chart (the "Portfolio" series). Matches the data-density principle:
-  // one composite, one line, no widget chrome.
+  // Pre-build the date-map cache so the scenario recompute is fast.
   const dateMapCache = useMemo(
     () => buildDateMapCache(strategiesForBuilder),
     [strategiesForBuilder],
   );
-  const portfolioEquityCurve = useMemo(
-    () =>
-      computeCompositeCurve(
-        strategiesForBuilder,
-        weightsById,
-        inceptionDate,
-        dateMapCache,
-      ),
-    [strategiesForBuilder, weightsById, inceptionDate, dateMapCache],
+
+  // Scenario state: all strategies active, weighted by their
+  // current_weight from portfolio_strategies, starting from each
+  // strategy's own start_date (or the seed default).
+  const scenarioState = useMemo<ScenarioState>(() => {
+    const selected: Record<string, boolean> = {};
+    const weights: Record<string, number> = {};
+    const startDates: Record<string, string> = {};
+    for (const row of strategies) {
+      selected[row.strategy_id] = true;
+      weights[row.strategy_id] = row.current_weight ?? 0;
+      startDates[row.strategy_id] = row.strategy.start_date ?? "2022-01-01";
+    }
+    return { selected, weights, startDates };
+  }, [strategies]);
+
+  const metrics = useMemo(
+    () => computeScenario(strategiesForBuilder, scenarioState, dateMapCache),
+    [strategiesForBuilder, scenarioState, dateMapCache],
   );
 
-  // Build StrategyForBuilder shapes for favorites (same normalization
-  // pipeline as the real strategies — the overlay math treats both sets
-  // uniformly). Favorites without daily_returns drop out. codename +
-  // disclosure_tier coalesce to safe defaults because the Strategy type
-  // marks them optional; StrategyForBuilder requires them non-undefined.
-  const favoritesForBuilder = useMemo<StrategyForBuilder[]>(
-    () =>
-      favorites
-        .map((f) => {
-          const dr = normalizeDailyReturns(
-            f.strategy.strategy_analytics?.daily_returns,
-          );
-          return {
-            id: f.strategy.id,
-            name: f.strategy.name,
-            codename: f.strategy.codename ?? null,
-            disclosure_tier: f.strategy.disclosure_tier ?? "exploratory",
-            strategy_types: f.strategy.strategy_types,
-            markets: f.strategy.markets,
-            start_date: f.strategy.start_date,
-            daily_returns: dr,
-            cagr: f.strategy.strategy_analytics?.cagr ?? null,
-            sharpe: f.strategy.strategy_analytics?.sharpe ?? null,
-            volatility: f.strategy.strategy_analytics?.volatility ?? null,
-            max_drawdown:
-              f.strategy.strategy_analytics?.max_drawdown ?? null,
-          };
-        })
-        .filter((s) => s.daily_returns.length > 0),
-    [favorites],
-  );
-
-  // Compute the "+ Favorites" overlay curve when any favorite is
-  // toggled ON. When all are off (or no favorites exist at all), the
-  // overlay is null and the chart renders only the real portfolio line
-  // + per-strategy lines.
-  const overlayCurve = useMemo(() => {
-    if (activeFavoriteIds.length === 0) return null;
-    const activeFavorites = favoritesForBuilder.filter((f) =>
-      activeFavoriteIds.includes(f.id),
-    );
-    if (activeFavorites.length === 0) return null;
-    return computeFavoritesOverlayCurve(
-      strategiesForBuilder,
-      weightsById,
-      activeFavorites,
-      inceptionDate,
-    );
-  }, [
-    activeFavoriteIds,
-    favoritesForBuilder,
-    strategiesForBuilder,
-    weightsById,
-    inceptionDate,
-  ]);
-
-  // MTD bars: use the server-side attribution_breakdown from the
-  // portfolio_analytics row if present, otherwise fall back to each
-  // strategy's summary metric if available. The plan only specs
-  // return_mtd at the fund level, not per-strategy, so we approximate
-  // by using each strategy's recent 21-day cumulative return.
-  const mtdRows = useMemo(
-    () =>
-      strategiesForBuilder.map((s) => {
-        // Recent 21 business days ≈ 1 month.
-        const slice = s.daily_returns.slice(-21);
-        let c = 1;
-        for (const d of slice) c *= 1 + d.value;
-        const mtd = slice.length > 0 ? c - 1 : null;
-        return {
-          strategy_id: s.id,
-          strategy_name: s.name,
-          return_mtd: mtd,
-        };
-      }),
-    [strategiesForBuilder],
+  const totalAllocated = strategies.reduce(
+    (sum, row) => sum + (row.allocated_amount ?? 0),
+    0,
   );
 
   return (
-    <>
+    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+      {/* Header */}
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="font-display text-3xl md:text-4xl text-text-primary tracking-tight">
@@ -314,199 +509,168 @@ export function MyAllocationClient({
             </span>
             <span className="text-text-muted">
               {" "}
-              {strategies.length === 1 ? "strategy" : "strategies"}
+              {strategies.length === 1 ? "investment" : "investments"}
             </span>
-            {analytics?.total_aum != null && (
+            {analytics?.total_aum != null ? (
               <>
                 <span className="mx-2 text-text-muted">·</span>
                 <span className="font-metric tabular-nums">
                   {formatCurrency(analytics.total_aum)}
                 </span>
               </>
-            )}
+            ) : totalAllocated > 0 ? (
+              <>
+                <span className="mx-2 text-text-muted">·</span>
+                <span className="font-metric tabular-nums">
+                  {formatCurrency(totalAllocated)}
+                </span>
+              </>
+            ) : null}
           </p>
         </div>
-        {/* Favorites panel trigger. Opens the right-side slide-out that
-            hosts the watchlist toggles and the Save-as-Test modal. */}
-        <button
-          type="button"
-          onClick={() => setPanelOpen(true)}
-          className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-2 text-sm text-text-secondary hover:text-text-primary hover:border-accent/40 hover:bg-bg-secondary transition-colors"
-          aria-label="View favorites"
-        >
-          View Favorites
-          <span aria-hidden="true">›</span>
-          {favorites.length > 0 && (
-            <span className="ml-1 rounded-full bg-accent/10 px-1.5 text-[10px] font-medium text-accent font-metric tabular-nums">
-              {favorites.length}
-            </span>
-          )}
-        </button>
       </header>
 
-      {alertCount.total > 0 && (
-        <div className="mb-6 bg-accent/5 border border-accent/20 rounded-md px-4 py-3 flex items-center justify-between gap-4">
-          <p className="text-sm text-text-secondary">
-            <span className="font-medium text-text-primary">
-              {alertCount.total}
-            </span>{" "}
-            unacknowledged{" "}
-            {alertCount.total === 1 ? "alert" : "alerts"}
-          </p>
-          <div className="flex items-center gap-2">
-            {alertCount.high > 0 && (
-              <Badge label={`${alertCount.high} High`} />
-            )}
-            {alertCount.medium > 0 && (
-              <Badge label={`${alertCount.medium} Medium`} />
-            )}
-            {alertCount.low > 0 && (
-              <Badge label={`${alertCount.low} Low`} />
-            )}
-          </div>
-        </div>
-      )}
-
-      <div className="mb-8">
-        <FundKPIStrip
-          aum={analytics?.total_aum ?? null}
-          return24h={analytics?.return_24h ?? null}
-          returnMtd={analytics?.return_mtd ?? null}
-          returnYtd={analytics?.return_ytd ?? null}
+      {/* KPI strip (scenario-style) */}
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-6">
+        <MetricCard
+          label="TWR"
+          value={formatPercent(metrics.twr)}
+          positive={metrics.twr != null && metrics.twr > 0}
+          negative={metrics.twr != null && metrics.twr < 0}
+        />
+        <MetricCard label="CAGR" value={formatPercent(metrics.cagr)} />
+        <MetricCard label="Sharpe" value={formatNumber(metrics.sharpe)} />
+        <MetricCard label="Sortino" value={formatNumber(metrics.sortino)} />
+        <MetricCard
+          label="Max DD"
+          value={formatPercent(metrics.max_drawdown)}
+          negative={metrics.max_drawdown != null && metrics.max_drawdown < 0}
+        />
+        <MetricCard
+          label="Avg |corr|"
+          value={formatNumber(metrics.avg_pairwise_correlation)}
         />
       </div>
 
-      <section aria-label="YTD PnL by strategy" className="mb-8 space-y-3">
-        <h2 className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-          YTD PnL by Strategy
-        </h2>
-        <div className="bg-surface border border-border rounded-lg">
-          {strategiesForBuilder.length === 0 ? (
-            <div className="h-[350px] flex items-center justify-center text-sm text-text-muted">
-              No strategies with daily return history yet.
-            </div>
-          ) : (
-            <PortfolioEquityCurve
-              portfolioEquityCurve={portfolioEquityCurve}
-              strategies={strategyCurves}
-              overlayCurve={overlayCurve}
-              overlayLabel="+ Favorites"
-            />
-          )}
+      {/* Equity curve */}
+      <Card className="mb-6">
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold text-text-primary">
+            Allocation equity curve
+          </h2>
+          <p className="text-xs text-text-muted mt-0.5">
+            {strategiesForBuilder.length} active investments
+            {metrics.effective_start && metrics.effective_end ? (
+              <>
+                {" "}
+                · {metrics.effective_start} → {metrics.effective_end} ·{" "}
+                {metrics.n} days
+              </>
+            ) : null}
+          </p>
         </div>
-      </section>
+        <EquityCurveChart
+          points={metrics.equity_curve}
+          emptyMessage={
+            strategies.length === 0
+              ? "Connect an exchange below to start tracking your real investments."
+              : "Waiting for analytics to compute — check back after the next sync."
+          }
+        />
+      </Card>
 
-      <div className="mb-8">
-        <StrategyMtdBars rows={mtdRows} />
-      </div>
-
-      <section aria-label="Strategy breakdown" className="space-y-3">
-        <h2 className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-          Strategies
-        </h2>
+      {/* Investments list */}
+      <Card className="mb-6">
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold text-text-primary">
+            Investments
+          </h2>
+          <p className="text-xs text-text-muted mt-0.5">
+            Each row is a team you&apos;ve connected to your exchange account.
+            Click the pencil to rename it.
+          </p>
+        </div>
         {strategies.length === 0 ? (
-          <Card className="text-center py-8">
-            <p className="text-text-muted mb-4">
-              Your book is empty. Browse strategies to add your first
-              allocation.
+          <div className="rounded-lg border border-dashed border-border bg-bg-secondary p-8 text-center">
+            <p className="text-sm text-text-secondary">
+              No investments yet. Connect a read-only exchange API key below
+              to start tracking your real positions.
             </p>
-            <Link
-              href="/strategies"
-              className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-            >
-              Browse Strategies
-            </Link>
-          </Card>
+          </div>
         ) : (
-          <div className="bg-surface border border-border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left px-5 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Name
-                  </th>
-                  <th className="text-right px-3 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Weight
-                  </th>
-                  <th className="text-right px-3 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Allocated
-                  </th>
-                  <th className="text-right px-3 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    CAGR
-                  </th>
-                  <th className="text-right px-3 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Sharpe
-                  </th>
-                  <th className="text-right px-3 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Max DD
-                  </th>
-                  <th className="text-right px-5 py-3 text-[10px] uppercase tracking-wider text-text-muted font-semibold">
-                    Vol
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {strategies.map((row) => {
-                  const a = row.strategy.strategy_analytics;
-                  return (
-                    <tr
-                      key={row.strategy_id}
-                      className="border-b border-border last:border-b-0 hover:bg-accent/5 transition-colors"
+          <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
+            {strategies.map((row) => {
+              const a = row.strategy.strategy_analytics;
+              const canonical =
+                (row.strategy.disclosure_tier === "exploratory" &&
+                  row.strategy.codename) ||
+                row.strategy.name;
+              return (
+                <div
+                  key={row.strategy_id}
+                  className="grid grid-cols-[minmax(0,2fr)_1fr_1fr_1fr_1fr] items-center gap-3 bg-surface px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <AliasEditor
+                      row={row}
+                      portfolioId={portfolio.id}
+                      initial={row.alias}
+                      canonical={canonical}
+                    />
+                    <p className="mt-0.5 text-[10px] text-text-muted line-clamp-1">
+                      {row.strategy.strategy_types.join(" · ")}
+                      {row.strategy.markets.length > 0
+                        ? ` · ${row.strategy.markets.slice(0, 3).join(", ")}`
+                        : ""}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                      Allocated
+                    </p>
+                    <p className="text-sm font-metric tabular-nums text-text-primary">
+                      {row.allocated_amount != null
+                        ? formatCurrency(row.allocated_amount)
+                        : "—"}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                      CAGR
+                    </p>
+                    <p
+                      className={`text-sm font-metric tabular-nums ${metricColor(a?.cagr)}`}
                     >
-                      <td className="px-5 py-3">
-                        <Link
-                          href={`/strategies/${row.strategy.id}`}
-                          className="text-text-primary hover:text-accent transition-colors font-medium"
-                        >
-                          {row.strategy.name}
-                        </Link>
-                        <p className="text-[10px] text-text-muted mt-0.5">
-                          {row.strategy.strategy_types.join(" · ")}
-                        </p>
-                      </td>
-                      <td className="text-right px-3 py-3 font-metric tabular-nums text-text-primary">
-                        {row.current_weight != null
-                          ? `${(row.current_weight * 100).toFixed(0)}%`
-                          : "—"}
-                      </td>
-                      <td className="text-right px-3 py-3 font-metric tabular-nums text-text-secondary">
-                        {row.allocated_amount != null
-                          ? formatCurrency(row.allocated_amount)
-                          : "—"}
-                      </td>
-                      <td
-                        className={`text-right px-3 py-3 font-metric tabular-nums ${metricColor(a?.cagr)}`}
-                      >
-                        {formatPercent(a?.cagr ?? null)}
-                      </td>
-                      <td
-                        className={`text-right px-3 py-3 font-metric tabular-nums ${metricColor(a?.sharpe)}`}
-                      >
-                        {formatNumber(a?.sharpe ?? null)}
-                      </td>
-                      <td className="text-right px-3 py-3 font-metric tabular-nums text-negative">
-                        {formatPercent(a?.max_drawdown ?? null)}
-                      </td>
-                      <td className="text-right px-5 py-3 font-metric tabular-nums text-text-secondary">
-                        {formatPercent(a?.volatility ?? null)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      {formatPercent(a?.cagr ?? null)}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                      Sharpe
+                    </p>
+                    <p
+                      className={`text-sm font-metric tabular-nums ${metricColor(a?.sharpe)}`}
+                    >
+                      {formatNumber(a?.sharpe ?? null)}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                      Max DD
+                    </p>
+                    <p className="text-sm font-metric tabular-nums text-negative">
+                      {formatPercent(a?.max_drawdown ?? null)}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
-      </section>
+      </Card>
 
-      <FavoritesPanel
-        open={panelOpen}
-        onClose={() => setPanelOpen(false)}
-        favorites={favoritesForBuilder}
-        realStrategyIds={strategies.map((s) => s.strategy_id)}
-        realPortfolioName={portfolio.name}
-        onSelectionChange={setActiveFavoriteIds}
-      />
-    </>
+      {/* Exchange connections (inline) */}
+      <AllocatorExchangeManager initialKeys={apiKeys} />
+    </main>
   );
 }

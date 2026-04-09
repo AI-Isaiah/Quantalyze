@@ -30,7 +30,9 @@ interface ExchangeConnection {
   exchange: string;
   label: string;
   is_active: boolean;
-  sync_status: string;
+  // Nullable to match the DB column (api_keys.sync_status is nullable
+  // — rows freshly inserted before the first sync tick have null).
+  sync_status: string | null;
   last_sync_at: string | null;
   account_balance_usdt: number | null;
   created_at: string;
@@ -174,7 +176,9 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
         .eq("id", keyId);
       setKeys((prev) =>
         prev.map((k) =>
-          k.id === keyId ? { ...k, last_sync_at: now, sync_status: "idle" } : k,
+          k.id === keyId
+            ? { ...k, last_sync_at: now, sync_status: "idle" as string | null }
+            : k,
         ),
       );
       // Simulate sync latency for UX realism

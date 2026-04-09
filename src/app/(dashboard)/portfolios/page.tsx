@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import { getTestPortfolios } from "@/lib/queries";
+import { getUserPortfolios } from "@/lib/queries";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { CreatePortfolioForm } from "@/components/portfolio/CreatePortfolioForm";
@@ -7,46 +7,34 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 /**
- * Test Portfolios — saved hypothetical what-if scenarios.
+ * /portfolios — generic portfolios browser.
  *
- * Renamed from the old generic "Portfolios" page as part of the My
- * Allocation restructure. The allocator's REAL invested book (single row
- * with is_test=false) lives on /allocations (My Allocation). This page
- * only ever lists the scenarios they've saved from the Favorites panel's
- * Save-as-Test flow (or created via the manual CreatePortfolioForm for
- * backwards compatibility).
- *
- * Detail pages (/portfolios/[id]) are unchanged — they still render the
- * full analytics dashboard, just reached from Test Portfolios instead of
- * the old top-level Portfolios list.
+ * The v0.4.0 pivot dropped the "Test Portfolios" rename. Allocators no
+ * longer use this page directly (it's removed from their sidebar —
+ * their real book lives on /allocations, their what-if exploration
+ * lives on /scenarios). The route is kept for managers and for any
+ * deep links that still point here. CreatePortfolioForm is still
+ * available for manual portfolio creation.
  */
-export default async function TestPortfoliosPage() {
+export default async function PortfoliosPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const portfolios = await getTestPortfolios(user.id);
+  const portfolios = await getUserPortfolios();
 
   return (
     <>
       <PageHeader
-        title="Test Portfolios"
-        description="Saved what-if scenarios built from your Favorites. These never touch real money."
+        title="Portfolios"
+        description="Build collections of strategies for comparison."
         actions={<CreatePortfolioForm />}
       />
 
       {portfolios.length === 0 ? (
         <Card className="text-center py-12">
-          <p className="text-text-muted mb-4">
-            No test portfolios yet. Open My Allocation, toggle some favorites
-            on, and save the scenario you like.
-          </p>
-          <Link
-            href="/allocations"
-            className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-          >
-            Go to My Allocation
-          </Link>
+          <p className="text-text-muted mb-4">No portfolios yet.</p>
+          <CreatePortfolioForm />
         </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

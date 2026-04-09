@@ -29,12 +29,29 @@ export default async function ConnectionsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // Role guard: Connections is an allocator-only surface. The sidebar
+  // hides it from managers, but the route itself needs to enforce the
+  // same invariant — a manager hitting the URL directly should land
+  // somewhere meaningful instead of seeing an empty Connections page.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (profile?.role !== "allocator" && profile?.role !== "both") {
+    redirect("/strategies");
+  }
+
+  // Fetch connections + the strategy's category slug so the detail
+  // links use the actual discovery slug instead of the legacy
+  // hardcoded `/discovery/crypto-sma/<id>` assumption.
   const { data: requests } = await supabase
     .from("contact_requests")
     .select(
       `id, status, message, created_at, founder_notes, allocation_amount,
        strategies (
          id, name, status, strategy_types, supported_exchanges, start_date, aum,
+         discovery_categories (slug),
          strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status)
        )`,
     )
@@ -50,26 +67,44 @@ export default async function ConnectionsPage() {
     const analytics = strategy
       ? (extractAnalytics(strategy.strategy_analytics) ?? EMPTY_ANALYTICS)
       : EMPTY_ANALYTICS;
-    return { request: r, strategy, analytics };
+    // Normalize the category embed — same array-or-object shape as every
+    // other Supabase nested fetch in this file.
+    const rawCategory = (strategy as Record<string, unknown> | null)
+      ?.discovery_categories;
+    const categorySlug = (
+      Array.isArray(rawCategory) ? rawCategory[0] : rawCategory
+    ) as { slug?: string } | null;
+    return { request: r, strategy, analytics, categorySlug: categorySlug?.slug ?? null };
   });
 
-  // Aggregate metrics across all connected strategies.
+  // Aggregate metrics across all connected strategies. The review of
+  // this code flagged that the original version shared a single `count`
+  // between CAGR and Sharpe, which silently miscalculated avgSharpe
+  // whenever availability of the two metrics differed. Fix: track
+  // cagrCount and sharpeCount independently.
   const aggMetrics = connections.reduce(
     (acc, c) => {
       if (c.analytics.cagr != null) {
         acc.totalCagr += c.analytics.cagr;
-        acc.count++;
+        acc.cagrCount++;
       }
-      if (c.analytics.sharpe != null) acc.totalSharpe += c.analytics.sharpe;
+      if (c.analytics.sharpe != null) {
+        acc.totalSharpe += c.analytics.sharpe;
+        acc.sharpeCount++;
+      }
       if (c.analytics.max_drawdown != null)
         acc.worstDrawdown = Math.min(acc.worstDrawdown, c.analytics.max_drawdown);
       return acc;
     },
-    { totalCagr: 0, totalSharpe: 0, worstDrawdown: 0, count: 0 },
+    { totalCagr: 0, totalSharpe: 0, worstDrawdown: 0, cagrCount: 0, sharpeCount: 0 },
   );
 
-  const avgCagr = aggMetrics.count > 0 ? aggMetrics.totalCagr / aggMetrics.count : null;
-  const avgSharpe = aggMetrics.count > 0 ? aggMetrics.totalSharpe / aggMetrics.count : null;
+  const avgCagr =
+    aggMetrics.cagrCount > 0 ? aggMetrics.totalCagr / aggMetrics.cagrCount : null;
+  const avgSharpe =
+    aggMetrics.sharpeCount > 0
+      ? aggMetrics.totalSharpe / aggMetrics.sharpeCount
+      : null;
 
   return (
     <>
@@ -130,19 +165,26 @@ export default async function ConnectionsPage() {
           </div>
 
           <div className="space-y-3">
-            {connections.map(({ request, strategy, analytics }) => {
+            {connections.map(({ request, strategy, analytics, categorySlug }) => {
               const s = strategy as Record<string, unknown> | null;
               if (!s) return null;
+              // Use the actual category slug from the joined row. Fall
+              // back to the generic /strategies/<id> route if the join
+              // produced no slug (shouldn't happen for published rows
+              // but keeps the link functional).
+              const detailHref = categorySlug
+                ? `/discovery/${categorySlug}/${s.id}`
+                : `/strategies/${s.id}`;
               return (
                 <Card key={request.id}>
                   <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <Link
-                          href={`/discovery/crypto-sma/${s.id}`}
+                          href={detailHref}
                           className="font-medium text-text-primary hover:text-accent transition-colors"
                         >
-                          {s.name as string}
+                          {String(s.name ?? "")}
                         </Link>
                         <HealthScore
                           analytics={analytics}

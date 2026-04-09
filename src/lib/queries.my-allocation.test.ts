@@ -34,12 +34,16 @@ const state = vi.hoisted(() => ({
     total_aum: number;
     return_ytd: number;
   }>,
-  favorites: [] as Array<{
+  apiKeys: [] as Array<{
+    id: string;
     user_id: string;
-    strategy_id: string;
+    exchange: string;
+    label: string;
+    is_active: boolean;
+    sync_status: string | null;
+    last_sync_at: string | null;
+    account_balance_usdt: number | null;
     created_at: string;
-    notes: string | null;
-    strategy: unknown;
   }>,
   alerts: [] as Array<{
     id: string;
@@ -53,7 +57,7 @@ function resetState() {
   state.portfolios = [];
   state.portfolioStrategies = [];
   state.analytics = [];
-  state.favorites = [];
+  state.apiKeys = [];
   state.alerts = [];
 }
 
@@ -89,8 +93,8 @@ function buildChain(table: string) {
         return applyFilters(state.portfolioStrategies);
       case "portfolio_analytics":
         return applyFilters(state.analytics);
-      case "user_favorites":
-        return applyFilters(state.favorites);
+      case "api_keys":
+        return applyFilters(state.apiKeys);
       case "portfolio_alerts":
         return applyFilters(state.alerts);
       default:
@@ -268,121 +272,19 @@ describe("getUserPortfolios — is_test column round-trip", () => {
   });
 });
 
-describe("getTestPortfolios", () => {
-  beforeEach(resetState);
-
-  it("returns only is_test=true portfolios", async () => {
-    state.portfolios = [
-      {
-        id: "real-1",
-        user_id: "user-1",
-        name: "Active Allocation",
-        description: null,
-        created_at: "2024-06-01T00:00:00Z",
-        is_test: false,
-      },
-      {
-        id: "test-1",
-        user_id: "user-1",
-        name: "What-if A",
-        description: null,
-        created_at: "2024-07-01T00:00:00Z",
-        is_test: true,
-      },
-      {
-        id: "test-2",
-        user_id: "user-1",
-        name: "What-if B",
-        description: null,
-        created_at: "2024-08-01T00:00:00Z",
-        is_test: true,
-      },
-    ];
-
-    const { getTestPortfolios } = await import("./queries");
-    const result = await getTestPortfolios("user-1");
-    expect(result).toHaveLength(2);
-    expect(result.every((p) => p.is_test === true)).toBe(true);
-    expect(result.map((p) => p.id).sort()).toEqual(["test-1", "test-2"]);
-  });
-
-  it("returns empty array when the user has no test portfolios", async () => {
-    state.portfolios = [
-      {
-        id: "real-1",
-        user_id: "user-1",
-        name: "Active",
-        description: null,
-        created_at: "2024-06-01T00:00:00Z",
-        is_test: false,
-      },
-    ];
-
-    const { getTestPortfolios } = await import("./queries");
-    const result = await getTestPortfolios("user-1");
-    expect(result).toEqual([]);
-  });
-});
-
-describe("getUserFavorites", () => {
-  beforeEach(resetState);
-
-  it("returns the user's favorites with joined strategy data", async () => {
-    const strategy = {
-      id: "strat-a",
-      name: "Polaris Arb",
-      codename: null,
-      disclosure_tier: "institutional",
-      strategy_types: ["arbitrage"],
-      markets: ["BTC"],
-      start_date: "2022-01-03",
-      strategy_analytics: {
-        daily_returns: [{ date: "2024-01-02", value: 0.001 }],
-        cagr: 0.15,
-        sharpe: 1.4,
-        volatility: 0.12,
-        max_drawdown: -0.05,
-      },
-    };
-    state.favorites = [
-      {
-        user_id: "user-1",
-        strategy_id: "strat-a",
-        created_at: "2026-04-01T00:00:00Z",
-        notes: null,
-        strategy,
-      },
-    ];
-
-    const { getUserFavorites } = await import("./queries");
-    const result = await getUserFavorites("user-1");
-    expect(result).toHaveLength(1);
-    expect(result[0].user_id).toBe("user-1");
-    expect(result[0].strategy_id).toBe("strat-a");
-    expect(result[0].strategy.name).toBe("Polaris Arb");
-    expect(result[0].strategy.strategy_analytics?.sharpe).toBe(1.4);
-  });
-
-  it("returns empty array when the user has no favorites", async () => {
-    const { getUserFavorites } = await import("./queries");
-    const result = await getUserFavorites("user-1");
-    expect(result).toEqual([]);
-  });
-});
-
 describe("getMyAllocationDashboard", () => {
   beforeEach(resetState);
 
-  it("returns null portfolio when the user has no real book", async () => {
+  it("returns null portfolio + empty arrays when the user has no real book", async () => {
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
     expect(result.portfolio).toBeNull();
     expect(result.strategies).toEqual([]);
-    expect(result.favorites).toEqual([]);
+    expect(result.apiKeys).toEqual([]);
     expect(result.alertCount.total).toBe(0);
   });
 
-  it("returns portfolio + analytics + empty arrays when everything else is absent", async () => {
+  it("returns portfolio + analytics + apiKeys + empty arrays when everything else is absent", async () => {
     state.portfolios = [
       {
         id: "real-1",
@@ -411,7 +313,7 @@ describe("getMyAllocationDashboard", () => {
       1_000_000,
     );
     expect(result.strategies).toEqual([]);
-    expect(result.favorites).toEqual([]);
+    expect(result.apiKeys).toEqual([]);
     expect(result.alertCount).toEqual({
       high: 0,
       medium: 0,

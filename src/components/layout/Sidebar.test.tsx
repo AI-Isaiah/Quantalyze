@@ -3,88 +3,102 @@ import { render, screen } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 
 /**
- * Sidebar label regression tests for the My Allocation restructure.
- * Three workspace items got renamed in PR 2 + a new Connections entry
- * was added. If a future refactor accidentally reverts any of these,
- * the allocator's mental model breaks (My Allocation = real book,
- * Test Portfolios = saved scenarios — the whole feature hinges on the
- * labels being right).
+ * Sidebar workspace-items regression tests.
+ *
+ * The v0.4.0 My Allocation pivot split allocator and
+ * manager/crypto-team workspaces:
+ *
+ *   Allocator view: My Allocation → Connections → Scenarios → Recommendations.
+ *     No Strategies (that's the manager surface). No Test Portfolios
+ *     (Scenarios replaces the what-if concept). No separate Exchanges
+ *     entry (inline in My Allocation).
+ *
+ *   Manager / crypto-team view: Strategies → Portfolios.
+ *
+ * If a future refactor collapses these back together or flips the
+ * labels, these tests catch it.
  */
 
-// next/navigation is a client hook, stubbed out so the component
-// renders in a vitest environment.
 vi.mock("next/navigation", () => ({
   usePathname: () => "/allocations",
 }));
 
-describe("Sidebar workspace labels — allocator view", () => {
+describe("Sidebar workspace — allocator view", () => {
   it("renders 'My Allocation' as the first workspace entry", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     expect(screen.getByText("My Allocation")).toBeInTheDocument();
-    // The link should point at /allocations, not /overview or /my-allocation.
     const link = screen.getByText("My Allocation").closest("a");
     expect(link).toHaveAttribute("href", "/allocations");
   });
 
-  it("renders 'Test Portfolios' (not 'Portfolios')", () => {
-    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.getByText("Test Portfolios")).toBeInTheDocument();
-    // The old "Portfolios" label must be gone for allocators.
-    expect(screen.queryByText("Portfolios")).toBeNull();
-    // Route is still /portfolios under the hood.
-    const link = screen.getByText("Test Portfolios").closest("a");
-    expect(link).toHaveAttribute("href", "/portfolios");
-  });
-
-  it("renders a 'Connections' entry pointing at /connections", () => {
+  it("renders 'Connections' pointing at /connections", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     expect(screen.getByText("Connections")).toBeInTheDocument();
     const link = screen.getByText("Connections").closest("a");
     expect(link).toHaveAttribute("href", "/connections");
   });
 
-  it("the old 'Allocations' label is gone for allocators", () => {
+  it("renders 'Scenarios' (allocator-only what-if surface)", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    // Would match both old and new, so we assert the NEW one is there
-    // and there's no raw "Allocations" without "My ".
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("Scenarios")).toBeInTheDocument();
+    const link = screen.getByText("Scenarios").closest("a");
+    expect(link).toHaveAttribute("href", "/scenarios");
+  });
+
+  it("does NOT render 'Strategies' in the allocator workspace", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    // "Strategies" is the manager/crypto-team surface, not an allocator one.
+    // The allocator browses published strategies via the Discovery group.
+    expect(screen.queryByText("Strategies")).toBeNull();
+  });
+
+  it("does NOT render 'Test Portfolios' or 'Portfolios' in the allocator workspace", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    expect(screen.queryByText("Test Portfolios")).toBeNull();
+    expect(screen.queryByText("Portfolios")).toBeNull();
+  });
+
+  it("does NOT render a top-level 'Allocations' label for allocators", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    // The old label was "Allocations" (plural). It was renamed to
+    // "My Allocation" (singular) in the v0.4.0 pivot.
     expect(screen.queryByText(/^Allocations$/)).toBeNull();
   });
 });
 
-describe("Sidebar workspace labels — non-allocator view", () => {
-  it("does NOT render the allocator-only entries for managers", () => {
+describe("Sidebar workspace — manager / crypto-team view", () => {
+  it("renders Strategies + Portfolios for non-allocators", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={false} />);
-    // Allocator-only workspace items must be hidden.
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+  });
+
+  it("does NOT render allocator-only items for managers", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={false} />);
     expect(screen.queryByText("My Allocation")).toBeNull();
     expect(screen.queryByText("Connections")).toBeNull();
-    expect(screen.queryByText("Recommendations")).toBeNull();
     expect(screen.queryByText("Scenarios")).toBeNull();
-    expect(screen.queryByText("Exchanges")).toBeNull();
-    // But the universal workspace items remain.
-    expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Test Portfolios")).toBeInTheDocument();
+    expect(screen.queryByText("Recommendations")).toBeNull();
   });
 });
 
-describe("Sidebar workspace order", () => {
-  it("places 'My Allocation' before 'Test Portfolios' for allocators", () => {
+describe("Sidebar workspace order — allocator view", () => {
+  it("places 'My Allocation' before 'Connections'", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     const myAlloc = screen.getByText("My Allocation");
-    const testPortfolios = screen.getByText("Test Portfolios");
-    // DOCUMENT_POSITION_FOLLOWING = 4 → testPortfolios comes after myAlloc.
+    const connections = screen.getByText("Connections");
     expect(
-      myAlloc.compareDocumentPosition(testPortfolios) &
+      myAlloc.compareDocumentPosition(connections) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  it("places 'Connections' after 'Test Portfolios' for allocators", () => {
+  it("places 'Connections' before 'Scenarios'", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const testPortfolios = screen.getByText("Test Portfolios");
     const connections = screen.getByText("Connections");
+    const scenarios = screen.getByText("Scenarios");
     expect(
-      testPortfolios.compareDocumentPosition(connections) &
+      connections.compareDocumentPosition(scenarios) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });

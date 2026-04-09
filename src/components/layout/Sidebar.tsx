@@ -18,49 +18,36 @@ function buildNavSections(
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
     : DISCOVERY_CATEGORIES;
 
-  // Sidebar order reflects the allocator's workflow: land on My Allocation
-  // (the single real invested book), browse Strategies to research, save
-  // what-ifs to Test Portfolios, manage manager Connections, see
-  // Recommendations, manage Exchange connections.
+  // v0.4.0 pivot: allocator workspace and manager/crypto-team workspace
+  // are distinct now.
   //
-  // Non-allocators see a slimmer list (Strategies + Test Portfolios) since
-  // they don't have an allocator's real book or manager relationships.
+  // Allocators see: My Allocation → Connections → Scenarios → Recommendations.
+  // No Strategies (that's the manager surface), no Test Portfolios
+  // (Scenarios replaces the what-if exploration concept), no Exchanges
+  // (inline API key management lives on My Allocation now).
+  //
+  // Managers / crypto teams see: Strategies, Portfolios (the legacy
+  // collection view). They're the ones publishing strategies for
+  // allocators to discover.
   const workspaceItems: NavItem[] = [];
   if (isAllocator && !isAdmin) {
-    workspaceItems.push({
-      label: "My Allocation",
-      href: "/allocations",
-      icon: PortfolioIcon,
-    });
-  }
-  workspaceItems.push(
-    { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-    { label: "Test Portfolios", href: "/portfolios", icon: PieChartIcon },
-  );
-
-  // Allocator-facing surfaces — hidden from managers and from the founder
-  // (who has the admin Match Queue instead of per-allocator tools).
-  if (isAllocator && !isAdmin) {
-    workspaceItems.push({
-      label: "Connections",
-      href: "/connections",
-      icon: LinkIcon,
-    });
-    workspaceItems.push({
-      label: "Recommendations",
-      href: "/recommendations",
-      icon: RecommendIcon,
-    });
-    workspaceItems.push({
-      label: "Scenarios",
-      href: "/scenarios",
-      icon: BarChartIcon,
-    });
-    workspaceItems.push({
-      label: "Exchanges",
-      href: "/exchanges",
-      icon: BarChartIcon,
-    });
+    workspaceItems.push(
+      { label: "My Allocation", href: "/allocations", icon: PortfolioIcon },
+      { label: "Connections", href: "/connections", icon: LinkIcon },
+      { label: "Scenarios", href: "/scenarios", icon: BarChartIcon },
+      {
+        label: "Recommendations",
+        href: "/recommendations",
+        icon: RecommendIcon,
+      },
+    );
+  } else {
+    // Non-allocator view (managers + admins): Strategies is their
+    // publishing surface, Portfolios is their collection view.
+    workspaceItems.push(
+      { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
+    );
   }
 
   return [
