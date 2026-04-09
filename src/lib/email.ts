@@ -3,9 +3,48 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { SEVERITY_HEX } from "./utils";
 import type { ManagerIdentity } from "@/lib/types";
 
+/**
+ * Full set of notification types written to `notification_dispatches`.
+ * Lifted from `string` to a literal union so a typo at a `send()` call site
+ * fails typecheck instead of silently dirtying the audit trail. When adding
+ * a new category, add it here AND mirror in the audit table CHECK constraint
+ * (tracked as a follow-up — migration 018 currently has no CHECK).
+ */
+export type NotificationType =
+  | "manager_intro_request"
+  | "manager_approved"
+  | "allocator_intro_status"
+  | "allocator_intro_request"
+  | "allocator_admin_intro"
+  | "manager_admin_intro"
+  | "founder_new_strategy"
+  | "founder_intro_request"
+  | "founder_generic"
+  | "alert_digest";
+
 const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
   : null;
+
+// Lazy singleton admin client for the notification_dispatches audit trail.
+// Avoids re-instantiating the Supabase client on every send() call (notable
+// under alert-digest fan-out where one digest triggers N sends). Stored as
+// null on first failure so subsequent calls skip the audit cleanly instead
+// of retrying the throwing constructor.
+let _auditAdmin: ReturnType<typeof createAdminClient> | null | undefined;
+function getAuditAdminClient(): ReturnType<typeof createAdminClient> | null {
+  if (_auditAdmin !== undefined) return _auditAdmin;
+  try {
+    _auditAdmin = createAdminClient();
+  } catch (err) {
+    console.warn(
+      "[email] admin client unavailable, dispatch audit disabled (non-blocking):",
+      err instanceof Error ? err.message : String(err),
+    );
+    _auditAdmin = null;
+  }
+  return _auditAdmin;
+}
 
 // Whitelabel-friendly platform identity. Defaults keep Quantalyze branding;
 // a partner deployment flips these via env vars without touching code.
@@ -30,22 +69,12 @@ async function send(
   to: string,
   subject: string,
   html: string,
-  notificationType: string,
+  notificationType: NotificationType,
   cc?: string | string[],
 ): Promise<void> {
   if (!to) return;
 
-  // Lazy-instantiate the admin client so importing email.ts in environments
-  // without SUPABASE_SERVICE_ROLE_KEY (e.g., build-time) doesn't throw.
-  let admin: ReturnType<typeof createAdminClient> | null = null;
-  try {
-    admin = createAdminClient();
-  } catch (err) {
-    console.warn(
-      "[email] admin client unavailable, dispatch audit disabled (non-blocking):",
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  const admin = getAuditAdminClient();
 
   const dispatchRow = {
     notification_type: notificationType,
@@ -81,7 +110,8 @@ async function send(
 
   if (!resend) {
     console.warn("[email] Resend not configured — skipping send to", to);
-    await markDispatch(admin, dispatchId, {
+    // Fire-and-forget: audit trail updates must never block the caller.
+    void markDispatch(admin, dispatchId, {
       status: "failed",
       error: "Resend not configured",
     });
@@ -110,20 +140,22 @@ async function send(
 
   if (sendError) {
     console.error("[email] Failed to send:", subject, sendError);
-    await markDispatch(admin, dispatchId, {
+    // Fire-and-forget audit write. The caller is already non-blocking w.r.t.
+    // send failures (per the function contract — we swallow email errors),
+    // so blocking on the audit update adds latency without buying anything.
+    void markDispatch(admin, dispatchId, {
       status: "failed",
       error: errorMessage(sendError),
     });
-    // Swallow — per the existing pattern, email failures shouldn't crash
-    // the caller. The dispatch row records the failure for observability.
     return;
   }
 
-  // Happy path: Resend accepted the message. Best-effort update to 'sent';
-  // a failure here does NOT mark the email as failed — it was sent. The
-  // row will stay in 'queued' state, and operators can spot stuck rows
-  // via the queued + age > threshold query.
-  await markDispatch(admin, dispatchId, {
+  // Happy path: Resend accepted the message. Fire-and-forget the update to
+  // 'sent' — the email is already delivered, so blocking the caller on the
+  // audit write only adds ~60ms of latency. A failure here does NOT mark
+  // the email as failed; the row stays in 'queued' and operators can spot
+  // stuck rows via the queued + age > threshold query.
+  void markDispatch(admin, dispatchId, {
     status: "sent",
     sent_at: new Date().toISOString(),
   });
