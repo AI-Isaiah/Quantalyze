@@ -80,7 +80,7 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/demo-screenshot.spec.ts
           kill $SERVER_PID 2>/dev/null || true
         env:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
