@@ -51,20 +51,29 @@ quantalyze/
       (dashboard)/    # Authenticated pages (discovery, strategies, portfolios, allocations, profile, preferences)
         admin/match/  # Founder-only Match Queue (triage + detail + eval dashboard)
         portfolios/   # Portfolio dashboard, management, documents
-      api/            # API routes (verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences)
+      demo/           # Public editorial /demo hero — 3 personas (?persona=active|cold|stalled)
+      api/            # API routes
+        cron/         # Vercel Cron handlers (warm-analytics)
+        demo/         # Public demo endpoints (signed-token portfolio-pdf)
+        # plus: verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences
     components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, admin/, preferences/, landing/, auth/)
     hooks/            # Reusable React hooks (useKeyboardShortcuts)
-    lib/              # Utilities, types, Supabase clients, queries, preferences
+    lib/              # Utilities, types, Supabase clients, queries, preferences, personas, portfolio-insights
   analytics-service/  # FastAPI backend (Python) — strategy + portfolio + match analytics
     services/         # metrics, portfolio_metrics, portfolio_risk, portfolio_optimizer, match_engine, match_eval
     routers/          # analytics, cron, exchange, portfolio, match
   supabase/           # Database migrations (011 = perfect match engine, 014 = strategies.codename)
+  e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
+  .github/workflows/  # CI + nightly probes (demo PDF cold-start)
   docs/
     runbooks/         # Operational runbooks (match-engine.md)
     superpowers/plans/ # Design + implementation plans from /autoplan
     pitch/            # Cap-intro partner pitch artifacts (qualification script, term sheet, one-pager)
     demos/            # Demo scripts + before/after metric capture for the partner demo
 ```
+
+Version and changelog live in `VERSION` (4-digit `MAJOR.MINOR.PATCH.MICRO`) and
+`CHANGELOG.md` — `/ship` bumps both. The current release is tracked in `VERSION`.
 
 ## Tech Stack
 

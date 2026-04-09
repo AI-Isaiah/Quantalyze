@@ -79,6 +79,21 @@
 - **Inputs:** 6px radius, 1px border, accent border on focus
 - **Modals:** White surface, subtle shadow, slide-out panels from right edge
 
+## Data density principle
+Data density > card density. Prefer tables and shared-axis panels over stacks of
+rounded cards. Reference: Bloomberg Terminal, FactSet.
+
+Rule: if 3+ cards share a row, ask whether it should be one panel with 3 columns
+instead. Cards are for interactive containers (Click, Hover) — not for visual
+grouping of metrics.
+
+## Meeting hero rule
+Meeting-hero pages (`/demo`, public forwarded URLs, one-screen thesis pages) use
+the 3-block editorial layout: **Verdict / Evidence / Action**, separated by
+hairline dividers (`border-t border-border`, 1px `#E2E8F0`). No card borders
+between blocks. This is the exception to the default Card primitive pattern.
+Reference: FactSet quarterly factsheet pages.
+
 ## Anti-Patterns (never use)
 - Purple/violet gradients
 - 3-column feature grids with icons in colored circles
@@ -96,3 +111,4 @@
 | 2026-04-06 | Muted teal #1B6B5A over bright #0D9488 | Current accent screams tech startup. Darker muted teal whispers institutional. Less eye-catching on first visit, more trustworthy over time. |
 | 2026-04-06 | DM Sans over Inter | Inter is the most overused font in tech. DM Sans is geometrically similar but warmer, with better personality at larger sizes. |
 | 2026-04-06 | Geist Mono over JetBrains Mono | Geist Mono designed for UI, not code editors. Sharper at small sizes. Better tabular-nums. |
+| 2026-04-09 | Data density > card density + Meeting hero rule | Portfolio demo hero (v0.2.0.0) inverted `/demo` from a 9-card mosaic to a 3-block editorial layout (Verdict / Evidence / Action) after cross-model design review. Codified both the general "data density" principle and the specific "meeting hero" exception so the page never drifts back into stacked cards. |
