@@ -1,4 +1,8 @@
 import { test, expect } from "@playwright/test";
+import {
+  filterUnexpectedConsoleErrors,
+  type CapturedConsoleError,
+} from "../src/lib/playwright-console-filter";
 
 /**
  * E2E coverage for the public `/demo/founder-view` page.
@@ -35,15 +39,14 @@ test.describe("Public /demo/founder-view page", () => {
   });
 
   test("no console errors on /demo/founder-view", async ({ page }) => {
-    // Capture BOTH the text and the source URL of every console error.
-    // Chrome's browser-level resource errors (e.g. 500 on a fetch) emit
-    // the line `Failed to load resource: the server responded with a
-    // status of 500 (...)`, and the offending URL is on
-    // `msg.location().url`, NOT in `msg.text()`. Filtering only on text
-    // made the `/api/demo/match` exclusion a no-op for exactly the case
-    // it needed to catch — the /api/demo/match route returns 500 under
-    // placeholder Supabase env.
-    const errors: Array<{ text: string; url: string }> = [];
+    // Capture BOTH text AND source URL for every console error. Chrome's
+    // browser-level resource errors (e.g. a 500 on a fetch) emit a generic
+    // text "Failed to load resource: the server responded with a status
+    // of 500 (...)" with the offending URL on `msg.location().url`, NOT
+    // in the text. The filter predicate lives in
+    // `src/lib/playwright-console-filter.ts` with unit tests in the same
+    // directory that pin down the regression (commit 0089cee).
+    const errors: CapturedConsoleError[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") {
         errors.push({ text: msg.text(), url: msg.location().url });
@@ -53,17 +56,10 @@ test.describe("Public /demo/founder-view page", () => {
     await page.goto("/demo/founder-view");
     await page.waitForTimeout(1000);
 
-    // Filter Next.js hydration warnings + redirect noise, same shape as
-    // smoke.spec.ts. The AllocatorMatchQueue will fail its /api/demo/match
-    // fetch against placeholder env; match that on the source URL.
-    const realErrors = errors.filter(
-      ({ text, url }) =>
-        !text.includes("Hydration") &&
-        !text.includes("NEXT_REDIRECT") &&
-        !text.includes("Failed to fetch") &&
-        !url.includes("/api/demo/match") &&
-        !text.includes("/api/demo/match"),
-    );
+    const realErrors = filterUnexpectedConsoleErrors(errors, {
+      ignoreTextIncludes: ["Hydration", "NEXT_REDIRECT", "Failed to fetch"],
+      ignoreTextOrUrlIncludes: ["/api/demo/match"],
+    });
     if (realErrors.length > 0) {
       // Surface the full context in CI logs when this fires so the next
       // debugger doesn't have to repro locally.
