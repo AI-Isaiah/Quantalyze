@@ -18,15 +18,34 @@ function buildNavSections(
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
     : DISCOVERY_CATEGORIES;
 
-  const workspaceItems: NavItem[] = [
-    { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-    { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
-    { label: "Allocations", href: "/allocations", icon: PortfolioIcon },
-  ];
-
-  // Allocator-facing recommendations surface — hidden from managers and
-  // from the founder (who has the admin Match Queue instead).
+  // Sidebar order reflects the allocator's workflow: land on My Allocation
+  // (the single real invested book), browse Strategies to research, save
+  // what-ifs to Test Portfolios, manage manager Connections, see
+  // Recommendations, manage Exchange connections.
+  //
+  // Non-allocators see a slimmer list (Strategies + Test Portfolios) since
+  // they don't have an allocator's real book or manager relationships.
+  const workspaceItems: NavItem[] = [];
   if (isAllocator && !isAdmin) {
+    workspaceItems.push({
+      label: "My Allocation",
+      href: "/allocations",
+      icon: PortfolioIcon,
+    });
+  }
+  workspaceItems.push(
+    { label: "Strategies", href: "/strategies", icon: BarChartIcon },
+    { label: "Test Portfolios", href: "/portfolios", icon: PieChartIcon },
+  );
+
+  // Allocator-facing surfaces — hidden from managers and from the founder
+  // (who has the admin Match Queue instead of per-allocator tools).
+  if (isAllocator && !isAdmin) {
+    workspaceItems.push({
+      label: "Connections",
+      href: "/connections",
+      icon: LinkIcon,
+    });
     workspaceItems.push({
       label: "Recommendations",
       href: "/recommendations",
@@ -189,6 +208,15 @@ function RecommendIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8 1l1.8 4.2 4.7.4-3.6 3 1.1 4.6L8 10.8 3.9 13.2l1.1-4.6-3.6-3 4.7-.4L8 1z" />
+    </svg>
+  );
+}
+
+function LinkIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 9a3 3 0 004.24 0l2-2a3 3 0 00-4.24-4.24l-1 1" />
+      <path d="M9 7a3 3 0 00-4.24 0l-2 2a3 3 0 004.24 4.24l1-1" />
     </svg>
   );
 }
