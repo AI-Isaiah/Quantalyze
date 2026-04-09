@@ -21,7 +21,7 @@ import {
   type RecommendationRow,
 } from "@/lib/demo-recommendations";
 import { signDemoPdfToken } from "@/lib/demo-pdf-token";
-import { ACTIVE_PORTFOLIO_ID } from "@/lib/demo";
+import { isDemoPortfolioId } from "@/lib/demo";
 import { EditorialHero } from "@/components/portfolio/EditorialHero";
 import { CounterfactualStrip } from "@/components/portfolio/CounterfactualStrip";
 import { MorningBriefing } from "@/components/portfolio/MorningBriefing";
@@ -168,17 +168,22 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
     benchmarkLabel,
   };
 
-  // Sign the PDF download token at request time so the link in the page is
-  // bound to the active persona's portfolio.
+  // Sign the PDF download token only when the current persona has a
+  // seeded portfolio that is ALSO on the public demo allowlist. Never
+  // fall back to a different persona's ID — silent cross-wiring is the
+  // worst case on a forwarded URL (colleague sees "Cold" in the hero
+  // and downloads the "Active" report).
   let pdfHref: string | null = null;
-  try {
-    const portfolioIdForPdf = portfolio?.id ?? ACTIVE_PORTFOLIO_ID;
-    const token = signDemoPdfToken(portfolioIdForPdf);
-    pdfHref = `/api/demo/portfolio-pdf/${portfolioIdForPdf}?token=${token}`;
-  } catch {
-    // DEMO_PDF_SECRET not configured (local dev). Hide the CTA rather than
-    // crashing the page — the friend's environment always has the secret.
-    pdfHref = null;
+  if (portfolio?.id && isDemoPortfolioId(portfolio.id)) {
+    try {
+      const token = signDemoPdfToken(portfolio.id);
+      pdfHref = `/api/demo/portfolio-pdf/${portfolio.id}?token=${token}`;
+    } catch {
+      // DEMO_PDF_SECRET not configured (local dev). Hide the CTA rather
+      // than crashing the page — the friend's environment always has the
+      // secret.
+      pdfHref = null;
+    }
   }
 
   return (

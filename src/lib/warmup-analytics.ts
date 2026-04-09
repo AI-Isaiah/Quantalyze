@@ -32,9 +32,9 @@ export function warmupAnalytics(): void {
     return;
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WARMUP_TIMEOUT_MS);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), WARMUP_TIMEOUT_MS);
     void fetch(`${url.replace(/\/+$/, "")}/health`, {
       method: "GET",
       signal: controller.signal,
@@ -53,7 +53,8 @@ export function warmupAnalytics(): void {
       });
   } catch {
     // Synchronous throw from fetch construction (e.g. malformed URL).
-    // Silently swallow — never abort render.
+    // Clear the timer so it doesn't leak until the next tick.
+    clearTimeout(timeout);
     console.info("[warmup-analytics] sync throw swallowed");
   }
 }

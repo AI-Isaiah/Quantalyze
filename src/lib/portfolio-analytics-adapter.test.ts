@@ -185,4 +185,48 @@ describe("adaptPortfolioAnalytics", () => {
     expect(parsed?.total_aum).toBeNull();
     expect(parsed?.portfolio_sharpe).toBeNull();
   });
+
+  it("rejects empty strings and booleans as numbers (no silent 0)", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...allNull,
+      total_aum: "",
+      portfolio_sharpe: "   ",
+      portfolio_volatility: false,
+      portfolio_max_drawdown: true,
+    });
+    expect(parsed?.total_aum).toBeNull();
+    expect(parsed?.portfolio_sharpe).toBeNull();
+    expect(parsed?.portfolio_volatility).toBeNull();
+    expect(parsed?.portfolio_max_drawdown).toBeNull();
+  });
+
+  it("strips dangerous keys from correlation matrix", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...allNull,
+      correlation_matrix: {
+        __proto__: { evil: 1 },
+        constructor: { evil: 1 },
+        "sid-a": { "sid-a": 1, "sid-b": 0.3, __proto__: 999 },
+      },
+    });
+    // The "sid-a" row survives but its __proto__ cell is filtered.
+    const matrix = parsed?.correlation_matrix ?? {};
+    expect(Object.keys(matrix).sort()).toEqual(["sid-a"]);
+    expect(matrix["sid-a"]?.["sid-b"]).toBe(0.3);
+    // Prototype should be untouched.
+    const proto = Object.getPrototypeOf({});
+    expect((proto as Record<string, unknown>).evil).toBeUndefined();
+  });
+
+  it("strips dangerous keys from rolling correlation", () => {
+    const parsed = adaptPortfolioAnalytics({
+      ...allNull,
+      rolling_correlation: {
+        "sid-a:sid-b": [{ date: "2026-01-01", value: 0.5 }],
+        __proto__: [{ date: "2026-01-01", value: 999 }],
+      },
+    });
+    const rolling = parsed?.rolling_correlation ?? {};
+    expect(Object.keys(rolling)).toEqual(["sid-a:sid-b"]);
+  });
 });

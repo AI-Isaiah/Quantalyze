@@ -92,9 +92,12 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${portfolioName}-portfolio.pdf"`,
-        // Public surface — let shared CDN cache for an hour. Tokens expire
-        // after 30 minutes anyway, so a cache hit is bounded.
-        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
+        // DO NOT cache at the edge. Shared caches are keyed on the URL, not
+        // the signed token's embedded expiry. A cached response could be
+        // replayed after the token expires, effectively extending TTL to
+        // `s-maxage + stale-while-revalidate` for anyone who can guess a
+        // recent URL. Pay the per-request Puppeteer cost instead.
+        "Cache-Control": "private, no-store, no-cache, must-revalidate",
       },
     });
   } catch (err) {

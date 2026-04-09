@@ -34,8 +34,31 @@ function isObject(v: Json): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Keys that can mutate Object.prototype or otherwise cause silent corruption
+ * when copied from an untrusted JSONB blob into a plain object. The analytics
+ * writer is trusted today, but defence-in-depth is cheap.
+ */
+const DANGEROUS_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+function isSafeKey(key: string): boolean {
+  return !DANGEROUS_KEYS.has(key);
+}
+
 function asNumber(v: Json): number | null {
   if (v === null || v === undefined) return null;
+  // Reject empty / whitespace-only strings and booleans — `Number("")` is 0
+  // and `Number(false)` is 0, which would silently corrupt metrics.
+  if (typeof v === "string") {
+    if (v.trim() === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (typeof v === "boolean") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
@@ -119,11 +142,13 @@ function parseOptimizerSuggestionRow(v: Json): OptimizerSuggestionRow | null {
 
 function parseCorrelationMatrix(v: Json): CorrelationMatrix | null {
   if (!isObject(v)) return null;
-  const result: CorrelationMatrix = {};
+  const result: CorrelationMatrix = Object.create(null);
   for (const [rowKey, row] of Object.entries(v)) {
+    if (!isSafeKey(rowKey)) continue;
     if (!isObject(row)) continue;
-    const inner: Record<string, number | null> = {};
+    const inner: Record<string, number | null> = Object.create(null);
     for (const [colKey, val] of Object.entries(row)) {
+      if (!isSafeKey(colKey)) continue;
       inner[colKey] = asNumber(val);
     }
     result[rowKey] = inner;
@@ -143,8 +168,9 @@ function parseRollingCorrelation(
     return series.length > 0 ? { _legacy: series } : null;
   }
   if (!isObject(v)) return null;
-  const result: Record<string, TimeSeriesPoint[]> = {};
+  const result: Record<string, TimeSeriesPoint[]> = Object.create(null);
   for (const [pairKey, series] of Object.entries(v)) {
+    if (!isSafeKey(pairKey)) continue;
     const parsed = parseTimeSeries(series);
     if (parsed.length > 0) result[pairKey] = parsed;
   }
