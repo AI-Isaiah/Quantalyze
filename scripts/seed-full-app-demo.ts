@@ -773,7 +773,7 @@ const IDX = {
 
 // REAL portfolio: 5 institutional, defensively-diversified holdings.
 // These are the ones that get exchange-sync allocation events.
-const ACTIVE_HOLDINGS = [
+const ACTIVE_HOLDINGS: HoldingSpec[] = [
   { idx: IDX.POLARIS_BASIS, weight: 0.25, initialUsd: 800_000 }, // low-vol carry
   { idx: IDX.HELIOS_FUNDING, weight: 0.22, initialUsd: 700_000 }, // market-neutral carry
   { idx: IDX.MERIDIAN_PAIRS, weight: 0.2, initialUsd: 650_000 }, // market-neutral alpha
@@ -782,7 +782,7 @@ const ACTIVE_HOLDINGS = [
 ];
 
 // What-if: Aggressive tilt — adds momentum + liquidation fade, drops basis
-const AGGRESSIVE_HOLDINGS = [
+const AGGRESSIVE_HOLDINGS: HoldingSpec[] = [
   { idx: IDX.HELIOS_FUNDING, weight: 0.15, initialUsd: 500_000 },
   { idx: IDX.REDLINE_TREND, weight: 0.22, initialUsd: 700_000 },
   { idx: IDX.REDLINE_MOM, weight: 0.18, initialUsd: 600_000 },
@@ -792,7 +792,7 @@ const AGGRESSIVE_HOLDINGS = [
 ];
 
 // What-if: Risk-off — only the 3 lowest-vol holdings, larger total
-const RISKOFF_HOLDINGS = [
+const RISKOFF_HOLDINGS: HoldingSpec[] = [
   { idx: IDX.POLARIS_ARB, weight: 0.35, initialUsd: 1_100_000 },
   { idx: IDX.POLARIS_BASIS, weight: 0.35, initialUsd: 1_100_000 },
   { idx: IDX.MERIDIAN_STATARB, weight: 0.3, initialUsd: 950_000 },
@@ -811,6 +811,9 @@ interface AllocEvent {
   notes: string;
   source: string;
 }
+
+// HoldingSpec is defined below this file section. Forward declaration is
+// implicit via hoisting — the function is only called from main().
 
 /**
  * Generate a realistic "exchange-sync" lifecycle for the REAL portfolio.
@@ -898,9 +901,15 @@ function buildActiveLifecycle(): AllocEvent[] {
   return out;
 }
 
+interface HoldingSpec {
+  idx: number;
+  weight: number;
+  initialUsd: number;
+}
+
 function buildScenarioLifecycle(
   portfolioId: string,
-  holdings: typeof ACTIVE_HOLDINGS,
+  holdings: readonly HoldingSpec[],
   label: string,
 ): AllocEvent[] {
   return holdings.map((h) => {
@@ -963,8 +972,8 @@ interface PortfolioAnalyticsPayload {
 }
 
 function buildPortfolioAnalytics(
-  portfolioId: string,
-  holdings: typeof ACTIVE_HOLDINGS,
+  _portfolioId: string,
+  holdings: readonly HoldingSpec[],
   narrativeLabel: string,
   strategyAnalytics: Map<string, AnalyticsPayload>,
 ): PortfolioAnalyticsPayload {
@@ -1519,7 +1528,7 @@ async function main() {
   console.log("[seed] Inserting portfolio_strategies (holdings)...");
   const makeHolding = (
     portfolioId: string,
-    h: (typeof ACTIVE_HOLDINGS)[number],
+    h: HoldingSpec,
     _source: "auto" | "manual",
   ) => ({
     portfolio_id: portfolioId,
