@@ -46,10 +46,19 @@ jobs:
 
   e2e:
     # Runs a small Playwright suite against a placeholder-env Next.js build.
-    # Scope: auth + smoke specs only. The full match-queue.spec.ts requires a
-    # seeded staging Supabase and hard-coded test credentials that CI does
-    # not have access to. Expand the --grep pattern once a seeded CI Supabase
-    # is available.
+    # Scope: auth, smoke, and the public /demo specs (demo-public +
+    # demo-founder-view). The full match-queue.spec.ts requires a seeded
+    # staging Supabase and hard-coded test credentials that CI does not
+    # have access to — expand the spec list below once a seeded CI
+    # Supabase is available.
+    #
+    # demo-screenshot.spec.ts is intentionally NOT in the CI scope: it
+    # compares against chromium-linux baseline PNGs that must be
+    # generated inside the Playwright Linux Docker image and committed
+    # alongside the spec. Until those baselines exist, running the spec
+    # in CI fails on "snapshot doesn't exist" for every case. Follow-up
+    # issue tracks baseline generation; spec still runs locally via
+    # `npx playwright test e2e/demo-screenshot.spec.ts`.
     runs-on: ubuntu-latest
     needs: frontend
     steps:
@@ -80,7 +89,7 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts
           kill $SERVER_PID 2>/dev/null || true
         env:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co

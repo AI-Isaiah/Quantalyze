@@ -178,6 +178,16 @@ export interface AllocationEvent {
   created_at: string;
 }
 
+/**
+ * `PortfolioAnalytics` mirrors the `portfolio_analytics` Postgres row.
+ *
+ * The JSONB columns reflect what `analytics-service/routers/portfolio.py`
+ * actually persists. Earlier versions of these types described intended
+ * shapes that did not match the writer; the demo-hero plan corrected them.
+ *
+ * If you change a shape here, you MUST also update
+ * `src/lib/portfolio-analytics-adapter.ts` and the analytics-service writer.
+ */
 export interface PortfolioAnalytics {
   id: string;
   portfolio_id: string;
@@ -195,13 +205,54 @@ export interface PortfolioAnalytics {
   return_mtd: number | null;
   return_ytd: number | null;
   narrative_summary: string | null;
-  correlation_matrix: Record<string, Record<string, number>> | null;
-  attribution_breakdown: { strategy_id: string; weight: number; twr: number; mwr: number; contribution: number }[] | null;
-  risk_decomposition: { strategy_id: string; marginal_risk: number; component_var: number; standalone_vol: number }[] | null;
-  benchmark_comparison: Record<string, { alpha: number; beta: number; info_ratio: number; tracking_error: number }> | null;
-  optimizer_suggestions: { strategy_id: string; strategy_name: string; corr_with_portfolio: number; sharpe_lift: number; dd_improvement: number; score: number }[] | null;
-  portfolio_equity_curve: { date: string; value: number }[] | null;
-  rolling_correlation: { date: string; value: number }[] | null;
+  correlation_matrix: CorrelationMatrix | null;
+  attribution_breakdown: AttributionRow[] | null;
+  risk_decomposition: RiskDecompositionRow[] | null;
+  benchmark_comparison: BenchmarkComparison | null;
+  optimizer_suggestions: OptimizerSuggestionRow[] | null;
+  portfolio_equity_curve: TimeSeriesPoint[] | null;
+  /** Pair-keyed rolling correlation series. Key format: "<strategyA>:<strategyB>". */
+  rolling_correlation: Record<string, TimeSeriesPoint[]> | null;
+}
+
+export interface TimeSeriesPoint {
+  date: string;
+  value: number;
+}
+
+export type CorrelationMatrix = Record<string, Record<string, number | null>>;
+
+export interface AttributionRow {
+  strategy_id: string;
+  strategy_name: string;
+  contribution: number;
+  allocation_effect: number;
+}
+
+export interface RiskDecompositionRow {
+  strategy_id: string;
+  strategy_name: string;
+  marginal_risk_pct: number;
+  standalone_vol: number;
+  component_var: number;
+  weight_pct: number;
+}
+
+export interface BenchmarkComparison {
+  symbol: string;
+  correlation: number | null;
+  benchmark_twr: number | null;
+  portfolio_twr: number | null;
+  stale: boolean;
+}
+
+export interface OptimizerSuggestionRow {
+  strategy_id: string;
+  strategy_name: string;
+  corr_with_portfolio: number;
+  sharpe_lift: number;
+  dd_improvement: number;
+  score: number;
 }
 
 export interface PortfolioStrategy {

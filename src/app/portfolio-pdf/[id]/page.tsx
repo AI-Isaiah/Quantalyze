@@ -2,11 +2,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { extractAnalytics } from "@/lib/queries";
 import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 import { Disclaimer } from "@/components/ui/Disclaimer";
-import type {
-  Portfolio,
-  PortfolioAnalytics,
-  StrategyAnalytics,
-} from "@/lib/types";
+import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
+import type { Portfolio, StrategyAnalytics } from "@/lib/types";
 import type { Metadata } from "next";
 
 export async function generateMetadata({
@@ -73,7 +70,11 @@ export default async function PortfolioPdfPage({
     );
   }
 
-  const analytics = analyticsRes.data as PortfolioAnalytics | null;
+  // Route ALL portfolio_analytics reads through the adapter so malformed
+  // JSONB (proto-key pollution, empty strings as numbers, legacy shape
+  // drift) can never crash or silently corrupt the PDF render. Matches the
+  // convention in `/demo` and `/portfolios/[id]`.
+  const analytics = adaptPortfolioAnalytics(analyticsRes.data);
   const strategiesRaw = strategiesRes.data;
 
   const strategyList = (strategiesRaw ?? []) as Array<{
@@ -91,16 +92,16 @@ export default async function PortfolioPdfPage({
   const rows: StrategyRow[] = strategyList.map((ps) => {
     const s = ps.strategies;
     const a = s
-      ? (extractAnalytics(
-          (s as Record<string, unknown>).strategy_analytics,
-        ) as StrategyAnalytics | null)
+      ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
       : null;
     const attr = attribution?.find((x) => x.strategy_id === ps.strategy_id);
+    // Persisted attribution rows expose contribution + allocation_effect.
+    // Weight comes from portfolio_strategies, TWR from the strategy's own analytics.
     return {
       strategy_id: ps.strategy_id,
       name: s?.name ?? "Unknown",
-      weight: attr?.weight ?? ps.current_weight ?? null,
-      twr: attr?.twr ?? a?.cagr ?? null,
+      weight: ps.current_weight ?? null,
+      twr: a?.cagr ?? null,
       sharpe: a?.sharpe ?? null,
       max_dd: a?.max_drawdown ?? null,
       contribution: attr?.contribution ?? null,

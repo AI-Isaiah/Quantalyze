@@ -1,0 +1,70 @@
+import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
+
+/**
+ * Vercel Cron — pings the Python analytics service /health every 5 minutes
+ * so the friend's forwarded /demo URL never lands on a cold-started worker.
+ *
+ * Vercel Cron dispatches an HTTP GET (not POST) to the configured path with
+ * a `Bearer ${CRON_SECRET}` header. We accept both verbs so the route also
+ * works for manual curl-based health probes during incident response.
+ *
+ * Why a cron AND a per-request warmup?
+ *   - Cron keeps the service warm during idle hours (belt).
+ *   - Per-request warmup (`src/lib/warmup-analytics.ts`) closes the gap if
+ *     the cron last ran > 5 min ago (suspenders).
+ *
+ * Schedule + secret: see `vercel.json`.
+ */
+
+/**
+ * Constant-time Bearer token compare so an attacker can't probe
+ * CRON_SECRET via timing differences on a public cron endpoint. JS `!==`
+ * short-circuits at the first differing byte, leaking length + prefix.
+ */
+function safeCompare(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+async function handle(req: NextRequest): Promise<NextResponse> {
+  const auth = req.headers.get("authorization") ?? "";
+  const expected = `Bearer ${process.env.CRON_SECRET}`;
+  if (!process.env.CRON_SECRET || !safeCompare(auth, expected)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const url = process.env.ANALYTICS_SERVICE_URL;
+  if (!url) {
+    return NextResponse.json({ ok: false, reason: "ANALYTICS_SERVICE_URL not set" });
+  }
+
+  const start = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`${url.replace(/\/+$/, "")}/health`, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    return NextResponse.json({
+      ok: res.ok,
+      status: res.status,
+      elapsed_ms: Date.now() - start,
+    });
+  } catch (err) {
+    return NextResponse.json({
+      ok: false,
+      reason: err instanceof Error ? err.message : "unknown",
+      elapsed_ms: Date.now() - start,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export const GET = handle;
+export const POST = handle;

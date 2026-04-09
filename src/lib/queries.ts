@@ -382,6 +382,47 @@ export async function getPortfolioAnalytics(portfolioId: string) {
   return data as PortfolioAnalytics | null;
 }
 
+/**
+ * Fetch the latest analytics row AND the latest row that successfully
+ * completed. The dashboard uses this to show "stale fallback" data when the
+ * most recent run failed: render last-good values with a stale badge instead
+ * of an error card. Both queries run in parallel.
+ *
+ * If no row exists at all, both fields are null. If the latest row is
+ * already complete, `lastGood` and `latest` reference the same row.
+ */
+export interface PortfolioAnalyticsWithFallback {
+  latest: PortfolioAnalytics | null;
+  lastGood: PortfolioAnalytics | null;
+}
+
+export async function getPortfolioAnalyticsWithFallback(
+  portfolioId: string,
+): Promise<PortfolioAnalyticsWithFallback> {
+  const supabase = await createClient();
+  const [latestRes, completeRes] = await Promise.all([
+    supabase
+      .from("portfolio_analytics")
+      .select("*")
+      .eq("portfolio_id", portfolioId)
+      .order("computed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from("portfolio_analytics")
+      .select("*")
+      .eq("portfolio_id", portfolioId)
+      .eq("computation_status", "complete")
+      .order("computed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  return {
+    latest: (latestRes.data ?? null) as PortfolioAnalytics | null,
+    lastGood: (completeRes.data ?? null) as PortfolioAnalytics | null,
+  };
+}
+
 export async function getPortfolioAlerts(portfolioId: string) {
   const supabase = await createClient();
   const { data } = await supabase

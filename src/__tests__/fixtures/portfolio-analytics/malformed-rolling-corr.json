@@ -1,0 +1,29 @@
+{
+  "id": "00000000-0000-4000-8000-000000000005",
+  "portfolio_id": "dddddddd-0001-4000-8000-000000000001",
+  "computed_at": "2026-04-09T08:00:00.000Z",
+  "computation_status": "complete",
+  "computation_error": null,
+  "total_aum": 10000000,
+  "total_return_twr": 0.18,
+  "total_return_mwr": 0.17,
+  "portfolio_sharpe": 1.42,
+  "portfolio_volatility": 0.13,
+  "portfolio_max_drawdown": -0.05,
+  "avg_pairwise_correlation": 0.21,
+  "return_24h": 0.002,
+  "return_mtd": 0.023,
+  "return_ytd": 0.18,
+  "narrative_summary": "Legacy fixture: rolling_correlation is a flat array (the wrong shape an earlier version of the TS type promised). The adapter should still handle this gracefully.",
+  "correlation_matrix": null,
+  "attribution_breakdown": null,
+  "risk_decomposition": null,
+  "benchmark_comparison": null,
+  "optimizer_suggestions": null,
+  "portfolio_equity_curve": null,
+  "rolling_correlation": [
+    { "date": "2026-02-09", "value": 0.18 },
+    { "date": "2026-03-09", "value": 0.22 },
+    { "date": "2026-04-09", "value": 0.31 }
+  ]
+}

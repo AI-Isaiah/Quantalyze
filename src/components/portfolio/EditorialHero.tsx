@@ -1,0 +1,122 @@
+import { type ReactNode } from "react";
+import { cn, formatPercent } from "@/lib/utils";
+
+/**
+ * `<EditorialHero>` — the verdict block at the top of /demo.
+ *
+ * One editorial line in Instrument Serif, one product descriptor in DM Sans,
+ * four hero numbers in Geist Mono tabular-nums. Optional CTA slot for the
+ * "Download IC Report" button. NO card border, NO icons, NO Health Score.
+ *
+ * Mobile: at 320px the headline reflows to 24/32; numbers stay on a 2x2
+ * grid; CTA stretches full-width.
+ */
+
+export interface EditorialHeroNumbers {
+  portfolioTwr: number | null;
+  benchmarkTwr: number | null;
+  portfolioMaxDrawdown: number | null;
+  benchmarkMaxDrawdown: number | null;
+  benchmarkLabel?: string;
+}
+
+export interface EditorialHeroProps {
+  /** The single editorial claim (e.g. "Beat BTC on the way up. And on the way down."). */
+  headline: string;
+  /** One-line product descriptor under the headline. */
+  descriptor?: string;
+  /** Hero numbers — if all are null the numbers block is hidden. */
+  numbers: EditorialHeroNumbers;
+  /** Optional CTA slot — typically the Download IC Report button. */
+  cta?: ReactNode;
+  /** Pass-through className for layout containers. */
+  className?: string;
+}
+
+interface MetricCellProps {
+  label: string;
+  value: number | null;
+  negative?: boolean;
+}
+
+function metricValueClass(value: number | null, negative?: boolean): string {
+  if (value == null) return "text-text-muted";
+  if (negative) return "text-negative";
+  return "text-text-primary";
+}
+
+function MetricCell({ label, value, negative }: MetricCellProps) {
+  // Using <dt>/<dd> inside the parent <dl> so the element set is valid
+  // HTML and screen readers expose this as a term/description pair. A
+  // <div> wrapper is allowed inside <dl> per the HTML spec.
+  return (
+    <div>
+      <dt className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
+        {label}
+      </dt>
+      <dd
+        className={cn(
+          "mt-1 font-metric tabular-nums text-2xl sm:text-3xl",
+          metricValueClass(value, negative),
+        )}
+      >
+        {formatPercent(value)}
+      </dd>
+    </div>
+  );
+}
+
+export function EditorialHero({
+  headline,
+  descriptor,
+  numbers,
+  cta,
+  className,
+}: EditorialHeroProps) {
+  const benchmarkLabel = numbers.benchmarkLabel ?? "BTC";
+  const hasAnyNumber =
+    numbers.portfolioTwr != null ||
+    numbers.benchmarkTwr != null ||
+    numbers.portfolioMaxDrawdown != null ||
+    numbers.benchmarkMaxDrawdown != null;
+
+  return (
+    <section
+      aria-labelledby="editorial-hero-headline"
+      className={cn("flex flex-col gap-6", className)}
+    >
+      <div>
+        <h1
+          id="editorial-hero-headline"
+          className="font-display text-3xl sm:text-4xl md:text-5xl leading-tight text-text-primary"
+        >
+          {headline}
+        </h1>
+        {descriptor && (
+          <p className="mt-3 text-sm sm:text-base text-text-secondary max-w-2xl">
+            {descriptor}
+          </p>
+        )}
+      </div>
+
+      {hasAnyNumber && (
+        <dl className="grid grid-cols-2 gap-x-8 gap-y-4 sm:max-w-xl">
+          <MetricCell label="Portfolio TWR" value={numbers.portfolioTwr} />
+          <MetricCell label={`${benchmarkLabel} TWR`} value={numbers.benchmarkTwr} />
+          <MetricCell
+            label="Portfolio drawdown"
+            value={numbers.portfolioMaxDrawdown}
+            negative
+          />
+          <MetricCell
+            label={`${benchmarkLabel} drawdown`}
+            value={numbers.benchmarkMaxDrawdown}
+            negative
+          />
+        </dl>
+      )}
+
+      {cta && <div className="flex flex-wrap items-center gap-3">{cta}</div>}
+    </section>
+  );
+}
