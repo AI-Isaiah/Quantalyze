@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
+import { ScopedBanner } from "@/components/ui/ScopedBanner";
 
 // Sample payload the founder can demo cold. Paste-and-go during the cap-intro
 // meeting: swap the partner tag, replace the CSVs with the partner's 3+3, hit
@@ -186,29 +187,28 @@ export default function PartnerImportPage() {
         )}
 
         {result && (
-          <Card className="border-l-4 border-accent">
-            <h3 className="text-base font-semibold text-text-primary">
-              Pilot imported
-            </h3>
-            <p className="mt-2 text-sm text-text-secondary">
-              <span className="font-metric text-text-primary">
-                {result.managers_created}
-              </span>{" "}
-              managers,{" "}
-              <span className="font-metric text-text-primary">
-                {result.strategies_created}
-              </span>{" "}
-              strategies,{" "}
-              <span className="font-metric text-text-primary">
-                {result.allocators_created}
-              </span>{" "}
-              allocators staged for{" "}
-              <span className="font-mono text-text-primary">{slug}</span>.
-            </p>
-            <p className="mt-2 text-xs text-text-muted">
-              Opening the pilot dashboard…
-            </p>
-          </Card>
+          <ScopedBanner
+            tone="success"
+            title="Pilot imported"
+            subtitle={
+              <>
+                <span className="font-metric text-text-primary">
+                  {result.managers_created}
+                </span>{" "}
+                managers,{" "}
+                <span className="font-metric text-text-primary">
+                  {result.strategies_created}
+                </span>{" "}
+                strategies,{" "}
+                <span className="font-metric text-text-primary">
+                  {result.allocators_created}
+                </span>{" "}
+                allocators staged for{" "}
+                <span className="font-mono text-text-primary">{slug}</span>.
+                Opening the pilot dashboard…
+              </>
+            }
+          />
         )}
 
         <div className="flex items-center gap-3">

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { ScopedBanner } from "@/components/ui/ScopedBanner";
 
 interface WeeklyRow {
   week_start: string;
@@ -97,46 +98,48 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
           filtered and an unfiltered view. When scoped to a partner pilot we
           use the accent-teal left border; otherwise we render an equally
           prominent neutral banner confirming "no filter". Trust breakage is
-          catastrophic if we ever ship a subtle text-only version of this. */}
-      {partnerTag ? (
-        <div
-          className="border-l-4 border-accent bg-accent/5 px-4 py-3"
-          role="status"
-          aria-live="polite"
-        >
-          <p className="font-display text-base text-text-primary">
-            Filtered to partner pilot:{" "}
-            <span className="font-mono text-accent">{partnerTag}</span>
-          </p>
-          <p className="mt-0.5 text-xs text-text-muted">
-            Hit rate scoped to allocators tagged{" "}
-            <span className="font-mono">{partnerTag}</span>. Intros shipped:{" "}
-            <span className="font-metric tabular-nums text-text-primary">
-              {metrics.intros_shipped}
-            </span>
-          </p>
-        </div>
-      ) : (
-        <div
-          className="border-l-4 border-border bg-surface px-4 py-3"
-          role="status"
-          aria-live="polite"
-        >
-          <p className="font-display text-base text-text-primary">
-            Showing all allocators (no filter)
-          </p>
-          <p className="mt-0.5 text-xs text-text-muted">
-            Unscoped view. Use{" "}
-            <Link
-              href="/admin/partner-import"
-              className="text-accent hover:text-accent-hover"
-            >
-              partner import
-            </Link>{" "}
-            to spin up a pilot and scope this dashboard.
-          </p>
-        </div>
-      )}
+          catastrophic if we ever ship a subtle text-only version of this.
+          Structure is enforced by <ScopedBanner> — both branches are the
+          same component, so the filtered/unfiltered symmetry cannot drift. */}
+      <div role="status" aria-live="polite">
+        {partnerTag ? (
+          <ScopedBanner
+            tone="accent"
+            title={
+              <>
+                Filtered to partner pilot:{" "}
+                <span className="font-mono text-accent">{partnerTag}</span>
+              </>
+            }
+            subtitle={
+              <>
+                Hit rate scoped to allocators tagged{" "}
+                <span className="font-mono">{partnerTag}</span>. Intros shipped:{" "}
+                <span className="font-metric tabular-nums text-text-primary">
+                  {metrics.intros_shipped}
+                </span>
+              </>
+            }
+          />
+        ) : (
+          <ScopedBanner
+            tone="neutral"
+            title="Showing all allocators (no filter)"
+            subtitle={
+              <>
+                Unscoped view. Use{" "}
+                <Link
+                  href="/admin/partner-import"
+                  className="text-accent hover:text-accent-hover"
+                >
+                  partner import
+                </Link>{" "}
+                to spin up a pilot and scope this dashboard.
+              </>
+            }
+          />
+        )}
+      </div>
 
       {/* Nav breadcrumb */}
       <nav className="flex items-center gap-2 text-sm text-text-muted">
