@@ -12,12 +12,14 @@ import {
 import { ALLOCATOR_ACTIVE_ID } from "@/lib/demo";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
-// Never cache — the friend clicking the Telegram link should see a fresh
-// batch on every visit so a background recompute shows up immediately.
-// The multi-step fallback (latest → previous batch → portfolio-only) is
-// intentional: design review flagged the "Refresh in 1 minute" empty state
-// as a demo-killer.
-export const dynamic = "force-dynamic";
+// ISR with 60s revalidation. The demo is hard-locked to a single seeded
+// allocator (ALLOCATOR_ACTIVE_ID), so every viewer sees the same HTML —
+// caching it at the Vercel CDN for 60 seconds turns a Telegram/link-viral
+// scenario from hundreds of Supabase calls per second into ~1 per minute.
+// The multi-step fallback (latest → previous batch → portfolio-only) still
+// kicks in when the batch is empty — it just runs once per revalidation
+// cycle now, not on every request.
+export const revalidate = 60;
 
 type StrategySummary = Pick<
   Strategy,
