@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
@@ -13,6 +14,7 @@ import type {
   AllocationEvent,
   DisclosureTier,
   ManagerIdentity,
+  UserFavoriteWithStrategy,
 } from "./types";
 
 /**
@@ -303,6 +305,7 @@ export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
     name: p.name,
     description: p.description,
     created_at: p.created_at,
+    is_test: p.is_test ?? false,
     strategy_count: Array.isArray(p.portfolio_strategies) ? p.portfolio_strategies.length : 0,
   }));
 }
@@ -462,3 +465,144 @@ export async function getAllocatorAggregates(userId: string) {
 
   return { portfolios, analytics: (analytics ?? []) as PortfolioAnalytics[] };
 }
+
+// =========================================================================
+// My Allocation + Test Portfolios + Favorites (migrations 023, 024)
+// =========================================================================
+
+/**
+ * Fetch the single real portfolio for the given user — the one row with
+ * `is_test = false`. Migration 023 enforces at most one real portfolio
+ * per user via a partial unique index, so this query is guaranteed to
+ * return either exactly one row or null.
+ *
+ * Used by the My Allocation page (renamed from the old cross-portfolio
+ * /allocations aggregator) to anchor all downstream queries — portfolio
+ * analytics, portfolio_strategies + daily_returns, alerts — on a single
+ * portfolio_id. Wrapped in React.cache() so multiple server components
+ * in the same render tree deduplicate to one DB call per request.
+ */
+export const getRealPortfolio = cache(
+  async (userId: string): Promise<Portfolio | null> => {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("portfolios")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("is_test", false)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data as Portfolio;
+  },
+);
+
+/**
+ * Fetch saved test portfolios for the given user — any row with
+ * `is_test = true`. Used by the renamed /portfolios page ("Test
+ * Portfolios"), which now only shows hypothetical scenarios. Real-money
+ * books live on the My Allocation page via getRealPortfolio.
+ *
+ * Each row is enriched with a strategy_count derived from the
+ * portfolio_strategies join, matching the shape the existing
+ * CreatePortfolioForm-consuming UI expects.
+ */
+export const getTestPortfolios = cache(
+  async (userId: string): Promise<PortfolioWithCount[]> => {
+    const supabase = await createClient();
+    const { data: portfolios, error } = await supabase
+      .from("portfolios")
+      .select("*, portfolio_strategies(strategy_id)")
+      .eq("user_id", userId)
+      .eq("is_test", true)
+      .order("created_at", { ascending: false });
+
+    if (error || !portfolios) return [];
+
+    return portfolios.map((p) => ({
+      id: p.id,
+      user_id: p.user_id,
+      name: p.name,
+      description: p.description,
+      created_at: p.created_at,
+      is_test: p.is_test,
+      strategy_count: Array.isArray(p.portfolio_strategies)
+        ? p.portfolio_strategies.length
+        : 0,
+    }));
+  },
+);
+
+/**
+ * Fetch the user's favorite strategies with the subset of strategy +
+ * strategy_analytics fields the Favorites panel needs:
+ *   - metadata for the list row (name, codename, type, markets, tier)
+ *   - summary scalars for the row stats (cagr, sharpe, vol, max_drawdown)
+ *   - raw daily_returns for the client-side composite curve math that
+ *     powers the "+ Favorites" overlay on the My Allocation chart
+ *
+ * RLS on user_favorites restricts rows to auth.uid() = user_id, so even
+ * though this query takes a userId argument, the server-side client
+ * enforces the constraint automatically. Ordered by created_at DESC so
+ * most-recently-starred strategies appear at the top.
+ */
+export const getUserFavorites = cache(
+  async (userId: string): Promise<UserFavoriteWithStrategy[]> => {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("user_favorites")
+      .select(
+        `
+        user_id,
+        strategy_id,
+        created_at,
+        notes,
+        strategy:strategies!inner (
+          id,
+          name,
+          codename,
+          disclosure_tier,
+          strategy_types,
+          markets,
+          start_date,
+          strategy_analytics (
+            daily_returns,
+            cagr,
+            sharpe,
+            volatility,
+            max_drawdown
+          )
+        )
+        `,
+      )
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (error || !data) return [];
+
+    // Supabase's join returns strategy as an array even with !inner when
+    // the PostgREST embed isn't marked many-to-one. Normalize to a single
+    // object; same pattern the allocations page already uses.
+    return data.map((row) => {
+      const rawStrategy = (row as unknown as { strategy: unknown }).strategy;
+      const strategy = (
+        Array.isArray(rawStrategy) ? rawStrategy[0] : rawStrategy
+      ) as UserFavoriteWithStrategy["strategy"];
+      const rawAnalytics = (strategy as unknown as { strategy_analytics: unknown })
+        ?.strategy_analytics;
+      const analytics = Array.isArray(rawAnalytics)
+        ? rawAnalytics[0]
+        : rawAnalytics;
+      return {
+        user_id: row.user_id,
+        strategy_id: row.strategy_id,
+        created_at: row.created_at,
+        notes: row.notes,
+        strategy: {
+          ...strategy,
+          strategy_analytics: (analytics ?? null) as
+            | UserFavoriteWithStrategy["strategy"]["strategy_analytics"],
+        },
+      };
+    });
+  },
+);

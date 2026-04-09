@@ -148,10 +148,55 @@ export interface Portfolio {
   name: string;
   description: string | null;
   created_at: string;
+  /**
+   * Added in migration 023. True for saved hypothetical test portfolios
+   * (shown in the /portfolios route, renamed "Test Portfolios"). False for
+   * the allocator's single real invested book (shown in /allocations,
+   * renamed "My Allocation"). A DB partial unique index
+   * (portfolios_one_real_per_user) enforces at most one is_test=false row
+   * per user_id.
+   */
+  is_test: boolean;
 }
 
 export interface PortfolioWithCount extends Portfolio {
   strategy_count: number;
+}
+
+/**
+ * Added in migration 024. An allocator's watchlist of strategies they are
+ * considering but have not put real capital into. Drives the Favorites
+ * panel in My Allocation that overlays a historical backfill on the real
+ * portfolio curve when strategies are toggled on.
+ */
+export interface UserFavorite {
+  user_id: string;
+  strategy_id: string;
+  created_at: string;
+  notes: string | null;
+}
+
+/**
+ * A favorite joined with its strategy + the subset of strategy_analytics
+ * the Favorites panel needs (raw daily_returns for the overlay math, plus
+ * the summary scalars shown in the panel row).
+ */
+export interface UserFavoriteWithStrategy extends UserFavorite {
+  strategy: Pick<
+    Strategy,
+    | "id"
+    | "name"
+    | "codename"
+    | "disclosure_tier"
+    | "strategy_types"
+    | "markets"
+    | "start_date"
+  > & {
+    strategy_analytics: Pick<
+      StrategyAnalytics,
+      "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
+    > | null;
+  };
 }
 
 export interface Deck {

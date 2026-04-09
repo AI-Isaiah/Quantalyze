@@ -1267,6 +1267,12 @@ async function wipeNewSeed(admin: SupabaseClient) {
   console.log("[seed] Wiping prior full-app seed data (idempotent)...");
   const portfolioIds = Object.values(PORTFOLIO_IDS);
 
+  // Wipe the allocator's favorites first. Migration 024 cascades from
+  // strategies → user_favorites, but we also wipe strategies below so
+  // belt-and-suspenders: deleting favorites explicitly is a noop if the
+  // table doesn't exist yet (pre-migration), and a proper cleanup post.
+  await admin.from("user_favorites").delete().eq("user_id", ALLOCATOR_ID);
+
   await admin
     .from("portfolio_analytics")
     .delete()
@@ -1528,6 +1534,7 @@ async function main() {
       description:
         "My real book — holdings are auto-synced from connected exchange API keys. Invest/divest events detected via exchange sync.",
       created_at: "2024-06-01T12:00:00Z",
+      is_test: false,
     },
     {
       id: PORTFOLIO_IDS.aggressive,
@@ -1536,6 +1543,7 @@ async function main() {
       description:
         "SCENARIO — not a real position. Simulates what my book would have done with more directional exposure.",
       created_at: "2024-07-15T12:00:00Z",
+      is_test: true,
     },
     {
       id: PORTFOLIO_IDS.riskoff,
@@ -1544,6 +1552,7 @@ async function main() {
       description:
         "SCENARIO — not a real position. Simulates a defensive arbitrage-only allocation.",
       created_at: "2024-07-15T13:00:00Z",
+      is_test: true,
     },
   ]);
   if (pfErr) throw new Error(`portfolios: ${pfErr.message}`);
@@ -1633,12 +1642,50 @@ async function main() {
   ]);
   if (paErr) throw new Error(`portfolio_analytics: ${paErr.message}`);
 
+  // ========= 11. user_favorites =========
+  // Seed four favorites for the demo allocator pointing at strategies NOT
+  // in Active Allocation, so the Favorites panel in My Allocation has
+  // genuinely interesting "what if I added this to my book?" material to
+  // toggle. Picks span different archetypes (arb, momentum, mean
+  // reversion, on-chain exploratory) so overlaying each tells a distinct
+  // story on the YTD chart.
+  console.log("[seed] Seeding user_favorites for the demo allocator...");
+  const FAVORITE_IDXS: number[] = [
+    IDX.POLARIS_ARB, // cross-exchange arbitrage — lowest-vol diversifier
+    IDX.REDLINE_MOM, // momentum / trend — adds upside convexity
+    IDX.KEPLER_MR, // mean reversion — orthogonal to the current book
+    IDX.DRIFT_ONCHAIN, // on-chain exploratory — higher vol, different beta
+  ];
+  const activeIdxSet = new Set(ACTIVE_HOLDINGS.map((h) => h.idx));
+  for (const idx of FAVORITE_IDXS) {
+    if (activeIdxSet.has(idx)) {
+      throw new Error(
+        `[seed] Favorite idx ${idx} (${ARCHETYPES[idx].name}) is already in ACTIVE_HOLDINGS. Pick a different strategy so the Favorites panel has something meaningful to toggle.`,
+      );
+    }
+  }
+  const favoriteRows = FAVORITE_IDXS.map((idx, i) => ({
+    user_id: ALLOCATOR_ID,
+    strategy_id: ARCHETYPES[idx].id,
+    // Stagger created_at so the most recent favorite appears at the top
+    // of the panel — mirrors a real user adding them over time.
+    created_at: new Date(
+      Date.UTC(2026, 3, 1 + i, 12, 0, 0),
+    ).toISOString(),
+    notes: null,
+  }));
+  const { error: favErr } = await admin
+    .from("user_favorites")
+    .upsert(favoriteRows);
+  if (favErr) throw new Error(`user_favorites: ${favErr.message}`);
+
   console.log("[seed] ✅ Full-app demo seed complete.");
   console.log(`  - 1 allocator (${ALLOCATOR_EMAIL} / ${ALLOCATOR_PASSWORD})`);
   console.log(`  - ${MANAGER_IDS.length} managers`);
   console.log(`  - ${ARCHETYPES.length} strategies`);
   console.log(`  - 3 portfolios (1 real + 2 scenarios)`);
   console.log(`  - ${events.length} allocation events`);
+  console.log(`  - ${favoriteRows.length} user_favorites`);
 }
 
 main().catch((err) => {
