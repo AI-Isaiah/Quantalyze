@@ -7,6 +7,7 @@ import { isValidPartnerTag } from "@/lib/partner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import type { Profile, Strategy, Role } from "@/lib/types";
 
 // /admin/partner-pilot/[partner_tag] — T-1.3 from the cap-intro demo sprint.
@@ -96,26 +97,23 @@ export default async function PartnerPilotPage({
         {/* Pipeline / hero card. Forward-looking framing — we never render
             "0 intros" literally because it reads as an apology instead of a
             promise. When N intros have shipped, we show a separate bar below. */}
-        <Card className="border-l-4 border-accent">
-          <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
-            Pipeline
-          </p>
-          <p className="mt-2 font-display text-[32px] leading-tight text-text-primary">
-            {allocators.length} allocators &times; {strategies.length} strategies ={" "}
-            <span className="font-metric tabular-nums">{potentialIntros}</span>{" "}
-            potential intros
-          </p>
-          <p className="mt-2 text-sm text-text-secondary">
-            Every allocator in this pilot is a candidate for every strategy.
-            Hit the match queue to start shipping — the algorithm has
-            already ranked candidates for each allocator.
-          </p>
-          <div className="mt-4">
+        <ScopedBanner
+          tone="accent"
+          title={
+            <>
+              {allocators.length} allocators &times; {strategies.length}{" "}
+              strategies ={" "}
+              <span className="font-metric tabular-nums">{potentialIntros}</span>{" "}
+              potential intros
+            </>
+          }
+          subtitle="Every allocator in this pilot is a candidate for every strategy. Hit the match queue to start shipping — the algorithm has already ranked candidates for each allocator."
+          cta={
             <Link href={`/admin/match/eval?partner_tag=${partner_tag}`}>
               <Button>Open filtered eval dashboard &rarr;</Button>
             </Link>
-          </div>
-        </Card>
+          }
+        />
 
         {/* Intros-shipped bar. Only rendered when strictly > 0 so we never
             display "0 intros" on the partner pilot page. */}

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
@@ -417,11 +418,11 @@ export function AllocatorMatchQueue({
           precedence over the mobile banner because it applies at every
           viewport, not just <md. */}
       {forceReadOnly && (
-        <div className="border-l-4 border-accent bg-accent/5 px-4 py-3 mb-4">
-          <p className="text-sm text-text-primary font-medium">
-            Read-only preview — actions disabled on the public demo.
-          </p>
-        </div>
+        <ScopedBanner
+          tone="accent"
+          title="Read-only preview"
+          subtitle="Actions disabled on the public demo."
+        />
       )}
 
       {/* Breadcrumb — hidden on the public demo because /admin/match requires

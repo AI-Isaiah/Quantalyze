@@ -213,9 +213,13 @@ here so the next session can opportunistically close them.
 - ~~`ALLOCATOR_ACTIVE_ID` and the `^[a-z0-9-]+$` partner-tag regex are
   hard-coded in three files each.~~ **DONE in hardening PR 6** — extracted
   to `src/lib/demo.ts` and `src/lib/partner.ts`.
-- Four "left-border-accent" banners (filtered eval, read-only preview,
+- ~~Four "left-border-accent" banners (filtered eval, read-only preview,
   partner pilot hero, partner import success) should be a `ScopedBanner`
-  primitive so the trust-critical filter banner stays structurally in sync.
+  primitive so the trust-critical filter banner stays structurally in sync.~~
+  **DONE in hardening PR 8** — extracted to
+  `src/components/ui/ScopedBanner.tsx` with 4 tones (accent/neutral/warning/
+  success) and 4 call sites consolidated. Filtered vs. unfiltered symmetry on
+  the eval dashboard is now enforced at the component level.
 - `useAnimatedNumber` rapid-change behavior: verify the tween doesn't
   degrade to a snap-to when the target updates every frame.
 - `match_eval.py` N+1 query pattern: each intro triggers two sequential
