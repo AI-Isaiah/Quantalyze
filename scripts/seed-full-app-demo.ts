@@ -836,7 +836,7 @@ function buildActiveLifecycle(): AllocEvent[] {
       amount: h.initialUsd,
       event_date: initialDate,
       notes: `Initial allocation detected on ${arch.exchanges[0].toUpperCase()} sub-account. Auto-synced from exchange API.`,
-      source: "exchange_sync",
+      source: "auto",
     });
 
     // Top-up after good quarter (~3 months later)
@@ -849,7 +849,7 @@ function buildActiveLifecycle(): AllocEvent[] {
       amount: topUpAmount,
       event_date: topUpDate,
       notes: `Additional capital deposited — ${arch.exchanges[0]} detected +${(rng() * 15 + 8).toFixed(1)}% equity growth this quarter.`,
-      source: "exchange_sync",
+      source: "auto",
     });
 
     // Trim after drawdown (directional strategies in Q4 2024)
@@ -865,7 +865,7 @@ function buildActiveLifecycle(): AllocEvent[] {
         event_date: trimDate,
         notes:
           "Partial redemption — exchange balance showed drawdown, reduced exposure.",
-        source: "exchange_sync",
+        source: "auto",
       });
 
       // Re-add after recovery (2025 Q1)
@@ -878,7 +878,7 @@ function buildActiveLifecycle(): AllocEvent[] {
         amount: reAddAmount,
         event_date: reAddDate,
         notes: `Thesis restored — re-added position after ${arch.exchanges[0]} account recovered prior peak.`,
-        source: "exchange_sync",
+        source: "auto",
       });
     }
 
@@ -892,7 +892,7 @@ function buildActiveLifecycle(): AllocEvent[] {
       amount: finalAmount,
       event_date: finalTopUp,
       notes: "Scheduled capital top-up, detected via exchange sync.",
-      source: "exchange_sync",
+      source: "auto",
     });
   }
   return out;
@@ -1379,7 +1379,7 @@ async function main() {
 
   // ========= 3. allocator_preferences =========
   console.log("[seed] Upserting allocator preferences...");
-  await admin.from("allocator_preferences").upsert({
+  const { error: prefErr } = await admin.from("allocator_preferences").upsert({
     user_id: ALLOCATOR_ID,
     mandate_archetype: "institutional_lp",
     target_ticket_size_usd: 1_000_000,
@@ -1393,11 +1393,12 @@ async function main() {
     founder_notes:
       "Active Allocation is my real book. Aggressive Tilt and Risk-Off are scenario tests I use to decide invest/divest.",
   });
+  if (prefErr) throw new Error(`allocator_preferences: ${prefErr.message}`);
 
   // ========= 4. api_keys =========
   console.log("[seed] Inserting api_keys for real-portfolio strategies...");
   for (const keyId of API_KEY_IDS) {
-    await admin.from("api_keys").upsert({
+    const { error } = await admin.from("api_keys").upsert({
       id: keyId,
       user_id: ALLOCATOR_ID,
       exchange: keyId === API_KEY_IDS[0] ? "binance" : "okx",
@@ -1413,6 +1414,7 @@ async function main() {
       last_sync_at: new Date().toISOString(),
       account_balance_usdt: 5_000_000,
     });
+    if (error) throw new Error(`api_keys ${keyId}: ${error.message}`);
   }
 
   // ========= 5. strategies =========
@@ -1421,7 +1423,7 @@ async function main() {
     ACTIVE_HOLDINGS.map((h) => ARCHETYPES[h.idx].id),
   );
   for (const arch of ARCHETYPES) {
-    await admin.from("strategies").upsert({
+    const { error } = await admin.from("strategies").upsert({
       id: arch.id,
       user_id: MANAGER_IDS[arch.managerIdx],
       api_key_id: realPortfolioStrategyIds.has(arch.id) ? API_KEY_IDS[0] : null,
@@ -1437,11 +1439,12 @@ async function main() {
       aum: arch.aum,
       max_capacity: arch.capacity,
       start_date: arch.startDate,
-      status: "verified",
+      status: "published",
       is_example: true,
       benchmark: "BTC",
       disclosure_tier: arch.tier,
     });
+    if (error) throw new Error(`strategies upsert failed for ${arch.name}: ${error.message}`);
   }
 
   // ========= 6. strategy_analytics =========
@@ -1450,7 +1453,14 @@ async function main() {
   for (const arch of ARCHETYPES) {
     const payload = generateAnalytics(arch);
     strategyAnalyticsMap.set(arch.id, payload);
-    await admin.from("strategy_analytics").upsert({
+    // Wipe existing analytics for this strategy first (composite PK is (id),
+    // but strategy_id isn't a PK — it's FK + we need the "one row per
+    // strategy" semantic via a delete-then-insert).
+    await admin
+      .from("strategy_analytics")
+      .delete()
+      .eq("strategy_id", arch.id);
+    const { error } = await admin.from("strategy_analytics").insert({
       strategy_id: arch.id,
       computation_status: "complete",
       benchmark: "BTC",
@@ -1472,11 +1482,12 @@ async function main() {
       rolling_metrics: payload.rolling_metrics,
       return_quantiles: payload.return_quantiles,
     });
+    if (error) throw new Error(`strategy_analytics insert failed for ${arch.name}: ${error.message}`);
   }
 
   // ========= 7. portfolios =========
   console.log("[seed] Inserting 3 portfolios...");
-  await admin.from("portfolios").upsert([
+  const { error: pfErr } = await admin.from("portfolios").upsert([
     {
       id: PORTFOLIO_IDS.active,
       user_id: ALLOCATOR_ID,
@@ -1502,13 +1513,14 @@ async function main() {
       created_at: "2024-07-15T13:00:00Z",
     },
   ]);
+  if (pfErr) throw new Error(`portfolios: ${pfErr.message}`);
 
   // ========= 8. portfolio_strategies =========
   console.log("[seed] Inserting portfolio_strategies (holdings)...");
   const makeHolding = (
     portfolioId: string,
     h: (typeof ACTIVE_HOLDINGS)[number],
-    source: "exchange_sync" | "manual",
+    _source: "auto" | "manual",
   ) => ({
     portfolio_id: portfolioId,
     strategy_id: ARCHETYPES[h.idx].id,
@@ -1522,12 +1534,13 @@ async function main() {
 
   const holdingsRows: ReturnType<typeof makeHolding>[] = [];
   for (const h of ACTIVE_HOLDINGS)
-    holdingsRows.push(makeHolding(PORTFOLIO_IDS.active, h, "exchange_sync"));
+    holdingsRows.push(makeHolding(PORTFOLIO_IDS.active, h, "auto"));
   for (const h of AGGRESSIVE_HOLDINGS)
     holdingsRows.push(makeHolding(PORTFOLIO_IDS.aggressive, h, "manual"));
   for (const h of RISKOFF_HOLDINGS)
     holdingsRows.push(makeHolding(PORTFOLIO_IDS.riskoff, h, "manual"));
-  await admin.from("portfolio_strategies").upsert(holdingsRows);
+  const { error: psErr } = await admin.from("portfolio_strategies").upsert(holdingsRows);
+  if (psErr) throw new Error(`portfolio_strategies: ${psErr.message}`);
 
   // ========= 9. allocation_events =========
   console.log("[seed] Inserting allocation_events (lifecycle)...");
@@ -1575,11 +1588,17 @@ async function main() {
     "What-if: Risk-Off",
     strategyAnalyticsMap,
   );
-  await admin.from("portfolio_analytics").upsert([
+  // portfolio_analytics is upsert-by-id not by portfolio_id; wipe first
+  await admin
+    .from("portfolio_analytics")
+    .delete()
+    .in("portfolio_id", Object.values(PORTFOLIO_IDS));
+  const { error: paErr } = await admin.from("portfolio_analytics").insert([
     { portfolio_id: PORTFOLIO_IDS.active, ...activeAnalytics },
     { portfolio_id: PORTFOLIO_IDS.aggressive, ...aggressiveAnalytics },
     { portfolio_id: PORTFOLIO_IDS.riskoff, ...riskoffAnalytics },
   ]);
+  if (paErr) throw new Error(`portfolio_analytics: ${paErr.message}`);
 
   console.log("[seed] ✅ Full-app demo seed complete.");
   console.log(`  - 1 allocator (${ALLOCATOR_EMAIL} / ${ALLOCATOR_PASSWORD})`);
