@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { isValidPartnerTag } from "@/lib/partner";
+import { ensureAuthUser } from "@/lib/supabase/admin-users";
+import type { DisclosureTier } from "@/lib/types";
 
 // POST /api/admin/partner-import
 //
@@ -13,21 +15,16 @@ import { isAdminUser } from "@/lib/admin";
 //   * Upserts everything idempotently so the founder can re-run during a demo.
 //   * On `user_already_exists` we MUST fall through to a profiles-by-email
 //     lookup and continue — silently skipping a row would kill the demo by
-//     under-counting the imported pilot.
+//     under-counting the imported pilot. This is handled in the shared
+//     `ensureAuthUser` helper.
 //
-// Auth: admin only. partner_tag validated server-side against ^[a-z0-9-]+$.
-
-const PARTNER_TAG_RE = /^[a-z0-9-]+$/;
-const KNOWN_USER_EXISTS_CODES = new Set([
-  "email_exists",
-  "user_already_exists",
-  "phone_exists",
-]);
+// Auth: admin only. partner_tag validated via the shared isValidPartnerTag
+// helper against the canonical PARTNER_TAG_RE.
 
 interface ManagerRow {
   manager_email: string;
   strategy_name: string;
-  disclosure_tier: "institutional" | "exploratory";
+  disclosure_tier: DisclosureTier;
 }
 
 interface AllocatorRow {
@@ -54,7 +51,7 @@ function parseManagersCsv(raw: string): ManagerRow[] {
     const [manager_email, strategy_name, disclosure_tierRaw] = cells;
     if (!manager_email || !strategy_name) continue;
     const tier = (disclosure_tierRaw || "exploratory").toLowerCase();
-    const disclosure_tier: "institutional" | "exploratory" =
+    const disclosure_tier: DisclosureTier =
       tier === "institutional" ? "institutional" : "exploratory";
     out.push({ manager_email, strategy_name, disclosure_tier });
   }
@@ -86,56 +83,6 @@ function displayNameFromEmail(email: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-/**
- * Create an auth user or look up the existing profile id. Never silently
- * skips — an existing user must be resolved to the real id so the downstream
- * profile upsert + strategy insert can proceed.
- */
-async function ensureAuthUser(
-  admin: SupabaseClient,
-  email: string,
-): Promise<string> {
-  const { data, error } = await admin.auth.admin.createUser({
-    email,
-    email_confirm: true,
-  });
-
-  if (!error && data?.user?.id) {
-    return data.user.id;
-  }
-
-  if (error) {
-    const code = (error as { code?: string }).code ?? "";
-    const status = (error as { status?: number }).status ?? 0;
-    const isKnownConflict =
-      KNOWN_USER_EXISTS_CODES.has(code) ||
-      (status === 422 && /exist/i.test(error.message ?? ""));
-    if (!isKnownConflict) {
-      throw error;
-    }
-  }
-
-  // Fall-through: the user already exists. Look up the existing profile id
-  // by email. Do NOT silently skip — the founder needs this row staged in
-  // the pilot so it flows through the downstream upserts.
-  const { data: profile, error: lookupErr } = await admin
-    .from("profiles")
-    .select("id")
-    .eq("email", email)
-    .maybeSingle();
-  if (lookupErr) {
-    throw new Error(
-      `Failed to resolve existing user for ${email}: ${lookupErr.message}`,
-    );
-  }
-  if (!profile?.id) {
-    throw new Error(
-      `User with email ${email} exists in auth but has no profile row — cannot stage pilot.`,
-    );
-  }
-  return profile.id as string;
-}
-
 export async function POST(request: Request): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -158,7 +105,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   const managersCsv = typeof body.managers_csv === "string" ? body.managers_csv : "";
   const allocatorsCsv = typeof body.allocators_csv === "string" ? body.allocators_csv : "";
 
-  if (!PARTNER_TAG_RE.test(partner_tag)) {
+  if (!isValidPartnerTag(partner_tag)) {
     return NextResponse.json(
       { error: "partner_tag must match ^[a-z0-9-]+$" },
       { status: 400 },
@@ -182,7 +129,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   try {
     for (const row of managers) {
-      const userId = await ensureAuthUser(admin, row.manager_email);
+      const userId = await ensureAuthUser(admin, { email: row.manager_email });
 
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
@@ -210,7 +157,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     for (const row of allocators) {
-      const userId = await ensureAuthUser(admin, row.allocator_email);
+      const userId = await ensureAuthUser(admin, { email: row.allocator_email });
 
       const { error: profileErr } = await admin.from("profiles").upsert(
         {

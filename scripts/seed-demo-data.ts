@@ -337,6 +337,15 @@ async function main() {
   // which allows specifying id + email. Idempotent: only swallows the
   // specific "already exists" conflicts Supabase returns (status 422 with
   // a known code). Anything else is a real error and must surface.
+  //
+  // NOTE: the shared `ensureAuthUser` helper in src/lib/supabase/admin-users.ts
+  // performs an additional profiles-by-email lookup on conflict, which is
+  // the correct behavior for partner-import but is WRONG for this seed script.
+  // The seed script assigns fixed UUIDs and re-runs may hit a half-broken
+  // state where auth.users has the row but profiles does not — the downstream
+  // profile upsert below (by hard-coded id) will repair that state, so we
+  // just continue on conflict here instead of demanding a matching profile
+  // row up-front.
   const authUsers = [
     { id: ALLOCATOR_COLD, email: "demo-cold@example.com" },
     { id: ALLOCATOR_ACTIVE, email: "demo-active@example.com" },

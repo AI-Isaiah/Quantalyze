@@ -3,9 +3,11 @@ import { redirect, notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { isValidPartnerTag } from "@/lib/partner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import type { Profile, Strategy, Role } from "@/lib/types";
 
 // /admin/partner-pilot/[partner_tag] — T-1.3 from the cap-intro demo sprint.
 // Filtered view of the profiles / strategies / contact_requests tagged with a
@@ -17,23 +19,18 @@ import { Button } from "@/components/ui/Button";
 // with the forward-looking "N allocators × M strategies = K potential intros"
 // number so the demo opens on a promise, not an apology.
 
-const PARTNER_TAG_RE = /^[a-z0-9-]+$/;
-
-interface ProfileLite {
-  id: string;
-  display_name: string | null;
-  email: string | null;
-  role: string;
-  allocator_status: string | null;
-}
-
-interface StrategyLite {
-  id: string;
-  name: string;
-  status: string;
-  disclosure_tier: string | null;
-  user_id: string;
-}
+// Narrow picks over the canonical `Profile` / `Strategy` types — preferable to
+// parallel shadow interfaces, because a new field on Profile will propagate
+// here automatically if this page ever reads it. `role` and `disclosure_tier`
+// use their canonical string unions, not string-typed fallbacks.
+type ProfileLite = Pick<
+  Profile,
+  "id" | "display_name" | "email" | "role" | "allocator_status"
+>;
+type StrategyLite = Pick<
+  Strategy,
+  "id" | "name" | "status" | "disclosure_tier" | "user_id"
+>;
 
 export default async function PartnerPilotPage({
   params,
@@ -42,7 +39,7 @@ export default async function PartnerPilotPage({
 }) {
   const { partner_tag } = await params;
 
-  if (!PARTNER_TAG_RE.test(partner_tag)) {
+  if (!isValidPartnerTag(partner_tag)) {
     notFound();
   }
 
@@ -74,10 +71,12 @@ export default async function PartnerPilotPage({
   const strategies = (strategiesRes.data ?? []) as StrategyLite[];
   const introsCount = contactsRes.count ?? 0;
 
-  const allocators = profiles.filter(
-    (p) => p.role === "allocator" || p.role === "both",
-  );
-  const managers = profiles.filter((p) => p.role === "manager" || p.role === "both");
+  // Role union narrows the strings below — any future value added to Role in
+  // types.ts that isn't handled here will surface as a TypeScript error.
+  const ALLOCATOR_ROLES: Role[] = ["allocator", "both"];
+  const MANAGER_ROLES: Role[] = ["manager", "both"];
+  const allocators = profiles.filter((p) => ALLOCATOR_ROLES.includes(p.role));
+  const managers = profiles.filter((p) => MANAGER_ROLES.includes(p.role));
 
   const potentialIntros = allocators.length * strategies.length;
 

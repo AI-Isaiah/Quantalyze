@@ -9,6 +9,7 @@ import {
   formatCurrency,
   extractAnalytics,
 } from "@/lib/utils";
+import { ALLOCATOR_ACTIVE_ID } from "@/lib/demo";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 // Never cache — the friend clicking the Telegram link should see a fresh
@@ -17,8 +18,6 @@ import type { Strategy, StrategyAnalytics } from "@/lib/types";
 // intentional: design review flagged the "Refresh in 1 minute" empty state
 // as a demo-killer.
 export const dynamic = "force-dynamic";
-
-const ALLOCATOR_ACTIVE_ID = "aaaaaaaa-0001-4000-8000-000000000002";
 
 type StrategySummary = Pick<
   Strategy,

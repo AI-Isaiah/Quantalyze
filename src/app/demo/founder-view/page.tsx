@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { AllocatorMatchQueue } from "@/components/admin/AllocatorMatchQueue";
+import { ALLOCATOR_ACTIVE_ID } from "@/lib/demo";
 
 // Never cache — we want the friend to see the latest match batch each time
 // they hit refresh, even if the hourly recompute ran in between.
@@ -16,7 +17,6 @@ export const dynamic = "force-dynamic";
  * NOT `/demo/admin` — "admin" in a shareable public URL is a trust-collapse
  * signal when the link gets forwarded to a colleague.
  */
-const ALLOCATOR_ACTIVE_ID = "aaaaaaaa-0001-4000-8000-000000000002";
 
 export default function DemoFounderViewPage() {
   return (

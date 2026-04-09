@@ -34,6 +34,12 @@ const buildChain = (data: unknown) => {
   chain.select = () => chain;
   chain.eq = () => chain;
   chain.single = () => Promise.resolve({ data, error: null });
+  // `loadManagerIdentity` (the shared helper in manager-identity.ts) uses
+  // `.maybeSingle()` — less fragile than `.single()` because it returns
+  // `null` instead of throwing on an empty row set. The mock chain must
+  // implement both so pre-existing tests (which used `.single()`) and the
+  // new shared helper (which uses `.maybeSingle()`) both work.
+  chain.maybeSingle = () => Promise.resolve({ data, error: null });
   return chain;
 };
 
