@@ -294,62 +294,66 @@ export function AllocatorMatchQueue({
   // Each handler short-circuits via the isLg check; we still register the
   // hook unconditionally so the listener doesn't churn on viewport changes.
   //
-  // `forceReadOnly` is checked at the top of EVERY handler (not just on the
-  // visible buttons) because the public /demo/founder-view page still mounts
-  // this component; we don't want `s`/`u`/`d`/`r` to fire admin actions
-  // against /api/admin even though the UI buttons are hidden.
+  // `forceReadOnly` is checked by the shared `guard` wrapper below (not just
+  // on the visible buttons) because the public /demo/founder-view page still
+  // mounts this component; we don't want `s`/`u`/`d`/`r` to fire admin
+  // actions against /api/admin even though the UI buttons are hidden.
+  // Centralizing the check means a future new shortcut can't accidentally
+  // forget to guard itself.
+  const guard = useCallback(
+    (fn: () => void) => () => {
+      if (forceReadOnly) return;
+      fn();
+    },
+    [forceReadOnly],
+  );
+
   useKeyboardShortcuts([
     {
       key: "j",
-      handler: () => {
-        if (forceReadOnly) return;
+      handler: guard(() => {
         if (!isLg || !data?.candidates.length) return;
         setSelectedIdx((i) => Math.min(i + 1, data.candidates.length - 1));
-      },
+      }),
     },
     {
       key: "k",
-      handler: () => {
-        if (forceReadOnly) return;
+      handler: guard(() => {
         if (!isLg) return;
         setSelectedIdx((i) => Math.max(i - 1, 0));
-      },
+      }),
     },
     {
       key: "s",
-      handler: () => {
-        if (forceReadOnly) return;
+      handler: guard(() => {
         if (!isLg) return;
         if (selectedCandidate) setSendIntroFor(selectedCandidate);
-      },
+      }),
     },
     {
       key: "u",
-      handler: () => {
-        if (forceReadOnly) return;
+      handler: guard(() => {
         if (!isLg) return;
         if (selectedCandidate) {
           handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id);
         }
-      },
+      }),
     },
     {
       key: "d",
-      handler: () => {
-        if (forceReadOnly) return;
+      handler: guard(() => {
         if (!isLg) return;
         if (selectedCandidate) {
           handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id);
         }
-      },
+      }),
     },
     {
       key: "r",
-      handler: () => {
-        if (forceReadOnly) return;
+      handler: guard(() => {
         if (!isLg) return;
         handleRecompute();
-      },
+      }),
     },
   ]);
 
@@ -559,10 +563,7 @@ export function AllocatorMatchQueue({
                 alreadySent={sentStrategyIds.has(cand.strategy_id)}
                 readOnly={forceReadOnly}
                 onSelect={() => setSelectedIdx(i)}
-                onSendIntro={() => {
-                  if (forceReadOnly) return;
-                  setSendIntroFor(cand);
-                }}
+                onSendIntro={guard(() => setSendIntroFor(cand))}
               />
             ))}
           </div>
@@ -649,18 +650,13 @@ export function AllocatorMatchQueue({
                 isKept={thumbsUpIds.has(selectedCandidate.strategy_id)}
                 isSkipped={thumbsDownIds.has(selectedCandidate.strategy_id)}
                 isReadOnly={forceReadOnly}
-                onSendIntro={() => {
-                  if (forceReadOnly) return;
-                  setSendIntroFor(selectedCandidate);
-                }}
-                onKeep={() => {
-                  if (forceReadOnly) return;
-                  handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id);
-                }}
-                onSkip={() => {
-                  if (forceReadOnly) return;
-                  handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id);
-                }}
+                onSendIntro={guard(() => setSendIntroFor(selectedCandidate))}
+                onKeep={guard(() =>
+                  handleDecision(selectedCandidate.strategy_id, "thumbs_up", selectedCandidate.id),
+                )}
+                onSkip={guard(() =>
+                  handleDecision(selectedCandidate.strategy_id, "thumbs_down", selectedCandidate.id),
+                )}
               />
             )}
           </div>

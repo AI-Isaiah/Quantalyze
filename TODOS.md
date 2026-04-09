@@ -198,15 +198,21 @@ ideas above are re-framings of existing components, not greenfield builds.
 Small cleanup debt the reviewers flagged on the cap-intro sprint PRs, kept
 here so the next session can opportunistically close them.
 
-- `/api/demo/match` is a near-verbatim copy of `/api/admin/match`; extract a
-  shared query helper.
+- ~~`/api/demo/match` is a near-verbatim copy of `/api/admin/match`; extract a
+  shared query helper.~~ **DONE in hardening PR 6** — extracted to
+  `src/lib/admin/match.ts::getAllocatorMatchPayload`.
 - `/demo/page.tsx` re-implements `formatPercent`, `formatNumber`,
   `formatCurrency`, and `extractAnalytics` instead of importing them from
   `lib/utils`.
-- `ensureAuthUser` in the partner-import route duplicates the seed script's
-  user-exists handling — promote to a shared helper.
-- `ALLOCATOR_ACTIVE_ID` and the `^[a-z0-9-]+$` partner-tag regex are
-  hard-coded in three files each.
+- ~~`ensureAuthUser` in the partner-import route duplicates the seed script's
+  user-exists handling — promote to a shared helper.~~ **DONE in hardening
+  PR 6** — extracted to `src/lib/supabase/admin-users.ts::ensureAuthUser`.
+  Seed script keeps its own inline handling (intentional — it has different
+  "fixed-UUID idempotent" semantics that the shared strict-mode helper
+  doesn't fit).
+- ~~`ALLOCATOR_ACTIVE_ID` and the `^[a-z0-9-]+$` partner-tag regex are
+  hard-coded in three files each.~~ **DONE in hardening PR 6** — extracted
+  to `src/lib/demo.ts` and `src/lib/partner.ts`.
 - Four "left-border-accent" banners (filtered eval, read-only preview,
   partner pilot hero, partner import success) should be a `ScopedBanner`
   primitive so the trust-critical filter banner stays structurally in sync.

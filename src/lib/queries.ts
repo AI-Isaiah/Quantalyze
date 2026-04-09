@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import type {
   Strategy,
@@ -17,7 +18,7 @@ import type {
 /**
  * Load + redact the manager identity for a strategy.
  *
- * Why this helper exists
+ * Why this wrapper exists
  *   The disclosure tier system has TWO security gates:
  *
  *     1. The bio/years_trading/aum_range columns on `profiles` had column-level
@@ -31,11 +32,10 @@ import type {
  *        `disclosure_tier='institutional'` strategies. Exploratory strategies
  *        get `null` and the profile is never queried.
  *
- *   Because of (1), this fetch MUST use `createAdminClient()` (service_role).
- *   The user-scoped `createClient()` would be denied at the column level.
- *
- *   Centralizing this logic in one place means future ManagerIdentity field
- *   additions only need to touch one select statement and one cast block.
+ *   The raw SELECT lives in `src/lib/manager-identity.ts` — this wrapper adds
+ *   the tier gate + admin-client plumbing. Keeping them in separate files
+ *   means the low-level fetch can be reused by the email routes without
+ *   duplicating the bio/years_trading/aum_range column list.
  */
 async function loadManagerIdentity(
   strategy: { user_id?: string | null },
@@ -44,25 +44,8 @@ async function loadManagerIdentity(
   if (!strategy.user_id || disclosureTier !== "institutional") {
     return null;
   }
-
   const admin = createAdminClient();
-  const { data: managerRow } = await admin
-    .from("profiles")
-    .select("display_name, company, bio, years_trading, aum_range, linkedin")
-    .eq("id", strategy.user_id)
-    .single();
-
-  if (!managerRow) return null;
-
-  return {
-    display_name: managerRow.display_name ?? null,
-    company: managerRow.company ?? null,
-    bio: (managerRow as { bio?: string | null }).bio ?? null,
-    years_trading:
-      (managerRow as { years_trading?: number | null }).years_trading ?? null,
-    aum_range: (managerRow as { aum_range?: string | null }).aum_range ?? null,
-    linkedin: managerRow.linkedin ?? null,
-  };
+  return loadManagerIdentityRaw(admin, strategy.user_id);
 }
 
 function readDisclosureTier(strategy: unknown): DisclosureTier {

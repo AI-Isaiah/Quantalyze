@@ -5,9 +5,9 @@ import {
   notifyManagerIntroRequest,
   notifyFounderIntroRequest,
   notifyAllocatorOfIntroRequest,
-  type ManagerIdentityBlock,
 } from "@/lib/email";
-import type { DisclosureTier } from "@/lib/types";
+import { loadManagerIdentity } from "@/lib/manager-identity";
+import type { DisclosureTier, ManagerIdentity } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -73,36 +73,22 @@ export async function POST(req: NextRequest) {
 
       // Manager identity block is only assembled for institutional-tier strategies.
       // Exploratory-tier allocator emails get a redacted "disclosed on acceptance" copy.
-      let managerBlock: ManagerIdentityBlock | null = null;
+      let managerBlock: ManagerIdentity | null = null;
       if (strategy.user_id) {
-        const { data: managerProfile } = await admin
+        // Fetch email separately so the identity helper doesn't need to
+        // widen its SELECT column list — email isn't part of ManagerIdentity.
+        const { data: managerEmailRow } = await admin
           .from("profiles")
-          .select(
-            "email, display_name, company, bio, years_trading, aum_range, linkedin",
-          )
+          .select("email")
           .eq("id", strategy.user_id)
           .single();
 
-        if (managerProfile?.email) {
-          notifyManagerIntroRequest(managerProfile.email, allocatorName, strategy.name);
+        if (managerEmailRow?.email) {
+          notifyManagerIntroRequest(managerEmailRow.email, allocatorName, strategy.name);
         }
 
-        if (managerProfile && disclosureTier === "institutional") {
-          const managerName =
-            managerProfile.display_name ??
-            managerProfile.company ??
-            "the manager";
-          managerBlock = {
-            name: managerName,
-            bio: (managerProfile as { bio?: string | null }).bio ?? null,
-            yearsTrading:
-              (managerProfile as { years_trading?: number | null }).years_trading ?? null,
-            aumRange:
-              (managerProfile as { aum_range?: string | null }).aum_range ?? null,
-            linkedinUrl:
-              (managerProfile as { linkedin?: string | null }).linkedin ?? null,
-            disclosureTier,
-          };
+        if (disclosureTier === "institutional") {
+          managerBlock = await loadManagerIdentity(admin, strategy.user_id);
         }
       }
 

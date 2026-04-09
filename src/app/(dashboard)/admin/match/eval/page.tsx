@@ -1,10 +1,9 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
+import { isValidPartnerTag } from "@/lib/partner";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { MatchEvalDashboard } from "@/components/admin/MatchEvalDashboard";
-
-const PARTNER_TAG_RE = /^[a-z0-9-]+$/;
 
 export default async function MatchEvalPage({
   searchParams,
@@ -20,8 +19,7 @@ export default async function MatchEvalPage({
 
   // Validate partner_tag server-side — if it's malformed, drop it rather
   // than passing an invalid value through to the dashboard fetch.
-  const safePartnerTag =
-    partner_tag && PARTNER_TAG_RE.test(partner_tag) ? partner_tag : undefined;
+  const safePartnerTag = isValidPartnerTag(partner_tag) ? partner_tag : undefined;
 
   return (
     <>

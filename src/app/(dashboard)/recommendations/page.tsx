@@ -101,6 +101,25 @@ export default async function RecommendationsPage() {
       }
     : null;
 
+  // Row shape returned by `get_allocator_recommendations` (migration 019
+  // RETURNS TABLE(...)). Hand-maintained because Supabase's generated
+  // types aren't wired into this repo yet; any column rename in the
+  // migration needs to be reflected here.
+  interface RecommendationRow {
+    id: string;
+    strategy_id: string;
+    rank: number;
+    score: number;
+    reasons: string[] | null;
+    strategy_name: string;
+    strategy_description: string | null;
+    discovery_category_slug: string | null;
+    cagr: number | null;
+    sharpe: number | null;
+    max_drawdown: number | null;
+    analytics_computed_at: string | null;
+  }
+
   const candidates: Array<{
     id: string;
     strategy_id: string;
@@ -117,21 +136,21 @@ export default async function RecommendationsPage() {
       max_drawdown: number | null;
       computed_at: string | null;
     };
-  }> = ((recsResult.data ?? []) as Record<string, unknown>[]).map((row) => ({
-    id: row.id as string,
-    strategy_id: row.strategy_id as string,
-    rank: row.rank as number,
-    score: row.score as number,
-    reasons: (row.reasons as string[] | null) ?? [],
+  }> = ((recsResult.data ?? []) as RecommendationRow[]).map((row) => ({
+    id: row.id,
+    strategy_id: row.strategy_id,
+    rank: row.rank,
+    score: row.score,
+    reasons: row.reasons ?? [],
     strategy: {
-      id: row.strategy_id as string,
-      name: row.strategy_name as string,
-      description: (row.strategy_description as string | null) ?? null,
-      category_slug: (row.discovery_category_slug as string | null) ?? null,
-      cagr: row.cagr as number | null,
-      sharpe: row.sharpe as number | null,
-      max_drawdown: row.max_drawdown as number | null,
-      computed_at: (row.analytics_computed_at as string | null) ?? null,
+      id: row.strategy_id,
+      name: row.strategy_name,
+      description: row.strategy_description ?? null,
+      category_slug: row.discovery_category_slug ?? null,
+      cagr: row.cagr,
+      sharpe: row.sharpe,
+      max_drawdown: row.max_drawdown,
+      computed_at: row.analytics_computed_at ?? null,
     },
   }));
 

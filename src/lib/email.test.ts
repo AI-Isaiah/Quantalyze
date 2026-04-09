@@ -176,12 +176,12 @@ describe("email.ts — notification_dispatches audit trail", () => {
     await notifyAllocatorOfAdminIntro(
       "allocator@example.com",
       {
-        name: "Jane Manager",
+        display_name: "Jane Manager",
+        company: "Macro Capital",
         bio: "20y macro",
-        yearsTrading: 20,
-        aumRange: "$50-100M",
-        linkedinUrl: null,
-        disclosureTier: "institutional",
+        years_trading: 20,
+        aum_range: "$50-100M",
+        linkedin: null,
       },
       "Long Vol Macro",
       "strategy-uuid",

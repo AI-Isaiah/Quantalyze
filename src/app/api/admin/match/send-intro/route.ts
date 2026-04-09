@@ -5,8 +5,9 @@ import { isAdminUser } from "@/lib/admin";
 import {
   notifyAllocatorOfAdminIntro,
   notifyManagerOfAdminIntro,
-  type ManagerIdentityBlock,
 } from "@/lib/email";
+import { loadManagerIdentity } from "@/lib/manager-identity";
+import type { ManagerIdentity } from "@/lib/types";
 
 // POST /api/admin/match/send-intro
 // Calls send_intro_with_decision(...) — a single Postgres transaction that upserts
@@ -109,12 +110,9 @@ async function dispatchAdminIntroEmails(params: {
   const { admin, allocatorId, strategyId, founderNote } = params;
 
   try {
-    // Fetch allocator + strategy + manager profile in parallel.
-    // Manager identity columns (bio/years_trading/aum_range, plus the
-    // pre-existing `linkedin` column reused from migration 001) are
-    // introduced in migration 012. If 012 has not been applied, the
-    // manager-profile select below will fail and the outer try/catch swallows
-    // the error — the intro is still persisted, just without email delivery.
+    // Fetch allocator + strategy in parallel. Manager identity is loaded
+    // separately via the shared loadManagerIdentity helper so the same
+    // column set + null-handling is reused by the self-serve intro route.
     const [allocatorResult, strategyResult] = await Promise.all([
       admin
         .from("profiles")
@@ -140,40 +138,37 @@ async function dispatchAdminIntroEmails(params: {
     }
 
     // Manager profile — may be null if strategy.user_id is unset.
-    let manager: ManagerIdentityBlock | null = null;
+    let manager: ManagerIdentity | null = null;
     let managerEmail: string | null = null;
     if (strategy.user_id) {
-      const { data: managerProfile } = await admin
+      manager = await loadManagerIdentity(admin, strategy.user_id);
+      // loadManagerIdentity only SELECTs identity columns; fetch the email
+      // separately because the allocator-intro email is the only reason we
+      // need it and we don't want to bloat ManagerIdentity's surface area.
+      const { data: managerEmailRow } = await admin
         .from("profiles")
-        .select(
-          "email, display_name, company, bio, years_trading, aum_range, linkedin",
-        )
+        .select("email")
         .eq("id", strategy.user_id)
         .single();
-
-      if (managerProfile) {
-        managerEmail = isLikelyEmail(managerProfile.email)
-          ? managerProfile.email
-          : null;
-        const managerName =
-          managerProfile.display_name ??
-          managerProfile.company ??
-          "the manager";
-        manager = {
-          name: managerName,
-          bio: (managerProfile as { bio?: string | null }).bio ?? null,
-          yearsTrading:
-            (managerProfile as { years_trading?: number | null }).years_trading ?? null,
-          aumRange:
-            (managerProfile as { aum_range?: string | null }).aum_range ?? null,
-          linkedinUrl:
-            (managerProfile as { linkedin?: string | null }).linkedin ?? null,
-        };
-      }
+      managerEmail = isLikelyEmail(managerEmailRow?.email)
+        ? managerEmailRow.email
+        : null;
     }
 
     const allocatorName =
       allocator!.display_name ?? allocator!.company ?? "the allocator";
+
+    // Default to a minimal ManagerIdentity shape if loadManagerIdentity
+    // returned null — the email still goes out with an "identity disclosed
+    // later" body rather than failing the whole dispatch.
+    const managerForEmail: ManagerIdentity = manager ?? {
+      display_name: null,
+      company: null,
+      bio: null,
+      years_trading: null,
+      aum_range: null,
+      linkedin: null,
+    };
 
     // Promise.allSettled — one failed send must NOT prevent the other from
     // running. The current observability story is "console.error inside
@@ -183,7 +178,7 @@ async function dispatchAdminIntroEmails(params: {
     const results = await Promise.allSettled([
       notifyAllocatorOfAdminIntro(
         allocator!.email!,
-        manager ?? { name: "the manager" },
+        managerForEmail,
         strategy.name,
         strategy.id,
         founderNote,

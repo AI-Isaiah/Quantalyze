@@ -1,6 +1,7 @@
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SEVERITY_HEX } from "./utils";
+import type { ManagerIdentity } from "@/lib/types";
 
 const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
@@ -333,7 +334,7 @@ export async function notifyAllocatorOfIntroRequest(
   allocatorEmail: string,
   strategyName: string,
   strategyId: string,
-  manager: ManagerIdentityBlock | null,
+  manager: ManagerIdentity | null,
 ) {
   const managerBlock = manager
     ? renderManagerIdentityBlock(manager)
@@ -355,24 +356,24 @@ export async function notifyAllocatorOfIntroRequest(
 
 // --- Admin-facilitated intros (Match Queue Send Intro) ---
 
-export interface ManagerIdentityBlock {
-  name: string;
-  bio?: string | null;
-  yearsTrading?: number | null;
-  aumRange?: string | null;
-  linkedinUrl?: string | null;
-  disclosureTier?: "institutional" | "exploratory" | null;
+/**
+ * Best-effort display name for a manager row. Matches the display precedence
+ * used throughout the app (display_name → company → "the manager") so the
+ * same identity resolves to the same string in emails and the UI.
+ */
+function managerDisplayName(manager: ManagerIdentity): string {
+  return manager.display_name ?? manager.company ?? "the manager";
 }
 
-function renderManagerIdentityBlock(manager: ManagerIdentityBlock): string {
+function renderManagerIdentityBlock(manager: ManagerIdentity): string {
   const parts: string[] = [
-    `<p><strong>${escapeHtml(manager.name)}</strong>${manager.yearsTrading ? ` — ${manager.yearsTrading}+ years trading` : ""}${manager.aumRange ? ` — ${escapeHtml(manager.aumRange)} AUM` : ""}</p>`,
+    `<p><strong>${escapeHtml(managerDisplayName(manager))}</strong>${manager.years_trading ? ` — ${manager.years_trading}+ years trading` : ""}${manager.aum_range ? ` — ${escapeHtml(manager.aum_range)} AUM` : ""}</p>`,
   ];
   if (manager.bio) {
     parts.push(`<p style="color:#4A5568;">${escapeHtml(manager.bio)}</p>`);
   }
-  if (manager.linkedinUrl) {
-    const safeHref = escapeHref(manager.linkedinUrl);
+  if (manager.linkedin) {
+    const safeHref = escapeHref(manager.linkedin);
     if (safeHref) {
       parts.push(
         `<p><a href="${safeHref}" style="color:${BRAND_COLOR};">LinkedIn profile →</a></p>`,
@@ -388,7 +389,7 @@ function renderManagerIdentityBlock(manager: ManagerIdentityBlock): string {
  */
 export async function notifyAllocatorOfAdminIntro(
   allocatorEmail: string,
-  manager: ManagerIdentityBlock,
+  manager: ManagerIdentity,
   strategyName: string,
   strategyId: string,
   founderNote: string,
@@ -396,7 +397,7 @@ export async function notifyAllocatorOfAdminIntro(
   const cc = FOUNDER_EMAIL || undefined;
   await send(
     allocatorEmail,
-    safeSubject(`Introduction: ${manager.name} — ${strategyName}`),
+    safeSubject(`Introduction: ${managerDisplayName(manager)} — ${strategyName}`),
     `<div style="font-family:'DM Sans',sans-serif;max-width:600px;">
        <p>Hi,</p>
        <p>Based on your mandate, I wanted to introduce you to a manager on ${PLATFORM_NAME} I think you'll find interesting.</p>
