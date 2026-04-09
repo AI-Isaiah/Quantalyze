@@ -3,10 +3,10 @@
   "framework": "nextjs",
   "buildCommand": "npm run build",
   "installCommand": "npm ci",
-  "crons": [
-    {
-      "path": "/api/cron/warm-analytics",
-      "schedule": "*/5 * * * *"
+  "experimentalServices": {
+    "analytics-service": {
+      "entrypoint": "analytics-service",
+      "routePrefix": "/"
     }
-  ]
+  }
 }
