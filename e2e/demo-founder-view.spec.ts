@@ -57,33 +57,22 @@ test.describe("Public /demo/founder-view page", () => {
     expect(realErrors).toHaveLength(0);
   });
 
-  test("renders without horizontal overflow at 320x568", async ({ page }) => {
-    await page.setViewportSize({ width: 320, height: 568 });
-    const response = await page.goto("/demo/founder-view");
-    expect(response?.status()).toBeLessThan(400);
-    const hasOverflow = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth,
-    );
-    expect(hasOverflow).toBe(false);
-  });
-
-  test("renders without horizontal overflow at 375x667", async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 667 });
-    const response = await page.goto("/demo/founder-view");
-    expect(response?.status()).toBeLessThan(400);
-    const hasOverflow = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth,
-    );
-    expect(hasOverflow).toBe(false);
-  });
-
-  test("renders without horizontal overflow at 1280x800", async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 800 });
-    const response = await page.goto("/demo/founder-view");
-    expect(response?.status()).toBeLessThan(400);
-    const hasOverflow = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth,
-    );
-    expect(hasOverflow).toBe(false);
-  });
+  const viewports = [
+    { width: 320, height: 568 },
+    { width: 375, height: 667 },
+    { width: 1280, height: 800 },
+  ];
+  for (const { width, height } of viewports) {
+    test(`renders without horizontal overflow at ${width}x${height}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height });
+      const response = await page.goto("/demo/founder-view");
+      expect(response?.status()).toBeLessThan(400);
+      const hasOverflow = await page.evaluate(
+        () => document.documentElement.scrollWidth > window.innerWidth,
+      );
+      expect(hasOverflow).toBe(false);
+    });
+  }
 });

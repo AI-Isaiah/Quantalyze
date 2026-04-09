@@ -33,15 +33,19 @@ export interface EditorialHeroProps {
   className?: string;
 }
 
-function MetricCell({
-  label,
-  value,
-  negative,
-}: {
+interface MetricCellProps {
   label: string;
   value: number | null;
   negative?: boolean;
-}) {
+}
+
+function metricValueClass(value: number | null, negative?: boolean): string {
+  if (value == null) return "text-text-muted";
+  if (negative) return "text-negative";
+  return "text-text-primary";
+}
+
+function MetricCell({ label, value, negative }: MetricCellProps) {
   // Using <dt>/<dd> inside the parent <dl> so the element set is valid
   // HTML and screen readers expose this as a term/description pair. A
   // <div> wrapper is allowed inside <dl> per the HTML spec.
@@ -53,11 +57,7 @@ function MetricCell({
       <dd
         className={cn(
           "mt-1 font-metric tabular-nums text-2xl sm:text-3xl",
-          value == null
-            ? "text-text-muted"
-            : negative
-              ? "text-negative"
-              : "text-text-primary",
+          metricValueClass(value, negative),
         )}
       >
         {formatPercent(value)}
@@ -74,11 +74,11 @@ export function EditorialHero({
   className,
 }: EditorialHeroProps) {
   const benchmarkLabel = numbers.benchmarkLabel ?? "BTC";
-  const allNumbersNull =
-    numbers.portfolioTwr == null &&
-    numbers.benchmarkTwr == null &&
-    numbers.portfolioMaxDrawdown == null &&
-    numbers.benchmarkMaxDrawdown == null;
+  const hasAnyNumber =
+    numbers.portfolioTwr != null ||
+    numbers.benchmarkTwr != null ||
+    numbers.portfolioMaxDrawdown != null ||
+    numbers.benchmarkMaxDrawdown != null;
 
   return (
     <section
@@ -99,7 +99,7 @@ export function EditorialHero({
         )}
       </div>
 
-      {!allNumbersNull && (
+      {hasAnyNumber && (
         <dl className="grid grid-cols-2 gap-x-8 gap-y-4 sm:max-w-xl">
           <MetricCell label="Portfolio TWR" value={numbers.portfolioTwr} />
           <MetricCell label={`${benchmarkLabel} TWR`} value={numbers.benchmarkTwr} />

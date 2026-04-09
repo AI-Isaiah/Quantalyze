@@ -144,18 +144,12 @@ describe("CorrelationHeatmap — WCAG contrast", () => {
   // two text-color thresholds. Narrow band (worst measured 3.75:1).
   const DEAD_ZONE = (v: number) => Math.abs(v) > 0.39 && Math.abs(v) < 0.49;
 
-  function asRgb(hex: string): string {
-    if (hex === "#FFFFFF") return WHITE;
-    if (hex === "#1A1A2E") return DARK;
-    return hex;
-  }
-
   it("every cell in [-1, 1] meets SC 1.4.11 non-text contrast (3:1)", () => {
     const failures: Array<{ v: number; bg: string; fg: string; ratio: number }> = [];
     for (let v = -1; v <= 1 + 1e-9; v += 0.05) {
       const rounded = Math.round(v * 100) / 100;
       const bg = correlationBg(rounded);
-      const fg = asRgb(textColor(rounded));
+      const fg = textColor(rounded);
       const ratio = contrastRatio(fg, bg);
       if (ratio < MIN_NONTEXT) {
         failures.push({ v: rounded, bg, fg, ratio: Math.round(ratio * 100) / 100 });
@@ -170,7 +164,7 @@ describe("CorrelationHeatmap — WCAG contrast", () => {
       const rounded = Math.round(v * 100) / 100;
       if (DEAD_ZONE(rounded)) continue;
       const bg = correlationBg(rounded);
-      const fg = asRgb(textColor(rounded));
+      const fg = textColor(rounded);
       const ratio = contrastRatio(fg, bg);
       if (ratio < MIN_TEXT_AA) {
         failures.push({ v: rounded, ratio: Math.round(ratio * 100) / 100 });
@@ -182,7 +176,7 @@ describe("CorrelationHeatmap — WCAG contrast", () => {
   it("the ±0.5 anchor cells clear strict AA with white text", () => {
     for (const v of [-0.5, 0.5]) {
       const bg = correlationBg(v);
-      const fg = asRgb(textColor(v));
+      const fg = textColor(v);
       expect(fg).toBe(WHITE);
       expect(contrastRatio(fg, bg)).toBeGreaterThanOrEqual(MIN_TEXT_AA);
     }
@@ -191,7 +185,7 @@ describe("CorrelationHeatmap — WCAG contrast", () => {
   it("the ±1.0 anchor cells clear strict AA with white text", () => {
     for (const v of [-1, 1]) {
       const bg = correlationBg(v);
-      const fg = asRgb(textColor(v));
+      const fg = textColor(v);
       expect(fg).toBe(WHITE);
       expect(contrastRatio(fg, bg)).toBeGreaterThanOrEqual(MIN_TEXT_AA);
     }
@@ -200,7 +194,7 @@ describe("CorrelationHeatmap — WCAG contrast", () => {
   it("cells near zero use dark text and clear strict AA", () => {
     for (const v of [-0.3, -0.1, 0, 0.1, 0.3]) {
       const bg = correlationBg(v);
-      const fg = asRgb(textColor(v));
+      const fg = textColor(v);
       expect(fg).toBe(DARK);
       expect(contrastRatio(fg, bg)).toBeGreaterThanOrEqual(MIN_TEXT_AA);
     }

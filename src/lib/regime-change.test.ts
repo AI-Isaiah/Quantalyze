@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import { computeRegimeChange } from "./regime-change";
 import type { TimeSeriesPoint } from "./types";
 
+// The regime-change implementation only reads `.value`, so the `.date`
+// field is opaque — we just need stable, unique-ish strings per index.
+function point(i: number, value: number): TimeSeriesPoint {
+  return { date: `2026-01-${String(i + 1).padStart(2, "0")}`, value };
+}
+
 function constSeries(n: number, value: number): TimeSeriesPoint[] {
-  return Array.from({ length: n }, (_, i) => ({
-    date: `2026-01-${String(i + 1).padStart(2, "0")}`,
-    value,
-  }));
+  return Array.from({ length: n }, (_, i) => point(i, value));
 }
 
 function shiftSeries(
@@ -21,10 +24,9 @@ function shiftSeries(
     throw new Error(`shiftSeries expects even n, got ${n}`);
   }
   const mid = n / 2;
-  return Array.from({ length: n }, (_, i) => ({
-    date: `2026-01-${String(i + 1).padStart(2, "0")}`,
-    value: i < mid ? prior : recent,
-  }));
+  return Array.from({ length: n }, (_, i) =>
+    point(i, i < mid ? prior : recent),
+  );
 }
 
 describe("computeRegimeChange", () => {
@@ -167,10 +169,7 @@ describe("computeRegimeChange", () => {
   });
 
   it("returns null when every value in the series is non-finite", () => {
-    const pair: TimeSeriesPoint[] = Array.from({ length: 20 }, (_, i) => ({
-      date: `2026-01-${String(i + 1).padStart(2, "0")}`,
-      value: Number.NaN,
-    }));
+    const pair = constSeries(20, Number.NaN);
     const result = computeRegimeChange(
       { rolling_correlation: { "a:b": pair } },
       { window: 10, minDelta: 0.1 },

@@ -19,11 +19,6 @@ export interface MorningBriefingProps {
   className?: string;
 }
 
-const CARD_CLASS =
-  "rounded-xl border border-border bg-surface p-6 shadow-card";
-
-const DEK_CLASS = "max-w-3xl";
-
 export function MorningBriefing({
   narrative,
   variant = "card",
@@ -35,8 +30,7 @@ export function MorningBriefing({
     return (
       <p
         className={cn(
-          "text-sm sm:text-base text-text-secondary leading-relaxed line-clamp-3",
-          DEK_CLASS,
+          "max-w-3xl text-sm sm:text-base text-text-secondary leading-relaxed line-clamp-3",
           className,
         )}
       >
@@ -48,7 +42,10 @@ export function MorningBriefing({
   return (
     <section
       aria-labelledby="morning-briefing-title"
-      className={cn(CARD_CLASS, className)}
+      className={cn(
+        "rounded-xl border border-border bg-surface p-6 shadow-card",
+        className,
+      )}
     >
       <h2
         id="morning-briefing-title"

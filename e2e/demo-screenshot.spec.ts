@@ -30,36 +30,25 @@ import { test, expect } from "@playwright/test";
  * `e2e/demo-screenshot.spec.ts-snapshots/` via Playwright's default path.
  */
 test.describe("Screenshot regression: /demo", () => {
-  test("matches baseline at 375x667 (mobile)", async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 667 });
-    await page.goto("/demo");
-    // Let any client-side mount settle before capturing. The demo page is
-    // a server component so there's no hydration flash to wait on, but
-    // the banner + persona switcher paint within a frame.
-    await page.waitForLoadState("networkidle");
-    await expect(page).toHaveScreenshot("demo-375.png", {
-      fullPage: true,
-      maxDiffPixelRatio: 0.02,
+  // The demo page is a server component so there's no hydration flash to
+  // wait on, but the banner + persona switcher paint within a frame —
+  // `networkidle` lets any client-side mount settle before capturing.
+  const screenshots = [
+    { width: 375, height: 667, label: "mobile", file: "demo-375.png" },
+    { width: 768, height: 1024, label: "tablet", file: "demo-768.png" },
+    { width: 1280, height: 800, label: "desktop", file: "demo-1280.png" },
+  ];
+  for (const { width, height, label, file } of screenshots) {
+    test(`matches baseline at ${width}x${height} (${label})`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto("/demo");
+      await page.waitForLoadState("networkidle");
+      await expect(page).toHaveScreenshot(file, {
+        fullPage: true,
+        maxDiffPixelRatio: 0.02,
+      });
     });
-  });
-
-  test("matches baseline at 768x1024 (tablet)", async ({ page }) => {
-    await page.setViewportSize({ width: 768, height: 1024 });
-    await page.goto("/demo");
-    await page.waitForLoadState("networkidle");
-    await expect(page).toHaveScreenshot("demo-768.png", {
-      fullPage: true,
-      maxDiffPixelRatio: 0.02,
-    });
-  });
-
-  test("matches baseline at 1280x800 (desktop)", async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto("/demo");
-    await page.waitForLoadState("networkidle");
-    await expect(page).toHaveScreenshot("demo-1280.png", {
-      fullPage: true,
-      maxDiffPixelRatio: 0.02,
-    });
-  });
+  }
 });

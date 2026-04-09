@@ -38,11 +38,19 @@ export interface BatchSummary {
 
 type AdminClient = ReturnType<typeof createAdminClient>;
 
-function extractStrategy(raw: unknown): StrategySummary | null {
+// Supabase nested selects return either an object or an array-wrapped
+// object depending on the FK cardinality. Normalize to a plain record or
+// null so the field extractors below stay trivial.
+function unwrapRow(raw: unknown): Record<string, unknown> | null {
   if (!raw) return null;
   const row = Array.isArray(raw) ? raw[0] : raw;
   if (!row || typeof row !== "object") return null;
-  const r = row as Record<string, unknown>;
+  return row as Record<string, unknown>;
+}
+
+function extractStrategy(raw: unknown): StrategySummary | null {
+  const r = unwrapRow(raw);
+  if (!r) return null;
   return {
     id: r.id as string,
     name: (r.name as string) ?? "",
@@ -54,10 +62,8 @@ function extractStrategy(raw: unknown): StrategySummary | null {
 }
 
 function toAnalyticsSummary(raw: unknown): AnalyticsSummary | null {
-  if (!raw) return null;
-  const row = Array.isArray(raw) ? raw[0] : raw;
-  if (!row || typeof row !== "object") return null;
-  const r = row as Record<string, unknown>;
+  const r = unwrapRow(raw);
+  if (!r) return null;
   return {
     cagr: (r.cagr as number | null) ?? null,
     sharpe: (r.sharpe as number | null) ?? null,
@@ -88,18 +94,17 @@ export async function fetchCandidatesForBatch(
     .limit(3);
 
   return ((rows ?? []) as Array<Record<string, unknown>>).map((row) => {
-    const strategyRaw = row.strategies;
-    const strategy = extractStrategy(strategyRaw);
-    const analytics = toAnalyticsSummary(
-      strategy
-        ? ((strategyRaw as Record<string, unknown>).strategy_analytics as unknown)
-        : null,
-    );
+    const strategyRow = unwrapRow(row.strategies);
+    const strategy = extractStrategy(strategyRow);
+    const analytics = toAnalyticsSummary(strategyRow?.strategy_analytics);
     return {
       id: row.id as string,
       rank: (row.rank as number | null) ?? null,
       score: (row.score as number) ?? 0,
       reasons: (row.reasons as string[] | null) ?? [],
+      // `strategies!inner` guarantees a non-null strategy row in production,
+      // but the test fake and any future RLS misconfig could violate it —
+      // fall back to a stub rather than crash the page.
       strategy: strategy ?? {
         id: row.strategy_id as string,
         name: "",

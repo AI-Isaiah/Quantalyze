@@ -24,19 +24,17 @@ export function NextFiveMillionCard({
 }: NextFiveMillionCardProps) {
   if (!suggestions || suggestions.length === 0) return null;
   const top = suggestions.slice(0, 3);
-  const totalScore = top.reduce((s, x) => s + Math.max(0, x.score), 0);
+  const totalScore = top.reduce((sum, row) => sum + Math.max(0, row.score), 0);
 
-  // If every score is zero (or negative), distribute equally.
-  const allocations =
-    totalScore <= 0
-      ? top.map((row) => ({
-          row,
-          dollars: amount / top.length,
-        }))
-      : top.map((row) => ({
-          row,
-          dollars: amount * (Math.max(0, row.score) / totalScore),
-        }));
+  // If every score is zero (or negative), distribute equally. Otherwise,
+  // allocate proportionally to each row's (clamped) score.
+  const allocations = top.map((row) => {
+    const dollars =
+      totalScore <= 0
+        ? amount / top.length
+        : amount * (Math.max(0, row.score) / totalScore);
+    return { row, dollars };
+  });
 
   return (
     <section

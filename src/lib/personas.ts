@@ -53,7 +53,7 @@ export function getPersona(
  * allowlist check.
  */
 export function isPersonaAllocatorId(id: string): boolean {
-  return Object.values(PERSONAS).includes(id as (typeof PERSONAS)[PersonaKey]);
+  return (Object.values(PERSONAS) as string[]).includes(id);
 }
 
 /**
@@ -61,8 +61,5 @@ export function isPersonaAllocatorId(id: string): boolean {
  * persona.
  */
 export function personaKeyForAllocatorId(id: string): PersonaKey | null {
-  for (const key of VALID_KEYS) {
-    if (PERSONAS[key] === id) return key;
-  }
-  return null;
+  return VALID_KEYS.find((key) => PERSONAS[key] === id) ?? null;
 }

@@ -92,9 +92,7 @@ export default async function PortfolioPdfPage({
   const rows: StrategyRow[] = strategyList.map((ps) => {
     const s = ps.strategies;
     const a = s
-      ? (extractAnalytics(
-          (s as Record<string, unknown>).strategy_analytics,
-        ) as StrategyAnalytics | null)
+      ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
       : null;
     const attr = attribution?.find((x) => x.strategy_id === ps.strategy_id);
     // Persisted attribution rows expose contribution + allocation_effect.

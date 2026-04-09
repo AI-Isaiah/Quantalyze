@@ -74,7 +74,9 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
   const rows: StrategyRow[] = useMemo(() => {
     return strategies.map((ps) => {
       const s = ps.strategies;
-      const analytics = s ? extractAnalytics((s as Record<string, unknown>).strategy_analytics) as StrategyAnalytics | null : null;
+      const analytics = s
+        ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
+        : null;
       const attr = attribution?.find((a) => a.strategy_id === ps.strategy_id);
 
       // The persisted attribution payload contains contribution + allocation_effect

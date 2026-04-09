@@ -22,10 +22,11 @@ export function WhatWedDoCard({ suggestions, className }: WhatWedDoCardProps) {
   // negative sharpe_lift OR a non-finite score means the optimizer has
   // nothing useful to say — hide the entire card rather than render a
   // contradictory sentence.
-  if (!Number.isFinite(top.score) || !Number.isFinite(top.sharpe_lift)) {
-    return null;
-  }
-  if (top.sharpe_lift < 0) {
+  if (
+    !Number.isFinite(top.score) ||
+    !Number.isFinite(top.sharpe_lift) ||
+    top.sharpe_lift < 0
+  ) {
     return null;
   }
 

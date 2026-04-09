@@ -30,22 +30,30 @@ export interface RegimeChangeResult {
 export interface RegimeChangeOptions {
   /** Window size in days for both recent and prior averages. Default 30. */
   window?: number;
-  /** Minimum |delta| to report a shift. Default 0.1. */
+  /** Minimum |delta| to report a shift. Default 0.15 (plan spec: Moment 2). */
   minDelta?: number;
 }
 
 /**
- * Average a list of `TimeSeriesPoint` values, rejecting non-finite values
- * (NaN, Infinity, null) before the reduce. Returns null when nothing
- * finite remains — a single NaN in the series would otherwise poison the
- * delta to NaN and silently suppress the shift detection branch.
+ * Mean of a number list. Caller is responsible for ensuring the list is
+ * non-empty and contains only finite values.
+ */
+function mean(values: number[]): number {
+  return values.reduce((s, v) => s + v, 0) / values.length;
+}
+
+/**
+ * Average the values in a `TimeSeriesPoint[]`, rejecting non-finite values
+ * (NaN, Infinity, null) first. Returns null when nothing finite remains —
+ * a single NaN in the series would otherwise poison the delta to NaN and
+ * silently suppress the shift detection branch.
  */
 function avg(points: TimeSeriesPoint[]): number | null {
   const finite = points
     .map((p) => p.value)
     .filter((v) => Number.isFinite(v));
   if (finite.length === 0) return null;
-  return finite.reduce((s, v) => s + v, 0) / finite.length;
+  return mean(finite);
 }
 
 /**
@@ -57,33 +65,31 @@ export function computeRegimeChange(
   analytics: Pick<PortfolioAnalytics, "rolling_correlation"> | null,
   options: RegimeChangeOptions = {},
 ): RegimeChangeResult | null {
-  const window = options.window ?? 30;
-  // Default noise floor matches the plan spec (Moment 2: ">0.15 delta").
-  // Tests that want a tighter threshold pass it explicitly.
-  const minDelta = options.minDelta ?? 0.15;
   if (!analytics?.rolling_correlation) return null;
+
+  const window = options.window ?? 30;
+  const minDelta = options.minDelta ?? 0.15;
+  const minLength = window * 2;
 
   const recentValues: number[] = [];
   const priorValues: number[] = [];
-  let pairsUsed = 0;
 
   for (const series of Object.values(analytics.rolling_correlation)) {
-    if (series.length < window * 2) continue;
-    pairsUsed += 1;
-    const recent = series.slice(-window);
-    const prior = series.slice(-window * 2, -window);
-    const recentAvg = avg(recent);
-    const priorAvg = avg(prior);
-    if (recentAvg != null) recentValues.push(recentAvg);
-    if (priorAvg != null) priorValues.push(priorAvg);
+    if (series.length < minLength) continue;
+    const recentAvg = avg(series.slice(-window));
+    const priorAvg = avg(series.slice(-minLength, -window));
+    // Only count pairs where BOTH windows yielded a finite mean. A pair
+    // that contributes to only one side would skew the delta.
+    if (recentAvg == null || priorAvg == null) continue;
+    recentValues.push(recentAvg);
+    priorValues.push(priorAvg);
   }
 
-  if (pairsUsed === 0 || recentValues.length === 0 || priorValues.length === 0) {
-    return null;
-  }
+  const pairsUsed = recentValues.length;
+  if (pairsUsed === 0) return null;
 
-  const recentAvgAll = recentValues.reduce((s, v) => s + v, 0) / recentValues.length;
-  const priorAvgAll = priorValues.reduce((s, v) => s + v, 0) / priorValues.length;
+  const recentAvgAll = mean(recentValues);
+  const priorAvgAll = mean(priorValues);
   const delta = recentAvgAll - priorAvgAll;
   return {
     recentAvg: recentAvgAll,

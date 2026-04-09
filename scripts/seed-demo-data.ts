@@ -540,21 +540,20 @@ export function generatePortfolioAnalyticsJSONB(
   // port_vol exactly — treat as a display proxy only. Flagged by
   // pre-landing code review (C1).
   const weightedVols = holdings.map((h) => h.weight * h.profile.annualizedVol);
-  const weightedVolSum = weightedVols.reduce((a, b) => a + b, 0) || 1;
   const sumWVol = weightedVols.reduce((a, b) => a + b, 0);
+  const weightedVolDenom = sumWVol || 1;
   const portVolApprox = annualVol > 0 ? annualVol : 1;
   const riskDecomposition = holdings.map((h, i) => {
     const vol_i = h.profile.annualizedVol;
     const w_i = h.weight;
     // (Cov @ w)[i] = w[i]*vol[i]^2 + avg_corr * vol[i] * sum_{j≠i} w[j]*vol[j]
     const sumOther = sumWVol - weightedVols[i];
-    const covDotW =
-      w_i * vol_i * vol_i + avgPairwise * vol_i * sumOther;
+    const covDotW = w_i * vol_i * vol_i + avgPairwise * vol_i * sumOther;
     const componentRisk = (w_i * covDotW) / portVolApprox;
     return {
       strategy_id: h.strategy_id,
       strategy_name: h.strategy_name,
-      marginal_risk_pct: round((weightedVols[i] / weightedVolSum) * 100, 2),
+      marginal_risk_pct: round((weightedVols[i] / weightedVolDenom) * 100, 2),
       standalone_vol: round(vol_i, 4),
       component_var: round(componentRisk, 6),
       weight_pct: round(w_i * 100, 2),
@@ -583,41 +582,40 @@ export function generatePortfolioAnalyticsJSONB(
 
   // Rolling correlation — a single representative pair for the first two
   // holdings, bucketed into 12 monthly points. Keyed by "<sidA>:<sidB>".
+  // The `holdings.length < 2` guard at the top guarantees [0] and [1] exist.
   const rolling: Record<string, Array<{ date: string; value: number }>> = {};
-  if (holdings.length >= 2) {
-    const a = holdings[0];
-    const b = holdings[1];
-    const pairKey = `${a.strategy_id}:${b.strategy_id}`;
-    const points: Array<{ date: string; value: number }> = [];
-    const windowDays = 30;
-    for (let k = 0; k < 12; k++) {
-      const startIdx = k * windowDays;
-      const endIdx = Math.min(startIdx + windowDays, days);
-      const sa = strategyReturns[a.strategy_id].slice(startIdx, endIdx);
-      const sb = strategyReturns[b.strategy_id].slice(startIdx, endIdx);
-      if (sa.length < 5) break;
-      const ma = sa.reduce((x, y) => x + y, 0) / sa.length;
-      const mb = sb.reduce((x, y) => x + y, 0) / sb.length;
-      let num = 0;
-      let da = 0;
-      let db = 0;
-      for (let i = 0; i < sa.length; i++) {
-        const xa = sa[i] - ma;
-        const xb = sb[i] - mb;
-        num += xa * xb;
-        da += xa * xa;
-        db += xb * xb;
-      }
-      const denom = Math.sqrt(da * db);
-      const d = new Date(startDate);
-      d.setUTCDate(d.getUTCDate() + startIdx + windowDays - 1);
-      points.push({
-        date: d.toISOString().slice(0, 10),
-        value: denom > 0 ? round(num / denom, 4) : 0,
-      });
+  const rollA = holdings[0];
+  const rollB = holdings[1];
+  const pairKey = `${rollA.strategy_id}:${rollB.strategy_id}`;
+  const points: Array<{ date: string; value: number }> = [];
+  const windowDays = 30;
+  for (let k = 0; k < 12; k++) {
+    const startIdx = k * windowDays;
+    const endIdx = Math.min(startIdx + windowDays, days);
+    const sa = strategyReturns[rollA.strategy_id].slice(startIdx, endIdx);
+    const sb = strategyReturns[rollB.strategy_id].slice(startIdx, endIdx);
+    if (sa.length < 5) break;
+    const ma = sa.reduce((x, y) => x + y, 0) / sa.length;
+    const mb = sb.reduce((x, y) => x + y, 0) / sb.length;
+    let num = 0;
+    let da = 0;
+    let db = 0;
+    for (let i = 0; i < sa.length; i++) {
+      const xa = sa[i] - ma;
+      const xb = sb[i] - mb;
+      num += xa * xb;
+      da += xa * xa;
+      db += xb * xb;
     }
-    if (points.length > 0) rolling[pairKey] = points;
+    const denom = Math.sqrt(da * db);
+    const d = new Date(startDate);
+    d.setUTCDate(d.getUTCDate() + startIdx + windowDays - 1);
+    points.push({
+      date: d.toISOString().slice(0, 10),
+      value: denom > 0 ? round(num / denom, 4) : 0,
+    });
   }
+  if (points.length > 0) rolling[pairKey] = points;
 
   // Period returns sampled from the back of the equity curve. 30/90/365 day
   // windows give MTD/YTD proxies that are monotonic within a run.

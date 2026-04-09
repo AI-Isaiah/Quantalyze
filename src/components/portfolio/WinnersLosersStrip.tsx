@@ -17,13 +17,7 @@ export interface WinnersLosersStripProps {
   className?: string;
 }
 
-function Row({
-  name,
-  contribution,
-}: {
-  name: string;
-  contribution: number;
-}) {
+function Row({ name, contribution }: { name: string; contribution: number }) {
   const positive = contribution >= 0;
   return (
     <li className="flex items-baseline justify-between gap-4 py-2">
@@ -40,6 +34,37 @@ function Row({
   );
 }
 
+function Column({
+  heading,
+  rows,
+  emptyCopy,
+}: {
+  heading: string;
+  rows: AttributionRow[];
+  emptyCopy: string;
+}) {
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
+        {heading}
+      </p>
+      {rows.length > 0 ? (
+        <ul role="list" className="divide-y divide-border">
+          {rows.map((r) => (
+            <Row
+              key={r.strategy_id}
+              name={r.strategy_name}
+              contribution={r.contribution}
+            />
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-text-muted">{emptyCopy}</p>
+      )}
+    </div>
+  );
+}
+
 export function WinnersLosersStrip({
   attribution,
   className,
@@ -49,56 +74,29 @@ export function WinnersLosersStrip({
   // Returning null used to cause layout shift when attribution was null or
   // all-zero; the strip now always renders with fallback copy in both
   // columns so the page height is stable across reloads.
+  const waiting = attribution == null || attribution.length === 0;
+  const winnersEmpty = waiting
+    ? "Waiting for the first attribution run."
+    : "No positive contributors yet.";
+  const losersEmpty = waiting
+    ? "Waiting for the first attribution run."
+    : "No detractors this period.";
 
   return (
     <section
       aria-label="Winners and losers"
       className={cn("grid gap-6 sm:grid-cols-2", className)}
     >
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
-          Top contributors
-        </p>
-        {winners.length > 0 ? (
-          <ul role="list" className="divide-y divide-border">
-            {winners.map((w) => (
-              <Row
-                key={w.strategy_id}
-                name={w.strategy_name}
-                contribution={w.contribution}
-              />
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-text-muted">
-            {attribution == null || attribution.length === 0
-              ? "Waiting for the first attribution run."
-              : "No positive contributors yet."}
-          </p>
-        )}
-      </div>
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium mb-2">
-          Top detractors
-        </p>
-        {losers.length > 0 ? (
-          <ul role="list" className="divide-y divide-border">
-            {losers.map((l) => (
-              <Row
-                key={l.strategy_id}
-                name={l.strategy_name}
-                contribution={l.contribution}
-              />
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-text-muted">
-            {attribution == null || attribution.length === 0
-              ? "Waiting for the first attribution run."
-              : "No detractors this period."}
-          </p>
-        )}
-      </div>
+      <Column
+        heading="Top contributors"
+        rows={winners}
+        emptyCopy={winnersEmpty}
+      />
+      <Column
+        heading="Top detractors"
+        rows={losers}
+        emptyCopy={losersEmpty}
+      />
     </section>
   );
 }

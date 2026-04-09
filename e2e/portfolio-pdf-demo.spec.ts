@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type APIRequestContext } from "@playwright/test";
 import { createHmac } from "crypto";
 import { ACTIVE_PORTFOLIO_ID } from "../src/lib/demo";
 
@@ -34,13 +34,19 @@ function signDemoPdfToken(portfolioId: string): string {
   return `${exp}.${sig}`;
 }
 
+function pdfUrl(portfolioId: string, token?: string): string {
+  const base = `/api/demo/portfolio-pdf/${portfolioId}`;
+  return token ? `${base}?token=${token}` : base;
+}
+
+function fetchPdf(request: APIRequestContext, url: string) {
+  return request.get(url, { timeout: PDF_REQUEST_TIMEOUT_MS });
+}
+
 test.describe("demo PDF endpoint @nightly", () => {
   test("returns a PDF when given a valid signed token", async ({ request }) => {
     const token = signDemoPdfToken(ACTIVE_PORTFOLIO_ID);
-    const res = await request.get(
-      `/api/demo/portfolio-pdf/${ACTIVE_PORTFOLIO_ID}?token=${token}`,
-      { timeout: PDF_REQUEST_TIMEOUT_MS },
-    );
+    const res = await fetchPdf(request, pdfUrl(ACTIVE_PORTFOLIO_ID, token));
     expect(res.status()).toBe(200);
     expect(res.headers()["content-type"]).toContain("application/pdf");
     const body = await res.body();
@@ -48,20 +54,14 @@ test.describe("demo PDF endpoint @nightly", () => {
   });
 
   test("returns 401 on missing token", async ({ request }) => {
-    const res = await request.get(
-      `/api/demo/portfolio-pdf/${ACTIVE_PORTFOLIO_ID}`,
-      { timeout: PDF_REQUEST_TIMEOUT_MS },
-    );
+    const res = await fetchPdf(request, pdfUrl(ACTIVE_PORTFOLIO_ID));
     expect(res.status()).toBe(401);
   });
 
   test("returns 401 on tampered token", async ({ request }) => {
     const valid = signDemoPdfToken(ACTIVE_PORTFOLIO_ID);
     const tampered = `${valid.split(".")[0]}.${"0".repeat(64)}`;
-    const res = await request.get(
-      `/api/demo/portfolio-pdf/${ACTIVE_PORTFOLIO_ID}?token=${tampered}`,
-      { timeout: PDF_REQUEST_TIMEOUT_MS },
-    );
+    const res = await fetchPdf(request, pdfUrl(ACTIVE_PORTFOLIO_ID, tampered));
     expect(res.status()).toBe(401);
   });
 
@@ -70,19 +70,13 @@ test.describe("demo PDF endpoint @nightly", () => {
   }) => {
     const rogueId = "00000000-0000-4000-8000-000000000000";
     const token = signDemoPdfToken(rogueId);
-    const res = await request.get(
-      `/api/demo/portfolio-pdf/${rogueId}?token=${token}`,
-      { timeout: PDF_REQUEST_TIMEOUT_MS },
-    );
+    const res = await fetchPdf(request, pdfUrl(rogueId, token));
     expect(res.status()).toBe(404);
   });
 
   test("does not cache the response (no-store)", async ({ request }) => {
     const token = signDemoPdfToken(ACTIVE_PORTFOLIO_ID);
-    const res = await request.get(
-      `/api/demo/portfolio-pdf/${ACTIVE_PORTFOLIO_ID}?token=${token}`,
-      { timeout: PDF_REQUEST_TIMEOUT_MS },
-    );
+    const res = await fetchPdf(request, pdfUrl(ACTIVE_PORTFOLIO_ID, token));
     expect(res.status()).toBe(200);
     const cc = res.headers()["cache-control"] ?? "";
     expect(cc).toContain("no-store");

@@ -58,16 +58,13 @@ const PALETTE: readonly PaletteStop[] = [
 
 export function correlationBg(v: number): string {
   const clamped = Math.max(-1, Math.min(1, v));
-  let lo = PALETTE[0];
-  let hi = PALETTE[PALETTE.length - 1];
-  for (let i = 0; i < PALETTE.length - 1; i++) {
-    if (clamped >= PALETTE[i].at && clamped <= PALETTE[i + 1].at) {
-      lo = PALETTE[i];
-      hi = PALETTE[i + 1];
-      break;
-    }
-  }
-  const t = hi.at === lo.at ? 0 : (clamped - lo.at) / (hi.at - lo.at);
+  // Find the first stop whose `at` is >= clamped; the previous stop is `lo`.
+  // Clamps guarantee clamped ∈ [-1, 1], which matches the palette endpoints,
+  // so `hiIdx` is always in [1, PALETTE.length - 1].
+  const hiIdx = Math.max(1, PALETTE.findIndex((stop) => stop.at >= clamped));
+  const lo = PALETTE[hiIdx - 1];
+  const hi = PALETTE[hiIdx];
+  const t = (clamped - lo.at) / (hi.at - lo.at);
   const r = Math.round(lo.r + t * (hi.r - lo.r));
   const g = Math.round(lo.g + t * (hi.g - lo.g));
   const b = Math.round(lo.b + t * (hi.b - lo.b));
@@ -82,8 +79,8 @@ export function correlationBg(v: number): string {
 export function relativeLuminance(rgb: string): number {
   const match = rgb.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
   if (!match) return 0;
-  const [r, g, b] = [match[1], match[2], match[3]].map((v) => {
-    const n = Number(v) / 255;
+  const [r, g, b] = match.slice(1, 4).map((channel) => {
+    const n = Number(channel) / 255;
     return n <= 0.03928 ? n / 12.92 : Math.pow((n + 0.055) / 1.055, 2.4);
   });
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -93,7 +90,8 @@ export function relativeLuminance(rgb: string): number {
 export function contrastRatio(fg: string, bg: string): number {
   const l1 = relativeLuminance(fg);
   const l2 = relativeLuminance(bg);
-  const [lighter, darker] = l1 > l2 ? [l1, l2] : [l2, l1];
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
   return (lighter + 0.05) / (darker + 0.05);
 }
 
@@ -122,21 +120,33 @@ export function textColor(v: number): string {
   return pickTextColor(correlationBg(v));
 }
 
+// Cell fallback colors for diagonal / missing-data cells.
+const DIAG_BG = "#F1F5F9";
+const MISSING_BG = "#F8F9FA";
+const MUTED_FG = "#718096";
+
+function pickTopTenByAvgCorr(
+  matrix: Record<string, Record<string, number>>,
+): string[] {
+  const all = Object.keys(matrix);
+  if (all.length <= 10) return all;
+  const scored = all.map((id) => {
+    const row = matrix[id];
+    const others = all.filter((other) => other !== id);
+    const avg =
+      others.reduce((sum, other) => sum + Math.abs(row[other] ?? 0), 0) /
+      (others.length || 1);
+    return { id, avg };
+  });
+  scored.sort((a, b) => b.avg - a.avg);
+  return scored.slice(0, 10).map((entry) => entry.id);
+}
+
 export function CorrelationHeatmap({ correlationMatrix, strategyNames }: CorrelationHeatmapProps) {
-  const ids = useMemo(() => {
-    if (!correlationMatrix) return [];
-    const all = Object.keys(correlationMatrix);
-    if (all.length <= 10) return all;
-    // Top-10 most-correlated pairs: pick the 10 IDs with highest avg |corr|
-    const avgCorr = all.map((id) => {
-      const row = correlationMatrix[id];
-      const others = all.filter((o) => o !== id);
-      const avg = others.reduce((s, o) => s + Math.abs(row[o] ?? 0), 0) / (others.length || 1);
-      return { id, avg };
-    });
-    avgCorr.sort((a, b) => b.avg - a.avg);
-    return avgCorr.slice(0, 10).map((x) => x.id);
-  }, [correlationMatrix]);
+  const ids = useMemo(
+    () => (correlationMatrix ? pickTopTenByAvgCorr(correlationMatrix) : []),
+    [correlationMatrix],
+  );
 
   if (!correlationMatrix || ids.length === 0) {
     return (
@@ -147,7 +157,9 @@ export function CorrelationHeatmap({ correlationMatrix, strategyNames }: Correla
   }
 
   const n = ids.length;
-  const label = (id: string) => strategyNames[id] ?? id.slice(0, 8);
+  function label(id: string): string {
+    return strategyNames[id] ?? id.slice(0, 8);
+  }
 
   return (
     <div
@@ -178,22 +190,33 @@ export function CorrelationHeatmap({ correlationMatrix, strategyNames }: Correla
             {ids.map((colId) => {
               const v = correlationMatrix[rowId]?.[colId] ?? null;
               const isDiag = rowId === colId;
-              const ariaLabel =
-                v != null
-                  ? `${label(rowId)} and ${label(colId)}: ${v.toFixed(2)} correlation`
-                  : `${label(rowId)} and ${label(colId)}: no data`;
+              const hasValue = v != null;
+              const ariaLabel = hasValue
+                ? `${label(rowId)} and ${label(colId)}: ${v.toFixed(2)} correlation`
+                : `${label(rowId)} and ${label(colId)}: no data`;
+
+              let backgroundColor: string;
+              let color: string;
+              if (!hasValue) {
+                backgroundColor = MISSING_BG;
+                color = MUTED_FG;
+              } else if (isDiag) {
+                backgroundColor = DIAG_BG;
+                color = MUTED_FG;
+              } else {
+                backgroundColor = correlationBg(v);
+                color = textColor(v);
+              }
+
               return (
                 <div
                   key={`${rowId}-${colId}`}
                   role="img"
                   aria-label={ariaLabel}
                   className="flex items-center justify-center py-2 font-metric text-xs"
-                  style={{
-                    backgroundColor: v != null ? (isDiag ? "#F1F5F9" : correlationBg(v)) : "#F8F9FA",
-                    color: v != null && !isDiag ? textColor(v) : "#718096",
-                  }}
+                  style={{ backgroundColor, color }}
                 >
-                  {v != null ? v.toFixed(2) : "\u2014"}
+                  {hasValue ? v.toFixed(2) : "\u2014"}
                 </div>
               );
             })}

@@ -29,7 +29,7 @@ function safeCompare(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-async function handle(req: NextRequest) {
+async function handle(req: NextRequest): Promise<NextResponse> {
   const auth = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.CRON_SECRET}`;
   if (!process.env.CRON_SECRET || !safeCompare(auth, expected)) {
@@ -50,26 +50,21 @@ async function handle(req: NextRequest) {
       cache: "no-store",
       signal: controller.signal,
     });
-    clearTimeout(timeout);
     return NextResponse.json({
       ok: res.ok,
       status: res.status,
       elapsed_ms: Date.now() - start,
     });
   } catch (err) {
-    clearTimeout(timeout);
     return NextResponse.json({
       ok: false,
       reason: err instanceof Error ? err.message : "unknown",
       elapsed_ms: Date.now() - start,
     });
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-export async function GET(req: NextRequest) {
-  return handle(req);
-}
-
-export async function POST(req: NextRequest) {
-  return handle(req);
-}
+export const GET = handle;
+export const POST = handle;

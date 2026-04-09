@@ -38,19 +38,14 @@ export function warmupAnalytics(): void {
     void fetch(`${url.replace(/\/+$/, "")}/health`, {
       method: "GET",
       signal: controller.signal,
-      // Server-side fetch — no credentials, no cookies.
       cache: "no-store",
     })
-      .then(() => {
-        clearTimeout(timeout);
-        // Successful warmup — silent. The next call to the service will be warm.
-      })
       .catch(() => {
-        clearTimeout(timeout);
         // Service is cold or unreachable. Logged at info level (not error)
         // because the page can still render from persisted data.
         console.info("[warmup-analytics] /health probe failed");
-      });
+      })
+      .finally(() => clearTimeout(timeout));
   } catch {
     // Synchronous throw from fetch construction (e.g. malformed URL).
     // Clear the timer so it doesn't leak until the next tick.

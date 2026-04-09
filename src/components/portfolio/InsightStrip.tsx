@@ -18,13 +18,15 @@ export interface InsightStripProps {
   className?: string;
 }
 
-const SEVERITY_DOT: Record<"high" | "medium" | "low", string> = {
+type Severity = "high" | "medium" | "low";
+
+const SEVERITY_DOT: Record<Severity, string> = {
   high: "bg-negative",
   medium: "bg-amber-500",
   low: "bg-text-muted",
 };
 
-const SEVERITY_LABEL: Record<"high" | "medium" | "low", string> = {
+const SEVERITY_LABEL: Record<Severity, string> = {
   high: "High severity",
   medium: "Medium severity",
   low: "Low severity",

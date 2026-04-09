@@ -253,11 +253,10 @@ function DashboardContent({
 
   const compositionRows = buildCompositionRows(strategies, attribution);
   const equitySeries = buildEquityCurveSeries(strategies);
-  const strategyNames = Object.fromEntries(
-    strategies
-      .filter((s): s is PortfolioStrategyRow & { strategies: NonNullable<PortfolioStrategyRow["strategies"]> } => s.strategies !== null && s.strategies !== undefined)
-      .map((s) => [s.strategy_id, s.strategies.name]),
-  );
+  const strategyNames: Record<string, string> = {};
+  for (const ps of strategies) {
+    if (ps.strategies) strategyNames[ps.strategy_id] = ps.strategies.name;
+  }
 
   // The CorrelationHeatmap component is typed to require non-nullable cell
   // values. Replace nulls with 0 for rendering — accurate-enough for the UI,
@@ -380,30 +379,17 @@ export default async function PortfolioDashboardPage({
   ]);
 
   const analytics = chooseAnalytics(analyticsBundle);
-
-  // DashboardShell state machine: empty | pending | computing | stale | complete
-  const state =
-    strategies.length === 0
-      ? "empty"
-      : !analytics
-        ? "pending"
-        : analytics.computation_status === "computing"
-          ? "computing"
-          : analytics.computation_status === "failed"
-            ? "stale"
-            : "complete";
+  const state = resolveDashboardState(strategies, analytics);
 
   // Surface any constituent strategy whose analytics are stale so the allocator
   // knows the portfolio view may be out of date at the source.
   const staleConstituents: string[] = [];
   for (const ps of strategies) {
-    const strategy = (ps as { strategies?: { name?: string; strategy_analytics?: unknown } })
-      .strategies;
-    if (!strategy) continue;
-    const sAnalytics = extractAnalytics(strategy.strategy_analytics);
+    if (!ps.strategies) continue;
+    const sAnalytics = extractAnalytics(ps.strategies.strategy_analytics);
     if (!sAnalytics) continue;
     if (computeFreshness(sAnalytics.computed_at) === "stale") {
-      staleConstituents.push(strategy.name ?? "unknown");
+      staleConstituents.push(ps.strategies.name);
     }
   }
 
@@ -469,6 +455,19 @@ export default async function PortfolioDashboardPage({
       <Disclaimer />
     </>
   );
+}
+
+type DashboardState = "empty" | "pending" | "computing" | "stale" | "complete";
+
+function resolveDashboardState(
+  strategies: PortfolioStrategyRow[],
+  analytics: PortfolioAnalytics | null,
+): DashboardState {
+  if (strategies.length === 0) return "empty";
+  if (!analytics) return "pending";
+  if (analytics.computation_status === "computing") return "computing";
+  if (analytics.computation_status === "failed") return "stale";
+  return "complete";
 }
 
 /**

@@ -10,10 +10,10 @@ on:
 jobs:
   demo-pdf-coldstart:
     runs-on: ubuntu-latest
-    # Gate on STAGING_BASE_URL being present AND non-whitespace. Without
-    # this guard a stray space would pass the simple != '' check and the
-    # run would fail confusingly. Note: the expression uses trim() via
-    # string replacement since GH Actions has no trim function.
+    # First-line guard on STAGING_BASE_URL: empty or single-space values
+    # are treated as unset. The shell step below applies a stricter trim
+    # check (belt + suspenders) since GH Actions expressions have no
+    # trim function and can't catch multi-character whitespace.
     if: ${{ vars.STAGING_BASE_URL != '' && vars.STAGING_BASE_URL != ' ' }}
     steps:
       - uses: actions/checkout@v4
@@ -59,13 +59,13 @@ jobs:
           REPO_NAME: ${{ github.repository }}
         with:
           script: |
-            const runId = process.env.RUN_ID;
-            const repo = process.env.REPO_NAME;
-            const title = `Nightly PDF probe failed on ${new Date().toISOString().slice(0, 10)}`;
+            const { RUN_ID, REPO_NAME } = process.env;
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `Nightly PDF probe failed on ${today}`;
             const body = [
               "The nightly demo-PDF cold-start probe failed. The forwarded /demo URL may be broken.",
               "",
-              `Workflow run: https://github.com/${repo}/actions/runs/${runId}`,
+              `Workflow run: https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`,
               "",
               "Likely causes: Puppeteer cold-start regression, Supabase connectivity, DEMO_PDF_SECRET rotation, token format drift.",
               "",

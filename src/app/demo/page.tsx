@@ -48,25 +48,34 @@ interface PortfolioHoldingRow {
   analytics: Pick<StrategyAnalytics, "cagr" | "sharpe" | "max_drawdown"> | null;
 }
 
-const PERSONA_HEADLINES: Record<PersonaKey, string> = {
-  active: "Beat BTC on the way up. And on the way down.",
-  cold: "Diversified, but is it earning its weight?",
-  stalled: "Concentrated. Confident. One drawdown away from a problem.",
-};
+interface PersonaMeta {
+  label: string;
+  headline: string;
+  descriptor: string;
+}
 
-const PERSONA_DESCRIPTORS: Record<PersonaKey, string> = {
-  active:
-    "Exchange-verified allocator portfolio review with manager recommendations and IC-ready reporting.",
-  cold:
-    "Six strategies, low correlation, mediocre return. The over-diversification trap.",
-  stalled:
-    "Two strategies carrying the book. Sharpe is great until it isn't.",
-};
-
-const PERSONA_LABELS: Record<PersonaKey, string> = {
-  active: "Active",
-  cold: "Cold",
-  stalled: "Stalled",
+// Single source of truth for per-persona display copy. Preserves the
+// persona enum lookup pattern — the only sanctioned input transform on
+// this public route.
+const PERSONA_META: Record<PersonaKey, PersonaMeta> = {
+  active: {
+    label: "Active",
+    headline: "Beat BTC on the way up. And on the way down.",
+    descriptor:
+      "Exchange-verified allocator portfolio review with manager recommendations and IC-ready reporting.",
+  },
+  cold: {
+    label: "Cold",
+    headline: "Diversified, but is it earning its weight?",
+    descriptor:
+      "Six strategies, low correlation, mediocre return. The over-diversification trap.",
+  },
+  stalled: {
+    label: "Stalled",
+    headline: "Concentrated. Confident. One drawdown away from a problem.",
+    descriptor:
+      "Two strategies carrying the book. Sharpe is great until it isn't.",
+  },
 };
 
 const PERSONA_KEYS: PersonaKey[] = ["active", "cold", "stalled"];
@@ -82,6 +91,7 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
 
   const params = await searchParams;
   const { key: personaKey, allocatorId } = getPersona(params.persona);
+  const persona = PERSONA_META[personaKey];
 
   const admin = createAdminClient();
 
@@ -187,19 +197,10 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
   // seeded portfolio that is ALSO on the public demo allowlist. Never
   // fall back to a different persona's ID — silent cross-wiring is the
   // worst case on a forwarded URL (colleague sees "Cold" in the hero
-  // and downloads the "Active" report).
-  let pdfHref: string | null = null;
-  if (portfolio?.id && isDemoPortfolioId(portfolio.id)) {
-    try {
-      const token = signDemoPdfToken(portfolio.id);
-      pdfHref = `/api/demo/portfolio-pdf/${portfolio.id}?token=${token}`;
-    } catch {
-      // DEMO_PDF_SECRET not configured (local dev). Hide the CTA rather
-      // than crashing the page — the friend's environment always has the
-      // secret.
-      pdfHref = null;
-    }
-  }
+  // and downloads the "Active" report). If `DEMO_PDF_SECRET` is not
+  // configured (local dev without env var), hide the CTA rather than
+  // crash — the friend's environment always has the secret.
+  const pdfHref = buildDemoPdfHref(portfolio?.id ?? null);
 
   return (
     <>
@@ -207,8 +208,8 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
 
       <EditorialHero
         className="mt-2 sm:mt-6"
-        headline={PERSONA_HEADLINES[personaKey]}
-        descriptor={PERSONA_DESCRIPTORS[personaKey]}
+        headline={persona.headline}
+        descriptor={persona.descriptor}
         numbers={heroNumbers}
         cta={
           pdfHref ? (
@@ -383,6 +384,16 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
   );
 }
 
+function buildDemoPdfHref(portfolioId: string | null): string | null {
+  if (!portfolioId || !isDemoPortfolioId(portfolioId)) return null;
+  try {
+    const token = signDemoPdfToken(portfolioId);
+    return `/api/demo/portfolio-pdf/${portfolioId}?token=${token}`;
+  } catch {
+    return null;
+  }
+}
+
 function adaptHoldings(rows: unknown): PortfolioHoldingRow[] {
   if (!Array.isArray(rows)) return [];
   return (rows as Array<Record<string, unknown>>).map((row) => {
@@ -426,25 +437,29 @@ function PersonaSwitcher({ current }: { current: PersonaKey }) {
   // Touch target sizing: min-h-[44px] + min-w-[44px] meets WCAG 2.5.5
   // Target Size Level AAA AND the iOS HIG 44pt minimum. The text remains
   // text-xs for visual density; padding takes up the rest.
+  const baseClass =
+    "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md px-4 text-xs font-medium";
   return (
     <nav
       aria-label="Demo persona"
       className="flex items-center gap-1 self-end"
     >
-      {PERSONA_KEYS.map((key) => (
-        <Link
-          key={key}
-          href={`/demo?persona=${key}`}
-          aria-current={key === current ? "page" : undefined}
-          className={
-            key === current
-              ? "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md bg-accent/10 px-4 text-xs font-medium text-accent"
-              : "inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md px-4 text-xs font-medium text-text-muted hover:text-text-primary"
-          }
-        >
-          {PERSONA_LABELS[key]}
-        </Link>
-      ))}
+      {PERSONA_KEYS.map((key) => {
+        const isCurrent = key === current;
+        const stateClass = isCurrent
+          ? "bg-accent/10 text-accent"
+          : "text-text-muted hover:text-text-primary";
+        return (
+          <Link
+            key={key}
+            href={`/demo?persona=${key}`}
+            aria-current={isCurrent ? "page" : undefined}
+            className={`${baseClass} ${stateClass}`}
+          >
+            {PERSONA_META[key].label}
+          </Link>
+        );
+      })}
     </nav>
   );
 }

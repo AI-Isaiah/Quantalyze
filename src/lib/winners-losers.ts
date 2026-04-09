@@ -22,29 +22,21 @@ export interface WinnersLosersOptions {
 }
 
 /**
- * Sort attribution rows by contribution descending. Ties broken by
- * strategy_id ascending so the order is deterministic across reloads.
+ * Sort attribution rows by contribution in the given direction. Ties are
+ * always broken by `strategy_id` ascending so the order is deterministic
+ * across reloads, regardless of direction.
  */
-function sortByContribution(rows: AttributionRow[]): AttributionRow[] {
+function sortByContribution(
+  rows: AttributionRow[],
+  direction: "desc" | "asc",
+): AttributionRow[] {
   return [...rows].sort((a, b) => {
     if (a.contribution === b.contribution) {
       return a.strategy_id.localeCompare(b.strategy_id);
     }
-    return b.contribution - a.contribution;
-  });
-}
-
-/**
- * Sort attribution rows by contribution ascending (most negative first).
- * Ties broken by strategy_id ascending for determinism. Used by the losers
- * branch so the tie-break is applied independently of the winners branch.
- */
-function sortByContributionAscending(rows: AttributionRow[]): AttributionRow[] {
-  return [...rows].sort((a, b) => {
-    if (a.contribution === b.contribution) {
-      return a.strategy_id.localeCompare(b.strategy_id);
-    }
-    return a.contribution - b.contribution;
+    return direction === "desc"
+      ? b.contribution - a.contribution
+      : a.contribution - b.contribution;
   });
 }
 
@@ -77,7 +69,7 @@ export function computeWinnersLosers(
 
   const positives = attribution.filter((r) => r.contribution > 0);
   const negatives = attribution.filter((r) => r.contribution < 0);
-  const winners = sortByContribution(positives).slice(0, count);
-  const losers = sortByContributionAscending(negatives).slice(0, count);
+  const winners = sortByContribution(positives, "desc").slice(0, count);
+  const losers = sortByContribution(negatives, "asc").slice(0, count);
   return { winners, losers };
 }

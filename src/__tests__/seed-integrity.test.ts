@@ -80,27 +80,22 @@ describe("seed portfolio UUIDs match src/lib/demo.ts", () => {
 
 // ---------- generatePortfolioAnalyticsJSONB ----------
 
+function holdingFor(index: number, weight: number): PortfolioAnalyticsHolding {
+  const profile = STRATEGY_PROFILES[index];
+  return {
+    strategy_id: profile.id,
+    strategy_name: profile.name,
+    weight,
+    profile,
+  };
+}
+
 function buildActiveHoldings(): PortfolioAnalyticsHolding[] {
-  return [
-    {
-      strategy_id: STRATEGY_PROFILES[0].id,
-      strategy_name: STRATEGY_PROFILES[0].name,
-      weight: 0.4,
-      profile: STRATEGY_PROFILES[0],
-    },
-    {
-      strategy_id: STRATEGY_PROFILES[1].id,
-      strategy_name: STRATEGY_PROFILES[1].name,
-      weight: 0.35,
-      profile: STRATEGY_PROFILES[1],
-    },
-    {
-      strategy_id: STRATEGY_PROFILES[2].id,
-      strategy_name: STRATEGY_PROFILES[2].name,
-      weight: 0.25,
-      profile: STRATEGY_PROFILES[2],
-    },
-  ];
+  return [holdingFor(0, 0.4), holdingFor(1, 0.35), holdingFor(2, 0.25)];
+}
+
+function buildStalledHoldings(): PortfolioAnalyticsHolding[] {
+  return [holdingFor(6, 0.65), holdingFor(3, 0.35)];
 }
 
 describe("generatePortfolioAnalyticsJSONB", () => {
@@ -167,23 +162,9 @@ describe("generatePortfolioAnalyticsJSONB", () => {
   });
 
   it("handles the 2-strategy STALLED persona without collapsing", () => {
-    const holdings: PortfolioAnalyticsHolding[] = [
-      {
-        strategy_id: STRATEGY_PROFILES[6].id,
-        strategy_name: STRATEGY_PROFILES[6].name,
-        weight: 0.65,
-        profile: STRATEGY_PROFILES[6],
-      },
-      {
-        strategy_id: STRATEGY_PROFILES[3].id,
-        strategy_name: STRATEGY_PROFILES[3].name,
-        weight: 0.35,
-        profile: STRATEGY_PROFILES[3],
-      },
-    ];
     const payload = generatePortfolioAnalyticsJSONB(
       STALLED_PORTFOLIO_ID,
-      holdings,
+      buildStalledHoldings(),
       9003,
     );
     expect(payload.attribution_breakdown).toHaveLength(2);
@@ -294,23 +275,9 @@ describe("generatePortfolioAnalyticsJSONB", () => {
   });
 
   it("adapter round-trips the 2-strategy STALLED persona (M1)", () => {
-    const stalled: PortfolioAnalyticsHolding[] = [
-      {
-        strategy_id: STRATEGY_PROFILES[6].id,
-        strategy_name: STRATEGY_PROFILES[6].name,
-        weight: 0.65,
-        profile: STRATEGY_PROFILES[6],
-      },
-      {
-        strategy_id: STRATEGY_PROFILES[3].id,
-        strategy_name: STRATEGY_PROFILES[3].name,
-        weight: 0.35,
-        profile: STRATEGY_PROFILES[3],
-      },
-    ];
     const payload = generatePortfolioAnalyticsJSONB(
       STALLED_PORTFOLIO_ID,
-      stalled,
+      buildStalledHoldings(),
       9003,
     );
     const rowLike = {

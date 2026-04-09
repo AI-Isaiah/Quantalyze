@@ -85,6 +85,23 @@ function parseTimeSeries(v: Json): TimeSeriesPoint[] {
   return v.map(parseTimeSeriesPoint).filter((p): p is TimeSeriesPoint => p !== null);
 }
 
+/**
+ * Map a raw JSONB value through `parser` and return a non-empty array, or
+ * `null` when the input is not an array or every element failed validation.
+ * Consolidates the `Array.isArray` + `.map().filter()` + "empty → null"
+ * pattern used by every array-shaped column on `portfolio_analytics`.
+ */
+function parseNonEmptyArray<T>(
+  v: Json,
+  parser: (item: Json) => T | null,
+): T[] | null {
+  if (!Array.isArray(v)) return null;
+  const parsed = v
+    .map(parser)
+    .filter((item): item is T => item !== null);
+  return parsed.length > 0 ? parsed : null;
+}
+
 function parseAttributionRow(v: Json): AttributionRow | null {
   if (!isObject(v)) return null;
   const strategy_id = asString(v.strategy_id);
@@ -177,6 +194,16 @@ function parseRollingCorrelation(
   return Object.keys(result).length > 0 ? result : null;
 }
 
+const COMPUTATION_STATUSES = ["pending", "computing", "complete", "failed"] as const;
+type ComputationStatus = (typeof COMPUTATION_STATUSES)[number];
+
+function isComputationStatus(v: Json): v is ComputationStatus {
+  return (
+    typeof v === "string" &&
+    (COMPUTATION_STATUSES as readonly string[]).includes(v)
+  );
+}
+
 /**
  * Convert a raw `portfolio_analytics` row (anything Supabase hands back) into
  * the strict `PortfolioAnalytics` shape. Required columns (`id`,
@@ -196,39 +223,10 @@ export function adaptPortfolioAnalytics(raw: Json): PortfolioAnalytics | null {
     id == null ||
     portfolio_id == null ||
     computed_at == null ||
-    computation_status !== "pending" &&
-      computation_status !== "computing" &&
-      computation_status !== "complete" &&
-      computation_status !== "failed"
+    !isComputationStatus(computation_status)
   ) {
     return null;
   }
-
-  // `Array.prototype.filter()` always returns an array (possibly empty),
-  // so the subsequent `|| null` branch previously appended was dead code.
-  // The downstream length guard (below) is the one that actually collapses
-  // an empty/all-invalid array to `null`.
-  const attribution_breakdown = Array.isArray(raw.attribution_breakdown)
-    ? raw.attribution_breakdown
-        .map(parseAttributionRow)
-        .filter((r): r is AttributionRow => r !== null)
-    : null;
-
-  const risk_decomposition = Array.isArray(raw.risk_decomposition)
-    ? raw.risk_decomposition
-        .map(parseRiskDecompositionRow)
-        .filter((r): r is RiskDecompositionRow => r !== null)
-    : null;
-
-  const optimizer_suggestions = Array.isArray(raw.optimizer_suggestions)
-    ? raw.optimizer_suggestions
-        .map(parseOptimizerSuggestionRow)
-        .filter((r): r is OptimizerSuggestionRow => r !== null)
-    : null;
-
-  const portfolio_equity_curve = Array.isArray(raw.portfolio_equity_curve)
-    ? parseTimeSeries(raw.portfolio_equity_curve)
-    : null;
 
   return {
     id,
@@ -248,23 +246,23 @@ export function adaptPortfolioAnalytics(raw: Json): PortfolioAnalytics | null {
     return_ytd: asNumber(raw.return_ytd),
     narrative_summary: asString(raw.narrative_summary),
     correlation_matrix: parseCorrelationMatrix(raw.correlation_matrix),
-    attribution_breakdown:
-      attribution_breakdown && attribution_breakdown.length > 0
-        ? attribution_breakdown
-        : null,
-    risk_decomposition:
-      risk_decomposition && risk_decomposition.length > 0
-        ? risk_decomposition
-        : null,
+    attribution_breakdown: parseNonEmptyArray(
+      raw.attribution_breakdown,
+      parseAttributionRow,
+    ),
+    risk_decomposition: parseNonEmptyArray(
+      raw.risk_decomposition,
+      parseRiskDecompositionRow,
+    ),
     benchmark_comparison: parseBenchmarkComparison(raw.benchmark_comparison),
-    optimizer_suggestions:
-      optimizer_suggestions && optimizer_suggestions.length > 0
-        ? optimizer_suggestions
-        : null,
-    portfolio_equity_curve:
-      portfolio_equity_curve && portfolio_equity_curve.length > 0
-        ? portfolio_equity_curve
-        : null,
+    optimizer_suggestions: parseNonEmptyArray(
+      raw.optimizer_suggestions,
+      parseOptimizerSuggestionRow,
+    ),
+    portfolio_equity_curve: parseNonEmptyArray(
+      raw.portfolio_equity_curve,
+      parseTimeSeriesPoint,
+    ),
     rolling_correlation: parseRollingCorrelation(raw.rolling_correlation),
   };
 }
