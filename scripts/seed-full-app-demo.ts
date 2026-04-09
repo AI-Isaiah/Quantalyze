@@ -618,12 +618,18 @@ function generateAnalytics(arch: Archetype): AnalyticsPayload {
 
   const sharpe = (meanR * 252) / volatility;
 
-  // Sortino uses downside deviation
-  const downsides = rawReturns.filter((r) => r < 0);
-  const downsideVar =
-    downsides.length > 0
-      ? downsides.reduce((s, r) => s + r * r, 0) / downsides.length
-      : 0;
+  // Sortino ratio: excess return over downside deviation.
+  // CRITICAL: downside deviation is the RMS of negative returns divided by
+  // TOTAL observations (n), NOT by the count of negative observations.
+  // Dividing by downsides.length inflates the denominator during calm
+  // periods (few negatives → small denominator → artificially small
+  // downside vol → artificially LARGE Sortino).
+  // See: Sortino, F. A., & Price, L. N. (1994).
+  const downsideSumSq = rawReturns.reduce(
+    (s, r) => s + (r < 0 ? r * r : 0),
+    0,
+  );
+  const downsideVar = downsideSumSq / n; // <-- /n, not /downsides.length
   const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(252);
   const sortino = downsideVol > 0 ? (meanR * 252) / downsideVol : sharpe;
 
@@ -680,10 +686,13 @@ function generateAnalytics(arch: Archetype): AnalyticsPayload {
     return out;
   };
 
-  // Quantiles
+  // Quantiles — clamp idx so q(1.0) doesn't read past the end.
   const sorted = [...rawReturns].sort((a, b) => a - b);
   const q = (p: number) => {
-    const idx = Math.floor(p * sorted.length);
+    const idx = Math.min(
+      Math.max(Math.floor(p * sorted.length), 0),
+      sorted.length - 1,
+    );
     return Number(sorted[idx].toFixed(5));
   };
 
@@ -979,28 +988,83 @@ function buildPortfolioAnalytics(
 ): PortfolioAnalyticsPayload {
   const total_aum = holdings.reduce((s, h) => s + h.initialUsd, 0);
 
-  // Weighted TWR + vol using each holding's weight and the strategy's scalar
-  // metrics. This isn't a real covariance-matrix portfolio calc but it's
-  // close enough for the demo and reflects the holdings in a sensible way.
-  let weightedCagr = 0;
-  let weightedSharpe = 0;
-  let weightedVol2 = 0;
+  // Portfolio metrics are computed from the portfolio's DAILY return series
+  // (weighted sum of strategy dailies), NOT from the weighted average of
+  // strategy scalars. This matters because:
+  //   (a) Sharpe uses mean-of-returns / std-of-returns, not CAGR / vol.
+  //       Mixing a geometric CAGR with a daily-derived vol is a
+  //       dimensional error a quant audience will catch immediately.
+  //   (b) Portfolio vol depends on the pairwise covariance structure,
+  //       not just weighted variance.
+  // We build the portfolio's daily-return vector once, derive everything
+  // from it, and only use the per-strategy scalars for attribution breakdowns.
+  const portfolioStart = new Date("2024-06-03T00:00:00Z");
+  const portfolioDates = businessDaysBetween(portfolioStart, SEED_END);
+
+  // Per-holding daily returns aligned to the portfolio date axis
+  const holdingDaily: number[][] = holdings.map((h) => {
+    const ana = strategyAnalytics.get(ARCHETYPES[h.idx].id)!;
+    return ana.daily_returns
+      .filter((d) => d.date >= "2024-06-03")
+      .map((d) => d.value);
+  });
+
+  // Portfolio daily returns + cumulative + equity curve (downsampled weekly)
+  const portfolioDaily: number[] = new Array(portfolioDates.length).fill(0);
+  const portfolio_equity_curve: Array<{ date: string; value: number }> = [];
+  let equity = 1;
+  for (let i = 0; i < portfolioDates.length; i++) {
+    let dayR = 0;
+    for (let j = 0; j < holdings.length; j++) {
+      const v = holdingDaily[j][i] ?? 0;
+      dayR += holdings[j].weight * v;
+    }
+    portfolioDaily[i] = dayR;
+    equity *= 1 + dayR;
+    if (i % 5 === 0) {
+      portfolio_equity_curve.push({
+        date: portfolioDates[i],
+        value: Number((equity - 1).toFixed(5)),
+      });
+    }
+  }
+  const total_return_twr = Number((equity - 1).toFixed(5));
+
+  // Portfolio scalars derived from the daily return vector — textbook
+  // definitions, no fudging.
+  const nPort = portfolioDaily.length;
+  const meanPort =
+    nPort > 0 ? portfolioDaily.reduce((s, r) => s + r, 0) / nPort : 0;
+  const varPort =
+    nPort > 1
+      ? portfolioDaily.reduce((s, r) => s + (r - meanPort) * (r - meanPort), 0) /
+        (nPort - 1)
+      : 0;
+  const portfolio_volatility = Math.sqrt(varPort) * Math.sqrt(252);
+  const portfolio_sharpe =
+    portfolio_volatility > 0
+      ? Number(((meanPort * 252) / portfolio_volatility).toFixed(3))
+      : 0;
+
+  // Attribution: contribution = weight * strategy_cagr (standard allocator
+  // attribution). `allocation_effect` is reserved for a future
+  // Brinson-style decomposition against a benchmark; for now it's nulled
+  // out rather than multiplied by a magic 0.85 constant that has no
+  // financial meaning and would embarrass the product in front of a quant.
   const attribution_breakdown: PortfolioAnalyticsPayload["attribution_breakdown"] =
     [];
   const risk_decomposition: PortfolioAnalyticsPayload["risk_decomposition"] =
     [];
-
   for (const h of holdings) {
     const arch = ARCHETYPES[h.idx];
     const ana = strategyAnalytics.get(arch.id)!;
-    weightedCagr += h.weight * ana.cagr;
-    weightedSharpe += h.weight * ana.sharpe;
-    weightedVol2 += h.weight * h.weight * ana.volatility * ana.volatility;
     attribution_breakdown.push({
       strategy_id: arch.id,
       strategy_name: arch.name,
       contribution: Number((h.weight * ana.cagr).toFixed(5)),
-      allocation_effect: Number((h.weight * ana.cagr * 0.85).toFixed(5)),
+      // Reserved for Brinson allocation effect — requires a benchmark
+      // weight vector we don't have yet. Zero is the honest placeholder.
+      allocation_effect: 0,
     });
     risk_decomposition.push({
       strategy_id: arch.id,
@@ -1011,23 +1075,11 @@ function buildPortfolioAnalytics(
       weight_pct: Number((h.weight * 100).toFixed(2)),
     });
   }
-  // Assume avg pairwise correlation of 0.15 between crypto-quant strategies
-  // (reflects the empirical evidence that diversified quant books have low
-  // inter-strategy correlation).
+
+  // Average pairwise correlation — used only to seed the displayed
+  // correlation matrix with realistic noise, not for the portfolio vol
+  // computation (which now comes from real portfolio daily returns).
   const avgCorr = 0.15;
-  let covariance = 0;
-  for (let i = 0; i < holdings.length; i++) {
-    for (let j = i + 1; j < holdings.length; j++) {
-      const vi = strategyAnalytics.get(ARCHETYPES[holdings[i].idx].id)!
-        .volatility;
-      const vj = strategyAnalytics.get(ARCHETYPES[holdings[j].idx].id)!
-        .volatility;
-      covariance +=
-        2 * holdings[i].weight * holdings[j].weight * vi * vj * avgCorr;
-    }
-  }
-  const portfolio_volatility = Math.sqrt(weightedVol2 + covariance);
-  const portfolio_sharpe = weightedCagr / portfolio_volatility;
 
   // Build correlation matrix (hollow diag=1, off=avgCorr + small noise)
   const correlation_matrix: Record<string, Record<string, number>> = {};
@@ -1046,35 +1098,7 @@ function buildPortfolioAnalytics(
     }
   }
 
-  // Portfolio equity curve: weighted sum of holding daily_returns
-  // Use a consistent start date = 2024-06-03 (uniform initial deposit)
-  const portfolioStart = new Date("2024-06-03T00:00:00Z");
-  const portfolioDates = businessDaysBetween(portfolioStart, SEED_END);
-  const portfolio_equity_curve: Array<{ date: string; value: number }> = [];
-  // Weighted daily returns
-  const holdingDaily: number[][] = holdings.map((h) => {
-    const ana = strategyAnalytics.get(ARCHETYPES[h.idx].id)!;
-    return ana.daily_returns
-      .filter((d) => d.date >= "2024-06-03")
-      .map((d) => d.value);
-  });
-  let equity = 1;
-  for (let i = 0; i < portfolioDates.length; i++) {
-    let dayR = 0;
-    for (let j = 0; j < holdings.length; j++) {
-      const v = holdingDaily[j][i] ?? 0;
-      dayR += holdings[j].weight * v;
-    }
-    equity *= 1 + dayR;
-    if (i % 5 === 0) {
-      portfolio_equity_curve.push({
-        date: portfolioDates[i],
-        value: Number((equity - 1).toFixed(5)),
-      });
-    }
-  }
-  const total_return_twr = Number((equity - 1).toFixed(5));
-  // Max DD on portfolio
+  // Max DD on portfolio (equity curve already computed above)
   let p = portfolio_equity_curve[0]?.value ?? 0;
   let maxDD = 0;
   for (const pt of portfolio_equity_curve) {
