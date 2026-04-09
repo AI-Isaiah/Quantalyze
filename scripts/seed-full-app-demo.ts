@@ -1458,6 +1458,26 @@ async function main() {
 
   // ========= 5. strategies =========
   console.log("[seed] Inserting 15 strategies...");
+  // Discovery categories: the sidebar + /discovery/[slug] page filter
+  // strategies by category_id. Seed strategies into "crypto-sma" so
+  // they show up where the demo allocator browses.
+  const { data: cryptoSmaCategory, error: categoryErr } = await admin
+    .from("discovery_categories")
+    .select("id")
+    .eq("slug", "crypto-sma")
+    .maybeSingle();
+  if (categoryErr) {
+    throw new Error(
+      `discovery_categories lookup failed: ${categoryErr.message}`,
+    );
+  }
+  if (!cryptoSmaCategory) {
+    throw new Error(
+      "discovery_categories row for slug='crypto-sma' is missing. Run the category seed before this script.",
+    );
+  }
+  const cryptoSmaCategoryId = cryptoSmaCategory.id as string;
+
   const realPortfolioStrategyIds = new Set(
     ACTIVE_HOLDINGS.map((h) => ARCHETYPES[h.idx].id),
   );
@@ -1465,6 +1485,7 @@ async function main() {
     const { error } = await admin.from("strategies").upsert({
       id: arch.id,
       user_id: MANAGER_IDS[arch.managerIdx],
+      category_id: cryptoSmaCategoryId,
       api_key_id: realPortfolioStrategyIds.has(arch.id) ? API_KEY_IDS[0] : null,
       name: arch.name,
       codename: arch.codename,
