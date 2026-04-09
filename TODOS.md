@@ -12,6 +12,45 @@
 
 ---
 
+## 🔴 HIGHEST PRIORITY — unblocked the moment the B1+B2 seed branch merges
+
+### Multistrategy Dashboard (allocator overview page)
+
+Top-level `/overview` page (new sidebar entry above `/portfolios`) that gives
+the allocator a **fund-level** view across ALL strategies in ALL their
+portfolios — the thing a multi-portfolio allocator actually opens first.
+
+Modelled after the FundLogic / Everysk "Multistrategy Dashboard" pattern:
+
+- **YTD PnL by Strategy** — overlaid line chart, one line per strategy,
+  distinct colors + hoverable legend. Reads directly from the seeded
+  `strategy_analytics.daily_returns`. Same client-side SVG approach as the
+  scenario builder.
+- **MTD PnL by Strategy** — horizontal bar chart, teal (positive) / orange
+  (negative), compound of the last ~21 trading days per strategy.
+- **Fund-level KPI strip** — 4 cards:
+  - Fund AUM (sum of `portfolio_strategies.allocated_amount` across all
+    portfolios owned by the allocator)
+  - Fund 24h Return (weighted by current allocation)
+  - Fund MTD Return
+  - Fund YTD Return
+- **Scope toggle** — "All strategies" vs "Active Allocation only" so the
+  real book and scenario portfolios don't muddy the chart together.
+- Each legend entry on the line chart is a deep link to the strategy detail
+  page so the allocator can drill from the overview directly.
+
+Everything needed to build this (daily_returns series per strategy,
+allocated_amount per holding, portfolio ownership) is already seeded by
+`scripts/seed-full-app-demo.ts`. Estimated 45-90 minutes of pure client-side
+code, no backend.
+
+Placement: new sidebar entry `"Overview"` with a chart/bar icon, positioned
+above `"Strategies"` in the `MY WORKSPACE` group. Make it the allocator's
+default landing page after login (redirect from `/` to `/overview` when
+`profile.role === 'allocator'`).
+
+---
+
 ## North star — the portfolio story a demo allocator should feel
 
 When an allocator opens their portfolio dashboard in the demo, they should hit

@@ -32,6 +32,16 @@ function buildNavSections(
       href: "/recommendations",
       icon: RecommendIcon,
     });
+    workspaceItems.push({
+      label: "Scenarios",
+      href: "/scenarios",
+      icon: BarChartIcon,
+    });
+    workspaceItems.push({
+      label: "Exchanges",
+      href: "/exchanges",
+      icon: BarChartIcon,
+    });
   }
 
   return [
