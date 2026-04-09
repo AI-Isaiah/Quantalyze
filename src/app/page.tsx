@@ -139,26 +139,26 @@ export default async function Home() {
           <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
             How It Works
           </h2>
-          <p className="mt-3 text-center text-text-secondary">
+          <p className="mt-3 text-text-secondary">
             For allocators seeking verified quant performance
           </p>
 
-          <div className="mt-14 grid gap-8 md:grid-cols-3">
+          <div className="mt-12 grid gap-px border-t border-border bg-border md:grid-cols-3">
             {[
               {
-                step: "1",
+                step: "01",
                 title: "Browse verified strategies",
                 description:
                   "Explore strategies with performance data pulled directly from exchange APIs. Every metric is independently verifiable.",
               },
               {
-                step: "2",
+                step: "02",
                 title: "Request an introduction",
                 description:
                   "Connect with strategy managers through our platform. Review track records, risk metrics, and trading history.",
               },
               {
-                step: "3",
+                step: "03",
                 title: "Allocate with confidence",
                 description:
                   "Make allocation decisions backed by exchange-verified data. No more relying on self-reported performance.",
@@ -166,12 +166,12 @@ export default async function Home() {
             ].map((item) => (
               <div
                 key={item.step}
-                className="rounded-xl border border-border bg-white p-6 shadow-card"
+                className="bg-page pt-8 md:pr-8"
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent/10 text-lg font-bold text-accent">
+                <p className="font-metric text-xs tracking-wider text-text-muted">
                   {item.step}
-                </div>
-                <h3 className="mt-4 text-base font-semibold text-text-primary">
+                </p>
+                <h3 className="mt-3 text-base font-semibold text-text-primary">
                   {item.title}
                 </h3>
                 <p className="mt-2 text-sm leading-relaxed text-text-secondary">
@@ -239,17 +239,19 @@ export default async function Home() {
 
       {/* CTA */}
       <section className="border-t border-border bg-page">
-        <div className="mx-auto max-w-6xl px-6 py-20 text-center md:py-24">
-          <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
-            Ready to see verified performance?
-          </h2>
-          <p className="mt-3 text-text-secondary">
-            Join the marketplace where every number is backed by exchange data.
-          </p>
-          <div className="mt-8">
+        <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
+          <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
+                Ready to see verified performance?
+              </h2>
+              <p className="mt-3 text-text-secondary">
+                Join the marketplace where every number is backed by exchange data.
+              </p>
+            </div>
             <Link
               href="/signup"
-              className="inline-flex items-center rounded-lg bg-accent px-6 py-3 text-base font-medium text-white hover:bg-accent-hover transition-colors"
+              className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-6 py-3 text-base font-medium text-white hover:bg-accent-hover transition-colors"
             >
               Get Started
             </Link>
