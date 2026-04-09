@@ -12,14 +12,14 @@ import {
 import { ALLOCATOR_ACTIVE_ID } from "@/lib/demo";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
-// ISR with 60s revalidation. The demo is hard-locked to a single seeded
-// allocator (ALLOCATOR_ACTIVE_ID), so every viewer sees the same HTML —
-// caching it at the Vercel CDN for 60 seconds turns a Telegram/link-viral
-// scenario from hundreds of Supabase calls per second into ~1 per minute.
-// The multi-step fallback (latest → previous batch → portfolio-only) still
-// kicks in when the batch is empty — it just runs once per revalidation
-// cycle now, not on every request.
-export const revalidate = 60;
+// Force dynamic rendering. The demo is hard-locked to a single seeded
+// allocator (ALLOCATOR_ACTIVE_ID) so ISR would be ideal for reducing hot-path
+// cost on a Telegram/link-viral scenario — BUT ISR prerenders the page at
+// build time, which calls createAdminClient() before any env vars are
+// available in CI, crashing the build. Revisit with a build-time guard when
+// we add a ratelimit-aware canary in PR-post-sprint. For now: per-request
+// render (matches pre-2026-04-09 behavior).
+export const dynamic = "force-dynamic";
 
 type StrategySummary = Pick<
   Strategy,
