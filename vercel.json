@@ -2,11 +2,5 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "buildCommand": "npm run build",
-  "installCommand": "npm ci",
-  "experimentalServices": {
-    "analytics-service": {
-      "entrypoint": "analytics-service",
-      "routePrefix": "/"
-    }
-  }
+  "installCommand": "npm ci"
 }
