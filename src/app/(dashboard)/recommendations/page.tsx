@@ -1,13 +1,12 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
-import { formatPercent, formatNumber, extractAnalytics } from "@/lib/utils";
+import { formatPercent, formatNumber } from "@/lib/utils";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 // Mirror /discovery/layout.tsx — the attestation gate must NEVER be cached.
@@ -58,29 +57,51 @@ export default async function RecommendationsPage() {
     return <AccreditedInvestorGate />;
   }
 
-  // Use the admin client to read match_* tables — RLS on those tables is
-  // admin-only, but we're showing the allocator their own matches so a
-  // server-side admin read with an explicit user_id filter is safe.
-  const admin = createAdminClient();
-
-  const [{ data: preferences }, { data: batch }] = await Promise.all([
-    admin
-      .from("allocator_preferences")
-      .select("mandate_archetype, target_ticket_size_usd")
-      .eq("user_id", user.id)
-      .maybeSingle(),
-    admin
-      .from("match_batches")
-      .select("id, computed_at, mode, candidate_count, engine_version")
-      .eq("allocator_id", user.id)
-      .order("computed_at", { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
+  // Fetch mandate via the allocator's own user client (RLS lets each user
+  // read their own allocator_preferences row).
+  const { data: preferences } = await supabase
+    .from("allocator_preferences")
+    .select("mandate_archetype, target_ticket_size_usd")
+    .eq("user_id", user.id)
+    .maybeSingle();
 
   const mandateSet = Boolean(preferences?.mandate_archetype);
 
-  let candidates: Array<{
+  // Fetch batch meta + top-3 candidates via SECURITY DEFINER RPCs
+  // (migration 019). Each RPC enforces "caller is the allocator or admin"
+  // in SQL, so a non-matching caller gets an empty result set -- the page
+  // can't accidentally leak cross-allocator matches via a shared batch id.
+  const [batchMetaResult, recsResult] = await Promise.all([
+    supabase.rpc("get_allocator_latest_batch_meta", {
+      p_allocator_id: user.id,
+    }),
+    supabase.rpc("get_allocator_recommendations", {
+      p_allocator_id: user.id,
+    }),
+  ]);
+
+  if (batchMetaResult.error) {
+    console.error(
+      "[recommendations] get_allocator_latest_batch_meta failed:",
+      batchMetaResult.error.message,
+    );
+  }
+  if (recsResult.error) {
+    console.error(
+      "[recommendations] get_allocator_recommendations failed:",
+      recsResult.error.message,
+    );
+  }
+
+  const batch = batchMetaResult.data?.[0]
+    ? {
+        id: batchMetaResult.data[0].batch_id as string,
+        computed_at: batchMetaResult.data[0].computed_at as string,
+        candidate_count: batchMetaResult.data[0].candidate_count as number,
+      }
+    : null;
+
+  const candidates: Array<{
     id: string;
     strategy_id: string;
     rank: number;
@@ -96,47 +117,23 @@ export default async function RecommendationsPage() {
       max_drawdown: number | null;
       computed_at: string | null;
     };
-  }> = [];
-
-  if (batch?.id) {
-    const { data: rows } = await admin
-      .from("match_candidates")
-      .select(
-        `id, strategy_id, rank, score, reasons,
-         strategies!inner (
-           id, name, description,
-           discovery_categories (slug),
-           strategy_analytics (cagr, sharpe, max_drawdown, computed_at)
-         )`,
-      )
-      .eq("batch_id", batch.id)
-      .not("rank", "is", null)
-      .order("rank", { ascending: true })
-      .limit(3);
-
-    candidates = (rows ?? []).map((row: Record<string, unknown>) => {
-      const s = (row.strategies as Record<string, unknown>) ?? {};
-      const analytics = extractAnalytics(s.strategy_analytics);
-      const cat = s.discovery_categories as { slug?: string } | null;
-      return {
-        id: row.id as string,
-        strategy_id: row.strategy_id as string,
-        rank: row.rank as number,
-        score: row.score as number,
-        reasons: (row.reasons as string[]) ?? [],
-        strategy: {
-          id: s.id as string,
-          name: s.name as string,
-          description: (s.description as string) ?? null,
-          category_slug: cat?.slug ?? null,
-          cagr: analytics?.cagr ?? null,
-          sharpe: analytics?.sharpe ?? null,
-          max_drawdown: analytics?.max_drawdown ?? null,
-          computed_at: analytics?.computed_at ?? null,
-        },
-      };
-    });
-  }
+  }> = ((recsResult.data ?? []) as Record<string, unknown>[]).map((row) => ({
+    id: row.id as string,
+    strategy_id: row.strategy_id as string,
+    rank: row.rank as number,
+    score: row.score as number,
+    reasons: (row.reasons as string[] | null) ?? [],
+    strategy: {
+      id: row.strategy_id as string,
+      name: row.strategy_name as string,
+      description: (row.strategy_description as string | null) ?? null,
+      category_slug: (row.discovery_category_slug as string | null) ?? null,
+      cagr: row.cagr as number | null,
+      sharpe: row.sharpe as number | null,
+      max_drawdown: row.max_drawdown as number | null,
+      computed_at: (row.analytics_computed_at as string | null) ?? null,
+    },
+  }));
 
   return (
     <>
