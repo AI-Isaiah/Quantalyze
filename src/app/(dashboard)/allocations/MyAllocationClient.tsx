@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -12,14 +12,20 @@ import {
 } from "@/lib/utils";
 import { FundKPIStrip } from "@/components/portfolio/FundKPIStrip";
 import { StrategyMtdBars } from "@/components/portfolio/StrategyMtdBars";
+import { FavoritesPanel } from "@/components/portfolio/FavoritesPanel";
 import {
   buildDateMapCache,
   computeCompositeCurve,
+  computeFavoritesOverlayCurve,
   computeStrategyCurve,
   type StrategyForBuilder,
   type DailyPoint,
 } from "@/lib/scenario";
-import type { PortfolioAnalytics, Portfolio } from "@/lib/types";
+import type {
+  PortfolioAnalytics,
+  Portfolio,
+  UserFavoriteWithStrategy,
+} from "@/lib/types";
 import Link from "next/link";
 
 /**
@@ -84,6 +90,7 @@ interface MyAllocationClientProps {
   portfolio: Portfolio;
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
+  favorites: UserFavoriteWithStrategy[];
   alertCount: { high: number; medium: number; low: number; total: number };
 }
 
@@ -134,8 +141,16 @@ export function MyAllocationClient({
   portfolio,
   analytics,
   strategies,
+  favorites,
   alertCount,
 }: MyAllocationClientProps) {
+  // Panel open/close state — driven by the "View Favorites" button.
+  const [panelOpen, setPanelOpen] = useState(false);
+  // Active favorite strategy ids — driven by toggles inside the panel.
+  // When non-empty, we compute a "+ Favorites" overlay curve and pass it
+  // to PortfolioEquityCurve as the dashed overlay line.
+  const [activeFavoriteIds, setActiveFavoriteIds] = useState<string[]>([]);
+
   // Build the StrategyForBuilder shapes the scenario math consumes,
   // once per render. Strategies without daily_returns drop out of the
   // chart but stay in the breakdown table.
@@ -206,6 +221,62 @@ export function MyAllocationClient({
     [strategiesForBuilder, weightsById, inceptionDate, dateMapCache],
   );
 
+  // Build StrategyForBuilder shapes for favorites (same normalization
+  // pipeline as the real strategies — the overlay math treats both sets
+  // uniformly). Favorites without daily_returns drop out. codename +
+  // disclosure_tier coalesce to safe defaults because the Strategy type
+  // marks them optional; StrategyForBuilder requires them non-undefined.
+  const favoritesForBuilder = useMemo<StrategyForBuilder[]>(
+    () =>
+      favorites
+        .map((f) => {
+          const dr = normalizeDailyReturns(
+            f.strategy.strategy_analytics?.daily_returns,
+          );
+          return {
+            id: f.strategy.id,
+            name: f.strategy.name,
+            codename: f.strategy.codename ?? null,
+            disclosure_tier: f.strategy.disclosure_tier ?? "exploratory",
+            strategy_types: f.strategy.strategy_types,
+            markets: f.strategy.markets,
+            start_date: f.strategy.start_date,
+            daily_returns: dr,
+            cagr: f.strategy.strategy_analytics?.cagr ?? null,
+            sharpe: f.strategy.strategy_analytics?.sharpe ?? null,
+            volatility: f.strategy.strategy_analytics?.volatility ?? null,
+            max_drawdown:
+              f.strategy.strategy_analytics?.max_drawdown ?? null,
+          };
+        })
+        .filter((s) => s.daily_returns.length > 0),
+    [favorites],
+  );
+
+  // Compute the "+ Favorites" overlay curve when any favorite is
+  // toggled ON. When all are off (or no favorites exist at all), the
+  // overlay is null and the chart renders only the real portfolio line
+  // + per-strategy lines.
+  const overlayCurve = useMemo(() => {
+    if (activeFavoriteIds.length === 0) return null;
+    const activeFavorites = favoritesForBuilder.filter((f) =>
+      activeFavoriteIds.includes(f.id),
+    );
+    if (activeFavorites.length === 0) return null;
+    return computeFavoritesOverlayCurve(
+      strategiesForBuilder,
+      weightsById,
+      activeFavorites,
+      inceptionDate,
+    );
+  }, [
+    activeFavoriteIds,
+    favoritesForBuilder,
+    strategiesForBuilder,
+    weightsById,
+    inceptionDate,
+  ]);
+
   // MTD bars: use the server-side attribution_breakdown from the
   // portfolio_analytics row if present, otherwise fall back to each
   // strategy's summary metric if available. The plan only specs
@@ -255,16 +326,21 @@ export function MyAllocationClient({
             )}
           </p>
         </div>
-        {/* Favorites panel button — wired as a no-op stub in PR 3, full
-            implementation in PR 4. */}
+        {/* Favorites panel trigger. Opens the right-side slide-out that
+            hosts the watchlist toggles and the Save-as-Test modal. */}
         <button
           type="button"
-          disabled
-          className="inline-flex items-center gap-1 rounded-md px-3 py-2 text-sm text-text-muted cursor-not-allowed"
-          aria-label="View favorites (coming in next commit)"
-          title="Favorites panel lands in the next commit on this branch"
+          onClick={() => setPanelOpen(true)}
+          className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-2 text-sm text-text-secondary hover:text-text-primary hover:border-accent/40 hover:bg-bg-secondary transition-colors"
+          aria-label="View favorites"
         >
-          View Favorites ›
+          View Favorites
+          <span aria-hidden="true">›</span>
+          {favorites.length > 0 && (
+            <span className="ml-1 rounded-full bg-accent/10 px-1.5 text-[10px] font-medium text-accent font-metric tabular-nums">
+              {favorites.length}
+            </span>
+          )}
         </button>
       </header>
 
@@ -313,6 +389,8 @@ export function MyAllocationClient({
             <PortfolioEquityCurve
               portfolioEquityCurve={portfolioEquityCurve}
               strategies={strategyCurves}
+              overlayCurve={overlayCurve}
+              overlayLabel="+ Favorites"
             />
           )}
         </div>
@@ -420,6 +498,15 @@ export function MyAllocationClient({
           </div>
         )}
       </section>
+
+      <FavoritesPanel
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        favorites={favoritesForBuilder}
+        realStrategyIds={strategies.map((s) => s.strategy_id)}
+        realPortfolioName={portfolio.name}
+        onSelectionChange={setActiveFavoriteIds}
+      />
     </>
   );
 }
