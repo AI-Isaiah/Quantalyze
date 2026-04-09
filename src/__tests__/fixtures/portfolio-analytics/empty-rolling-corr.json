@@ -1,0 +1,53 @@
+{
+  "id": "00000000-0000-4000-8000-000000000003",
+  "portfolio_id": "dddddddd-0001-4000-8000-000000000001",
+  "computed_at": "2026-04-09T08:00:00.000Z",
+  "computation_status": "complete",
+  "computation_error": null,
+  "total_aum": 5000000,
+  "total_return_twr": 0.06,
+  "total_return_mwr": 0.058,
+  "portfolio_sharpe": 0.8,
+  "portfolio_volatility": 0.09,
+  "portfolio_max_drawdown": -0.04,
+  "avg_pairwise_correlation": null,
+  "return_24h": 0.001,
+  "return_mtd": 0.012,
+  "return_ytd": 0.06,
+  "narrative_summary": "Single-strategy portfolio. Rolling correlation requires at least 2 strategies.",
+  "correlation_matrix": {
+    "cccccccc-0001-4000-8000-000000000001": {
+      "cccccccc-0001-4000-8000-000000000001": 1.0
+    }
+  },
+  "attribution_breakdown": [
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000001",
+      "strategy_name": "Stellar Neutral Alpha",
+      "contribution": 0.06,
+      "allocation_effect": 0.0
+    }
+  ],
+  "risk_decomposition": [
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000001",
+      "strategy_name": "Stellar Neutral Alpha",
+      "marginal_risk_pct": 100.0,
+      "standalone_vol": 0.09,
+      "component_var": 0.0081,
+      "weight_pct": 100.0
+    }
+  ],
+  "benchmark_comparison": {
+    "symbol": "BTC",
+    "correlation": 0.18,
+    "benchmark_twr": 0.12,
+    "portfolio_twr": 0.06,
+    "stale": false
+  },
+  "optimizer_suggestions": null,
+  "portfolio_equity_curve": [
+    { "date": "2026-04-09", "value": 1.06 }
+  ],
+  "rolling_correlation": {}
+}

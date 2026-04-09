@@ -3,7 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { formatPercent, formatNumber, metricColor, extractAnalytics } from "@/lib/utils";
-import type { StrategyAnalytics } from "@/lib/types";
+import type { StrategyAnalytics, AttributionRow } from "@/lib/types";
 
 type SortKey = "name" | "weight" | "twr" | "sharpe" | "max_dd" | "contribution";
 type SortDir = "asc" | "desc";
@@ -37,7 +37,7 @@ interface StrategyBreakdownTableProps {
       strategy_analytics: unknown;
     } | null;
   }>;
-  attribution: { strategy_id: string; weight: number; twr: number; contribution: number }[] | null;
+  attribution: AttributionRow[] | null;
   portfolioId: string;
 }
 
@@ -77,11 +77,15 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
       const analytics = s ? extractAnalytics((s as Record<string, unknown>).strategy_analytics) as StrategyAnalytics | null : null;
       const attr = attribution?.find((a) => a.strategy_id === ps.strategy_id);
 
+      // The persisted attribution payload contains contribution + allocation_effect
+      // (see analytics-service/services/portfolio_risk.py::compute_attribution).
+      // Weight and TWR come from the joined portfolio_strategies row and the
+      // strategy's own analytics, not from attribution.
       return {
         strategy_id: ps.strategy_id,
         name: s?.name ?? "Unknown",
-        weight: attr?.weight ?? ps.current_weight ?? null,
-        twr: attr?.twr ?? analytics?.cagr ?? null,
+        weight: ps.current_weight ?? null,
+        twr: analytics?.cagr ?? null,
         sharpe: analytics?.sharpe ?? null,
         max_dd: analytics?.max_drawdown ?? null,
         contribution: attr?.contribution ?? null,

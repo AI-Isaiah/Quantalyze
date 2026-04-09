@@ -1,0 +1,127 @@
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "portfolio_id": "dddddddd-0001-4000-8000-000000000001",
+  "computed_at": "2026-04-09T08:00:00.000Z",
+  "computation_status": "complete",
+  "computation_error": null,
+  "total_aum": 10000000,
+  "total_return_twr": 0.18,
+  "total_return_mwr": 0.17,
+  "portfolio_sharpe": 1.42,
+  "portfolio_volatility": 0.13,
+  "portfolio_max_drawdown": -0.05,
+  "avg_pairwise_correlation": 0.21,
+  "return_24h": 0.002,
+  "return_mtd": 0.023,
+  "return_ytd": 0.18,
+  "narrative_summary": "Your portfolio returned +2.3% MTD (TWR), driven primarily by Stellar Neutral Alpha (+1.40% contribution). Average pairwise correlation is 0.21, which is well-diversified.",
+  "correlation_matrix": {
+    "cccccccc-0001-4000-8000-000000000001": {
+      "cccccccc-0001-4000-8000-000000000001": 1.0,
+      "cccccccc-0001-4000-8000-000000000002": 0.18,
+      "cccccccc-0001-4000-8000-000000000003": -0.04
+    },
+    "cccccccc-0001-4000-8000-000000000002": {
+      "cccccccc-0001-4000-8000-000000000001": 0.18,
+      "cccccccc-0001-4000-8000-000000000002": 1.0,
+      "cccccccc-0001-4000-8000-000000000003": 0.31
+    },
+    "cccccccc-0001-4000-8000-000000000003": {
+      "cccccccc-0001-4000-8000-000000000001": -0.04,
+      "cccccccc-0001-4000-8000-000000000002": 0.31,
+      "cccccccc-0001-4000-8000-000000000003": 1.0
+    }
+  },
+  "attribution_breakdown": [
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000001",
+      "strategy_name": "Stellar Neutral Alpha",
+      "contribution": 0.072,
+      "allocation_effect": 0.012
+    },
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000002",
+      "strategy_name": "Nebula Momentum",
+      "contribution": 0.098,
+      "allocation_effect": -0.003
+    },
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000003",
+      "strategy_name": "Aurora Basis Trade",
+      "contribution": 0.035,
+      "allocation_effect": 0.005
+    }
+  ],
+  "risk_decomposition": [
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000001",
+      "strategy_name": "Stellar Neutral Alpha",
+      "marginal_risk_pct": 28.0,
+      "standalone_vol": 0.11,
+      "component_var": 0.0145,
+      "weight_pct": 40.0
+    },
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000002",
+      "strategy_name": "Nebula Momentum",
+      "marginal_risk_pct": 58.0,
+      "standalone_vol": 0.32,
+      "component_var": 0.0322,
+      "weight_pct": 35.0
+    },
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000003",
+      "strategy_name": "Aurora Basis Trade",
+      "marginal_risk_pct": 14.0,
+      "standalone_vol": 0.07,
+      "component_var": 0.0078,
+      "weight_pct": 25.0
+    }
+  ],
+  "benchmark_comparison": {
+    "symbol": "BTC",
+    "correlation": 0.31,
+    "benchmark_twr": 0.12,
+    "portfolio_twr": 0.18,
+    "stale": false
+  },
+  "optimizer_suggestions": [
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000004",
+      "strategy_name": "Vega Volatility Harvester",
+      "corr_with_portfolio": 0.08,
+      "sharpe_lift": 0.18,
+      "dd_improvement": 0.012,
+      "score": 0.142
+    },
+    {
+      "strategy_id": "cccccccc-0001-4000-8000-000000000005",
+      "strategy_name": "Helios L/S Stat Arb",
+      "corr_with_portfolio": 0.12,
+      "sharpe_lift": 0.09,
+      "dd_improvement": 0.008,
+      "score": 0.078
+    }
+  ],
+  "portfolio_equity_curve": [
+    { "date": "2025-10-09", "value": 1.0 },
+    { "date": "2025-11-09", "value": 1.04 },
+    { "date": "2025-12-09", "value": 1.08 },
+    { "date": "2026-01-09", "value": 1.11 },
+    { "date": "2026-02-09", "value": 1.14 },
+    { "date": "2026-03-09", "value": 1.16 },
+    { "date": "2026-04-09", "value": 1.18 }
+  ],
+  "rolling_correlation": {
+    "cccccccc-0001-4000-8000-000000000001:cccccccc-0001-4000-8000-000000000002": [
+      { "date": "2026-02-09", "value": 0.12 },
+      { "date": "2026-03-09", "value": 0.18 },
+      { "date": "2026-04-09", "value": 0.22 }
+    ],
+    "cccccccc-0001-4000-8000-000000000002:cccccccc-0001-4000-8000-000000000003": [
+      { "date": "2026-02-09", "value": 0.21 },
+      { "date": "2026-03-09", "value": 0.28 },
+      { "date": "2026-04-09", "value": 0.31 }
+    ]
+  }
+}

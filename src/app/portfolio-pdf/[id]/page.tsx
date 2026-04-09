@@ -96,11 +96,13 @@ export default async function PortfolioPdfPage({
         ) as StrategyAnalytics | null)
       : null;
     const attr = attribution?.find((x) => x.strategy_id === ps.strategy_id);
+    // Persisted attribution rows expose contribution + allocation_effect.
+    // Weight comes from portfolio_strategies, TWR from the strategy's own analytics.
     return {
       strategy_id: ps.strategy_id,
       name: s?.name ?? "Unknown",
-      weight: attr?.weight ?? ps.current_weight ?? null,
-      twr: attr?.twr ?? a?.cagr ?? null,
+      weight: ps.current_weight ?? null,
+      twr: a?.cagr ?? null,
       sharpe: a?.sharpe ?? null,
       max_dd: a?.max_drawdown ?? null,
       contribution: attr?.contribution ?? null,
