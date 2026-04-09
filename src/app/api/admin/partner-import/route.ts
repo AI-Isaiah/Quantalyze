@@ -78,6 +78,70 @@ function displayNameFromEmail(email: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/**
+ * Zero-dep concurrency limiter. Spawns `concurrency` workers that pull
+ * indices from a shared counter and run `fn(items[idx])` until exhausted.
+ * Preserves input order in the returned results. Used by the partner
+ * importer because Supabase GoTrue `admin.createUser` is rate-limited,
+ * so we can't just `Promise.all(items.map(fn))` — unbounded concurrency
+ * trips the auth service. A small cap (5) gets ~5× speedup in practice
+ * without hitting the rate limit.
+ *
+ * Fail-stop semantics: when any worker throws, the shared `aborted` flag
+ * is set so the other workers skip their remaining items. Already-started
+ * work still has to complete (there is no generic way to cancel an
+ * in-flight fetch), but no NEW rows are picked up after the first failure.
+ * This is the closest analogue to the old sequential loop's "stop on
+ * first error" behaviour.
+ */
+async function mapConcurrent<T, U>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, idx: number) => Promise<U>,
+): Promise<U[]> {
+  const results: U[] = new Array(items.length);
+  let nextIdx = 0;
+  let aborted = false;
+  let firstError: unknown;
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (!aborted) {
+        const idx = nextIdx++;
+        if (idx >= items.length) return;
+        try {
+          results[idx] = await fn(items[idx], idx);
+        } catch (err) {
+          if (!aborted) {
+            aborted = true;
+            firstError = err;
+          }
+          return;
+        }
+      }
+    },
+  );
+  await Promise.all(workers);
+  if (aborted) throw firstError;
+  return results;
+}
+
+/**
+ * Deduplicate rows by a key-producing function. Last write wins (the later
+ * row in the CSV replaces the earlier one). Used before `mapConcurrent` to
+ * prevent the `ensureAuthUser` race where two workers for the same email
+ * both hit the createUser path — the first wins, the second falls into
+ * the "exists in auth but has no profile row" branch because the first
+ * worker hasn't upserted the profile yet.
+ */
+function dedupeBy<T>(rows: T[], keyFn: (row: T) => string): T[] {
+  const byKey = new Map<string, T>();
+  for (const row of rows) {
+    byKey.set(keyFn(row), row);
+  }
+  return Array.from(byKey.values());
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -131,8 +195,29 @@ export async function POST(request: Request): Promise<NextResponse> {
   let strategies_created = 0;
   let allocators_created = 0;
 
+  // The managers CSV intentionally allows one `manager_email` to appear on
+  // multiple rows — that's how a manager with 3 strategies is represented.
+  // Dedupe ONLY for the auth-user + profile upsert step (one write per
+  // email) so parallel workers can't race on `ensureAuthUser`, then insert
+  // every strategy row against the pre-resolved user id map.
+  //
+  // Allocators are naturally one-row-per-email (each allocator has a
+  // single preferences row), but we dedupe defensively in case a
+  // malformed CSV repeats an allocator — last-write-wins on preferences.
+  const uniqueManagerEmails = dedupeBy(managers, (r) => r.manager_email);
+  const dedupedAllocators = dedupeBy(allocators, (r) => r.allocator_email);
+
+  // Concurrency cap for the per-row Supabase fan-out. Set to 5 because
+  // Supabase GoTrue `admin.createUser` is the bottleneck and it rate-limits
+  // at ~low single-digit concurrent calls. Each row also does 1-2 follow-up
+  // DB writes; at N=20 rows this takes the total from ~20 sequential RTTs
+  // down to ~4 batches of 5 concurrent RTTs.
+  const IMPORT_CONCURRENCY = 5;
+
   try {
-    for (const row of managers) {
+    // Phase 1: one auth user + profile per distinct manager email.
+    const managerIdByEmail = new Map<string, string>();
+    await mapConcurrent(uniqueManagerEmails, IMPORT_CONCURRENCY, async (row) => {
       const userId = await ensureAuthUser(admin, { email: row.manager_email });
 
       const { error: profileErr } = await admin.from("profiles").upsert(
@@ -146,8 +231,19 @@ export async function POST(request: Request): Promise<NextResponse> {
         { onConflict: "id" },
       );
       if (profileErr) throw profileErr;
+      managerIdByEmail.set(row.manager_email, userId);
       managers_created += 1;
+    });
 
+    // Phase 2: insert EVERY strategy row, including multi-strategy managers.
+    // Uses the pre-resolved user id map so there's no auth race.
+    await mapConcurrent(managers, IMPORT_CONCURRENCY, async (row) => {
+      const userId = managerIdByEmail.get(row.manager_email);
+      if (!userId) {
+        throw new Error(
+          `partner-import: missing user id for manager ${row.manager_email} (phase 1 should have resolved it)`,
+        );
+      }
       const { error: strategyErr } = await admin.from("strategies").insert({
         user_id: userId,
         name: row.strategy_name,
@@ -158,10 +254,12 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
       if (strategyErr) throw strategyErr;
       strategies_created += 1;
-    }
+    });
 
-    for (const row of allocators) {
-      const userId = await ensureAuthUser(admin, { email: row.allocator_email });
+    await mapConcurrent(dedupedAllocators, IMPORT_CONCURRENCY, async (row) => {
+      const userId = await ensureAuthUser(admin, {
+        email: row.allocator_email,
+      });
 
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
@@ -188,7 +286,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           { onConflict: "user_id" },
         );
       if (prefErr) throw prefErr;
-    }
+    });
   } catch (err) {
     console.error("[api/admin/partner-import] failed:", err);
     return NextResponse.json(
