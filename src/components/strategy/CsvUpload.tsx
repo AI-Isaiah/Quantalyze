@@ -50,6 +50,7 @@ function parseCsvWithHeaders(text: string): {
 export function CsvUpload({ strategyId }: CsvUploadProps) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<{ headers: string[]; mapping: Record<number, string>; rows: string[][]; total: number } | null>(null);
+  const [parsedAllRows, setParsedAllRows] = useState<string[][] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -97,19 +98,19 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
         return;
       }
 
+      setParsedAllRows(rows);
       setPreview({ headers, mapping, rows: rows.slice(0, 5), total: rows.length });
     };
     reader.readAsText(f);
   }
 
   async function handleUpload() {
-    if (!file || !preview) return;
+    if (!file || !preview || !parsedAllRows) return;
     setUploading(true);
     setError(null);
 
     try {
-      const text = await file.text();
-      const { rows } = parseCsvWithHeaders(text);
+      const rows = parsedAllRows;
       const { mapping } = preview;
 
       // Transform rows to daily PnL records
@@ -169,6 +170,7 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
 
       setFile(null);
       setPreview(null);
+      setParsedAllRows(null);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
@@ -236,7 +238,7 @@ export function CsvUpload({ strategyId }: CsvUploadProps) {
             <p className="text-sm text-text-primary font-medium">
               {file?.name} ({preview.total} trades)
             </p>
-            <Button size="sm" variant="ghost" onClick={() => { setPreview(null); setFile(null); setError(null); }}>
+            <Button size="sm" variant="ghost" onClick={() => { setPreview(null); setFile(null); setParsedAllRows(null); setError(null); }}>
               Clear
             </Button>
           </div>
