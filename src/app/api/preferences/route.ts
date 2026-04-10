@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { assertSameOrigin } from "@/lib/csrf";
 import {
   pickSelfEditableFields,
   validateSelfEditableInput,
   getOwnPreferences,
 } from "@/lib/preferences";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 export async function GET(): Promise<NextResponse> {
   const supabase = await createClient();
@@ -23,10 +25,21 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function PUT(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const rl = await checkLimit(userActionLimiter, `preferences:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   let body: Record<string, unknown>;
@@ -43,7 +56,10 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: validationError }, { status: 400 });
   }
 
-  // Upsert (insert if no row, update if exists). Allocator can only edit their own row.
+  // Defense-in-depth: ownership is enforced by binding user_id to the
+  // authenticated user.id. RLS on allocator_preferences is the DB-layer
+  // gate, but even if the policy breaks, this upsert can only affect the
+  // caller's own row because user_id is hardcoded from the session.
   const { error } = await supabase
     .from("allocator_preferences")
     .upsert(

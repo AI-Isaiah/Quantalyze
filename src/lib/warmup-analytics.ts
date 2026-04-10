@@ -16,7 +16,7 @@
  *      swallowed instead of bubbling to the runtime.
  */
 
-const WARMUP_TIMEOUT_MS = 2000;
+const WARMUP_TIMEOUT_MS = 10_000;
 
 /**
  * Fire-and-forget warmup. Returns immediately. Never throws.

@@ -23,7 +23,7 @@ const DEFAULT_WEIGHTS: WeightConfig = {
   winRate: 0.15,
 };
 
-function freshnesScore(computedAt: string | null): number {
+function freshnessScore(computedAt: string | null): number {
   if (!computedAt) return 0;
   const hours = (Date.now() - new Date(computedAt).getTime()) / (1000 * 60 * 60);
   if (hours < 24) return 100;
@@ -77,7 +77,7 @@ export function computeHealthScore(
   weights: WeightConfig = DEFAULT_WEIGHTS,
 ): number {
   const scores = {
-    freshness: freshnesScore(analytics.computed_at),
+    freshness: freshnessScore(analytics.computed_at),
     trackRecord: trackRecordScore(startDate),
     sharpe: sharpeScore(analytics.sharpe),
     drawdown: drawdownScore(analytics.max_drawdown),

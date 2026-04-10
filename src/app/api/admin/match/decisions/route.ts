@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 
 type Decision = "thumbs_up" | "thumbs_down" | "snoozed";
 const VALID: Decision[] = ["thumbs_up", "thumbs_down", "snoozed"];
@@ -11,6 +12,9 @@ const VALID: Decision[] = ["thumbs_up", "thumbs_down", "snoozed"];
 // behavior via the partial unique indexes — repeated thumbs_up on the same
 // (allocator, strategy) no-ops at the DB level.
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
@@ -68,6 +72,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 // Removes a thumbs_up / thumbs_down / snoozed decision (lets the founder change
 // their mind without inserting a contradicting row).
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 

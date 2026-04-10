@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.4.1.0] - 2026-04-10
+
+### Security
+- **Portfolio-PDF IDOR closed** — the `/portfolio-pdf/[id]` page now requires a signed HMAC render token. Direct browser access without a valid token returns "Unauthorized". API routes pass a 2-minute token to Puppeteer.
+- **CSRF retrofit** — Origin/Referer check applied to all ~25 mutating API routes (was only 2).
+- **Rate limiting extended** — all mutating/sensitive routes now have Upstash rate limits.
+- **Timing-safe token comparison** — `verify-strategy/[id]/status` uses `timingSafeEqual` instead of `!==`.
+- **`import 'server-only'`** guard on admin client modules prevents accidental browser bundle leak.
+- **Trade upload validation** — rows are schema-validated and `strategy_id` is forced server-side.
+- **API-layer auth defense-in-depth** — `getUser()` checks added before DB operations on write paths.
+
+### Added
+- **Sentry instrumentation** — `@sentry/nextjs` installed, `src/instrumentation.ts` conditionally initializes when `SENTRY_DSN` is set. `onRequestError` captures unhandled server errors.
+- **Error boundaries** at root (`global-error.tsx`), dashboard, and auth layout levels.
+- **Zod contract validation** for all 8 analytics service response types.
+- **Email retry with backoff** — Resend calls now retry 3x with exponential backoff.
+- **Analytics API version header** — client sends `X-Api-Version: 1`, warns on mismatch.
+- **Stuck-notification health check** — `src/lib/observability.ts` for monitoring `notification_dispatches`.
+- **13 Architecture Decision Records** in `docs/architecture/` covering RLS, auth, cron, caching, deployment, and more.
+- **7 regression tests** for critical findings (`critical-regressions.test.ts`).
+- **5 route tests** for trades/upload cross-user write protection.
+- **My Allocation dashboard redesign spec** at `docs/superpowers/specs/2026-04-10-my-allocation-dashboard.md`.
+- **Round-1 and round-2 audit reports** in `audit/`.
+
+### Changed
+- **Analytics client timeout** — shared fetch wrapper now uses `AbortSignal.timeout(30s)` with configurable override.
+- **Analytics client consolidated** — `portfolio-optimizer` and `admin/match/eval` routes now use the shared client.
+- **Vercel Crons re-registered** — `warm-analytics` (every 5 min) and `alert-digest` (daily 9 AM) in `vercel.json`.
+- **Warmup timeout bumped** from 2s to 10s.
+- **PDF routes** — `maxDuration=30` set on all 4 handlers; auth'd route cache changed from `s-maxage=3600` to `private, no-store`.
+- **Trade upload cap** lowered from 50k to 5k rows per request.
+- **Admin auth consolidated** — proxy now uses canonical `isAdmin()` from `src/lib/admin.ts`.
+- **`api_keys` reads** switched from admin client to user-scoped client (respects RLS).
+- **MyAllocationClient** broken up from 1218 to 544 LoC (6 sub-components extracted).
+- **AllocatorMatchQueue** broken up from 1028 to 754 LoC (4 sub-components extracted).
+- **`as unknown as` casts** reduced from 34 to 9 via typed `castRow`/`castRows` helpers.
+- **VERSION synced** — `package.json` version matches `VERSION` file.
+
+### Fixed
+- **`freshnesScore` typo** fixed to `freshnessScore` across all files.
+- **CsvUpload double-read** eliminated by storing parsed rows in state.
+- **Fake sync button** in AllocatorExchangeManager replaced with disabled "Auto-synced" indicator.
+- **`.env.example`** rewritten: fixed analytics port (8000 → 8002), added 10 missing vars, removed stale entries.
+
+### Removed
+- **Dead API routes** — `/api/keys/encrypt` and `/api/keys/validate` deleted (superseded by `validate-and-encrypt`).
+- **CI audit swallow** — removed `|| true` from `npm audit` in CI.
+
+### Design
+- **PageHeader** uses Instrument Serif per DESIGN.md (propagates to all dashboard pages).
+- **Landing page** H2 headings normalized to Instrument Serif 32px.
+- **"How It Works"** section rebuilt from 3-card slop to editorial hairline columns.
+- **WCAG 2.5.5** 44px touch targets enforced across Input/Select/Button primitives.
+- **404 page** and **legal pages** typography aligned with DESIGN.md.
+
 ## [0.4.0.0] - 2026-04-09
 
 ### Added

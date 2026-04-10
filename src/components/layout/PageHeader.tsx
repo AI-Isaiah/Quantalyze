@@ -12,7 +12,7 @@ export function PageHeader({ title, description, actions, meta }: PageHeaderProp
   return (
     <div className="flex items-start justify-between mb-8">
       <div>
-        <h1 className="text-[32px] font-bold tracking-tight text-text-primary">
+        <h1 className="font-display text-[32px] tracking-tight text-text-primary">
           {title}
         </h1>
         {description && (

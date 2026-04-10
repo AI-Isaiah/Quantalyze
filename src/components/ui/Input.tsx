@@ -23,7 +23,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         <input
           ref={ref}
           id={inputId}
-          className={cn("rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:bg-page disabled:text-text-muted", error && "border-negative", className)}
+          className={cn("min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:bg-page disabled:text-text-muted", error && "border-negative", className)}
           {...props}
         />
         {error && <p className="text-xs text-negative">{error}</p>}

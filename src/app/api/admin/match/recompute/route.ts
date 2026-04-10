@@ -1,14 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { recomputeMatch } from "@/lib/analytics-client";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
+  const rl = await checkLimit(adminActionLimiter, `match-recompute:${user!.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   let body: { allocator_id?: string; force?: boolean };

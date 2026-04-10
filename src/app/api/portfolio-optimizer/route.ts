@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { assertSameOrigin } from "@/lib/csrf";
 import { assertPortfolioOwnership } from "@/lib/queries";
+import {
+  runPortfolioOptimizer,
+  AnalyticsTimeoutError,
+} from "@/lib/analytics-client";
 
-const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
-const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
+/** Optimizer can take 3-8s on large portfolios; 15s is generous. */
+const OPTIMIZER_TIMEOUT_MS = 15_000;
 
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },
@@ -33,22 +41,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let res: Response;
   try {
-    res = await fetch(`${ANALYTICS_URL}/api/portfolio-optimizer`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
-      },
-      body: JSON.stringify({ portfolio_id: portfolioId }),
-      signal: AbortSignal.timeout(60000),
+    const data = (await runPortfolioOptimizer(
+      portfolioId,
+      OPTIMIZER_TIMEOUT_MS,
+    )) as { status?: string; suggestions?: unknown };
+
+    return NextResponse.json({
+      status: "complete",
+      suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
     });
   } catch (err) {
-    const isTimeout =
-      err instanceof Error &&
-      (err.name === "TimeoutError" || err.name === "AbortError");
-    if (isTimeout) {
+    if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
         { status: "failed", suggestions: null, error: "Optimizer timed out" },
         { status: 504 },
@@ -58,44 +62,10 @@ export async function POST(req: NextRequest) {
       {
         status: "failed",
         suggestions: null,
-        error: "Analytics service unreachable",
+        error:
+          err instanceof Error ? err.message : "Analytics service unreachable",
       },
       { status: 503 },
     );
   }
-
-  if (res.status >= 500) {
-    return NextResponse.json(
-      {
-        status: "failed",
-        suggestions: null,
-        error: "Analytics service unreachable",
-      },
-      { status: 503 },
-    );
-  }
-
-  if (!res.ok) {
-    let detail = `Optimizer returned ${res.status}`;
-    try {
-      const errBody = await res.json();
-      if (errBody?.detail) detail = String(errBody.detail);
-    } catch {
-      /* non-JSON body */
-    }
-    return NextResponse.json(
-      { status: "failed", suggestions: null, error: detail },
-      { status: res.status },
-    );
-  }
-
-  const data = (await res.json()) as {
-    status?: string;
-    suggestions?: unknown;
-  };
-
-  return NextResponse.json({
-    status: "complete",
-    suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
-  });
 }

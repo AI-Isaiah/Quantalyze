@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { safeCompare } from "@/lib/timing-safe-compare";
 
 export async function GET(
   req: NextRequest,
@@ -24,8 +25,8 @@ export async function GET(
     return NextResponse.json({ error: "Verification not found" }, { status: 404 });
   }
 
-  // --- Validate capability token ---
-  if (verification.public_token !== token) {
+  // --- Validate capability token (constant-time to prevent timing attacks) ---
+  if (!verification.public_token || !safeCompare(verification.public_token, token)) {
     return NextResponse.json({ error: "Verification not found" }, { status: 404 });
   }
 

@@ -1,10 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { DisclosureTier } from "@/lib/types";
 
 // POST /api/admin/partner-import
@@ -143,10 +145,21 @@ function dedupeBy<T>(rows: T[], keyFn: (row: T) => string): T[] {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(request as NextRequest);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
+  const rl = await checkLimit(adminActionLimiter, `partner-import:${user!.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   let body: {

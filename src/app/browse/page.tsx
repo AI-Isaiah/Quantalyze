@@ -25,7 +25,7 @@ export default async function BrowsePage() {
   return (
     <>
       <div className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight text-text-primary md:text-3xl">
+        <h1 className="font-display text-3xl tracking-tight text-text-primary md:text-[32px]">
           Browse Verified Strategies
         </h1>
         <p className="mt-2 text-text-secondary">
@@ -57,20 +57,24 @@ export default async function BrowsePage() {
         </div>
       )}
 
-      <div className="mt-12 rounded-xl border border-border bg-page p-6 text-center">
-        <h2 className="text-lg font-semibold text-text-primary">
-          Want full analytics and introductions?
-        </h2>
-        <p className="mt-2 text-sm text-text-secondary">
-          Sign up to access detailed performance reports, request introductions
-          to managers, and build portfolios.
-        </p>
-        <Link
-          href="/signup"
-          className="mt-4 inline-flex items-center rounded-lg bg-accent px-5 py-2.5 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-        >
-          Get Started Free
-        </Link>
+      <div className="mt-12 border-t border-border pt-8">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="font-display text-2xl text-text-primary">
+              Want full analytics and introductions?
+            </h2>
+            <p className="mt-2 text-sm text-text-secondary">
+              Sign up to access detailed performance reports, request
+              introductions to managers, and build portfolios.
+            </p>
+          </div>
+          <Link
+            href="/signup"
+            className="inline-flex shrink-0 items-center justify-center rounded-lg bg-accent px-5 py-3 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+          >
+            Get Started Free
+          </Link>
+        </div>
       </div>
     </>
   );

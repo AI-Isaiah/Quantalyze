@@ -1,15 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import {
   notifyManagerIntroRequest,
   notifyFounderIntroRequest,
   notifyAllocatorOfIntroRequest,
 } from "@/lib/email";
 import { loadManagerIdentity } from "@/lib/manager-identity";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { DisclosureTier, ManagerIdentity } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },
@@ -17,6 +22,30 @@ export async function POST(req: NextRequest) {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const rl = await checkLimit(userActionLimiter, `intro:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
+  }
+
+  // Defense-in-depth: verify the user has an allocator role before allowing
+  // intro requests. RLS on contact_requests is the DB-layer gate, but a broken
+  // policy would silently let any authenticated user insert rows.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .single();
+
+  if (!profile || (profile.role !== "allocator" && profile.role !== "both")) {
+    return NextResponse.json(
+      { error: "Only allocators can request introductions" },
+      { status: 403 },
+    );
   }
 
   const body = await req.json();

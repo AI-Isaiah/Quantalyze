@@ -1,7 +1,9 @@
-import { NextResponse } from "next/server";
+import "server-only";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 type AdminHandler = (
@@ -11,6 +13,10 @@ type AdminHandler = (
 
 export function withAdminAuth(handler: AdminHandler) {
   return async (request: Request): Promise<NextResponse> => {
+    // CSRF defense-in-depth: admin routes are always mutating (POST).
+    const csrfError = assertSameOrigin(request as NextRequest);
+    if (csrfError) return csrfError;
+
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
 

@@ -1,47 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Modal } from "@/components/ui/Modal";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
 import { SendIntroPanel } from "@/components/admin/SendIntroPanel";
 import { PreferencesPanel } from "@/components/admin/PreferencesPanel";
-
-/**
- * Reactive media-query hook. Returns true when the query matches.
- *
- * Used to gate keyboard shortcuts to lg+ viewports without forcing a
- * separate mobile component tree. Implemented with useSyncExternalStore
- * so we don't fall into the "setState inside useEffect" anti-pattern
- * the React compiler (rightly) complains about. The SSR snapshot is
- * `false` so the read-only mobile UI hydrates first — flipping the
- * other way would briefly expose write actions before JS classifies
- * the viewport.
- */
-function useMediaQuery(query: string): boolean {
-  const subscribe = useCallback(
-    (onChange: () => void) => {
-      if (typeof window === "undefined") return () => {};
-      const mql = window.matchMedia(query);
-      mql.addEventListener("change", onChange);
-      return () => mql.removeEventListener("change", onChange);
-    },
-    [query],
-  );
-  const getSnapshot = useCallback(() => {
-    if (typeof window === "undefined") return false;
-    return window.matchMedia(query).matches;
-  }, [query]);
-  const getServerSnapshot = useCallback(() => false, []);
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-}
+import { ModeBadge, ScoreCell } from "@/components/admin/match/ModeBadge";
+import { MatchQueueSkeleton } from "@/components/admin/match/MatchQueueSkeleton";
+import { ShortcutHelpModal } from "@/components/admin/match/ShortcutHelpModal";
+import { ShortlistCard } from "@/components/admin/match/ShortlistCard";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -292,15 +267,7 @@ export function AllocatorMatchQueue({
   );
 
   // Keyboard shortcuts — only active at lg+ (1024+) per Sprint 4 T10.1.
-  // Each handler short-circuits via the isLg check; we still register the
-  // hook unconditionally so the listener doesn't churn on viewport changes.
-  //
-  // `forceReadOnly` is checked by the shared `guard` wrapper below (not just
-  // on the visible buttons) because the public /demo/founder-view page still
-  // mounts this component; we don't want `s`/`u`/`d`/`r` to fire admin
-  // actions against /api/admin even though the UI buttons are hidden.
-  // Centralizing the check means a future new shortcut can't accidentally
-  // forget to guard itself.
+  // `forceReadOnly` is checked by the shared `guard` wrapper below.
   const guard = useCallback(
     (fn: () => void) => () => {
       if (forceReadOnly) return;
@@ -358,21 +325,11 @@ export function AllocatorMatchQueue({
     },
   ]);
 
-  // Shortcut help overlay: bound to "?" (Shift+/). Stricter than the
-  // useKeyboardShortcuts hook because we want it to fire ONLY when the
-  // user has nothing focused — body. This excludes the case where a
-  // slide-out panel is open and focus has moved into it. Esc closes the
-  // modal via the native <dialog> behavior.
-  //
-  // Suppressed in read-only mode — the keyboard shortcuts themselves are
-  // disabled on /demo/founder-view, so advertising them would be a lie.
+  // Shortcut help overlay: bound to "?" (Shift+/).
   useEffect(() => {
     if (!isLg || forceReadOnly) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "?") return;
-      // Strict body check: only fire on the bare page, not over an open
-      // modal/slide-out/input. document.body is the activeElement when
-      // nothing is focused.
       if (document.activeElement !== document.body) return;
       e.preventDefault();
       setShowShortcutHelp(true);
@@ -414,9 +371,7 @@ export function AllocatorMatchQueue({
 
   return (
     <div className="space-y-6">
-      {/* Public demo read-only banner — only on /demo/founder-view. Takes
-          precedence over the mobile banner because it applies at every
-          viewport, not just <md. */}
+      {/* Public demo read-only banner */}
       {forceReadOnly && (
         <ScopedBanner
           tone="accent"
@@ -425,8 +380,7 @@ export function AllocatorMatchQueue({
         />
       )}
 
-      {/* Breadcrumb — hidden on the public demo because /admin/match requires
-          auth and 404s under the public layout. */}
+      {/* Breadcrumb */}
       {!forceReadOnly && (
         <nav className="flex items-center gap-2 text-sm text-text-muted">
           <Link href="/admin/match" className="hover:text-text-primary">
@@ -439,11 +393,7 @@ export function AllocatorMatchQueue({
         </nav>
       )}
 
-      {/* Read-only mobile banner: below the md breakpoint (768px) the queue
-          hides all KEEP/SKIP/SENT actions so a founder accidentally demoing
-          from their phone doesn't record a decision with the wrong intent.
-          Suppressed on the public demo because the top banner already says
-          "read-only" at every viewport. */}
+      {/* Read-only mobile banner */}
       {!forceReadOnly && (
         <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
           <p className="text-sm text-text-primary">
@@ -487,8 +437,7 @@ export function AllocatorMatchQueue({
           </div>
         </div>
 
-        {/* Action bar — hidden entirely in read-only mode so the demo page
-            doesn't render dead buttons. Stats line stays. */}
+        {/* Action bar */}
         <div className="mt-4 flex items-center gap-2 flex-wrap">
           {!forceReadOnly && (
             <>
@@ -511,8 +460,8 @@ export function AllocatorMatchQueue({
           )}
           {batch && (
             <span className="ml-auto text-[11px] text-text-muted font-mono tabular-nums">
-              {candidates.length} candidates ·{" "}
-              {decisions.filter((d) => d.decision === "sent_as_intro").length} sent ·{" "}
+              {candidates.length} candidates &middot;{" "}
+              {decisions.filter((d) => d.decision === "sent_as_intro").length} sent &middot;{" "}
               {decisions.filter((d) => d.decision === "thumbs_up").length} kept
             </span>
           )}
@@ -674,7 +623,7 @@ export function AllocatorMatchQueue({
             }}
             className="cursor-pointer text-sm font-medium text-text-primary hover:text-accent"
           >
-            Excluded strategies ({excluded.length}) {showExcluded ? "▼" : "▶"}
+            Excluded strategies ({excluded.length}) {showExcluded ? "\u25BC" : "\u25B6"}
           </summary>
           {showExcluded && (
             <Card className="mt-2 p-0">
@@ -702,7 +651,7 @@ export function AllocatorMatchQueue({
                         {exc.exclusion_reason}
                       </td>
                       <td className="px-4 py-2 text-xs font-mono text-text-muted">
-                        {exc.exclusion_provenance || "—"}
+                        {exc.exclusion_provenance || "\u2014"}
                       </td>
                     </tr>
                   ))}
@@ -723,7 +672,7 @@ export function AllocatorMatchQueue({
             }}
             className="cursor-pointer text-sm font-medium text-text-primary hover:text-accent"
           >
-            Decision history ({decisions.length}) {showHistory ? "▼" : "▶"}
+            Decision history ({decisions.length}) {showHistory ? "\u25BC" : "\u25B6"}
           </summary>
           {showHistory && (
             <Card className="mt-2 p-0">
@@ -757,7 +706,7 @@ export function AllocatorMatchQueue({
                         {displayStrategyName(d.strategies)}
                       </td>
                       <td className="px-4 py-2 text-xs text-text-secondary max-w-[320px] truncate">
-                        {d.founder_note || "—"}
+                        {d.founder_note || "\u2014"}
                       </td>
                     </tr>
                   ))}
@@ -800,229 +749,6 @@ export function AllocatorMatchQueue({
       {showShortcutHelp && (
         <ShortcutHelpModal onClose={() => setShowShortcutHelp(false)} />
       )}
-    </div>
-  );
-}
-
-// ─── Subcomponents ──────────────────────────────────────────────────────
-
-function ModeBadge({ mode }: { mode: "personalized" | "screening" }) {
-  if (mode === "personalized") {
-    return (
-      <span className="inline-flex items-center rounded-sm border border-accent px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider text-accent">
-        Personalized
-      </span>
-    );
-  }
-  return (
-    <div>
-      <span className="inline-flex items-center rounded-sm border border-text-secondary px-2 py-0.5 text-[11px] font-mono uppercase tracking-wider text-text-secondary">
-        Screening
-      </span>
-      <p className="mt-1 text-[11px] text-text-muted text-right">
-        No portfolio context — score reflects preference fit only.
-      </p>
-    </div>
-  );
-}
-
-function ScoreCell({ score }: { score: number }) {
-  const pct = Math.max(0, Math.min(1, score / 100));
-  return (
-    <div className="inline-flex flex-col items-end gap-1">
-      <span className="font-mono tabular-nums text-sm text-text-primary">
-        {score.toFixed(0)}
-      </span>
-      <div className="h-[2px] w-[32px] bg-border">
-        <div className="h-full bg-accent" style={{ width: `${pct * 100}%` }} />
-      </div>
-    </div>
-  );
-}
-
-/**
- * Shimmer skeleton shown while the queue data is loading. Matches the rough
- * shape of the real layout (header strip + shortlist strip + two-pane list
- * + sticky detail) so there's no jarring reflow when data arrives.
- */
-function MatchQueueSkeleton() {
-  return (
-    <div className="space-y-4 animate-pulse">
-      <div className="h-4 w-48 bg-border rounded" />
-      <Card>
-        <div className="h-6 w-64 bg-border rounded" />
-        <div className="mt-2 h-3 w-40 bg-border/60 rounded" />
-        <div className="mt-4 flex gap-2">
-          <div className="h-8 w-32 bg-border rounded" />
-          <div className="h-8 w-32 bg-border/60 rounded" />
-        </div>
-      </Card>
-      <div>
-        <div className="mb-2 h-3 w-20 bg-border/60 rounded" />
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="rounded-lg border border-border bg-surface p-4 space-y-3">
-              <div className="h-4 w-3/4 bg-border rounded" />
-              <div className="h-3 w-full bg-border/60 rounded" />
-              <div className="h-2 w-full bg-border/40 rounded" />
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-[2fr_3fr] gap-4">
-        <Card className="p-0">
-          {[0, 1, 2, 3, 4].map((i) => (
-            <div
-              key={i}
-              className="border-b border-border px-4 py-3 space-y-2 last:border-b-0"
-            >
-              <div className="h-3 w-2/3 bg-border rounded" />
-              <div className="h-2 w-1/2 bg-border/60 rounded" />
-            </div>
-          ))}
-        </Card>
-        <Card className="min-h-[320px] space-y-3">
-          <div className="h-5 w-48 bg-border rounded" />
-          <div className="h-3 w-full bg-border/60 rounded" />
-          <div className="h-3 w-5/6 bg-border/60 rounded" />
-          <div className="h-3 w-4/6 bg-border/60 rounded" />
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-/** Keyboard shortcut hint modal triggered by `?`. */
-function ShortcutHelpModal({ onClose }: { onClose: () => void }) {
-  const shortcuts: Array<{ keys: string[]; label: string }> = [
-    { keys: ["j"], label: "Next candidate" },
-    { keys: ["k"], label: "Previous candidate" },
-    { keys: ["s"], label: "Open Send Intro panel" },
-    { keys: ["u"], label: "Mark as keep (thumbs up)" },
-    { keys: ["d"], label: "Mark as skip (thumbs down)" },
-    { keys: ["r"], label: "Recompute now" },
-    { keys: ["?"], label: "Show this help" },
-    { keys: ["Esc"], label: "Close open panel" },
-  ];
-  return (
-    <Modal open onClose={onClose} title="Keyboard shortcuts">
-      <p className="text-sm text-text-secondary mb-4">
-        Shortcuts only fire on the match-queue page and only on desktop
-        (1024px+). They&rsquo;re suppressed whenever a modal or input has
-        focus.
-      </p>
-      <dl className="space-y-2">
-        {shortcuts.map((shortcut) => (
-          <div
-            key={shortcut.label}
-            className="flex items-center justify-between border-b border-border pb-2 last:border-b-0"
-          >
-            <dt className="text-sm text-text-primary">{shortcut.label}</dt>
-            <dd className="flex items-center gap-1">
-              {shortcut.keys.map((k) => (
-                <kbd
-                  key={k}
-                  className="inline-flex items-center rounded border border-border bg-page px-2 py-0.5 font-mono text-[11px] text-text-primary"
-                >
-                  {k}
-                </kbd>
-              ))}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </Modal>
-  );
-}
-
-function ShortlistCard({
-  candidate,
-  selected,
-  alreadySent,
-  readOnly = false,
-  onSelect,
-  onSendIntro,
-}: {
-  candidate: CandidateRow;
-  selected: boolean;
-  alreadySent: boolean;
-  readOnly?: boolean;
-  onSelect: () => void;
-  onSendIntro: () => void;
-}) {
-  // Using a <div> with role="button" instead of a native <button> so that
-  // we can nest a real <button> (the "Send intro →" action) inside without
-  // DOM nesting violations. Keyboard activation is handled via onKeyDown.
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-      className={`text-left rounded-lg border bg-surface p-4 transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent/40 ${
-        selected
-          ? "border-accent"
-          : "border-border hover:border-border-focus"
-      } ${alreadySent ? "opacity-50" : ""}`}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-text-primary truncate">
-            {displayStrategyName(candidate.strategies)}
-          </p>
-          {candidate.reasons[0] && (
-            <p className="mt-1 text-xs text-text-secondary line-clamp-2">
-              {candidate.reasons[0]}
-            </p>
-          )}
-        </div>
-        <div className="shrink-0">
-          <span className="font-mono tabular-nums text-[24px] text-text-primary">
-            {candidate.score.toFixed(0)}
-          </span>
-        </div>
-      </div>
-      <div className="mt-3">
-        <div
-          className="h-[2px] bg-border"
-          aria-label={`Score ${candidate.score.toFixed(0)} out of 100`}
-        >
-          <div
-            className="h-full bg-accent"
-            style={{ width: `${Math.min(100, candidate.score)}%` }}
-          />
-        </div>
-      </div>
-      <div className="mt-3 flex items-center justify-between">
-        <span className="text-[10px] font-mono uppercase tracking-wider text-text-muted">
-          Rank {candidate.rank}
-        </span>
-        {!readOnly && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (!alreadySent) onSendIntro();
-            }}
-            disabled={alreadySent}
-            className={`inline-flex items-center text-xs font-medium ${
-              alreadySent ? "text-text-muted" : "text-accent hover:text-accent-hover cursor-pointer"
-            }`}
-          >
-            {alreadySent ? "Sent" : "Send intro →"}
-          </button>
-        )}
-        {readOnly && alreadySent && (
-          <span className="inline-flex items-center text-xs font-medium text-text-muted">
-            Sent
-          </span>
-        )}
-      </div>
     </div>
   );
 }

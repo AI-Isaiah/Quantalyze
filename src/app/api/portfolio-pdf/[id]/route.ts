@@ -8,6 +8,9 @@ import {
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { signPdfRenderToken } from "@/lib/pdf-render-token";
+
+export const maxDuration = 30;
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -60,8 +63,8 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
-    // The printable page reads data via the admin client, no auth required
-    await page.goto(`${APP_URL}/portfolio-pdf/${id}`, {
+    const renderToken = signPdfRenderToken(id);
+    await page.goto(`${APP_URL}/portfolio-pdf/${id}?renderToken=${renderToken}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });
@@ -76,10 +79,10 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${portfolio.name}-portfolio.pdf"`,
-        // Semi-public share surface — allow shared-CDN caching of the rendered
-        // PDF for an hour, but keep stale-while-revalidate short since
-        // portfolio contents can drift under the owner's feet.
-        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
+        // Auth-gated route with user-specific portfolio data — never cache at
+        // the shared CDN. A shared cache keyed on URL would leak one user's
+        // portfolio to another who hits the same URL.
+        "Cache-Control": "private, no-store",
       },
     });
   } catch (err) {

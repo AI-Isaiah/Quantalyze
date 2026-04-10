@@ -118,31 +118,46 @@ async function send(
     return;
   }
 
-  // Only the Resend call itself should count as "send failed" for the
-  // audit trail. An exception from the post-send dispatch update would
-  // otherwise mark a successfully-delivered email as failed, which is
-  // a misleading operator signal.
+  // Retry with exponential backoff: 2 retries (3 total attempts).
+  // Base delay 500ms, so attempts fire at ~0ms, ~500ms, ~1000ms.
+  // A transient Resend 5xx or network blip is recovered silently;
+  // a persistent failure still lands in the audit trail as 'failed'.
+  const MAX_ATTEMPTS = 3;
+  const BASE_DELAY_MS = 500;
   let sendError: unknown = null;
-  try {
-    const result = await resend.emails.send({
-      from: FROM,
-      to,
-      cc,
-      subject,
-      html,
-    });
-    if (result.error) {
-      sendError = result.error;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    sendError = null;
+    try {
+      const result = await resend.emails.send({
+        from: FROM,
+        to,
+        cc,
+        subject,
+        html,
+      });
+      if (result.error) {
+        sendError = result.error;
+      }
+    } catch (err) {
+      sendError = err;
     }
-  } catch (err) {
-    sendError = err;
+
+    if (!sendError) break; // Success — exit retry loop.
+
+    // Don't retry on the last attempt — fall through to the failure path.
+    if (attempt < MAX_ATTEMPTS - 1) {
+      const delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
+      console.warn(
+        `[email] Send attempt ${attempt + 1}/${MAX_ATTEMPTS} failed, retrying in ${delayMs}ms:`,
+        errorMessage(sendError),
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
 
   if (sendError) {
-    console.error("[email] Failed to send:", subject, sendError);
-    // Fire-and-forget audit write. The caller is already non-blocking w.r.t.
-    // send failures (per the function contract — we swallow email errors),
-    // so blocking on the audit update adds latency without buying anything.
+    console.error("[email] Failed to send after all retries:", subject, sendError);
     void markDispatch(admin, dispatchId, {
       status: "failed",
       error: errorMessage(sendError),

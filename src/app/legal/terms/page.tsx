@@ -11,7 +11,7 @@ export const metadata = {
 export default function TermsOfServicePage() {
   return (
     <>
-      <h1 className="text-3xl font-display text-text-primary">Terms of Service</h1>
+      <h1 className="font-display text-3xl text-text-primary md:text-[32px]">Terms of Service</h1>
       <p className="text-xs text-text-muted">Last updated: 2026-04-07</p>
 
       <h2>1. Acceptance</h2>

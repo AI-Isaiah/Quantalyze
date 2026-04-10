@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getUserApiKeys } from "@/lib/queries";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -8,17 +9,6 @@ import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchan
 
 export const dynamic = "force-dynamic";
 
-interface ExchangeConnection {
-  id: string;
-  exchange: string;
-  label: string;
-  is_active: boolean;
-  sync_status: string;
-  last_sync_at: string | null;
-  account_balance_usdt: number | null;
-  created_at: string;
-}
-
 export default async function AllocatorExchangesPage() {
   const supabase = await createClient();
   const {
@@ -26,18 +16,8 @@ export default async function AllocatorExchangesPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login?next=/exchanges");
 
-  // Admin client to bypass RLS (api_keys has owner-only RLS but we verified
-  // ownership via auth.getUser above).
   const admin = createAdminClient();
-  const { data: keyRows } = await admin
-    .from("api_keys")
-    .select(
-      "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at",
-    )
-    .eq("user_id", user.id)
-    .order("created_at", { ascending: false });
-
-  const keys = (keyRows ?? []) as ExchangeConnection[];
+  const keys = await getUserApiKeys(user.id);
 
   // Find the allocator's "active" portfolio (the one synced from exchanges).
   // For the seeded demo this is always "Active Allocation".

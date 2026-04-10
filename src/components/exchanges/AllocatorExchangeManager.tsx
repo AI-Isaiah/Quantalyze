@@ -83,7 +83,6 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formLoading, setFormLoading] = useState(false);
-  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [, startTransition] = useTransition();
 
   const supabase = createClient();
@@ -162,32 +161,11 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
     }
   }
 
-  async function handleSync(keyId: string) {
-    setSyncingId(keyId);
-    // Optimistic: mark as syncing, then resolve after a brief delay and
-    // refresh last_sync_at. For the seeded demo this is a no-op; in
-    // production this would fire a backend endpoint that queues a trade
-    // pull + derives new allocation_events rows.
-    try {
-      const now = new Date().toISOString();
-      await supabase
-        .from("api_keys")
-        .update({ last_sync_at: now, sync_status: "idle" })
-        .eq("id", keyId);
-      setKeys((prev) =>
-        prev.map((k) =>
-          k.id === keyId
-            ? { ...k, last_sync_at: now, sync_status: "idle" as string | null }
-            : k,
-        ),
-      );
-      // Simulate sync latency for UX realism
-      await new Promise((r) => setTimeout(r, 800));
-      startTransition(() => router.refresh());
-    } finally {
-      setSyncingId(null);
-    }
-  }
+  // NOTE: Real-time exchange sync is not yet implemented. The sync button
+  // is disabled until a backend endpoint exists that queues a trade pull
+  // and recomputes allocation_events. Do NOT fake last_sync_at updates
+  // from the browser client — it misrepresents sync state and breaks
+  // downstream staleness logic. See HIGH-09 in audit/tech-debt-round-1.md.
 
   return (
     <div className="mt-6 space-y-4">
@@ -257,10 +235,10 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                   </div>
                   <Button
                     variant="secondary"
-                    onClick={() => handleSync(key.id)}
-                    disabled={syncingId === key.id}
+                    disabled
+                    title="Exchange sync is not yet available"
                   >
-                    {syncingId === key.id ? "Syncing…" : "Sync now"}
+                    Auto-synced
                   </Button>
                 </div>
               );

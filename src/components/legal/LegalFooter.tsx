@@ -11,18 +11,27 @@ const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 export function LegalFooter() {
   return (
     <footer className="border-t border-border bg-surface">
-      <div className="mx-auto max-w-6xl px-6 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-text-muted">
+      <div className="mx-auto flex max-w-6xl flex-col items-start justify-between gap-3 px-6 py-4 text-xs text-text-muted sm:flex-row sm:items-center">
         <p>
           © {new Date().getFullYear()} {PLATFORM_NAME}. All rights reserved.
         </p>
-        <nav className="flex items-center gap-4">
-          <Link href="/legal/privacy" className="hover:text-text-primary">
+        <nav className="flex items-center gap-1">
+          <Link
+            href="/legal/privacy"
+            className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
+          >
             Privacy
           </Link>
-          <Link href="/legal/terms" className="hover:text-text-primary">
+          <Link
+            href="/legal/terms"
+            className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
+          >
             Terms
           </Link>
-          <Link href="/legal/disclaimer" className="hover:text-text-primary">
+          <Link
+            href="/legal/disclaimer"
+            className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
+          >
             Risk Disclaimer
           </Link>
         </nav>

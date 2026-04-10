@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { pickAdminEditableFields, validateAdminEditableInput } from "@/lib/preferences";
 
 // PUT /api/admin/match/preferences/[allocator_id]
@@ -10,6 +11,9 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ allocator_id: string }> },
 ): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const { allocator_id } = await params;
 
   const supabase = await createClient();
