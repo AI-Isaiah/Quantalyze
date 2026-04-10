@@ -30,7 +30,7 @@ describe("Critical regression guards", () => {
       // If it still uses the admin client, it MUST have an auth/token gate.
       const hasAuthGate =
         /\.auth\.getUser\s*\(/.test(src) ||
-        /verifyDemoPdfToken|verifyPdfToken|verifyPortfolioPdfToken/.test(src) ||
+        /verifyDemoPdfToken|verifyPdfToken|verifyPortfolioPdfToken|verifyPdfRenderToken/.test(src) ||
         /timingSafeEqual/.test(src);
       expect(
         hasAuthGate,

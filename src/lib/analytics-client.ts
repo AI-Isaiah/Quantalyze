@@ -1,6 +1,8 @@
 const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
+const ANALYTICS_TIMEOUT_MS = 30_000;
+
 async function analyticsRequest(path: string, body: Record<string, unknown>) {
   let res: Response;
   try {
@@ -11,8 +13,12 @@ async function analyticsRequest(path: string, body: Record<string, unknown>) {
         ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(ANALYTICS_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      throw new Error(`Analytics service timed out after ${ANALYTICS_TIMEOUT_MS}ms on ${path}`);
+    }
     throw new Error("Analytics service is not reachable. Please ensure it is running.");
   }
 

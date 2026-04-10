@@ -8,6 +8,7 @@ import {
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { signPdfRenderToken } from "@/lib/pdf-render-token";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
@@ -60,8 +61,8 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
-    // The printable page reads data via the admin client, no auth required
-    await page.goto(`${APP_URL}/portfolio-pdf/${id}`, {
+    const renderToken = signPdfRenderToken(id);
+    await page.goto(`${APP_URL}/portfolio-pdf/${id}?renderToken=${renderToken}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });

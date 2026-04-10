@@ -3,15 +3,23 @@ import { extractAnalytics } from "@/lib/queries";
 import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
+import { verifyPdfRenderToken } from "@/lib/pdf-render-token";
 import type { Portfolio, StrategyAnalytics } from "@/lib/types";
 import type { Metadata } from "next";
 
 export async function generateMetadata({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }): Promise<Metadata> {
   const { id } = await params;
+  const sp = await searchParams;
+  const renderToken = typeof sp.renderToken === "string" ? sp.renderToken : null;
+  if (!verifyPdfRenderToken(id, renderToken)) {
+    return { title: "Unauthorized", robots: "noindex" };
+  }
   const admin = createAdminClient();
   const { data } = await admin
     .from("portfolios")
@@ -37,10 +45,21 @@ type StrategyRow = {
 
 export default async function PortfolioPdfPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const sp = await searchParams;
+  const renderToken = typeof sp.renderToken === "string" ? sp.renderToken : null;
+
+  if (!verifyPdfRenderToken(id, renderToken)) {
+    return (
+      <div className="p-8 text-center text-text-muted">Unauthorized.</div>
+    );
+  }
+
   const admin = createAdminClient();
 
   const [portfolioRes, analyticsRes, strategiesRes] = await Promise.all([

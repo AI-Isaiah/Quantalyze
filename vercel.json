@@ -2,5 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "buildCommand": "npm run build",
-  "installCommand": "npm ci"
+  "installCommand": "npm ci",
+  "crons": [
+    { "path": "/api/cron/warm-analytics", "schedule": "*/5 * * * *" },
+    { "path": "/api/alert-digest", "schedule": "0 9 * * *" }
+  ]
 }
