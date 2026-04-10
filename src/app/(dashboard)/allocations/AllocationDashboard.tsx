@@ -23,6 +23,7 @@ import { KpiStrip } from "./components/KpiStrip";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { AddWidgetModal } from "./components/AddWidgetModal";
 import { UndoToast } from "./components/UndoToast";
+import { WIDGET_COMPONENTS } from "./widgets";
 
 // ---------------------------------------------------------------------------
 // Types — matches MyAllocationClient props exactly
@@ -89,7 +90,7 @@ export function AllocationDashboard({
   portfolio,
   analytics,
   strategies,
-  apiKeys: _apiKeys, // eslint-disable-line @typescript-eslint/no-unused-vars
+  apiKeys,
 }: AllocationDashboardProps) {
   const { config, addTile, removeTile, updateLayout, restoreTile } =
     useDashboardConfig();
@@ -226,27 +227,44 @@ export function AllocationDashboard({
     [updateLayout],
   );
 
-  // ── Widget renderer (placeholder for now — Task 10 wires real widgets) ──
+  // ── Widget data payload (shared across all widgets) ──────────────
 
-  const renderWidget = useCallback((widgetId: string) => {
-    const meta = WIDGET_REGISTRY[widgetId];
-    return (
-      <div
-        className="flex h-full items-center justify-center text-sm"
-        style={{ color: "#718096" }}
-      >
-        <span className="mr-2">{meta?.icon ?? "?"}</span>
-        <span className="font-sans">
-          {meta?.name ?? widgetId}
-          {meta?.status === "todo" && (
-            <span className="ml-2 rounded bg-[#F8F9FA] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[#718096]">
-              Coming soon
-            </span>
-          )}
-        </span>
-      </div>
-    );
-  }, []);
+  const widgetData = useMemo(
+    () => ({
+      portfolio,
+      analytics,
+      strategies: strategies.map((row) => ({
+        strategy_id: row.strategy_id,
+        weight: row.current_weight ?? 0,
+        allocated_amount: row.allocated_amount,
+        alias: row.alias,
+        strategy: row.strategy,
+      })),
+      apiKeys,
+      metrics,
+    }),
+    [portfolio, analytics, strategies, apiKeys, metrics],
+  );
+
+  // ── Widget renderer ─────────────────────────────────────────────
+
+  const renderWidget = useCallback(
+    (widgetId: string) => {
+      const Widget = WIDGET_COMPONENTS[widgetId];
+      if (!Widget) {
+        return (
+          <div
+            className="flex h-full items-center justify-center text-sm"
+            style={{ color: "#718096" }}
+          >
+            Widget not found: {widgetId}
+          </div>
+        );
+      }
+      return <Widget data={widgetData} timeframe={timeframe} width={0} height={0} />;
+    },
+    [widgetData, timeframe],
+  );
 
   // Active widget IDs for the modal
   const activeWidgetIds = config.tiles.map((t) => t.widgetId);
