@@ -4,6 +4,8 @@ import { useMemo } from "react";
 import type { WidgetProps } from "../../lib/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import { compound } from "@/lib/portfolio-math-utils";
+import { formatPercent, metricColor } from "@/lib/utils";
+import { displayName } from "@/lib/allocation-helpers";
 
 interface StrategyRow {
   strategy_id: string;
@@ -25,25 +27,6 @@ interface PeriodReturns {
   qtd: number | null;
   ytd: number | null;
   oneYear: number | null;
-}
-
-function displayName(row: StrategyRow): string {
-  if (row.alias?.trim()) return row.alias.trim();
-  if (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) {
-    return row.strategy.codename;
-  }
-  return row.strategy.name;
-}
-
-function fmtReturn(v: number | null): string {
-  if (v == null) return "\u2014";
-  const sign = v >= 0 ? "+" : "";
-  return `${sign}${(v * 100).toFixed(2)}%`;
-}
-
-function returnColor(v: number | null): string {
-  if (v == null) return "text-text-muted";
-  return v >= 0 ? "text-positive" : "text-negative";
 }
 
 /**
@@ -99,6 +82,12 @@ export default function PerformanceByPeriod({ data }: WidgetProps) {
     });
 
     // Portfolio composite (equal-weighted)
+    // Pre-build Map<date, value> per strategy for O(1) lookup (was O(n^2) with .find())
+    const dateMaps = allDailyArrays.map((arr) => {
+      const m = new Map<string, number>();
+      for (const d of arr) m.set(d.date, d.value);
+      return m;
+    });
     const allDates = new Set<string>();
     for (const arr of allDailyArrays) {
       for (const d of arr) allDates.add(d.date);
@@ -110,10 +99,10 @@ export default function PerformanceByPeriod({ data }: WidgetProps) {
     for (const date of datesSorted) {
       let sum = 0;
       let count = 0;
-      for (const arr of allDailyArrays) {
-        const point = arr.find((d) => d.date === date);
-        if (point) {
-          sum += point.value;
+      for (const m of dateMaps) {
+        const val = m.get(date);
+        if (val !== undefined) {
+          sum += val;
           count++;
         }
       }
@@ -178,9 +167,9 @@ export default function PerformanceByPeriod({ data }: WidgetProps) {
               {periods.map((p) => (
                 <td
                   key={p.key}
-                  className={`px-2 py-2.5 text-right font-metric tabular-nums ${returnColor(row[p.key] as number | null)}`}
+                  className={`px-2 py-2.5 text-right font-metric tabular-nums ${metricColor(row[p.key] as number | null)}`}
                 >
-                  {fmtReturn(row[p.key] as number | null)}
+                  {formatPercent(row[p.key] as number | null)}
                 </td>
               ))}
             </tr>
@@ -193,9 +182,9 @@ export default function PerformanceByPeriod({ data }: WidgetProps) {
             {periods.map((p) => (
               <td
                 key={p.key}
-                className={`px-2 py-2.5 text-right font-metric tabular-nums ${returnColor(portfolio[p.key] as number | null)}`}
+                className={`px-2 py-2.5 text-right font-metric tabular-nums ${metricColor(portfolio[p.key] as number | null)}`}
               >
-                {fmtReturn(portfolio[p.key] as number | null)}
+                {formatPercent(portfolio[p.key] as number | null)}
               </td>
             ))}
           </tr>

@@ -1,9 +1,10 @@
 "use client";
 
 import type { WidgetProps } from "../../lib/types";
+import { TodoPlaceholder } from "../lib/TodoPlaceholder";
 
 /**
- * Allocation Over Time — TODO widget.
+ * Allocation Over Time -- TODO widget.
  *
  * Weight snapshots are not yet captured by the analytics pipeline.
  * Once the pipeline persists periodic weight snapshots, this widget
@@ -12,17 +13,24 @@ import type { WidgetProps } from "../../lib/types";
  */
 export default function AllocationOverTime(_props: WidgetProps) {
   return (
-    <div
-      className="flex h-full items-center justify-center rounded-lg border border-dashed border-[#E2E8F0] px-6 py-8"
-      data-testid="allocation-over-time-todo"
-    >
-      <p
-        className="max-w-md text-center leading-relaxed text-[#718096]"
-        style={{ fontFamily: "var(--font-dm-sans), sans-serif", fontSize: 14 }}
-      >
-        Historical weight data not yet available. Weight snapshots will enable
-        tracking allocation changes over time.
-      </p>
-    </div>
+    <TodoPlaceholder
+      testId="allocation-over-time-todo"
+      icon={
+        <svg
+          width="28"
+          height="28"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#718096"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3v9l6.36 3.64" />
+        </svg>
+      }
+      message="Historical weight data not yet available. Weight snapshots will enable tracking allocation changes over time."
+    />
   );
 }

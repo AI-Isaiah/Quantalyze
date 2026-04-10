@@ -1,7 +1,8 @@
 "use client";
 
 import type { WidgetProps } from "../../lib/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { buildCompositeReturns } from "../lib/composite-returns";
 import { computeReturnDistribution } from "@/lib/portfolio-stats";
 import { useMemo } from "react";
 import {
@@ -18,26 +19,10 @@ const NUM_BINS = 30;
 
 export default function ReturnDistribution({ data }: WidgetProps) {
   const histogramData = useMemo(() => {
-    if (!data?.strategies?.length) return [];
+    const compositeDaily: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    if (compositeDaily.length === 0) return [];
 
-    const strats = data.strategies as Array<{
-      strategy: { strategy_analytics: { daily_returns: unknown } };
-      weight: number;
-    }>;
-
-    const dateMap = new Map<string, number>();
-    let totalWeight = 0;
-    for (const s of strats) {
-      const dr = normalizeDailyReturns(s.strategy?.strategy_analytics?.daily_returns);
-      const w = s.weight ?? 1;
-      totalWeight += w;
-      for (const d of dr) {
-        dateMap.set(d.date, (dateMap.get(d.date) ?? 0) + d.value * w);
-      }
-    }
-    if (totalWeight === 0) return [];
-
-    const returns = Array.from(dateMap.values()).map((v) => v / totalWeight);
+    const returns = compositeDaily.map((d) => d.value);
     const bins = computeReturnDistribution(returns, NUM_BINS);
 
     return bins.map((bin) => ({

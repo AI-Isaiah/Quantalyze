@@ -51,12 +51,20 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
     const dates = Array.from(dateSet).sort();
     if (dates.length < 10) return null;
 
-    // Build date->index maps for fast lookup
+    // Build date->value maps for fast lookup
     const dateMaps = nonEmpty.map((dr) => {
       const m = new Map<string, number>();
       for (const d of dr) m.set(d.date, d.value);
       return m;
     });
+
+    // Pre-build index map: nonEmpty[i] -> original strategy index
+    // Avoids O(n) indexOf inside the hot loop
+    const nonEmptyToStratIdx = new Map<number, number>();
+    for (let i = 0; i < nonEmpty.length; i++) {
+      const origIdx = allDailys.indexOf(nonEmpty[i]);
+      nonEmptyToStratIdx.set(i, origIdx);
+    }
 
     // Portfolio weighted returns (using current_weight) and equal-weight benchmark
     const portfolioReturns: number[] = [];
@@ -69,7 +77,7 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
       let benchCount = 0;
 
       for (let i = 0; i < nonEmpty.length; i++) {
-        const stratIdx = allDailys.indexOf(nonEmpty[i]);
+        const stratIdx = nonEmptyToStratIdx.get(i)!;
         const val = dateMaps[i].get(date);
         if (val === undefined) continue;
 

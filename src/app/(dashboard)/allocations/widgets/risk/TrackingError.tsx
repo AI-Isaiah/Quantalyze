@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import type { WidgetProps } from "../../lib/types";
 import { normalizeDailyReturns, mean } from "@/lib/portfolio-math-utils";
 import { computeTrackingError } from "@/lib/portfolio-stats";
+import { formatPercent } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Tracking Error Widget
@@ -12,10 +13,6 @@ import { computeTrackingError } from "@/lib/portfolio-stats";
 // benchmark (average of all strategy returns per day). Renders a large
 // number with context about the benchmark methodology.
 // ---------------------------------------------------------------------------
-
-function formatPct(v: number): string {
-  return `${(v * 100).toFixed(2)}%`;
-}
 
 function teInterpretation(te: number): { label: string; color: string } {
   const pct = te * 100;
@@ -128,7 +125,7 @@ export function TrackingError({ data }: WidgetProps) {
           className="font-metric text-3xl tabular-nums"
           style={{ color: interpretation.color }}
         >
-          {formatPct(te)}
+          {formatPercent(te)}
         </div>
         <div
           className="mt-1 font-sans text-xs font-semibold uppercase tracking-wider"

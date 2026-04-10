@@ -12,6 +12,7 @@ import {
   type VisibilityState,
   type ColumnDef,
 } from "@tanstack/react-table";
+import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Row type — one row per strategy in the portfolio
@@ -33,22 +34,23 @@ interface PositionRow {
 }
 
 // ---------------------------------------------------------------------------
-// Number formatting helpers
+// Formatting wrappers — thin adapters over shared utils for the "--" fallback
+// these columns need (instead of the em-dash used by formatPercent).
 // ---------------------------------------------------------------------------
 
 function fmtPct(v: number | null): string {
   if (v == null) return "--";
-  return `${(v * 100).toFixed(2)}%`;
+  return formatPercent(v);
 }
 
 function fmtRatio(v: number | null): string {
   if (v == null) return "--";
-  return v.toFixed(2);
+  return formatNumber(v);
 }
 
 function fmtUsd(v: number | null): string {
   if (v == null) return "--";
-  return `$${v.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  return formatCurrency(v);
 }
 
 // ---------------------------------------------------------------------------

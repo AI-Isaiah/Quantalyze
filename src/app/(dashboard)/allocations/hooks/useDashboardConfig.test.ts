@@ -175,6 +175,29 @@ describe("useDashboardConfig", () => {
     expect(dd!.y).toBe(0);
   });
 
+  it("removeTile returns the removed tile synchronously (not null)", () => {
+    // Regression: old implementation assigned `removed` inside the setConfig
+    // updater callback, which runs asynchronously. The fix reads from
+    // config.tiles before calling setConfig.
+    const { result } = renderHook(() => useDashboardConfig());
+
+    // Call removeTile and capture the return value in the same act()
+    let removed: ReturnType<typeof result.current.removeTile> = null;
+    act(() => {
+      removed = result.current.removeTile("equity-curve-1");
+    });
+
+    // Must be non-null and contain the correct tile data
+    expect(removed).not.toBeNull();
+    expect(removed!.i).toBe("equity-curve-1");
+    expect(removed!.widgetId).toBe("equity-curve");
+
+    // The tile must actually be removed from config
+    expect(
+      result.current.config.tiles.find((t) => t.i === "equity-curve-1"),
+    ).toBeUndefined();
+  });
+
   it("updateTileConfig merges config into a tile", () => {
     const { result } = renderHook(() => useDashboardConfig());
 

@@ -4,20 +4,13 @@ import { useMemo } from "react";
 import type { WidgetProps } from "../../lib/types";
 import { computeRebalanceSuggestions } from "@/lib/portfolio-stats";
 import { formatPercent } from "@/lib/utils";
+import { displayName } from "@/lib/allocation-helpers";
 
 interface StrategyRow {
   strategy_id: string;
   current_weight: number | null;
   alias: string | null;
   strategy: { name: string; codename: string | null; disclosure_tier: string };
-}
-
-function displayName(row: StrategyRow): string {
-  if (row.alias?.trim()) return row.alias.trim();
-  if (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) {
-    return row.strategy.codename;
-  }
-  return row.strategy.name;
 }
 
 /**

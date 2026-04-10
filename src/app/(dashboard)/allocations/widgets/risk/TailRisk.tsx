@@ -11,7 +11,8 @@ import {
   ReferenceLine,
 } from "recharts";
 import type { WidgetProps } from "../../lib/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { buildCompositeReturns } from "../lib/composite-returns";
 
 // ---------------------------------------------------------------------------
 // Tail Risk Widget
@@ -35,15 +36,9 @@ function quantile(sorted: number[], q: number): number {
 
 export function TailRisk({ data }: WidgetProps) {
   const { histogram, p5, p1, tailCount } = useMemo(() => {
-    const allReturns: number[] = [];
-    if (data?.strategies && Array.isArray(data.strategies)) {
-      for (const s of data.strategies) {
-        const dr = normalizeDailyReturns(
-          s?.strategy?.strategy_analytics?.daily_returns,
-        );
-        for (const d of dr) allReturns.push(d.value);
-      }
-    }
+    // Use weighted composite returns instead of unweighted concatenation
+    const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    const allReturns = composite.map((d) => d.value);
 
     // Filter to tail events (below -2%)
     const tail = allReturns.filter((r) => r < TAIL_THRESHOLD);

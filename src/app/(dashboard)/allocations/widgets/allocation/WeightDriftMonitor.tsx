@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import type { WidgetProps } from "../../lib/types";
 import { computeWeightDrift } from "@/lib/portfolio-stats";
 import { formatPercent } from "@/lib/utils";
+import { displayName } from "@/lib/allocation-helpers";
 
 interface StrategyRow {
   strategy_id: string;
@@ -17,14 +18,6 @@ function driftColor(drift: number): string {
   if (abs <= 0.02) return "text-positive";  // green: within +/-2%
   if (abs <= 0.05) return "text-[#D97706]"; // yellow: 2-5%
   return "text-negative";                    // red: >5%
-}
-
-function displayName(row: StrategyRow): string {
-  if (row.alias?.trim()) return row.alias.trim();
-  if (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) {
-    return row.strategy.codename;
-  }
-  return row.strategy.name;
 }
 
 /**

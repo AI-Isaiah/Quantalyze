@@ -15,6 +15,7 @@ import {
   type ScenarioState,
 } from "@/lib/scenario";
 import { normalizeDailyReturns, displayName, getTimeframeStart } from "@/lib/allocation-helpers";
+import { buildCompositeReturns } from "./widgets/lib/composite-returns";
 import type { TimeframeKey } from "@/components/ui/TimeframeSelector";
 import { TimeframeSelector } from "@/components/ui/TimeframeSelector";
 import { formatCurrency } from "@/lib/utils";
@@ -168,9 +169,15 @@ export function AllocationDashboard({
     [strategiesForBuilder, scenarioState, dateMapCache],
   );
 
-  const totalAllocated = strategies.reduce(
-    (sum, row) => sum + (row.allocated_amount ?? 0),
-    0,
+  // Pre-compute composite weighted daily returns once for all widgets
+  const compositeReturns = useMemo(
+    () => buildCompositeReturns(strategies),
+    [strategies],
+  );
+
+  const totalAllocated = useMemo(
+    () => strategies.reduce((sum, row) => sum + (row.allocated_amount ?? 0), 0),
+    [strategies],
   );
   const aum = analytics?.total_aum ?? (totalAllocated > 0 ? totalAllocated : null);
 
@@ -242,8 +249,9 @@ export function AllocationDashboard({
       })),
       apiKeys,
       metrics,
+      compositeReturns,
     }),
-    [portfolio, analytics, strategies, apiKeys, metrics],
+    [portfolio, analytics, strategies, apiKeys, metrics, compositeReturns],
   );
 
   // ── Widget renderer ─────────────────────────────────────────────

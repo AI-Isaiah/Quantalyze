@@ -1,7 +1,8 @@
 "use client";
 
 import type { WidgetProps } from "../../lib/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { buildCompositeReturns } from "../lib/composite-returns";
 import { useMemo } from "react";
 import {
   Area,
@@ -14,39 +15,19 @@ import {
 
 export default function DrawdownChart({ data }: WidgetProps) {
   const drawdownData = useMemo(() => {
-    if (!data?.strategies?.length) return [];
+    const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    if (composite.length === 0) return [];
 
-    // Gather all daily returns across strategies, weighted
-    const strats = data.strategies as Array<{
-      strategy: { strategy_analytics: { daily_returns: unknown } };
-      weight: number;
-    }>;
-
-    // Build composite daily returns
-    const dateMap = new Map<string, number>();
-    let totalWeight = 0;
-    for (const s of strats) {
-      const dr = normalizeDailyReturns(s.strategy?.strategy_analytics?.daily_returns);
-      const w = s.weight ?? 1;
-      totalWeight += w;
-      for (const d of dr) {
-        dateMap.set(d.date, (dateMap.get(d.date) ?? 0) + d.value * w);
-      }
-    }
-    if (totalWeight === 0) return [];
-
-    const dates = Array.from(dateMap.keys()).sort();
     // Compute cumulative equity, then drawdown from peak
     let cumulative = 1;
     let peak = 1;
     const result: { date: string; value: number }[] = [];
 
-    for (const date of dates) {
-      const dailyReturn = dateMap.get(date)! / totalWeight;
-      cumulative *= 1 + dailyReturn;
+    for (const d of composite) {
+      cumulative *= 1 + d.value;
       if (cumulative > peak) peak = cumulative;
       const dd = (cumulative - peak) / peak;
-      result.push({ date, value: dd });
+      result.push({ date: d.date, value: dd });
     }
 
     return result;

@@ -1,7 +1,8 @@
 "use client";
 
 import type { WidgetProps } from "../../lib/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { buildCompositeReturns } from "../lib/composite-returns";
 import { computeAnnualReturns } from "@/lib/portfolio-stats";
 import { useMemo } from "react";
 import {
@@ -16,29 +17,8 @@ import {
 
 export default function AnnualReturns({ data }: WidgetProps) {
   const annualData = useMemo(() => {
-    if (!data?.strategies?.length) return [];
-
-    const strats = data.strategies as Array<{
-      strategy: { strategy_analytics: { daily_returns: unknown } };
-      weight: number;
-    }>;
-
-    const dateMap = new Map<string, number>();
-    let totalWeight = 0;
-    for (const s of strats) {
-      const dr = normalizeDailyReturns(s.strategy?.strategy_analytics?.daily_returns);
-      const w = s.weight ?? 1;
-      totalWeight += w;
-      for (const d of dr) {
-        dateMap.set(d.date, (dateMap.get(d.date) ?? 0) + d.value * w);
-      }
-    }
-    if (totalWeight === 0) return [];
-
-    const compositeDaily = Array.from(dateMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, val]) => ({ date, value: val / totalWeight }));
-
+    const compositeDaily: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    if (compositeDaily.length === 0) return [];
     return computeAnnualReturns(compositeDaily);
   }, [data]);
 

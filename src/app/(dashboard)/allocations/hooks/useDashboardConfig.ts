@@ -88,15 +88,18 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
   }, []);
 
   const removeTile = useCallback((tileId: string): TileConfig | null => {
-    let removed: TileConfig | null = null;
-    setConfig((prev) => {
-      const idx = prev.tiles.findIndex((t) => t.i === tileId);
-      if (idx === -1) return prev;
-      removed = prev.tiles[idx];
-      return { ...prev, tiles: prev.tiles.filter((t) => t.i !== tileId) };
-    });
-    return removed;
-  }, []);
+    // Look up the tile from current config BEFORE calling setConfig.
+    // setConfig's updater runs asynchronously, so assigning inside it
+    // would return null to the caller.
+    const tile = config.tiles.find((t) => t.i === tileId) ?? null;
+    if (tile) {
+      setConfig((prev) => ({
+        ...prev,
+        tiles: prev.tiles.filter((t) => t.i !== tileId),
+      }));
+    }
+    return tile;
+  }, [config.tiles]);
 
   const updateLayout = useCallback(
     (newLayout: Array<{ i: string; x: number; y: number; w: number; h: number }>) => {

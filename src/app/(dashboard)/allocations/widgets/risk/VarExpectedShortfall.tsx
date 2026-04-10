@@ -2,20 +2,18 @@
 
 import { useMemo } from "react";
 import type { WidgetProps } from "../../lib/types";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { buildCompositeReturns } from "../lib/composite-returns";
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
+import { formatPercent } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // VaR & Expected Shortfall Widget
 //
 // Computes Value at Risk (95%, 99%) and Expected Shortfall (CVaR 95%)
-// from portfolio daily returns. Renders three large numbers with labels
-// and a horizontal bar with green/yellow/red risk zones.
+// from portfolio composite weighted daily returns. Renders three large
+// numbers with labels and a horizontal bar with green/yellow/red risk zones.
 // ---------------------------------------------------------------------------
-
-function formatPct(v: number): string {
-  return `${(v * 100).toFixed(2)}%`;
-}
 
 /** Map a VaR value to a zone for the bar indicator. */
 function riskZone(var95: number): "green" | "yellow" | "red" {
@@ -33,16 +31,9 @@ const ZONE_COLORS = {
 
 export function VarExpectedShortfall({ data }: WidgetProps) {
   const { var95, var99, es95, zone } = useMemo(() => {
-    // Gather all daily returns across strategies
-    const allReturns: number[] = [];
-    if (data?.strategies && Array.isArray(data.strategies)) {
-      for (const s of data.strategies) {
-        const dr = normalizeDailyReturns(
-          s?.strategy?.strategy_analytics?.daily_returns,
-        );
-        for (const d of dr) allReturns.push(d.value);
-      }
-    }
+    // Use weighted composite returns instead of unweighted concatenation
+    const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
+    const allReturns = composite.map((d) => d.value);
 
     if (allReturns.length < 10) {
       return { var95: 0, var99: 0, es95: 0, zone: "green" as const };
@@ -78,7 +69,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
             className="font-metric text-xl tabular-nums"
             style={{ color: "#DC2626" }}
           >
-            {formatPct(var95)}
+            {formatPercent(var95)}
           </div>
           <div
             className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
@@ -92,7 +83,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
             className="font-metric text-xl tabular-nums"
             style={{ color: "#DC2626" }}
           >
-            {formatPct(var99)}
+            {formatPercent(var99)}
           </div>
           <div
             className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
@@ -106,7 +97,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
             className="font-metric text-xl tabular-nums"
             style={{ color: "#DC2626" }}
           >
-            {formatPct(es95)}
+            {formatPercent(es95)}
           </div>
           <div
             className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"

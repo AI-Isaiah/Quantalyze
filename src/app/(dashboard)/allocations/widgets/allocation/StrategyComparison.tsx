@@ -5,6 +5,7 @@ import type { WidgetProps } from "../../lib/types";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { computeWinRate } from "@/lib/portfolio-stats";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { displayName } from "@/lib/allocation-helpers";
 
 interface StrategyRow {
   strategy_id: string;
@@ -33,14 +34,6 @@ interface RowData {
   maxDD: number | null;
   volatility: number | null;
   winRate: number | null;
-}
-
-function displayName(row: StrategyRow): string {
-  if (row.alias?.trim()) return row.alias.trim();
-  if (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) {
-    return row.strategy.codename;
-  }
-  return row.strategy.name;
 }
 
 /**
