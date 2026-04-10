@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
-// Regression guards for CRITICAL findings from the 2026-04-10 deep audit.
+// Regression guards for CRITICAL findings from the 2026-04-10 deep audit
+// and CSO security findings (SEC-001 through SEC-005).
 // Each test fails against the code state at commit 9930829 (baseline) and
 // is expected to pass after the corresponding fix in the same PR.
 //
@@ -12,6 +13,9 @@ import { describe, it, expect } from "vitest";
 //   SD-CRITICAL-01 audit/system-design-round-1.md  analytics-client no timeout
 //   SD-CRITICAL-02 audit/system-design-round-1.md  vercel.json missing crons
 //   SD-CRITICAL-03 audit/system-design-round-1.md  no production error telemetry
+//   SEC-002       CSO audit                        alert-digest timing-safe compare
+//   SEC-003       CSO audit                        Content-Disposition sanitizer
+//   SEC-004       CSO audit                        Content-Security-Policy headers
 
 const REPO_ROOT = join(__dirname, "..", "..");
 const readText = (relPath: string) => readFileSync(join(REPO_ROOT, relPath), "utf8");
@@ -84,6 +88,63 @@ describe("Critical regression guards", () => {
       const cfg = readJson<VercelConfig>("vercel.json");
       const paths = (cfg.crons ?? []).map((c) => c.path);
       expect(paths).toContain("/api/alert-digest");
+    });
+  });
+
+  describe("[SEC-002] alert-digest must use timing-safe secret comparison", () => {
+    it("alert-digest route must import safeCompare, not use !== for secret check", () => {
+      const src = readText("src/app/api/alert-digest/route.ts");
+      expect(
+        /safeCompare/.test(src),
+        "alert-digest route does not import/use safeCompare — timing side-channel on cron secret",
+      ).toBe(true);
+      // The route must NOT have a bare `auth !== expected` comparison
+      const hasBareComparison = /auth\s*!==\s*expected/.test(src);
+      expect(
+        hasBareComparison,
+        "alert-digest route still uses `auth !== expected` — replace with safeCompare(auth, expected)",
+      ).toBe(false);
+    });
+  });
+
+  describe("[SEC-003] PDF routes must sanitize Content-Disposition filenames", () => {
+    const pdfRoutes = [
+      "src/app/api/factsheet/[id]/pdf/route.ts",
+      "src/app/api/factsheet/[id]/tearsheet.pdf/route.ts",
+      "src/app/api/portfolio-pdf/[id]/route.ts",
+      "src/app/api/demo/portfolio-pdf/[id]/route.ts",
+    ];
+
+    for (const route of pdfRoutes) {
+      it(`${route} must use sanitizeFilename`, () => {
+        const src = readText(route);
+        expect(
+          /sanitizeFilename/.test(src),
+          `${route} does not use sanitizeFilename — Content-Disposition header injection risk`,
+        ).toBe(true);
+      });
+    }
+  });
+
+  describe("[SEC-004] next.config.ts must set security headers", () => {
+    it("must include Content-Security-Policy header", () => {
+      const src = readText("next.config.ts");
+      expect(
+        /Content-Security-Policy/.test(src),
+        "next.config.ts has no Content-Security-Policy header",
+      ).toBe(true);
+    });
+
+    it("must include X-Frame-Options DENY", () => {
+      const src = readText("next.config.ts");
+      expect(/X-Frame-Options/.test(src) && /DENY/.test(src)).toBe(true);
+    });
+
+    it("must include X-Content-Type-Options nosniff", () => {
+      const src = readText("next.config.ts");
+      expect(
+        /X-Content-Type-Options/.test(src) && /nosniff/.test(src),
+      ).toBe(true);
     });
   });
 

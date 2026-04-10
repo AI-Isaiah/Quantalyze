@@ -1,50 +1,6 @@
-import type { DailyPoint } from "@/lib/scenario";
 import type { TimeframeKey } from "@/components/ui/TimeframeSelector";
 
-/**
- * Normalize the analytics.daily_returns JSONB into a flat
- * { date, value }[] series. Handles three real-world shapes: already
- * an array, a flat {date: value} dict, and a nested {year: {MM-DD: value}}
- * dict. The nested case zero-pads MM-DD components so lexicographic
- * sorting aligns with every other strategy's dates.
- */
-export function normalizeDailyReturns(raw: unknown): DailyPoint[] {
-  if (!raw) return [];
-  if (Array.isArray(raw)) {
-    return raw
-      .filter(
-        (p): p is DailyPoint =>
-          p !== null &&
-          typeof p === "object" &&
-          "date" in p &&
-          "value" in p &&
-          typeof (p as DailyPoint).date === "string" &&
-          typeof (p as DailyPoint).value === "number",
-      )
-      .sort((a, b) => a.date.localeCompare(b.date));
-  }
-  const out: DailyPoint[] = [];
-  const obj = raw as Record<string, unknown>;
-  for (const [k, v] of Object.entries(obj)) {
-    if (typeof v === "number") {
-      out.push({ date: k, value: v });
-    } else if (v && typeof v === "object") {
-      for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
-        if (typeof vv === "number") {
-          if (kk.length === 10) {
-            out.push({ date: kk, value: vv });
-          } else {
-            const [mm = "", dd = ""] = kk.split("-");
-            const paddedMm = mm.padStart(2, "0");
-            const paddedDd = dd.padStart(2, "0");
-            out.push({ date: `${k}-${paddedMm}-${paddedDd}`, value: vv });
-          }
-        }
-      }
-    }
-  }
-  return out.sort((a, b) => a.date.localeCompare(b.date));
-}
+export { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 
 /**
  * Pick the display name for an investment row. The allocator-provided

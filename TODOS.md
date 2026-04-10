@@ -23,6 +23,12 @@ with a dashed "+ Favorites" overlay curve, and saved favorite combinations
 land in the renamed "Test Portfolios" section. See CHANGELOG.md and the plan
 file at `~/.claude/plans/adaptive-puzzling-yao.md`.)
 
+### P1: Column-level REVOKE on api_keys encrypted columns (SEC-005)
+Needs: New Supabase migration to REVOKE SELECT on encrypted_key, encrypted_secret, encrypted_passphrase from anon and authenticated roles
+Pattern: Follow migration 020 (PII revoke) as template
+Risk: Currently mitigated by app-layer column projection, but defense-in-depth requires DB enforcement
+Files: supabase/migrations/027_api_keys_column_revoke.sql (new)
+
 ### Follow-ups from the My Allocation restructure (v0.4.0.0)
 
 These were flagged during `/plan-design-review` and `/plan-eng-review` but
@@ -61,6 +67,38 @@ intentionally deferred out of the restructure PR to keep scope tight:
   logs in, lands on My Allocation, toggles a favorite, saves as test
   portfolio, verifies Test Portfolios picks it up, verifies /connections
   still works.
+
+### My Allocation Dashboard -- Widgets Needing New Endpoints
+
+Six widgets are wired into the grid but render placeholder UI because they
+depend on data sources that don't exist yet. Listed by priority.
+
+#### P2: Trading Activity Log (Widget 26)
+- Needs: trades table query endpoint aggregating recent trades across strategies
+- Blocked by: no trades API route for cross-strategy aggregation
+- File: `src/app/(dashboard)/allocations/widgets/positions/TradingActivityLog.tsx`
+
+#### P2: Trade Volume Over Time (Widget 27)
+- Needs: same trades query as Widget 26, aggregated by day
+- File: `src/app/(dashboard)/allocations/widgets/positions/TradeVolume.tsx`
+
+#### P2: Exposure by Asset Class (Widget 28)
+- Needs: position-level data from exchange APIs (current holdings per asset)
+- Blocked by: exchange position data not currently fetched
+- File: `src/app/(dashboard)/allocations/widgets/positions/ExposureByAsset.tsx`
+
+#### P2: Net Exposure Over Time (Widget 29)
+- Needs: historical position data aggregated over time
+- File: `src/app/(dashboard)/allocations/widgets/positions/NetExposure.tsx`
+
+#### P3: Allocation Over Time (Widget 18)
+- Needs: historical weight snapshots (weight changes over time)
+- Blocked by: no weight history in current schema
+- File: `src/app/(dashboard)/allocations/widgets/allocation/AllocationOverTime.tsx`
+
+#### P3: Notes Widget (Widget 38)
+- Needs: user_notes storage (Supabase table or localStorage with sync)
+- File: `src/app/(dashboard)/allocations/widgets/meta/NotesWidget.tsx`
 
 ---
 

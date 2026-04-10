@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendAlertDigest, type AlertDigestEntry } from "@/lib/email";
+import { safeCompare } from "@/lib/timing-safe-compare";
 
 interface PendingAlertRow {
   id: string;
@@ -17,10 +18,11 @@ interface PendingAlertRow {
 }
 
 export async function POST(req: NextRequest) {
-  // Verify cron secret
+  // Verify cron secret — timing-safe comparison to prevent byte-by-byte
+  // probing via response-time side channels.
   const auth = req.headers.get("authorization");
   const expected = `Bearer ${process.env.CRON_SECRET}`;
-  if (!process.env.CRON_SECRET || auth !== expected) {
+  if (!process.env.CRON_SECRET || !auth || !safeCompare(auth, expected)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

@@ -8,6 +8,7 @@ import {
   PDF_QUEUE_TIMEOUT_MESSAGE,
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { sanitizeFilename } from "@/lib/sanitize-filename";
 
 export const maxDuration = 30;
 
@@ -86,7 +87,7 @@ export async function GET(
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${strategy.name}-factsheet.pdf"`,
+        "Content-Disposition": `inline; filename="${sanitizeFilename(strategy.name, "Strategy")}-factsheet.pdf"`,
         // Auth-gated route — keep browser caching on for the same viewer but
         // do not let the shared CDN hold onto it.
         "Cache-Control": "private, max-age=86400",
