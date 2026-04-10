@@ -1,6 +1,7 @@
 import { cache } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import type {
@@ -109,7 +110,7 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
-    rows.push({ id: s.id, analytics: a as unknown as Record<string, number | null> });
+    rows.push({ id: s.id, analytics: castRow<Record<string, number | null>>(a, "analytics") });
   }
 
   if (rows.length < 5) return null;
@@ -642,12 +643,13 @@ export const getMyAllocationDashboard = cache(
     // inference. Same normalization pattern the old allocations page
     // used. Alias + current_weight + allocated_amount carry through
     // from the join row.
+    type StrategyPayload = MyAllocationDashboardPayload["strategies"][number]["strategy"];
     const strategies = (strategiesRes.data ?? []).map((row) => {
-      const rawStrategy = (row as unknown as { strategy: unknown }).strategy;
+      const rawStrategy = castRow<{ strategy: unknown }>(row, "strategy-join").strategy;
       const strategy = (
         Array.isArray(rawStrategy) ? rawStrategy[0] : rawStrategy
-      ) as MyAllocationDashboardPayload["strategies"][number]["strategy"];
-      const rawAnalytics = (strategy as unknown as { strategy_analytics: unknown })
+      ) as StrategyPayload;
+      const rawAnalytics = castRow<{ strategy_analytics: unknown }>(strategy, "analytics-join")
         ?.strategy_analytics;
       const analytics = Array.isArray(rawAnalytics)
         ? rawAnalytics[0]
@@ -656,7 +658,7 @@ export const getMyAllocationDashboard = cache(
         strategy_id: row.strategy_id,
         current_weight: row.current_weight,
         allocated_amount: row.allocated_amount,
-        alias: (row as unknown as { alias: string | null }).alias ?? null,
+        alias: castRow<{ alias: string | null }>(row, "alias").alias ?? null,
         strategy: {
           ...strategy,
           strategy_analytics: (analytics ?? null) as

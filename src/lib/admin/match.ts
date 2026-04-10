@@ -1,5 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { castRow, castRows } from "@/lib/supabase/cast";
 
 /**
  * Shared payload builder for the per-allocator Match Queue.
@@ -139,20 +140,16 @@ export async function getAllocatorMatchPayload(
 
   if (!batchRow) {
     return {
-      profile: (profile as unknown as Record<string, unknown> | null) ?? null,
+      profile: castRow<Record<string, unknown>>(profile, "profile"),
       preferences:
-        (preferences as unknown as Record<string, unknown> | null) ?? null,
+        castRow<Record<string, unknown> | null>(preferences ?? null, "preferences"),
       batch: null,
       candidates: [],
       excluded: [],
       decisions:
-        (decisions as unknown as Array<Record<string, unknown>> | null) ?? [],
+        castRows<Record<string, unknown>>(decisions),
       existing_contact_requests:
-        (existingContactRequests as unknown as Array<{
-          strategy_id: string;
-          created_at: string;
-          status: string;
-        }> | null) ?? [],
+        castRows<{ strategy_id: string; created_at: string; status: string }>(existingContactRequests),
     };
   }
 
@@ -170,12 +167,10 @@ export async function getAllocatorMatchPayload(
 
   // Supabase's generated row types for Postgres select strings with inline
   // joins don't flatten cleanly into Record<string, unknown> — the generic
-  // `GenericStringError` type leaks through and TypeScript refuses the
-  // direct cast. Double-cast through unknown as TypeScript explicitly
-  // suggests. The consuming React components in AllocatorMatchQueue.tsx
-  // own the narrow CandidateRow type.
-  const candidateRowsArr =
-    (candidateRows as unknown as Array<Record<string, unknown>> | null) ?? [];
+  // `GenericStringError` type leaks through. Use castRows to centralize
+  // the cast surface. The consuming React components in
+  // AllocatorMatchQueue.tsx own the narrow CandidateRow type.
+  const candidateRowsArr = castRows<Record<string, unknown>>(candidateRows);
 
   // Split into candidates (eligible) and excluded
   const candidates = candidateRowsArr.filter((r) => r.exclusion_reason === null);
@@ -208,19 +203,15 @@ export async function getAllocatorMatchPayload(
     }));
 
   return {
-    profile: (profile as unknown as Record<string, unknown> | null) ?? null,
+    profile: castRow<Record<string, unknown>>(profile, "profile"),
     preferences:
-      (preferences as unknown as Record<string, unknown> | null) ?? null,
+      castRow<Record<string, unknown> | null>(preferences ?? null, "preferences"),
     batch: batchRow,
     candidates: enrichWithAnalytics(candidates),
     excluded: enrichWithAnalytics(excluded),
     decisions:
-      (decisions as unknown as Array<Record<string, unknown>> | null) ?? [],
+      castRows<Record<string, unknown>>(decisions),
     existing_contact_requests:
-      (existingContactRequests as unknown as Array<{
-        strategy_id: string;
-        created_at: string;
-        status: string;
-      }> | null) ?? [],
+      castRows<{ strategy_id: string; created_at: string; status: string }>(existingContactRequests),
   };
 }
