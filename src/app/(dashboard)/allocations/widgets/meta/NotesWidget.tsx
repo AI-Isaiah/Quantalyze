@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import type { WidgetProps } from "../../lib/types";
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function NotesWidget(_props: WidgetProps) {
+ 
+export function NotesWidget() {
   const [notes, setNotes] = useState("");
 
   return (

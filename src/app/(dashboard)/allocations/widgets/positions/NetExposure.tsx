@@ -1,9 +1,8 @@
 "use client";
 
-import type { WidgetProps } from "../../lib/types";
 import { TodoPlaceholder } from "../lib/TodoPlaceholder";
 
-export default function NetExposure(_props: WidgetProps) {
+export default function NetExposure() {
   return (
     <TodoPlaceholder
       icon={

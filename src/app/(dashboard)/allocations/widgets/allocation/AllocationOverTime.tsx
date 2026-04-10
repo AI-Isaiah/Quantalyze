@@ -1,6 +1,5 @@
 "use client";
 
-import type { WidgetProps } from "../../lib/types";
 import { TodoPlaceholder } from "../lib/TodoPlaceholder";
 
 /**
@@ -11,7 +10,7 @@ import { TodoPlaceholder } from "../lib/TodoPlaceholder";
  * will render a stacked area chart showing how allocation weights
  * evolved over time.
  */
-export default function AllocationOverTime(_props: WidgetProps) {
+export default function AllocationOverTime() {
   return (
     <TodoPlaceholder
       testId="allocation-over-time-todo"

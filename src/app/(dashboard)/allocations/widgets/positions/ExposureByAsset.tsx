@@ -1,9 +1,8 @@
 "use client";
 
-import type { WidgetProps } from "../../lib/types";
 import { TodoPlaceholder } from "../lib/TodoPlaceholder";
 
-export default function ExposureByAsset(_props: WidgetProps) {
+export default function ExposureByAsset() {
   return (
     <TodoPlaceholder
       icon={
