@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.5.1.0] - 2026-04-11
+
+### Security
+- **SEC-005 — `api_keys` encrypted columns locked down** (migration 027). Revokes SELECT on `api_key_encrypted`, `api_secret_encrypted`, `passphrase_encrypted`, `dek_encrypted`, and `nonce` from anon and authenticated roles at the table level, then grants back only the allowlisted non-sensitive columns. Self-verifying DO blocks assert the grant state before committing, no more silent no-ops like migrations 012 and 017.
+- **Cross-tenant `api_key_id` linkage blocked** (migration 028). A new `BEFORE INSERT OR UPDATE OF api_key_id` trigger on `strategies` enforces `api_keys.user_id = strategies.user_id`. Previously a user could set their strategy's `api_key_id` to another user's key via client-side state manipulation and claim their verified track record. Found by 3 independent adversarial reviewers (Claude, Codex, Grok).
+- **Follow-up hardening** (migration 029). Retro-scan verifies no existing cross-tenant rows (found and remediated 5 demo seed violations). Trigger function gains `FOR SHARE` row lock, short-circuit on no-op updates, schema-qualified `public.api_keys`, and tightened `search_path = pg_catalog, public`. `strategies_update` policy adds explicit `WITH CHECK`. Verification uses `has_column_privilege()` ground-truth API instead of `information_schema.column_privileges`.
+- **App-layer audit** — every `from("api_keys")` call site projects the `API_KEY_USER_COLUMNS` allowlist. `ApiKeyManager.tsx:49` no longer uses `.select("*")` which would have silently returned NULL after migration 027. `AllocatorExchangeManager.tsx` uses the shared constant for consistency.
+
+### Added
+- **`API_KEY_USER_COLUMNS` + `API_KEY_ENCRYPTED_COLUMNS`** constants in `src/lib/constants.ts` as the single source of truth for the projection allowlist. Backed by `API_KEY_USER_COLUMNS_ARR` tuple for type safety.
+- **SEC-005 regression tests** — `src/lib/sec-005-api-keys-projection.test.ts` scans `src/**` for `.from("api_keys").select("*")` and PostgREST `api_keys(*)` embed syntax. Fails loudly if any call site regresses.
+- **Migration 028 integration tests** — `src/lib/migration-028-tenant-check.test.ts` simulates the cross-tenant attack end-to-end (INSERT, UPDATE, self-link, NULL) against a live DB.
+- **SEC-005 live probe** — `src/lib/sec-005-live-probe.test.ts` signs in as an authenticated user and asserts encrypted columns return NULL, catching regressions the static regex scan can't see. Also cross-references `API_KEY_USER_COLUMNS_ARR` against the live GRANT to detect constant-vs-migration drift.
+- **Shared test helpers** — `src/lib/test-helpers/live-db.ts` centralizes `HAS_LIVE_DB` gate, admin client factory, test user creation, and cleanup for live-DB integration tests.
+
+### Fixed
+- **Demo seed cross-tenant `api_key_id`** — `scripts/seed-full-app-demo.ts` no longer sets `strategies.api_key_id` to the allocator-owned key. Demo strategies rely on synthetic analytics; the field is now NULL, which matches the product model (the column is the manager's verification key, not a portfolio-tracking reference).
+- **9 pre-existing TypeScript errors** in widget test files unblocked (`allocation.test.tsx`, `meta.test.tsx`, `positions.test.tsx`). Placeholder widgets now have zero-arg signatures; tests call them without spreading grid props.
+- **`ApiKey` type extended** to match the full projection (`sync_status`, `account_balance_usdt`), removing the stale `as ApiKey[]` cast in `ApiKeyManager.tsx`.
+
 ## [0.4.1.0] - 2026-04-10
 
 ### Security
