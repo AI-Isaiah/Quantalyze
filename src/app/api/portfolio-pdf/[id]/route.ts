@@ -9,6 +9,7 @@ import {
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { signPdfRenderToken } from "@/lib/pdf-render-token";
+import { sanitizeFilename } from "@/lib/sanitize-filename";
 
 export const maxDuration = 30;
 
@@ -78,7 +79,7 @@ export async function GET(
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${portfolio.name}-portfolio.pdf"`,
+        "Content-Disposition": `inline; filename="${sanitizeFilename(portfolio.name, "Portfolio")}-portfolio.pdf"`,
         // Auth-gated route with user-specific portfolio data — never cache at
         // the shared CDN. A shared cache keyed on URL would leak one user's
         // portfolio to another who hits the same URL.

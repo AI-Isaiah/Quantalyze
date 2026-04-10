@@ -10,6 +10,7 @@ import {
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { signPdfRenderToken } from "@/lib/pdf-render-token";
+import { sanitizeFilename } from "@/lib/sanitize-filename";
 
 export const maxDuration = 30;
 
@@ -98,18 +99,7 @@ export async function GET(
     });
 
     const rawName = (portfolio as { name?: string } | null)?.name ?? "Portfolio";
-    // Strip anything that could break the Content-Disposition header
-    // (quote, backslash, CR/LF inject a new header, non-ASCII breaks
-    // RFC 2183). The portfolio allowlist means this name comes from a
-    // DB row we control today, but the sanitizer prevents a latent
-    // header-injection footgun if any user-editable name ever flows
-    // through this route. Also cap length to 80 chars to avoid an
-    // unreasonable Content-Disposition value.
-    const portfolioName = rawName
-      .replace(/[\r\n"\\]/g, "")
-      .replace(/[^\x20-\x7E]/g, "")
-      .trim()
-      .slice(0, 80) || "Portfolio";
+    const portfolioName = sanitizeFilename(rawName, "Portfolio");
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",

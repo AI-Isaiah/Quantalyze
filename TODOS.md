@@ -23,6 +23,12 @@ with a dashed "+ Favorites" overlay curve, and saved favorite combinations
 land in the renamed "Test Portfolios" section. See CHANGELOG.md and the plan
 file at `~/.claude/plans/adaptive-puzzling-yao.md`.)
 
+### P1: Column-level REVOKE on api_keys encrypted columns (SEC-005)
+Needs: New Supabase migration to REVOKE SELECT on encrypted_key, encrypted_secret, encrypted_passphrase from anon and authenticated roles
+Pattern: Follow migration 020 (PII revoke) as template
+Risk: Currently mitigated by app-layer column projection, but defense-in-depth requires DB enforcement
+Files: supabase/migrations/027_api_keys_column_revoke.sql (new)
+
 ### Follow-ups from the My Allocation restructure (v0.4.0.0)
 
 These were flagged during `/plan-design-review` and `/plan-eng-review` but

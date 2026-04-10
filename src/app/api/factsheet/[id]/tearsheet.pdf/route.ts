@@ -8,6 +8,7 @@ import {
 } from "@/lib/puppeteer";
 import { extractAnalytics } from "@/lib/queries";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { sanitizeFilename } from "@/lib/sanitize-filename";
 
 export const maxDuration = 30;
 
@@ -89,7 +90,7 @@ export async function GET(
     return new NextResponse(Buffer.from(pdfBuffer) as unknown as BodyInit, {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${strategy.name}-tearsheet.pdf"`,
+        "Content-Disposition": `inline; filename="${sanitizeFilename(strategy.name, "Strategy")}-tearsheet.pdf"`,
         // Public route (accessible to cap-intro partners without auth) — let
         // Vercel's CDN cache hot tearsheets so a newsletter blast doesn't
         // launch a fresh Chromium per click.
