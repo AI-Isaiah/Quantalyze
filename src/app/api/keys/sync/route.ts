@@ -2,9 +2,18 @@ import { NextRequest, NextResponse } from "next/server";
 import { fetchTrades, computeAnalytics } from "@/lib/analytics-client";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
+  const rl = await checkLimit(userActionLimiter, `keys-sync:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
+  }
+
   const body = await req.json();
   const { strategy_id } = body;
 

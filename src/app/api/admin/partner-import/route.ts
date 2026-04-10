@@ -5,6 +5,7 @@ import { isAdminUser } from "@/lib/admin";
 import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { DisclosureTier } from "@/lib/types";
 
 // POST /api/admin/partner-import
@@ -147,6 +148,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!(await isAdminUser(supabase, user))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
+  const rl = await checkLimit(adminActionLimiter, `partner-import:${user!.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   let body: {

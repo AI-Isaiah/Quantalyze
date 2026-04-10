@@ -5,6 +5,7 @@ import {
   validateSelfEditableInput,
   getOwnPreferences,
 } from "@/lib/preferences";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 export async function GET(): Promise<NextResponse> {
   const supabase = await createClient();
@@ -27,6 +28,14 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const rl = await checkLimit(userActionLimiter, `preferences:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   let body: Record<string, unknown>;

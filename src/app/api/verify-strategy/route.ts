@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyStrategy } from "@/lib/analytics-client";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 
 const MAX_REQUESTS_PER_DAY = 5;
 
@@ -11,6 +12,16 @@ function isValidEmail(email: string): boolean {
 }
 
 export async function POST(req: NextRequest) {
+  // IP rate limit before any DB or Railway work
+  const ip = getClientIp(req.headers);
+  const rl = await checkLimit(publicIpLimiter, `verify-strategy:${ip}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
+  }
+
   let body: Record<string, unknown>;
   try {
     body = await req.json();

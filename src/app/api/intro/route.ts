@@ -7,6 +7,7 @@ import {
   notifyAllocatorOfIntroRequest,
 } from "@/lib/email";
 import { loadManagerIdentity } from "@/lib/manager-identity";
+import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { DisclosureTier, ManagerIdentity } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
@@ -17,6 +18,14 @@ export async function POST(req: NextRequest) {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const rl = await checkLimit(userActionLimiter, `intro:${user.id}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   const body = await req.json();
