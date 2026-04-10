@@ -69,8 +69,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing strategy_id or trades" }, { status: 400 });
   }
 
-  if (trades.length > 50000) {
-    return NextResponse.json({ error: "Maximum 50,000 trades per upload" }, { status: 400 });
+  if (trades.length > 5000) {
+    return NextResponse.json({ error: "Maximum 5,000 trades per upload" }, { status: 400 });
   }
 
   // Verify user owns this strategy
