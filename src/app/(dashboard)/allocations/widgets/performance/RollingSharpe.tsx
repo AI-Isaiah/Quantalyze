@@ -1,0 +1,115 @@
+"use client";
+
+import type { WidgetProps } from "../../lib/types";
+import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { computeRollingMetric } from "@/lib/portfolio-stats";
+import { useMemo } from "react";
+import {
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+const WINDOWS = [
+  { key: "sharpe_30d", window: 30, label: "30d", width: 1, color: "#94A3B8" },
+  { key: "sharpe_90d", window: 90, label: "90d", width: 1.5, color: "#6366F1" },
+  { key: "sharpe_180d", window: 180, label: "180d", width: 2.5, color: "#1B6B5A" },
+] as const;
+
+export default function RollingSharpe({ data }: WidgetProps) {
+  const merged = useMemo(() => {
+    if (!data?.strategies?.length) return [];
+
+    const strats = data.strategies as Array<{
+      strategy: { strategy_analytics: { daily_returns: unknown } };
+      weight: number;
+    }>;
+
+    const dateMap = new Map<string, number>();
+    let totalWeight = 0;
+    for (const s of strats) {
+      const dr = normalizeDailyReturns(s.strategy?.strategy_analytics?.daily_returns);
+      const w = s.weight ?? 1;
+      totalWeight += w;
+      for (const d of dr) {
+        dateMap.set(d.date, (dateMap.get(d.date) ?? 0) + d.value * w);
+      }
+    }
+    if (totalWeight === 0) return [];
+
+    const compositeDaily = Array.from(dateMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, val]) => ({ date, value: val / totalWeight }));
+
+    // Compute rolling sharpe for each window
+    const series: Record<string, { date: string; value: number }[]> = {};
+    for (const w of WINDOWS) {
+      series[w.key] = computeRollingMetric(compositeDaily, w.window, "sharpe");
+    }
+
+    // Merge by date
+    const mergedMap = new Map<string, Record<string, string | number>>();
+    for (const w of WINDOWS) {
+      for (const point of series[w.key]) {
+        if (!mergedMap.has(point.date)) mergedMap.set(point.date, { date: point.date });
+        mergedMap.get(point.date)![w.key] = point.value;
+      }
+    }
+
+    return Array.from(mergedMap.values()).sort((a, b) =>
+      String(a.date).localeCompare(String(b.date)),
+    );
+  }, [data]);
+
+  if (merged.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-text-muted">
+        Insufficient data for rolling Sharpe
+      </div>
+    );
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height="100%">
+      <LineChart data={merged} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
+        <XAxis
+          dataKey="date"
+          tick={{ fontSize: 11, fill: "#718096" }}
+          tickLine={false}
+          axisLine={{ stroke: "#E2E8F0" }}
+          tickFormatter={(d: string) => d.slice(5)}
+          interval="preserveStartEnd"
+        />
+        <YAxis
+          tick={{ fontSize: 11, fill: "#718096", fontFamily: "var(--font-geist-mono), monospace" }}
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(v: number) => v.toFixed(1)}
+        />
+        <Tooltip
+          contentStyle={{ fontSize: 12, borderColor: "#E2E8F0" }}
+          formatter={(v, name) => {
+            const label = WINDOWS.find((w) => w.key === name)?.label ?? name;
+            return [Number(v).toFixed(2), label];
+          }}
+        />
+        <ReferenceLine y={1} stroke="#E2E8F0" strokeDasharray="4 4" label={{ value: "1.0", fontSize: 10, fill: "#718096", position: "right" }} />
+        <ReferenceLine y={2} stroke="#E2E8F0" strokeDasharray="4 4" label={{ value: "2.0", fontSize: 10, fill: "#718096", position: "right" }} />
+        {WINDOWS.map((w) => (
+          <Line
+            key={w.key}
+            type="monotone"
+            dataKey={w.key}
+            stroke={w.color}
+            strokeWidth={w.width}
+            dot={false}
+          />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
