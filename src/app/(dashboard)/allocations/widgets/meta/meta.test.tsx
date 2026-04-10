@@ -45,7 +45,7 @@ describe("CustomKpiStrip", () => {
 
 describe("NotesWidget", () => {
   it("renders textarea with placeholder", () => {
-    render(<NotesWidget data={{}} {...baseProps} />);
+    render(<NotesWidget />);
     const textarea = screen.getByPlaceholderText(
       "Personal portfolio notes. Persistence coming soon.",
     );
@@ -53,7 +53,7 @@ describe("NotesWidget", () => {
   });
 
   it("shows reset warning text", () => {
-    render(<NotesWidget data={{}} {...baseProps} />);
+    render(<NotesWidget />);
     expect(screen.getByText("Notes reset on page reload")).toBeInTheDocument();
   });
 });

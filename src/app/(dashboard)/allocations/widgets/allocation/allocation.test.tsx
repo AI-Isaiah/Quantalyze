@@ -93,18 +93,18 @@ describe("AllocationDonut", () => {
 
 describe("AllocationOverTime", () => {
   it("renders without crash", () => {
-    render(<AllocationOverTime {...widgetProps} />);
+    render(<AllocationOverTime />);
   });
 
   it("shows TODO message", () => {
-    render(<AllocationOverTime {...widgetProps} />);
+    render(<AllocationOverTime />);
     expect(
       screen.getByText(/Historical weight data not yet available/),
     ).toBeTruthy();
   });
 
   it("has correct test ID", () => {
-    render(<AllocationOverTime {...widgetProps} />);
+    render(<AllocationOverTime />);
     expect(screen.getByTestId("allocation-over-time-todo")).toBeTruthy();
   });
 });

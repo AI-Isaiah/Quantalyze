@@ -132,7 +132,7 @@ describe("PositionsTable", () => {
 
 describe("TradingActivityLog (TODO)", () => {
   it("renders placeholder message", () => {
-    render(<TradingActivityLog {...WIDGET_PROPS} />);
+    render(<TradingActivityLog />);
     expect(
       screen.getByText(/Trade log requires a trades query endpoint/),
     ).toBeInTheDocument();
@@ -141,7 +141,7 @@ describe("TradingActivityLog (TODO)", () => {
 
 describe("TradeVolume (TODO)", () => {
   it("renders placeholder message", () => {
-    render(<TradeVolume {...WIDGET_PROPS} />);
+    render(<TradeVolume />);
     expect(
       screen.getByText(/Trade volume chart requires the same trades query endpoint/),
     ).toBeInTheDocument();
@@ -150,7 +150,7 @@ describe("TradeVolume (TODO)", () => {
 
 describe("ExposureByAsset (TODO)", () => {
   it("renders placeholder message", () => {
-    render(<ExposureByAsset {...WIDGET_PROPS} />);
+    render(<ExposureByAsset />);
     expect(
       screen.getByText(/Asset-level exposure breakdown requires position-level data/),
     ).toBeInTheDocument();
@@ -159,7 +159,7 @@ describe("ExposureByAsset (TODO)", () => {
 
 describe("NetExposure (TODO)", () => {
   it("renders placeholder message", () => {
-    render(<NetExposure {...WIDGET_PROPS} />);
+    render(<NetExposure />);
     expect(
       screen.getByText(/Net exposure tracking requires historical position data/),
     ).toBeInTheDocument();
