@@ -11,6 +11,8 @@ import {
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { signPdfRenderToken } from "@/lib/pdf-render-token";
 
+export const maxDuration = 30;
+
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
 /**

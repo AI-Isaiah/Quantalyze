@@ -9,6 +9,8 @@ import {
 import { extractAnalytics } from "@/lib/queries";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 
+export const maxDuration = 30;
+
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
 /**
