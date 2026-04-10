@@ -2,8 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { getMyAllocationDashboard } from "@/lib/queries";
-import { MyAllocationClient } from "./MyAllocationClient";
 import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchangeManager";
+import { AllocationDashboard } from "./AllocationDashboard";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -59,7 +59,7 @@ export default async function MyAllocationPage() {
   }
 
   return (
-    <MyAllocationClient
+    <AllocationDashboard
       portfolio={portfolio}
       analytics={analytics}
       strategies={strategies}

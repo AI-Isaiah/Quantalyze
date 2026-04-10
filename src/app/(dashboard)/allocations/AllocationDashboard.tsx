@@ -1,0 +1,331 @@
+"use client";
+
+import { useMemo, useState, useCallback } from "react";
+import type { Layout, LayoutItem } from "react-grid-layout";
+import type { Portfolio, PortfolioAnalytics } from "@/lib/types";
+import type { TileConfig } from "./lib/types";
+import { WIDGET_REGISTRY } from "./lib/widget-registry";
+import { useDashboardConfig } from "./hooks/useDashboardConfig";
+import { useTimeframe } from "./hooks/useTimeframe";
+import {
+  buildDateMapCache,
+  computeScenario,
+  type StrategyForBuilder,
+  type DailyPoint,
+  type ScenarioState,
+} from "@/lib/scenario";
+import { normalizeDailyReturns, displayName, getTimeframeStart } from "@/lib/allocation-helpers";
+import type { TimeframeKey } from "@/components/ui/TimeframeSelector";
+import { TimeframeSelector } from "@/components/ui/TimeframeSelector";
+import { formatCurrency } from "@/lib/utils";
+
+import { KpiStrip } from "./components/KpiStrip";
+import { DashboardGrid } from "./components/DashboardGrid";
+import { AddWidgetModal } from "./components/AddWidgetModal";
+import { UndoToast } from "./components/UndoToast";
+
+// ---------------------------------------------------------------------------
+// Types — matches MyAllocationClient props exactly
+// ---------------------------------------------------------------------------
+
+interface StrategyRow {
+  strategy_id: string;
+  current_weight: number | null;
+  allocated_amount: number | null;
+  alias: string | null;
+  strategy: {
+    id: string;
+    name: string;
+    codename: string | null;
+    disclosure_tier: string;
+    strategy_types: string[];
+    markets: string[];
+    start_date: string | null;
+    strategy_analytics: {
+      daily_returns:
+        | Record<string, Record<string, number>>
+        | DailyPoint[]
+        | null;
+      cagr: number | null;
+      sharpe: number | null;
+      volatility: number | null;
+      max_drawdown: number | null;
+    } | null;
+  };
+}
+
+interface ApiKeyRow {
+  id: string;
+  exchange: string;
+  label: string;
+  is_active: boolean;
+  sync_status: string | null;
+  last_sync_at: string | null;
+  account_balance_usdt: number | null;
+  created_at: string;
+}
+
+interface AllocationDashboardProps {
+  portfolio: Portfolio;
+  analytics: PortfolioAnalytics | null;
+  strategies: StrategyRow[];
+  apiKeys: ApiKeyRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Toast state
+// ---------------------------------------------------------------------------
+
+interface ToastState {
+  widgetName: string;
+  tile: TileConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
+export function AllocationDashboard({
+  portfolio,
+  analytics,
+  strategies,
+  apiKeys: _apiKeys, // eslint-disable-line @typescript-eslint/no-unused-vars
+}: AllocationDashboardProps) {
+  const { config, addTile, removeTile, updateLayout, restoreTile } =
+    useDashboardConfig();
+  const [timeframe, setTimeframe] = useTimeframe("YTD");
+
+  const [showModal, setShowModal] = useState(false);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [recentlyClosed, setRecentlyClosed] = useState<string[]>([]);
+
+  // ── Portfolio analytics via scenario math ─────────────────────────
+
+  const strategiesForBuilder = useMemo<StrategyForBuilder[]>(
+    () =>
+      strategies
+        .map((row) => {
+          const dr = normalizeDailyReturns(
+            row.strategy.strategy_analytics?.daily_returns,
+          );
+          return {
+            id: row.strategy_id,
+            name: displayName(row),
+            codename: row.strategy.codename ?? null,
+            disclosure_tier: row.strategy.disclosure_tier ?? "exploratory",
+            strategy_types: row.strategy.strategy_types,
+            markets: row.strategy.markets,
+            start_date: row.strategy.start_date,
+            daily_returns: dr,
+            cagr: row.strategy.strategy_analytics?.cagr ?? null,
+            sharpe: row.strategy.strategy_analytics?.sharpe ?? null,
+            volatility: row.strategy.strategy_analytics?.volatility ?? null,
+            max_drawdown: row.strategy.strategy_analytics?.max_drawdown ?? null,
+          };
+        })
+        .filter((s) => s.daily_returns.length > 0),
+    [strategies],
+  );
+
+  const dateMapCache = useMemo(
+    () => buildDateMapCache(strategiesForBuilder),
+    [strategiesForBuilder],
+  );
+
+  const lastDataDate = useMemo(() => {
+    let latest: string | null = null;
+    for (const s of strategiesForBuilder) {
+      const tail = s.daily_returns[s.daily_returns.length - 1]?.date;
+      if (tail && (!latest || tail > latest)) latest = tail;
+    }
+    return latest;
+  }, [strategiesForBuilder]);
+
+  const inceptionDate = portfolio.created_at?.slice(0, 10) ?? "2022-01-01";
+
+  const timeframeStart = useMemo(
+    () => getTimeframeStart(timeframe as TimeframeKey, lastDataDate, inceptionDate),
+    [timeframe, lastDataDate, inceptionDate],
+  );
+
+  const scenarioState = useMemo<ScenarioState>(() => {
+    const selected: Record<string, boolean> = {};
+    const weights: Record<string, number> = {};
+    const startDates: Record<string, string> = {};
+    for (const row of strategies) {
+      const ownStart = row.strategy.start_date ?? inceptionDate;
+      const clampedStart = timeframeStart > ownStart ? timeframeStart : ownStart;
+      selected[row.strategy_id] = true;
+      weights[row.strategy_id] = row.current_weight ?? 0;
+      startDates[row.strategy_id] = clampedStart;
+    }
+    return { selected, weights, startDates };
+  }, [strategies, timeframeStart, inceptionDate]);
+
+  const metrics = useMemo(
+    () => computeScenario(strategiesForBuilder, scenarioState, dateMapCache),
+    [strategiesForBuilder, scenarioState, dateMapCache],
+  );
+
+  const totalAllocated = strategies.reduce(
+    (sum, row) => sum + (row.allocated_amount ?? 0),
+    0,
+  );
+  const aum = analytics?.total_aum ?? (totalAllocated > 0 ? totalAllocated : null);
+
+  // ── Tile close / undo / add handlers ──────────────────────────────
+
+  const handleClose = useCallback(
+    (tileId: string) => {
+      const removed = removeTile(tileId);
+      if (removed) {
+        const meta = WIDGET_REGISTRY[removed.widgetId];
+        const name = meta?.name ?? removed.widgetId;
+        setToast({ widgetName: name, tile: removed });
+        setRecentlyClosed((prev) =>
+          prev.includes(removed.widgetId) ? prev : [removed.widgetId, ...prev].slice(0, 5),
+        );
+      }
+    },
+    [removeTile],
+  );
+
+  const handleUndo = useCallback(() => {
+    if (toast) {
+      restoreTile(toast.tile);
+      setRecentlyClosed((prev) => prev.filter((id) => id !== toast.tile.widgetId));
+    }
+    setToast(null);
+  }, [toast, restoreTile]);
+
+  const handleDismiss = useCallback(() => {
+    setToast(null);
+  }, []);
+
+  const handleAdd = useCallback(
+    (widgetId: string) => {
+      addTile(widgetId);
+      setRecentlyClosed((prev) => prev.filter((id) => id !== widgetId));
+    },
+    [addTile],
+  );
+
+  const handleLayoutChange = useCallback(
+    (layout: Layout) => {
+      // Layout is readonly LayoutItem[] in v2; map to mutable array for updateLayout
+      updateLayout(
+        layout.map((item: LayoutItem) => ({
+          i: item.i,
+          x: item.x,
+          y: item.y,
+          w: item.w,
+          h: item.h,
+        })),
+      );
+    },
+    [updateLayout],
+  );
+
+  // ── Widget renderer (placeholder for now — Task 10 wires real widgets) ──
+
+  const renderWidget = useCallback((widgetId: string) => {
+    const meta = WIDGET_REGISTRY[widgetId];
+    return (
+      <div
+        className="flex h-full items-center justify-center text-sm"
+        style={{ color: "#718096" }}
+      >
+        <span className="mr-2">{meta?.icon ?? "?"}</span>
+        <span className="font-sans">
+          {meta?.name ?? widgetId}
+          {meta?.status === "todo" && (
+            <span className="ml-2 rounded bg-[#F8F9FA] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[#718096]">
+              Coming soon
+            </span>
+          )}
+        </span>
+      </div>
+    );
+  }, []);
+
+  // Active widget IDs for the modal
+  const activeWidgetIds = config.tiles.map((t) => t.widgetId);
+
+  return (
+    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+      {/* Header */}
+      <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="font-display text-3xl md:text-4xl text-text-primary tracking-tight">
+            My Allocation
+          </h1>
+          <p className="mt-1 text-sm text-text-secondary">
+            <span>{portfolio.name}</span>
+            <span className="mx-2 text-text-muted">&middot;</span>
+            <span className="font-metric tabular-nums">{strategies.length}</span>
+            <span className="text-text-muted">
+              {" "}
+              {strategies.length === 1 ? "investment" : "investments"}
+            </span>
+            {aum != null && (
+              <>
+                <span className="mx-2 text-text-muted">&middot;</span>
+                <span className="font-metric tabular-nums">
+                  {formatCurrency(aum)}
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowModal(true)}
+            className="rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-sm font-medium transition-colors hover:bg-[#F8F9FA] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
+            style={{ color: "#1B6B5A" }}
+          >
+            + Add Widget
+          </button>
+          <TimeframeSelector
+            value={timeframe as TimeframeKey}
+            onChange={setTimeframe}
+          />
+        </div>
+      </header>
+
+      {/* KPI strip */}
+      <KpiStrip
+        analytics={analytics}
+        metrics={metrics}
+        timeframe={timeframe}
+        aum={aum}
+      />
+
+      {/* Grid */}
+      <DashboardGrid
+        config={config}
+        onLayoutChange={handleLayoutChange}
+        onClose={handleClose}
+        renderWidget={renderWidget}
+      />
+
+      {/* Add Widget Modal */}
+      <AddWidgetModal
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        onAdd={handleAdd}
+        activeWidgetIds={activeWidgetIds}
+        recentlyClosed={recentlyClosed}
+      />
+
+      {/* Undo Toast */}
+      {toast && (
+        <UndoToast
+          widgetName={toast.widgetName}
+          onUndo={handleUndo}
+          onDismiss={handleDismiss}
+        />
+      )}
+    </main>
+  );
+}
