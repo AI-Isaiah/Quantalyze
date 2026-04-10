@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
@@ -144,6 +145,9 @@ function dedupeBy<T>(rows: T[], keyFn: (row: T) => string): T[] {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(request as NextRequest);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!(await isAdminUser(supabase, user))) {

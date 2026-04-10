@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 
 // GET — returns { enabled: boolean }
 // POST — body { enabled: boolean }, flips the flag. Admin only.
@@ -37,6 +38,9 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!(await isAdminUser(supabase, user))) {

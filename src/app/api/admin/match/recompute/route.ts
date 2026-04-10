@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { recomputeMatch } from "@/lib/analytics-client";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 

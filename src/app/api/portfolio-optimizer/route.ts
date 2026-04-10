@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { assertSameOrigin } from "@/lib/csrf";
 import { assertPortfolioOwnership } from "@/lib/queries";
 import {
   runPortfolioOptimizer,
@@ -10,6 +11,9 @@ import {
 const OPTIMIZER_TIMEOUT_MS = 15_000;
 
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },

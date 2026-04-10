@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import {
   notifyManagerIntroRequest,
   notifyFounderIntroRequest,
@@ -11,6 +12,9 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { DisclosureTier, ManagerIdentity } from "@/lib/types";
 
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },

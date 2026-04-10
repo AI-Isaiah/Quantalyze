@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import { verifyStrategy } from "@/lib/analytics-client";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
@@ -12,6 +13,8 @@ function isValidEmail(email: string): boolean {
 }
 
 export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
   // IP rate limit before any DB or Railway work
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `verify-strategy:${ip}`);

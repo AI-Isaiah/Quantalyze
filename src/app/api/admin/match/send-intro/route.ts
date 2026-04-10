@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
 import {
   notifyAllocatorOfAdminIntro,
   notifyManagerOfAdminIntro,
@@ -18,6 +19,9 @@ import type { ManagerIdentity } from "@/lib/types";
 // and the manager, CC'ing the founder. Email failure is non-fatal — the intro is
 // persisted regardless so the admin can retry delivery out-of-band.
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
