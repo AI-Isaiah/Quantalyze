@@ -550,10 +550,13 @@ const API_KEY_COLUMNS =
  * Fetch all API keys for a user. Shared by the allocations page
  * (empty-state + full dashboard) and the exchanges page so column
  * projections stay in sync.
+ *
+ * Uses the user-scoped client so the query runs under RLS
+ * (api_keys has a policy allowing SELECT where user_id = auth.uid()).
  */
 export async function getUserApiKeys(userId: string) {
-  const admin = createAdminClient();
-  const { data } = await admin
+  const supabase = await createClient();
+  const { data } = await supabase
     .from("api_keys")
     .select(API_KEY_COLUMNS)
     .eq("user_id", userId)
