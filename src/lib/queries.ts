@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
+import { API_KEY_USER_COLUMNS } from "./constants";
 import type {
   Strategy,
   StrategyAnalytics,
@@ -543,9 +544,6 @@ export interface MyAllocationDashboardPayload {
   alertCount: { high: number; medium: number; low: number; total: number };
 }
 
-const API_KEY_COLUMNS =
-  "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at" as const;
-
 /**
  * Fetch all API keys for a user. Shared by the allocations page
  * (empty-state + full dashboard) and the exchanges page so column
@@ -553,12 +551,16 @@ const API_KEY_COLUMNS =
  *
  * Uses the user-scoped client so the query runs under RLS
  * (api_keys has a policy allowing SELECT where user_id = auth.uid()).
+ *
+ * Projects only `API_KEY_USER_COLUMNS` from constants.ts. After migration
+ * 027 (SEC-005), any other projection will silently return NULL for revoked
+ * columns. Do not use `.select("*")` on api_keys from a user client.
  */
 export async function getUserApiKeys(userId: string) {
   const supabase = await createClient();
   const { data } = await supabase
     .from("api_keys")
-    .select(API_KEY_COLUMNS)
+    .select(API_KEY_USER_COLUMNS)
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
   return (data ?? []) as Array<{

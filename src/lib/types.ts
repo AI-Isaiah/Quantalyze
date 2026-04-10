@@ -121,13 +121,19 @@ export interface ContactRequest {
   responded_at: string | null;
 }
 
+/**
+ * Shape matches `API_KEY_USER_COLUMNS` in `lib/constants.ts`. When the
+ * projection changes, update this interface too.
+ */
 export interface ApiKey {
   id: string;
   user_id: string;
   exchange: "binance" | "okx" | "bybit";
   label: string;
   is_active: boolean;
+  sync_status: string | null;
   last_sync_at: string | null;
+  account_balance_usdt: number | null;
   created_at: string;
 }
 

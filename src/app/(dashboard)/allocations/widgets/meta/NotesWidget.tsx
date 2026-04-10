@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 
- 
 export function NotesWidget() {
   const [notes, setNotes] = useState("");
 

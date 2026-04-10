@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "@/components/strategy/ApiKeyForm";
 import { createClient } from "@/lib/supabase/client";
+import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 
 interface ExchangeConnection {
   id: string;
@@ -142,9 +143,7 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           kek_version: result.kek_version ?? 1,
           sync_status: "idle",
         })
-        .select(
-          "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at",
-        )
+        .select(API_KEY_USER_COLUMNS)
         .single();
       if (insertErr || !inserted) {
         setFormError(insertErr?.message ?? "Failed to save key");

@@ -1478,15 +1478,21 @@ async function main() {
   }
   const cryptoSmaCategoryId = cryptoSmaCategory.id as string;
 
-  const realPortfolioStrategyIds = new Set(
-    ACTIVE_HOLDINGS.map((h) => ARCHETYPES[h.idx].id),
-  );
+  // Do NOT set strategies.api_key_id here. That column is the manager's
+  // verification key (proving the strategy's track record via read-only
+  // exchange API access). The demo has no manager-owned api_keys — the
+  // api_keys rows are allocator-owned, used for portfolio tracking, not
+  // strategy verification. Linking a manager-owned strategy to an
+  // allocator-owned key is a cross-tenant violation that migration 028's
+  // tenant check trigger blocks. Leave api_key_id NULL for demo strategies;
+  // the synthetic analytics in strategy_analytics provide the dashboard
+  // data without needing a verification key.
   for (const arch of ARCHETYPES) {
     const { error } = await admin.from("strategies").upsert({
       id: arch.id,
       user_id: MANAGER_IDS[arch.managerIdx],
       category_id: cryptoSmaCategoryId,
-      api_key_id: realPortfolioStrategyIds.has(arch.id) ? API_KEY_IDS[0] : null,
+      api_key_id: null,
       name: arch.name,
       codename: arch.codename,
       description: arch.description,
