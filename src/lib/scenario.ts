@@ -43,10 +43,8 @@
  * `src/lib/scenario.test.ts` pin them (PR 3 scope).
  */
 
-export interface DailyPoint {
-  date: string;
-  value: number;
-}
+import type { DailyPoint } from "./portfolio-math-utils";
+export type { DailyPoint } from "./portfolio-math-utils";
 
 export interface StrategyForBuilder {
   id: string;
