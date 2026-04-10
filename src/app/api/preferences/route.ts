@@ -52,7 +52,10 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: validationError }, { status: 400 });
   }
 
-  // Upsert (insert if no row, update if exists). Allocator can only edit their own row.
+  // Defense-in-depth: ownership is enforced by binding user_id to the
+  // authenticated user.id. RLS on allocator_preferences is the DB-layer
+  // gate, but even if the policy breaks, this upsert can only affect the
+  // caller's own row because user_id is hardcoded from the session.
   const { error } = await supabase
     .from("allocator_preferences")
     .upsert(

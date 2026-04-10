@@ -28,6 +28,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Defense-in-depth: verify the user has an allocator role before allowing
+  // intro requests. RLS on contact_requests is the DB-layer gate, but a broken
+  // policy would silently let any authenticated user insert rows.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .single();
+
+  if (!profile || (profile.role !== "allocator" && profile.role !== "both")) {
+    return NextResponse.json(
+      { error: "Only allocators can request introductions" },
+      { status: 403 },
+    );
+  }
+
   const body = await req.json();
   const { strategy_id, message } = body;
 
