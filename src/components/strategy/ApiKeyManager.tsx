@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { SyncProgress, type SyncStatus } from "./SyncProgress";
 import type { ApiKey } from "@/lib/types";
+import { API_KEY_USER_COLUMNS } from "@/lib/constants";
 
 interface ApiKeyManagerProps {
   strategyId: string;
@@ -44,9 +45,12 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   const loadKeys = useCallback(async () => {
     const supabase = createClient();
+    // Project only the allowlist — never `.select("*")` on api_keys from a
+    // user-scoped client. Migration 027 (SEC-005) revokes SELECT on the
+    // encrypted columns; `.select("*")` would silently return NULL for them.
     const { data } = await supabase
       .from("api_keys")
-      .select("*")
+      .select(API_KEY_USER_COLUMNS)
       .order("created_at", { ascending: false });
     if (data) {
       setKeys(data);
