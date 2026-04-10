@@ -1,23 +1,58 @@
+import type { z } from "zod";
+import {
+  ValidateKeyResponseSchema,
+  EncryptKeyResponseSchema,
+  FetchTradesResponseSchema,
+  ComputeAnalyticsResponseSchema,
+  PortfolioAnalyticsResponseSchema,
+  PortfolioOptimizerResponseSchema,
+  VerifyStrategyResponseSchema,
+  RecomputeMatchResponseSchema,
+} from "./analytics-schemas";
+
 const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
-const ANALYTICS_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
-async function analyticsRequest(path: string, body: Record<string, unknown>) {
+/** Thrown when the analytics service does not respond within the timeout. */
+export class AnalyticsTimeoutError extends Error {
+  constructor(path: string, timeoutMs: number) {
+    super(`Analytics service timed out after ${timeoutMs}ms on ${path}`);
+    this.name = "AnalyticsTimeoutError";
+  }
+}
+
+/**
+ * Core fetch wrapper for the Python analytics service.
+ *
+ * @param path    - URL path (e.g. "/api/compute-analytics")
+ * @param body    - JSON body to POST
+ * @param options - Optional overrides. `timeoutMs` defaults to 30s.
+ *                  `method` defaults to "POST".
+ */
+async function analyticsRequest(
+  path: string,
+  body: Record<string, unknown> | null,
+  options?: { timeoutMs?: number; method?: string },
+) {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const method = options?.method ?? "POST";
+
   let res: Response;
   try {
     res = await fetch(`${ANALYTICS_URL}${path}`, {
-      method: "POST",
+      method,
       headers: {
         "Content-Type": "application/json",
         ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
       },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(ANALYTICS_TIMEOUT_MS),
+      ...(body !== null && { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "TimeoutError") {
-      throw new Error(`Analytics service timed out after ${ANALYTICS_TIMEOUT_MS}ms on ${path}`);
+      throw new AnalyticsTimeoutError(path, timeoutMs);
     }
     throw new Error("Analytics service is not reachable. Please ensure it is running.");
   }
@@ -41,38 +76,73 @@ async function analyticsRequest(path: string, body: Record<string, unknown>) {
   return res.json();
 }
 
+/**
+ * Parse an analytics response against a Zod schema. Logs a warning on
+ * validation failure and returns the raw data so existing call sites
+ * don't break on unexpected extra fields. The warning gives operators
+ * a loud signal that contract drift has occurred.
+ */
+function parseResponse<T>(
+  schema: z.ZodType<T>,
+  data: unknown,
+  endpoint: string,
+): T {
+  const result = schema.safeParse(data);
+  if (!result.success) {
+    console.error(
+      `[analytics-client] Contract validation failed for ${endpoint}:`,
+      result.error.issues,
+    );
+    // Throw so callers get a clear error rather than silently wrong data.
+    throw new Error(
+      `Analytics response contract violation on ${endpoint}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
 export async function computeAnalytics(strategyId: string) {
-  return analyticsRequest("/api/compute-analytics", { strategy_id: strategyId });
+  const data = await analyticsRequest("/api/compute-analytics", { strategy_id: strategyId });
+  return parseResponse(ComputeAnalyticsResponseSchema, data, "/api/compute-analytics");
 }
 
 export async function fetchTrades(strategyId: string) {
-  return analyticsRequest("/api/fetch-trades", { strategy_id: strategyId });
+  const data = await analyticsRequest("/api/fetch-trades", { strategy_id: strategyId });
+  return parseResponse(FetchTradesResponseSchema, data, "/api/fetch-trades");
 }
 
 export async function validateKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
-  return analyticsRequest("/api/validate-key", {
+  const data = await analyticsRequest("/api/validate-key", {
     exchange,
     api_key: apiKey,
     api_secret: apiSecret,
     passphrase: passphrase ?? null,
   });
+  return parseResponse(ValidateKeyResponseSchema, data, "/api/validate-key");
 }
 
 export async function encryptKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
-  return analyticsRequest("/api/encrypt-key", {
+  const data = await analyticsRequest("/api/encrypt-key", {
     exchange,
     api_key: apiKey,
     api_secret: apiSecret,
     passphrase: passphrase ?? null,
   });
+  return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
 }
 
 export async function computePortfolioAnalytics(portfolioId: string) {
-  return analyticsRequest("/api/portfolio-analytics", { portfolio_id: portfolioId });
+  const data = await analyticsRequest("/api/portfolio-analytics", { portfolio_id: portfolioId });
+  return parseResponse(PortfolioAnalyticsResponseSchema, data, "/api/portfolio-analytics");
 }
 
-export async function runPortfolioOptimizer(portfolioId: string) {
-  return analyticsRequest("/api/portfolio-optimizer", { portfolio_id: portfolioId });
+export async function runPortfolioOptimizer(portfolioId: string, timeoutMs?: number) {
+  const data = await analyticsRequest(
+    "/api/portfolio-optimizer",
+    { portfolio_id: portfolioId },
+    timeoutMs ? { timeoutMs } : undefined,
+  );
+  return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");
 }
 
 export async function verifyStrategy(data: {
@@ -82,12 +152,27 @@ export async function verifyStrategy(data: {
   api_secret: string;
   passphrase?: string;
 }) {
-  return analyticsRequest("/api/verify-strategy", data);
+  const result = await analyticsRequest("/api/verify-strategy", data);
+  return parseResponse(VerifyStrategyResponseSchema, result, "/api/verify-strategy");
 }
 
 export async function recomputeMatch(allocatorId: string, force = false) {
-  return analyticsRequest("/api/match/recompute", {
+  const data = await analyticsRequest("/api/match/recompute", {
     allocator_id: allocatorId,
     force,
+  });
+  return parseResponse(RecomputeMatchResponseSchema, data, "/api/match/recompute");
+}
+
+export async function evalMatch(params: {
+  lookback_days: string;
+  partner_tag?: string;
+}) {
+  const qs = new URLSearchParams({ lookback_days: params.lookback_days });
+  if (params.partner_tag) qs.set("partner_tag", params.partner_tag);
+  // evalMatch has no fixed schema — it returns variable evaluation data.
+  // Validation can be added when the eval response shape stabilizes.
+  return analyticsRequest(`/api/match/eval?${qs.toString()}`, null, {
+    method: "GET",
   });
 }
