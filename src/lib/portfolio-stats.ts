@@ -101,6 +101,7 @@ export function computeRollingMetric(
  * Sort ascending, pick index floor((1-confidence) * n).
  */
 export function computeVaR(returns: number[], confidence: number): number {
+  if (returns.length === 0) return 0;
   const sorted = [...returns].sort((a, b) => a - b);
   const idx = Math.floor((1 - confidence) * sorted.length);
   return sorted[Math.max(0, idx)];
@@ -236,6 +237,12 @@ function aggregatePeriods(
 function findMinMax(
   periods: Map<string, number>,
 ): { best: PeriodExtreme; worst: PeriodExtreme } {
+  if (periods.size === 0) {
+    return {
+      best: { date: "", value: 0 },
+      worst: { date: "", value: 0 },
+    };
+  }
   let bestKey = "";
   let bestVal = -Infinity;
   let worstKey = "";

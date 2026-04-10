@@ -60,8 +60,9 @@ export function normalizeDailyReturns(raw: unknown): DailyPoint[] {
 }
 
 // ── Numeric helpers ─────────────────────────────────────────────────
-/** Arithmetic mean. Caller must ensure `values` is non-empty. */
+/** Arithmetic mean. Returns 0 for an empty array. */
 export function mean(values: number[]): number {
+  if (values.length === 0) return 0;
   return values.reduce((s, v) => s + v, 0) / values.length;
 }
 
