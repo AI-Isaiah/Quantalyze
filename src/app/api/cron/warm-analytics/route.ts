@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "crypto";
+import { safeCompare } from "@/lib/timing-safe-compare";
 
 /**
  * Vercel Cron — pings the Python analytics service /health every 5 minutes
@@ -21,18 +21,6 @@ import { timingSafeEqual } from "crypto";
 // Next.js from ever static-optimising a future variant and silently
 // stripping the auth check.
 export const dynamic = "force-dynamic";
-
-/**
- * Constant-time Bearer token compare so an attacker can't probe
- * CRON_SECRET via timing differences on a public cron endpoint. JS `!==`
- * short-circuits at the first differing byte, leaking length + prefix.
- */
-function safeCompare(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
-}
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const auth = req.headers.get("authorization") ?? "";
