@@ -21,19 +21,12 @@ cp .env.example .env.local
 # Edit .env.local with your Supabase project URL and anon key
 
 # 3. Run database migrations
-# In Supabase SQL Editor, run all files in order:
-#   supabase/migrations/001_initial_schema.sql
-#   ...
-#   supabase/migrations/014_strategy_codename.sql
-#
-# For 011 specifically, set the admin email ahead of the migration so is_admin
-# backfills automatically (persist it at the DB level so future restores stay
-# consistent):
+# In Supabase SQL Editor, run ALL files in supabase/migrations/ in
+# numeric order (001 through 026+). Before running migration 011,
+# set the admin email so is_admin backfills automatically:
 #   ALTER DATABASE postgres SET app.admin_email = 'you@example.com';
 #
-# Migration 014 adds the nullable strategies.codename column that the match
-# engine and admin match queue depend on — apply it before running the seed
-# script or recomputing matches.
+# See CHANGELOG.md for details on what each migration adds.
 
 # 4. Start the dev server
 npm run dev
