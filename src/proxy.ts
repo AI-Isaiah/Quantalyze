@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { isAdmin } from "@/lib/admin";
 
 const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal", "/demo", "/api/demo"];
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
@@ -60,21 +61,16 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Admin route protection: optimistic email check from JWT (can't query DB cheaply here).
-  // This is a fast-path that bounces non-admin users early. The authoritative check uses
-  // isAdminUser() at the page/API handler level (DAL pattern), which ALSO checks
-  // profiles.is_admin = true. As of migration 011 the only admin is the founder whose
-  // email matches ADMIN_EMAIL AND who has is_admin = true after backfill, so the cheap
-  // proxy check is sufficient. When a 2nd admin is added with is_admin = true but a
-  // different email, this proxy check needs a JWT custom claim or a session cache.
-  // Tracked in TODOS.md (P2: drop email-based gate).
+  // Admin route protection: fast-path email check via the canonical isAdmin()
+  // helper in lib/admin.ts. This bounces non-admin users early without a DB
+  // call. The authoritative check (isAdminUser) at the page/API handler level
+  // also queries profiles.is_admin, so DB-only admins still pass at the DAL
+  // layer — they just won't be blocked here at the proxy level.
   const isAdminRoute = ADMIN_ROUTES.some((route) =>
     request.nextUrl.pathname.startsWith(route)
   );
   if (isAdminRoute) {
-    const adminEmail = process.env.ADMIN_EMAIL ?? "";
-    const email = session?.user?.email ?? "";
-    if (!adminEmail || email.toLowerCase() !== adminEmail.toLowerCase()) {
+    if (!isAdmin(session?.user?.email)) {
       const url = request.nextUrl.clone();
       url.pathname = DEFAULT_AUTHENTICATED_ROUTE;
       return NextResponse.redirect(url);
