@@ -542,6 +542,33 @@ export interface MyAllocationDashboardPayload {
   alertCount: { high: number; medium: number; low: number; total: number };
 }
 
+const API_KEY_COLUMNS =
+  "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at" as const;
+
+/**
+ * Fetch all API keys for a user. Shared by the allocations page
+ * (empty-state + full dashboard) and the exchanges page so column
+ * projections stay in sync.
+ */
+export async function getUserApiKeys(userId: string) {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("api_keys")
+    .select(API_KEY_COLUMNS)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+  return (data ?? []) as Array<{
+    id: string;
+    exchange: string;
+    label: string;
+    is_active: boolean;
+    sync_status: string | null;
+    last_sync_at: string | null;
+    account_balance_usdt: number | null;
+    created_at: string;
+  }>;
+}
+
 export const getMyAllocationDashboard = cache(
   async (userId: string): Promise<MyAllocationDashboardPayload> => {
     const supabase = await createClient();
@@ -552,18 +579,11 @@ export const getMyAllocationDashboard = cache(
     if (!portfolio) {
       // No real portfolio yet — still fetch api_keys so the page can
       // prompt the user to connect their first exchange.
-      const { data: keyRows } = await admin
-        .from("api_keys")
-        .select(
-          "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at",
-        )
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false });
       return {
         portfolio: null,
         analytics: null,
         strategies: [],
-        apiKeys: (keyRows ?? []) as MyAllocationDashboardPayload["apiKeys"],
+        apiKeys: await getUserApiKeys(userId),
         alertCount: { high: 0, medium: 0, low: 0, total: 0 },
       };
     }
@@ -572,7 +592,7 @@ export const getMyAllocationDashboard = cache(
     // strategy_analytics because the analytics daily_returns are only
     // exposed to service role (migration 010 revokes SELECT on that
     // column from anon/authenticated for column-level privacy).
-    const [analyticsRes, strategiesRes, apiKeysRes, alertsRes] =
+    const [analyticsRes, strategiesRes, apiKeys, alertsRes] =
       await Promise.all([
         admin
           .from("portfolio_analytics")
@@ -609,13 +629,7 @@ export const getMyAllocationDashboard = cache(
           )
           .eq("portfolio_id", portfolio.id)
           .order("current_weight", { ascending: false }),
-        admin
-          .from("api_keys")
-          .select(
-            "id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at",
-          )
-          .eq("user_id", userId)
-          .order("created_at", { ascending: false }),
+        getUserApiKeys(userId),
         supabase
           .from("portfolio_alerts")
           .select("id, severity")
@@ -664,7 +678,7 @@ export const getMyAllocationDashboard = cache(
       portfolio,
       analytics: (analyticsRes.data ?? null) as PortfolioAnalytics | null,
       strategies,
-      apiKeys: (apiKeysRes.data ?? []) as MyAllocationDashboardPayload["apiKeys"],
+      apiKeys: apiKeys,
       alertCount: alertCounts,
     };
   },
