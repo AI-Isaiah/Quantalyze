@@ -79,10 +79,10 @@ export async function GET(
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="${portfolio.name}-portfolio.pdf"`,
-        // Auth-gated route with user-specific portfolio data — never cache at
-        // the shared CDN. A shared cache keyed on URL would leak one user's
-        // portfolio to another who hits the same URL.
-        "Cache-Control": "private, no-store",
+        // Semi-public share surface — allow shared-CDN caching of the rendered
+        // PDF for an hour, but keep stale-while-revalidate short since
+        // portfolio contents can drift under the owner's feet.
+        "Cache-Control": "s-maxage=3600, stale-while-revalidate=86400",
       },
     });
   } catch (err) {
