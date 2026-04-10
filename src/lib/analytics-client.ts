@@ -13,6 +13,9 @@ import {
 const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
+/** Client-side API contract version. Sent as X-Api-Version on every request. */
+export const ANALYTICS_API_VERSION = "1";
+
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** Thrown when the analytics service does not respond within the timeout. */
@@ -45,6 +48,7 @@ async function analyticsRequest(
       method,
       headers: {
         "Content-Type": "application/json",
+        "X-Api-Version": ANALYTICS_API_VERSION,
         ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
       },
       ...(body !== null && { body: JSON.stringify(body) }),
@@ -55,6 +59,14 @@ async function analyticsRequest(
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
     throw new Error("Analytics service is not reachable. Please ensure it is running.");
+  }
+
+  // Warn on API version mismatch (don't fail — just surface contract drift).
+  const serverVersion = res.headers.get("X-Api-Version");
+  if (serverVersion && serverVersion !== ANALYTICS_API_VERSION) {
+    console.warn(
+      `[analytics-client] API version mismatch: client=${ANALYTICS_API_VERSION}, server=${serverVersion}`,
+    );
   }
 
   if (!res.ok) {
