@@ -191,6 +191,53 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
     metrics_json["consecutive_wins"] = int(win_streaks.max()) if len(win_streaks) > 0 else 0
     metrics_json["consecutive_losses"] = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
 
+    # Top drawdown episodes (peak -> trough -> recovery with depth + duration).
+    # Note: qs.stats.drawdown_details expects the drawdown series (underwater curve),
+    # not the returns series. Its output has columns ['start', 'valley', 'end',
+    # 'days', 'max drawdown', ...] where `max drawdown` is a NEGATIVE percentage
+    # (e.g. -12.5 means -12.5%) and start/valley/end are date strings (dtype=object).
+    # Ongoing drawdowns are encoded as `end == last date` with dd_series.iloc[-1] < 0
+    # (quantstats does NOT use NaN for ongoing episodes).
+    try:
+        details = qs.stats.drawdown_details(dd_series)
+        if details is not None and len(details) > 0:
+            # quantstats reports `max drawdown` as a NEGATIVE percentage;
+            # sort by absolute value to get deepest-first.
+            top = (
+                details.assign(_abs_dd=details["max drawdown"].abs())
+                .sort_values("_abs_dd", ascending=False)
+                .head(5)
+            )
+            # Compare via datetime.date to be tz-agnostic. `returns.index` may be
+            # tz-aware while quantstats-parsed `end` is tz-naive (or vice versa);
+            # subtracting mixed Timestamps raises and gets swallowed by the outer
+            # except, silently dropping the whole field. .date() sidesteps that.
+            last_date_date = pd.Timestamp(returns.index[-1]).date()
+            still_underwater = bool(float(dd_series.iloc[-1]) < 0)
+            episodes: list[dict[str, Any]] = []
+            for _, row in top.iterrows():
+                start_date = pd.Timestamp(row["start"]).date()
+                valley_date = pd.Timestamp(row["valley"]).date()
+                end_date = pd.Timestamp(row["end"]).date()
+                # Ongoing if this episode's end matches the last returns date and
+                # the underwater curve is still below zero at that last date.
+                is_current = still_underwater and end_date >= last_date_date
+                recovery_date = None if is_current else end_date.strftime("%Y-%m-%d")
+                # Duration: peak -> recovery (or peak -> last returns date if ongoing)
+                effective_end = last_date_date if is_current else end_date
+                duration_days = int((effective_end - start_date).days)
+                episodes.append({
+                    "peak_date": start_date.strftime("%Y-%m-%d"),
+                    "trough_date": valley_date.strftime("%Y-%m-%d"),
+                    "recovery_date": recovery_date,
+                    "depth_pct": _safe_float(row["max drawdown"] / 100.0),
+                    "duration_days": duration_days,
+                    "is_current": bool(is_current),
+                })
+            metrics_json["drawdown_episodes"] = episodes
+    except Exception:
+        pass
+
     # Outlier ratios
     try:
         mean_ret = float(returns.mean())
@@ -218,6 +265,8 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
                 beta = metrics_json.get("beta", 0)
                 if beta and beta != 0 and cagr is not None:
                     metrics_json["treynor"] = _safe_float(cagr / beta)
+            if len(aligned[0]) >= 90:
+                metrics_json["btc_rolling_correlation_90d"] = _rolling_correlation(aligned[0], aligned[1], 90)
         except Exception:
             pass
 
@@ -312,19 +361,30 @@ def _monthly_returns_grid_from_series(monthly: pd.Series) -> dict[str, dict[str,
     return grid
 
 
+def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
+    """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size."""
+    cleaned = series.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    result = [
+        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
+        for d, v in cleaned.items()
+    ]
+    return cap_data_points(result)
+
+
 def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
     """Compute rolling annualized Sharpe using vectorized pandas rolling."""
     if len(returns) < window:
         return []
     roll_mean = returns.rolling(window).mean()
     roll_std = returns.rolling(window).std()
-    rolling_sharpe = (roll_mean / roll_std) * np.sqrt(252)
-    rolling_sharpe = rolling_sharpe.dropna().replace([np.inf, -np.inf], np.nan).dropna()
-    result = [
-        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
-        for d, v in rolling_sharpe.items()
-    ]
-    return cap_data_points(result)
+    return _finalize_rolling((roll_mean / roll_std) * np.sqrt(252))
+
+
+def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[dict[str, Any]]:
+    """Vectorized rolling Pearson correlation between two aligned series."""
+    if len(a) < window:
+        return []
+    return _finalize_rolling(a.rolling(window).corr(b))
 
 
 def _return_quantiles(returns: pd.Series) -> dict[str, list[float]]:
