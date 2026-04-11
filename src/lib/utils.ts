@@ -1,9 +1,12 @@
 import type { StrategyAnalytics } from "./types";
 
-export function formatPercent(value: number | null | undefined): string {
+export function formatPercent(
+  value: number | null | undefined,
+  decimals = 2,
+): string {
   if (value == null) return "—";
   const sign = value >= 0 ? "+" : "";
-  return `${sign}${(value * 100).toFixed(2)}%`;
+  return `${sign}${(value * 100).toFixed(decimals)}%`;
 }
 
 const numberFormatters = new Map<number, Intl.NumberFormat>();
@@ -38,6 +41,48 @@ export function metricColor(value: number | null | undefined): string {
 
 export function cn(...classes: (string | false | undefined | null)[]): string {
   return classes.filter(Boolean).join(" ");
+}
+
+/** RFC 4122 hex UUID regex. Used by every API route that takes an id
+ *  from a client body. Case-insensitive to match Postgres' output. */
+export const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+
+/** Human-friendly "N{m,h,d} ago" formatter with a fallback to absolute
+ *  date once the gap crosses 30 days. Callers pass an explicit `now`
+ *  so the function stays pure and client components can memo-gate on
+ *  bucket changes. Both branches use the `en-US` locale + UTC
+ *  timezone so SSR and client-first-paint produce identical strings. */
+export function formatRelativeTime(iso: string, now: number): string {
+  const then = new Date(iso).getTime();
+  const minutes = Math.round((now - then) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return formatAbsoluteDate(iso);
+}
+
+/** SSR-deterministic short date. Same output on Node and browser. */
+export function formatAbsoluteDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/** Minute-bucket key used to gate relative-time re-renders. Callers
+ *  that tick every minute can compare buckets and skip the state
+ *  update when it hasn't changed. */
+export function minuteBucket(now: number): number {
+  return Math.floor(now / 60_000);
 }
 
 /** Multi-strategy chart color palette — design system approved.
