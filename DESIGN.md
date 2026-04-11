@@ -31,7 +31,7 @@
   - Micro: 10-11px (labels, badges, uppercase tracking)
 
 ## Color
-- **Approach:** Restrained — 1 accent + neutrals. Color is rare and meaningful.
+- **Approach:** Restrained — 1 accent + 3 semantic (positive/negative/warning) + neutrals. Color is rare and meaningful; warning is reserved for transient recoverable states that the system will handle on its own.
 - **Accent:** #1B6B5A — muted institutional teal. Darker and more serious than the bright teal (#0D9488) that competitors use. Means "verified" and "action".
 - **Accent hover:** #155A4B
 - **Page background:** #F8F9FA — warm off-white
@@ -41,7 +41,8 @@
 - **Text secondary:** #4A5568 — for descriptions, secondary content
 - **Text muted:** #718096 — for labels, captions, timestamps
 - **Positive:** #16A34A — gains, verified status, success
-- **Negative:** #DC2626 — losses, errors, warnings
+- **Negative:** #DC2626 — losses, errors, permanent failures
+- **Warning:** #D97706 — transient retry states, non-critical warnings (added 2026-04-11)
 - **Border:** #E2E8F0 — subtle dividers
 - **Border focus:** #1B6B5A — accent color for focused inputs
 - **Chart strategy:** #1B6B5A — equity curve color
@@ -112,3 +113,4 @@ Reference: FactSet quarterly factsheet pages.
 | 2026-04-06 | DM Sans over Inter | Inter is the most overused font in tech. DM Sans is geometrically similar but warmer, with better personality at larger sizes. |
 | 2026-04-06 | Geist Mono over JetBrains Mono | Geist Mono designed for UI, not code editors. Sharper at small sizes. Better tabular-nums. |
 | 2026-04-09 | Data density > card density + Meeting hero rule | Portfolio demo hero (v0.2.0.0) inverted `/demo` from a 9-card mosaic to a 3-block editorial layout (Verdict / Evidence / Action) after cross-model design review. Codified both the general "data density" principle and the specific "meeting hero" exception so the page never drifts back into stacked cards. |
+| 2026-04-11 | Added `warning` amber #D97706 as a 4th semantic color | Sprint 2 Task 2.9 compute queue admin UI needs a color for `failed_retry` state that is neither red (permanent failure) nor green (success). Palette relaxed from "1 accent + neutrals" to "1 accent + 3 semantic (positive/negative/warning) + neutrals". Warning is reserved for transient states that will recover on their own. Contrast verified ~4.6:1 on white (AA pass). |

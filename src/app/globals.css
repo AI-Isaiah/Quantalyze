@@ -18,6 +18,7 @@
   --color-accent-hover: #155A4B;
   --color-positive: #16A34A;
   --color-negative: #DC2626;
+  --color-warning: #D97706;
 
   --color-border: #E2E8F0;
   --color-border-focus: #1B6B5A;
@@ -45,6 +46,19 @@
   /* --- Shadows --- */
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+}
+
+/* Respect user motion preferences for the shared `animate-pulse` utility,
+   used by Skeleton, ComputeStatus, wizard SyncPreviewStep liveness dots,
+   and the compute-jobs admin UI. Tailwind's built-in keyframe fades
+   opacity 1.0 → 0.5 → 1.0 on a 2s cycle. When reduced-motion is set,
+   we freeze at full opacity; the subsequent tick of the elapsed-time
+   counter still communicates "this row is alive". See DESIGN.md Motion. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 body {

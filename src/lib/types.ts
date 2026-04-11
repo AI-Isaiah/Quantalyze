@@ -316,3 +316,75 @@ export interface VerificationRequest {
   created_at: string;
   completed_at: string | null;
 }
+
+/**
+ * Compute queue job kinds. Registered in Postgres via the
+ * `compute_job_kinds` FK reference table (migration 032). Keep in sync
+ * with the seeded rows and with `analytics-service/services/jobs.py`'s
+ * dispatch table.
+ */
+export type JobKind = "sync_trades" | "compute_analytics" | "compute_portfolio";
+
+/**
+ * Compute queue job status. Mirrors the CHECK constraint on
+ * `compute_jobs.status` in migration 032.
+ *
+ * - pending: ready to run when next_attempt_at <= now()
+ * - running: claimed by a worker via SKIP LOCKED
+ * - done: terminal success
+ * - done_pending_children: parent finished but children are not all
+ *   done yet. Fan-in handled by check_fan_in_ready().
+ * - failed_retry: transient failure, scheduled for retry via backoff
+ * - failed_final: gave up after max_attempts or classified permanent
+ */
+export type ComputeJobStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "done_pending_children"
+  | "failed_retry"
+  | "failed_final";
+
+/**
+ * Error classification used by `mark_compute_job_failed` to decide
+ * retry vs final. Set by the Python runner's `classify_exception`
+ * helper.
+ */
+export type ErrorKind = "transient" | "permanent" | "unknown";
+
+/**
+ * `ComputeJob` mirrors the `compute_jobs` Postgres row (migration 032).
+ *
+ * A compute job targets EXACTLY ONE of (`strategy_id`, `portfolio_id`);
+ * the `compute_jobs_target_xor` CHECK constraint enforces this at the
+ * DB level. The table is service-role-only (RLS deny-all policy); user
+ * reads go through `get_user_compute_jobs()` SECURITY DEFINER.
+ *
+ * Admin UI consumers use this type via the server-side helper
+ * `src/lib/compute-jobs-admin.ts::listComputeJobs`. The wizard
+ * `SyncPreviewStep` subscribes to a user-scoped subset via Supabase
+ * Realtime. The Railway Python runner reads/writes full rows.
+ */
+export interface ComputeJob {
+  id: string;
+  strategy_id: string | null;
+  portfolio_id: string | null;
+  kind: JobKind;
+  parent_job_ids: string[];
+  status: ComputeJobStatus;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string;
+  claimed_at: string | null;
+  claimed_by: string | null;
+  last_error: string | null;
+  error_kind: ErrorKind | null;
+  idempotency_key: string | null;
+  /** sync_trades only; NULL for compute_analytics and compute_portfolio. */
+  exchange: "binance" | "okx" | "bybit" | null;
+  /** Populated after a successful fetch_trades run, for observability. */
+  trade_count: number | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown> | null;
+}

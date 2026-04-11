@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.7.0.0] - 2026-04-11
+
+Start of Sprint 2. Round 1 of Task 2.9 (Ingestion Control Plane) ships the
+durable compute-queue substrate: PostgreSQL schema, RPCs, runbook, types,
+and strict-versioned Zod contracts. The queue is flag-gated dormant until
+Round 2 lands the Python worker and the Next.js enqueue path.
+
+### Added
+- **`compute_jobs` durable queue table + `compute_job_kinds` registry** (migration 032). Service-role-only Postgres-backed queue for async `sync_trades`, `compute_analytics`, and `compute_portfolio` jobs. Supports fan-out / fan-in via `parent_job_ids UUID[]` so a multi-exchange strategy can run N parallel `sync_trades` parents before a single `compute_analytics` child. Status state machine: `pending` → `running` → `done | failed_retry | failed_final`, plus `done_pending_children` for fan-in waits. Kind is enforced via FK to `compute_job_kinds` so future kinds are one INSERT, not an ALTER TABLE lock.
+- **Nine SECURITY DEFINER RPCs** behind `compute_jobs`. `enqueue_compute_job` / `enqueue_compute_portfolio_job` do an idempotent upsert via `ON CONFLICT DO NOTHING RETURNING id` (matches migration 011's canonical shape) and delegate to a shared `_enqueue_compute_job_internal` helper. Both run a defense-in-depth `auth.uid()` ownership check via a shared `_assert_owner(regclass, uuid, text)` helper — a belt-and-suspenders over the REVOKE declarations, so a future accidental GRANT to `authenticated` can never leak cross-tenant writes. `claim_compute_jobs` uses `SELECT FOR UPDATE SKIP LOCKED` with a 1000-row cap, `mark_compute_job_done` advances any children waiting in `done_pending_children` via `check_fan_in_ready`, and `mark_compute_job_failed` owns the backoff schedule (attempt 1 → +30s, 2 → +2min, else `failed_final`) in one place. `reclaim_stuck_compute_jobs` resets rows stuck in `running` for more than 10 minutes. `update_api_key_rate_limit` stamps `api_keys.last_429_at` for the per-exchange circuit breaker. `get_user_compute_jobs` is the only function GRANTed to `authenticated`; it redacts `last_error` to `NULL` and caps results at 1000 rows so raw exception text from the Python runner never reaches strategy owners even if Python-side sanitization slips.
+- **`api_keys.last_429_at` column** for the per-exchange circuit breaker the Python runner will use in Round 2 (windows: Bybit 10min, Binance 2min, OKX 5min).
+- **6 query-specific indexes**: partial unique indexes per target type enforcing "one in-flight per (target, kind)", a pending-claim index, a stuck-running watchdog index, a GIN index on `parent_job_ids` for fan-in lookups, and an exchange+status index for observability.
+- **`docs/runbooks/compute-queue.md`** — operational runbook matching the `posthog-wizard-funnel.md` setup-recipe format. Contains the three observability SQL queries (current state, recent failures, stuck jobs), rollback procedure, circuit-breaker reference, Sentry alert routing, and a DO-NOT-FLIP-THE-FLAG banner for Round 1 (the queue's double-execution guard ships in Round 2's Python runner).
+- **`ComputeJob` / `JobKind` / `ComputeJobStatus` / `ErrorKind` types** (`src/lib/types.ts`) mirroring the migration 032 schema.
+- **Strict-versioned Zod contracts** (`src/lib/analytics-schemas.ts`). `TickJobsResponseSchema` is the first analytics-service response schema to use `.strict()` + `contract_version: z.literal(1)` — parse failures throw instead of warning. New object-shape endpoints should follow this style; existing endpoints continue using the legacy loose `.passthrough()` shape until they're migrated. Accompanied by `EnqueueComputeJobResponseSchema = z.string().uuid()`.
+- **26 Zod schema unit tests** (`src/lib/analytics-schemas.test.ts`) locking in the strict-contract guarantee. Covers happy path, contract version drift (both `contract_version=2` drift-up and `contract_version=0` literal-binding), missing fields, negative counters, non-integers, empty strings, and — critically — rejection of unknown extra fields so a future Python-side drift can't silently slip through.
+- **`warning` amber color (#D97706)** added to `DESIGN.md` as a fourth semantic color alongside positive/negative/accent. Reserved for transient recoverable states (e.g. `failed_retry` pills in the Round 2 admin UI). Palette intentionally relaxed from "1 accent + neutrals" to "1 accent + 3 semantic + neutrals". Decision logged in DESIGN.md.
+
+### Changed
+- **`prefers-reduced-motion` now targets Tailwind's built-in `animate-pulse` class** (`src/app/globals.css`). Previously there was no reduced-motion handling at all; this adds it and the override applies to the 5 existing `animate-pulse` consumers across `ComputeStatus`, `SyncPreviewStep`, `Skeleton`, `MatchQueueSkeleton`, and `DashboardGrid` as a free accessibility improvement. The `Negative` color description in `DESIGN.md` was also tightened from "losses, errors, warnings" to "losses, errors, permanent failures" now that `warning` is its own semantic color.
+
+### Deferred to Round 2+
+- Python job worker (`analytics-service/routers/jobs.py` + `services/jobs.py`) with `pg_try_advisory_xact_lock` double-execution guard, per-exchange circuit breaker, exception classifier, dispatch table, integration tests against a real Postgres.
+- Next.js enqueue path (`src/lib/compute-queue.ts`), `/api/keys/sync` rewrite, Vercel fallback cron with HMAC nonce, admin `/admin/compute-jobs` UI with retry button, `SyncPreviewStep` Realtime refactor, Sentry integration, Python CI workflow, end-to-end tests.
+
 ## [0.6.1.0] - 2026-04-11
 
 ### Added
