@@ -47,6 +47,10 @@ interface TileWrapperProps {
   title: string;
   tileId: string;
   onClose: (id: string) => void;
+  /** Click-to-resize callback. When omitted, the size indicators are
+   *  rendered but do nothing (legacy callers). DashboardGrid passes a
+   *  real handler that folds the new width into onLayoutChange. */
+  onResize?: (id: string, cols: number) => void;
   children: ReactNode;
 }
 
@@ -57,7 +61,13 @@ const SIZES = [
   { label: "Full", cols: 12 },
 ] as const;
 
-export function TileWrapper({ title, tileId, onClose, children }: TileWrapperProps) {
+export function TileWrapper({
+  title,
+  tileId,
+  onClose,
+  onResize,
+  children,
+}: TileWrapperProps) {
   return (
     <div
       className="flex h-full flex-col overflow-hidden rounded-lg bg-white"
@@ -87,16 +97,21 @@ export function TileWrapper({ title, tileId, onClose, children }: TileWrapperPro
           {title}
         </h2>
 
-        {/* Resize indicators (visual-only) */}
+        {/* Resize indicators — click-to-resize via the onResize callback.
+            DashboardGrid folds the new width into the next onLayoutChange
+            so react-grid-layout picks it up without re-mounting the tile. */}
         <div className="hidden items-center gap-0.5 sm:flex">
           {SIZES.map((s) => (
-            <span
+            <button
               key={s.label}
-              className="rounded px-1.5 py-0.5 text-[10px] text-[#718096] hover:bg-[#F8F9FA]"
+              type="button"
+              onClick={() => onResize?.(tileId, s.cols)}
+              aria-label={`Resize ${title} to ${s.label} width (${s.cols} columns)`}
+              className="rounded px-1.5 py-0.5 text-[10px] text-[#718096] hover:bg-[#F8F9FA] hover:text-[#1A1A2E] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
               title={`Resize to ${s.label} width (${s.cols} columns)`}
             >
               {s.label}
-            </span>
+            </button>
           ))}
         </div>
 

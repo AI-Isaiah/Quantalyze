@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, type ReactNode } from "react";
+import { Suspense, useCallback, type ReactNode } from "react";
 import {
   default as GridLayout,
   useContainerWidth,
@@ -58,6 +58,22 @@ export function DashboardGrid({
     minH: 2,
   }));
 
+  /** Click-to-resize handler passed down to TileWrapper. Swaps the `w`
+   *  column count for the target tile and re-emits the layout through
+   *  the existing onLayoutChange wire — same pathway react-grid-layout
+   *  uses when the user drags the resize handle. Clamped to the grid's
+   *  12-column max. */
+  const handleResize = useCallback(
+    (tileId: string, cols: number) => {
+      const clamped = Math.max(3, Math.min(12, cols));
+      const nextLayout: Layout = layout.map((item) =>
+        item.i === tileId ? { ...item, w: clamped } : item,
+      );
+      onLayoutChange(nextLayout);
+    },
+    [layout, onLayoutChange],
+  );
+
   return (
     <div ref={containerRef}>
       {mounted && (
@@ -87,7 +103,12 @@ export function DashboardGrid({
 
             return (
               <div key={tile.i}>
-                <TileWrapper title={title} tileId={tile.i} onClose={onClose}>
+                <TileWrapper
+                  title={title}
+                  tileId={tile.i}
+                  onClose={onClose}
+                  onResize={handleResize}
+                >
                   <Suspense fallback={<WidgetSkeleton />}>
                     {renderWidget(tile.widgetId)}
                   </Suspense>

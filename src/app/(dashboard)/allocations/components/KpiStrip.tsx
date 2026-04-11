@@ -126,7 +126,8 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
     : null;
 
   return (
-    <div className="mb-6 flex items-center gap-0 overflow-x-auto rounded-lg border border-[#E2E8F0] bg-white">
+    <div className="relative mb-6">
+      <div className="flex items-center gap-0 overflow-x-auto rounded-lg border border-[#E2E8F0] bg-white">
       {groups.map((group, gi) => (
         <div key={group.label} className="flex items-center">
           {gi > 0 && (
@@ -169,6 +170,19 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
           {timeframe}
         </span>
       </div>
+      </div>
+      {/* Right-edge scroll affordance — mobile only. The KPI row already has
+          overflow-x-auto, but on 375px viewports ~7 of 10 metrics sit off-screen
+          with no visual hint that content extends beyond the edge. This
+          linear gradient from opaque-white to transparent signals "more to
+          the right". pointer-events-none so it never blocks a tap. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute right-0 top-0 bottom-0 w-12 rounded-r-lg md:hidden"
+        style={{
+          background: "linear-gradient(to left, white 15%, transparent)",
+        }}
+      />
     </div>
   );
 }
