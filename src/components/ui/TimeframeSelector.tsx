@@ -34,7 +34,12 @@ export function TimeframeSelector({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(t.key)}
-            className={`px-2.5 py-1 text-xs font-medium tabular-nums rounded-md transition-colors ${
+            // font-metric (Geist Mono) on numeric tokens per DESIGN.md —
+            // DM Sans kerns "1M" tight enough at 12px that the 1 + M glyphs
+            // visually merge into "IM". Geist Mono spaces them correctly.
+            // min-h-11 (44px) on touch for WCAG AA; md:min-h-0 + py-1 keeps
+            // the dense institutional look for mouse users.
+            className={`px-2.5 min-h-11 md:min-h-0 md:py-1 inline-flex items-center justify-center text-xs font-medium font-metric tabular-nums rounded-md transition-colors ${
               active
                 ? "bg-accent text-white"
                 : "text-text-secondary hover:text-text-primary hover:bg-bg-secondary"

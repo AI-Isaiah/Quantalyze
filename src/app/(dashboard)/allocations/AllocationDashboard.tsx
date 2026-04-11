@@ -307,7 +307,7 @@ export function AllocationDashboard({
           <button
             type="button"
             onClick={() => setShowModal(true)}
-            className="rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-sm font-medium transition-colors hover:bg-[#F8F9FA] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
+            className="whitespace-nowrap rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-sm font-medium transition-colors hover:bg-[#F8F9FA] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
             style={{ color: "#1B6B5A" }}
           >
             + Add Widget

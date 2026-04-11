@@ -77,13 +77,15 @@ export function TileWrapper({ title, tileId, onClose, children }: TileWrapperPro
           &#x2807;
         </span>
 
-        {/* Title */}
-        <span
-          className="flex-1 truncate font-sans text-[13px] font-semibold"
+        {/* Title — h2 for screen-reader heading navigation. The page has
+            one h1 ("My Allocation") so tile headers are h2. Visual styling
+            stays 13px semibold regardless of tag. */}
+        <h2
+          className="flex-1 truncate font-sans text-[13px] font-semibold m-0"
           style={{ color: "#1A1A2E" }}
         >
           {title}
-        </span>
+        </h2>
 
         {/* Resize indicators (visual-only) */}
         <div className="hidden items-center gap-0.5 sm:flex">
@@ -98,12 +100,15 @@ export function TileWrapper({ title, tileId, onClose, children }: TileWrapperPro
           ))}
         </div>
 
-        {/* Close button */}
+        {/* Close button — inline-flex + explicit 32px hit area (desktop)
+            and 44px on touch, keeps the glyph visually small (14px) but
+            gives fingers room to actually hit it. Previous padding made
+            this a 12x28 target — WCAG AA fail. */}
         <button
           type="button"
           onClick={() => onClose(tileId)}
           aria-label={`Remove ${title} widget`}
-          className="ml-1 rounded p-0.5 text-[#718096] transition-colors hover:bg-[#F8F9FA] hover:text-[#DC2626] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
+          className="ml-1 inline-flex items-center justify-center rounded min-h-[44px] min-w-[44px] md:min-h-[32px] md:min-w-[32px] text-[#718096] transition-colors hover:bg-[#F8F9FA] hover:text-[#DC2626] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
         >
           <span aria-hidden="true" style={{ fontSize: 14, lineHeight: 1 }}>
             &times;
