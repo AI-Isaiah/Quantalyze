@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { notifyFounderNewStrategy } from "@/lib/email";
+import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -36,20 +36,10 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient();
 
-  const { data: strategy } = await admin
-    .from("strategies")
-    .select("name")
-    .eq("id", strategy_id)
-    .single();
-
-  const { data: profile } = await admin
-    .from("profiles")
-    .select("display_name, company")
-    .eq("id", user.id)
-    .single();
-
-  const managerName =
-    profile?.display_name ?? profile?.company ?? user.email ?? "Unknown";
+  const [{ data: strategy }, managerName] = await Promise.all([
+    admin.from("strategies").select("name").eq("id", strategy_id).single(),
+    resolveManagerName(admin, user),
+  ]);
 
   await notifyFounderNewStrategy(strategy?.name ?? "Unknown strategy", managerName);
 

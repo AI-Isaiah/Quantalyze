@@ -4,6 +4,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
+import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
+import { isUuid } from "@/lib/utils";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -55,9 +57,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     max_capacity,
   } = body as Record<string, unknown>;
 
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-  if (typeof strategy_id !== "string" || !UUID_RE.test(strategy_id)) {
+  if (!isUuid(strategy_id)) {
     return NextResponse.json(
       { error: "strategy_id must be a valid UUID" },
       { status: 400 },
@@ -78,7 +78,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (typeof category_id !== "string" || !UUID_RE.test(category_id)) {
+  if (!isUuid(category_id)) {
     return NextResponse.json(
       { error: "category_id must be a valid UUID" },
       { status: 400 },
@@ -147,35 +147,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // pending_review, so failures to notify or touch last_sync_at must
   // not block the response or reverse the finalize.
   after(async () => {
-    try {
-      const origin = req.headers.get("origin") ?? new URL(req.url).origin;
-      await fetch(`${origin}/api/admin/notify-submission`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: resolvedId }),
-      });
-    } catch (err) {
-      console.warn(
-        "[strategies/finalize-wizard] notify-submission failed (non-blocking):",
-        err,
-      );
-    }
-
-    try {
-      const admin = createAdminClient();
-      const { data: keyLink } = await admin
+    const admin = createAdminClient();
+    const [managerName, { data: keyLink }] = await Promise.all([
+      resolveManagerName(admin, user),
+      admin
         .from("strategies")
         .select("api_key_id")
         .eq("id", resolvedId)
-        .single();
-      if (keyLink?.api_key_id) {
-        await admin
-          .from("api_keys")
-          .update({ last_sync_at: new Date().toISOString() })
-          .eq("id", keyLink.api_key_id);
+        .single(),
+    ]);
+
+    const results = await Promise.allSettled([
+      notifyFounderNewStrategy(name, managerName),
+      keyLink?.api_key_id
+        ? admin
+            .from("api_keys")
+            .update({ last_sync_at: new Date().toISOString() })
+            .eq("id", keyLink.api_key_id)
+        : Promise.resolve(),
+    ]);
+    for (const [i, r] of results.entries()) {
+      if (r.status === "rejected") {
+        console.warn(
+          `[strategies/finalize-wizard] side effect ${i} failed (non-blocking):`,
+          r.reason,
+        );
       }
-    } catch (err) {
-      console.warn("[strategies/finalize-wizard] recency update failed:", err);
     }
   });
 
