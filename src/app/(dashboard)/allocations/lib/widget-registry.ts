@@ -259,7 +259,10 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     name: "Positions Table",
     category: "positions",
     icon: "▦",
-    defaultW: 6,
+    // Full-width default: the Positions Table is a wide data table and
+    // looks broken when it sits alone in a half-width row with empty
+    // whitespace to its right. Design review FINDING-009.
+    defaultW: 12,
     defaultH: 4,
     description: "Live positions with entry price, PnL, and weight.",
     status: "ready",
