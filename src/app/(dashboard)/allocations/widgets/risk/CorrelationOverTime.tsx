@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import type { WidgetProps } from "../../lib/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-import { mean } from "@/lib/portfolio-math-utils";
+import { pearson } from "@/lib/correlation-math";
 
 // ---------------------------------------------------------------------------
 // Correlation Over Time Widget
@@ -26,26 +26,6 @@ const ROLLING_WINDOW = 90;
 const TOP_PAIRS = 3;
 
 const PAIR_COLORS = ["#1B6B5A", "#DC2626", "#2563EB"];
-
-/** Pearson correlation for two same-length arrays. */
-function pearson(a: number[], b: number[]): number {
-  const n = a.length;
-  if (n < 2) return 0;
-  const ma = mean(a);
-  const mb = mean(b);
-  let cov = 0;
-  let varA = 0;
-  let varB = 0;
-  for (let i = 0; i < n; i++) {
-    const da = a[i] - ma;
-    const db = b[i] - mb;
-    cov += da * db;
-    varA += da * da;
-    varB += db * db;
-  }
-  const denom = Math.sqrt(varA * varB);
-  return denom > 0 ? cov / denom : 0;
-}
 
 interface StrategyReturns {
   name: string;

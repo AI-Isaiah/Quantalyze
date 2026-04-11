@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.8.0.0] - 2026-04-11
+
+Sprint 2 Strategy Detail Depth — allocators now see drawdown event history and
+a strategy-vs-BTC correlation chart on every strategy detail page. Three of the
+four original sprint tasks (2.1, 2.5, 2.7) shipped; 2.6 was a no-op (Yearly
+Returns was already live).
+
+### Added
+- **Worst Drawdowns table** on the Overview tab of every strategy detail page. Top 5 historical drawdowns rendered as a dense Variant C table (peak · trough · recovery · depth · days) with an `ongoing` state for strategies currently underwater. Computed server-side via `qs.stats.drawdown_details` and persisted as `metrics_json.drawdown_episodes`, so the same data also flows into factsheet + tear-sheet PDFs for institutional distribution. A client-side `segmentDrawdowns()` fallback in `src/lib/drawdown-math.ts` keeps freshly-computed strategies rendering correctly before the next compute tick. (Task 2.1)
+- **Correlation with BTC chart** on the Risk tab. Single-line rolling 90-day Pearson correlation vs the benchmark, clamped to [-1, 1] with a zero reference line. Primary source is server-side `metrics_json.btc_rolling_correlation_90d` (added to `analytics-service/services/metrics.py` via a new vectorized `_rolling_correlation` helper); fallback computes client-side from the existing cumulative `returns_series` + `benchmark_returns` using the shared `pearson` + `rollingCorrelation` helpers in `src/lib/correlation-math.ts`. Handles <90-day histories and missing benchmarks with explicit empty-state copy. (Task 2.5)
+- **Average Sharpe reference line** on the Rolling Sharpe chart in the Risk tab. A dashed horizontal line at the strategy's overall Sharpe gives allocators immediate context for "is this recent dip below average for this strategy?" Powered by a new optional `overallSharpe` prop on `RollingMetrics`. (Task 2.7)
+- **`src/components/charts/chart-tokens.ts`** — single source of truth for Recharts stroke/fill/font literals that mirror DESIGN.md. Replaces copy-pasted `#0D9488`/`#1B6B5A`/`'JetBrains Mono'` literals in the three chart files touched by this sprint. Future chart palette drift gets fixed in one file, not N.
+- **`_finalize_rolling` Python helper** (`analytics-service/services/metrics.py`) factoring out the shared post-processing tail (`dropna` → inf cleanup → `{date, value}` format → `cap_data_points`) that `_rolling_sharpe` and `_rolling_correlation` both need. New rolling metrics pipe through this one helper.
+- **`src/lib/drawdown-math.ts`** and **`src/lib/correlation-math.ts`** — new pure math libraries with 23 vitest cases between them. The `pearson()` helper was extracted from `CorrelationOverTime.tsx` (same behavior, zero drift risk) so the portfolio widget and the new strategy panel now share one implementation.
+- **44 new unit + integration tests.** `WorstDrawdowns` (10 cases including the silent-drop fallback regression), `CorrelationWithBenchmark` (11 cases including the cumulative→daily conversion correctness test), `RollingMetrics` (7 cases pinning the `overallSharpe` edge cases — 0, null, NaN, Infinity, undefined), `drawdown-math` (13 cases), `correlation-math` (10 cases), plus 4 new `test_metrics.py` cases for the Python-side rolling correlation + drawdown episodes.
+
+### Changed
+- **`src/components/charts/DrawdownChart.tsx`**, **`RollingMetrics.tsx`**, and **`CorrelationWithBenchmark.tsx`** all now import from `chart-tokens.ts` instead of hardcoding color / font literals. The old bright `#0D9488` teal is replaced by DESIGN.md's institutional `#1B6B5A` accent on the Overview-tab drawdown curve. Axis labels use Geist Mono via `var(--font-mono)`. Chart drift across the 9 untouched chart files is flagged as a separate cleanup PR.
+- **`src/app/(dashboard)/allocations/widgets/risk/CorrelationOverTime.tsx`** — DRY cleanup. The inline `pearson()` function is removed in favor of importing from `@/lib/correlation-math`. Behavior unchanged.
+- **`RollingMetrics.tsx`** merge-by-date step is now wrapped in `useMemo` so it runs once per `data` reference change instead of on every parent re-render. Same for the new WorstDrawdowns and CorrelationWithBenchmark client-side fallbacks.
+
 ## [0.7.0.0] - 2026-04-11
 
 Start of Sprint 2. Round 1 of Task 2.9 (Ingestion Control Plane) ships the

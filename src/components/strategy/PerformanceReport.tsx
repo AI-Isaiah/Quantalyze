@@ -11,6 +11,8 @@ import { RollingMetrics } from "@/components/charts/RollingMetrics";
 import { ReturnHistogram } from "@/components/charts/ReturnHistogram";
 import { RiskOfRuin } from "@/components/charts/RiskOfRuin";
 import { YearlyReturns } from "@/components/charts/YearlyReturns";
+import { WorstDrawdowns } from "@/components/charts/WorstDrawdowns";
+import { CorrelationWithBenchmark } from "@/components/charts/CorrelationWithBenchmark";
 import { MetricPanel } from "./MetricPanel";
 import type { Percentiles } from "./MetricPanel";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
@@ -75,6 +77,10 @@ export function PerformanceReport({ analytics, percentiles }: { analytics: Strat
                 <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Underwater / Drawdown</h3>
                 <DrawdownChart data={analytics.drawdown_series ?? []} />
               </Card>
+              <Card padding="sm">
+                <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Worst Drawdowns</h3>
+                <WorstDrawdowns analytics={analytics} />
+              </Card>
             </>
           )}
           {tab === "Returns" && (
@@ -104,8 +110,12 @@ export function PerformanceReport({ analytics, percentiles }: { analytics: Strat
           {tab === "Risk" && (
             <>
               <Card padding="sm">
+                <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Correlation with BTC</h3>
+                <CorrelationWithBenchmark analytics={analytics} />
+              </Card>
+              <Card padding="sm">
                 <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Rolling Sharpe</h3>
-                <RollingMetrics data={analytics.rolling_metrics ?? {}} />
+                <RollingMetrics data={analytics.rolling_metrics ?? {}} overallSharpe={analytics.sharpe} />
               </Card>
               <Card padding="sm">
                 <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">Risk of Ruin</h3>

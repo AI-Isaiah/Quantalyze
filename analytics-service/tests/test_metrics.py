@@ -225,3 +225,82 @@ class TestComputeAllMetrics:
         # Ratios should be between 0 and 1
         assert 0 <= mj["outlier_win_ratio"] <= 1
         assert 0 <= mj["outlier_loss_ratio"] <= 1
+
+    def test_rolling_correlation_with_benchmark(self, golden_returns, benchmark_returns):
+        """btc_rolling_correlation_90d should be populated with 90-day rolling corr."""
+        result = compute_all_metrics(golden_returns, benchmark_returns)
+        corr_series = result["metrics_json"].get("btc_rolling_correlation_90d")
+        assert corr_series is not None, "btc_rolling_correlation_90d missing"
+        assert isinstance(corr_series, list)
+        assert len(corr_series) > 0
+        for entry in corr_series:
+            assert "date" in entry and "value" in entry
+            assert -1.0 <= entry["value"] <= 1.0
+            assert not math.isnan(entry["value"])
+
+    def test_drawdown_episodes(self, golden_returns):
+        """drawdown_episodes should list top-5 drawdowns sorted by depth desc."""
+        result = compute_all_metrics(golden_returns)
+        episodes = result["metrics_json"].get("drawdown_episodes")
+        assert episodes is not None
+        assert isinstance(episodes, list)
+        assert len(episodes) <= 5
+        if len(episodes) >= 2:
+            # Sorted by depth desc (most negative first); abs value strictly non-increasing
+            depths = [abs(e["depth_pct"]) for e in episodes]
+            for i in range(len(depths) - 1):
+                assert depths[i] >= depths[i + 1]
+        for e in episodes:
+            assert "peak_date" in e
+            assert "trough_date" in e
+            assert "recovery_date" in e  # may be None
+            assert "depth_pct" in e
+            assert "duration_days" in e
+            assert "is_current" in e
+            assert e["depth_pct"] <= 0  # drawdowns are negative
+            assert e["duration_days"] >= 0
+
+    def test_rolling_correlation_absent_when_less_than_90_days(self):
+        """< 90 aligned days → btc_rolling_correlation_90d must not be emitted."""
+        np.random.seed(7)
+        dates = pd.bdate_range("2024-01-01", periods=60)
+        strat = pd.Series(np.random.normal(0.001, 0.01, 60), index=dates, name="returns")
+        bench = pd.Series(np.random.normal(0.0005, 0.015, 60), index=dates, name="BTC")
+        result = compute_all_metrics(strat, bench)
+        assert "btc_rolling_correlation_90d" not in result["metrics_json"]
+
+    def test_drawdown_episodes_ongoing_flag_set_when_series_ends_in_drawdown(self):
+        """Series ending underwater → at least one episode has is_current=True."""
+        dates = pd.bdate_range("2024-01-01", periods=60)
+        # Positive drift for first half, then a big sustained drawdown to the end.
+        values = np.concatenate([
+            np.full(30, 0.005),
+            np.full(30, -0.01),
+        ])
+        returns = pd.Series(values, index=dates, name="returns")
+        result = compute_all_metrics(returns)
+        episodes = result["metrics_json"].get("drawdown_episodes") or []
+        assert len(episodes) >= 1
+        ongoing = [e for e in episodes if e["is_current"]]
+        assert len(ongoing) >= 1
+        for e in ongoing:
+            assert e["recovery_date"] is None
+
+    def test_rolling_correlation_zero_variance_returns_empty(self):
+        """Constant (zero-variance) series produce NaN rolling corr → empty list."""
+        from services.metrics import _rolling_correlation
+        dates = pd.bdate_range("2024-01-01", periods=150)
+        a = pd.Series(0.001, index=dates, name="a")
+        b = pd.Series(0.002, index=dates, name="b")
+        assert _rolling_correlation(a, b, 90) == []
+
+    def test_rolling_correlation_identical_series_all_ones(self):
+        """Correlating a series with itself yields ~1.0 across every window."""
+        from services.metrics import _rolling_correlation
+        np.random.seed(17)
+        dates = pd.bdate_range("2024-01-01", periods=150)
+        a = pd.Series(np.random.normal(0, 0.01, 150), index=dates, name="a")
+        result = _rolling_correlation(a, a, 90)
+        assert len(result) > 0
+        for entry in result:
+            assert abs(entry["value"] - 1.0) < 1e-6
