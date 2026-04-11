@@ -246,6 +246,52 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
   );
 }
 
+interface StrategyAnalyticsSlice {
+  cagr: number | null;
+  sharpe: number | null;
+  max_drawdown: number | null;
+  computation_status: string | null;
+  computed_at: string | null;
+}
+
+function extractAnalytics(raw: unknown): StrategyAnalyticsSlice | null {
+  if (!raw) return null;
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  if (!first || typeof first !== "object") return null;
+  return first as StrategyAnalyticsSlice;
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const pct = value * 100;
+  const sign = pct >= 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+function formatNumber(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return value.toFixed(2);
+}
+
+function formatRecency(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const delta = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(delta)) return "—";
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function sourceBadgeLabel(source: string | undefined): string {
+  if (source === "wizard") return "wizard";
+  if (source === "admin_import") return "import";
+  return "legacy";
+}
+
 function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, unknown>> }) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
@@ -262,9 +308,17 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, action: "approve" }),
       });
-      if (!res.ok) { setError("Approval failed."); return; }
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(data.error ?? "Approval failed.");
+        return;
+      }
       router.refresh();
-    } catch { setError("Network error."); } finally { setLoading(null); }
+    } catch {
+      setError("Network error.");
+    } finally {
+      setLoading(null);
+    }
   }
 
   async function reject() {
@@ -277,42 +331,112 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: rejectId, action: "reject", review_note: rejectNote }),
       });
-      if (!res.ok) { setError("Rejection failed."); return; }
+      if (!res.ok) {
+        setError("Rejection failed.");
+        return;
+      }
       setRejectId(null);
       setRejectNote("");
       router.refresh();
-    } catch { setError("Network error."); } finally { setLoading(null); }
+    } catch {
+      setError("Network error.");
+    } finally {
+      setLoading(null);
+    }
   }
 
   if (strategies.length === 0) {
-    return <Card className="text-center py-8 text-text-muted">All caught up. No strategies pending review.</Card>;
+    return (
+      <Card className="text-center py-8 text-text-muted">
+        All caught up. No strategies pending review.
+      </Card>
+    );
   }
 
   return (
     <>
-      {error && <p className="text-sm text-negative mb-3">{error}</p>}
+      {error && (
+        <p className="text-sm text-negative mb-3" role="alert">
+          {error}
+        </p>
+      )}
       <div className="space-y-3">
         {strategies.map((s) => {
           const profile = s.profiles as Record<string, string> | null;
+          const analytics = extractAnalytics(s.strategy_analytics);
+          const source = s.source as string | undefined;
+          const isWizard = source === "wizard";
           return (
             <Card key={s.id as string}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-text-primary">{s.name as string}</p>
-                  <p className="text-xs text-text-muted">by {profile?.display_name ?? "Unknown"}</p>
-                  <div className="flex gap-1 mt-1">
-                    {((s.strategy_types as string[]) ?? []).map((t) => (
-                      <Badge key={t} label={t} />
-                    ))}
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-medium text-text-primary">
+                      {s.name as string}
+                    </p>
+                    <span
+                      className={cn(
+                        "rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+                        isWizard
+                          ? "bg-accent/10 text-accent"
+                          : "bg-page text-text-muted",
+                      )}
+                      data-testid="admin-source-badge"
+                    >
+                      {sourceBadgeLabel(source)}
+                    </span>
                   </div>
+                  <p className="mt-0.5 text-xs text-text-muted">
+                    by {profile?.display_name ?? "Unknown"} ·{" "}
+                    Synced {formatRecency(analytics?.computed_at ?? null)}
+                  </p>
+
+                  <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border pt-3">
+                    <MetricCell label="CAGR" value={formatPercent(analytics?.cagr)} />
+                    <MetricCell label="Sharpe" value={formatNumber(analytics?.sharpe)} />
+                    <MetricCell label="Max DD" value={formatPercent(analytics?.max_drawdown)} />
+                  </div>
+
+                  {(s.strategy_types as string[] | undefined)?.length ? (
+                    <div className="mt-3 flex flex-wrap gap-1">
+                      {(s.strategy_types as string[]).map((t) => (
+                        <Badge key={t} label={t} />
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {analytics?.computation_status &&
+                    analytics.computation_status !== "complete" && (
+                      <p className="mt-2 text-[11px] text-amber-600">
+                        Analytics: {analytics.computation_status}
+                      </p>
+                    )}
                 </div>
-                <div className="flex gap-2">
-                  <Button size="sm" onClick={() => approve(s.id as string)} disabled={loading === s.id}>
-                    Approve
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setRejectId(s.id as string)}>
-                    Reject
-                  </Button>
+                <div className="flex flex-col items-end gap-2">
+                  <a
+                    href={`/factsheet/${s.id}`}
+                    className="text-[11px] text-text-muted underline-offset-4 hover:text-accent hover:underline"
+                    target="_blank"
+                    rel="noopener"
+                  >
+                    View factsheet →
+                  </a>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => approve(s.id as string)}
+                      disabled={loading === s.id}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setRejectId(s.id as string)}
+                    >
+                      Reject
+                    </Button>
+                  </div>
                 </div>
               </div>
             </Card>
@@ -320,7 +444,9 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
         })}
       </div>
       <Modal open={!!rejectId} onClose={() => setRejectId(null)} title="Reject Strategy">
-        <p className="text-sm text-text-secondary mb-3">The manager will see this feedback on their strategy page.</p>
+        <p className="text-sm text-text-secondary mb-3">
+          The manager will see this feedback on their strategy page.
+        </p>
         <Textarea
           label="Review Note"
           value={rejectNote}
@@ -330,11 +456,26 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
           className="mb-4"
         />
         <div className="flex justify-end gap-3">
-          <Button variant="secondary" onClick={() => setRejectId(null)}>Cancel</Button>
-          <Button variant="danger" onClick={reject} disabled={loading !== null}>Reject</Button>
+          <Button variant="secondary" onClick={() => setRejectId(null)}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={reject} disabled={loading !== null}>
+            Reject
+          </Button>
         </div>
       </Modal>
     </>
+  );
+}
+
+function MetricCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wider text-text-muted">{label}</p>
+      <p className="mt-0.5 font-metric text-sm font-semibold text-text-primary tabular-nums">
+        {value}
+      </p>
+    </div>
   );
 }
 

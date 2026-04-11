@@ -27,16 +27,31 @@ import type { CtaLocation } from "@/lib/analytics";
 const MAILTO_HREF =
   "mailto:security@quantalyze.com?subject=Quantalyze%20onboarding%20call%20request&body=Hi%2C%0A%0AI%27d%20like%20to%20schedule%20an%20onboarding%20call%20for%20my%20quant%20team.%0A%0AName%3A%0AFirm%3A%0APreferred%20time%3A%0ANotes%3A%0A";
 
+/**
+ * Optional wizard context payload — populated by WizardClient so the
+ * founder can tell a lead came from inside the /strategies/new/wizard
+ * flow and at which step. Shape matches `for_quants_leads.wizard_context`
+ * JSONB column added in migration 031.
+ */
+export interface RequestCallWizardContext {
+  draft_strategy_id: string | null;
+  step: string;
+  wizard_session_id: string;
+}
+
 interface RequestCallModalProps {
   open: boolean;
   onClose: () => void;
   ctaLocation: CtaLocation;
+  /** When present, forwarded to /api/for-quants-lead as `wizard_context`. */
+  wizardContext?: RequestCallWizardContext;
 }
 
 export function RequestCallModal({
   open,
   onClose,
   ctaLocation,
+  wizardContext,
 }: RequestCallModalProps) {
   if (!open) return null;
   return (
@@ -44,7 +59,11 @@ export function RequestCallModal({
       <p className="-mt-3 mb-4 text-xs text-text-muted">
         The founder will reach out within 24 hours.
       </p>
-      <RequestCallForm onClose={onClose} ctaLocation={ctaLocation} />
+      <RequestCallForm
+        onClose={onClose}
+        ctaLocation={ctaLocation}
+        wizardContext={wizardContext}
+      />
     </Modal>
   );
 }
@@ -52,9 +71,11 @@ export function RequestCallModal({
 function RequestCallForm({
   onClose,
   ctaLocation,
+  wizardContext,
 }: {
   onClose: () => void;
   ctaLocation: CtaLocation;
+  wizardContext?: RequestCallWizardContext;
 }) {
   const [name, setName] = useState("");
   const [firm, setFirm] = useState("");
@@ -99,6 +120,7 @@ function RequestCallForm({
           email,
           preferred_time: preferredTime,
           notes,
+          wizard_context: wizardContext ?? null,
         }),
       });
 

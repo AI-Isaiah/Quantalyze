@@ -40,6 +40,17 @@ import { trackForQuantsEventServer } from "@/lib/analytics";
  *   - PostHog unconfigured → event silently dropped, lead still lands.
  */
 
+const WIZARD_CONTEXT_SCHEMA = z
+  .object({
+    draft_strategy_id: z.string().uuid().nullable().optional(),
+    step: z
+      .enum(["connect_key", "sync_preview", "metadata", "submit"])
+      .optional(),
+    wizard_session_id: z.string().min(8).max(64).optional(),
+  })
+  .nullable()
+  .optional();
+
 const LEAD_SCHEMA = z.object({
   name: z
     .string()
@@ -68,6 +79,13 @@ const LEAD_SCHEMA = z.object({
     .max(2000, "Notes are too long")
     .optional()
     .or(z.literal("")),
+  /**
+   * Optional wizard context payload — populated when the lead was
+   * captured from inside /strategies/new/wizard. Stored on
+   * `for_quants_leads.wizard_context` (migration 031) so the founder
+   * can triage in-wizard leads separately from landing-page leads.
+   */
+  wizard_context: WIZARD_CONTEXT_SCHEMA,
 });
 
 export async function POST(req: NextRequest) {
@@ -142,6 +160,9 @@ export async function POST(req: NextRequest) {
       notes: parsed.notes || null,
       source_ip: sanitizeInetForDb(ip),
       user_agent: req.headers.get("user-agent"),
+      // Migration 031 added this column. NULL for landing-page leads,
+      // populated for leads captured from inside the wizard.
+      wizard_context: parsed.wizard_context ?? null,
     })
     .select("id")
     .single();

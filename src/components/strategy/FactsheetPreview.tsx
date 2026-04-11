@@ -1,20 +1,19 @@
 import { Sparkline } from "@/components/charts/Sparkline";
 
 /**
- * Shared factsheet metric/sparkline preview. Renders the same hero-metric
- * layout from either real analytics or seeded demo data.
+ * Shared factsheet hero-metric panel. Takes preformatted strings so
+ * demo seeds and real analytics can share the same component without
+ * the demo side having to fake the full StrategyAnalytics shape.
+ * Renders 6 metrics in a single shared-axis row (DESIGN.md anti-pattern
+ * against 3x2 rounded cards).
  *
- * Design choices:
- *   - Takes a `metrics` array of preformatted strings, NOT a full
- *     StrategyAnalytics row. The caller formats numbers itself; this
- *     decouples the component from the analytics schema so demo seeds
- *     don't need to fake the row shape.
- *   - Renders 6 metrics as a single shared-axis row with hairline
- *     dividers, NOT as 3x2 rounded cards. The grid form is an
- *     institutional-report anti-pattern per DESIGN.md.
- *   - Sparkline is optional — we never render placeholder boxes.
- *   - `sampleLabel` is opt-in so a real preview can't accidentally
- *     render a demo badge.
+ * `verificationState` controls the header badge:
+ *   - "verified" (default): "Verified by Quantalyze" in accent. Used
+ *     on /for-quants (seeded) and /factsheet/[id] (approved).
+ *   - "pending": "Submitted for review" in muted text. Used after
+ *     wizard SubmitStep fires finalize.
+ *   - "draft": "Draft preview · pending review" in muted text. Used
+ *     inside the wizard SyncPreviewStep before admin review.
  */
 export interface FactsheetPreviewMetric {
   label: string;
@@ -23,6 +22,8 @@ export interface FactsheetPreviewMetric {
   /** Optional qualitative suffix (e.g., "Strong", "Modest"). */
   qualifier?: string;
 }
+
+export type FactsheetVerificationState = "draft" | "pending" | "verified";
 
 export interface FactsheetPreviewProps {
   /** Strategy display name — shown in the header. Pass the codename for exploratory-tier. */
@@ -37,6 +38,51 @@ export interface FactsheetPreviewProps {
   computedAt?: string | null;
   /** When true, renders a "Sample Strategy (Demo Data)" caption below the panel. */
   sampleLabel?: string;
+  /**
+   * Trust/verification state shown in the header badge. Defaults to
+   * "verified" so existing /for-quants and /factsheet/[id] callers
+   * render unchanged. Wizard SyncPreviewStep passes "draft".
+   */
+  verificationState?: FactsheetVerificationState;
+}
+
+interface VerificationBadgeStyle {
+  headline: string;
+  caption: string;
+  className: string;
+}
+
+function resolveBadge(
+  state: FactsheetVerificationState,
+  computedAt: string | null | undefined,
+): VerificationBadgeStyle {
+  const dateLabel = computedAt
+    ? `Data from exchange API · ${new Date(computedAt).toLocaleDateString()}`
+    : null;
+
+  if (state === "draft") {
+    return {
+      headline: "Draft preview · pending review",
+      caption:
+        dateLabel ?? "Computed from your exchange trades — not yet admin-reviewed",
+      className: "text-text-muted",
+    };
+  }
+
+  if (state === "pending") {
+    return {
+      headline: "Submitted for review",
+      caption: dateLabel ?? "Awaiting founder approval",
+      className: "text-text-muted",
+    };
+  }
+
+  // "verified" — the historic default. Preserves /for-quants exactly.
+  return {
+    headline: "Verified by Quantalyze",
+    caption: dateLabel ?? "",
+    className: "text-accent",
+  };
 }
 
 export function FactsheetPreview({
@@ -46,7 +92,10 @@ export function FactsheetPreview({
   sparklineReturns,
   computedAt,
   sampleLabel,
+  verificationState = "verified",
 }: FactsheetPreviewProps) {
+  const badge = resolveBadge(verificationState, computedAt ?? null);
+
   return (
     <div className="rounded-lg border border-border bg-white">
       {/* Header: name + subtitle + verified badge */}
@@ -58,11 +107,15 @@ export function FactsheetPreview({
           )}
         </div>
         <div className="text-right">
-          <p className="text-[11px] font-semibold text-accent">Verified by Quantalyze</p>
-          {computedAt && (
-            <p className="text-[10px] text-text-muted">
-              Data verified from exchange API · {new Date(computedAt).toLocaleDateString()}
-            </p>
+          <p
+            className={`text-[11px] font-semibold ${badge.className}`}
+            data-testid="factsheet-verification-badge"
+            data-verification-state={verificationState}
+          >
+            {badge.headline}
+          </p>
+          {badge.caption && (
+            <p className="text-[10px] text-text-muted">{badge.caption}</p>
           )}
         </div>
       </div>

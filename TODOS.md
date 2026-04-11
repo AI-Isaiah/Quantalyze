@@ -42,14 +42,44 @@ Shipped with 11-voice adversarial review: 5 critical findings resolved + 7 taste
 - Proxy exemption so logged-in managers can share the page with colleagues
 - E2E smoke test + unit + component + static projection tests
 
+### ~~Sprint 1 Task 1.2: "Connect Your Strategy" wizard~~ — ✅ DONE in v0.6.0.0
+Shipped with 12-voice adversarial review + review/simplify/ship pipeline:
+- 4-step wizard at `/strategies/new/wizard` (ConnectKey / SyncPreview / Metadata / Submit) with visible inline permission block, exchange cards, show/hide secret toggle, progress rail, Delete draft, Request a Call, desktop-only 640 px gate
+- Migration 031: `strategies.source` column + `create_wizard_strategy` + `finalize_wizard_strategy` SECURITY DEFINER RPCs + `guard_wizard_draft_updates` trigger + `for_quants_leads.wizard_context`
+- New API routes: `/api/strategies/create-with-key`, `/api/strategies/finalize-wizard`, `/api/strategies/draft`, `/api/strategies/draft/[id]`
+- `/api/keys/sync` refactored to fire-and-forget via Next.js `after()` pattern
+- `FactsheetPreview.verificationState` prop (draft/pending/verified)
+- `src/lib/strategyGate.ts` pure helper (used by admin review + wizard)
+- `src/lib/wizardErrors.ts` 16-code scripted error matrix
+- Task 1.3 admin card enhancement rolled in: source badge, CAGR/Sharpe/Max DD, computed-at recency, View factsheet link
+- 16 PostHog wizard funnel events with `wizard_session_id`
+- `/security` per-exchange setup guides (Binance, OKX, Bybit) + thresholds, sync-timing, draft-resume anchors
+- Fix: pre-existing `ApiKeyManager.tsx:201` retry closure bug
+
 ### Sprint 1 follow-ups (deferred from Task 1.1 review)
 
 - **security@quantalyze.com DNS alias** — infrastructure task, not code. Once done, update `/security` and `security.txt` expiry.
-- **`for_quants_leads` admin CRM view** — founder currently reads leads via Supabase dashboard. A `/admin/for-quants-leads` page listing unprocessed leads with a "mark as processed" button would close the loop.
-- **PostHog dashboard + Slack alert** — wire a QQAR + CTR dashboard in PostHog and alert the founder if CTR < 5% across 100 qualified visits (Codex CEO pivot trigger).
-- **Conditional primary CTA when Task 1.2 lands** — update `ForQuantsCtas.tsx::LOGGED_IN_CTA_HREF` from `/strategies/new` to `/strategies/new/wizard` once the wizard ships.
+- **`for_quants_leads` admin CRM view** — founder currently reads leads via Supabase dashboard. A `/admin/for-quants-leads` page listing unprocessed leads with a "mark as processed" button would close the loop. Task 1.2 added `wizard_context` JSONB so the view can separate in-wizard leads from cold landing-page leads.
+- **PostHog dashboard + Slack alert** — wire a QQAR + CTR dashboard in PostHog and alert the founder if CTR < 5% across 100 qualified visits (Codex CEO pivot trigger). Extend with the wizard funnel now that `wizard_start → wizard_submit_success` events exist.
 - **Signup `?role=manager` handoff** — the query param is currently informational. Wire it into `SignupForm` + `OnboardingWizard` so the role is pre-selected for users arriving from `/for-quants`.
 - **Cloudflare Turnstile on `/api/for-quants-lead`** — IP rate limit is enough for Sprint 1; add a captcha if we see spam.
+
+### Sprint 1 follow-ups (deferred from Task 1.2 review)
+
+- **Wizard draft cleanup cron** — Sprint 2. `DELETE FROM strategies WHERE source = 'wizard' AND status = 'draft' AND created_at < now() - interval '24 hours'`. Write it as a single atomic DELETE, not SELECT-then-DELETE, so a concurrent finalize at the 24h boundary races cleanly per Postgres READ COMMITTED semantics.
+- **Orphaned `api_keys` cleanup** — Sprint 2. Sweep `api_keys` rows not referenced by any `strategies` row after the wizard draft cleanup runs.
+- **Partner pilot CSV export source filter audit** — Sprint 2. Confirm the partner-pilot export path filters by `source` or `status` so any future draft/wizard rows can never leak.
+- **Per-exchange setup screenshot walkthroughs** — Sprint 2 polish. The `/security#binance-readonly`, `#okx-readonly`, `#bybit-readonly` anchors currently ship with numbered steps only. Add 3 screenshots per exchange (API management page, edit dialog with only Read checked, save button).
+- **Downloadable security packet** — Sprint 2. 3/3 CEO voices at Task 1.2 planning wanted a single-page PDF with AES spec, permissions list, SOC 2 status, data retention policy, and the security contact.
+- **Live key permission viewer** — Sprint 2. 3/3 CEO voices wanted the wizard to show the detected scopes returned by the exchange before accepting the key (e.g., "Read ✓ Trade ✗ Withdraw ✗" with color coding). Currently we infer from the read-only check.
+- **Status=OPEN cleanup for legacy StrategyForm** — Sprint 3. Once the wizard has been live for a sprint and no one's using `/strategies/[id]/edit` for net-new strategies, remove the legacy StrategyForm flow entirely.
+- **Allocator intent capture surface** — Sprint 3. All 3 CEO voices flagged demand-side as the bigger risk. Ship an allocator-facing mandate-capture flow so the wizard-sourced supply has somewhere to land.
+- **Founder triage dashboard for allocator intent** — Sprint 3. Pair with the intent capture surface.
+- **Strategy sync failure checkpointing** — Sprint 3. If `fetchTrades` succeeds but `computeAnalytics` fails, the current retry re-fetches trades from scratch. Track a `last_fetched_trade_timestamp` so retries resume from the checkpoint.
+- **SOC 2 Type II certification + audit report** — Sprint 7. Institutional quants want to see the report.
+- **Wizard mobile responsive polish** — Sprint 10. Desktop-only gate at 640 px is a Sprint 1 shortcut; the final product should support mobile without the gate.
+- **Extend `withAuth` to forward dynamic route context** — chore. Eliminates the `getAuthedUserIdOrError` inline helper in `/api/strategies/draft/[id]/route.ts` and 8+ other dynamic routes that already inline the same pattern.
+- **Extract `useStrategySyncPoller` hook** — chore. Both `SyncProgress.tsx` and `SyncPreviewStep.tsx` implement the same 3-second `strategy_analytics` polling pattern. A shared hook would prevent divergence on the next change.
 
 ### Follow-ups from the My Allocation restructure (v0.4.0.0)
 
