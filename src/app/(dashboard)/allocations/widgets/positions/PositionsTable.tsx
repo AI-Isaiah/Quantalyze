@@ -265,7 +265,14 @@ function ColumnVisibilityDropdown({
 // Main PositionsTable widget
 // ---------------------------------------------------------------------------
 
+// React Compiler cannot safely memoize TanStack Table's useReactTable()
+// output — it returns non-stable function references by design. The
+// "use no memo" directive tells the Babel compiler to skip memoization
+// on this component; the inline eslint-disable on the useReactTable
+// call silences the companion ESLint rule. Both are required because
+// they run in different layers (Babel vs lint).
 export default function PositionsTable({ data, width }: WidgetProps) {
+  "use no memo";
   // Build rows from data.strategies
   const rows = useMemo<PositionRow[]>(() => {
     if (!data?.strategies?.length) return [];
@@ -327,6 +334,7 @@ export default function PositionsTable({ data, width }: WidgetProps) {
     setColumnVisibility((prev) => ({ ...prev, [colId]: prev[colId] === false ? true : false }));
   }, []);
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- see "use no memo" directive at top of function
   const table = useReactTable({
     data: rows,
     columns: ALL_COLUMNS,
