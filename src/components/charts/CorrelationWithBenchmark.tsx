@@ -156,7 +156,7 @@ export function CorrelationWithBenchmark({
 }: CorrelationWithBenchmarkProps) {
   const { series, message } = useMemo(
     () => resolveBenchmarkCorrelation(analytics),
-    [analytics.returns_series, analytics.metrics_json],
+    [analytics],
   );
 
   if (message !== null) {

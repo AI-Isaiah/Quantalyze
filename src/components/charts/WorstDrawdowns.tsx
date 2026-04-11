@@ -84,10 +84,7 @@ const CELL_DEPTH = `${CELL_BASE} text-sm font-metric tabular-nums text-right tex
 const CELL_DAYS = `${CELL_BASE} text-xs font-metric tabular-nums text-text-muted text-right`;
 
 export function WorstDrawdowns({ analytics }: { analytics: StrategyAnalytics }) {
-  const episodes = useMemo(
-    () => normalize(analytics),
-    [analytics.metrics_json, analytics.drawdown_series],
-  );
+  const episodes = useMemo(() => normalize(analytics), [analytics]);
 
   if (episodes.length === 0) {
     return (

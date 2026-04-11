@@ -8,22 +8,28 @@ import { RollingMetrics } from "./RollingMetrics";
 // recharts module with plain-div stand-ins so children pass through and
 // can be queried directly.
 vi.mock("recharts", () => {
-  const passthrough =
-    (name: string) =>
-    ({ children }: { children?: React.ReactNode }) => (
+  function makePassthrough(name: string) {
+    const Component = ({ children }: { children?: React.ReactNode }) => (
       <div data-recharts={name}>{children}</div>
     );
+    Component.displayName = `RechartsMock(${name})`;
+    return Component;
+  }
+  const NullComponent = () => null;
+  NullComponent.displayName = "RechartsMockNull";
+  const RefLine = ({ y, label }: { y: number; label?: { value?: string } }) => (
+    <div data-testid="ref-line" data-y={y} data-label={label?.value ?? ""} />
+  );
+  RefLine.displayName = "RechartsMockReferenceLine";
   return {
-    ResponsiveContainer: passthrough("ResponsiveContainer"),
-    LineChart: passthrough("LineChart"),
-    Line: () => null,
-    XAxis: () => null,
-    YAxis: () => null,
-    Tooltip: () => null,
-    Legend: () => null,
-    ReferenceLine: ({ y, label }: { y: number; label?: { value?: string } }) => (
-      <div data-testid="ref-line" data-y={y} data-label={label?.value ?? ""} />
-    ),
+    ResponsiveContainer: makePassthrough("ResponsiveContainer"),
+    LineChart: makePassthrough("LineChart"),
+    Line: NullComponent,
+    XAxis: NullComponent,
+    YAxis: NullComponent,
+    Tooltip: NullComponent,
+    Legend: NullComponent,
+    ReferenceLine: RefLine,
   };
 });
 
