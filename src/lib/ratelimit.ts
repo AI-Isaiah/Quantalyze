@@ -86,16 +86,64 @@ export async function checkLimit(
 }
 
 /**
- * Extract a client IP from Next.js request headers. Uses x-forwarded-for
- * (first entry, Vercel's standard) or x-real-ip as fallback. Returns
- * "unknown" if neither is set.
+ * Extract a client IP from request headers for rate-limit bucketing.
+ *
+ * Ordering:
+ *   1. `x-real-ip` — on Vercel this is the verified TCP peer and is
+ *      NOT client-controllable. Trust it.
+ *   2. `x-forwarded-for` as a fallback. We take the RIGHTMOST entry,
+ *      not the leftmost: the leftmost is attacker-controllable (a bot
+ *      can inject its own value per request), the rightmost is the
+ *      last trusted proxy's write and is stable per client.
+ *
+ * Returns "unknown" when neither header is present. Callers should
+ * treat the return value as a bucket key, not as ground truth.
  */
 export function getClientIp(headers: Headers): string {
-  const forwarded = headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0]?.trim() ?? "unknown";
-  }
   const real = headers.get("x-real-ip");
   if (real) return real.trim();
+
+  const forwarded = headers.get("x-forwarded-for");
+  if (forwarded) {
+    // Rightmost entry = last-hop proxy's write (harder to spoof).
+    const parts = forwarded.split(",").map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
+
   return "unknown";
+}
+
+/**
+ * Validate that a string is a real IPv4 or IPv6 address so it can be
+ * safely stored in a Postgres `INET` column. Returns the IP if it
+ * parses, `null` otherwise. A malformed `x-forwarded-for` header would
+ * otherwise crash the whole insert with `invalid input syntax for type
+ * inet`.
+ */
+export function sanitizeInetForDb(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === "unknown") return null;
+
+  // Strip optional IPv6 brackets.
+  const unbracketed = trimmed.replace(/^\[/, "").replace(/\]$/, "");
+
+  // IPv4: four dot-separated octets, each 0-255.
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const m4 = unbracketed.match(ipv4);
+  if (m4) {
+    if (m4.slice(1).every((o) => Number(o) >= 0 && Number(o) <= 255)) {
+      return unbracketed;
+    }
+    return null;
+  }
+
+  // IPv6: hex + colons, optional zone id after `%`. Not a full validator
+  // but catches the common malformed shapes Postgres rejects.
+  const ipv6 = /^[0-9a-f:]+(%[0-9a-z]+)?$/i;
+  if (ipv6.test(unbracketed) && unbracketed.includes(":")) {
+    return unbracketed;
+  }
+
+  return null;
 }
