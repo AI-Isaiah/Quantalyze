@@ -332,6 +332,25 @@ export async function notifyAllocatorIntroStatus(
 
 // --- Founder notifications ---
 
+/**
+ * Shared fallback ladder for "who submitted this" labels in founder
+ * emails and admin UIs. Prefers the profile display name, falls back
+ * to the firm/company, then the auth email, then a hard-coded
+ * sentinel. Used by the wizard finalize path and the legacy
+ * notify-submission route so both produce identical manager strings.
+ */
+export async function resolveManagerName(
+  admin: ReturnType<typeof createAdminClient>,
+  user: { id: string; email?: string | null },
+): Promise<string> {
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("display_name, company")
+    .eq("id", user.id)
+    .single();
+  return profile?.display_name ?? profile?.company ?? user.email ?? "Unknown";
+}
+
 export async function notifyFounderNewStrategy(
   strategyName: string,
   managerName: string,

@@ -332,3 +332,63 @@ describe("email.ts — notification_dispatches audit trail", () => {
     );
   });
 });
+
+/**
+ * resolveManagerName tests — separate describe so we can use a fresh,
+ * lightweight mock store without touching the notification_dispatches
+ * state. We dynamic-import email.ts here AFTER the module mocks above
+ * have been registered, so the `createAdminClient` stub survives.
+ */
+describe("resolveManagerName — manager fallback ladder", () => {
+  const USER_ID = "11111111-0000-0000-0000-000000000001";
+
+  async function runWithProfile(
+    profile: Record<string, unknown> | null,
+    user: { id: string; email?: string | null },
+  ): Promise<string> {
+    const { createMockSupabaseClient, createMockStore, seedTable } = await import(
+      "./supabase/mock"
+    );
+    const { resolveManagerName } = await import("./email");
+    const store = createMockStore();
+    if (profile) {
+      seedTable(store, "profiles", [{ id: USER_ID, ...profile }]);
+    }
+    const client = createMockSupabaseClient(store);
+    return resolveManagerName(client, user);
+  }
+
+  it("prefers display_name when present", async () => {
+    const name = await runWithProfile(
+      { display_name: "Alice Quant", company: "Acme Capital" },
+      { id: USER_ID, email: "alice@example.com" },
+    );
+    expect(name).toBe("Alice Quant");
+  });
+
+  it("falls back to company when display_name is null", async () => {
+    const name = await runWithProfile(
+      { display_name: null, company: "Acme Capital" },
+      { id: USER_ID, email: "alice@example.com" },
+    );
+    expect(name).toBe("Acme Capital");
+  });
+
+  it("falls back to email when both profile fields are null", async () => {
+    const name = await runWithProfile(
+      { display_name: null, company: null },
+      { id: USER_ID, email: "alice@example.com" },
+    );
+    expect(name).toBe("alice@example.com");
+  });
+
+  it("returns 'Unknown' when profile row is missing and email is null", async () => {
+    const name = await runWithProfile(null, { id: USER_ID, email: null });
+    expect(name).toBe("Unknown");
+  });
+
+  it("returns 'Unknown' when profile row is missing and email is undefined", async () => {
+    const name = await runWithProfile(null, { id: USER_ID });
+    expect(name).toBe("Unknown");
+  });
+});
