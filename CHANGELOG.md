@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.8.1.0] - 2026-04-11
+
+Second design-review pass on `/allocations`: the four deferred findings from the
+v0.8.0.1 audit all land. Ships the allocator workspace on mobile for the first
+time (hamburger drawer), makes the widget resize indicators actually work, adds
+a scroll affordance to the KPI strip, and fixes the default Positions Table
+half-width layout bug. Post-fix Design Score: ~9.8/10.
+
+### Added
+- **Mobile sidebar drawer** (`MobileSidebarDrawer.tsx` + `MobileTopBar.tsx`, both new).
+  Allocators on mobile can now reach My Allocation, Connections, Scenarios, and
+  Recommendations via a hamburger button in a new sticky mobile-only top bar. The
+  drawer mounts the existing `<Sidebar>` component unchanged via a new `variant`
+  prop, so desktop/drawer rendering never diverges. Closes on backdrop tap, Escape
+  key, or route change. Locks body scroll while open and restores focus to the
+  hamburger button on close. `role="dialog" aria-modal="true"`, 44×44 hit area on
+  the trigger. The 3-tab bottom `MobileNav` is untouched. Closes FINDING-002 —
+  the biggest remaining gap from the v0.8.0.1 audit.
+- **Functional widget resize indicators** (`TileWrapper.tsx` + `DashboardGrid.tsx`).
+  The 1/4, 1/3, 1/2, Full pills in the tile header were visual-only `<span>`
+  elements — users tapped them and nothing happened. Now they're `<button>` elements
+  that call an `onResize(tileId, cols)` prop. `DashboardGrid` provides the handler,
+  which folds the new column width into the next `onLayoutChange` call (same
+  pathway react-grid-layout uses when the user drags the resize handle). Width is
+  clamped to the 3-12 column range. `aria-label` includes the widget name so screen
+  readers announce "Resize Equity Curve to 1/2 width (6 columns)". Closes FINDING-006.
+- **KPI strip right-edge gradient fade on mobile** (`KpiStrip.tsx`). The row already
+  had `overflow-x-auto`, so horizontal scroll worked — the affordance was missing.
+  New `pointer-events-none` linear-gradient pseudo-element fades the right 48px
+  on mobile viewports so users understand more content sits off-screen. Always
+  on (mobile only); zero JS state. Closes FINDING-008.
+
+### Changed
+- **Default dashboard layout: Positions Table full-width** (`dashboard-defaults.ts`
+  and `widget-registry.ts`). Previously `w: 6` / `defaultW: 6`, which left the
+  Positions Table alone in a half-width row with 40% empty whitespace to its
+  right. Now `w: 12` / `defaultW: 12` so fresh-load dashboards render the table
+  across the full row. Users with saved custom layouts keep their existing widths.
+  Closes FINDING-009.
+- **`Sidebar` accepts a `variant` prop** (`Sidebar.tsx`). Default `"desktop"`
+  preserves the existing `fixed inset-y-0 left-0 z-30` positioning. New `"drawer"`
+  variant drops the fixed class so the same component mounts cleanly inside the
+  mobile drawer overlay. Every existing desktop caller (there's one) is unaffected.
+- **`DashboardChrome` owns the drawer state** — `useState(menuOpen)` + `useRef`
+  for the hamburger trigger. Both the full-bleed (admin match queue) and standard
+  dashboard layouts mount `MobileTopBar` + `MobileSidebarDrawer`, so the entire
+  dashboard segment gains mobile navigation — not just `/allocations`.
+
 ## [0.8.0.1] - 2026-04-11
 
 Design-review pass on `/allocations` (My Allocation dashboard). Five quick-win
