@@ -130,6 +130,119 @@ export default function SecurityPage() {
             </p>
           </Section>
 
+          <Section
+            id="readonly-key"
+            title="Creating a read-only API key"
+          >
+            <p>
+              A read-only key lets our analytics service fetch your trade
+              history without ever being able to place trades or move funds.
+              Every supported exchange has a read-only scope — here is the
+              shortest path per exchange. If any step fails, the wizard will
+              reject the key with a scripted error pointing back here.
+            </p>
+            <div className="mt-4 space-y-4">
+              <SubAnchor id="binance-readonly" title="Binance">
+                <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-text-secondary">
+                  <li>
+                    Go to Binance API Management and click Create API. Pick
+                    System-generated.
+                  </li>
+                  <li>
+                    Check only <strong>Enable Reading</strong>. Leave Enable
+                    Spot &amp; Margin Trading, Enable Futures, and Enable
+                    Withdrawals unchecked.
+                  </li>
+                  <li>
+                    Save the key and copy both the key and secret. Paste
+                    them into the wizard.
+                  </li>
+                </ol>
+              </SubAnchor>
+
+              <SubAnchor id="okx-readonly" title="OKX">
+                <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-text-secondary">
+                  <li>
+                    Go to OKX API Management and click Create API Key V5.
+                  </li>
+                  <li>
+                    Set the permission to <strong>Read</strong> only. Do not
+                    enable Trade or Withdraw.
+                  </li>
+                  <li>
+                    Set a passphrase (OKX requires one). Copy the key,
+                    secret, and passphrase into the wizard.
+                  </li>
+                </ol>
+              </SubAnchor>
+
+              <SubAnchor id="bybit-readonly" title="Bybit">
+                <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-text-secondary">
+                  <li>
+                    Go to Bybit API Management and click Create New Key. Pick
+                    System-generated.
+                  </li>
+                  <li>
+                    Pick <strong>Read-Only</strong> access. Leave Trade,
+                    Derivatives, and Transfer permissions unchecked.
+                  </li>
+                  <li>Copy the key and secret into the wizard.</li>
+                </ol>
+              </SubAnchor>
+            </div>
+          </Section>
+
+          <Section
+            id="thresholds"
+            title="Trade history thresholds (5 trades, 7 days)"
+          >
+            <p>
+              We require a minimum of 5 filled trades and 7 calendar days of
+              activity before we compute a verified factsheet. Sharpe, Sortino,
+              and drawdown numbers on smaller samples are noise, not signal.
+              The wizard refuses to advance past Step 2 until both thresholds
+              are met, and the admin review flow enforces the same gate. If
+              your draft does not pass, we save it for 30 days so you can
+              resume after trading more history.
+            </p>
+          </Section>
+
+          <Section id="regenerate-key" title="Regenerating an API key">
+            <p>
+              Some exchanges only show the secret once at creation. If you
+              cannot find it, create a fresh read-only key and paste the new
+              credentials. The old key can be deleted from your exchange
+              dashboard afterwards.
+            </p>
+          </Section>
+
+          <Section id="sync-timing" title="Sync timing and cold starts">
+            <p>
+              The first sync of the day can take up to 45 seconds while our
+              analytics service wakes up. Accounts with multi-year history can
+              take up to 3 minutes. Your draft is saved — you can leave the
+              wizard tab and come back. If sync fails, the wizard error copy
+              tells you exactly what to retry and when to contact{" "}
+              <a
+                href="mailto:security@quantalyze.com"
+                className="underline hover:text-text-primary"
+              >
+                security@quantalyze.com
+              </a>
+              .
+            </p>
+          </Section>
+
+          <Section id="draft-resume" title="Resuming a wizard draft">
+            <p>
+              Wizard drafts are stored server-side and tied to your account.
+              If you close the tab, open a new one, sign in, and navigate
+              back to the wizard, you will see a Resume banner. Secrets are
+              never stored in your browser, so you will need to paste the API
+              secret one more time before sync kicks off again.
+            </p>
+          </Section>
+
           <Section id="disclosures" title="Security disclosures">
             <p>
               If you found a vulnerability, please email{" "}
@@ -203,5 +316,29 @@ function Section({
       </h2>
       <div className="leading-relaxed text-text-secondary">{children}</div>
     </section>
+  );
+}
+
+function SubAnchor({
+  id,
+  title,
+  children,
+}: {
+  id: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div id={id} className="rounded-md border border-border bg-page px-4 py-3">
+      <h3 className="font-display text-base text-text-primary">
+        <a
+          href={`#${id}`}
+          className="transition-colors hover:text-accent"
+        >
+          {title}
+        </a>
+      </h3>
+      <div className="leading-relaxed text-text-secondary">{children}</div>
+    </div>
   );
 }

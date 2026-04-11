@@ -261,6 +261,11 @@ export async function POST(request: Request): Promise<NextResponse> {
         user_id: userId,
         name: row.strategy_name,
         status: "draft",
+        // Migration 031 introduced `source` to discriminate wizard drafts
+        // from legacy and admin-imported drafts. Partner-import seeds
+        // belong in the `admin_import` bucket so the Sprint 2 cleanup
+        // cron (which only sweeps `source='wizard'`) never touches them.
+        source: "admin_import",
         is_example: false,
         disclosure_tier: row.disclosure_tier,
         partner_tag,

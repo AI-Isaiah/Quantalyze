@@ -37,6 +37,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncingKeyId, setSyncingKeyId] = useState<string | null>(null);
+  // `lastAttemptedKeyId` survives the catch block that clears
+  // `syncingKeyId` so the SyncProgress retry button has a stable
+  // target. Without it, the retry closure would see null and no-op
+  // (pre-existing bug found in Task 1.2 Phase 3 eng review).
+  const [lastAttemptedKeyId, setLastAttemptedKeyId] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -164,6 +169,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
 
   async function handleSyncTrades(keyId: string) {
     setSyncingKeyId(keyId);
+    setLastAttemptedKeyId(keyId);
     setSyncStatus("syncing");
     setSyncError(null);
     setError(null);
@@ -199,6 +205,8 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       setSyncError(message);
       setError(message);
       setSyncingKeyId(null);
+      // Note: lastAttemptedKeyId is intentionally NOT cleared so the
+      // retry button below has a target.
     }
   }
 
@@ -291,7 +299,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           syncStatus={syncStatus}
           lastSyncAt={lastSyncAt}
           syncError={syncError}
-          onRetry={() => syncingKeyId && handleSyncTrades(syncingKeyId)}
+          onRetry={() => lastAttemptedKeyId && handleSyncTrades(lastAttemptedKeyId)}
           onStatusChange={handleSyncStatusChange}
         />
       )}

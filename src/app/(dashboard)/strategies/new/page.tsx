@@ -1,18 +1,15 @@
-import { PageHeader } from "@/components/layout/PageHeader";
-import { Breadcrumb } from "@/components/layout/Breadcrumb";
-import { StrategyForm } from "@/components/strategy/StrategyForm";
+import { redirect } from "next/navigation";
 
+/**
+ * Legacy `/strategies/new` route. Task 1.2 replaced the inverted
+ * StrategyForm flow with the 4-step wizard at
+ * `/strategies/new/wizard`. This file just redirects so any existing
+ * bookmarks, dashboard links, or email CTAs land on the new flow.
+ *
+ * The underlying StrategyForm component stays in the repo for the
+ * `/strategies/[id]/edit` page (which is a distinct "edit an existing
+ * strategy" flow). It will be fully removed in Sprint 3.
+ */
 export default function NewStrategyPage() {
-  return (
-    <>
-      <Breadcrumb
-        items={[
-          { label: "Strategies", href: "/strategies" },
-          { label: "New Strategy" },
-        ]}
-      />
-      <PageHeader title="New Strategy" />
-      <StrategyForm mode="create" />
-    </>
-  );
+  redirect("/strategies/new/wizard");
 }

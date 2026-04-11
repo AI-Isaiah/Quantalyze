@@ -27,8 +27,9 @@ import { RequestCallModal } from "./RequestCallModal";
  *   - Authenticated → /strategies/new (update when the wizard lands)
  */
 const LOGGED_OUT_CTA_HREF = "/signup?role=manager";
-// TODO: swap to /strategies/new/wizard when the wizard ships.
-const LOGGED_IN_CTA_HREF = "/strategies/new";
+// Task 1.2 shipped the Connect Your Strategy wizard. Logged-in managers
+// land directly on the wizard instead of the legacy StrategyForm.
+const LOGGED_IN_CTA_HREF = "/strategies/new/wizard";
 
 let viewEventFired = false;
 
@@ -52,7 +53,7 @@ export function ForQuantsCtas({ location, isLoggedIn }: ForQuantsCtasProps) {
   }, []);
 
   const primaryHref = isLoggedIn ? LOGGED_IN_CTA_HREF : LOGGED_OUT_CTA_HREF;
-  const primaryLabel = isLoggedIn ? "Go to your strategies" : "Start Wizard";
+  const primaryLabel = isLoggedIn ? "Connect your strategy" : "Start Wizard";
 
   return (
     <div className="mt-10 flex flex-col items-start gap-3 sm:flex-row sm:items-center">

@@ -110,7 +110,7 @@ describe("FactsheetPreview", () => {
     expect(screen.getByText("Sample Strategy (Demo Data)")).toBeInTheDocument();
   });
 
-  it("renders the computedAt date when provided", () => {
+  it("renders the computedAt date caption on the verified variant", () => {
     render(
       <FactsheetPreview
         strategyName="X"
@@ -118,10 +118,60 @@ describe("FactsheetPreview", () => {
         computedAt="2026-04-10T00:00:00Z"
       />,
     );
-    // Date is formatted with toLocaleDateString; assert the "verified from
-    // exchange API" prefix is present.
+    // Task 1.2 refactored FactsheetPreview to derive the caption from
+    // `verificationState`. The verified variant (the default) now shows
+    // "Data from exchange API · <date>" instead of the historic
+    // "Data verified from exchange API · <date>" prefix.
     expect(
-      screen.getByText(/Data verified from exchange API/),
+      screen.getByText(/Data from exchange API/),
     ).toBeInTheDocument();
+  });
+
+  describe("verificationState prop (Task 1.2 regression fence)", () => {
+    it("defaults to 'verified' with the accent-colored badge", () => {
+      render(<FactsheetPreview strategyName="X" metrics={METRICS} />);
+      const badge = screen.getByTestId("factsheet-verification-badge");
+      expect(badge).toHaveTextContent("Verified by Quantalyze");
+      expect(badge).toHaveAttribute("data-verification-state", "verified");
+    });
+
+    it("renders the draft badge when verificationState is 'draft'", () => {
+      render(
+        <FactsheetPreview
+          strategyName="X"
+          metrics={METRICS}
+          verificationState="draft"
+        />,
+      );
+      const badge = screen.getByTestId("factsheet-verification-badge");
+      // Pre-ship blocking: wizard must never show "Verified by Quantalyze"
+      // before admin review.
+      expect(badge).toHaveTextContent("Draft preview · pending review");
+      expect(badge).toHaveAttribute("data-verification-state", "draft");
+    });
+
+    it("renders the pending badge when verificationState is 'pending'", () => {
+      render(
+        <FactsheetPreview
+          strategyName="X"
+          metrics={METRICS}
+          verificationState="pending"
+        />,
+      );
+      const badge = screen.getByTestId("factsheet-verification-badge");
+      expect(badge).toHaveTextContent("Submitted for review");
+      expect(badge).toHaveAttribute("data-verification-state", "pending");
+    });
+
+    it("never shows 'Verified by Quantalyze' in the draft state", () => {
+      render(
+        <FactsheetPreview
+          strategyName="X"
+          metrics={METRICS}
+          verificationState="draft"
+        />,
+      );
+      expect(screen.queryByText("Verified by Quantalyze")).not.toBeInTheDocument();
+    });
   });
 });

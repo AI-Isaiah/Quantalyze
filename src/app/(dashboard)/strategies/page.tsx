@@ -14,10 +14,18 @@ export default async function StrategiesPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
+  // Filter out wizard drafts — they belong to the wizard flow and
+  // have their own Resume banner at /strategies/new/wizard. Including
+  // them here would render a confusing "edit" link pointing at the
+  // legacy StrategyForm, which does not understand wizard state.
+  // See migration 031: `source` discriminates wizard drafts from
+  // legacy / admin_import drafts. The PostgREST `.or()` filter below
+  // keeps legacy drafts visible while hiding wizard-in-progress rows.
   const { data: strategies } = await supabase
     .from("strategies")
-    .select("id, name, status, strategy_types, review_note, created_at, api_key_id")
+    .select("id, name, status, source, strategy_types, review_note, created_at, api_key_id")
     .eq("user_id", user.id)
+    .or("source.neq.wizard,status.neq.draft")
     .order("created_at", { ascending: false });
 
   const strategyIds = strategies?.map((s) => s.id) ?? [];
