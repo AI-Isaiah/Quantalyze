@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.8.0.1] - 2026-04-11
+
+Design-review pass on `/allocations` (My Allocation dashboard). Five quick-win
+fixes from a structured audit against DESIGN.md, all CSS/markup-only. Post-fix
+scores: Design Score B+ (8.8/10) → A- (~9.3/10); AI Slop Score stayed A
+(zero slop patterns on this screen).
+
+### Fixed
+- **Timeframe tabs no longer read "1M" as "IM"** (`TimeframeSelector.tsx`). DM Sans
+  kerned the `1` and `M` tight enough at 12px that the pair visually merged. Numeric
+  tokens use Geist Mono (`font-metric`) per DESIGN.md Typography, which spaces them
+  correctly. Applied to 1D / 1W / 1M / 1Q / YTD / 3Y / All.
+- **Timeframe tab touch target now 44×44 on mobile** (`TimeframeSelector.tsx`).
+  Previously 24px tall on every viewport, failing WCAG AA. `min-h-11` on touch,
+  `md:min-h-0 md:py-1` keeps the dense 24px institutional look for mouse users.
+- **Widget close button now 32×32 desktop / 44×44 mobile** (`TileWrapper.tsx`).
+  Previously a 12×28 px hit area (`p-0.5` around a 14px × glyph) — WCAG fail.
+  Glyph stays 14px for visual density; the hit area is explicit via inline-flex
+  + min-h / min-w.
+- **Widget titles are now semantic `<h2>`, not `<span>`** (`TileWrapper.tsx`). Runtime
+  DOM audit found exactly one heading on the entire dashboard (`<h1>My Allocation</h1>`).
+  Screen readers navigating by heading level now see all 6 widget titles (Equity Curve,
+  Drawdown Chart, Allocation Donut, Correlation Matrix, Monthly Returns, Positions Table).
+  Visual rendering unchanged (same `text-[13px] font-semibold`).
+- **"+ Add Widget" button no longer wraps to two lines on mobile** (`AllocationDashboard.tsx`).
+  `whitespace-nowrap` keeps "+ Add Widget" on one line even when the header's flex-wrap
+  parent narrows on 375px viewports.
+
+### Deferred (flagged in audit, not in this PR)
+- Mobile navigation drops the allocator workspace entirely — `MobileNav.tsx` only
+  exposes Discovery / Strategies / Profile, losing My Allocation / Connections /
+  Scenarios / Recommendations. Needs an IA decision: add a hamburger overlay or
+  restructure the bottom nav.
+- Widget "resize indicators" (1/4, 1/3, 1/2, Full) look interactive but are
+  visual-only — wire them up or remove them.
+- KPI row clips on mobile with no scroll affordance.
+- Default dashboard layout leaves Positions Table alone in a half-width row.
+
+Full audit + before/after screenshots at
+`~/.gstack/projects/AI-Isaiah-Quantalyze/designs/design-audit-20260411-allocations/design-audit-allocations.md`.
+
 ## [0.8.0.0] - 2026-04-11
 
 Sprint 2 Strategy Detail Depth — allocators now see drawdown event history and
