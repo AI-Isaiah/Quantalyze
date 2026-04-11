@@ -71,6 +71,7 @@ function buildNavSections(
           items: [
             { label: "Dashboard", href: "/admin", icon: BarChartIcon },
             { label: "Match queue", href: "/admin/match", icon: MatchIcon },
+            { label: "For-quants leads", href: "/admin/for-quants-leads", icon: MailIcon },
           ],
         }]
       : []),
@@ -204,6 +205,15 @@ function LinkIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M7 9a3 3 0 004.24 0l2-2a3 3 0 00-4.24-4.24l-1 1" />
       <path d="M9 7a3 3 0 00-4.24 0l-2 2a3 3 0 004.24 4.24l1-1" />
+    </svg>
+  );
+}
+
+function MailIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <path d="M2.5 4.5L8 9l5.5-4.5" />
     </svg>
   );
 }

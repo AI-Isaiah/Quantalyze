@@ -7,7 +7,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
-import { cn } from "@/lib/utils";
+import {
+  cn,
+  extractAnalytics,
+  formatPercent,
+  formatNumber,
+  formatRelativeTime,
+} from "@/lib/utils";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
 
 const TABS = ["Intro Requests", "Strategy Review", "Allocators"] as const;
@@ -246,44 +252,9 @@ function IntroRequestsTab({ requests }: { requests: Array<Record<string, unknown
   );
 }
 
-interface StrategyAnalyticsSlice {
-  cagr: number | null;
-  sharpe: number | null;
-  max_drawdown: number | null;
-  computation_status: string | null;
-  computed_at: string | null;
-}
-
-function extractAnalytics(raw: unknown): StrategyAnalyticsSlice | null {
-  if (!raw) return null;
-  const first = Array.isArray(raw) ? raw[0] : raw;
-  if (!first || typeof first !== "object") return null;
-  return first as StrategyAnalyticsSlice;
-}
-
-function formatPercent(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  const pct = value * 100;
-  const sign = pct >= 0 ? "+" : "";
-  return `${sign}${pct.toFixed(1)}%`;
-}
-
-function formatNumber(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  return value.toFixed(2);
-}
-
 function formatRecency(iso: string | null | undefined): string {
   if (!iso) return "—";
-  const delta = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(delta)) return "—";
-  const minutes = Math.floor(delta / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return formatRelativeTime(iso, Date.now());
 }
 
 function sourceBadgeLabel(source: string | undefined): string {
@@ -392,9 +363,9 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
                   </p>
 
                   <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border pt-3">
-                    <MetricCell label="CAGR" value={formatPercent(analytics?.cagr)} />
+                    <MetricCell label="CAGR" value={formatPercent(analytics?.cagr, 1)} />
                     <MetricCell label="Sharpe" value={formatNumber(analytics?.sharpe)} />
-                    <MetricCell label="Max DD" value={formatPercent(analytics?.max_drawdown)} />
+                    <MetricCell label="Max DD" value={formatPercent(analytics?.max_drawdown, 1)} />
                   </div>
 
                   {(s.strategy_types as string[] | undefined)?.length ? (

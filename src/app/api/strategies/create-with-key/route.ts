@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
+import { isUuid } from "@/lib/utils";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -87,8 +88,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (typeof wizard_session_id !== "string" || !UUID_RE.test(wizard_session_id)) {
+  if (!isUuid(wizard_session_id)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "wizard_session_id required" },
       { status: 400 },

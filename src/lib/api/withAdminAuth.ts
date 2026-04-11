@@ -26,7 +26,14 @@ export function withAdminAuth(handler: AdminHandler) {
 
     let body: Record<string, unknown>;
     try {
-      body = await request.json();
+      const parsed = await request.json();
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return NextResponse.json(
+          { error: "Request body must be a JSON object" },
+          { status: 400 },
+        );
+      }
+      body = parsed as Record<string, unknown>;
     } catch {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
