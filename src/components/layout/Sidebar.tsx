@@ -86,10 +86,16 @@ export function Sidebar({
   populatedSlugs,
   isAdmin,
   isAllocator,
+  variant = "desktop",
 }: {
   populatedSlugs?: string[];
   isAdmin?: boolean;
   isAllocator?: boolean;
+  /** "desktop" (default) mounts as a fixed left rail — existing behavior.
+   *  "drawer" mounts as a flow child of its parent so the same Sidebar
+   *  component can live inside the MobileSidebarDrawer overlay without
+   *  fighting for position with the backdrop or the slide-in panel. */
+  variant?: "desktop" | "drawer";
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
@@ -98,7 +104,13 @@ export function Sidebar({
   );
 
   return (
-    <aside className="fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text">
+    <aside
+      className={
+        variant === "desktop"
+          ? "fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text"
+          : "flex h-full w-[260px] flex-col bg-sidebar text-sidebar-text"
+      }
+    >
       <div className="flex h-16 items-center px-6">
         <Link href="/" className="text-lg font-display text-white tracking-tight">
           Quantalyze

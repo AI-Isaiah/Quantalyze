@@ -1,8 +1,11 @@
 "use client";
 
+import { useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { MobileNav } from "@/components/layout/MobileNav";
+import { MobileTopBar } from "@/components/layout/MobileTopBar";
+import { MobileSidebarDrawer } from "@/components/layout/MobileSidebarDrawer";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { LegalFooter } from "@/components/legal/LegalFooter";
 
@@ -30,6 +33,12 @@ export function DashboardChrome({
 }: DashboardChromeProps) {
   const pathname = usePathname();
 
+  // Mobile sidebar drawer — owned at the chrome level so both the
+  // full-bleed and standard layouts can share the same hamburger +
+  // overlay without duplicating state.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
+
   // Full-bleed routes: hide sidebar + skip the centered max-w container so
   // the underlying page can claim every pixel. The match queue detail page
   // is the only one that needs this for now (Sprint 4 T10.1).
@@ -40,6 +49,11 @@ export function DashboardChrome({
     return (
       <div className="flex h-full">
         <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
+          <MobileTopBar
+            ref={hamburgerRef}
+            onMenuClick={() => setMenuOpen(true)}
+            menuOpen={menuOpen}
+          />
           <div className="px-4 py-6 md:px-8 md:py-8">
             {children}
             <Disclaimer variant="footer" />
@@ -47,6 +61,14 @@ export function DashboardChrome({
           <LegalFooter />
         </main>
         <MobileNav />
+        <MobileSidebarDrawer
+          open={menuOpen}
+          onClose={() => setMenuOpen(false)}
+          isAdmin={isAdmin}
+          isAllocator={isAllocator}
+          populatedSlugs={populatedSlugs}
+          triggerRef={hamburgerRef}
+        />
       </div>
     );
   }
@@ -62,6 +84,11 @@ export function DashboardChrome({
         />
       </div>
       <main className="flex-1 md:ml-[260px] overflow-y-auto pb-16 md:pb-0">
+        <MobileTopBar
+          ref={hamburgerRef}
+          onMenuClick={() => setMenuOpen(true)}
+          menuOpen={menuOpen}
+        />
         <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-8">
           {children}
           <Disclaimer variant="footer" />
@@ -70,6 +97,17 @@ export function DashboardChrome({
       </main>
       {/* Mobile bottom nav */}
       <MobileNav />
+      {/* Mobile sidebar drawer — opens from the top bar hamburger.
+          The desktop Sidebar above is <div className="hidden md:block">
+          so the drawer and desktop rail never render simultaneously. */}
+      <MobileSidebarDrawer
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        isAdmin={isAdmin}
+        isAllocator={isAllocator}
+        populatedSlugs={populatedSlugs}
+        triggerRef={hamburgerRef}
+      />
     </div>
   );
 }
