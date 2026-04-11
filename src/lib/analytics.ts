@@ -1,0 +1,126 @@
+import "server-only";
+import { PostHog } from "posthog-node";
+
+/**
+ * Server-side PostHog wrapper for /for-quants funnel events.
+ *
+ * `import "server-only"` makes any accidental client-bundle leak fail
+ * the build instead of silently shipping 200KB of Node deps to the
+ * browser. Client Components import `@/lib/for-quants-analytics`
+ * instead.
+ *
+ * When NEXT_PUBLIC_POSTHOG_KEY is missing (local dev, preview deploys),
+ * every track call becomes a no-op and logs a single startup warning.
+ */
+
+// Literal union instead of `string` so typos at call sites fail typecheck
+// (same pattern as NotificationType in src/lib/email.ts).
+export type ForQuantsEvent =
+  | "for_quants_view"
+  | "for_quants_cta_click"
+  | "for_quants_request_call_click"
+  | "for_quants_lead_submit";
+
+export type CtaLocation = "hero" | "footer";
+
+export interface ForQuantsEventProps {
+  /** Where the interaction happened inside the page (hero vs footer CTA). */
+  cta_location?: CtaLocation;
+  /** Where the CTA routes to (absolute or relative URL). */
+  destination?: string;
+  /** Referrer from the request headers (server events only). */
+  referrer?: string | null;
+  /** UTM source for attribution. */
+  utm_source?: string | null;
+  /** Lead row id from the /api/for-quants-lead response. */
+  lead_id?: string;
+  /** Submission source — "modal" (form) or "mailto" (text link). */
+  source?: "modal" | "mailto";
+  /** User agent for bot filtering. */
+  user_agent?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Server-side PostHog client
+// ---------------------------------------------------------------------------
+//
+// Stored as a module-level singleton so the first import initializes it.
+// `posthog-node` uses a background flush timer; Vercel's Fluid Compute model
+// reuses function instances across requests, so the flush timer keeps
+// working across invocations.
+let _serverClient: PostHog | null = null;
+let _serverWarned = false;
+
+function getServerClient(): PostHog | null {
+  if (_serverClient !== null) return _serverClient;
+
+  const key = process.env.NEXT_PUBLIC_POSTHOG_KEY;
+  if (!key) {
+    if (!_serverWarned) {
+      console.warn(
+        "[analytics] NEXT_PUBLIC_POSTHOG_KEY not set — server-side events disabled.",
+      );
+      _serverWarned = true;
+    }
+    return null;
+  }
+
+  _serverClient = new PostHog(key, {
+    host: process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com",
+    // Flush aggressively so Vercel function suspension doesn't drop events.
+    flushAt: 1,
+    flushInterval: 0,
+  });
+  return _serverClient;
+}
+
+/**
+ * Fire a /for-quants event from a Server Component or API route.
+ *
+ * `distinctId` should be a stable identifier for the caller. For the
+ * `/api/for-quants-lead` submit path we use the lead row UUID wrapped in
+ * `lead:<uuid>` so PostHog persons don't collide with anonymous
+ * client-side visitors.
+ *
+ * The returned promise must be awaited (or passed into `after()` by the
+ * caller) so the event actually lands before the function instance
+ * suspends. See `src/app/api/for-quants-lead/route.ts` for the `after()`
+ * pattern.
+ */
+export async function trackForQuantsEventServer(
+  event: ForQuantsEvent,
+  distinctId: string,
+  props: ForQuantsEventProps = {},
+): Promise<void> {
+  const client = getServerClient();
+  if (!client) return;
+
+  try {
+    // `flushAt: 1` on the constructor means capture() synchronously
+    // enqueues a flush in the background. No explicit await needed.
+    client.capture({
+      distinctId,
+      event,
+      properties: {
+        ...props,
+        $host: process.env.NEXT_PUBLIC_SITE_URL ?? "quantalyze.com",
+        source_layer: "server",
+      },
+    });
+  } catch (err) {
+    console.warn(
+      "[analytics] server capture failed (non-blocking):",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/**
+ * Reset the cached server client. Exported for tests only — do NOT call
+ * from production code. Tests that mutate NEXT_PUBLIC_POSTHOG_KEY need
+ * this to get a fresh client on the next getServerClient() call.
+ */
+export function __resetForQuantsAnalyticsForTest(): void {
+  _serverClient = null;
+  _serverWarned = false;
+}

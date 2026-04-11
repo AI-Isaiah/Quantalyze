@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.5.2.0] - 2026-04-10
+
+### Added
+- **`/for-quants` public landing page** (Sprint 1 Task 1.1). Quant-team-facing marketing surface with 5 sections: Hero → Trust → How It Works → Factsheet Sample → CTA. Copy rewritten verbatim from the Codex Design review: "List a verified track record without exposing trading permissions." The primary CTA routes to `/signup?role=manager` for cold visitors and `/strategies/new` for signed-in managers.
+- **"Request a Call" modal + public lead endpoint** — `RequestCallModal` client component submits to `POST /api/for-quants-lead` (CSRF + IP rate limit + Zod validation), writing to a new `for_quants_leads` table via the service-role client and emailing the founder. Mailto fallback to `security@quantalyze.com` is always visible for users without JS.
+- **Migration 030 — `for_quants_leads`** — service-role-only lead intake table. RLS enabled with zero policies; `REVOKE ALL FROM anon, authenticated`; self-verifying DO block using `has_table_privilege()` asserts no leakage to user-scoped clients before committing.
+- **`FactsheetPreview` shared server component** (`src/components/strategy/FactsheetPreview.tsx`) — extracted from `factsheet/[id]/page.tsx` hero metrics. Takes preformatted metric items (not a full analytics row) so it can render both real analytics (Task 1.2 wizard preview) and seeded demo data (/for-quants Sample section). Renders as a single shared-axis row per design guardrails.
+- **`/security` public page + `public/security.txt`** — explicit security practices page covering read-only key enforcement, envelope encryption, tenant isolation, codename anonymization, allocator gating, deletion, and a `security@quantalyze.com` contact. `security.txt` follows RFC 9116 and is served from both `/security.txt` and `/.well-known/security.txt`.
+- **PostHog analytics** (`src/lib/analytics.ts`) — dual-layer wrapper. Server-side `trackForQuantsEventServer` fires `for_quants_view` from the Server Component so JS-disabled crawlers still land in the funnel; client-side `trackForQuantsEventClient` fires `for_quants_cta_click`, `for_quants_request_call_click`, and `for_quants_lead_submit`. Graceful degradation when `NEXT_PUBLIC_POSTHOG_KEY` is missing. Powers the Sprint 1 ship metric (QQAR 5% within 7 days + CTR 10% as leading indicator).
+- **`/api/for-quants-lead` regression tests** — 14 unit tests covering CSRF enforcement, Zod validation (missing fields, invalid email, oversized notes, malformed JSON), happy-path insert, optional-field normalization, and service failure handling.
+- **`FactsheetPreview` component tests** — 7 assertions covering metric rendering, optional sparkline, sample label opt-in, and computed timestamp.
+- **Static projection test for `for_quants_leads`** (`src/lib/for-quants-leads-projection.test.ts`) — scans `src/**` for any file that touches the table and asserts it imports `createAdminClient`, not the user-scoped Supabase client. Prevents future regressions where RLS would silently block a user-scoped read.
+- **E2E smoke test** — `e2e/for-quants-landing.spec.ts` covers page load, 5-section visibility, CTA destination, Request a Call modal open/close/Escape flow, and both security.txt paths.
+
+### Changed
+- **`src/proxy.ts`** — added `/for-quants`, `/api/for-quants-lead`, `/security` to `PUBLIC_ROUTES`. Extended the logged-in-redirect exemption (previously only `/demo`) to cover `/for-quants` and `/security` so signed-in managers can share the landing page with colleagues without being bounced to the dashboard.
+- **`.env.example`** — added `NEXT_PUBLIC_POSTHOG_KEY` and `NEXT_PUBLIC_POSTHOG_HOST`.
+
+### Dependencies
+- Added `posthog-js` (~6 KB gzipped, browser SDK) and `posthog-node` (server SDK). Both dynamically imported so neither ships to bundles that don't call the analytics helpers.
+
+### Review trail
+- Passed full `/autoplan` pipeline: 11 adversarial voices across 4 phases (Claude + Codex + Grok × CEO/Design/Eng, plus Claude + Grok DX). 5 critical findings surfaced and resolved: `getSocialProofStats()` not exported, `/strategies/new` auth-gated, `/api/intro` reuse mismatch, proxy logged-in redirect bug, no ship metric. 7 taste decisions resolved by user at the final gate.
+
 ## [0.5.1.0] - 2026-04-11
 
 ### Security

@@ -30,6 +30,27 @@ Shipped as 3 migrations (027, 028, 029):
 - 029: Follow-up hardening (retro-scan, `WITH CHECK`, `FOR SHARE` lock, hardened search_path, `has_column_privilege` verification)
 Plus: regression tests, live-DB probe, shared test helpers, demo seed fix.
 
+### ~~Sprint 1 Task 1.1: `/for-quants` public landing page~~ — ✅ DONE in v0.5.2.0
+Shipped with 11-voice adversarial review: 5 critical findings resolved + 7 taste decisions.
+- Public `/for-quants` page with Hero → Trust → How → Factsheet Sample → CTA
+- Codex copy rewrites adopted verbatim ("List a verified track record without exposing trading permissions")
+- `/security` page + `public/security.txt` (RFC 9116)
+- `RequestCallModal` + `/api/for-quants-lead` public endpoint (CSRF + rate limit + Zod + service-role insert)
+- Migration 030: `for_quants_leads` service-role-only table
+- `FactsheetPreview` shared server component (extracted from factsheet/[id], reusable by Task 1.2 wizard)
+- PostHog dual-layer analytics (server-side `for_quants_view`, client-side CTA click + submit)
+- Proxy exemption so logged-in managers can share the page with colleagues
+- E2E smoke test + unit + component + static projection tests
+
+### Sprint 1 follow-ups (deferred from Task 1.1 review)
+
+- **security@quantalyze.com DNS alias** — infrastructure task, not code. Once done, update `/security` and `security.txt` expiry.
+- **`for_quants_leads` admin CRM view** — founder currently reads leads via Supabase dashboard. A `/admin/for-quants-leads` page listing unprocessed leads with a "mark as processed" button would close the loop.
+- **PostHog dashboard + Slack alert** — wire a QQAR + CTR dashboard in PostHog and alert the founder if CTR < 5% across 100 qualified visits (Codex CEO pivot trigger).
+- **Conditional primary CTA when Task 1.2 lands** — update `ForQuantsCtas.tsx::LOGGED_IN_CTA_HREF` from `/strategies/new` to `/strategies/new/wizard` once the wizard ships.
+- **Signup `?role=manager` handoff** — the query param is currently informational. Wire it into `SignupForm` + `OnboardingWizard` so the role is pre-selected for users arriving from `/for-quants`.
+- **Cloudflare Turnstile on `/api/for-quants-lead`** — IP rate limit is enough for Sprint 1; add a captcha if we see spam.
+
 ### Follow-ups from the My Allocation restructure (v0.4.0.0)
 
 These were flagged during `/plan-design-review` and `/plan-eng-review` but

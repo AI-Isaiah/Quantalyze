@@ -1,0 +1,13 @@
+# Quantalyze Security disclosure policy
+# https://quantalyze.com/security
+#
+# If you found a vulnerability, please email security@quantalyze.com.
+# We reply within 1 business day and acknowledge researchers who
+# coordinate responsible disclosure at https://quantalyze.com/security.
+
+Contact: mailto:security@quantalyze.com
+Expires: 2027-04-10T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://quantalyze.com/.well-known/security.txt
+Policy: https://quantalyze.com/security
+Acknowledgments: https://quantalyze.com/security#acknowledgments
