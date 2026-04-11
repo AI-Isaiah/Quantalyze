@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { isAdmin } from "@/lib/admin";
 
-const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal", "/demo", "/api/demo"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/strategy", "/factsheet", "/api/factsheet", "/browse", "/api/keys", "/api/trades", "/api/verify-strategy", "/api/alert-digest", "/portfolio-pdf", "/legal", "/demo", "/api/demo", "/for-quants", "/api/for-quants-lead", "/security"];
 const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
@@ -48,11 +48,17 @@ export async function proxy(request: NextRequest) {
   }
 
   const isApiRoute = path.startsWith("/api/");
-  // Exclude `/demo/*` from the logged-in redirect branch so admins/founders
-  // viewing the public demo while signed in stay on the demo page instead of
-  // being bounced to the dashboard.
+  // Exclude `/demo/*`, `/for-quants/*`, and `/security/*` from the logged-in
+  // redirect branch so admins/founders viewing public marketing surfaces
+  // while signed in (or managers sharing the landing page with a colleague)
+  // stay on those pages instead of being bounced to the dashboard.
   const isDemoRoute = path === "/demo" || path.startsWith("/demo/");
-  if (session && isPublicRoute && !isApiRoute && !isDemoRoute) {
+  const isForQuantsRoute =
+    path === "/for-quants" || path.startsWith("/for-quants/");
+  const isSecurityRoute =
+    path === "/security" || path.startsWith("/security/");
+  const isMarketingExempt = isDemoRoute || isForQuantsRoute || isSecurityRoute;
+  if (session && isPublicRoute && !isApiRoute && !isMarketingExempt) {
     const redirect = request.nextUrl.searchParams.get("redirect");
     const safePath = redirect && /^\/[a-z]/.test(redirect) ? redirect : DEFAULT_AUTHENTICATED_ROUTE;
     const url = request.nextUrl.clone();

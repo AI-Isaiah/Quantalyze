@@ -1,6 +1,14 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  async rewrites() {
+    return [
+      // RFC 9116 canonical path is /.well-known/security.txt — also serve
+      // it at /security.txt for scanners/researchers that hit the root
+      // path first. One physical file, two URL paths.
+      { source: "/security.txt", destination: "/.well-known/security.txt" },
+    ];
+  },
   async headers() {
     return [
       {
