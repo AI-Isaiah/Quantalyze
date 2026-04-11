@@ -58,9 +58,9 @@ Shipped with 12-voice adversarial review + review/simplify/ship pipeline:
 
 ### Sprint 1 follow-ups (deferred from Task 1.1 review)
 
-- **security@quantalyze.com DNS alias** — infrastructure task, not code. Once done, update `/security` and `security.txt` expiry.
-- **`for_quants_leads` admin CRM view** — founder currently reads leads via Supabase dashboard. A `/admin/for-quants-leads` page listing unprocessed leads with a "mark as processed" button would close the loop. Task 1.2 added `wizard_context` JSONB so the view can separate in-wizard leads from cold landing-page leads.
-- **PostHog dashboard + Slack alert** — wire a QQAR + CTR dashboard in PostHog and alert the founder if CTR < 5% across 100 qualified visits (Codex CEO pivot trigger). Extend with the wizard funnel now that `wizard_start → wizard_submit_success` events exist.
+- **~~security@quantalyze.com DNS alias~~** — ✅ Runbook shipped in v0.6.1.0 at `docs/runbooks/security-contact.md` (full DNS/SPF/DKIM/DMARC setup + smoke-test recipe). DNS config itself is still external infrastructure work; track as a dated checklist item in the runbook once done.
+- **~~`for_quants_leads` admin CRM view~~** — ✅ DONE in v0.6.1.0. Page at `/admin/for-quants-leads` with mark-processed / unmark toggle, "from wizard" pill, 500-row truncation warning, shared minute-bucket clock. New "For-quants leads" sidebar entry.
+- **~~PostHog dashboard + Slack alert~~** — ✅ Runbook shipped in v0.6.1.0 at `docs/runbooks/posthog-wizard-funnel.md` (5 insights + dashboard layout + SQL ship-metric cross-check). Actual PostHog UI wiring is a 15-minute manual setup per the runbook; Slack alert deferred to Sprint 2 (needs qualified-visit cohort definition first).
 - **Signup `?role=manager` handoff** — the query param is currently informational. Wire it into `SignupForm` + `OnboardingWizard` so the role is pre-selected for users arriving from `/for-quants`.
 - **Cloudflare Turnstile on `/api/for-quants-lead`** — IP rate limit is enough for Sprint 1; add a captcha if we see spam.
 
