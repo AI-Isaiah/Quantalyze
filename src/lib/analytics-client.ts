@@ -8,6 +8,7 @@ import {
   PortfolioOptimizerResponseSchema,
   VerifyStrategyResponseSchema,
   RecomputeMatchResponseSchema,
+  BridgeResponseSchema,
 } from "./analytics-schemas";
 
 const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
@@ -155,6 +156,23 @@ export async function runPortfolioOptimizer(portfolioId: string, timeoutMs?: num
     timeoutMs ? { timeoutMs } : undefined,
   );
   return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");
+}
+
+export async function findReplacementCandidates(
+  portfolioId: string,
+  underperformerStrategyId: string,
+  userId: string,
+) {
+  const data = await analyticsRequest(
+    "/api/portfolio-bridge",
+    {
+      portfolio_id: portfolioId,
+      underperformer_strategy_id: underperformerStrategyId,
+      user_id: userId,
+    },
+    { timeoutMs: 15_000 },
+  );
+  return parseResponse(BridgeResponseSchema, data, "/api/portfolio-bridge");
 }
 
 export async function verifyStrategy(data: {

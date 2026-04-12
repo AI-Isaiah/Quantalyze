@@ -131,3 +131,33 @@ export const TickJobsResponseSchema = z
   // fine and render as if nothing happened.
   .strict();
 export type TickJobsResponse = z.infer<typeof TickJobsResponseSchema>;
+
+// ─────────────────────────────────────────────────────────────────────
+// Bridge response (Sprint 4 Phase 3)
+//
+// Strict schema for /api/portfolio-bridge. Each candidate must match
+// the BridgeCandidate shape in types.ts. Parse failures throw.
+// ─────────────────────────────────────────────────────────────────────
+
+const BridgeFitLabelSchema = z.enum([
+  "Strong fit",
+  "Good fit",
+  "Moderate fit",
+  "Weak fit",
+]);
+
+const BridgeCandidateSchema = z.object({
+  strategy_id: z.string(),
+  strategy_name: z.string(),
+  sharpe_delta: z.number(),
+  dd_delta: z.number(),
+  corr_delta: z.number(),
+  composite_score: z.number(),
+  fit_label: BridgeFitLabelSchema,
+});
+
+export const BridgeResponseSchema = z.object({
+  candidates: z.array(BridgeCandidateSchema),
+}).passthrough();
+
+export type BridgeResponse = z.infer<typeof BridgeResponseSchema>;
