@@ -61,25 +61,35 @@ describe("GET /api/activity/portfolio", () => {
         };
       }
       if (table === "trades") {
+        const tradeData = [
+          {
+            timestamp: "2026-04-10T12:00:00Z",
+            strategy_id: "s1",
+            symbol: "BTCUSDT",
+            realized_pnl: 100.5,
+            exchange: "binance",
+          },
+        ];
         return {
-          select: () => ({
-            in: () => ({
-              order: () => ({
-                limit: () => ({
-                  data: [
-                    {
-                      timestamp: "2026-04-10T12:00:00Z",
-                      strategy_id: "s1",
-                      symbol: "BTCUSDT",
-                      realized_pnl: 100.5,
-                      exchange: "binance",
-                    },
-                  ],
-                  error: null,
+          select: (...args: unknown[]) => {
+            // fill count query: .select("id", { count: "exact", head: true }).in().eq()
+            if (args.length >= 2 && typeof args[1] === "object" && args[1] && "count" in args[1]) {
+              return { in: () => ({ eq: () => ({ count: 0, error: null }) }) };
+            }
+            // normal trades query: .select().in().eq().order().limit()
+            return {
+              in: () => ({
+                eq: () => ({
+                  order: () => ({
+                    limit: () => ({
+                      data: tradeData,
+                      error: null,
+                    }),
+                  }),
                 }),
               }),
-            }),
-          }),
+            };
+          },
         };
       }
       return { select: () => ({ eq: () => ({ data: null, error: null }) }) };
