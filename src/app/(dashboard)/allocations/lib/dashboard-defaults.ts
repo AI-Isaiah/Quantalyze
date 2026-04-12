@@ -10,4 +10,7 @@ export const DEFAULT_LAYOUT: TileConfig[] = [
   // row with empty whitespace to its right. Design review FINDING-009b.
   // Users with saved custom layouts keep their existing width.
   { i: "positions-table-1", widgetId: "positions-table", x: 0, y: 11, w: 12, h: 4 },
+  { i: "net-exposure-1", widgetId: "net-exposure", x: 0, y: 15, w: 12, h: 4 },
+  { i: "trade-volume-1", widgetId: "trade-volume", x: 0, y: 19, w: 6, h: 3 },
+  { i: "exposure-by-asset-1", widgetId: "exposure-by-asset", x: 6, y: 19, w: 6, h: 3 },
 ];

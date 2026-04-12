@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useCallback } from "react";
 import type { Layout, LayoutItem } from "react-grid-layout";
-import type { Portfolio, PortfolioAnalytics } from "@/lib/types";
+import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
@@ -72,6 +72,8 @@ interface AllocationDashboardProps {
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
   apiKeys: ApiKeyRow[];
+  weightSnapshots?: WeightSnapshot[];
+  positionSnapshots?: PositionSnapshot[];
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,8 @@ export function AllocationDashboard({
   analytics,
   strategies,
   apiKeys,
+  weightSnapshots = [],
+  positionSnapshots = [],
 }: AllocationDashboardProps) {
   const { config, addTile, removeTile, updateLayout, restoreTile } =
     useDashboardConfig();
@@ -235,6 +239,14 @@ export function AllocationDashboard({
   );
 
   // ── Widget data payload (shared across all widgets) ──────────────
+  // NOTE (I-F6): TradingActivityLog and TradeVolume both independently
+  // fetch /api/activity/portfolio. Ideally, activity data (DailyPnlRow[])
+  // would be fetched once in the server component and passed through
+  // widgetData. Skipped for now: the server component doesn't have access
+  // to portfolio_id at the point where it assembles props, and hoisting
+  // the fetch would require restructuring the page-level data flow.
+  // The duplicate fetch is ~1 extra API call per page load — acceptable
+  // until the allocation page performance budget gets tighter.
 
   const widgetData = useMemo(
     () => ({
@@ -250,8 +262,10 @@ export function AllocationDashboard({
       apiKeys,
       metrics,
       compositeReturns,
+      weightSnapshots,
+      positionSnapshots,
     }),
-    [portfolio, analytics, strategies, apiKeys, metrics, compositeReturns],
+    [portfolio, analytics, strategies, apiKeys, metrics, compositeReturns, weightSnapshots, positionSnapshots],
   );
 
   // ── Widget renderer ─────────────────────────────────────────────

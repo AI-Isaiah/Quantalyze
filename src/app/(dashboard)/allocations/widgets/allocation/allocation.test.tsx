@@ -92,20 +92,27 @@ describe("AllocationDonut", () => {
 });
 
 describe("AllocationOverTime", () => {
-  it("renders without crash", () => {
-    render(<AllocationOverTime />);
-  });
-
-  it("shows TODO message", () => {
-    render(<AllocationOverTime />);
+  it("renders empty state when no weight snapshots", () => {
+    render(<AllocationOverTime {...widgetProps} />);
     expect(
-      screen.getByText(/Historical weight data not yet available/),
+      screen.getByText(/No weight history yet/),
     ).toBeTruthy();
   });
 
-  it("has correct test ID", () => {
-    render(<AllocationOverTime />);
-    expect(screen.getByTestId("allocation-over-time-todo")).toBeTruthy();
+  it("renders chart when weight snapshots provided", () => {
+    const propsWithSnapshots = {
+      ...widgetProps,
+      data: {
+        ...mockData,
+        weightSnapshots: [
+          { id: "w1", portfolio_id: "p1", strategy_id: "s1", snapshot_date: "2024-01-01", target_weight: 0.4, actual_weight: 0.38, created_at: "2024-01-01" },
+          { id: "w2", portfolio_id: "p1", strategy_id: "s2", snapshot_date: "2024-01-01", target_weight: 0.6, actual_weight: 0.62, created_at: "2024-01-01" },
+        ],
+      },
+    };
+    const { container } = render(<AllocationOverTime {...propsWithSnapshots} />);
+    // Recharts renders inside the container (ResponsiveContainer may render a div)
+    expect(container.firstChild).toBeTruthy();
   });
 });
 

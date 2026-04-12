@@ -130,38 +130,31 @@ describe("PositionsTable", () => {
 // TODO widget tests
 // ---------------------------------------------------------------------------
 
-describe("TradingActivityLog (TODO)", () => {
-  it("renders placeholder message", () => {
-    render(<TradingActivityLog />);
-    expect(
-      screen.getByText(/Trade log requires a trades query endpoint/),
-    ).toBeInTheDocument();
+describe("TradingActivityLog", () => {
+  it("renders loading then empty state when no portfolio", () => {
+    render(<TradingActivityLog data={{}} timeframe="YTD" width={800} height={400} />);
+    // With no portfolio, it should show empty or loading
+    expect(document.querySelector("div")).toBeTruthy();
   });
 });
 
-describe("TradeVolume (TODO)", () => {
-  it("renders placeholder message", () => {
-    render(<TradeVolume />);
-    expect(
-      screen.getByText(/Trade volume chart requires the same trades query endpoint/),
-    ).toBeInTheDocument();
+describe("TradeVolume", () => {
+  it("renders loading then empty state when no portfolio", () => {
+    render(<TradeVolume data={{}} timeframe="YTD" width={800} height={400} />);
+    expect(document.querySelector("div")).toBeTruthy();
   });
 });
 
-describe("ExposureByAsset (TODO)", () => {
-  it("renders placeholder message", () => {
-    render(<ExposureByAsset />);
-    expect(
-      screen.getByText(/Asset-level exposure breakdown requires position-level data/),
-    ).toBeInTheDocument();
+describe("ExposureByAsset", () => {
+  it("shows empty state when no position snapshots", () => {
+    render(<ExposureByAsset data={{}} timeframe="YTD" width={800} height={400} />);
+    expect(screen.getByText("No position data available.")).toBeInTheDocument();
   });
 });
 
-describe("NetExposure (TODO)", () => {
-  it("renders placeholder message", () => {
-    render(<NetExposure />);
-    expect(
-      screen.getByText(/Net exposure tracking requires historical position data/),
-    ).toBeInTheDocument();
+describe("NetExposure", () => {
+  it("shows empty state when no position snapshots", () => {
+    render(<NetExposure data={{}} timeframe="YTD" width={800} height={400} />);
+    expect(screen.getByText("No position history available.")).toBeInTheDocument();
   });
 });

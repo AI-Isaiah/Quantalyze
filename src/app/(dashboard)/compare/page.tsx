@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { CompareTable } from "@/components/strategy/CompareTable";
+import { CompareEquityOverlay } from "@/components/strategy/CompareEquityOverlay";
+import { CompareCorrelationMatrix } from "@/components/strategy/CompareCorrelationMatrix";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 export default async function ComparePage({
@@ -45,7 +47,11 @@ export default async function ComparePage({
     <>
       <Breadcrumb items={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]} />
       <PageHeader title={`Comparing ${items.length} Strategies`} />
-      <CompareTable items={items} />
+      <div className="space-y-8">
+        <CompareTable items={items} />
+        <CompareEquityOverlay items={items} />
+        <CompareCorrelationMatrix items={items} />
+      </div>
     </>
   );
 }

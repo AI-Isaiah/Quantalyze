@@ -323,7 +323,7 @@ export interface VerificationRequest {
  * with the seeded rows and with `analytics-service/services/jobs.py`'s
  * dispatch table.
  */
-export type JobKind = "sync_trades" | "compute_analytics" | "compute_portfolio";
+export type JobKind = "sync_trades" | "compute_analytics" | "compute_portfolio" | "poll_positions";
 
 /**
  * Compute queue job status. Mirrors the CHECK constraint on
@@ -387,4 +387,76 @@ export interface ComputeJob {
   created_at: string;
   updated_at: string;
   metadata: Record<string, unknown> | null;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 3 — admin, position snapshots, weight snapshots, activity, notes
+// ---------------------------------------------------------------------------
+
+export interface ComputeJobAdminRow {
+  id: string;
+  strategy_id: string | null;
+  portfolio_id: string | null;
+  kind: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string;
+  claimed_at: string | null;
+  claimed_by: string | null;
+  last_error: string | null;
+  error_kind: string | null;
+  idempotency_key: string | null;
+  exchange: string | null;
+  trade_count: number | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown> | null;
+  strategy_name: string | null;
+  portfolio_name: string | null;
+  user_email: string | null;
+}
+
+export interface PositionSnapshot {
+  id: string;
+  strategy_id: string;
+  snapshot_date: string;
+  symbol: string;
+  side: "long" | "short" | "flat";
+  size_base: number | null;
+  size_usd: number | null;
+  entry_price: number | null;
+  mark_price: number | null;
+  unrealized_pnl: number | null;
+  exchange: "binance" | "okx" | "bybit" | null;
+  computed_at: string;
+  created_at: string;
+}
+
+export interface WeightSnapshot {
+  id: string;
+  portfolio_id: string;
+  strategy_id: string;
+  snapshot_date: string;
+  target_weight: number | null;
+  actual_weight: number | null;
+  created_at: string;
+}
+
+export interface DailyPnlRow {
+  date: string;
+  strategy_id: string;
+  strategy_name: string;
+  symbol: string;
+  pnl_usd: number;
+  exchange: string;
+}
+
+export interface UserNote {
+  id: string;
+  user_id: string;
+  portfolio_id: string | null;
+  content: string;
+  updated_at: string;
+  created_at: string;
 }

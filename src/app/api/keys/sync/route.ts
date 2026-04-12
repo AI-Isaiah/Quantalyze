@@ -7,11 +7,37 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
 /**
- * POST /api/keys/sync — kicks off fetchTrades + computeAnalytics
- * against the Railway analytics service using the `after()` pattern.
- * Marks `strategy_analytics.computation_status = 'computing'` via the
- * service-role client, returns 202, and runs the long work in the
- * background. Clients poll `strategy_analytics` to track progress.
+ * POST /api/keys/sync — kicks off trade sync + analytics computation.
+ *
+ * Two execution paths controlled by the USE_COMPUTE_JOBS_QUEUE feature flag:
+ *
+ *   Flag ON  → enqueue a `sync_trades` job into the compute_jobs queue via
+ *              the `enqueue_compute_job` RPC (migration 032). The Python
+ *              worker is the sole writer of strategy_analytics.computation_status
+ *              on this path (via the `sync_strategy_analytics_status` RPC,
+ *              migration 038). No direct upsert from this route.
+ *
+ *   Flag OFF → legacy `after()` fire-and-forget path. This route upserts
+ *              computation_status='computing' directly, then runs fetchTrades
+ *              + computeAnalytics in the background. This is the only
+ *              non-worker writer of computation_status in the codebase.
+ *
+ * Response shape is identical on both paths: 202 {accepted, strategy_id, status}.
+ *
+ * ─── Direct-writes audit (D.10) ───────────────────────────────────────
+ * Post-2.9 R2 writers of strategy_analytics.computation_status:
+ *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — sole
+ *       writer when USE_COMPUTE_JOBS_QUEUE=true.
+ *   (b) Legacy after() path below (flag OFF only) — upserts 'computing' on
+ *       entry and 'failed' on error. Will be removed when flag is retired.
+ *   (c) analytics_runner.py (Python /api/compute-analytics) — upserts
+ *       'computing'/'complete'/'failed' during direct compute calls. Called
+ *       by the worker internally; also reachable via the legacy after() path.
+ *   (d) portfolio.py (Python /api/portfolio-analytics) — writes
+ *       computation_status for portfolio_analytics rows only, not strategy.
+ *   (e) Initial strategy creation: migration 001 DEFAULT 'pending' on INSERT.
+ * No other paths write strategy_analytics.computation_status for strategies.
+ * ──────────────────────────────────────────────────────────────────────
  */
 export const maxDuration = 300;
 
@@ -48,6 +74,36 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // ── Queue path (USE_COMPUTE_JOBS_QUEUE=true) ──────────────────────
+  if (process.env.USE_COMPUTE_JOBS_QUEUE === "true") {
+    const admin = createAdminClient();
+    const { data: rpcData, error: rpcError } = await admin.rpc(
+      "enqueue_compute_job",
+      { p_strategy_id: strategy_id, p_kind: "sync_trades" },
+    );
+
+    if (rpcError) {
+      console.error(
+        `[keys/sync] enqueue_compute_job RPC failed for ${strategy_id}:`,
+        rpcError,
+      );
+      return NextResponse.json(
+        { error: "Could not start sync. Try again in a moment." },
+        { status: 503 },
+      );
+    }
+
+    console.log(
+      `[keys/sync] enqueued sync_trades job=${rpcData} for strategy=${strategy_id}`,
+    );
+
+    return NextResponse.json(
+      { accepted: true, strategy_id, status: "syncing" },
+      { status: 202 },
+    );
+  }
+
+  // ── Legacy path (flag OFF — default) ──────────────────────────────
   // Mark the row as `computing` via the service-role client. The
   // CHECK constraint at migration 001:74 only allows the four
   // canonical states, so we reuse `computing` rather than adding a
@@ -109,11 +165,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   });
 
   return NextResponse.json(
-    {
-      accepted: true,
-      strategy_id,
-      status: "syncing",
-    },
+    { accepted: true, strategy_id, status: "syncing" },
     { status: 202 },
   );
 });
