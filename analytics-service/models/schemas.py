@@ -31,6 +31,12 @@ class PortfolioOptimizerRequest(BaseModel):
     weights: Optional[dict] = None  # Custom optimizer weights
 
 
+class BridgeRequest(BaseModel):
+    portfolio_id: str
+    underperformer_strategy_id: str
+    user_id: str
+
+
 class VerifyStrategyRequest(BaseModel):
     email: str
     exchange: str  # binance, okx, bybit
