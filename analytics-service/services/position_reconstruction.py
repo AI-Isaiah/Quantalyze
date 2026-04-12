@@ -90,10 +90,10 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
 
     durations = []
     for p in closed:
-        dur = p.get("duration_hours")
+        dur = p.get("duration_days")
         if dur is not None:
             durations.append(dur)
-    avg_duration_days = (sum(durations) / len(durations) / 24.0) if durations else 0.0
+    avg_duration_days = (sum(durations) / len(durations)) if durations else 0.0
 
     long_count = sum(1 for p in all_positions if p.get("side") == "long")
     short_count = sum(1 for p in all_positions if p.get("side") == "short")
@@ -130,6 +130,7 @@ def _match_positions_fifo(
     entry_fills: list[dict] = []  # fills that opened the current position
     total_entry_cost = 0.0
     total_entry_qty = 0.0
+    peak_qty = 0.0  # track peak position size for size_peak column
     total_fees = 0.0
     position_side = None  # "long" or "short"
     position_open_time = None
@@ -161,6 +162,7 @@ def _match_positions_fifo(
 
             total_entry_cost = price * qty
             total_entry_qty = qty
+            peak_qty = qty
             entry_fills = [fill]
             position_open_time = fill.get("timestamp")
             continue
@@ -172,6 +174,7 @@ def _match_positions_fifo(
                 net_qty += qty
                 total_entry_cost += price * qty
                 total_entry_qty += qty
+                peak_qty = max(peak_qty, abs(net_qty))
                 entry_fills.append(fill)
             else:
                 # Reducing/closing long
@@ -182,6 +185,7 @@ def _match_positions_fifo(
                 net_qty -= qty
                 total_entry_cost += price * qty
                 total_entry_qty += qty
+                peak_qty = max(peak_qty, abs(net_qty))
                 entry_fills.append(fill)
             else:
                 # Reducing/closing short
@@ -201,8 +205,8 @@ def _match_positions_fifo(
                 realized_pnl = (entry_avg - exit_avg) * total_entry_qty - total_fees
                 roi = (entry_avg - exit_avg) / entry_avg if entry_avg > 0 else 0
 
-            # Compute duration
-            duration_hours = None
+            # Compute duration in days (INTEGER column)
+            duration_days = None
             close_time = fill.get("timestamp")
             if position_open_time and close_time:
                 try:
@@ -212,7 +216,7 @@ def _match_positions_fifo(
                     close_dt = datetime.fromisoformat(
                         close_time.replace("Z", "+00:00")
                     )
-                    duration_hours = (close_dt - open_dt).total_seconds() / 3600.0
+                    duration_days = int((close_dt - open_dt).total_seconds() / 86400)
                 except (ValueError, TypeError):
                     pass
 
@@ -224,10 +228,11 @@ def _match_positions_fifo(
                 "entry_price_avg": round(entry_avg, 8),
                 "exit_price_avg": round(exit_avg, 8),
                 "size_base": round(total_entry_qty, 8),
+                "size_peak": round(peak_qty, 8),
                 "realized_pnl": round(realized_pnl, 4),
                 "fee_total": round(total_fees, 4),
                 "roi": round(roi, 6),
-                "duration_hours": round(duration_hours, 2) if duration_hours else None,
+                "duration_days": duration_days,
                 "opened_at": position_open_time,
                 "closed_at": close_time,
                 "fill_count": len(entry_fills) + 1,  # +1 for closing fill
@@ -245,6 +250,7 @@ def _match_positions_fifo(
                     net_qty = remainder
                 total_entry_cost = price * remainder
                 total_entry_qty = remainder
+                peak_qty = remainder
                 entry_fills = [fill]
                 total_fees = 0.0
                 position_open_time = fill.get("timestamp")
@@ -252,6 +258,7 @@ def _match_positions_fifo(
                 net_qty = 0.0
                 total_entry_cost = 0.0
                 total_entry_qty = 0.0
+                peak_qty = 0.0
                 entry_fills = []
                 total_fees = 0.0
                 position_side = None
@@ -268,10 +275,11 @@ def _match_positions_fifo(
             "entry_price_avg": round(entry_avg, 8),
             "exit_price_avg": None,
             "size_base": round(total_entry_qty, 8),
+            "size_peak": round(peak_qty, 8),
             "realized_pnl": None,
             "fee_total": round(total_fees, 4),
             "roi": None,
-            "duration_hours": None,
+            "duration_days": None,
             "opened_at": position_open_time,
             "closed_at": None,
             "fill_count": len(entry_fills),
