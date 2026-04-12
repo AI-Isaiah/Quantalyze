@@ -45,16 +45,16 @@ describe("CustomKpiStrip", () => {
 
 describe("NotesWidget", () => {
   it("renders textarea with placeholder", () => {
-    render(<NotesWidget />);
-    const textarea = screen.getByPlaceholderText(
-      "Personal portfolio notes. Persistence coming soon.",
-    );
+    render(<NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />);
+    const textarea = screen.getByPlaceholderText("Loading...");
     expect(textarea).toBeInTheDocument();
   });
 
-  it("shows reset warning text", () => {
-    render(<NotesWidget />);
-    expect(screen.getByText("Notes reset on page reload")).toBeInTheDocument();
+  it("renders without crash", () => {
+    const { container } = render(
+      <NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+    );
+    expect(container.querySelector("textarea")).toBeTruthy();
   });
 });
 

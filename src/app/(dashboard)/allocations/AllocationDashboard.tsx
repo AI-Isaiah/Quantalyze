@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useCallback } from "react";
 import type { Layout, LayoutItem } from "react-grid-layout";
-import type { Portfolio, PortfolioAnalytics } from "@/lib/types";
+import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
@@ -72,6 +72,8 @@ interface AllocationDashboardProps {
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
   apiKeys: ApiKeyRow[];
+  weightSnapshots?: WeightSnapshot[];
+  positionSnapshots?: PositionSnapshot[];
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,8 @@ export function AllocationDashboard({
   analytics,
   strategies,
   apiKeys,
+  weightSnapshots = [],
+  positionSnapshots = [],
 }: AllocationDashboardProps) {
   const { config, addTile, removeTile, updateLayout, restoreTile } =
     useDashboardConfig();
@@ -250,8 +254,10 @@ export function AllocationDashboard({
       apiKeys,
       metrics,
       compositeReturns,
+      weightSnapshots,
+      positionSnapshots,
     }),
-    [portfolio, analytics, strategies, apiKeys, metrics, compositeReturns],
+    [portfolio, analytics, strategies, apiKeys, metrics, compositeReturns, weightSnapshots, positionSnapshots],
   );
 
   // ── Widget renderer ─────────────────────────────────────────────

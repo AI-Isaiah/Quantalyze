@@ -15,8 +15,9 @@ import {
   formatRelativeTime,
 } from "@/lib/utils";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
+import { ComputeJobsTable } from "./ComputeJobsTable";
 
-const TABS = ["Intro Requests", "Strategy Review", "Allocators"] as const;
+const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Compute Jobs"] as const;
 type Tab = (typeof TABS)[number];
 
 interface AdminTabsProps {
@@ -62,6 +63,7 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators 
       {tab === "Intro Requests" && <IntroRequestsTab requests={introRequests} />}
       {tab === "Strategy Review" && <StrategyReviewTab strategies={pendingStrategies} />}
       {tab === "Allocators" && <AllocatorsTab allocators={pendingAllocators} />}
+      {tab === "Compute Jobs" && <ComputeJobsTable />}
     </div>
   );
 }

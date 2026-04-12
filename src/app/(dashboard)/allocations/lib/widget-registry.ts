@@ -188,7 +188,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 6,
     defaultH: 3,
     description: "Stacked area chart showing how weights evolved over time.",
-    status: "todo",
+    status: "ready",
   },
   "weight-drift-monitor": {
     id: "weight-drift-monitor",
@@ -275,7 +275,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 6,
     defaultH: 4,
     description: "Chronological trade log with filters.",
-    status: "todo",
+    status: "ready",
   },
   "trade-volume": {
     id: "trade-volume",
@@ -285,7 +285,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 4,
     defaultH: 3,
     description: "Daily/weekly trade volume bars.",
-    status: "todo",
+    status: "ready",
   },
   "exposure-by-asset": {
     id: "exposure-by-asset",
@@ -295,7 +295,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 4,
     defaultH: 3,
     description: "Net exposure breakdown by underlying asset.",
-    status: "todo",
+    status: "ready",
   },
   "net-exposure": {
     id: "net-exposure",
@@ -305,7 +305,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 4,
     defaultH: 3,
     description: "Long vs short exposure over time.",
-    status: "todo",
+    status: "ready",
   },
 
   // ── Monitoring (4) ─────────────────────────────────────────────────
@@ -401,7 +401,7 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 4,
     defaultH: 3,
     description: "Free-form markdown notes pinned to the dashboard.",
-    status: "todo",
+    status: "ready",
   },
   "quick-actions": {
     id: "quick-actions",
