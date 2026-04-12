@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.9.0.0] - 2026-04-12
+
+Sprint 3 combined: data pipeline + async jobs wiring + worker dyno + 6 widgets +
+/compare depth + notes widget + admin compute-jobs table. Single branch, 5 bisectable
+commits. Three-model review (Claude + Codex + Grok) on the plan; 30+ fixes applied
+before implementation.
+
+### Added
+- **Compute queue wiring (2.9 R2).** `/api/keys/sync` now routes through the
+  `compute_jobs` durable queue when `USE_COMPUTE_JOBS_QUEUE=true`. Worker is the
+  sole writer of `strategy_analytics.computation_status` on the new path; the
+  legacy `after()` fire-and-forget is preserved when the flag is OFF (default).
+  Response shape unchanged — callers (ApiKeyManager, SyncPreviewStep, wizard) need
+  zero changes.
+- **Dedicated Railway worker service** (`main_worker.py`). Three asyncio loops:
+  dispatch (30s), watchdog (60s), daily position-polling enqueue (24h). Each tick
+  factored into a testable async function. Signal-based graceful shutdown. Calls
+  `validate_kek_on_startup()` at boot. Health server on separate port.
+- **Job dispatcher** (`services/job_worker.py`). Per-kind handlers with timeouts
+  (sync_trades 5m, compute_analytics 15m, compute_portfolio 10m, poll_positions 3m).
+  CCXT error classification table (transient/permanent/unknown). Circuit breaker
+  per api_key via `last_429_at` + `defer_compute_job` (defers without burning retries).
+  Decrypt credentials via KEK/DEK envelope before exchange calls.
+- **Position polling pipeline** (`services/positions.py`). `fetch_positions()` per
+  exchange (Binance unified, OKX hedge mode, Bybit CCXT + raw V5 fallback).
+  `persist_position_snapshots()` idempotent upserts via partial unique index.
+  Bybit schema drift test fixture.
+- **Atomic UI status bridge** (`services/analytics_status.py` + migration 038 RPC).
+  Maps compute_jobs aggregate state to `strategy_analytics.computation_status` in
+  a single SQL statement. Eliminates the read-then-write race from Eng review
+  Finding 2-B.
+- **Migrations 033-038.** Admin view + defer RPC + per-kind watchdog + position/weight
+  snapshot tables + poll_positions kind + user_notes table + sync_status RPC. All
+  self-verifying with DO blocks.
+- **Admin compute-jobs table.** `/api/admin/compute-jobs` route gated by
+  `isAdminUser`. `ComputeJobsTable.tsx` Variant C dense table with colored status
+  badges, status/kind/exchange filters, 50-row pagination, auto-refresh toggle.
+  New "Compute Jobs" tab in AdminTabs.
+- **6 widget wirings** (all flipped `status: "todo"` → `"ready"`):
+  - AllocationOverTime: stacked AreaChart of weight_snapshots
+  - TradingActivityLog: dense table of daily PnL + info footnote
+  - TradeVolume: BarChart with positive/negative coloring + info footnote
+  - ExposureByAsset: horizontal BarChart by |size_usd|
+  - NetExposure: LineChart of net USD exposure over time
+  - NotesWidget: `/api/notes`-backed textarea with 1s debounce + save indicator
+- **/compare enhancements.** `CompareEquityOverlay`: 2-4 equity curves overlaid
+  (Recharts LineChart, 320px). `CompareCorrelationMatrix`: NxN table with Pearson
+  correlation + color coding at extremes.
+- **API routes.** `/api/activity/portfolio` (daily PnL aggregation across portfolio
+  strategies). `/api/notes` (GET + PATCH with 100KB cap, portfolio ownership check).
+- **One-time deploy script** (`scripts/reset_stuck_computing_rows.py`). Cleans up
+  `computation_status='computing'` rows stranded by the legacy `after()` path.
+- **Dashboard defaults.** net-exposure, trade-volume, exposure-by-asset added to
+  `DEFAULT_LAYOUT` for first-time allocators.
+
+### Changed
+- **`routers/analytics.py`** refactored to thin wrapper calling
+  `services/analytics_runner.py` for reuse by both the HTTP endpoint and the worker.
+- **Dockerfile** documented Railway CMD override for worker service (`python -m
+  main_worker`). Default CMD remains uvicorn for FastAPI.
+
 ## [0.8.1.0] - 2026-04-11
 
 Second design-review pass on `/allocations`: the four deferred findings from the
