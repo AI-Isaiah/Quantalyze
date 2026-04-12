@@ -141,7 +141,7 @@ export function PerformanceReport({ analytics, percentiles, positions }: { analy
         <VolumeExposureTab analytics={analytics} />
       )}
       {tab === "Positions" && (
-        <PositionsTab analytics={analytics} positions={positions ?? null} />
+        <PositionsTab analytics={analytics} positions={positions || null} />
       )}
     </div>
   );
