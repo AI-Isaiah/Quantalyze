@@ -27,6 +27,7 @@ interface VolumeDay {
 export default function TradeVolume({ data }: WidgetProps) {
   const portfolioId: string | undefined = data?.portfolio?.id;
   const [volumeByDay, setVolumeByDay] = useState<VolumeDay[]>([]);
+  const [hasFills, setHasFills] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -42,7 +43,10 @@ export default function TradeVolume({ data }: WidgetProps) {
         );
         if (!res.ok) throw new Error("fetch failed");
         const json = await res.json();
-        if (!cancelled) setVolumeByDay(json.volumeByDay ?? []);
+        if (!cancelled) {
+          setVolumeByDay(json.volumeByDay ?? []);
+          setHasFills(json.has_fills === true);
+        }
       } catch {
         // silent
       } finally {
@@ -109,9 +113,11 @@ export default function TradeVolume({ data }: WidgetProps) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <p className="px-3 py-1 text-xs" style={{ color: "#718096", fontSize: 12 }}>
-        Daily P&amp;L aggregated from exchange account history. Trade-level granularity coming in a future sprint.
-      </p>
+      {!hasFills && (
+        <p className="px-3 py-1 text-xs" style={{ color: "#718096", fontSize: 12 }}>
+          Daily P&amp;L aggregated from exchange account history. Trade-level granularity coming in a future sprint.
+        </p>
+      )}
     </div>
   );
 }

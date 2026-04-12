@@ -1,5 +1,11 @@
 import ccxt.async_support as ccxt
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
+
+logger = logging.getLogger("quantalyze.analytics")
 
 
 EXCHANGE_CLASSES: dict[str, type] = {
@@ -110,9 +116,6 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     exactly what we need for analytics: daily profit/loss.
     """
     daily_pnl: list[dict[str, Any]] = []
-
-    import logging
-    logger = logging.getLogger("quantalyze.analytics")
 
     try:
         if exchange.id == "okx":
@@ -298,10 +301,315 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                 pass
 
     except Exception as e:
-        import logging
-        logging.getLogger("quantalyze.analytics").error("fetch_daily_pnl failed: %s", str(e))
+        logger.error("fetch_daily_pnl failed: %s", str(e))
 
     return daily_pnl
+
+
+@dataclass
+class RawFill:
+    exchange_order_id: str
+    exchange_fill_id: str
+    symbol: str
+    side: str  # "buy" or "sell"
+    price: Decimal
+    amount: Decimal
+    cost: Decimal
+    fee: Decimal
+    fee_currency: str
+    is_maker: bool
+    timestamp: datetime
+    exchange: str
+    raw_data: dict | None = None
+
+
+async def fetch_raw_trades(
+    exchange: ccxt.Exchange,
+    strategy_id: str,
+    supabase,
+    since_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch raw fill-level trades from the exchange.
+
+    Returns a list of dicts normalized to the trades table schema with
+    is_fill=True. Overlap window: subtracts 1 hour from since_ms for
+    late-arriving fills; dedup is handled by the DB partial unique index.
+    """
+    from services.db import db_execute
+
+    fills: list[dict[str, Any]] = []
+
+    # Apply overlap window for late-arriving fills
+    effective_since = None
+    if since_ms is not None:
+        effective_since = since_ms - 3_600_000  # subtract 1 hour
+
+    try:
+        if exchange.id == "binance":
+            fills = await _fetch_raw_trades_binance(
+                exchange, strategy_id, supabase, effective_since
+            )
+        elif exchange.id == "okx":
+            fills = await _fetch_raw_trades_okx(exchange, effective_since)
+        elif exchange.id == "bybit":
+            fills = await _fetch_raw_trades_bybit(exchange, effective_since)
+        else:
+            logger.warning("fetch_raw_trades: unsupported exchange %s", exchange.id)
+    except Exception as e:
+        logger.error("fetch_raw_trades failed for %s: %s", exchange.id, str(e))
+        raise
+
+    logger.info(
+        "fetch_raw_trades: %d fills from %s for strategy %s",
+        len(fills), exchange.id, strategy_id,
+    )
+    return fills
+
+
+async def _fetch_raw_trades_binance(
+    exchange: ccxt.Exchange,
+    strategy_id: str,
+    supabase,
+    since_ms: int | None,
+) -> list[dict[str, Any]]:
+    """Binance: per-symbol iteration using fetch_my_trades."""
+    from services.db import db_execute
+
+    # Get symbol list: DISTINCT symbols from trades + position_snapshots
+    def _get_symbols():
+        trade_syms = (
+            supabase.table("trades")
+            .select("symbol")
+            .eq("strategy_id", strategy_id)
+            .eq("is_fill", True)
+            .execute()
+        )
+        pos_syms = (
+            supabase.table("position_snapshots")
+            .select("symbol")
+            .eq("strategy_id", strategy_id)
+            .execute()
+        )
+        symbols = set()
+        for row in trade_syms.data or []:
+            if row.get("symbol"):
+                symbols.add(row["symbol"])
+        for row in pos_syms.data or []:
+            if row.get("symbol"):
+                symbols.add(row["symbol"])
+        return list(symbols)
+
+    symbols = await db_execute(_get_symbols)
+
+    # Cold start: fetch current positions to get symbols
+    if not symbols:
+        try:
+            positions = await exchange.fetch_positions()
+            for pos in positions:
+                sym = pos.get("symbol")
+                contracts = pos.get("contracts") or 0
+                if sym and float(contracts) > 0:
+                    symbols.append(sym)
+            # Deduplicate
+            symbols = list(set(symbols))
+            logger.info(
+                "Binance cold start: discovered %d symbols from positions", len(symbols)
+            )
+        except Exception as e:
+            logger.warning("Binance cold start position fetch failed: %s", str(e))
+
+    fills: list[dict[str, Any]] = []
+    for symbol in symbols:
+        try:
+            # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
+            ccxt_symbol = symbol
+            if "/" not in ccxt_symbol:
+                # Try to find the symbol in loaded markets
+                if hasattr(exchange, "markets") and exchange.markets:
+                    for mkt_symbol, mkt in exchange.markets.items():
+                        normalized = mkt_symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
+                        if normalized == symbol:
+                            ccxt_symbol = mkt_symbol
+                            break
+
+            trades = await exchange.fetch_my_trades(
+                ccxt_symbol, since=since_ms, limit=1000
+            )
+            for t in trades:
+                fills.append(_normalize_fill(t, exchange.id))
+        except Exception as e:
+            logger.warning(
+                "Binance fetch_my_trades failed for %s: %s", symbol, str(e)
+            )
+            continue
+
+    return fills
+
+
+async def _fetch_raw_trades_okx(
+    exchange: ccxt.Exchange,
+    since_ms: int | None,
+) -> list[dict[str, Any]]:
+    """OKX: private_get_trade_fills_history with cursor-based pagination."""
+    fills: list[dict[str, Any]] = []
+    cursor = ""
+
+    for page in range(100):
+        params: dict[str, str] = {"instType": "SWAP", "limit": "100"}
+        if cursor:
+            params["before"] = cursor
+        if since_ms and not cursor:
+            params["begin"] = str(since_ms)
+
+        try:
+            result = await exchange.private_get_trade_fills_history(params)
+            data = result.get("data", [])
+            if not data:
+                break
+
+            for fill in data:
+                ts_raw = fill.get("ts", "")
+                if ts_raw and ts_raw.isdigit():
+                    ts_dt = datetime.fromtimestamp(
+                        int(ts_raw) / 1000, tz=timezone.utc
+                    )
+                else:
+                    ts_dt = datetime.now(timezone.utc)
+
+                symbol = fill.get("instId", "").replace("-", "")
+                side = fill.get("side", "").lower()
+                price = float(fill.get("fillPx", 0))
+                amount = float(fill.get("fillSz", 0))
+                fee = abs(float(fill.get("fee", 0)))
+                fee_currency = fill.get("feeCcy", "USDT")
+                is_maker = fill.get("execType", "") == "M"
+
+                raw_data = dict(fill)
+                # Include posSide for hedge mode
+                if fill.get("posSide"):
+                    raw_data["posSide"] = fill["posSide"]
+
+                fills.append({
+                    "exchange": "okx",
+                    "symbol": symbol,
+                    "side": side,
+                    "price": price,
+                    "quantity": amount,
+                    "fee": fee,
+                    "fee_currency": fee_currency,
+                    "timestamp": ts_dt.isoformat(),
+                    "order_type": "fill",
+                    "exchange_order_id": fill.get("ordId", ""),
+                    "exchange_fill_id": fill.get("tradeId", ""),
+                    "is_fill": True,
+                    "is_maker": is_maker,
+                    "cost": price * amount,
+                    "raw_data": raw_data,
+                })
+
+            cursor = data[-1].get("tradeId", "")
+            if len(data) < 100:
+                break
+        except Exception as e:
+            logger.warning("OKX fills fetch failed page %d: %s", page, str(e))
+            break
+
+    return fills
+
+
+async def _fetch_raw_trades_bybit(
+    exchange: ccxt.Exchange,
+    since_ms: int | None,
+) -> list[dict[str, Any]]:
+    """Bybit: private_get_v5_execution_list with cursor-based pagination."""
+    fills: list[dict[str, Any]] = []
+    cursor = ""
+
+    for page in range(100):
+        params: dict[str, str] = {"category": "linear", "limit": "100"}
+        if cursor:
+            params["cursor"] = cursor
+        if since_ms and not cursor:
+            params["startTime"] = str(since_ms)
+
+        try:
+            result = await exchange.private_get_v5_execution_list(params)
+            items = result.get("result", {}).get("list", [])
+            if not items:
+                break
+
+            for fill in items:
+                ts_raw = fill.get("execTime", "")
+                if ts_raw and ts_raw.isdigit():
+                    ts_dt = datetime.fromtimestamp(
+                        int(ts_raw) / 1000, tz=timezone.utc
+                    )
+                else:
+                    ts_dt = datetime.now(timezone.utc)
+
+                symbol = fill.get("symbol", "")
+                side = fill.get("side", "").lower()
+                price = float(fill.get("execPrice", 0))
+                amount = float(fill.get("execQty", 0))
+                fee = abs(float(fill.get("execFee", 0)))
+                fee_currency = fill.get("feeCurrency", "USDT")
+                is_maker = fill.get("isMaker", "false") == "true"
+
+                fills.append({
+                    "exchange": "bybit",
+                    "symbol": symbol,
+                    "side": side,
+                    "price": price,
+                    "quantity": amount,
+                    "fee": fee,
+                    "fee_currency": fee_currency,
+                    "timestamp": ts_dt.isoformat(),
+                    "order_type": "fill",
+                    "exchange_order_id": fill.get("orderId", ""),
+                    "exchange_fill_id": fill.get("execId", ""),
+                    "is_fill": True,
+                    "is_maker": is_maker,
+                    "cost": price * amount,
+                    "raw_data": dict(fill),
+                })
+
+            next_cursor = result.get("result", {}).get("nextPageCursor", "")
+            if not next_cursor:
+                break
+            cursor = next_cursor
+        except Exception as e:
+            logger.warning("Bybit execution list failed page %d: %s", page, str(e))
+            break
+
+    return fills
+
+
+def _normalize_fill(trade: dict, exchange_id: str) -> dict[str, Any]:
+    """Normalize a CCXT unified trade to our fill dict shape."""
+    fee_info = trade.get("fee") or {}
+    fee_cost = abs(float(fee_info.get("cost", 0) or 0))
+    fee_currency = fee_info.get("currency", "USDT") or "USDT"
+    price = float(trade.get("price", 0))
+    amount = float(trade.get("amount", 0))
+
+    return {
+        "exchange": exchange_id,
+        "symbol": (trade.get("symbol", "")
+                   .replace("/", "").replace(":USDT", "").replace(":USD", "")),
+        "side": trade.get("side", ""),
+        "price": price,
+        "quantity": amount,
+        "fee": fee_cost,
+        "fee_currency": fee_currency,
+        "timestamp": trade.get("datetime", ""),
+        "order_type": "fill",
+        "exchange_order_id": trade.get("order", ""),
+        "exchange_fill_id": trade.get("id", ""),
+        "is_fill": True,
+        "is_maker": trade.get("takerOrMaker") == "maker",
+        "cost": price * amount,
+        "raw_data": trade.get("info"),
+    }
 
 
 async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, since_ms: int | None = None) -> list[dict[str, Any]]:
@@ -315,7 +623,6 @@ def parse_since_ms(last_sync_at: str | None) -> int | None:
     if not last_sync_at:
         return None
     try:
-        from datetime import datetime
         dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
         return int(dt.timestamp() * 1000)
     except Exception:
@@ -324,14 +631,11 @@ def parse_since_ms(last_sync_at: str | None) -> int | None:
 
 async def fetch_usdt_balance(exchange: ccxt.Exchange) -> float | None:
     """Fetch total USDT balance from exchange. Returns None on failure."""
-    import logging
     try:
         balance = await exchange.fetch_balance()
         usdt_total = balance.get("total", {}).get("USDT", 0)
         if usdt_total and float(usdt_total) > 0:
             return float(usdt_total)
     except Exception as e:
-        logging.getLogger("quantalyze.analytics").warning(
-            "Could not fetch account balance: %s", str(e)
-        )
+        logger.warning("Could not fetch account balance: %s", str(e))
     return None

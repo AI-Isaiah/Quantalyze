@@ -7,6 +7,7 @@ import type { DailyPnlRow } from "@/lib/types";
 export default function TradingActivityLog({ data }: WidgetProps) {
   const portfolioId: string | undefined = data?.portfolio?.id;
   const [activity, setActivity] = useState<DailyPnlRow[]>([]);
+  const [hasFills, setHasFills] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -22,7 +23,10 @@ export default function TradingActivityLog({ data }: WidgetProps) {
         );
         if (!res.ok) throw new Error("fetch failed");
         const json = await res.json();
-        if (!cancelled) setActivity(json.activity ?? []);
+        if (!cancelled) {
+          setActivity(json.activity ?? []);
+          setHasFills(json.has_fills === true);
+        }
       } catch {
         // silent — empty state is fine
       } finally {
@@ -107,9 +111,11 @@ export default function TradingActivityLog({ data }: WidgetProps) {
           </tbody>
         </table>
       </div>
-      <p className="px-3 py-2 text-xs" style={{ color: "#718096", fontSize: 12 }}>
-        Daily P&amp;L aggregated from exchange account history. Trade-level granularity coming in a future sprint.
-      </p>
+      {!hasFills && (
+        <p className="px-3 py-2 text-xs" style={{ color: "#718096", fontSize: 12 }}>
+          Daily P&amp;L aggregated from exchange account history. Trade-level granularity coming in a future sprint.
+        </p>
+      )}
     </div>
   );
 }

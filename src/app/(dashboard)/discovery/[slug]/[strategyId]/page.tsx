@@ -26,9 +26,15 @@ export default async function StrategyDetailPage({
 
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
-  const [result, percentileMap] = await Promise.all([
+  const [result, percentileMap, positionsResult] = await Promise.all([
     getStrategyDetail(strategyId),
     getPercentiles(slug),
+    supabase
+      .from("positions")
+      .select("id, strategy_id, symbol, side, status, entry_price_avg, exit_price_avg, size_base, size_peak, realized_pnl, fee_total, fill_count, opened_at, closed_at, duration_days, roi")
+      .eq("strategy_id", strategyId)
+      .order("roi", { ascending: false })
+      .limit(20),
   ]);
 
   if (!result) {
@@ -108,7 +114,7 @@ export default async function StrategyDetailPage({
           <ComputeStatus status={analytics.computation_status} error={analytics.computation_error} />
         </div>
       )}
-      <PerformanceReport analytics={analytics} percentiles={percentiles} />
+      <PerformanceReport analytics={analytics} percentiles={percentiles} positions={positionsResult?.data ?? null} />
       <Disclaimer variant="strategy" />
 
       {/* Sticky Request Intro CTA */}

@@ -109,6 +109,59 @@ export interface StrategyAnalytics {
   rolling_metrics: Record<string, { date: string; value: number }[]> | null;
   return_quantiles: Record<string, number[]> | null;
   trade_metrics: Record<string, unknown> | null;
+  volume_metrics: VolumeMetrics | null;
+  exposure_metrics: ExposureMetrics | null;
+  data_quality_flags: Record<string, unknown> | null;
+}
+
+export interface VolumeMetrics {
+  buy_volume_pct: number;
+  sell_volume_pct: number;
+  long_volume_pct: number;
+  short_volume_pct: number;
+  total_fills: number;
+  total_volume_usd: number;
+}
+
+export interface ExposureMetrics {
+  mean_gross_exposure: number;
+  std_gross_exposure: number;
+  max_gross_exposure: number;
+  mean_net_exposure: number;
+  std_net_exposure: number;
+  max_net_exposure: number;
+}
+
+export interface TradeMetrics {
+  total_positions: number;
+  open_positions: number;
+  closed_positions: number;
+  win_rate: number;
+  avg_roi: number;
+  avg_duration_days: number;
+  long_count: number;
+  short_count: number;
+  best_trade_roi: number;
+  worst_trade_roi: number;
+}
+
+export interface Position {
+  id: string;
+  strategy_id: string;
+  symbol: string;
+  side: "long" | "short";
+  status: "open" | "closed";
+  entry_price_avg: number;
+  exit_price_avg: number | null;
+  size_base: number;
+  size_peak: number;
+  realized_pnl: number | null;
+  fee_total: number | null;
+  fill_count: number;
+  opened_at: string;
+  closed_at: string | null;
+  duration_days: number | null;
+  roi: number | null;
 }
 
 export interface ContactRequest {

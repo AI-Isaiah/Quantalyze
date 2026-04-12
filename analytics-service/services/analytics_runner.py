@@ -46,6 +46,37 @@ from services.transforms import trades_to_daily_returns
 logger = logging.getLogger("quantalyze.analytics.runner")
 
 
+def _compute_volume_metrics(fills: list[dict]) -> dict:
+    """Compute volume metrics from raw fill data.
+
+    fills: list of dicts with 'side' and 'cost' keys.
+    """
+    total_cost = 0.0
+    buy_cost = 0.0
+    sell_cost = 0.0
+
+    for fill in fills:
+        cost = float(fill.get("cost", 0) or 0)
+        side = (fill.get("side") or "").lower()
+        total_cost += cost
+        if side == "buy":
+            buy_cost += cost
+        elif side == "sell":
+            sell_cost += cost
+
+    buy_pct = buy_cost / total_cost if total_cost > 0 else 0.0
+    sell_pct = sell_cost / total_cost if total_cost > 0 else 0.0
+
+    return {
+        "buy_volume_pct": round(buy_pct, 4),
+        "sell_volume_pct": round(sell_pct, 4),
+        "long_volume_pct": round(buy_pct, 4),  # approximation from fill sides
+        "short_volume_pct": round(sell_pct, 4),
+        "total_fills": len(fills),
+        "total_volume_usd": round(total_cost, 2),
+    }
+
+
 async def run_strategy_analytics(strategy_id: str) -> dict:
     """Run the full analytics pipeline for a single strategy.
 
@@ -56,7 +87,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
     # Verify strategy exists
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id")
+        .select("id, user_id, api_key_id")
         .eq("id", strategy_id)
         .single()
         .execute()
@@ -76,11 +107,12 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
     )
 
     try:
-        # Fetch trades
+        # Fetch trades (exclude raw fills to avoid double-counting)
         result = await db_execute(
             lambda: supabase.table("trades")
             .select("*")
             .eq("strategy_id", strategy_id)
+            .neq("is_fill", True)
             .order("timestamp")
             .execute()
         )
@@ -104,16 +136,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # strategy_id column).
         account_balance = None
         try:
-            strategy_with_key = await db_execute(
-                lambda: supabase.table("strategies")
-                .select("api_key_id")
-                .eq("id", strategy_id)
-                .single()
-                .execute()
-            )
             api_key_id = (
-                strategy_with_key.data.get("api_key_id")
-                if strategy_with_key.data
+                strategy_result.data.get("api_key_id")
+                if strategy_result.data
                 else None
             )
             if api_key_id:
@@ -184,6 +209,68 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 on_conflict="strategy_id",
             ).execute()
         )
+
+        # --- Sprint 4: Position reconstruction + fill metrics (graceful degradation) ---
+        try:
+            from services.position_reconstruction import (
+                reconstruct_positions,
+                compute_exposure_metrics,
+            )
+
+            trade_metrics = await reconstruct_positions(strategy_id, supabase)
+            exposure_metrics = await compute_exposure_metrics(strategy_id, supabase)
+
+            # Compute volume metrics from fills
+            fills_result = await db_execute(
+                lambda: supabase.table("trades")
+                .select("side, cost")
+                .eq("strategy_id", strategy_id)
+                .eq("is_fill", True)
+                .execute()
+            )
+            volume_metrics = (
+                _compute_volume_metrics(fills_result.data)
+                if fills_result.data
+                else None
+            )
+
+            # Upsert fill metrics
+            fill_update: dict = {"strategy_id": strategy_id}
+            if trade_metrics:
+                fill_update["trade_metrics"] = trade_metrics
+            if volume_metrics:
+                fill_update["volume_metrics"] = volume_metrics
+            if exposure_metrics:
+                fill_update["exposure_metrics"] = exposure_metrics
+
+            if len(fill_update) > 1:  # more than just strategy_id
+                await db_execute(
+                    lambda: supabase.table("strategy_analytics")
+                    .upsert(fill_update, on_conflict="strategy_id")
+                    .execute()
+                )
+        except Exception as e:
+            logger.warning(
+                "Position reconstruction failed for %s: %s", strategy_id, str(e)
+            )
+            # Set data quality flag but don't fail the overall job
+            try:
+                existing = data_quality_flags or {}
+                existing["position_metrics_failed"] = True
+                existing["position_metrics_error"] = str(e)[:200]
+                await db_execute(
+                    lambda: supabase.table("strategy_analytics")
+                    .upsert(
+                        {
+                            "strategy_id": strategy_id,
+                            "data_quality_flags": existing,
+                        },
+                        on_conflict="strategy_id",
+                    )
+                    .execute()
+                )
+            except Exception:
+                pass
 
         return {"status": "complete", "strategy_id": strategy_id}
 

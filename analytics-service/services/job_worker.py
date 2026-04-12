@@ -105,7 +105,7 @@ class DispatchResult:
 # to fail-classify itself rather than being yanked back to 'pending' by the
 # watchdog while still running.
 TIMEOUT_PER_KIND: dict[str, float] = {
-    "sync_trades": 5 * 60,       # 5 minutes
+    "sync_trades": 15 * 60,      # 15 minutes (supports 90-day raw fill backfill)
     "compute_analytics": 15 * 60,  # 15 minutes
     "compute_portfolio": 10 * 60,  # 10 minutes
     "poll_positions": 3 * 60,    # 3 minutes (stub; real handler lands commit 3)
@@ -356,9 +356,27 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     strategy_id = job["strategy_id"]
     since_ms = parse_since_ms(ctx.key_row.get("last_sync_at"))
 
+    raw_fills: list = []
     try:
         trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
         account_balance = await fetch_usdt_balance(ctx.exchange)
+
+        # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
+        import os
+        if os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true":
+            try:
+                from services.exchange import fetch_raw_trades
+
+                raw_fills = await fetch_raw_trades(
+                    ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
+                )
+            except Exception as e:
+                # Phase 2 failure should NOT fail Phase 1
+                logger.warning(
+                    "Raw fill ingestion failed for strategy %s (Phase 1 succeeded): %s",
+                    strategy_id,
+                    str(e),
+                )
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
         raise
@@ -382,6 +400,24 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         inserted = await db_execute(_sync)
         logger.info(
             "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
+        )
+
+    # Persist raw fills (Phase 2, after exchange is closed)
+    if raw_fills:
+        # Direct insert with ON CONFLICT DO NOTHING (dedup via partial unique index)
+        # Cannot use sync_trades RPC — it DELETE+INSERTs, which would destroy Phase 1 daily_pnl
+        for i in range(0, len(raw_fills), 100):
+            batch = raw_fills[i:i + 100]
+            def _insert_fills(rows=batch):
+                ctx.supabase.table("trades").upsert(
+                    [{"strategy_id": strategy_id, **fill} for fill in rows],
+                    on_conflict="strategy_id,exchange,exchange_fill_id",
+                    ignore_duplicates=True,
+                ).execute()
+            await db_execute(_insert_fills)
+        logger.info(
+            "sync_trades Phase 2: persisted %d raw fills for strategy %s",
+            len(raw_fills), strategy_id,
         )
 
     # Advance sync cursor always (even for empty fetches).

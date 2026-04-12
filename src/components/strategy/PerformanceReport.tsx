@@ -15,13 +15,15 @@ import { WorstDrawdowns } from "@/components/charts/WorstDrawdowns";
 import { CorrelationWithBenchmark } from "@/components/charts/CorrelationWithBenchmark";
 import { MetricPanel } from "./MetricPanel";
 import type { Percentiles } from "./MetricPanel";
+import { VolumeExposureTab } from "./VolumeExposureTab";
+import { PositionsTab } from "./PositionsTab";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
-import type { StrategyAnalytics } from "@/lib/types";
+import type { StrategyAnalytics, Position } from "@/lib/types";
 
-const TABS = ["Overview", "Returns", "Risk"] as const;
+const TABS = ["Overview", "Returns", "Risk", "Volume & Exposure", "Positions"] as const;
 type Tab = (typeof TABS)[number];
 
-export function PerformanceReport({ analytics, percentiles }: { analytics: StrategyAnalytics; percentiles?: Percentiles }) {
+export function PerformanceReport({ analytics, percentiles, positions }: { analytics: StrategyAnalytics; percentiles?: Percentiles; positions?: Position[] | null }) {
   const [tab, setTab] = useState<Tab>("Overview");
 
   const benchmarkSeries = useMemo(() => {
@@ -125,12 +127,22 @@ export function PerformanceReport({ analytics, percentiles }: { analytics: Strat
           )}
         </div>
 
-        <div className="flex-[35] min-w-0">
-          <Card padding="sm">
-            <MetricPanel analytics={analytics} percentiles={percentiles} />
-          </Card>
-        </div>
+        {(tab === "Overview" || tab === "Returns" || tab === "Risk") && (
+          <div className="flex-[35] min-w-0">
+            <Card padding="sm">
+              <MetricPanel analytics={analytics} percentiles={percentiles} />
+            </Card>
+          </div>
+        )}
       </div>
+
+      {/* Full-width tabs with their own layout */}
+      {tab === "Volume & Exposure" && (
+        <VolumeExposureTab analytics={analytics} />
+      )}
+      {tab === "Positions" && (
+        <PositionsTab analytics={analytics} positions={positions || null} />
+      )}
     </div>
   );
 }
