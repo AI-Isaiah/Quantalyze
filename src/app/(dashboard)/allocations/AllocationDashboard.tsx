@@ -25,6 +25,7 @@ import { DashboardGrid } from "./components/DashboardGrid";
 import { AddWidgetModal } from "./components/AddWidgetModal";
 import { UndoToast } from "./components/UndoToast";
 import { WIDGET_COMPONENTS } from "./widgets";
+import { InsightStrip } from "@/components/portfolio/InsightStrip";
 
 // ---------------------------------------------------------------------------
 // Types — matches MyAllocationClient props exactly
@@ -67,11 +68,19 @@ interface ApiKeyRow {
   created_at: string;
 }
 
+interface AlertCount {
+  high: number;
+  medium: number;
+  low: number;
+  total: number;
+}
+
 interface AllocationDashboardProps {
   portfolio: Portfolio;
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
   apiKeys: ApiKeyRow[];
+  alertCount?: AlertCount;
   weightSnapshots?: WeightSnapshot[];
   positionSnapshots?: PositionSnapshot[];
 }
@@ -94,6 +103,7 @@ export function AllocationDashboard({
   analytics,
   strategies,
   apiKeys,
+  alertCount,
   weightSnapshots = [],
   positionSnapshots = [],
 }: AllocationDashboardProps) {
@@ -260,12 +270,13 @@ export function AllocationDashboard({
         strategy: row.strategy,
       })),
       apiKeys,
+      alertCount,
       metrics,
       compositeReturns,
       weightSnapshots,
       positionSnapshots,
     }),
-    [portfolio, analytics, strategies, apiKeys, metrics, compositeReturns, weightSnapshots, positionSnapshots],
+    [portfolio, analytics, strategies, apiKeys, alertCount, metrics, compositeReturns, weightSnapshots, positionSnapshots],
   );
 
   // ── Widget renderer ─────────────────────────────────────────────
@@ -340,6 +351,11 @@ export function AllocationDashboard({
         timeframe={timeframe}
         aum={aum}
       />
+
+      {/* Insight strip — fixed above the widget grid */}
+      <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
+        <InsightStrip analytics={analytics} portfolioId={portfolio.id} max={3} />
+      </div>
 
       {/* Grid */}
       <DashboardGrid

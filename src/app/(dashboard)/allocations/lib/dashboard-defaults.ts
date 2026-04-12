@@ -1,5 +1,15 @@
 import type { TileConfig } from "./types";
 
+/**
+ * Bump this version whenever the default GRID layout changes materially.
+ * The useDashboardConfig hook compares this against the persisted version
+ * and resets to defaults when it differs.
+ *
+ * Sprint 4: NOT bumped. InsightStrip and health score live ABOVE the grid
+ * (fixed elements, not grid tiles), so existing user layouts are preserved.
+ */
+export const LAYOUT_VERSION = 1;
+
 export const DEFAULT_LAYOUT: TileConfig[] = [
   { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
   { i: "drawdown-chart-1", widgetId: "drawdown-chart", x: 0, y: 4, w: 12, h: 4 },

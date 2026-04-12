@@ -306,7 +306,7 @@ export default async function DemoPage({ searchParams }: DemoPageProps) {
         attribution={analytics?.attribution_breakdown ?? null}
       />
 
-      <InsightStrip className="mt-10" analytics={analytics} />
+      <InsightStrip className="mt-10" analytics={analytics} portfolioId={portfolio?.id} />
 
       {/* Evidence / Action divider */}
       <div className="my-10 border-t border-border" />

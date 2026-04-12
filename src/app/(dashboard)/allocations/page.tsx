@@ -28,7 +28,7 @@ export default async function MyAllocationPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { portfolio, analytics, strategies, apiKeys } =
+  const { portfolio, analytics, strategies, apiKeys, alertCount } =
     await getMyAllocationDashboard(user.id);
 
   if (!portfolio) {
@@ -64,6 +64,7 @@ export default async function MyAllocationPage() {
       analytics={analytics}
       strategies={strategies}
       apiKeys={apiKeys}
+      alertCount={alertCount}
     />
   );
 }

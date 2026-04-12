@@ -3,18 +3,22 @@
 import { useState, useEffect, useCallback } from "react";
 import type { DashboardConfig, TileConfig } from "../lib/types";
 import { WIDGET_REGISTRY } from "../lib/widget-registry";
-import { DEFAULT_LAYOUT } from "../lib/dashboard-defaults";
+import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 
 const STORAGE_KEY = "quantalyze-dashboard-config";
 
 function loadConfig(): DashboardConfig {
   if (typeof window === "undefined") {
-    return { tiles: DEFAULT_LAYOUT, timeframe: "YTD" };
+    return { tiles: DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION };
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DashboardConfig;
+      // Reset to defaults when layout version changes (new widgets added)
+      if (parsed.layoutVersion !== LAYOUT_VERSION) {
+        return { tiles: DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION };
+      }
       if (Array.isArray(parsed.tiles) && parsed.tiles.length > 0) {
         return parsed;
       }
@@ -22,7 +26,7 @@ function loadConfig(): DashboardConfig {
   } catch {
     // Corrupted data — fall back to defaults
   }
-  return { tiles: DEFAULT_LAYOUT, timeframe: "YTD" };
+  return { tiles: DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION };
 }
 
 function persist(config: DashboardConfig): void {
@@ -137,7 +141,7 @@ export function useDashboardConfig(): UseDashboardConfigReturn {
   }, []);
 
   const resetToDefault = useCallback(() => {
-    setConfig({ tiles: DEFAULT_LAYOUT, timeframe: "YTD" });
+    setConfig({ tiles: DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION });
   }, []);
 
   return { config, addTile, removeTile, updateLayout, updateTileConfig, restoreTile, resetToDefault };

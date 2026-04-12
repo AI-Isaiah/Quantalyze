@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import type { PortfolioAnalytics } from "@/lib/types";
-import { computeAllInsights } from "@/lib/portfolio-insights";
+import { computeAllInsights, type PortfolioInsight } from "@/lib/portfolio-insights";
+import { BridgeTrigger } from "./BridgeTrigger";
 
 /**
  * `<InsightStrip>` — Moment 2 ("what I didn't know") rendered as a tight
@@ -9,10 +10,16 @@ import { computeAllInsights } from "@/lib/portfolio-insights";
  *
  * If zero rules fire, the strip stays visible with a fallback "No unusual
  * activity" sentence so the layout doesn't shift mid-page.
+ *
+ * When an underperformance insight targets a specific strategy, the sentence
+ * is wrapped in `<BridgeTrigger>` which renders a "Find Replacement" link
+ * and opens the ReplacementPanel slide-out on click.
  */
 
 export interface InsightStripProps {
   analytics: PortfolioAnalytics | null;
+  /** Portfolio ID — required for bridge triggers to call /api/bridge. */
+  portfolioId?: string | null;
   /** Maximum number of insights to render. Default 3. */
   max?: number;
   className?: string;
@@ -32,8 +39,18 @@ const SEVERITY_LABEL: Record<Severity, string> = {
   low: "Low severity",
 };
 
+/** Returns true when an insight can activate the bridge trigger. */
+function isBridgeable(insight: PortfolioInsight, portfolioId?: string | null): boolean {
+  return (
+    insight.key === "underperformance" &&
+    !!insight.strategy_id &&
+    !!portfolioId
+  );
+}
+
 export function InsightStrip({
   analytics,
+  portfolioId,
   max = 3,
   className,
 }: InsightStripProps) {
@@ -55,7 +72,7 @@ export function InsightStrip({
         <ul role="list" className="space-y-2">
           {insights.map((insight) => (
             <li
-              key={insight.key}
+              key={`${insight.key}${insight.strategy_id ? `:${insight.strategy_id}` : ""}`}
               className="flex items-start gap-3 text-sm text-text-secondary"
             >
               <span
@@ -66,7 +83,16 @@ export function InsightStrip({
                 )}
               />
               <span className="sr-only">{SEVERITY_LABEL[insight.severity]}:</span>
-              <span>{insight.sentence}</span>
+              {isBridgeable(insight, portfolioId) ? (
+                <BridgeTrigger
+                  insight={insight}
+                  portfolioId={portfolioId!}
+                >
+                  <span>{insight.sentence}</span>
+                </BridgeTrigger>
+              ) : (
+                <span>{insight.sentence}</span>
+              )}
             </li>
           ))}
         </ul>

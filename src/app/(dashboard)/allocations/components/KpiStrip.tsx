@@ -1,8 +1,15 @@
 "use client";
 
 import type React from "react";
+import { useMemo } from "react";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
+import {
+  computePortfolioHealthScore,
+  HEALTH_THRESHOLD_HEALTHY,
+  HEALTH_THRESHOLD_MODERATE,
+} from "@/lib/health-score";
+import { Tooltip } from "@/components/ui/Tooltip";
 
 interface KpiStripProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,8 +33,20 @@ function kpiColor(raw: number | null | undefined): React.CSSProperties | undefin
   return undefined;
 }
 
+/** Color for the portfolio health score badge — green/yellow/red banding. */
+function healthColor(score: number): string {
+  if (score >= HEALTH_THRESHOLD_HEALTHY) return "#16A34A";
+  if (score >= HEALTH_THRESHOLD_MODERATE) return "#D97706";
+  return "#DC2626";
+}
+
 export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) {
   const resolvedAum = aum ?? analytics?.total_aum ?? null;
+
+  const health = useMemo(
+    () => computePortfolioHealthScore(analytics),
+    [analytics],
+  );
 
   const groups: { label: string; items: KpiItem[] }[] = [
     {
@@ -37,19 +56,19 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
           label: "AUM",
           value: formatCurrency(resolvedAum),
           raw: resolvedAum,
-          tooltip: "Assets under management — total portfolio value",
+          tooltip: "Total assets under management across all strategies in your portfolio. Updated each time analytics are recomputed.",
         },
         {
           label: "TWR",
           value: formatPercent(metrics.twr),
           raw: metrics.twr,
-          tooltip: "Time-weighted return for the selected timeframe",
+          tooltip: "Time-weighted return isolates portfolio performance from cash flows. Measures how the investment decisions performed over the selected timeframe.",
         },
         {
           label: "CAGR",
           value: formatPercent(metrics.cagr),
           raw: metrics.cagr,
-          tooltip: "Compound annual growth rate",
+          tooltip: "Compound annual growth rate normalizes returns to a yearly basis. Useful for comparing strategies with different track record lengths.",
         },
       ],
     },
@@ -60,13 +79,13 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
           label: "Sharpe",
           value: formatNumber(metrics.sharpe),
           raw: metrics.sharpe,
-          tooltip: "Sharpe ratio — excess return per unit of total risk",
+          tooltip: "Excess return per unit of total risk. Above 1.0 is generally considered acceptable; above 2.0 is strong for crypto strategies.",
         },
         {
           label: "Sortino",
           value: formatNumber(metrics.sortino),
           raw: metrics.sortino,
-          tooltip: "Sortino ratio — excess return per unit of downside risk",
+          tooltip: "Like Sharpe but only penalizes downside volatility. A higher Sortino means the portfolio captures more upside without proportional drawdowns.",
         },
         {
           label: "Calmar",
@@ -79,7 +98,7 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
             metrics.cagr != null && metrics.max_drawdown != null && metrics.max_drawdown !== 0
               ? Math.abs(metrics.cagr / metrics.max_drawdown)
               : null,
-          tooltip: "Calmar ratio — CAGR divided by max drawdown",
+          tooltip: "CAGR divided by max drawdown. Measures how well the portfolio compensates for its worst peak-to-trough loss.",
         },
       ],
     },
@@ -90,29 +109,44 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
           label: "Max DD",
           value: formatPercent(metrics.max_drawdown),
           raw: metrics.max_drawdown,
-          tooltip: "Maximum peak-to-trough drawdown",
+          tooltip: "Maximum peak-to-trough decline over the full track record. Represents the worst loss an investor would have experienced.",
         },
         {
           label: "Alpha",
           value: formatNumber(analytics?.alpha ?? null),
           raw: analytics?.alpha ?? null,
-          tooltip: "Alpha — excess return not explained by market beta",
+          tooltip: "Excess return not explained by market beta. Positive alpha means the portfolio adds value beyond passive exposure.",
         },
         {
           label: "Beta",
           value: formatNumber(analytics?.beta ?? null),
           raw: analytics?.beta ?? null,
-          tooltip: "Beta — portfolio sensitivity to market movements",
+          tooltip: "Sensitivity to broad market movements. A beta of 0.5 means the portfolio moves roughly half as much as the benchmark.",
         },
         {
           label: "Vol",
           value: formatPercent(metrics.volatility),
           raw: metrics.volatility,
-          tooltip: "Annualized portfolio volatility",
+          tooltip: "Annualized standard deviation of daily returns. Higher volatility means wider day-to-day swings in portfolio value.",
         },
       ],
     },
   ];
+
+  // 4th group: Portfolio Health (only when analytics available)
+  if (health) {
+    groups.push({
+      label: "Health",
+      items: [
+        {
+          label: "Score",
+          value: `${health.total}`,
+          raw: health.total,
+          tooltip: `Portfolio health ${health.total}/100 (${health.label}). Composite of Sharpe quality, drawdown recovery, correlation spread, and capacity.`,
+        },
+      ],
+    });
+  }
 
   const computedAt = analytics?.computed_at;
   const asOf = computedAt
@@ -133,26 +167,33 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
           {gi > 0 && (
             <div className="w-px self-stretch bg-[#E2E8F0] mx-1" style={{ minHeight: 40 }} />
           )}
-          {group.items.map((item) => (
-            <div
-              key={item.label}
-              className="flex flex-col items-center px-4 py-2.5 min-w-[80px]"
-              title={item.tooltip}
-            >
-              <span
-                className="text-[10px] uppercase tracking-wider font-semibold"
-                style={{ color: "#718096" }}
-              >
-                {item.label}
-              </span>
-              <span
-                className="font-mono text-sm tabular-nums font-medium"
-                style={kpiColor(item.label === "AUM" ? null : item.raw)}
-              >
-                {item.value}
-              </span>
-            </div>
-          ))}
+          {group.items.map((item) => {
+            const isHealthScore = group.label === "Health" && item.label === "Score";
+            return (
+              <Tooltip key={item.label} content={item.tooltip} className="relative inline-flex">
+                <div
+                  className="flex flex-col items-center px-4 py-2.5 min-w-[80px] cursor-default"
+                >
+                  <span
+                    className="text-[10px] uppercase tracking-wider font-semibold"
+                    style={{ color: "#718096" }}
+                  >
+                    {item.label}
+                  </span>
+                  <span
+                    className="font-mono text-sm tabular-nums font-medium"
+                    style={
+                      isHealthScore && health
+                        ? { color: healthColor(health.total) }
+                        : kpiColor(item.label === "AUM" ? null : item.raw)
+                    }
+                  >
+                    {item.value}
+                  </span>
+                </div>
+              </Tooltip>
+            );
+          })}
         </div>
       ))}
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useDashboardConfig } from "./useDashboardConfig";
-import { DEFAULT_LAYOUT } from "../lib/dashboard-defaults";
+import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 
 // ---------------------------------------------------------------------------
 // Mock localStorage
@@ -146,6 +146,7 @@ describe("useDashboardConfig", () => {
     const custom = {
       tiles: [{ i: "custom-1", widgetId: "tail-risk", x: 0, y: 0, w: 4, h: 3 }],
       timeframe: "1M",
+      layoutVersion: LAYOUT_VERSION,
     };
     store.set(STORAGE_KEY, JSON.stringify(custom));
 
