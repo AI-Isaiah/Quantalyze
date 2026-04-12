@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.11.0.0] - 2026-04-12
+
+Sprint 4: Intelligence Layer + Bridge V1. Allocators now see what they didn't know
+about their portfolio (insights, health score, monthly commentary) AND can act on it
+(find a replacement strategy, see portfolio impact, request an intro). The Bridge is
+the feature neither quants.space nor 1token can build.
+
+### Added
+- **InsightStrip above dashboard** on My Allocation. Four insight rules (biggest risk, correlation regime shift, underperformance, concentration creep) run on every page load, always visible. No "add widget" needed. Underperformance insights include a "Find Replacement" link that opens the Bridge.
+- **Portfolio health score** (0-100) in the KPI strip. Composite of Sharpe quality, drawdown recovery, correlation spread, and capacity utilization. Color-banded: green >= 70, yellow >= 40, red < 40.
+- **Accessible KPI tooltips.** 2-sentence narrative on every KPI cell, keyboard-navigable (Radix-style `useId` tooltips replacing native `title` attrs).
+- **Monthly performance commentary** in the MorningBriefing widget. Per-month returns with top contributor attribution. Optimizer recommendation sentence when suggestions are available.
+- **3 new alert types** (`regime_shift`, `underperformance`, `concentration_creep`) in `portfolio_alerts` with deduplication via partial unique index (migration 042). Cooldown prevents noisy duplicate alerts.
+- **Bridge V1 backend** (`analytics-service/services/bridge_scoring.py`). REPLACE scoring: removes incumbent, redistributes weight, scores each published candidate by portfolio impact (Sharpe delta, MaxDD delta, correlation delta). Composite score with fit labels (Strong/Good/Moderate/Weak).
+- **`POST /api/portfolio-bridge`** endpoint. Authenticated, rate-limited (10/hr), user-ownership verified in both Next.js and Python layers (defense-in-depth).
+- **`POST /api/bridge`** Next.js route proxying to Python service with CSRF protection and 15s timeout.
+- **BridgeTrigger** client component. Renders "Find Replacement" link on underperformance insights, opens the ReplacementPanel slide-out.
+- **ReplacementPanel** slide-out. Right-edge panel with loading skeletons, error state, empty state, and 3-5 replacement cards. AbortController cancels in-flight requests on close. Focus management + Escape key close.
+- **ReplacementCard** with fit label badge, 3 metric deltas (green for improvements, red for regressions), and "Request Intro" button. Uses existing `/api/intro` with `source: "bridge"` metadata. 409 dedup handled as success.
+- **Zod `BridgeResponseSchema`** validating the bridge response contract. `findReplacementCandidates` now uses `parseResponse()` like every other analytics client function.
+- **`BridgeCandidate` + `BridgeFitLabel` types** in `src/lib/types.ts`.
+- **8 Python tests** for REPLACE scoring (sorted output, excludes portfolio members, max 5, empty cases, 2-strategy edge, result fields, insufficient data).
+- **E2E bridge-flow spec** (Playwright) covering InsightStrip render, Bridge trigger, panel open/close.
+- **Vercel preview CSRF fix.** `NEXT_PUBLIC_VERCEL_URL` added to CSRF allowlist so preview deployments don't 403 on POST requests.
+- **`computePortfolioHealthScore()`** in `src/lib/health-score.ts` with exported threshold constants.
+
+### Changed
+- **`PortfolioInsight` type** now carries optional `strategy_id` and `strategy_name` for Bridge trigger binding. `computeUnderperformance` and `computeConcentrationCreep` populate them.
+- **`_generate_alerts()`** in Python uses select-then-insert per alert type (replaces broken upsert on partial unique index). Each alert checks for existing unacknowledged instance before inserting.
+- **`generate_narrative()`** enriched with per-month breakdown and optimizer recommendation sentence. Invariant computation hoisted out of monthly loop.
+- **`bridge_scoring.py`** imports shared `_compute_sharpe`, `_avg_corr`, `_max_drawdown` from `portfolio_optimizer.py` instead of duplicating them.
+- **Alert type union** in `PortfolioAlert` TypeScript type expanded with 3 new types.
+- **`InsightStrip`** React list key uses composite `${key}:${strategy_id}` to prevent silent dedup.
+
+### Fixed
+- **Pre-existing VERSION/package.json drift** (0.10.0.0 vs 0.9.0.0). Synced.
+- **Pre-existing activity route test mock** missing `.eq("is_fill")` chain from Sprint 4 raw fills feature.
+- **Alert generation test mocks** updated for select-then-insert pattern.
+
 ## [0.10.0.0] - 2026-04-12
 
 Sprint 4: Raw trade ingestion, position reconstruction, and strategy detail depth.
