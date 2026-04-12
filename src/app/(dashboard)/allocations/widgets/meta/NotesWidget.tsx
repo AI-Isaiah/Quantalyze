@@ -11,6 +11,8 @@ export function NotesWidget({ data }: WidgetProps) {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contentRef = useRef("");
+  const lastSavedRef = useRef("");
 
   // Load notes on mount
   useEffect(() => {
@@ -24,7 +26,12 @@ export function NotesWidget({ data }: WidgetProps) {
         const res = await fetch(`/api/notes?portfolio_id=${portfolioId}`);
         if (res.ok) {
           const json = await res.json();
-          if (!cancelled) setNotes(json.content ?? "");
+          if (!cancelled) {
+            const c = json.content ?? "";
+            setNotes(c);
+            contentRef.current = c;
+            lastSavedRef.current = c;
+          }
         }
         // 404 is fine — no note exists yet
       } catch {
@@ -49,6 +56,7 @@ export function NotesWidget({ data }: WidgetProps) {
           body: JSON.stringify({ content, portfolio_id: portfolioId }),
         });
         if (res.ok) {
+          lastSavedRef.current = content;
           setSaveState("saved");
         } else {
           setSaveState("error");
@@ -63,6 +71,7 @@ export function NotesWidget({ data }: WidgetProps) {
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const val = e.target.value;
     setNotes(val);
+    contentRef.current = val;
     setSaveState("idle");
 
     // Debounce save by 1 second
@@ -70,12 +79,20 @@ export function NotesWidget({ data }: WidgetProps) {
     debounceRef.current = setTimeout(() => save(val), 1000);
   }
 
-  // Cleanup debounce on unmount
+  // Flush pending save on unmount instead of silently discarding
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
+      // If content changed since last save, fire-and-forget the save
+      if (contentRef.current !== lastSavedRef.current && portfolioId) {
+        fetch("/api/notes", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: contentRef.current, portfolio_id: portfolioId }),
+        }).catch(() => {}); // fire-and-forget
+      }
     };
-  }, []);
+  }, [portfolioId]);
 
   const stateLabels: Record<SaveState, string> = {
     idle: "",

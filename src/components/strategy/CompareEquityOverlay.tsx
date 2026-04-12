@@ -12,10 +12,10 @@ import {
 } from "recharts";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import {
-  CHART_ACCENT,
   CHART_BORDER,
   CHART_AXIS_TICK,
   CHART_FONT_MONO,
+  CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
 
 const LINE_COLORS = ["#1B6B5A", "#3B82F6", "#8B5CF6", "#F97316"];
@@ -135,12 +135,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
             width={48}
           />
           <Tooltip
-            contentStyle={{
-              fontSize: 12,
-              fontFamily: CHART_FONT_MONO,
-              borderColor: CHART_BORDER,
-              borderRadius: 6,
-            }}
+            contentStyle={CHART_TOOLTIP_STYLE}
             formatter={(value, name) => {
               const label = keys.find((k) => k.key === name)?.name ?? String(name);
               return [`${Number(value).toFixed(2)}%`, label];

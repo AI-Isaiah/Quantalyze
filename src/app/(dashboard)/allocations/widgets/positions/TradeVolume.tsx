@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -16,6 +16,7 @@ import {
   CHART_BORDER,
   CHART_AXIS_TICK,
   CHART_FONT_MONO,
+  CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
 
 interface VolumeDay {
@@ -91,12 +92,7 @@ export default function TradeVolume({ data }: WidgetProps) {
               width={52}
             />
             <Tooltip
-              contentStyle={{
-                fontSize: 12,
-                fontFamily: CHART_FONT_MONO,
-                borderColor: CHART_BORDER,
-                borderRadius: 6,
-              }}
+              contentStyle={CHART_TOOLTIP_STYLE}
               formatter={(value) => [
                 `$${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
                 "Daily PnL",

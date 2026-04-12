@@ -239,6 +239,14 @@ export function AllocationDashboard({
   );
 
   // ── Widget data payload (shared across all widgets) ──────────────
+  // NOTE (I-F6): TradingActivityLog and TradeVolume both independently
+  // fetch /api/activity/portfolio. Ideally, activity data (DailyPnlRow[])
+  // would be fetched once in the server component and passed through
+  // widgetData. Skipped for now: the server component doesn't have access
+  // to portfolio_id at the point where it assembles props, and hoisting
+  // the fetch would require restructuring the page-level data flow.
+  // The duplicate fetch is ~1 extra API call per page load — acceptable
+  // until the allocation page performance budget gets tighter.
 
   const widgetData = useMemo(
     () => ({

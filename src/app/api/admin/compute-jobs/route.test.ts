@@ -118,4 +118,27 @@ describe("GET /api/admin/compute-jobs", () => {
       p_offset: 0,
     }));
   });
+
+  it("returns 500 on RPC error", async () => {
+    mockRpc.mockResolvedValue({ data: null, error: { message: "RPC failed" } });
+
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Failed to fetch compute jobs");
+  });
+
+  it("clamps negative/NaN limit and offset", async () => {
+    const { GET } = await import("./route");
+    await GET(makeReq({ limit: "-5", offset: "abc" }));
+
+    // limit: Number("-5") = -5 → Math.max(1, ...) = 1
+    // offset: Number("abc") = NaN → || 0 → Math.max(0, 0) = 0
+    expect(mockRpc).toHaveBeenCalledWith("get_admin_compute_jobs", expect.objectContaining({
+      p_limit: 1,
+      p_offset: 0,
+    }));
+  });
 });

@@ -17,8 +17,8 @@ export async function GET(request: NextRequest) {
   }
 
   const url = request.nextUrl;
-  const p_limit = Math.min(Number(url.searchParams.get("limit") ?? "50"), 200);
-  const p_offset = Number(url.searchParams.get("offset") ?? "0");
+  const p_limit = Math.max(1, Math.min(Number(url.searchParams.get("limit")) || 50, 200));
+  const p_offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
   const p_status = url.searchParams.get("status") || null;
   const p_kind = url.searchParams.get("kind") || null;
   const p_exchange = url.searchParams.get("exchange") || null;

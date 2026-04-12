@@ -13,3 +13,11 @@ export const CHART_BORDER = "#E2E8F0";
 export const CHART_AXIS_TICK = "#64748B";
 export const CHART_FONT_MONO = "var(--font-mono), monospace";
 export const CHART_REFERENCE_DASH = "3 3";
+
+/** Shared Recharts Tooltip contentStyle — identical across all Sprint 3 widgets. */
+export const CHART_TOOLTIP_STYLE = {
+  fontSize: 12,
+  fontFamily: CHART_FONT_MONO,
+  borderColor: CHART_BORDER,
+  borderRadius: 6,
+} as const;

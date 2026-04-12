@@ -17,6 +17,7 @@ import {
   CHART_BORDER,
   CHART_AXIS_TICK,
   CHART_FONT_MONO,
+  CHART_TOOLTIP_STYLE,
 } from "@/components/charts/chart-tokens";
 
 interface ExposureRow {
@@ -87,12 +88,7 @@ export default function ExposureByAsset({ data }: WidgetProps) {
           width={80}
         />
         <Tooltip
-          contentStyle={{
-            fontSize: 12,
-            fontFamily: CHART_FONT_MONO,
-            borderColor: CHART_BORDER,
-            borderRadius: 6,
-          }}
+          contentStyle={CHART_TOOLTIP_STYLE}
           formatter={(value) => [
             `$${Number(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
             "Exposure",

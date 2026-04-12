@@ -23,6 +23,7 @@ Usage:
 
 import os
 import sys
+from datetime import datetime, timezone, timedelta
 
 from supabase import create_client
 
@@ -52,12 +53,17 @@ def main() -> None:
     #   2. For each, check if there's an active compute_jobs row
     #   3. Reset those without active jobs
 
-    # Step 1: Get all computing rows updated more than 5 minutes ago
+    # Step 1: Get all computing rows updated more than 5 minutes ago.
+    # Use a Python-computed ISO timestamp — PostgREST .lt() sends the
+    # value as a string literal, not a SQL expression, so raw SQL like
+    # "now() - interval '5 minutes'" would be compared lexicographically
+    # against the timestamp column instead of being evaluated as SQL.
+    threshold = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     result = (
         supabase.table("strategy_analytics")
         .select("strategy_id, updated_at")
         .eq("computation_status", "computing")
-        .lt("updated_at", "now() - interval '5 minutes'")
+        .lt("updated_at", threshold)
         .execute()
     )
 

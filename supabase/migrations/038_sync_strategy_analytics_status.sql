@@ -60,6 +60,16 @@
 BEGIN;
 
 -- --------------------------------------------------------------------------
+-- STEP 0: Index on compute_jobs(strategy_id) for the RPC's WHERE clauses.
+-- Without this, every sync_strategy_analytics_status call does a seq scan
+-- on compute_jobs filtered by strategy_id. The partial index skips NULL
+-- strategy_id rows (portfolio-only jobs).
+-- --------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS compute_jobs_strategy_id
+  ON compute_jobs (strategy_id)
+  WHERE strategy_id IS NOT NULL;
+
+-- --------------------------------------------------------------------------
 -- STEP 1: sync_strategy_analytics_status RPC
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
@@ -107,7 +117,8 @@ BEGIN
     VALUES (p_strategy_id, 'computing', NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = EXCLUDED.computation_status,
-           computation_error  = EXCLUDED.computation_error;
+           computation_error  = EXCLUDED.computation_error,
+           computed_at        = now();
     RETURN;
   END IF;
 
@@ -134,7 +145,8 @@ BEGIN
     VALUES (p_strategy_id, 'failed', v_latest_error)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = EXCLUDED.computation_status,
-           computation_error  = EXCLUDED.computation_error;
+           computation_error  = EXCLUDED.computation_error,
+           computed_at        = now();
     RETURN;
   END IF;
 
@@ -145,7 +157,8 @@ BEGIN
   VALUES (p_strategy_id, 'complete', NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = EXCLUDED.computation_status,
-         computation_error  = EXCLUDED.computation_error;
+         computation_error  = EXCLUDED.computation_error,
+         computed_at        = now();
 END;
 $$;
 
@@ -220,7 +233,17 @@ BEGIN
     RAISE EXCEPTION 'Migration 038 failed: strategy_analytics.strategy_id has no UNIQUE/PK constraint — ON CONFLICT clauses will break';
   END IF;
 
-  RAISE NOTICE 'Migration 038: sync_strategy_analytics_status RPC installed and verified.';
+  -- 5. compute_jobs_strategy_id index exists (Step 0)
+  IF NOT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename  = 'compute_jobs'
+      AND indexname   = 'compute_jobs_strategy_id'
+  ) THEN
+    RAISE EXCEPTION 'Migration 038 failed: compute_jobs_strategy_id index missing';
+  END IF;
+
+  RAISE NOTICE 'Migration 038: sync_strategy_analytics_status RPC + compute_jobs_strategy_id index installed and verified.';
 END
 $$;
 

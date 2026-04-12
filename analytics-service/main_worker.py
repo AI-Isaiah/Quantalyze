@@ -34,6 +34,7 @@ import logging
 import os
 import signal
 import socket
+import time
 
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
@@ -47,7 +48,10 @@ logger = logging.getLogger("quantalyze.analytics.worker")
 WORKER_ID = f"worker-{socket.gethostname()}-{os.getpid()}"
 
 # ---------------------------------------------------------------------------
-# Shutdown event — set by SIGTERM/SIGINT handler; all loops check this
+# Shutdown event — set by SIGTERM/SIGINT handler; all loops check this.
+# Module-level is safe here: Railway runs one worker process per container,
+# and asyncio.Event is bound to the running loop on first await. If this
+# ever moves to multi-process, SHUTDOWN must be created inside main().
 # ---------------------------------------------------------------------------
 SHUTDOWN = asyncio.Event()
 
@@ -167,7 +171,7 @@ async def dispatch_tick(worker_id: str) -> None:
     # Update healthz timestamp
     import main_worker_healthz
 
-    main_worker_healthz.LAST_TICK_AT = __import__("time").time()
+    main_worker_healthz.LAST_TICK_AT = time.time()
 
 
 async def watchdog_tick() -> None:
@@ -255,12 +259,9 @@ async def daily_enqueue_loop(interval: float = 86400.0) -> None:
     while not SHUTDOWN.is_set():
         try:
             await asyncio.wait_for(SHUTDOWN.wait(), timeout=interval)
-            break
+            break  # SHUTDOWN was set
         except asyncio.TimeoutError:
-            pass
-
-        if SHUTDOWN.is_set():
-            break
+            pass  # interval elapsed, tick again
 
         try:
             await daily_enqueue_tick()
@@ -268,16 +269,6 @@ async def daily_enqueue_loop(interval: float = 86400.0) -> None:
             logger.error("daily_enqueue_loop tick failed: %s", exc, exc_info=True)
 
     logger.info("daily_enqueue_loop exiting (shutdown)")
-
-
-# ---------------------------------------------------------------------------
-# Signal handlers
-# ---------------------------------------------------------------------------
-
-def _handle_shutdown(signum, frame):
-    """Set SHUTDOWN event on SIGTERM or SIGINT."""
-    logger.info("Received signal %s, initiating graceful shutdown...", signum)
-    SHUTDOWN.set()
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +288,12 @@ async def main() -> None:
     validate_kek_on_startup()
     logger.info("KEK validation passed")
 
-    # Signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, _handle_shutdown)
-    signal.signal(signal.SIGINT, _handle_shutdown)
+    # Signal handlers for graceful shutdown — use loop.add_signal_handler
+    # (the correct asyncio pattern) instead of signal.signal, which can
+    # interact poorly with the event loop's signal wakeup fd.
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, SHUTDOWN.set)
 
     # Import healthz server
     from main_worker_healthz import start_healthz_server

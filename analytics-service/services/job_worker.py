@@ -33,6 +33,7 @@ hammering the exchange.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -179,7 +180,7 @@ async def _load_strategy_and_key(
             supabase.table("strategies")
             .select("id, user_id, api_key_id")
             .eq("id", strategy_id)
-            .single()
+            .maybe_single()
             .execute()
         )
         return res.data
@@ -193,7 +194,7 @@ async def _load_strategy_and_key(
             supabase.table("api_keys")
             .select("*")
             .eq("id", strategy_row["api_key_id"])
-            .single()
+            .maybe_single()
             .execute()
         )
         return res.data
@@ -274,6 +275,67 @@ async def _stamp_429(supabase, key_row: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared pre-flight for exchange-calling handlers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _ExchangeContext:
+    """Holds the shared state produced by pre-flight for exchange handlers."""
+    supabase: object
+    strategy_row: dict
+    key_row: dict
+    exchange: object
+
+
+async def _exchange_preflight(
+    job: dict, handler_name: str
+) -> DispatchResult | _ExchangeContext:
+    """Shared pre-flight for handlers that connect to an exchange.
+
+    Loads the strategy + API key, checks the circuit breaker, decrypts
+    credentials, and creates the exchange. Returns an _ExchangeContext
+    on success, or a DispatchResult (FAILED/DEFERRED) if pre-flight
+    cannot proceed.
+    """
+    strategy_id = job.get("strategy_id")
+    if not strategy_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"{handler_name}: strategy_id missing",
+            error_kind="permanent",
+        )
+
+    kek = get_kek()
+    supabase = get_supabase()
+
+    strategy_row, key_row, error_msg = await _load_strategy_and_key(
+        supabase, strategy_id
+    )
+    if error_msg:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=error_msg,
+            error_kind="permanent",
+        )
+
+    defer_result = await _check_circuit_breaker(supabase, job, key_row)
+    if defer_result is not None:
+        return defer_result
+
+    api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
+    exchange = create_exchange(
+        key_row["exchange"], api_key, api_secret, passphrase
+    )
+
+    return _ExchangeContext(
+        supabase=supabase,
+        strategy_row=strategy_row,
+        key_row=key_row,
+        exchange=exchange,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Per-kind handlers
 # ---------------------------------------------------------------------------
 
@@ -287,62 +349,31 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     On ccxt.RateLimitExceeded (429), stamps api_keys.last_429_at before
     classifying so the circuit breaker kicks in for subsequent jobs.
     """
-    strategy_id = job.get("strategy_id")
-    if not strategy_id:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="run_sync_trades_job: strategy_id missing",
-            error_kind="permanent",
-        )
+    ctx = await _exchange_preflight(job, "run_sync_trades_job")
+    if isinstance(ctx, DispatchResult):
+        return ctx
 
-    kek = get_kek()
-    supabase = get_supabase()
-
-    # Load strategy + api_key row
-    strategy_row, key_row, error_msg = await _load_strategy_and_key(
-        supabase, strategy_id
-    )
-    if error_msg:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message=error_msg,
-            error_kind="permanent",
-        )
-
-    # Circuit breaker: defer if 429 cooldown active
-    defer_result = await _check_circuit_breaker(supabase, job, key_row)
-    if defer_result is not None:
-        return defer_result
-
-    # Decrypt credentials
-    api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-
-    exchange = create_exchange(
-        key_row["exchange"], api_key, api_secret, passphrase
-    )
-    since_ms = parse_since_ms(key_row.get("last_sync_at"))
+    strategy_id = job["strategy_id"]
+    since_ms = parse_since_ms(ctx.key_row.get("last_sync_at"))
 
     try:
-        trades = await fetch_all_trades(exchange, since_ms=since_ms)
-        account_balance = await fetch_usdt_balance(exchange)
+        trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
+        account_balance = await fetch_usdt_balance(ctx.exchange)
     except ccxt.RateLimitExceeded:
-        # Stamp 429 for circuit breaker before re-raising
-        await _stamp_429(supabase, key_row)
+        await _stamp_429(ctx.supabase, ctx.key_row)
         raise
     finally:
         try:
-            await exchange.close()
+            await ctx.exchange.close()
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
     # Persist trades atomically via sync_trades RPC
     if trades:
-        import json as _json
-
-        trades_json = _json.dumps(trades, default=str)
+        trades_json = json.dumps(trades, default=str)
 
         def _sync() -> int:
-            res = supabase.rpc(
+            res = ctx.supabase.rpc(
                 "sync_trades",
                 {"p_strategy_id": strategy_id, "p_trades": trades_json},
             ).execute()
@@ -360,8 +391,8 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         }
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
-        supabase.table("api_keys").update(update_data).eq(
-            "id", key_row["id"]
+        ctx.supabase.table("api_keys").update(update_data).eq(
+            "id", ctx.key_row["id"]
         ).execute()
 
     await db_execute(_update_cursor)
@@ -423,56 +454,27 @@ async def run_poll_positions_job(job: dict) -> DispatchResult:
     On ccxt.RateLimitExceeded (429), stamps api_keys.last_429_at before
     classifying so the circuit breaker kicks in for subsequent jobs.
     """
-    strategy_id = job.get("strategy_id")
-    if not strategy_id:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="run_poll_positions_job: strategy_id missing",
-            error_kind="permanent",
-        )
+    ctx = await _exchange_preflight(job, "run_poll_positions_job")
+    if isinstance(ctx, DispatchResult):
+        return ctx
 
-    kek = get_kek()
-    supabase = get_supabase()
-
-    # Load strategy + api_key row
-    strategy_row, key_row, error_msg = await _load_strategy_and_key(
-        supabase, strategy_id
-    )
-    if error_msg:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message=error_msg,
-            error_kind="permanent",
-        )
-
-    # Circuit breaker: defer if 429 cooldown active
-    defer_result = await _check_circuit_breaker(supabase, job, key_row)
-    if defer_result is not None:
-        return defer_result
-
-    # Decrypt credentials
-    api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-
-    exchange = create_exchange(
-        key_row["exchange"], api_key, api_secret, passphrase
-    )
+    strategy_id = job["strategy_id"]
 
     try:
-        snapshots = await fetch_positions(key_row["exchange"], exchange)
+        snapshots = await fetch_positions(ctx.key_row["exchange"], ctx.exchange)
     except ccxt.RateLimitExceeded:
-        # Stamp 429 for circuit breaker before re-raising
-        await _stamp_429(supabase, key_row)
+        await _stamp_429(ctx.supabase, ctx.key_row)
         raise
     finally:
         try:
-            await exchange.close()
+            await ctx.exchange.close()
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
     # Persist snapshots
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     count = await persist_position_snapshots(
-        supabase, snapshots, strategy_id, today_str
+        ctx.supabase, snapshots, strategy_id, today_str
     )
     logger.info(
         "poll_positions: persisted %d position snapshots for strategy %s",
@@ -486,6 +488,7 @@ async def run_poll_positions_job(job: dict) -> DispatchResult:
 # Dispatch
 # ---------------------------------------------------------------------------
 
+
 async def dispatch(job: dict) -> DispatchResult:
     """Route a claimed job to its per-kind handler, wrap in timeout, classify.
 
@@ -493,26 +496,27 @@ async def dispatch(job: dict) -> DispatchResult:
     scoped jobs call the UI status bridge so strategy_analytics.computation_status
     reflects the new compute_jobs aggregate. Portfolio-scoped jobs skip
     the bridge (there is no strategy_analytics row to update).
+
+    Handler lookup is done via if/elif rather than a dict so that
+    monkeypatching the module-level run_*_job functions in tests works
+    correctly (a dict captures references at import time, defeating mocks).
     """
     kind = job.get("kind")
     timeout = TIMEOUT_PER_KIND.get(kind, 5 * 60)
 
+    if kind == "sync_trades":
+        handler = run_sync_trades_job
+    elif kind == "compute_analytics":
+        handler = run_compute_analytics_job
+    elif kind == "compute_portfolio":
+        handler = run_compute_portfolio_job
+    elif kind == "poll_positions":
+        handler = run_poll_positions_job
+    else:
+        handler = None
+
     try:
-        if kind == "sync_trades":
-            result = await asyncio.wait_for(run_sync_trades_job(job), timeout=timeout)
-        elif kind == "compute_analytics":
-            result = await asyncio.wait_for(
-                run_compute_analytics_job(job), timeout=timeout
-            )
-        elif kind == "compute_portfolio":
-            result = await asyncio.wait_for(
-                run_compute_portfolio_job(job), timeout=timeout
-            )
-        elif kind == "poll_positions":
-            result = await asyncio.wait_for(
-                run_poll_positions_job(job), timeout=timeout
-            )
-        else:
+        if handler is None:
             # Unknown kind — permanent failure so the DB row goes straight
             # to failed_final. Prevents a future new-kind insert from
             # retry-looping against an older worker that doesn't know about it.
@@ -521,6 +525,8 @@ async def dispatch(job: dict) -> DispatchResult:
                 error_message=f"Unknown job kind: {kind!r}",
                 error_kind="permanent",
             )
+        else:
+            result = await asyncio.wait_for(handler(job), timeout=timeout)
     except Exception as exc:  # noqa: BLE001
         error_kind, sanitized = classify_exception(exc)
         result = DispatchResult(

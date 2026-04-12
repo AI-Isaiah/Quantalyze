@@ -131,10 +131,24 @@ def _bybit_ccxt_has_critical_fields(positions: list[dict]) -> bool:
     If any position is missing markPrice, entryPrice, or unrealizedPnl,
     we need to fall back to the raw V5 API.
     """
-    for pos in positions:
-        if pos.get("markPrice") is None or pos.get("entryPrice") is None or pos.get("unrealizedPnl") is None:
-            return False
-    return True
+    return all(
+        pos.get("markPrice") is not None
+        and pos.get("entryPrice") is not None
+        and pos.get("unrealizedPnl") is not None
+        for pos in positions
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal: batch normalize CCXT positions
+# ---------------------------------------------------------------------------
+
+def _normalize_ccxt_positions(raw: list[dict], exchange_name: str) -> list[dict]:
+    """Normalize a list of CCXT unified positions, filtering out zero-size."""
+    return [
+        n for pos in raw
+        if (n := _normalize_ccxt_position(pos, exchange_name)) is not None
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +176,7 @@ async def fetch_positions(exchange_name: str, exchange: Any) -> list[dict]:
 
     # Binance and OKX both use the CCXT unified fetch_positions
     raw_positions = await exchange.fetch_positions()
-    result: list[dict] = []
-    for pos in raw_positions:
-        normalized = _normalize_ccxt_position(pos, exchange_name)
-        if normalized is not None:
-            result.append(normalized)
-    return result
+    return _normalize_ccxt_positions(raw_positions, exchange_name)
 
 
 async def _fetch_positions_bybit(exchange: Any) -> list[dict]:
@@ -176,12 +185,7 @@ async def _fetch_positions_bybit(exchange: Any) -> list[dict]:
 
     # Check if CCXT returned complete data
     if raw_positions and _bybit_ccxt_has_critical_fields(raw_positions):
-        result: list[dict] = []
-        for pos in raw_positions:
-            normalized = _normalize_ccxt_position(pos, "bybit")
-            if normalized is not None:
-                result.append(normalized)
-        return result
+        return _normalize_ccxt_positions(raw_positions, "bybit")
 
     # Fallback: raw V5 API
     logger.info("Bybit CCXT positions missing critical fields, falling back to V5 API")
@@ -209,20 +213,10 @@ async def persist_position_snapshots(
     if not snapshots:
         return 0
 
-    rows = []
-    for snap in snapshots:
-        rows.append({
-            "strategy_id": strategy_id,
-            "snapshot_date": snapshot_date,
-            "symbol": snap["symbol"],
-            "side": snap["side"],
-            "size_base": snap["size_base"],
-            "size_usd": snap["size_usd"],
-            "entry_price": snap["entry_price"],
-            "mark_price": snap["mark_price"],
-            "unrealized_pnl": snap["unrealized_pnl"],
-            "exchange": snap["exchange"],
-        })
+    rows = [
+        {**snap, "strategy_id": strategy_id, "snapshot_date": snapshot_date}
+        for snap in snapshots
+    ]
 
     def _upsert():
         return supabase_client.table("position_snapshots").upsert(

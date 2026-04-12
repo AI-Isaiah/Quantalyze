@@ -27,7 +27,13 @@ export async function GET(request: NextRequest) {
     .eq("portfolio_id", portfolioId)
     .single();
 
-  if (error || !data) {
+  if (error && error.code !== "PGRST116") {
+    // PGRST116 = "JSON object requested, multiple (or no) rows returned"
+    // i.e. .single() found 0 rows — that's a legitimate not-found, not a DB error.
+    console.error("[notes] DB error:", error.message);
+    return NextResponse.json({ error: "Database error" }, { status: 500 });
+  }
+  if (!data) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 

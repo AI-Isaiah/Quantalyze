@@ -39,7 +39,7 @@ import logging
 from fastapi import HTTPException
 
 from services.benchmark import get_benchmark_returns
-from services.db import get_supabase
+from services.db import db_execute, get_supabase
 from services.metrics import compute_all_metrics
 from services.transforms import trades_to_daily_returns
 
@@ -54,8 +54,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
     supabase = get_supabase()
 
     # Verify strategy exists
-    strategy_result = (
-        supabase.table("strategies")
+    strategy_result = await db_execute(
+        lambda: supabase.table("strategies")
         .select("id, user_id")
         .eq("id", strategy_id)
         .single()
@@ -68,15 +68,17 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
     # Update status to computing. The worker-side bridge (038 RPC) may
     # overwrite this soon after if the strategy has multiple concurrent
     # jobs, which is fine — the aggregate mapping is the source of truth.
-    supabase.table("strategy_analytics").upsert(
-        {"strategy_id": strategy_id, "computation_status": "computing"},
-        on_conflict="strategy_id",
-    ).execute()
+    await db_execute(
+        lambda: supabase.table("strategy_analytics").upsert(
+            {"strategy_id": strategy_id, "computation_status": "computing"},
+            on_conflict="strategy_id",
+        ).execute()
+    )
 
     try:
         # Fetch trades
-        result = (
-            supabase.table("trades")
+        result = await db_execute(
+            lambda: supabase.table("trades")
             .select("*")
             .eq("strategy_id", strategy_id)
             .order("timestamp")
@@ -85,14 +87,16 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
 
         trades = result.data
         if not trades or len(trades) < 2:
-            supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    "computation_error": "Insufficient trade history. At least 2 trading days required.",
-                },
-                on_conflict="strategy_id",
-            ).execute()
+            await db_execute(
+                lambda: supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": "Insufficient trade history. At least 2 trading days required.",
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+            )
             raise HTTPException(status_code=400, detail="Insufficient trade history")
 
         # Fetch account balance for accurate capital estimation.
@@ -100,8 +104,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # strategy_id column).
         account_balance = None
         try:
-            strategy_with_key = (
-                supabase.table("strategies")
+            strategy_with_key = await db_execute(
+                lambda: supabase.table("strategies")
                 .select("api_key_id")
                 .eq("id", strategy_id)
                 .single()
@@ -113,10 +117,10 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 else None
             )
             if api_key_id:
-                key_result = (
-                    supabase.table("api_keys")
+                key_result = await db_execute(
+                    lambda kid=api_key_id: supabase.table("api_keys")
                     .select("account_balance_usdt")
-                    .eq("id", api_key_id)
+                    .eq("id", kid)
                     .single()
                     .execute()
                 )
@@ -135,14 +139,16 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         )
 
         if len(returns) < 2:
-            supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    "computation_error": "Insufficient trading days after aggregation.",
-                },
-                on_conflict="strategy_id",
-            ).execute()
+            await db_execute(
+                lambda: supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": "Insufficient trading days after aggregation.",
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+            )
             raise HTTPException(status_code=400, detail="Insufficient trading days")
 
         # Fetch benchmark returns for BTC overlay
@@ -158,24 +164,26 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         metrics = compute_all_metrics(returns, benchmark_rets)
 
         # Build data quality flags
-        data_quality_flags: dict = {}
+        data_quality_flags: dict | None = None
         if benchmark_stale or benchmark_rets is None:
-            data_quality_flags["benchmark_unavailable"] = True
-            data_quality_flags["benchmark_note"] = (
-                "Benchmark data unavailable. Alpha, beta, and correlation not computed."
-            )
+            data_quality_flags = {
+                "benchmark_unavailable": True,
+                "benchmark_note": "Benchmark data unavailable. Alpha, beta, and correlation not computed.",
+            }
 
         # Store results
-        supabase.table("strategy_analytics").upsert(
-            {
-                "strategy_id": strategy_id,
-                "computation_status": "complete",
-                "computation_error": None,
-                "data_quality_flags": data_quality_flags if data_quality_flags else None,
-                **metrics,
-            },
-            on_conflict="strategy_id",
-        ).execute()
+        await db_execute(
+            lambda: supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "complete",
+                    "computation_error": None,
+                    "data_quality_flags": data_quality_flags,
+                    **metrics,
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        )
 
         return {"status": "complete", "strategy_id": strategy_id}
 
@@ -185,12 +193,14 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         logger.error(
             "Compute analytics failed for %s: %s", strategy_id, str(e)
         )
-        supabase.table("strategy_analytics").upsert(
-            {
-                "strategy_id": strategy_id,
-                "computation_status": "failed",
-                "computation_error": "Analytics computation failed. Contact support if this persists.",
-            },
-            on_conflict="strategy_id",
-        ).execute()
+        await db_execute(
+            lambda: supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_error": "Analytics computation failed. Contact support if this persists.",
+                },
+                on_conflict="strategy_id",
+            ).execute()
+        )
         raise HTTPException(status_code=500, detail="Analytics computation failed")
