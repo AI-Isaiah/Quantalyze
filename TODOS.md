@@ -125,14 +125,27 @@ intentionally deferred out of the restructure PR to keep scope tight:
 Six widgets are wired into the grid but render placeholder UI because they
 depend on data sources that don't exist yet. Listed by priority.
 
-#### P2: Trading Activity Log (Widget 26)
-- Needs: trades table query endpoint aggregating recent trades across strategies
-- Blocked by: no trades API route for cross-strategy aggregation
-- File: `src/app/(dashboard)/allocations/widgets/positions/TradingActivityLog.tsx`
+#### ~~P2: Trading Activity Log (Widget 26)~~ — ✅ DONE in v0.10.0.0 (Sprint 4)
+Upgraded to prefer real fill data (is_fill=true) over daily P&L summaries. Footnote removed when fills present.
 
-#### P2: Trade Volume Over Time (Widget 27)
-- Needs: same trades query as Widget 26, aggregated by day
-- File: `src/app/(dashboard)/allocations/widgets/positions/TradeVolume.tsx`
+#### ~~P2: Trade Volume Over Time (Widget 27)~~ — ✅ DONE in v0.10.0.0 (Sprint 4)
+Same upgrade as Widget 26. Uses real fill data when available.
+
+### Sprint 4 follow-ups (deferred from eng review)
+
+#### P2: Funding rate ingestion (Sprint 5+)
+- What: Fetch funding rate history per exchange (OKX account_bills FUNDING_FEE, Binance income FUNDING_FEE, Bybit closed PnL funding). Adjust position realized_pnl.
+- Why: Fill-based ROI underreports costs for perp strategies (funding can be -3% to +1% annually). Position ROI currently labeled "Price ROI (excl. funding)."
+- Blocked by: Raw fill ingestion stable in production.
+
+#### P3: Rollback runbook for raw fill data
+- What: Document SQL cleanup for derived positions/metrics after USE_RAW_TRADE_INGESTION flag-off.
+- SQL: `DELETE FROM positions WHERE strategy_id = X; UPDATE strategy_analytics SET trade_metrics = NULL, volume_metrics = NULL, exposure_metrics = NULL WHERE strategy_id = X;`
+
+#### P3: Daily PnL deprecation (Sprint 6+)
+- What: Migrate returns pipeline from daily_pnl to raw fills. Stop generating daily_pnl rows.
+- Blocked by: Funding rate ingestion + 2 sprints of stable fills.
+- Why: Two parallel data sources is tech debt. The fills are ground truth.
 
 #### P2: Exposure by Asset Class (Widget 28)
 - Needs: position-level data from exchange APIs (current holdings per asset)

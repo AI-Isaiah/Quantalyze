@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.10.0.0] - 2026-04-12
+
+Sprint 4: Raw trade ingestion, position reconstruction, and strategy detail depth.
+Allocators can now see how strategies actually trade, not just daily P&L summaries.
+
+### Added
+- Raw trade fill ingestion from Binance (per-symbol), OKX (cursor pagination), and Bybit (cursor pagination) via `fetch_raw_trades()` in exchange.py
+- FIFO position reconstruction from individual fills with entry/exit prices, ROI, duration, fees, and position lifecycle tracking
+- Volume & Exposure tab on strategy detail page: buy/sell split, long/short bars, turnover chart, net exposure chart, gross exposure stats
+- Positions tab: top 5 best/worst trades tables, win rate, duration stats, ROI metrics with "Price ROI excl. funding" tooltip
+- Dedicated `positions` table (migration 040) for reconstructed position lifecycles
+- `volume_metrics` and `exposure_metrics` JSONB columns on strategy_analytics (migration 041)
+- Fill pipeline health monitoring on admin compute-jobs page
+- Empty state, error state, and loading state for all new tab components
+- E2E Playwright spec for 5-tab strategy detail page
+- 22 new Python tests: position reconstruction FIFO edge cases, raw fill ingestion per exchange, feature flag integration, is_fill regression
+
+### Changed
+- Strategy detail page from 3 tabs to 5 tabs (Overview, Returns, Risk, Volume & Exposure, Positions)
+- `sync_trades` job timeout from 5 to 15 minutes (supports 90-day backfill)
+- `trades` table extended with `is_fill`, `exchange_fill_id`, `exchange_order_id`, `is_maker`, `cost`, `raw_data` columns (migration 039)
+- Widgets #26 (TradingActivityLog) and #27 (TradeVolume) now prefer real fill data over daily P&L summaries when available
+- Analytics runner filters `WHERE is_fill = false` to prevent double-counting when both data types exist
+- Position reconstruction runs with graceful degradation inside compute_analytics (failure sets data_quality_flag, doesn't crash the job)
+- Raw fill persistence uses direct upsert with dedup index instead of sync_trades RPC (prevents Phase 1 data destruction)
+- Incremental sync uses 1-hour overlap window for late-arriving fills
+
 ## [0.9.0.0] - 2026-04-12
 
 Sprint 3 combined: data pipeline + async jobs wiring + worker dyno + 6 widgets +
