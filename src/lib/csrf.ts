@@ -24,6 +24,13 @@ function buildAllowedHosts(): Set<string> {
       console.warn("[csrf] NEXT_PUBLIC_SITE_URL is not a valid URL:", siteUrl);
     }
   }
+  // Vercel preview deployments get unique URLs. Allow them for QA.
+  const vercelUrl = process.env.NEXT_PUBLIC_VERCEL_URL;
+  if (vercelUrl) {
+    try {
+      hosts.add(new URL(`https://${vercelUrl}`).host);
+    } catch { /* malformed — skip */ }
+  }
   if (process.env.NODE_ENV !== "production") {
     hosts.add("localhost:3000");
     hosts.add("localhost:3001");

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from models.schemas import PortfolioAnalyticsRequest, PortfolioOptimizerRequest, VerifyStrategyRequest
+from models.schemas import BridgeRequest, PortfolioAnalyticsRequest, PortfolioOptimizerRequest, VerifyStrategyRequest
 from services.benchmark import get_benchmark_returns
 from services.db import get_supabase
 from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
@@ -245,13 +245,46 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         drawdown = (cumulative - running_max) / running_max
         max_drawdown = _safe_float(float(drawdown.min()))
 
-        # Narrative
+        # Narrative — pass enriched payload for monthly breakdown + optimizer sentence
         analytics_payload: dict = {
             "return_mtd": period_returns.get("return_mtd"),
             "avg_pairwise_correlation": avg_pairwise_corr,
             "attribution_breakdown": attribution,
             "risk_decomposition": risk_decomp,
+            "portfolio_sharpe": sharpe,
         }
+
+        # Attempt to add monthly returns for per-month narrative breakdown.
+        # Monthly returns are computed per-strategy in strategy_analytics; for the
+        # portfolio-level narrative we build a weighted monthly return from the
+        # daily portfolio returns series.
+        try:
+            monthly_returns: dict[str, dict[str, float]] = {}
+            for d, v in portfolio_returns_series.items():
+                year_str = str(d.year) if hasattr(d, "year") else str(d)[:4]
+                month_str = str(d.month).zfill(2) if hasattr(d, "month") else str(d)[5:7]
+                monthly_returns.setdefault(year_str, {}).setdefault(month_str, 1.0)
+                monthly_returns[year_str][month_str] *= (1 + float(v))
+            # Convert cumulative to period returns
+            for year_str in monthly_returns:
+                for month_str in monthly_returns[year_str]:
+                    monthly_returns[year_str][month_str] -= 1.0
+            analytics_payload["monthly_returns"] = monthly_returns
+        except Exception:
+            pass  # Monthly breakdown is best-effort
+
+        # Attach optimizer suggestions from last completed analytics (if any)
+        try:
+            prev_analytics = supabase.table("portfolio_analytics").select(
+                "optimizer_suggestions"
+            ).eq("portfolio_id", portfolio_id).eq(
+                "computation_status", "complete"
+            ).order("computed_at", desc=True).limit(1).execute()
+            if prev_analytics.data and prev_analytics.data[0].get("optimizer_suggestions"):
+                analytics_payload["optimizer_suggestions"] = prev_analytics.data[0]["optimizer_suggestions"]
+        except Exception:
+            pass  # Optimizer sentence is best-effort
+
         narrative = generate_narrative(analytics_payload)
 
         # Persist results
@@ -281,7 +314,15 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
         ).execute()
 
         # Generate alerts
-        _generate_alerts(supabase, portfolio_id, max_drawdown, avg_pairwise_corr)
+        _generate_alerts(
+            supabase,
+            portfolio_id,
+            max_drawdown,
+            avg_pairwise_corr,
+            rolling_corr=rolling_corr,
+            attribution=attribution,
+            risk_decomp=risk_decomp,
+        )
 
         return {"analytics_id": analytics_id, **update_payload}
 
@@ -303,10 +344,19 @@ def _generate_alerts(
     portfolio_id: str,
     max_drawdown: float | None,
     avg_pairwise_corr: float | None,
+    rolling_corr: dict | None = None,
+    attribution: list | None = None,
+    risk_decomp: list | None = None,
+    strategy_returns: dict | None = None,
 ) -> None:
-    """Insert portfolio alerts for drawdown > 10% or correlation spike > 0.7.
+    """Insert portfolio alerts for threshold breaches.
 
-    Note: portfolio_alerts uses triggered_at (auto-default), not created_at.
+    Original rules: drawdown > 10%, correlation spike > 0.7.
+    Sprint 4 additions: regime_shift, underperformance, concentration_creep.
+
+    Uses ON CONFLICT DO NOTHING with the partial unique index
+    `portfolio_alerts_dedup_unacked` (migration 042) to skip inserts when
+    an unacknowledged alert of the same type already exists.
     """
     alerts = []
 
@@ -329,11 +379,102 @@ def _generate_alerts(
             ),
         })
 
+    # ── Sprint 4: regime_shift ──────────────────────────────────────
+    # Fires when the rolling correlation delta between the most recent and
+    # prior window exceeds 0.15 for any strategy pair.
+    if rolling_corr:
+        window = 5
+        best_delta = 0.0
+        best_recent = 0.0
+        best_prior = 0.0
+        for series in rolling_corr.values():
+            if not isinstance(series, list) or len(series) < window * 2:
+                continue
+            recent_vals = [p["value"] if isinstance(p, dict) else p for p in series[-window:]]
+            prior_vals = [p["value"] if isinstance(p, dict) else p for p in series[-window * 2:-window]]
+            recent_avg = sum(recent_vals) / len(recent_vals)
+            prior_avg = sum(prior_vals) / len(prior_vals)
+            delta = abs(recent_avg - prior_avg)
+            if delta > best_delta:
+                best_delta = delta
+                best_recent = recent_avg
+                best_prior = prior_avg
+        if best_delta > 0.15:
+            direction = "tightened" if best_recent > best_prior else "loosened"
+            alerts.append({
+                "portfolio_id": portfolio_id,
+                "alert_type": "regime_shift",
+                "severity": "medium",
+                "message": (
+                    f"Correlation regime shift detected: pairwise correlation "
+                    f"{direction} from {best_prior:.2f} to {best_recent:.2f} (delta {best_delta:.2f})."
+                ),
+            })
+
+    # ── Sprint 4: underperformance ──────────────────────────────────
+    # Fires when the worst strategy trails the portfolio average contribution
+    # by more than 1 standalone-vol band.
+    if attribution and risk_decomp and len(attribution) >= 2:
+        vol_by_sid = {r["strategy_id"]: r.get("standalone_vol", 0) for r in risk_decomp}
+        avg_contribution = sum(a.get("contribution", 0) for a in attribution) / len(attribution)
+        sorted_attr = sorted(attribution, key=lambda a: a.get("contribution", 0))
+        worst = sorted_attr[0]
+        band = vol_by_sid.get(worst.get("strategy_id", ""), 0.01)
+        threshold = band if band > 0 else 0.01
+        trail_distance = avg_contribution - worst.get("contribution", 0)
+        if trail_distance > threshold:
+            second = sorted_attr[1] if len(sorted_attr) > 1 else None
+            if not second or (second.get("contribution", 0) - worst.get("contribution", 0)) >= 0.005:
+                alerts.append({
+                    "portfolio_id": portfolio_id,
+                    "alert_type": "underperformance",
+                    "severity": "medium",
+                    "message": (
+                        f"{worst.get('strategy_name', 'Unknown')} is trailing the portfolio "
+                        f"baseline by {abs(trail_distance) * 100:.2f}% over the trailing window."
+                    ),
+                })
+
+    # ── Sprint 4: concentration_creep ───────────────────────────────
+    # Fires when any strategy weight exceeds 1.5x the equal-weight baseline
+    # (only meaningful with 3+ strategies).
+    if risk_decomp and len(risk_decomp) >= 3:
+        equal_weight = 100.0 / len(risk_decomp)
+        top = max(risk_decomp, key=lambda r: r.get("weight_pct", 0))
+        if top.get("weight_pct", 0) >= equal_weight * 1.5:
+            alerts.append({
+                "portfolio_id": portfolio_id,
+                "alert_type": "concentration_creep",
+                "severity": "low",
+                "message": (
+                    f"{top.get('strategy_name', 'Unknown')} is {top['weight_pct']:.0f}% "
+                    f"of the portfolio (equal-weight baseline is {equal_weight:.0f}%)."
+                ),
+            })
+
     if alerts:
-        try:
-            supabase.table("portfolio_alerts").insert(alerts).execute()
-        except Exception as exc:
-            logger.warning("Failed to insert portfolio alerts for %s: %s", portfolio_id, exc)
+        # Insert each alert individually, skipping if an unacknowledged alert
+        # of the same type already exists. PostgREST's upsert cannot reference
+        # the partial unique index (WHERE acknowledged_at IS NULL), so we do a
+        # select-then-insert per type. The partial unique index in migration 042
+        # serves as a DB-level safety net for any race conditions.
+        for alert in alerts:
+            try:
+                existing = supabase.table("portfolio_alerts").select("id").eq(
+                    "portfolio_id", alert["portfolio_id"]
+                ).eq(
+                    "alert_type", alert["alert_type"]
+                ).is_(
+                    "acknowledged_at", "null"
+                ).limit(1).execute()
+                if existing.data:
+                    continue  # Already have an unacknowledged alert of this type
+                supabase.table("portfolio_alerts").insert(alert).execute()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to insert %s alert for %s: %s",
+                    alert.get("alert_type"), portfolio_id, exc,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +607,114 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 3: POST /api/verify-strategy
+# Endpoint 3: POST /api/portfolio-bridge
+# ---------------------------------------------------------------------------
+
+@router.post("/portfolio-bridge")
+@limiter.limit("10/hour")
+async def portfolio_bridge(request: Request, req: BridgeRequest):
+    """Find replacement candidates for an underperforming strategy (Bridge V1).
+
+    Uses REPLACE scoring: removes the incumbent, redistributes its weight,
+    and scores each published candidate in that slot. Returns allocator-safe
+    payload (no admin internals, no profile data).
+    """
+    from services.bridge_scoring import find_replacement_candidates
+
+    supabase = get_supabase()
+
+    # Verify portfolio exists AND belongs to the requesting user.
+    # Defense-in-depth: Next.js layer already checks ownership, but the Python
+    # service uses a service-role client that bypasses RLS. This closes the gap
+    # if the service is ever reachable from another path.
+    portfolio_result = supabase.table("portfolios").select("id").eq(
+        "id", req.portfolio_id
+    ).eq("user_id", req.user_id).single().execute()
+    if not portfolio_result.data:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    # Verify the underperformer is actually in this portfolio
+    ps_result = supabase.table("portfolio_strategies").select(
+        "strategy_id, current_weight"
+    ).eq("portfolio_id", req.portfolio_id).execute()
+
+    portfolio_strategies = ps_result.data or []
+    strategy_ids = [row["strategy_id"] for row in portfolio_strategies]
+
+    if req.underperformer_strategy_id not in strategy_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Strategy not found in this portfolio",
+        )
+
+    # Build weights
+    raw_weights = {
+        row["strategy_id"]: float(row["current_weight"]) if row.get("current_weight") else 1.0
+        for row in portfolio_strategies
+    }
+    total_w = sum(raw_weights.values()) or 1.0
+    weights = {sid: w / total_w for sid, w in raw_weights.items()}
+
+    # Fetch portfolio strategy returns
+    sa_in_result = supabase.table("strategy_analytics").select(
+        "strategy_id, returns_series"
+    ).in_("strategy_id", strategy_ids).execute()
+
+    portfolio_returns: dict[str, pd.Series] = {}
+    for row in (sa_in_result.data or []):
+        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+        if s is not None:
+            portfolio_returns[row["strategy_id"]] = s
+
+    if not portfolio_returns:
+        raise HTTPException(status_code=400, detail="No returns data available")
+
+    # Fetch all published candidate strategies (excluding portfolio members)
+    all_published = supabase.table("strategies").select("id, name").eq(
+        "status", "published"
+    ).not_.in_("id", strategy_ids).execute()
+
+    candidate_rows = all_published.data or []
+    candidate_ids = [row["id"] for row in candidate_rows]
+    candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
+
+    candidate_returns: dict[str, pd.Series] = {}
+    if candidate_ids:
+        sa_cand_result = supabase.table("strategy_analytics").select(
+            "strategy_id, returns_series"
+        ).in_("strategy_id", candidate_ids).execute()
+
+        for row in (sa_cand_result.data or []):
+            s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+            if s is not None:
+                candidate_returns[row["strategy_id"]] = s
+
+    if not candidate_returns:
+        return {
+            "status": "complete",
+            "portfolio_id": req.portfolio_id,
+            "underperformer_strategy_id": req.underperformer_strategy_id,
+            "candidates": [],
+        }
+
+    candidates = find_replacement_candidates(
+        portfolio_returns, candidate_returns, weights, req.underperformer_strategy_id
+    )
+
+    # Hydrate with strategy names (allocator-safe, no emails/profiles)
+    for c in candidates:
+        c["strategy_name"] = candidate_names.get(c["strategy_id"], c["strategy_id"])
+
+    return {
+        "status": "complete",
+        "portfolio_id": req.portfolio_id,
+        "underperformer_strategy_id": req.underperformer_strategy_id,
+        "candidates": candidates,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 4: POST /api/verify-strategy
 # ---------------------------------------------------------------------------
 
 @router.post("/verify-strategy")

@@ -52,7 +52,18 @@ class TestGenerateAlerts:
     """Tests for _generate_alerts — the pure business-logic alert rules."""
 
     def _make_supabase_mock(self):
+        """Build a mock that supports the select-then-insert dedup pattern.
+
+        The new _generate_alerts does:
+          1. SELECT to check for existing unacknowledged alert of the same type
+          2. If none found, INSERT the new alert
+        The select chain: .table().select().eq().eq().is_().limit().execute()
+        By default, the select returns no existing alerts (data=[]), so the
+        insert proceeds for every alert type.
+        """
         sb = MagicMock()
+        # Default: no existing alerts → dedup check passes → insert proceeds
+        sb.table.return_value.select.return_value.eq.return_value.eq.return_value.is_.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
         sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "alert-1"}])
         return sb
 
@@ -72,9 +83,8 @@ class TestGenerateAlerts:
         """Drawdown at -15% (> -10%, < -20%) → severity='medium'."""
         sb = self._make_supabase_mock()
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.15, avg_pairwise_corr=0.2)
-        call_args = sb.table.return_value.insert.call_args[0][0]
-        assert len(call_args) == 1
-        alert = call_args[0]
+        # New code inserts one alert per call (select-then-insert per type)
+        alert = sb.table.return_value.insert.call_args[0][0]
         assert alert["alert_type"] == "drawdown"
         assert alert["severity"] == "medium"
         assert "15.0%" in alert["message"]
@@ -83,17 +93,14 @@ class TestGenerateAlerts:
         """Drawdown at -25% (< -20%) → severity='high'."""
         sb = self._make_supabase_mock()
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.25, avg_pairwise_corr=0.2)
-        call_args = sb.table.return_value.insert.call_args[0][0]
-        alert = call_args[0]
+        alert = sb.table.return_value.insert.call_args[0][0]
         assert alert["severity"] == "high"
 
     def test_correlation_spike_triggers_alert(self):
         """avg_pairwise_corr > 0.70 → correlation_spike alert with medium severity."""
         sb = self._make_supabase_mock()
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.05, avg_pairwise_corr=0.85)
-        call_args = sb.table.return_value.insert.call_args[0][0]
-        assert len(call_args) == 1
-        alert = call_args[0]
+        alert = sb.table.return_value.insert.call_args[0][0]
         assert alert["alert_type"] == "correlation_spike"
         assert alert["severity"] == "medium"
 
@@ -104,12 +111,13 @@ class TestGenerateAlerts:
         sb.table.assert_not_called()
 
     def test_both_triggers_fire_together(self):
-        """Both drawdown and correlation spike → 2 alerts inserted in a single call."""
+        """Both drawdown and correlation spike → 2 separate insert calls."""
         sb = self._make_supabase_mock()
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.22, avg_pairwise_corr=0.75)
-        call_args = sb.table.return_value.insert.call_args[0][0]
-        assert len(call_args) == 2
-        types_found = {a["alert_type"] for a in call_args}
+        # New code does one insert per alert type
+        insert_calls = sb.table.return_value.insert.call_args_list
+        assert len(insert_calls) == 2
+        types_found = {call[0][0]["alert_type"] for call in insert_calls}
         assert types_found == {"drawdown", "correlation_spike"}
 
     def test_none_inputs_no_crash(self):
@@ -121,6 +129,8 @@ class TestGenerateAlerts:
     def test_supabase_insert_failure_does_not_raise(self):
         """If Supabase raises during insert, _generate_alerts swallows it silently."""
         sb = MagicMock()
+        # Mock the select-then-insert path: select succeeds (no existing), insert fails
+        sb.table.return_value.select.return_value.eq.return_value.eq.return_value.is_.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
         sb.table.return_value.insert.return_value.execute.side_effect = RuntimeError("DB down")
         # Should NOT propagate the exception
         _generate_alerts(sb, "portfolio-1", max_drawdown=-0.25, avg_pairwise_corr=0.80)

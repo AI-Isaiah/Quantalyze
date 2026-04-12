@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from datetime import date as _date
 from typing import Optional
 from services.metrics import _safe_float
 
@@ -53,6 +54,15 @@ def find_improvement_candidates(
 
 
 def generate_narrative(analytics: dict) -> str:
+    """Build a deterministic portfolio narrative.
+
+    Structure:
+      1. MTD headline + top contributor
+      2. Correlation / diversification quality
+      3. Risk concentration warning (if applicable)
+      4. Per-month breakdown (from monthly_returns if available)
+      5. Optimizer recommendation sentence (if optimizer_suggestions present)
+    """
     parts = []
     mtd = analytics.get("return_mtd")
     if mtd is not None:
@@ -74,6 +84,55 @@ def generate_narrative(analytics: dict) -> str:
                 f"({top_risk['marginal_risk_pct']:.0f}% of portfolio volatility on "
                 f"{top_risk.get('weight_pct', 0):.0f}% of capital)"
             )
+
+    # ── Per-month breakdown ─────────────────────────────────────────
+    monthly_returns = analytics.get("monthly_returns")
+    if monthly_returns and attr:
+        # monthly_returns: {"2026": {"01": 0.05, "02": -0.02, ...}}
+        # Pick the last 3 months that have data
+        month_entries = []
+        for year_str, months in sorted(monthly_returns.items()):
+            for month_str, ret in sorted(months.items()):
+                month_entries.append((year_str, month_str, ret))
+        # Compute top contributor once (invariant across months — uses overall attribution)
+        top_contrib = max(attr, key=lambda a: abs(a.get("contribution", 0)))
+        total_abs = sum(abs(a.get("contribution", 0)) for a in attr) or 1
+        top_share = abs(top_contrib.get("contribution", 0)) / total_abs
+
+        for year_str, month_str, ret in month_entries[-3:]:
+            try:
+                month_name = _date(int(year_str), int(month_str), 1).strftime("%B %Y")
+            except (ValueError, TypeError):
+                month_name = f"{month_str}/{year_str}"
+            parts.append(
+                f"In {month_name}, portfolio returned {ret * 100:+.1f}%. "
+                f"{top_contrib.get('strategy_name', 'unknown')} drove {top_share * 100:.0f}% of the gain"
+            )
+
+    # ── Optimizer recommendation sentence ───────────────────────────
+    suggestions = analytics.get("optimizer_suggestions")
+    if suggestions and len(suggestions) > 0 and attr:
+        worst_attr = min(attr, key=lambda a: a.get("contribution", 0))
+        best_suggestion = suggestions[0]
+        sharpe_lift = best_suggestion.get("sharpe_lift", 0)
+        if sharpe_lift > 0 and worst_attr.get("strategy_name"):
+            # Compute current Sharpe from risk decomp or attribution context
+            current_sharpe_str = ""
+            new_sharpe_str = ""
+            risk_items = analytics.get("risk_decomposition", [])
+            if risk_items:
+                # Use portfolio-level sharpe if available
+                portfolio_sharpe = analytics.get("portfolio_sharpe")
+                if portfolio_sharpe is not None:
+                    current_sharpe_str = f"{portfolio_sharpe:.2f}"
+                    new_sharpe_str = f"{portfolio_sharpe + sharpe_lift:.2f}"
+            if current_sharpe_str and new_sharpe_str:
+                parts.append(
+                    f"If you trim {worst_attr['strategy_name']} and redistribute to "
+                    f"{best_suggestion.get('strategy_name', 'top candidates')}, "
+                    f"expected Sharpe moves from {current_sharpe_str} to {new_sharpe_str}"
+                )
+
     return ". ".join(parts) + "." if parts else "Portfolio analytics pending computation."
 
 

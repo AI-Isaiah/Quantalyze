@@ -11,6 +11,8 @@ export interface TileConfig {
 export interface DashboardConfig {
   tiles: TileConfig[];
   timeframe: string;
+  /** Layout schema version — when this differs from LAYOUT_VERSION, reset to defaults. */
+  layoutVersion?: number;
 }
 
 export interface WidgetMeta {
