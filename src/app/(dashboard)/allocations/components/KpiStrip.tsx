@@ -161,7 +161,7 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
 
   return (
     <div className="relative mb-6">
-      <div className="flex items-center gap-0 overflow-x-auto rounded-lg border border-[#E2E8F0] bg-white">
+      <div className="flex items-center gap-0 overflow-x-auto bg-white border-b border-[#E2E8F0]">
       {groups.map((group, gi) => (
         <div key={group.label} className="flex items-center">
           {gi > 0 && (
@@ -181,7 +181,7 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
                     {item.label}
                   </span>
                   <span
-                    className="font-mono text-sm tabular-nums font-medium"
+                    className="font-metric text-sm tabular-nums font-medium"
                     style={
                       isHealthScore && health
                         ? { color: healthColor(health.total) }
