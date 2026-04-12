@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
     .eq("portfolio_id", portfolioId);
 
   if (!psRows || psRows.length === 0) {
-    return NextResponse.json({ activity: [], volumeByDay: [] });
+    return NextResponse.json({ activity: [], volumeByDay: [], has_fills: false });
   }
 
   const strategyIds = psRows.map(
@@ -57,16 +57,26 @@ export async function GET(request: NextRequest) {
     nameMap[r.strategy_id as string] = strat?.name ?? "Unknown";
   }
 
-  // Query trades, group by date+strategy+symbol
+  // Check if any fills exist for these strategies
+  const { count: fillCount } = await admin
+    .from("trades")
+    .select("id", { count: "exact", head: true })
+    .in("strategy_id", strategyIds)
+    .eq("is_fill", true);
+
+  const hasFills = (fillCount ?? 0) > 0;
+
+  // Query trades — prefer fills when available, fall back to legacy daily_pnl rows
   const { data: trades } = await admin
     .from("trades")
     .select("timestamp, strategy_id, symbol, realized_pnl, exchange")
     .in("strategy_id", strategyIds)
+    .eq("is_fill", hasFills)
     .order("timestamp", { ascending: false })
     .limit(5000);
 
   if (!trades || trades.length === 0) {
-    return NextResponse.json({ activity: [], volumeByDay: [] });
+    return NextResponse.json({ activity: [], volumeByDay: [], has_fills: hasFills });
   }
 
   // Aggregate by date+strategy+symbol
@@ -103,5 +113,5 @@ export async function GET(request: NextRequest) {
     .map(([date, pnlUsd]) => ({ date, pnlUsd }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  return NextResponse.json({ activity, volumeByDay });
+  return NextResponse.json({ activity, volumeByDay, has_fills: hasFills });
 }

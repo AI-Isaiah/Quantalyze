@@ -352,3 +352,129 @@ class TestDispatchStatusBridge:
         ) as mock_sync:
             await dispatch(job)
         mock_sync.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Feature flag: USE_RAW_TRADE_INGESTION
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesFeatureFlag:
+    """Tests that the raw fill ingestion Phase 2 in run_sync_trades_job
+    is gated by the USE_RAW_TRADE_INGESTION environment variable.
+
+    These tests mock the full exchange preflight chain so only the
+    feature-flag path is exercised.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_feature_flag_off(self) -> None:
+        """With USE_RAW_TRADE_INGESTION=false (default), verify Phase 2
+        (fetch_raw_trades) is never called."""
+        from services.job_worker import run_sync_trades_job
+
+        # Build mock exchange context
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-1", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # Mock the supabase RPC chain
+        mock_rpc = MagicMock()
+        mock_rpc.execute.return_value = MagicMock(data=5)
+        mock_ctx.supabase.rpc.return_value = mock_rpc
+
+        # Mock the table update chain
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {"id": "job-ff-1", "kind": "sync_trades", "strategy_id": "strat-1"}
+
+        mock_fetch_raw = AsyncMock(return_value=[])
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            side_effect=lambda fn: asyncio.to_thread(fn),
+        ), patch(
+            "services.exchange.fetch_raw_trades",
+            mock_fetch_raw,
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        mock_fetch_raw.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_feature_flag_on(self) -> None:
+        """With USE_RAW_TRADE_INGESTION=true, verify fetch_raw_trades IS
+        called after fetch_all_trades."""
+        from services.job_worker import run_sync_trades_job
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-1", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "binance",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        mock_rpc = MagicMock()
+        mock_rpc.execute.return_value = MagicMock(data=5)
+        mock_ctx.supabase.rpc.return_value = mock_rpc
+
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {"id": "job-ff-2", "kind": "sync_trades", "strategy_id": "strat-1"}
+
+        mock_fetch_raw = AsyncMock(return_value=[{"fill": "data"}])
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            side_effect=lambda fn: asyncio.to_thread(fn),
+        ), patch(
+            "services.exchange.fetch_raw_trades",
+            mock_fetch_raw,
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        mock_fetch_raw.assert_awaited_once()
