@@ -186,20 +186,20 @@ class TestDispatchRouting:
         assert result.outcome == DispatchOutcome.DONE
 
     @pytest.mark.asyncio
-    async def test_dispatch_poll_positions_stub_returns_permanent_failed(self) -> None:
-        """Commit 2 stubs poll_positions as permanent-failed; commit 3 wires
-        the real handler. The stub must ship a permanent error_kind so the
-        DB goes straight to failed_final (no wasted retries for code that
-        is known to be missing)."""
+    async def test_dispatch_routes_poll_positions(self) -> None:
+        """Commit 3 wires the real poll_positions handler. Verify dispatch
+        routes kind='poll_positions' to run_poll_positions_job."""
         job = {"id": "job-4", "kind": "poll_positions", "strategy_id": "strat-3"}
         with patch(
+            "services.job_worker.run_poll_positions_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
             "services.job_worker.sync_strategy_analytics_status",
             new=AsyncMock(return_value=None),
         ):
             result = await dispatch(job)
-        assert result.outcome == DispatchOutcome.FAILED
-        assert result.error_kind == "permanent"
-        assert "not yet implemented" in (result.error_message or "")
+        mock_handler.assert_awaited_once_with(job)
+        assert result.outcome == DispatchOutcome.DONE
 
     @pytest.mark.asyncio
     async def test_dispatch_unknown_kind_returns_permanent_failed(self) -> None:

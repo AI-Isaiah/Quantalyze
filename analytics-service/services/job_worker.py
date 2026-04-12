@@ -6,11 +6,11 @@ wraps each handler in an asyncio.wait_for timeout, classifies any
 exception into (error_kind, sanitized message), and always (on strategy-
 scoped jobs) updates the UI status bridge before returning.
 
-Supported kinds (Sprint 3 commit 2):
+Supported kinds (Sprint 3 commit 3 — final worker modifications):
   sync_trades       -> run_sync_trades_job      (5-minute timeout)
   compute_analytics -> run_compute_analytics_job (15-minute timeout)
   compute_portfolio -> run_compute_portfolio_job (10-minute timeout)
-  poll_positions    -> stub (permanent failure until commit 3 wires it up)
+  poll_positions    -> run_poll_positions_job    (3-minute timeout)
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
 decision. See commit 2 plan for rationale:
@@ -20,15 +20,15 @@ decision. See commit 2 plan for rationale:
   asyncio.TimeoutError -> transient (wait_for expiry)
   everything else -> unknown (retried by default)
 
-TODO (commit 4): add circuit-breaker defer path based on api_keys.last_429_at
-before calling create_exchange in run_sync_trades_job. When last_429_at is
-within the per-exchange cooldown window, call defer_compute_job RPC and
-return DispatchResult(outcome=DEFERRED) instead of proceeding.
+Circuit breaker (commit 3): before creating the exchange in sync_trades and
+poll_positions, check api_keys.last_429_at. If within the per-exchange
+cooldown window (Binance 120s, OKX 300s, Bybit 600s), call defer_compute_job
+RPC and return DispatchResult(outcome=DEFERRED).
 
-TODO (commit 4): currently run_sync_trades_job decrypts credentials inline
-via decrypt_credentials. Commit 4 will factor the credential loading +
-circuit-breaker + exchange-construction sequence into a shared helper so the
-same pre-flight runs for every exchange-touching handler.
+On 429 (ccxt.RateLimitExceeded), stamp api_keys.last_429_at via
+update_api_key_rate_limit before classifying as transient. This feeds the
+circuit breaker so subsequent jobs for the same API key defer instead of
+hammering the exchange.
 """
 from __future__ import annotations
 
@@ -50,8 +50,19 @@ from services.exchange import (
     fetch_usdt_balance,
     parse_since_ms,
 )
+from services.positions import fetch_positions, persist_position_snapshots
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker: per-exchange cooldown after 429
+# ---------------------------------------------------------------------------
+EXCHANGE_COOLDOWNS: dict[str, int] = {
+    "binance": 120,   # 2 minutes
+    "okx": 300,       # 5 minutes
+    "bybit": 600,     # 10 minutes
+}
 
 
 # ---------------------------------------------------------------------------
@@ -152,34 +163,17 @@ def classify_exception(exc: Exception) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Per-kind handlers
+# Shared helpers: API key loading, circuit breaker, 429 stamping
 # ---------------------------------------------------------------------------
 
-async def run_sync_trades_job(job: dict) -> DispatchResult:
-    """Decrypt the strategy's API key, fetch daily PnL from the exchange,
-    and persist via the sync_trades RPC.
+async def _load_strategy_and_key(
+    supabase, strategy_id: str
+) -> tuple[dict | None, dict | None, str | None]:
+    """Load strategy row and its api_key row. Returns (strategy, key_row, error_msg).
 
-    Mirrors the logic in routers/exchange.py::fetch_trades. Refactoring the
-    shared sequence into a single helper is commit 4's scope — commit 2
-    keeps the two callers in parity but separate.
-
-    Commit 4 will add the api_keys.last_429_at circuit-breaker check before
-    create_exchange. If the exchange is in cooldown, the handler will call
-    defer_compute_job and return DispatchResult(outcome=DEFERRED). Until
-    then, the handler always proceeds straight to the exchange call.
+    On success, error_msg is None. On failure, strategy and key_row may be
+    None and error_msg explains why.
     """
-    strategy_id = job.get("strategy_id")
-    if not strategy_id:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="run_sync_trades_job: strategy_id missing",
-            error_kind="permanent",
-        )
-
-    kek = get_kek()
-    supabase = get_supabase()
-
-    # Look up the strategy to get api_key_id
     def _load_strategy() -> dict | None:
         res = (
             supabase.table("strategies")
@@ -192,11 +186,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
     strategy_row = await db_execute(_load_strategy)
     if not strategy_row or not strategy_row.get("api_key_id"):
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="Strategy has no connected API key",
-            error_kind="permanent",
-        )
+        return None, None, "Strategy has no connected API key"
 
     def _load_key() -> dict | None:
         res = (
@@ -210,27 +200,121 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
     key_row = await db_execute(_load_key)
     if not key_row:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="API key not found",
-            error_kind="permanent",
-        )
+        return strategy_row, None, "API key not found"
 
     if key_row.get("user_id") != strategy_row.get("user_id"):
+        return strategy_row, key_row, "API key does not belong to strategy owner"
+
+    return strategy_row, key_row, None
+
+
+async def _check_circuit_breaker(
+    supabase, job: dict, key_row: dict
+) -> DispatchResult | None:
+    """Check circuit breaker: if api_key has a recent 429, defer the job.
+
+    Returns a DEFERRED DispatchResult if the job should be deferred, or
+    None if the circuit breaker is not tripped (proceed normally).
+    """
+    last_429_str = key_row.get("last_429_at")
+    if not last_429_str:
+        return None
+
+    try:
+        last_429 = datetime.fromisoformat(
+            last_429_str.replace("Z", "+00:00")
+        )
+    except (ValueError, TypeError):
+        return None
+
+    now = datetime.now(timezone.utc)
+    exchange_name = key_row.get("exchange", "")
+    cooldown = EXCHANGE_COOLDOWNS.get(exchange_name, 120)
+    remaining = cooldown - (now - last_429).total_seconds()
+
+    if remaining <= 0:
+        return None
+
+    defer_seconds = int(remaining) + 5  # small buffer
+
+    def _defer():
+        supabase.rpc("defer_compute_job", {
+            "p_job_id": job["id"],
+            "p_defer_seconds": defer_seconds,
+            "p_reason": f"exchange_cooldown:{exchange_name}:{int(remaining)}s_remaining",
+        }).execute()
+
+    await db_execute(_defer)
+
+    logger.info(
+        "Circuit breaker tripped for job %s (exchange=%s, %ds remaining)",
+        job["id"], exchange_name, int(remaining),
+    )
+    return DispatchResult(outcome=DispatchOutcome.DEFERRED)
+
+
+async def _stamp_429(supabase, key_row: dict) -> None:
+    """Stamp api_keys.last_429_at on a 429 response.
+
+    Called before classify_exception returns, so subsequent jobs for the
+    same API key will be deferred by the circuit breaker.
+    """
+    def _update():
+        supabase.table("api_keys").update({
+            "last_429_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", key_row["id"]).execute()
+
+    try:
+        await db_execute(_update)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to stamp last_429_at for api_key %s: %s",
+            key_row.get("id"), exc,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-kind handlers
+# ---------------------------------------------------------------------------
+
+async def run_sync_trades_job(job: dict) -> DispatchResult:
+    """Decrypt the strategy's API key, fetch daily PnL from the exchange,
+    and persist via the sync_trades RPC.
+
+    Pre-flight: load API key, check circuit breaker (defer if 429 cooldown
+    active), decrypt credentials, then create exchange.
+
+    On ccxt.RateLimitExceeded (429), stamps api_keys.last_429_at before
+    classifying so the circuit breaker kicks in for subsequent jobs.
+    """
+    strategy_id = job.get("strategy_id")
+    if not strategy_id:
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
-            error_message="API key does not belong to strategy owner",
+            error_message="run_sync_trades_job: strategy_id missing",
             error_kind="permanent",
         )
 
-    # TODO (commit 4): circuit-breaker defer check goes here. If
-    # api_keys.last_429_at is within the per-exchange cooldown window
-    # (Binance 120s, OKX 300s, Bybit 600s), call defer_compute_job(job['id'],
-    # remaining_seconds, 'circuit_breaker_cooldown') and return
-    # DispatchResult(outcome=DispatchOutcome.DEFERRED).
+    kek = get_kek()
+    supabase = get_supabase()
 
-    # Decrypt credentials. InvalidToken → classify as permanent with a
-    # sanitized message.
+    # Load strategy + api_key row
+    strategy_row, key_row, error_msg = await _load_strategy_and_key(
+        supabase, strategy_id
+    )
+    if error_msg:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=error_msg,
+            error_kind="permanent",
+        )
+
+    # Circuit breaker: defer if 429 cooldown active
+    defer_result = await _check_circuit_breaker(supabase, job, key_row)
+    if defer_result is not None:
+        return defer_result
+
+    # Decrypt credentials
     api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
 
     exchange = create_exchange(
@@ -241,6 +325,10 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     try:
         trades = await fetch_all_trades(exchange, since_ms=since_ms)
         account_balance = await fetch_usdt_balance(exchange)
+    except ccxt.RateLimitExceeded:
+        # Stamp 429 for circuit breaker before re-raising
+        await _stamp_429(supabase, key_row)
+        raise
     finally:
         try:
             await exchange.close()
@@ -326,6 +414,74 @@ async def run_compute_portfolio_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_poll_positions_job(job: dict) -> DispatchResult:
+    """Fetch open positions from the exchange and persist as snapshots.
+
+    Pre-flight: load API key, check circuit breaker (defer if 429 cooldown
+    active), decrypt credentials, then create exchange.
+
+    On ccxt.RateLimitExceeded (429), stamps api_keys.last_429_at before
+    classifying so the circuit breaker kicks in for subsequent jobs.
+    """
+    strategy_id = job.get("strategy_id")
+    if not strategy_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_poll_positions_job: strategy_id missing",
+            error_kind="permanent",
+        )
+
+    kek = get_kek()
+    supabase = get_supabase()
+
+    # Load strategy + api_key row
+    strategy_row, key_row, error_msg = await _load_strategy_and_key(
+        supabase, strategy_id
+    )
+    if error_msg:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=error_msg,
+            error_kind="permanent",
+        )
+
+    # Circuit breaker: defer if 429 cooldown active
+    defer_result = await _check_circuit_breaker(supabase, job, key_row)
+    if defer_result is not None:
+        return defer_result
+
+    # Decrypt credentials
+    api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
+
+    exchange = create_exchange(
+        key_row["exchange"], api_key, api_secret, passphrase
+    )
+
+    try:
+        snapshots = await fetch_positions(key_row["exchange"], exchange)
+    except ccxt.RateLimitExceeded:
+        # Stamp 429 for circuit breaker before re-raising
+        await _stamp_429(supabase, key_row)
+        raise
+    finally:
+        try:
+            await exchange.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+
+    # Persist snapshots
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    count = await persist_position_snapshots(
+        supabase, snapshots, strategy_id, today_str
+    )
+    logger.info(
+        "poll_positions: persisted %d position snapshots for strategy %s",
+        count, strategy_id,
+    )
+
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -353,13 +509,8 @@ async def dispatch(job: dict) -> DispatchResult:
                 run_compute_portfolio_job(job), timeout=timeout
             )
         elif kind == "poll_positions":
-            # TODO (commit 3): wire run_poll_positions_job(job) here.
-            # The handler + services/positions.py land in commit 3 along
-            # with the poll_positions error classification path.
-            result = DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message="poll_positions handler not yet implemented",
-                error_kind="permanent",
+            result = await asyncio.wait_for(
+                run_poll_positions_job(job), timeout=timeout
             )
         else:
             # Unknown kind — permanent failure so the DB row goes straight
