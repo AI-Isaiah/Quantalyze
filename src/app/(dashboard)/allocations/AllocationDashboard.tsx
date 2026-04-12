@@ -309,7 +309,7 @@ export function AllocationDashboard({
     : null;
 
   return (
-    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+    <main className="max-w-[1280px] mx-auto p-4 pb-12">
       {/* Header — Bloomberg style */}
       <header className="mb-2 flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -351,7 +351,7 @@ export function AllocationDashboard({
       <ViewTabs activeTab={activeView} onTabChange={setActiveView} />
 
       {/* KPI strip — dense Bloomberg row */}
-      <div className="mt-4">
+      <div className="mt-2">
         <KpiStrip
           analytics={analytics}
           metrics={metrics}
@@ -362,13 +362,13 @@ export function AllocationDashboard({
 
       {/* "As of" timestamp */}
       {asOfDate && (
-        <p className="mb-4 text-right text-[11px] text-text-muted font-metric tabular-nums">
+        <p className="mb-2 text-right text-[11px] text-text-muted font-metric tabular-nums">
           As of {asOfDate} &middot; {timeframe}
         </p>
       )}
 
       {/* Insight strip — fixed above the widget grid */}
-      <div className="mb-5 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
+      <div className="mb-3 border border-[#E2E8F0] bg-white px-3 py-2" style={{ borderRadius: 4 }}>
         <InsightStrip analytics={analytics} portfolioId={portfolio.id} max={3} />
       </div>
 

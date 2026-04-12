@@ -43,7 +43,7 @@ export default function DrawdownChart({ data }: WidgetProps) {
 
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart data={drawdownData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
+      <AreaChart data={drawdownData} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
         <defs>
           <linearGradient id="dd-fill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#DC2626" stopOpacity={0.3} />

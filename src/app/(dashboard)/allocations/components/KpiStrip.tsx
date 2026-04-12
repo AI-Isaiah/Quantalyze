@@ -160,7 +160,7 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
     : null;
 
   return (
-    <div className="relative mb-6">
+    <div className="relative mb-3">
       <div className="flex items-center gap-0 overflow-x-auto bg-white border-b border-[#E2E8F0]">
       {groups.map((group, gi) => (
         <div key={group.label} className="flex items-center">
@@ -172,7 +172,7 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
             return (
               <Tooltip key={item.label} content={item.tooltip} className="relative inline-flex">
                 <div
-                  className="flex flex-col items-center px-4 py-2.5 min-w-[80px] cursor-default"
+                  className="flex flex-col items-center px-3 py-1.5 min-w-[72px] cursor-default"
                 >
                   <span
                     className="text-[10px] uppercase tracking-wider font-semibold"
