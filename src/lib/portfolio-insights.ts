@@ -27,6 +27,10 @@ export interface PortfolioInsight {
     | "concentration_creep";
   severity: InsightSeverity;
   sentence: string;
+  /** Strategy this insight targets, if applicable. Used by Bridge triggers. */
+  strategy_id?: string | null;
+  /** Strategy name for display. */
+  strategy_name?: string | null;
 }
 
 function formatPct2(n: number): string {
@@ -76,6 +80,8 @@ export function computeBiggestRisk(
         key: "biggest_risk_concentration",
         severity: "high",
         sentence: `Risk is concentrated in ${top.strategy_name}: ${Math.round(top.marginal_risk_pct)}% of portfolio volatility on ${Math.round(top.weight_pct)}% of capital.`,
+        strategy_id: top.strategy_id,
+        strategy_name: top.strategy_name,
       };
     }
   }
@@ -180,6 +186,8 @@ export function computeUnderperformance(
     key: "underperformance",
     severity: "medium",
     sentence: `${worst.strategy_name} has trailed the portfolio baseline by ${formatPct2(Math.abs(trailDistance))} over the trailing window.`,
+    strategy_id: worst.strategy_id,
+    strategy_name: worst.strategy_name,
   };
 }
 
@@ -202,6 +210,8 @@ export function computeConcentrationCreep(
     key: "concentration_creep",
     severity: "low",
     sentence: `${top.strategy_name} is ${Math.round(top.weight_pct)}% of the portfolio (equal-weight baseline would be ${Math.round(equalWeight)}%).`,
+    strategy_id: top.strategy_id,
+    strategy_name: top.strategy_name,
   };
 }
 

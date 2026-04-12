@@ -322,6 +322,18 @@ export interface OptimizerSuggestionRow {
   score: number;
 }
 
+export type BridgeFitLabel = "Strong fit" | "Good fit" | "Moderate fit" | "Weak fit";
+
+export interface BridgeCandidate {
+  strategy_id: string;
+  strategy_name: string;
+  sharpe_delta: number;
+  dd_delta: number;
+  corr_delta: number;
+  composite_score: number;
+  fit_label: BridgeFitLabel;
+}
+
 export interface PortfolioStrategy {
   portfolio_id: string;
   strategy_id: string;
@@ -349,7 +361,15 @@ export interface PortfolioDocument {
 export interface PortfolioAlert {
   id: string;
   portfolio_id: string;
-  alert_type: "drawdown" | "correlation_spike" | "sync_failure" | "status_change" | "optimizer_suggestion";
+  alert_type:
+    | "drawdown"
+    | "correlation_spike"
+    | "sync_failure"
+    | "status_change"
+    | "optimizer_suggestion"
+    | "regime_shift"
+    | "underperformance"
+    | "concentration_creep";
   severity: "high" | "medium" | "low";
   message: string;
   metadata: Record<string, unknown> | null;
