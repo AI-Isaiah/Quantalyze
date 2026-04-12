@@ -9,6 +9,7 @@ Also computes exposure metrics from position_snapshots.
 from __future__ import annotations
 
 import logging
+import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -77,12 +78,11 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
 
     # Compute trade_metrics
     closed = [p for p in all_positions if p.get("status") == "closed"]
-    open_positions = [p for p in all_positions if p.get("status") == "open"]
     winners = [p for p in closed if (p.get("roi") or 0) > 0]
 
     total = len(all_positions)
     closed_count = len(closed)
-    open_count = len(open_positions)
+    open_count = total - closed_count
 
     win_rate = len(winners) / closed_count if closed_count > 0 else 0.0
     rois = [p.get("roi", 0) or 0 for p in closed]
@@ -151,7 +151,7 @@ def _match_positions_fifo(
         total_fees += fee
 
         # Determine if this fill opens or closes position
-        if net_qty == 0.0:
+        if abs(net_qty) < 1e-12:
             # Opening a new position
             if pos_side == "short" or (not pos_side and side == "sell"):
                 position_side = "short"
@@ -333,8 +333,6 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
 
     if not gross_exposures:
         return {}
-
-    import statistics
 
     mean_gross = statistics.mean(gross_exposures)
     std_gross = statistics.stdev(gross_exposures) if len(gross_exposures) > 1 else 0.0

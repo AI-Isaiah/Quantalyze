@@ -32,6 +32,9 @@ function makeAnalytics(
     rolling_metrics: null,
     return_quantiles: null,
     trade_metrics: null,
+    volume_metrics: null,
+    exposure_metrics: null,
+    data_quality_flags: null,
     ...overrides,
   };
 }

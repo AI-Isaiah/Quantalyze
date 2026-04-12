@@ -87,7 +87,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
     # Verify strategy exists
     strategy_result = await db_execute(
         lambda: supabase.table("strategies")
-        .select("id, user_id")
+        .select("id, user_id, api_key_id")
         .eq("id", strategy_id)
         .single()
         .execute()
@@ -136,16 +136,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # strategy_id column).
         account_balance = None
         try:
-            strategy_with_key = await db_execute(
-                lambda: supabase.table("strategies")
-                .select("api_key_id")
-                .eq("id", strategy_id)
-                .single()
-                .execute()
-            )
             api_key_id = (
-                strategy_with_key.data.get("api_key_id")
-                if strategy_with_key.data
+                strategy_result.data.get("api_key_id")
+                if strategy_result.data
                 else None
             )
             if api_key_id:

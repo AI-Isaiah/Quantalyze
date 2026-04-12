@@ -11,7 +11,7 @@ export function PositionsTab({
   analytics: StrategyAnalytics;
   positions: Position[] | null;
 }) {
-  const dqf = analytics.metrics_json?.data_quality_flags as Record<string, unknown> | undefined;
+  const dqf = analytics.data_quality_flags ?? null;
   const positionMetricsFailed = dqf?.position_metrics_failed === true;
 
   const tm = analytics.trade_metrics as Record<string, number> | null;
@@ -77,7 +77,7 @@ export function PositionsTab({
       {positionMetricsFailed && (
         <div className="mb-4 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
           <p className="text-sm font-medium text-warning">
-            Volume metrics couldn&apos;t be computed.
+            Position metrics couldn&apos;t be computed.
           </p>
         </div>
       )}

@@ -529,6 +529,8 @@ async def _fetch_raw_trades_bybit(
         params: dict[str, str] = {"category": "linear", "limit": "100"}
         if cursor:
             params["cursor"] = cursor
+        if since_ms and not cursor:
+            params["startTime"] = str(since_ms)
 
         try:
             result = await exchange.private_get_v5_execution_list(params)

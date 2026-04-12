@@ -102,6 +102,9 @@ export function generateMockStrategies(count: number): (Strategy & { analytics: 
       rolling_metrics: null,
       return_quantiles: null,
       trade_metrics: null,
+      volume_metrics: null,
+      exposure_metrics: null,
+      data_quality_flags: null,
     };
 
     return { ...strategy, analytics };
@@ -207,10 +210,19 @@ export function generateDetailAnalytics(strategyId: string): StrategyAnalytics {
       "Monthly": [randomBetween(-0.15, -0.05), randomBetween(-0.03, 0), randomBetween(0, 0.02), randomBetween(0.02, 0.05), randomBetween(0.06, 0.2)],
     },
     trade_metrics: {
-      total_trades: Math.floor(randomBetween(500, 10000)),
+      total_positions: Math.floor(randomBetween(500, 10000)),
+      open_positions: Math.floor(randomBetween(0, 20)),
+      closed_positions: Math.floor(randomBetween(480, 9980)),
       win_rate: randomBetween(0.4, 0.65),
-      maker_pct: randomBetween(0.3, 0.7),
-      long_pct: randomBetween(0.4, 0.6),
+      avg_roi: randomBetween(-0.05, 0.1),
+      avg_duration_days: randomBetween(0.5, 30),
+      long_count: Math.floor(randomBetween(200, 5000)),
+      short_count: Math.floor(randomBetween(200, 5000)),
+      best_trade_roi: randomBetween(0.05, 0.5),
+      worst_trade_roi: randomBetween(-0.5, -0.05),
     },
+    volume_metrics: null,
+    exposure_metrics: null,
+    data_quality_flags: null,
   };
 }

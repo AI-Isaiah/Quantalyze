@@ -367,9 +367,8 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             try:
                 from services.exchange import fetch_raw_trades
 
-                fill_since_ms = parse_since_ms(ctx.key_row.get("last_sync_at"))
                 raw_fills = await fetch_raw_trades(
-                    ctx.exchange, strategy_id, ctx.supabase, since_ms=fill_since_ms
+                    ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
                 )
             except Exception as e:
                 # Phase 2 failure should NOT fail Phase 1
@@ -405,28 +404,21 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
     # Persist raw fills (Phase 2, after exchange is closed)
     if raw_fills:
-        try:
-            fills_json = json.dumps(raw_fills, default=str)
-
-            def _sync_fills() -> int:
-                res = ctx.supabase.rpc(
-                    "sync_trades",
-                    {"p_strategy_id": strategy_id, "p_trades": fills_json},
+        # Direct insert with ON CONFLICT DO NOTHING (dedup via partial unique index)
+        # Cannot use sync_trades RPC — it DELETE+INSERTs, which would destroy Phase 1 daily_pnl
+        for i in range(0, len(raw_fills), 100):
+            batch = raw_fills[i:i + 100]
+            def _insert_fills(rows=batch):
+                ctx.supabase.table("trades").upsert(
+                    [{"strategy_id": strategy_id, **fill} for fill in rows],
+                    on_conflict="strategy_id,exchange,exchange_fill_id",
+                    ignore_duplicates=True,
                 ).execute()
-                return int(res.data or 0)
-
-            fill_count = await db_execute(_sync_fills)
-            logger.info(
-                "sync_trades Phase 2: persisted %d raw fills for strategy %s",
-                fill_count,
-                strategy_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "Raw fill persist failed for strategy %s (Phase 1 succeeded): %s",
-                strategy_id,
-                str(e),
-            )
+            await db_execute(_insert_fills)
+        logger.info(
+            "sync_trades Phase 2: persisted %d raw fills for strategy %s",
+            len(raw_fills), strategy_id,
+        )
 
     # Advance sync cursor always (even for empty fetches).
     def _update_cursor() -> None:

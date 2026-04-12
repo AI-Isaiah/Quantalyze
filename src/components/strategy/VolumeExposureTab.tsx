@@ -4,10 +4,10 @@ import { formatPercent, formatNumber, formatCurrency, cn } from "@/lib/utils";
 import type { StrategyAnalytics } from "@/lib/types";
 
 export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics }) {
-  const dqf = analytics.metrics_json?.data_quality_flags as Record<string, unknown> | undefined;
+  const dqf = analytics.data_quality_flags ?? null;
   const positionMetricsFailed = dqf?.position_metrics_failed === true;
 
-  const vm = analytics.metrics_json?.volume_metrics as {
+  const vm = analytics.volume_metrics as {
     buy_volume_pct?: number;
     sell_volume_pct?: number;
     long_volume_pct?: number;
@@ -16,13 +16,13 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
     total_volume_usd?: number;
   } | null | undefined;
 
-  const em = analytics.metrics_json?.exposure_metrics as {
-    gross_mean?: number;
-    gross_std?: number;
-    gross_max?: number;
-    net_mean?: number;
-    net_std?: number;
-    net_max?: number;
+  const em = analytics.exposure_metrics as {
+    mean_gross_exposure?: number;
+    std_gross_exposure?: number;
+    max_gross_exposure?: number;
+    mean_net_exposure?: number;
+    std_net_exposure?: number;
+    max_net_exposure?: number;
   } | null | undefined;
 
   const tm = analytics.trade_metrics as Record<string, number> | null;
@@ -89,9 +89,9 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
               <h3 className="text-sm font-semibold text-text-primary mb-3">Trade Counts</h3>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs text-text-muted">Total Trades</p>
+                  <p className="text-xs text-text-muted">Total Positions</p>
                   <p className="font-metric text-lg text-text-primary">
-                    {tm.total_trades != null ? Math.round(tm.total_trades).toLocaleString() : "--"}
+                    {tm.total_positions != null ? Math.round(tm.total_positions).toLocaleString() : "--"}
                   </p>
                 </div>
                 <div>
@@ -101,15 +101,15 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-text-muted">Long %</p>
+                  <p className="text-xs text-text-muted">Long</p>
                   <p className="font-metric text-sm text-positive">
-                    {formatPercent(tm.long_pct)}
+                    {tm.long_count != null ? Math.round(tm.long_count).toLocaleString() : "--"}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-text-muted">Maker %</p>
-                  <p className="font-metric text-sm text-text-secondary">
-                    {formatPercent(tm.maker_pct)}
+                  <p className="text-xs text-text-muted">Short</p>
+                  <p className="font-metric text-sm text-negative">
+                    {tm.short_count != null ? Math.round(tm.short_count).toLocaleString() : "--"}
                   </p>
                 </div>
               </div>
@@ -136,12 +136,12 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
                 <div className="px-4 py-3">
                   <h4 className="text-sm font-semibold text-text-primary mb-2">Exposure</h4>
                   <div className="space-y-2">
-                    <MetricRow label="Gross (mean)" value={formatNumber(em.gross_mean)} />
-                    <MetricRow label="Gross (std)" value={formatNumber(em.gross_std)} />
-                    <MetricRow label="Gross (max)" value={formatNumber(em.gross_max)} />
-                    <MetricRow label="Net (mean)" value={formatNumber(em.net_mean)} />
-                    <MetricRow label="Net (std)" value={formatNumber(em.net_std)} />
-                    <MetricRow label="Net (max)" value={formatNumber(em.net_max)} />
+                    <MetricRow label="Gross (mean)" value={formatNumber(em.mean_gross_exposure)} />
+                    <MetricRow label="Gross (std)" value={formatNumber(em.std_gross_exposure)} />
+                    <MetricRow label="Gross (max)" value={formatNumber(em.max_gross_exposure)} />
+                    <MetricRow label="Net (mean)" value={formatNumber(em.mean_net_exposure)} />
+                    <MetricRow label="Net (std)" value={formatNumber(em.std_net_exposure)} />
+                    <MetricRow label="Net (max)" value={formatNumber(em.max_net_exposure)} />
                   </div>
                 </div>
               </>

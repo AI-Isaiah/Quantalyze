@@ -109,6 +109,9 @@ export interface StrategyAnalytics {
   rolling_metrics: Record<string, { date: string; value: number }[]> | null;
   return_quantiles: Record<string, number[]> | null;
   trade_metrics: Record<string, unknown> | null;
+  volume_metrics: VolumeMetrics | null;
+  exposure_metrics: ExposureMetrics | null;
+  data_quality_flags: Record<string, unknown> | null;
 }
 
 export interface VolumeMetrics {
@@ -121,12 +124,12 @@ export interface VolumeMetrics {
 }
 
 export interface ExposureMetrics {
-  gross_mean: number;
-  gross_std: number;
-  gross_max: number;
-  net_mean: number;
-  net_std: number;
-  net_max: number;
+  mean_gross_exposure: number;
+  std_gross_exposure: number;
+  max_gross_exposure: number;
+  mean_net_exposure: number;
+  std_net_exposure: number;
+  max_net_exposure: number;
 }
 
 export interface TradeMetrics {

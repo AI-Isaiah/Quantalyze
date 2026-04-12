@@ -31,7 +31,7 @@ export default async function StrategyDetailPage({
     getPercentiles(slug),
     supabase
       .from("positions")
-      .select("*")
+      .select("id, strategy_id, symbol, side, status, entry_price_avg, exit_price_avg, size_base, size_peak, realized_pnl, fee_total, fill_count, opened_at, closed_at, duration_days, roi")
       .eq("strategy_id", strategyId)
       .order("roi", { ascending: false })
       .limit(20),
