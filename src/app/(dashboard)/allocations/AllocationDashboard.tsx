@@ -27,6 +27,7 @@ import { UndoToast } from "./components/UndoToast";
 import { ViewTabs, type ViewTabId } from "./components/ViewTabs";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
+import { ConnectAccountModal } from "@/components/portfolio/ConnectAccountModal";
 
 // ---------------------------------------------------------------------------
 // Types — matches MyAllocationClient props exactly
@@ -113,6 +114,7 @@ export function AllocationDashboard({
   const [timeframe, setTimeframe] = useTimeframe("YTD");
 
   const [showModal, setShowModal] = useState(false);
+  const [showConnectModal, setShowConnectModal] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [recentlyClosed, setRecentlyClosed] = useState<string[]>([]);
   const [activeView, setActiveView] = useState<ViewTabId>("default");
@@ -334,6 +336,14 @@ export function AllocationDashboard({
         <div className="flex items-center gap-3">
           <button
             type="button"
+            onClick={() => setShowConnectModal(true)}
+            className="whitespace-nowrap text-[13px] font-medium transition-colors hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
+            style={{ color: "#1B6B5A" }}
+          >
+            Connect Account
+          </button>
+          <button
+            type="button"
             onClick={() => setShowModal(true)}
             className="whitespace-nowrap text-[13px] font-medium transition-colors hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
             style={{ color: "#1B6B5A" }}
@@ -396,6 +406,11 @@ export function AllocationDashboard({
           onUndo={handleUndo}
           onDismiss={handleDismiss}
         />
+      )}
+
+      {/* Connect Account Panel */}
+      {showConnectModal && (
+        <ConnectAccountModal onClose={() => setShowConnectModal(false)} />
       )}
     </main>
   );
