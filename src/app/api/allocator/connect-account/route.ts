@@ -182,9 +182,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     )) as Record<string, unknown>;
 
     const api_key_encrypted = encrypted.api_key_encrypted as string | undefined;
-    const api_secret_encrypted = encrypted.api_secret_encrypted as
+    // Note: api_secret_encrypted is intentionally null — the Python service
+    // bundles the secret into the api_key_encrypted blob for Fernet envelope
+    // encryption. Only api_key_encrypted needs to be present.
+    const api_secret_encrypted = (encrypted.api_secret_encrypted ?? null) as
       | string
-      | undefined;
+      | null;
     const passphrase_encrypted = (encrypted.passphrase_encrypted ?? null) as
       | string
       | null;
@@ -193,7 +196,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const kek_version =
       typeof encrypted.kek_version === "number" ? encrypted.kek_version : 1;
 
-    if (!api_key_encrypted || !api_secret_encrypted) {
+    if (!api_key_encrypted) {
       console.error(
         "[allocator/connect-account] Encryption returned unexpected shape:",
         Object.keys(encrypted),
