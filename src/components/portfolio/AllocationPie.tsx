@@ -63,10 +63,10 @@ export function AllocationPie({
   });
 
   return (
-    <div className="flex flex-col items-start gap-3 md:flex-row md:items-center md:gap-6">
+    <div className="flex h-full flex-col items-start gap-2 md:flex-row md:items-center md:gap-3">
       <svg
         viewBox="0 0 180 180"
-        className="w-44 h-44 shrink-0"
+        className="w-48 h-48 shrink-0"
         aria-label="Allocation share per strategy"
         role="img"
       >
@@ -80,7 +80,7 @@ export function AllocationPie({
           />
         ))}
       </svg>
-      <ul className="min-w-0 flex-1 space-y-1.5">
+      <ul className="min-w-0 flex-1 space-y-0.5">
         {slices.map((s) => {
           const hidden = hiddenIds.has(s.id);
           const pct = hidden ? 0 : s.amount / total;
@@ -90,7 +90,7 @@ export function AllocationPie({
                 type="button"
                 onClick={() => onToggle(s.id)}
                 aria-pressed={!hidden}
-                className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors ${
+                className={`flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left transition-colors ${
                   hidden
                     ? "text-text-muted hover:bg-bg-secondary"
                     : "text-text-primary hover:bg-bg-secondary"

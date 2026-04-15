@@ -36,10 +36,12 @@ export const ValidateKeyResponseSchema = z.object({
 
 // --- /api/encrypt-key ---
 export const EncryptKeyResponseSchema = z.object({
-  encrypted_key: z.string(),
-  encrypted_secret: z.string(),
+  api_key_encrypted: z.string(),
+  api_secret_encrypted: z.string().nullable(),
+  passphrase_encrypted: z.string().nullable().optional(),
+  dek_encrypted: z.string().nullable().optional(),
+  nonce: z.string().nullable().optional(),
   kek_version: z.number().or(z.string()).optional(),
-  encrypted_passphrase: z.string().nullable().optional(),
 }).passthrough();
 
 // --- /api/fetch-trades ---

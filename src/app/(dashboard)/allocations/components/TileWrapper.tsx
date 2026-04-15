@@ -70,10 +70,10 @@ export function TileWrapper({
 }: TileWrapperProps) {
   return (
     <div
-      className="flex h-full flex-col overflow-hidden rounded-lg bg-white"
+      className="flex h-full flex-col overflow-hidden bg-white"
       style={{
         border: "1px solid #E2E8F0",
-        borderRadius: 8,
+        borderRadius: 4,
       }}
     >
       {/* Header */}
@@ -132,7 +132,7 @@ export function TileWrapper({
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto p-2">
         <WidgetErrorBoundary>{children}</WidgetErrorBoundary>
       </div>
     </div>

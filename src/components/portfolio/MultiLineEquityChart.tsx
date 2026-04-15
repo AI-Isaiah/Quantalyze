@@ -30,7 +30,7 @@ export function MultiLineEquityChart({
 
   const width = 800;
   const height = 280;
-  const padding = { top: 12, right: 16, bottom: 28, left: 48 };
+  const padding = { top: 8, right: 8, bottom: 24, left: 40 };
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
 
@@ -90,10 +90,10 @@ export function MultiLineEquityChart({
   );
 
   return (
-    <div className="rounded-lg border border-border bg-bg-secondary p-3">
+    <div className="w-full h-full">
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="w-full h-72"
+        className="w-full h-full"
         aria-label="Allocation equity curve, portfolio composite plus per-strategy lines"
         role="img"
       >
