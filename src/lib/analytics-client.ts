@@ -10,6 +10,7 @@ import {
   RecomputeMatchResponseSchema,
   BridgeResponseSchema,
 } from "./analytics-schemas";
+import { SimulatorResponseSchema } from "./api/simulatorSchema";
 
 const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
@@ -24,6 +25,21 @@ export class AnalyticsTimeoutError extends Error {
   constructor(path: string, timeoutMs: number) {
     super(`Analytics service timed out after ${timeoutMs}ms on ${path}`);
     this.name = "AnalyticsTimeoutError";
+  }
+}
+
+/**
+ * Thrown when the analytics service returns a non-2xx HTTP response.
+ * Preserves the upstream status so route handlers can forward 4xx semantics
+ * (e.g. 400 "already in portfolio", 404 "not found") instead of flattening
+ * every upstream error to 500.
+ */
+export class AnalyticsUpstreamError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "AnalyticsUpstreamError";
+    this.status = status;
   }
 }
 
@@ -74,11 +90,17 @@ async function analyticsRequest(
     const contentType = res.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const error = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(error.detail ?? "Analytics service error");
+      throw new AnalyticsUpstreamError(
+        error.detail ?? "Analytics service error",
+        res.status,
+      );
     }
     // Non-JSON error (FastAPI unhandled exception returns text/plain)
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(text || `Analytics service error (${res.status})`);
+    throw new AnalyticsUpstreamError(
+      text || `Analytics service error (${res.status})`,
+      res.status,
+    );
   }
 
   const contentType = res.headers.get("content-type") ?? "";
@@ -173,6 +195,35 @@ export async function findReplacementCandidates(
     { timeoutMs: 15_000 },
   );
   return parseResponse(BridgeResponseSchema, data, "/api/portfolio-bridge");
+}
+
+/**
+ * Sprint 6 Task 6.4 — portfolio impact simulator (ADD scenario).
+ *
+ * Calls the Python `/api/simulator` endpoint with a 15s timeout (matching
+ * the Bridge and mirroring the 15s budget the Next.js route enforces).
+ * Response is validated against SimulatorResponseSchema — parse failures
+ * throw so contract drift is loud.
+ */
+export async function simulateAddCandidate(
+  portfolioId: string,
+  candidateStrategyId: string,
+  userId: string,
+) {
+  const data = await analyticsRequest(
+    "/api/simulator",
+    {
+      portfolio_id: portfolioId,
+      candidate_strategy_id: candidateStrategyId,
+      user_id: userId,
+    },
+    { timeoutMs: 15_000 },
+  );
+  return parseResponse(
+    SimulatorResponseSchema,
+    data,
+    "/api/simulator",
+  );
 }
 
 export async function verifyStrategy(data: {

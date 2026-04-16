@@ -358,6 +358,67 @@ export interface BridgeCandidate {
   fit_label: BridgeFitLabel;
 }
 
+/**
+ * Portfolio impact simulator (ADD scenario) status.
+ *   - `ok`: simulation ran; deltas, curves, and metrics are populated.
+ *   - `insufficient_data`: candidate failed the 30-day overlap floor. Current
+ *     metrics are populated; proposed metrics are null and the proposed curve
+ *     is empty.
+ *   - `already_in_portfolio`: candidate is already a constituent; ADD is undefined.
+ *   - `empty_portfolio`: nothing to add to.
+ */
+export type SimulatorStatus =
+  | "ok"
+  | "insufficient_data"
+  | "already_in_portfolio"
+  | "empty_portfolio";
+
+/**
+ * Deltas follow the "positive = improvement" sign convention, oriented
+ * so all four chips render green when the candidate improves the portfolio:
+ *   - sharpe_delta:        proposed_sharpe - current_sharpe
+ *   - dd_delta:            current_max_dd  - proposed_max_dd
+ *                          (MaxDD is a negative number; positive delta =
+ *                           shallower drawdown in the proposed portfolio)
+ *   - corr_delta:          current_avg_corr - proposed_avg_corr
+ *                          (lower correlation = better diversification)
+ *   - concentration_delta: current_hhi - proposed_hhi
+ *                          (HHI = sum of squared weights; lower = more
+ *                           diversified)
+ */
+export interface SimulatorDeltas {
+  sharpe_delta: number;
+  dd_delta: number;
+  corr_delta: number;
+  concentration_delta: number;
+}
+
+export interface SimulatorMetricsSnapshot {
+  sharpe: number | null;
+  max_drawdown: number | null;
+  avg_correlation: number | null;
+  concentration: number | null;
+}
+
+/**
+ * Full simulator response for a single candidate against a portfolio.
+ * Returned by POST /api/simulator.
+ */
+export interface SimulatorCandidate {
+  candidate_id: string;
+  candidate_name: string;
+  portfolio_id: string;
+  status: SimulatorStatus;
+  overlap_days: number;
+  /** True when overlap_days < ~6mo of business days; UI shows a warning. */
+  partial_history: boolean;
+  deltas: SimulatorDeltas;
+  current: SimulatorMetricsSnapshot;
+  proposed: SimulatorMetricsSnapshot;
+  equity_curve_current: TimeSeriesPoint[];
+  equity_curve_proposed: TimeSeriesPoint[];
+}
+
 export interface PortfolioStrategy {
   portfolio_id: string;
   strategy_id: string;

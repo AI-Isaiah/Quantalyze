@@ -45,17 +45,20 @@ function makeLimiter(
   });
 }
 
-// 5 requests/minute per authenticated user — for sensitive POSTs like
-// attestation and deletion requests.
+// 5/minute per authenticated user — sensitive POSTs (attestation, deletion requests).
 export const userActionLimiter = makeLimiter(5, "60 s");
 
-// 10 requests/minute per IP — for public GET endpoints like PDF routes
-// that can be hit by crawlers or scrapers.
+// 10/minute per IP — public GETs (PDF routes) exposed to crawlers and scrapers.
 export const publicIpLimiter = makeLimiter(10, "60 s");
 
-// 20 requests/minute per IP — for admin actions that burst-run during
-// normal use (match queue operations, etc.). Reserved for future use.
+// 20/minute per IP — admin actions that burst during normal use (match recompute,
+// partner imports).
 export const adminActionLimiter = makeLimiter(20, "60 s");
+
+// 20/hour per authenticated user — portfolio impact simulator. Caps the
+// compute-intensive weighted-covariance Python endpoint at roughly one
+// exploration session per hour.
+export const simulatorLimiter = makeLimiter(20, "3600 s");
 
 export type CheckLimitResult =
   | { success: true }

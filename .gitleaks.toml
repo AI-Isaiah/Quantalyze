@@ -1,0 +1,38 @@
+# Gitleaks config for Quantalyze — Task 7.6
+#
+# We extend the default ruleset rather than redefining it. `useDefault =
+# true` pulls in the full upstream rules (AWS, GCP, Stripe, GitHub,
+# JWT, private keys, generic high-entropy strings, etc.), and we layer
+# a narrow allowlist on top for known test fixtures that look like
+# secrets but are not.
+#
+# Keep this file minimal. Every allowlist entry must be justified with a
+# comment pointing at the fixture it protects. If a new intentional
+# fixture starts tripping gitleaks, add a line here with its path, not a
+# broad pattern.
+
+title = "Quantalyze gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known test fixtures and placeholder env samples"
+
+# File-path allowlist — fixtures and sample files that contain
+# intentionally key-shaped strings:
+#
+# - .env.example: documented placeholder values only (your-anon-key,
+#   your-service-role-key, etc.). Contributors need this file.
+# - src/lib/admin/pii-scrub.test.ts: unit test for the PII scrubber;
+#   contains a canonical JWT fixture
+#   (eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMe...) used to
+#   verify the scrubber redacts JWT-shaped strings. Not a real token.
+# - package-lock.json: integrity hashes trip gitleaks generic
+#   high-entropy detection; this is well-known noise to ignore.
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
+  '''(^|/)analytics-service/tests/test_encryption\.py$''',
+  '''(^|/)package-lock\.json$''',
+]

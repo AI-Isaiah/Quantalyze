@@ -112,6 +112,18 @@ export default function SecurityPage() {
                 listing reference are removed in the same transaction; the
                 analytics service loses its decryption path immediately.
               </p>
+              <p>
+                All traffic between your browser, our web tier, the analytics
+                service, and the exchanges is encrypted in transit with TLS
+                1.3. We disable TLS 1.0, 1.1, and 1.2 at the edge; internal
+                service-to-service calls use the same profile. Certificates
+                are issued by a public CA and rotated automatically before
+                expiry. HSTS is enabled for{" "}
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                  quantalyze.com
+                </code>{" "}
+                with a one-year max-age.
+              </p>
             </div>
           </section>
 
@@ -194,6 +206,116 @@ export default function SecurityPage() {
                   security.txt
                 </a>{" "}
                 follows RFC 9116.
+              </p>
+            </div>
+          </section>
+
+          <section
+            aria-labelledby="data-handling-summary"
+            className="mt-12 border-t border-border pt-12"
+          >
+            <h2
+              id="data-handling-summary"
+              className="font-display text-2xl tracking-tight text-text-primary"
+            >
+              Data handling at a glance
+            </h2>
+            <p className="mt-4 text-[14px] leading-relaxed text-text-secondary">
+              The three control surfaces a risk team checks first — transport,
+              storage, and authorization — summarized on one line each.
+            </p>
+            <table className="mt-6 w-full border-collapse text-left text-[14px]">
+              <caption className="sr-only">
+                Quantalyze data-handling matrix — transport, storage, and
+                access controls.
+              </caption>
+              <thead>
+                <tr className="border-b border-border">
+                  <th
+                    scope="col"
+                    className="py-2 pr-4 text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                  >
+                    Surface
+                  </th>
+                  <th
+                    scope="col"
+                    className="py-2 pr-4 text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                  >
+                    Control
+                  </th>
+                  <th
+                    scope="col"
+                    className="py-2 text-[11px] font-medium uppercase tracking-wider text-text-muted"
+                  >
+                    Detail
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="font-mono text-[13px] tabular-nums text-text-primary">
+                <tr className="border-b border-border">
+                  <th
+                    scope="row"
+                    className="py-3 pr-4 font-medium text-text-primary"
+                  >
+                    In Transit
+                  </th>
+                  <td className="py-3 pr-4">TLS 1.3</td>
+                  <td className="py-3 text-text-secondary">
+                    Edge and service-to-service; HSTS enabled
+                  </td>
+                </tr>
+                <tr className="border-b border-border">
+                  <th
+                    scope="row"
+                    className="py-3 pr-4 font-medium text-text-primary"
+                  >
+                    At Rest
+                  </th>
+                  <td className="py-3 pr-4">AES-256-GCM</td>
+                  <td className="py-3 text-text-secondary">
+                    Per-row DEK wrapped by Vault-held KEK
+                  </td>
+                </tr>
+                <tr>
+                  <th
+                    scope="row"
+                    className="py-3 pr-4 font-medium text-text-primary"
+                  >
+                    Access
+                  </th>
+                  <td className="py-3 pr-4">RBAC + RLS</td>
+                  <td className="py-3 text-text-secondary">
+                    Postgres role grants; tenant-scoped policies
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section
+            aria-labelledby="breach-notification"
+            className="mt-12 border-t border-border pt-12"
+          >
+            <h2
+              id="breach-notification"
+              className="font-display text-2xl tracking-tight text-text-primary"
+            >
+              Breach notification
+            </h2>
+            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+              <p>
+                In the event of a personal-data breach affecting your account,
+                we notify you within 72 hours of becoming aware of it, in line
+                with GDPR Article 33. Notification is sent to the account
+                email on file and, for institutional customers, to the
+                security contact named in the onboarding record.
+              </p>
+              <p>
+                The notice states what data was affected, the scope of the
+                incident, the remediation actions taken, and the contact
+                point for follow-up. If the 72-hour window cannot be met,
+                the notice is sent without undue further delay with a
+                written justification for the delay, per the same Article.
               </p>
             </div>
           </section>
