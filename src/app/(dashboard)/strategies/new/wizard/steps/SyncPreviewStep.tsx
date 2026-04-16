@@ -8,6 +8,7 @@ import {
   FactsheetPreview,
   type FactsheetPreviewMetric,
 } from "@/components/strategy/FactsheetPreview";
+import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
   type StrategyGateResult,
@@ -353,6 +354,19 @@ export function SyncPreviewStep({
             : "your account"}
           . Review the preview and continue to add metadata.
         </p>
+
+        {/*
+          Sprint 5 Task 5.8: informational scope badge. The route-level gate
+          in /api/keys/validate-and-encrypt (line 26) already blocked any key
+          with trade/withdraw before we got here, so by definition this should
+          render Read ✓ / Trade ✗ / Withdraw ✗. The badge surfaces it for
+          allocator confidence and confirms scopes haven't drifted.
+        */}
+        {apiKeyId && (
+          <div className="mt-6">
+            <KeyPermissionBadge apiKeyId={apiKeyId} />
+          </div>
+        )}
 
         <div className="mt-6">
           <FactsheetPreview

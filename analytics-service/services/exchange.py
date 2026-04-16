@@ -33,77 +33,45 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 
 
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
-    """Validate that the API key is functional using safe read-only operations."""
-    result = {"valid": False, "read_only": False, "error": None}
+    """Validate that the API key is functional using safe read-only operations.
+
+    Public shape preserved for backwards compat: ``{valid, read_only, error}``.
+    Sprint 5 Task 5.8 moved the per-exchange permission probes into
+    ``services.key_permissions`` so the new live viewer can reuse the same
+    parsers. ``read_only`` here is derived from the new triple as
+    ``read and not trade and not withdraw`` — same semantics as before.
+    """
+    from services.key_permissions import detect_permissions
+
+    result: dict[str, Any] = {"valid": False, "read_only": False, "error": None}
 
     try:
         await exchange.load_markets()
         await exchange.fetch_balance()
         result["valid"] = True
-
-        # Check permissions via exchange-specific API (never place orders)
-        if exchange.id == "binance":
-            try:
-                api_restrictions = await exchange.sapi_get_account_apirestrictions()
-                can_withdraw = api_restrictions.get("enableWithdrawals", False)
-                can_trade = api_restrictions.get("enableSpotAndMarginTrading", False) or api_restrictions.get("enableFutures", False)
-                result["read_only"] = not can_withdraw and not can_trade
-                if can_withdraw:
-                    result["error"] = "Key has withdrawal permissions. Please use a read-only key."
-                elif can_trade:
-                    result["error"] = "Key has trading permissions. Please use a read-only key."
-            except Exception:
-                result["error"] = "Could not verify key permissions. Please ensure your key is read-only."
-                result["read_only"] = False
-        elif exchange.id == "okx":
-            try:
-                config = await exchange.private_get_account_config()
-                data = config.get("data", [{}])
-                if isinstance(data, list) and len(data) > 0:
-                    perm_type = data[0].get("permType", "") or data[0].get("perm", "")
-                else:
-                    perm_type = ""
-                # OKX read-only permission type is "read_only" or empty (for read-only keys)
-                # If we can fetch balance but can't determine permissions, accept it
-                # (the balance fetch already proved the key works)
-                is_read_only = perm_type in ("read_only", "readOnly", "") or "read" in perm_type.lower()
-                # Try to detect trade/withdraw permissions explicitly
-                has_trade = "trade" in perm_type.lower() if perm_type else False
-                has_withdraw = "withdraw" in perm_type.lower() if perm_type else False
-                if has_withdraw:
-                    result["read_only"] = False
-                    result["error"] = "Key has withdrawal permissions. Please use a read-only key."
-                elif has_trade:
-                    result["read_only"] = False
-                    result["error"] = "Key has trading permissions. Please use a read-only key."
-                else:
-                    result["read_only"] = True
-            except Exception:
-                # If permission check fails but balance fetch worked, accept the key
-                # with a warning (better UX than blocking)
-                result["read_only"] = True
-        elif exchange.id == "bybit":
-            try:
-                api_info = await exchange.private_get_v5_user_query_api()
-                permissions = api_info.get("result", {}).get("permissions", {})
-                has_trade = bool(permissions.get("ContractTrade") or permissions.get("Spot") or permissions.get("Exchange"))
-                has_withdraw = bool(permissions.get("Wallet"))
-                result["read_only"] = not has_trade and not has_withdraw
-                if has_withdraw:
-                    result["error"] = "Key has withdrawal permissions. Please use a read-only key."
-                elif has_trade:
-                    result["error"] = "Key has trading permissions. Please use a read-only key."
-            except Exception:
-                result["error"] = "Could not verify Bybit key permissions. Please ensure your key is read-only."
-                result["read_only"] = False
-        else:
-            result["error"] = "Unsupported exchange for permission verification."
-            result["read_only"] = False
-
     except ccxt.AuthenticationError:
         result["error"] = "Authentication failed. Check your API key and secret."
+        return result
     except Exception:
         result["error"] = "Key validation failed. Please verify your credentials."
+        return result
+
+    if exchange.id not in EXCHANGE_CLASSES:
+        result["error"] = "Unsupported exchange for permission verification."
+        return result
+
+    # Pre-store path: no api_key_id yet, bypass cache.
+    perms = await detect_permissions(exchange, api_key_id=None)
+    has_withdraw = perms.get("withdraw", False)
+    has_trade = perms.get("trade", False)
+    has_read = perms.get("read", False)
+
+    result["read_only"] = bool(has_read and not has_trade and not has_withdraw)
+
+    if has_withdraw:
+        result["error"] = "Key has withdrawal permissions. Please use a read-only key."
+    elif has_trade:
+        result["error"] = "Key has trading permissions. Please use a read-only key."
 
     return result
 
