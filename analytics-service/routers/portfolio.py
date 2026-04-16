@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -353,10 +353,15 @@ def _generate_alerts(
 
     Original rules: drawdown > 10%, correlation spike > 0.7.
     Sprint 4 additions: regime_shift, underperformance, concentration_creep.
+    Sprint 5 addition: rebalance_drift (Task 5.4) with its own select-then-
+    insert path because dedup is per (portfolio, strategy, UTC-week) rather
+    than per (portfolio, alert_type).
 
-    Uses ON CONFLICT DO NOTHING with the partial unique index
-    `portfolio_alerts_dedup_unacked` (migration 042) to skip inserts when
-    an unacknowledged alert of the same type already exists.
+    Uses select-then-insert per alert type. The partial unique index
+    `portfolio_alerts_dedup_unacked` (migration 042, carved in 050 to
+    exclude rebalance_drift) and the concurrent weekly index
+    `portfolio_alerts_rebalance_drift_weekly` (migration 051) act as
+    DB-level safety nets for any races.
 
     NOTE: `sync_failure` alerts are NOT generated here. They are inserted
     by `run_reconcile_strategy_job` in services/job_worker.py, which has
@@ -480,6 +485,148 @@ def _generate_alerts(
                     "Failed to insert %s alert for %s: %s",
                     alert.get("alert_type"), portfolio_id, exc,
                 )
+
+    # ── Sprint 5 Task 5.4: rebalance_drift ─────────────────────────────
+    # Handled on its own because dedup is weekly per (portfolio, strategy),
+    # not per (portfolio, alert_type). Kept AFTER the generic loop so a
+    # Supabase failure in this block can't starve the other alerts.
+    _generate_rebalance_drift_alert(supabase, portfolio_id)
+
+
+def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
+    """Fire a rebalance_drift alert for the strategy with the largest drift > 5%.
+
+    Two-layer safety against alert storms:
+      1. Honeymoon: skip when portfolio age < 7 days.
+      2. Null-target guard: skip strategies whose latest weight_snapshots
+         target_weight is NULL. NULL is explicit ("not yet set"), not 0.
+
+    Weekly dedup: at most one unacked alert per (portfolio, strategy, UTC
+    week). Enforced in the query below and defended at the DB layer by
+    the partial unique index from migration 051.
+
+    Severity: drift > 10% → high; 5-10% → medium.
+
+    Swallows all exceptions — alert generation is best-effort; a failure
+    here must NOT break the analytics write that already succeeded above.
+    """
+    try:
+        # Portfolio age → honeymoon guard
+        portfolio_row = supabase.table("portfolios").select(
+            "created_at"
+        ).eq("id", portfolio_id).single().execute()
+        if not portfolio_row.data:
+            return
+        created_at_str = portfolio_row.data.get("created_at")
+        if not created_at_str:
+            return
+        created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+        age_days = (datetime.now(timezone.utc) - created_at).days
+        if age_days < 7:
+            return
+
+        # Latest weight_snapshots row per strategy for this portfolio
+        ws_rows = supabase.table("weight_snapshots").select(
+            "strategy_id, target_weight, actual_weight, snapshot_date"
+        ).eq("portfolio_id", portfolio_id).order(
+            "snapshot_date", desc=True
+        ).execute()
+        if not ws_rows.data:
+            return
+
+        # Keep most recent per strategy. Rows come back ordered DESC.
+        seen: set[str] = set()
+        latest: list[dict] = []
+        for row in ws_rows.data:
+            sid = row.get("strategy_id")
+            if sid in seen:
+                continue
+            seen.add(sid)
+            latest.append(row)
+
+        # Strategy names for the sentence
+        strategy_ids = [row["strategy_id"] for row in latest]
+        strat_rows = supabase.table("strategies").select(
+            "id, name"
+        ).in_("id", strategy_ids).execute()
+        name_by_id = {
+            r["id"]: r.get("name") or r["id"] for r in (strat_rows.data or [])
+        }
+
+        # Find worst-drift strategy with both values present
+        worst: dict | None = None
+        for row in latest:
+            target = row.get("target_weight")
+            actual = row.get("actual_weight")
+            if target is None or actual is None:
+                continue
+            drift = abs(float(actual) - float(target))
+            if worst is None or drift > worst["drift"]:
+                worst = {
+                    "strategy_id": row["strategy_id"],
+                    "target": float(target),
+                    "actual": float(actual),
+                    "drift": drift,
+                }
+
+        if worst is None or worst["drift"] <= 0.05:
+            return
+
+        # Weekly dedup check: any unacked rebalance_drift for this
+        # (portfolio, strategy) inside the current UTC ISO week?
+        # Postgres `date_trunc('week', ...)` starts Monday 00:00 UTC.
+        now = datetime.now(timezone.utc)
+        # ISO week: Monday is weekday()==0
+        week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        existing = supabase.table("portfolio_alerts").select("id").eq(
+            "portfolio_id", portfolio_id
+        ).eq(
+            "strategy_id", worst["strategy_id"]
+        ).eq(
+            "alert_type", "rebalance_drift"
+        ).is_(
+            "acknowledged_at", "null"
+        ).gte(
+            "triggered_at", week_start.isoformat()
+        ).limit(1).execute()
+        if existing.data:
+            return
+
+        severity = "high" if worst["drift"] > 0.10 else "medium"
+        strategy_name = name_by_id.get(worst["strategy_id"], worst["strategy_id"])
+        message = (
+            f"{strategy_name}'s weight is {worst['actual'] * 100:.0f}% "
+            f"(target {worst['target'] * 100:.0f}%) — consider rebalancing."
+        )
+
+        try:
+            supabase.table("portfolio_alerts").insert({
+                "portfolio_id": portfolio_id,
+                "strategy_id": worst["strategy_id"],
+                "alert_type": "rebalance_drift",
+                "severity": severity,
+                "message": message,
+                "metadata": {
+                    "target_weight": worst["target"],
+                    "actual_weight": worst["actual"],
+                    "drift": worst["drift"],
+                },
+            }).execute()
+        except Exception as exc:
+            # The DB-side weekly unique index (migration 051) is the
+            # authoritative race guard. A unique_violation here means
+            # a concurrent writer won — silently skip.
+            logger.warning(
+                "Failed to insert rebalance_drift alert for %s: %s",
+                portfolio_id, exc,
+            )
+    except Exception as exc:
+        logger.warning(
+            "rebalance_drift alert generation failed for %s: %s",
+            portfolio_id, exc,
+        )
 
 
 # ---------------------------------------------------------------------------

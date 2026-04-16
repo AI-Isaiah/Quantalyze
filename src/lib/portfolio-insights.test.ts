@@ -3,8 +3,10 @@ import {
   computeAllInsights,
   computeBiggestRisk,
   computeConcentrationCreep,
+  computeRebalanceDrift,
   computeRegimeChange,
   computeUnderperformance,
+  type RebalanceDriftInput,
 } from "./portfolio-insights";
 import type { PortfolioAnalytics } from "./types";
 
@@ -397,5 +399,139 @@ describe("computeAllInsights", () => {
       }),
     );
     expect(insights[0].severity).toBe("high");
+  });
+
+  it("passes rebalance_drift inputs through when provided", () => {
+    const insights = computeAllInsights(
+      buildAnalytics(),
+      [
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.3, target_weight: 0.2 },
+      ],
+      30,
+    );
+    const drift = insights.find((i) => i.key === "rebalance_drift");
+    expect(drift).toBeDefined();
+  });
+});
+
+describe("computeRebalanceDrift", () => {
+  const inputs = (rows: RebalanceDriftInput[]) => rows;
+
+  it("returns null during the 7-day honeymoon", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.40, target_weight: 0.20 },
+      ]),
+      3,
+    );
+    expect(insight).toBeNull();
+  });
+
+  it("honeymoon boundary: fires at day 7, not day 6", () => {
+    const row: RebalanceDriftInput = {
+      strategy_id: "a",
+      strategy_name: "Alpha",
+      actual_weight: 0.40,
+      target_weight: 0.20,
+    };
+    expect(computeRebalanceDrift([row], 6)).toBeNull();
+    expect(computeRebalanceDrift([row], 7)).not.toBeNull();
+  });
+
+  it("skips strategies with a null target_weight", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.40, target_weight: null },
+      ]),
+      30,
+    );
+    expect(insight).toBeNull();
+  });
+
+  it("skips strategies with a null actual_weight", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: null, target_weight: 0.20 },
+      ]),
+      30,
+    );
+    expect(insight).toBeNull();
+  });
+
+  it("returns null when no strategy has drift > 5%", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.23, target_weight: 0.20 },
+        { strategy_id: "b", strategy_name: "Beta",  actual_weight: 0.18, target_weight: 0.20 },
+      ]),
+      30,
+    );
+    expect(insight).toBeNull();
+  });
+
+  it("returns null at exactly 5% drift (strict >)", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.25, target_weight: 0.20 },
+      ]),
+      30,
+    );
+    expect(insight).toBeNull();
+  });
+
+  it("flags drift > 5% at medium severity", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.28, target_weight: 0.20 },
+      ]),
+      30,
+    );
+    expect(insight).not.toBeNull();
+    expect(insight?.key).toBe("rebalance_drift");
+    expect(insight?.severity).toBe("medium");
+    expect(insight?.sentence).toContain("Alpha");
+    expect(insight?.sentence).toContain("28%");
+    expect(insight?.sentence).toContain("20%");
+    expect(insight?.strategy_id).toBe("a");
+  });
+
+  it("escalates to high severity above 10% drift", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.35, target_weight: 0.20 },
+      ]),
+      30,
+    );
+    expect(insight?.severity).toBe("high");
+  });
+
+  it("severity boundary: exactly 10% drift stays medium", () => {
+    // drift > 0.10 → high; at 10% exactly, stays medium.
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.30, target_weight: 0.20 },
+      ]),
+      30,
+    );
+    expect(insight?.severity).toBe("medium");
+  });
+
+  it("picks the strategy with the largest drift", () => {
+    const insight = computeRebalanceDrift(
+      inputs([
+        { strategy_id: "a", strategy_name: "Alpha", actual_weight: 0.27, target_weight: 0.20 }, // 7%
+        { strategy_id: "b", strategy_name: "Beta",  actual_weight: 0.40, target_weight: 0.20 }, // 20%
+        { strategy_id: "c", strategy_name: "Gamma", actual_weight: 0.21, target_weight: 0.20 }, // 1%
+      ]),
+      30,
+    );
+    expect(insight?.strategy_id).toBe("b");
+    expect(insight?.severity).toBe("high");
+  });
+
+  it("returns null on empty or null inputs", () => {
+    expect(computeRebalanceDrift([], 30)).toBeNull();
+    expect(computeRebalanceDrift(null, 30)).toBeNull();
+    expect(computeRebalanceDrift(undefined, 30)).toBeNull();
   });
 });

@@ -196,6 +196,48 @@ export function AllocationDashboard({
   );
   const aum = analytics?.total_aum ?? (totalAllocated > 0 ? totalAllocated : null);
 
+  // ── Rebalance drift inputs for InsightStrip ──────────────────────
+  // Target weight comes from the most-recent weight_snapshots row per
+  // strategy (null when user hasn't set targets — migration 050 seeds
+  // NULL on portfolio create). Actual weight is the live portfolio_strategies
+  // current_weight; when null we pass null through so the insight's
+  // null-target guard can skip the strategy cleanly.
+  const latestTargetByStrategy = useMemo(() => {
+    const map = new Map<string, { target: number | null; date: string }>();
+    for (const ws of weightSnapshots) {
+      const existing = map.get(ws.strategy_id);
+      if (!existing || ws.snapshot_date > existing.date) {
+        map.set(ws.strategy_id, {
+          target: ws.target_weight,
+          date: ws.snapshot_date,
+        });
+      }
+    }
+    return map;
+  }, [weightSnapshots]);
+
+  const rebalanceDriftInputs = useMemo(
+    () =>
+      strategies.map((row) => ({
+        strategy_id: row.strategy_id,
+        strategy_name: displayName(row),
+        actual_weight: row.current_weight,
+        target_weight: latestTargetByStrategy.get(row.strategy_id)?.target ?? null,
+      })),
+    [strategies, latestTargetByStrategy],
+  );
+
+  // `Date.now()` is impure — capture it once per mount so React's purity
+  // rules accept the derived age in `useMemo`. Age updates on re-mount
+  // (navigation, refresh), which is the right cadence for a honeymoon
+  // guard anyway.
+  const [nowMs] = useState(() => Date.now());
+  const portfolioAgeDays = useMemo(() => {
+    if (!portfolio.created_at) return 0;
+    const created = new Date(portfolio.created_at).getTime();
+    return Math.floor((nowMs - created) / (1000 * 60 * 60 * 24));
+  }, [portfolio.created_at, nowMs]);
+
   // ── Tile close / undo / add handlers ──────────────────────────────
 
   const handleClose = useCallback(
@@ -359,7 +401,13 @@ export function AllocationDashboard({
 
       {/* Insight strip — fixed above the widget grid */}
       <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
-        <InsightStrip analytics={analytics} portfolioId={portfolio.id} max={3} />
+        <InsightStrip
+          analytics={analytics}
+          portfolioId={portfolio.id}
+          max={3}
+          portfolioStrategies={rebalanceDriftInputs}
+          portfolioAgeDays={portfolioAgeDays}
+        />
       </div>
 
       {/* Grid */}

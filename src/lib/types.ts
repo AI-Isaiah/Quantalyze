@@ -383,6 +383,11 @@ export interface PortfolioDocument {
 export interface PortfolioAlert {
   id: string;
   portfolio_id: string;
+  /**
+   * Pinned source strategy for per-strategy alert types (rebalance_drift).
+   * NULL for portfolio-wide alerts. Added in migration 050.
+   */
+  strategy_id: string | null;
   alert_type:
     | "drawdown"
     | "correlation_spike"
@@ -391,7 +396,8 @@ export interface PortfolioAlert {
     | "optimizer_suggestion"
     | "regime_shift"
     | "underperformance"
-    | "concentration_creep";
+    | "concentration_creep"
+    | "rebalance_drift";
   severity: "critical" | "high" | "medium" | "low";
   message: string;
   metadata: Record<string, unknown> | null;
