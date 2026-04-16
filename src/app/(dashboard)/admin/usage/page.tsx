@@ -88,7 +88,7 @@ export default async function AdminUsagePage() {
           Daily funnel (30d)
         </h2>
         {funnel.error ? (
-          <NoticeBox message={`PostHog unavailable: ${funnel.error}`} />
+          <NoticeBox message={funnel.error} />
         ) : funnel.rows.length === 0 ? (
           <p className="text-sm text-text-muted">No usage events yet.</p>
         ) : (
@@ -151,7 +151,7 @@ export default async function AdminUsagePage() {
           Widget views (30d)
         </h2>
         {widgets.error ? (
-          <NoticeBox message={`PostHog unavailable: ${widgets.error}`} />
+          <NoticeBox message={widgets.error} />
         ) : widgets.rows.length === 0 ? (
           <p className="text-sm text-text-muted">No widget_viewed events yet.</p>
         ) : (
@@ -194,7 +194,7 @@ export default async function AdminUsagePage() {
           Session heatmap (14d)
         </h2>
         {heatmap.error ? (
-          <NoticeBox message={`PostHog unavailable: ${heatmap.error}`} />
+          <NoticeBox message={heatmap.error} />
         ) : heatmapRows.length === 0 ? (
           <p className="text-sm text-text-muted">No session_start events yet.</p>
         ) : (

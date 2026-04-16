@@ -104,12 +104,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return NextResponse.json({
-    enqueued,
-    failed,
-    total_candidates: rows.length,
-    ...(errors.length > 0 ? { errors: errors.slice(0, 5) } : {}),
-  });
+  // If every enqueue failed, the cron run produced zero useful work —
+  // surface that as a 500 so monitoring catches the regression instead
+  // of treating an all-failed batch as a successful empty run.
+  const status = enqueued === 0 && failed > 0 ? 500 : 200;
+  return NextResponse.json(
+    {
+      enqueued,
+      failed,
+      total_candidates: rows.length,
+      ...(errors.length > 0 ? { errors: errors.slice(0, 5) } : {}),
+    },
+    { status },
+  );
 }
 
 export const GET = handle;

@@ -38,10 +38,16 @@ interface AlertBannerProps {
 export function AlertBanner({ portfolioId }: AlertBannerProps) {
   const [alerts, setAlerts] = useState<CriticalAlert[]>([]);
   const [acking, setAcking] = useState(false);
+  // True when the most recent fetch returned 5xx — we render a small
+  // inline hint so the user knows the critical-alert check failed.
+  // 4xx and network errors don't surface (advisory banner; we still
+  // log to console.error for debugging).
+  const [fetchFailed, setFetchFailed] = useState(false);
 
-  // Fetch critical alerts on mount. If the network flakes we silently
-  // render nothing — the banner is not a blocker, and a stale fetch
-  // should not surface an error row where there was no critical state.
+  // Fetch critical alerts on mount. Failures are logged to console.error
+  // so they're visible in browser devtools / Sentry breadcrumbs; only
+  // 5xx responses surface a UI hint (the banner is advisory and we'd
+  // rather under-disclose than show error chrome on transient 4xx).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -50,11 +56,25 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
           `/api/alerts/critical?portfolio_id=${encodeURIComponent(portfolioId)}`,
           { cache: "no-store" },
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          console.error(
+            "[AlertBanner] critical-alert fetch failed",
+            { portfolioId, status: res.status },
+          );
+          if (!cancelled && res.status >= 500) setFetchFailed(true);
+          return;
+        }
         const body = (await res.json()) as { alerts?: CriticalAlert[] };
-        if (!cancelled) setAlerts(body.alerts ?? []);
-      } catch {
-        // silent — banner is advisory, not load-blocking
+        if (!cancelled) {
+          setAlerts(body.alerts ?? []);
+          setFetchFailed(false);
+        }
+      } catch (err) {
+        console.error(
+          "[AlertBanner] critical-alert fetch threw",
+          { portfolioId, err },
+        );
+        // Network error — treat as transient, no UI hint.
       }
     })();
     return () => {
@@ -87,7 +107,24 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
     }
   }, [alerts, acking]);
 
-  if (alerts.length === 0) return null;
+  if (alerts.length === 0) {
+    if (!fetchFailed) return null;
+    // 5xx fetch failure with no known critical state — show a quiet
+    // inline hint so the user knows the check itself failed (rather than
+    // assuming "no critical alerts").
+    return (
+      <p
+        className="hidden md:block mb-2 text-[12px]"
+        style={{
+          color: "#A3A3A3",
+          fontFamily: "DM Sans, sans-serif",
+        }}
+        role="status"
+      >
+        Couldn&apos;t verify critical alerts.
+      </p>
+    );
+  }
 
   const [head, ...rest] = alerts;
   const extra = rest.length;

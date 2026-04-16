@@ -145,9 +145,11 @@ describe("src/lib/admin/usage-metrics.ts — PostHog HogQL helpers", () => {
     const second = await dailyFunnel(7);
     // Three total attempts: priming + 5xx + 5xx-retry.
     expect(fetchSpy).toHaveBeenCalledTimes(3);
-    // Cached payload was returned (no error field, identical row).
-    expect(second.error).toBeUndefined();
+    // Cached payload was returned with a "stale data" banner so the
+    // admin page can render a notice instead of pretending the data
+    // is fresh.
     expect(second.rows[0]?.session_start).toBe(99);
+    expect(second.error).toMatch(/PostHog unavailable .* showing cached data/);
   });
 
   it("returns { error: PostHog unavailable } when both 5xx attempts fail and no cache exists", async () => {

@@ -21,19 +21,25 @@
 --
 -- What this migration does
 -- ------------------------
--- 1. CREATE TABLE used_ack_tokens with PK (token_hash). Deleting the alert
---    cascades and drops stale hashes so the weekly cleanup cron can focus
---    on 30-day retention instead of orphan pruning.
+-- 1. CREATE TABLE used_ack_tokens with PK (token_hash). On alert delete the
+--    FK is SET NULL (NOT cascade) — destroying ack-history when an alert
+--    is purged would erase forensic evidence of who acked what. The
+--    weekly cleanup cron (30-day retention on used_at) is the
+--    authoritative pruner.
 -- 2. Index used_at so the weekly cleanup cron
 --    (src/app/api/cron/cleanup-ack-tokens/route.ts) can range-scan.
 -- 3. RLS: enable, with NO policies — service-role writes only (the ack
 --    route calls createAdminClient). No public reads.
+-- 4. Idempotent ALTER block at the end: if this migration already ran in
+--    dev with the prior CASCADE+NOT NULL definition, swap the FK in
+--    place so staging/prod re-run doesn't need a separate migration.
 
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS used_ack_tokens (
   token_hash TEXT PRIMARY KEY,
-  alert_id UUID NOT NULL REFERENCES portfolio_alerts(id) ON DELETE CASCADE,
+  -- ON DELETE SET NULL preserves forensic ack-history past alert delete.
+  alert_id UUID REFERENCES portfolio_alerts(id) ON DELETE SET NULL,
   used_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -41,6 +47,32 @@ CREATE INDEX IF NOT EXISTS idx_used_ack_tokens_used_at
   ON used_ack_tokens(used_at);
 
 ALTER TABLE used_ack_tokens ENABLE ROW LEVEL SECURITY;
+
+-- Idempotent in-place fix for environments that already ran the prior
+-- CASCADE+NOT NULL version of this migration. Drops the old constraint
+-- (if present) and re-adds with SET NULL; relaxes NOT NULL on alert_id
+-- so SET NULL can fire.
+DO $$
+DECLARE
+  fk_name TEXT;
+BEGIN
+  SELECT conname INTO fk_name
+  FROM pg_constraint
+  WHERE conrelid = 'public.used_ack_tokens'::regclass
+    AND contype = 'f'
+    AND pg_get_constraintdef(oid) LIKE '%REFERENCES portfolio_alerts%';
+
+  IF fk_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE used_ack_tokens DROP CONSTRAINT %I', fk_name);
+  END IF;
+
+  -- Always enforce the relaxed shape; both ALTERs are no-ops if already
+  -- in the right state.
+  ALTER TABLE used_ack_tokens ALTER COLUMN alert_id DROP NOT NULL;
+  ALTER TABLE used_ack_tokens
+    ADD CONSTRAINT used_ack_tokens_alert_id_fkey
+    FOREIGN KEY (alert_id) REFERENCES portfolio_alerts(id) ON DELETE SET NULL;
+END $$;
 
 -- No public policies. Service role (createAdminClient) bypasses RLS.
 

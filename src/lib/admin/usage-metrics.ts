@@ -96,15 +96,20 @@ interface CacheEntry<T> {
 
 const cache = new Map<string, CacheEntry<unknown>>();
 
-function readCache<T>(key: string): T | null {
+function readCache<T>(key: string): { value: T; storedAt: number } | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined;
   if (!entry) return null;
   if (Date.now() - entry.storedAt > CACHE_TTL_MS) return null;
-  return entry.value;
+  return { value: entry.value, storedAt: entry.storedAt };
 }
 
 function writeCache<T>(key: string, value: T): void {
   cache.set(key, { value, storedAt: Date.now() });
+}
+
+function staleBannerMessage(storedAt: number): string {
+  const iso = new Date(storedAt).toISOString();
+  return `PostHog unavailable — showing cached data from ${iso}`;
 }
 
 /** Reset for tests. Do NOT call from production code. */
@@ -242,7 +247,11 @@ export async function dailyFunnel(days: number = 30): Promise<DailyFunnelResult>
     return result;
   } catch (err) {
     const cached = readCache<DailyFunnelResult>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      // Surface the staleness so the page renders a banner instead of
+      // pretending the data is fresh.
+      return { ...cached.value, error: staleBannerMessage(cached.storedAt) };
+    }
     console.warn(
       "[usage-metrics] dailyFunnel failed, no cache:",
       err instanceof Error ? err.message : String(err),
@@ -295,7 +304,9 @@ export async function widgetViews(days: number = 30): Promise<WidgetViewsResult>
     return result;
   } catch (err) {
     const cached = readCache<WidgetViewsResult>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      return { ...cached.value, error: staleBannerMessage(cached.storedAt) };
+    }
     console.warn(
       "[usage-metrics] widgetViews failed, no cache:",
       err instanceof Error ? err.message : String(err),
@@ -364,7 +375,9 @@ export async function sessionHeatmap(
     return result;
   } catch (err) {
     const cached = readCache<SessionHeatmapResult>(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      return { ...cached.value, error: staleBannerMessage(cached.storedAt) };
+    }
     console.warn(
       "[usage-metrics] sessionHeatmap failed, no cache:",
       err instanceof Error ? err.message : String(err),

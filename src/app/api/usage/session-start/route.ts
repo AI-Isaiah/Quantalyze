@@ -16,16 +16,16 @@ import { trackUsageEventServer } from "@/lib/analytics/usage-events";
  * Debounce: 30-minute window keyed off
  * `user_metadata.last_session_start_at`. Two tabs opened back-to-back
  * count as one session; a stale tab refreshed an hour later counts as
- * a new session. The debounce lives server-side so it can't be bypassed
- * by clearing localStorage.
+ * a new session. The debounce + increment is performed atomically by
+ * the `increment_user_session_count` RPC (migration 053) so concurrent
+ * tabs can't both read the same count and write back the same N+1.
  */
 
-const DEBOUNCE_MS = 30 * 60 * 1000;
+const DEBOUNCE_SECONDS = 30 * 60;
 
-interface SessionMetadata {
-  session_count?: number;
-  last_session_start_at?: string;
-  [key: string]: unknown;
+interface IncrementResult {
+  session_count: number;
+  debounced: boolean;
 }
 
 export async function POST(req: NextRequest) {
@@ -42,64 +42,52 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient();
 
-  // Re-fetch the user via admin so we get the canonical user_metadata —
-  // the cookie-bearing client returns a redacted view.
-  const { data: adminUserRes, error: getErr } = await admin.auth.admin.getUserById(
-    user.id,
+  // Atomic SELECT FOR UPDATE + UPDATE inside a SECURITY DEFINER RPC —
+  // see migration 053. Returns either the bumped count (with
+  // debounced=false) or the existing count untouched (debounced=true).
+  const { data, error: rpcErr } = await admin.rpc(
+    "increment_user_session_count",
+    {
+      p_user_id: user.id,
+      p_debounce_seconds: DEBOUNCE_SECONDS,
+    },
   );
-  if (getErr || !adminUserRes?.user) {
-    return NextResponse.json(
-      { error: "Failed to read user metadata" },
-      { status: 500 },
+
+  if (rpcErr) {
+    console.error(
+      "[usage/session-start] increment_user_session_count RPC failed",
+      rpcErr,
     );
-  }
-
-  const meta = (adminUserRes.user.user_metadata ?? {}) as SessionMetadata;
-  const currentCount =
-    typeof meta.session_count === "number" && Number.isFinite(meta.session_count)
-      ? meta.session_count
-      : 0;
-  const lastStart = meta.last_session_start_at
-    ? Date.parse(meta.last_session_start_at)
-    : NaN;
-  const now = Date.now();
-
-  // Debounce: within DEBOUNCE_MS of the last session_start, return the
-  // existing count and DO NOT fire the PostHog event. This is the
-  // primary deduplication for two-tabs-open / refresh churn.
-  if (Number.isFinite(lastStart) && now - lastStart < DEBOUNCE_MS) {
-    return NextResponse.json({
-      session_count: currentCount,
-      debounced: true,
-    });
-  }
-
-  const nextCount = currentCount + 1;
-  const nextMeta: SessionMetadata = {
-    ...meta,
-    session_count: nextCount,
-    last_session_start_at: new Date(now).toISOString(),
-  };
-
-  const { error: updateErr } = await admin.auth.admin.updateUserById(user.id, {
-    user_metadata: nextMeta,
-  });
-  if (updateErr) {
     return NextResponse.json(
       { error: "Failed to update session metadata" },
       { status: 500 },
     );
   }
 
-  // Fire the PostHog event AFTER the DB write succeeds. If PostHog is
-  // down or unconfigured this becomes a no-op — the increment already
-  // landed in user_metadata, which is the source of truth.
-  await trackUsageEventServer("session_start", user.id, {
-    session_count: nextCount,
-  });
+  // The RPC returns SETOF — Supabase normalizes single-row sets to either
+  // an array or the first row depending on definition. Defensively pick
+  // the first element when an array.
+  const result = (Array.isArray(data) ? data[0] : data) as
+    | IncrementResult
+    | null;
+
+  if (!result || typeof result.session_count !== "number") {
+    return NextResponse.json(
+      { error: "Failed to update session metadata" },
+      { status: 500 },
+    );
+  }
+
+  // Fire the PostHog event only when the increment actually applied.
+  // Debounced calls return the existing count and are silent.
+  if (!result.debounced) {
+    await trackUsageEventServer("session_start", user.id, {
+      session_count: result.session_count,
+    });
+  }
 
   return NextResponse.json({
-    session_count: nextCount,
-    debounced: false,
+    session_count: result.session_count,
+    debounced: result.debounced,
   });
 }

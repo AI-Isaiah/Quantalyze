@@ -58,13 +58,14 @@ export async function computePortfolioSnapshot(
   const admin = createAdminClient();
 
   // 1. Primary portfolio = most recently created for this user.
-  const { data: portfolio } = await admin
+  const { data: portfolio, error: portfolioErr } = await admin
     .from("portfolios")
     .select("id")
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (portfolioErr) throw portfolioErr;
 
   if (!portfolio) {
     // Brand-new allocator with no portfolio. Return a fully-zero snapshot
@@ -83,25 +84,27 @@ export async function computePortfolioSnapshot(
   const portfolioId = portfolio.id as string;
 
   // 2. Portfolio-level analytics (most recent).
-  const { data: analyticsRow } = await admin
+  const { data: analyticsRow, error: analyticsErr } = await admin
     .from("portfolio_analytics")
     .select("portfolio_sharpe, portfolio_max_drawdown")
     .eq("portfolio_id", portfolioId)
     .order("computed_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (analyticsErr) throw analyticsErr;
 
   const analytics = analyticsRow as
     | Pick<PortfolioAnalytics, "portfolio_sharpe" | "portfolio_max_drawdown">
     | null;
 
   // 3. Portfolio strategies + weights + per-strategy analytics.
-  const { data: strategyLinks } = await admin
+  const { data: strategyLinks, error: strategyLinksErr } = await admin
     .from("portfolio_strategies")
     .select(
       "strategy_id, current_weight, allocated_amount, strategies ( id, name ), strategy_analytics:strategy_analytics ( strategy_id, sharpe )",
     )
     .eq("portfolio_id", portfolioId);
+  if (strategyLinksErr) throw strategyLinksErr;
 
   // PostgREST returns embedded relations as arrays even when they are
   // logically 1:1; we collapse to the first element below. Cast through
@@ -156,11 +159,12 @@ export async function computePortfolioSnapshot(
 
   // 4. Alerts last 7 days for this portfolio.
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const { count } = await admin
+  const { count, error: alertsErr } = await admin
     .from("portfolio_alerts")
     .select("id", { count: "exact", head: true })
     .eq("portfolio_id", portfolioId)
     .gte("triggered_at", sevenDaysAgo);
+  if (alertsErr) throw alertsErr;
 
   const snapshot: PortfolioSnapshotJSON = {
     sharpe: analytics?.portfolio_sharpe ?? null,

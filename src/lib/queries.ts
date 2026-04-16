@@ -541,7 +541,13 @@ export interface MyAllocationDashboardPayload {
     account_balance_usdt: number | null;
     created_at: string;
   }>;
-  alertCount: { high: number; medium: number; low: number; total: number };
+  alertCount: {
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    total: number;
+  };
 }
 
 /**
@@ -590,7 +596,7 @@ export const getMyAllocationDashboard = cache(
         analytics: null,
         strategies: [],
         apiKeys: await getUserApiKeys(userId),
-        alertCount: { high: 0, medium: 0, low: 0, total: 0 },
+        alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
       };
     }
 
@@ -672,10 +678,17 @@ export const getMyAllocationDashboard = cache(
       };
     });
 
-    const alertCounts = { high: 0, medium: 0, low: 0, total: 0 };
+    const alertCounts = {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      total: 0,
+    };
     for (const a of alertsRes.data ?? []) {
       const sev = (a as { severity: string }).severity;
-      if (sev === "high") alertCounts.high++;
+      if (sev === "critical") alertCounts.critical++;
+      else if (sev === "high") alertCounts.high++;
       else if (sev === "medium") alertCounts.medium++;
       else if (sev === "low") alertCounts.low++;
       alertCounts.total++;

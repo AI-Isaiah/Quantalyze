@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyAlertAckToken } from "@/lib/alert-ack-token";
@@ -116,6 +116,18 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const id = url.searchParams.get("id") ?? "";
   const token = url.searchParams.get("t");
+
+  // Per-IP rate limit on GET as well — Outlook Safe Links and other
+  // preloaders can hammer this URL on every email scan, and rendering
+  // the confirm page still costs a DB roundtrip per call.
+  const ip = getClientIp(req.headers);
+  const rl = await checkLimit(publicIpLimiter, `alerts-ack-get:${ip}`);
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
+  }
 
   const guard = await runGuards(id, token);
   if (!guard.ok) {
@@ -252,8 +264,10 @@ export async function POST(req: NextRequest) {
   // The email link has no browser session, so we resolve the
   // allocator id via portfolios.user_id. If the lookup fails (deleted
   // portfolio, etc.) we still fire with a synthetic distinctId of
-  // `alert:<id>` so the funnel count stays accurate.
-  void (async () => {
+  // `alert:<id>` so the funnel count stays accurate. Wrapped in `after`
+  // (≈ Vercel waitUntil) so the runtime doesn't reap the post-response
+  // PostHog roundtrip.
+  after(async () => {
     let distinctId = `alert:${guard.alert.id}`;
     try {
       const { data: portfolio } = await admin
@@ -272,7 +286,7 @@ export async function POST(req: NextRequest) {
       alert_type: guard.alert.alert_type,
       source: "email",
     });
-  })();
+  });
 
   return NextResponse.redirect(ACK_REDIRECT.success(guard.alert.alert_type), {
     status: 303,

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -49,28 +49,56 @@ type SnapshotRaceResult =
   | { kind: "pending" }
   | { kind: "failed" };
 
+/**
+ * Race the snapshot compute against a 2s timer with a small state machine
+ * so a post-timer rejection can't:
+ *   1. Surface as an unhandled rejection.
+ *   2. Get misclassified as 'pending' (which would enqueue a backfill job
+ *      for a snapshot that's never going to compute).
+ *
+ * The compute promise gets a `.catch()` immediately so rejections that
+ * land after the timer wins are absorbed and recorded in `state`.
+ */
 async function raceSnapshot(userId: string): Promise<SnapshotRaceResult> {
-  const timeoutMarker = Symbol("timeout");
-  const timeoutPromise = new Promise<typeof timeoutMarker>((resolve) => {
-    setTimeout(() => resolve(timeoutMarker), SNAPSHOT_BUDGET_MS);
+  type State = "pending" | "ready" | "failed";
+  // Wrap in an object so TS doesn't narrow `state` to its initial literal
+  // across the closure boundary — the .then/.catch mutate it.
+  const box: { state: State; result: PortfolioSnapshotJSON | null } = {
+    state: "pending",
+    result: null,
+  };
+
+  const computePromise = computePortfolioSnapshot(userId)
+    .then((r) => {
+      if (box.state === "pending") {
+        box.state = "ready";
+        box.result = r;
+      }
+    })
+    .catch((err) => {
+      // Always observe rejection so it can never bubble up as
+      // unhandledRejection — even when the timer has already won.
+      console.warn("[api/intro] snapshot compute rejected:", err);
+      if (box.state === "pending") {
+        box.state = "failed";
+      }
+    });
+
+  const timeoutPromise = new Promise<void>((resolve) => {
+    setTimeout(resolve, SNAPSHOT_BUDGET_MS);
   });
 
-  try {
-    const result = await Promise.race([
-      computePortfolioSnapshot(userId),
-      timeoutPromise,
-    ]);
-    if (result === timeoutMarker) {
-      // Compute still running — it will be abandoned by the Vercel
-      // runtime shortly. A compute_intro_snapshot job handles the async
-      // path.
-      return { kind: "pending" };
-    }
-    return { kind: "ready", snapshot: result };
-  } catch (err) {
-    console.warn("[api/intro] snapshot compute failed synchronously:", err);
+  await Promise.race([computePromise, timeoutPromise]);
+
+  if (box.state === "ready" && box.result) {
+    return { kind: "ready", snapshot: box.result };
+  }
+  if (box.state === "failed") {
     return { kind: "failed" };
   }
+  // Timer won AND the compute hasn't rejected (yet) — only this branch
+  // should enqueue the async backfill.
+  return { kind: "pending" };
 }
 
 export async function POST(req: NextRequest) {
@@ -179,9 +207,10 @@ export async function POST(req: NextRequest) {
 
   // If snapshot compute didn't finish in time, enqueue the async worker.
   // Use the admin client — enqueue_compute_job is SECURITY DEFINER and
-  // service-role bypasses the auth check. We want this to be awaited so
-  // a dropped promise doesn't leave snapshot_status stuck at 'pending'.
+  // service-role bypasses the auth check. We await so a dropped promise
+  // doesn't leave snapshot_status stuck at 'pending'.
   if (snapshotResult.kind === "pending" && inserted?.id) {
+    let enqueueOk = false;
     try {
       const admin = createAdminClient();
       const { error: enqueueError } = await admin.rpc("enqueue_compute_job", {
@@ -190,26 +219,40 @@ export async function POST(req: NextRequest) {
         p_metadata: { contact_request_id: inserted.id },
       });
       if (enqueueError) {
-        // The DB row is already inserted with snapshot_status='pending'.
-        // Log the enqueue failure; a later manual requeue is possible
-        // from the admin UI. We don't fail the request — the intro
-        // itself succeeded, the snapshot is a nice-to-have.
         console.error(
           "[api/intro] failed to enqueue compute_intro_snapshot:",
           enqueueError,
         );
+      } else {
+        enqueueOk = true;
       }
     } catch (err) {
-      console.error(
-        "[api/intro] compute_intro_snapshot enqueue threw:",
-        err,
-      );
+      console.error("[api/intro] compute_intro_snapshot enqueue threw:", err);
+    }
+
+    // Enqueue failed — promote the row to 'failed' so it doesn't sit at
+    // 'pending' indefinitely. The intro itself still succeeded; only the
+    // backfill snapshot is unavailable.
+    if (!enqueueOk) {
+      const admin = createAdminClient();
+      const { error: updateErr } = await admin
+        .from("contact_requests")
+        .update({ snapshot_status: "failed" })
+        .eq("id", inserted.id);
+      if (updateErr) {
+        console.error(
+          "[api/intro] failed to mark snapshot_status=failed after enqueue failure:",
+          updateErr,
+        );
+      }
     }
   }
 
   const userEmail = user.email;
   const userId = user.id;
-  Promise.resolve().then(async () => {
+  // Use Next 16's `after` (≈ Vercel waitUntil) so the runtime doesn't
+  // reap the email work after the response flushes.
+  after(async () => {
     try {
       const admin = createAdminClient();
       const [{ data: strategy }, { data: allocatorProfile }] = await Promise.all([
@@ -246,7 +289,14 @@ export async function POST(req: NextRequest) {
           .single();
 
         if (managerEmailRow?.email) {
-          notifyManagerIntroRequest(managerEmailRow.email, allocatorName, strategy.name);
+          try {
+            notifyManagerIntroRequest(managerEmailRow.email, allocatorName, strategy.name);
+          } catch (err) {
+            console.error(
+              "[intro] notifyManagerIntroRequest failed",
+              { strategy_id, user_id: userId, err },
+            );
+          }
         }
 
         if (disclosureTier === "institutional") {
@@ -255,16 +305,35 @@ export async function POST(req: NextRequest) {
       }
 
       if (userEmail) {
-        notifyAllocatorOfIntroRequest(
-          userEmail,
-          strategy.name,
-          strategy.id,
-          managerBlock,
-        );
+        try {
+          notifyAllocatorOfIntroRequest(
+            userEmail,
+            strategy.name,
+            strategy.id,
+            managerBlock,
+          );
+        } catch (err) {
+          console.error(
+            "[intro] notifyAllocatorOfIntroRequest failed",
+            { strategy_id, user_id: userId, err },
+          );
+        }
       }
 
-      notifyFounderIntroRequest(allocatorName, strategy.name);
-    } catch { /* email failure is non-fatal */ }
+      try {
+        notifyFounderIntroRequest(allocatorName, strategy.name);
+      } catch (err) {
+        console.error(
+          "[intro] notifyFounderIntroRequest failed",
+          { strategy_id, user_id: userId, err },
+        );
+      }
+    } catch (err) {
+      console.error(
+        "[intro] post-success notification failed",
+        { strategy_id, user_id: userId, err },
+      );
+    }
   });
 
   return NextResponse.json({ success: true });

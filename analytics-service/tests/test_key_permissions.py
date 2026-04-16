@@ -40,7 +40,12 @@ class TestBinanceParser:
             "enableWithdrawals": False,
         })
         result = await detect_binance_permissions(ex)
-        assert result == {"read": True, "trade": False, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_read_plus_trade(self):
@@ -52,7 +57,12 @@ class TestBinanceParser:
             "enableWithdrawals": False,
         })
         result = await detect_binance_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_read_plus_trade_plus_withdraw(self):
@@ -64,7 +74,12 @@ class TestBinanceParser:
             "enableWithdrawals": True,
         })
         result = await detect_binance_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": True}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": True,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_futures_only_counts_as_trade(self):
@@ -85,8 +100,14 @@ class TestBinanceParser:
         ex.id = "binance"
         ex.sapi_get_account_apirestrictions = AsyncMock(side_effect=Exception("network"))
         result = await detect_binance_permissions(ex)
-        # Fail-closed: assume worst case so wizard rejects.
-        assert result == {"read": True, "trade": True, "withdraw": True}
+        # Fail-CLOSED: assume worst case so wizard rejects. probe_error
+        # signals "do not cache" to the dispatcher.
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": True,
+            "probe_error": True,
+        }
 
 
 class TestOkxParser:
@@ -98,7 +119,12 @@ class TestOkxParser:
             "data": [{"perm": "read_only"}],
         })
         result = await detect_okx_permissions(ex)
-        assert result == {"read": True, "trade": False, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_read_plus_trade(self):
@@ -108,7 +134,12 @@ class TestOkxParser:
             "data": [{"perm": "read,trade"}],
         })
         result = await detect_okx_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_read_plus_trade_plus_withdraw(self):
@@ -118,17 +149,28 @@ class TestOkxParser:
             "data": [{"permType": "read,trade,withdraw"}],
         })
         result = await detect_okx_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": True}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": True,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
-    async def test_exchange_error_falls_back_to_read_only(self):
-        # Legacy behavior: balance fetch already proved read works, so a
-        # permission-endpoint failure should still treat the key as read-only.
+    async def test_exchange_error_fails_closed(self):
+        # Updated for parity with Binance/Bybit: a flaky permission
+        # endpoint must NOT silently mark a trading key as read-only.
+        # Fail-CLOSED across the board.
         ex = AsyncMock()
         ex.id = "okx"
         ex.private_get_account_config = AsyncMock(side_effect=Exception("flaky"))
         result = await detect_okx_permissions(ex)
-        assert result == {"read": True, "trade": False, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": True,
+            "probe_error": True,
+        }
 
 
 class TestBybitParser:
@@ -140,7 +182,12 @@ class TestBybitParser:
             "result": {"permissions": {}},
         })
         result = await detect_bybit_permissions(ex)
-        assert result == {"read": True, "trade": False, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_read_plus_trade(self):
@@ -150,7 +197,12 @@ class TestBybitParser:
             "result": {"permissions": {"Spot": ["SpotTrade"]}},
         })
         result = await detect_bybit_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": False}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_read_plus_trade_plus_withdraw(self):
@@ -165,7 +217,12 @@ class TestBybitParser:
             },
         })
         result = await detect_bybit_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": True}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": True,
+            "probe_error": False,
+        }
 
     @pytest.mark.asyncio
     async def test_exchange_error_fails_closed(self):
@@ -173,7 +230,12 @@ class TestBybitParser:
         ex.id = "bybit"
         ex.private_get_v5_user_query_api = AsyncMock(side_effect=Exception("503"))
         result = await detect_bybit_permissions(ex)
-        assert result == {"read": True, "trade": True, "withdraw": True}
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": True,
+            "probe_error": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +267,12 @@ class TestDetectPermissionsCache:
         })
 
         first = await detect_permissions(ex, api_key_id="key-abc")
-        assert first == {"read": True, "trade": False, "withdraw": False}
+        assert first == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
         assert ex.sapi_get_account_apirestrictions.await_count == 1
 
         # Second call with the same key_id should be cached — no new exchange call.
@@ -259,7 +326,45 @@ class TestDetectPermissionsCache:
         ex = AsyncMock()
         ex.id = "kraken"  # not in the dispatch table
         result = await detect_permissions(ex)
-        assert result == {"read": False, "trade": False, "withdraw": False}
+        assert result == {
+            "read": False,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_probe_error_is_not_cached(self, monkeypatch):
+        # Regression: a transient fail-CLOSED default must not be cached,
+        # otherwise a single network blip pins the UI to "all scopes on"
+        # for the full TTL.
+        monkeypatch.setenv("KEY_PERMISSION_CACHE_TTL", "900")
+        ex = AsyncMock()
+        ex.id = "binance"
+        # First call: probe raises -> fail-CLOSED with probe_error=True.
+        ex.sapi_get_account_apirestrictions = AsyncMock(
+            side_effect=Exception("blip"),
+        )
+        first = await detect_permissions(ex, api_key_id="key-flaky")
+        assert first["probe_error"] is True
+        assert ex.sapi_get_account_apirestrictions.await_count == 1
+
+        # Second call: probe now succeeds — the cache MUST NOT have
+        # persisted the previous fail-CLOSED default, so the detector
+        # must run again.
+        ex.sapi_get_account_apirestrictions = AsyncMock(return_value={
+            "enableSpotAndMarginTrading": False,
+            "enableFutures": False,
+            "enableWithdrawals": False,
+        })
+        second = await detect_permissions(ex, api_key_id="key-flaky")
+        assert second == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
+        assert ex.sapi_get_account_apirestrictions.await_count == 1
 
     @pytest.mark.asyncio
     async def test_per_key_isolation(self):

@@ -139,7 +139,8 @@ async def get_key_permissions(key_id: str, request: Request) -> dict:
     if not _consume_rate_limit(key_id):
         raise HTTPException(
             status_code=429,
-            detail=f"Too many permission probes for this key. Try again in a moment.",
+            detail="Too many permission probes for this key. Try again in a moment.",
+            headers={"Retry-After": str(int(_RATE_LIMIT_WINDOW_S))},
         )
 
     supabase = get_supabase()
@@ -153,8 +154,16 @@ async def get_key_permissions(key_id: str, request: Request) -> dict:
     else:
         caller_ip = request.client.host if request.client else None
 
-    # Audit: insert before doing the work so a row exists even if the probe
-    # fails. Best-effort — never let an audit failure break the call.
+    # Load the api_keys row FIRST. We deliberately insert the audit row
+    # AFTER the FK target is confirmed to exist — otherwise an unknown
+    # key_id would fire a stream of FK-failing audit inserts and silently
+    # log them (the prior ordering swallowed those by best-effort), making
+    # 404 attempts invisible to the audit trail.
+    api_key_row = supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
+    if not api_key_row.data:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    # Audit: best-effort — never let an audit failure break the call.
     try:
         supabase.table("key_permission_audit").insert({
             "api_key_id": key_id,
@@ -164,11 +173,6 @@ async def get_key_permissions(key_id: str, request: Request) -> dict:
         logger.warning(
             "key_permission_audit insert failed for key=%s: %s", key_id, exc
         )
-
-    # Load the api_keys row.
-    api_key_row = supabase.table("api_keys").select("*").eq("id", key_id).maybe_single().execute()
-    if not api_key_row.data:
-        raise HTTPException(status_code=404, detail="API key not found")
 
     key_data = api_key_row.data
 

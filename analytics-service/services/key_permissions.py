@@ -39,6 +39,20 @@ logger = logging.getLogger("quantalyze.analytics")
 PermissionDict = dict[str, bool]
 
 
+# Shape contract: detect_*_permissions return
+# {"read": bool, "trade": bool, "withdraw": bool, "probe_error": bool}.
+# probe_error=True means we caught an exception and returned the
+# fail-CLOSED default (all scopes True so the wizard rejects). Callers
+# (and the cache layer) MUST NOT cache rows where probe_error is True —
+# they're transient defaults, not real signals.
+_FAIL_CLOSED: PermissionDict = {
+    "read": True,
+    "trade": True,
+    "withdraw": True,
+    "probe_error": True,
+}
+
+
 def _cache_ttl_seconds() -> int:
     """Read TTL from env at call time so tests can monkeypatch the env var."""
     raw = os.getenv("KEY_PERMISSION_CACHE_TTL", "900")
@@ -95,19 +109,22 @@ async def detect_binance_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         api_restrictions = await exchange.sapi_get_account_apirestrictions()
     except Exception as exc:
         logger.warning("Binance permission probe failed: %s", exc)
-        # Fail-closed: signal "scopes unknown but assume worst" by setting all
-        # three to True. The legacy validator surfaced a generic "could not
-        # verify" error in this case; the new wizard surfaces it as "key has
-        # trading/withdrawal perms" via the derived ``read_only`` shim, which
-        # is a stricter UX (we'd rather over-reject than under-reject).
-        return {"read": True, "trade": True, "withdraw": True}
+        # Fail-CLOSED: scopes unknown -> assume worst so the wizard rejects.
+        # probe_error=True so the cache layer does NOT persist this transient
+        # default (otherwise a single network blip pins the UI for 15 min).
+        return dict(_FAIL_CLOSED)
 
     can_withdraw = bool(api_restrictions.get("enableWithdrawals", False))
     can_trade = bool(
         api_restrictions.get("enableSpotAndMarginTrading", False)
         or api_restrictions.get("enableFutures", False)
     )
-    return {"read": True, "trade": can_trade, "withdraw": can_withdraw}
+    return {
+        "read": True,
+        "trade": can_trade,
+        "withdraw": can_withdraw,
+        "probe_error": False,
+    }
 
 
 async def detect_okx_permissions(exchange: ccxt.Exchange) -> PermissionDict:
@@ -124,10 +141,10 @@ async def detect_okx_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         config = await exchange.private_get_account_config()
     except Exception as exc:
         logger.warning("OKX permission probe failed: %s", exc)
-        # Mirror legacy fallback in services.exchange.validate_key_permissions:
-        # if balance fetch worked but permission check fails, the key likely
-        # IS read-only (OKX's permission endpoint is finicky on sub-accounts).
-        return {"read": True, "trade": False, "withdraw": False}
+        # Fail-CLOSED, matching Binance/Bybit. The legacy fail-OPEN here
+        # was a security mismatch — a flaky OKX permissions endpoint must
+        # not silently mark a trading key as read-only.
+        return dict(_FAIL_CLOSED)
 
     data = config.get("data", [{}])
     if isinstance(data, list) and len(data) > 0:
@@ -137,7 +154,12 @@ async def detect_okx_permissions(exchange: ccxt.Exchange) -> PermissionDict:
 
     has_trade = "trade" in perm_str
     has_withdraw = "withdraw" in perm_str
-    return {"read": True, "trade": has_trade, "withdraw": has_withdraw}
+    return {
+        "read": True,
+        "trade": has_trade,
+        "withdraw": has_withdraw,
+        "probe_error": False,
+    }
 
 
 async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
@@ -150,7 +172,7 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         api_info = await exchange.private_get_v5_user_query_api()
     except Exception as exc:
         logger.warning("Bybit permission probe failed: %s", exc)
-        return {"read": True, "trade": True, "withdraw": True}
+        return dict(_FAIL_CLOSED)
 
     permissions = api_info.get("result", {}).get("permissions", {})
     has_trade = bool(
@@ -159,7 +181,12 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         or permissions.get("Exchange")
     )
     has_withdraw = bool(permissions.get("Wallet"))
-    return {"read": True, "trade": has_trade, "withdraw": has_withdraw}
+    return {
+        "read": True,
+        "trade": has_trade,
+        "withdraw": has_withdraw,
+        "probe_error": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -178,18 +205,28 @@ async def detect_permissions(
     exchange: ccxt.Exchange,
     api_key_id: Optional[str] = None,
 ) -> PermissionDict:
-    """Detect ``{read, trade, withdraw}`` for ``exchange``.
+    """Detect ``{read, trade, withdraw, probe_error}`` for ``exchange``.
 
     When ``api_key_id`` is provided, the result is cached for
     ``KEY_PERMISSION_CACHE_TTL`` seconds (default 900) keyed by
     ``(api_key_id, exchange.id)``. Calling without an ``api_key_id`` (e.g. the
     pre-store validate path in the wizard) bypasses the cache because there's
     no stable identity to key on.
+
+    Cache safety: if the underlying probe raised and the per-exchange
+    detector returned the fail-CLOSED default (``probe_error=True``), we do
+    NOT write that into the cache — otherwise a single transient blip
+    would pin the UI to "all scopes on" for the full TTL.
     """
     detector = _DISPATCH.get(exchange.id)
     if detector is None:
         # Unknown exchange — be conservative.
-        return {"read": False, "trade": False, "withdraw": False}
+        return {
+            "read": False,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }
 
     cache_key: Optional[tuple[str, str]] = (
         (api_key_id, exchange.id) if api_key_id else None
@@ -202,7 +239,8 @@ async def detect_permissions(
 
     result = await detector(exchange)
 
-    if cache_key is not None:
+    # Don't persist transient fail-closed defaults — see docstring above.
+    if cache_key is not None and not result.get("probe_error", False):
         _cache_set(cache_key, result)
 
     return result

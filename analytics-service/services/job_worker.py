@@ -69,6 +69,18 @@ EXCHANGE_COOLDOWNS: dict[str, int] = {
 }
 
 
+# Severity ordering used by reconcile dedup. A new finding with a
+# higher rank than the existing unacked row escalates in place; equal-
+# or-lower rank skips. Source of truth lives in
+# supabase/migrations/047c_severity_critical.sql.
+SEVERITY_RANK: dict[str, int] = {
+    "low": 0,
+    "medium": 1,
+    "high": 2,
+    "critical": 3,
+}
+
+
 # ---------------------------------------------------------------------------
 # Public shape
 # ---------------------------------------------------------------------------
@@ -742,11 +754,15 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         f"fills for {report.report_date}."
     )
 
+    # Severity ordering for escalation: an existing 'high' unacked alert
+    # must be promoted (UPDATE in place) when a new 'critical' finding
+    # arrives — silently skipping would let needs_manual_review hide
+    # behind a stale row.
     for portfolio_id in portfolio_ids:
         def _insert_alert(pid=portfolio_id) -> None:
             existing = (
                 ctx.supabase.table("portfolio_alerts")
-                .select("id")
+                .select("id, severity")
                 .eq("portfolio_id", pid)
                 .eq("alert_type", "sync_failure")
                 .is_("acknowledged_at", "null")
@@ -754,6 +770,17 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
                 .execute()
             )
             if existing.data:
+                existing_row = existing.data[0]
+                existing_sev = existing_row.get("severity", "medium")
+                if (
+                    SEVERITY_RANK.get(severity, 1)
+                    > SEVERITY_RANK.get(existing_sev, 1)
+                ):
+                    ctx.supabase.table("portfolio_alerts").update({
+                        "severity": severity,
+                        "message": message,
+                        "triggered_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", existing_row["id"]).execute()
                 return
             ctx.supabase.table("portfolio_alerts").insert({
                 "portfolio_id": pid,
@@ -771,11 +798,25 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         try:
             await db_execute(_insert_alert)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
+            # Narrow swallow: only the partial-unique-index race
+            # (PostgREST surfaces 23505) is benign here. Anything else is
+            # an actual failure we must surface — log at error and re-raise
+            # so the worker classifies + retries the job.
+            code = getattr(exc, "code", None)
+            msg = str(exc)
+            if code == "23505" or "23505" in msg or "duplicate key" in msg.lower():
+                logger.warning(
+                    "reconcile_strategy: dedup race on sync_failure alert "
+                    "for portfolio %s (strategy %s): %s",
+                    portfolio_id, strategy_id, exc,
+                )
+                continue
+            logger.error(
                 "reconcile_strategy: failed to insert sync_failure alert "
                 "for portfolio %s (strategy %s): %s",
                 portfolio_id, strategy_id, exc,
             )
+            raise
 
     return DispatchResult(outcome=DispatchOutcome.DONE)
 

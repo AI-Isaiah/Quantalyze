@@ -74,7 +74,7 @@ const mockData = {
     mockStrategy("s3", "Gamma Scalper", 0.25),
   ],
   apiKeys: [],
-  alertCount: { high: 0, medium: 0, low: 0, total: 0 },
+  alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
 };
 
 const widgetProps = {

@@ -17,9 +17,10 @@ import type { User } from "@supabase/supabase-js";
  * Two cache layers stack here:
  *   1. Python in-memory TTL cache — 15 minutes per (api_key_id, exchange_id),
  *      configurable via KEY_PERMISSION_CACHE_TTL.
- *   2. This Next layer — 5 minutes via unstable_cache. Smaller window because
- *      a hot Next reload (or a user spamming Re-check) can blast through the
- *      Python rate limit otherwise; this absorbs the bursts.
+ *   2. This Next layer — 60 seconds via unstable_cache. Conservative window
+ *      because the Python tier already absorbs the longer cool-down; this
+ *      Next layer just collapses concurrent in-flight requests / refresh
+ *      bursts so we don't flood the internal endpoint per render pass.
  *
  * Ownership: a SELECT against api_keys verifies the key belongs to the caller
  * BEFORE we proxy to Python. Returns 403 on mismatch / 404 on unknown key.
@@ -77,7 +78,7 @@ function makeCachedFetcher(keyId: string) {
       return (await res.json()) as PermissionPayload;
     },
     [`key-permissions:${keyId}`],
-    { revalidate: 300, tags: [`key-permissions:${keyId}`] },
+    { revalidate: 60, tags: [`key-permissions:${keyId}`] },
   );
 }
 

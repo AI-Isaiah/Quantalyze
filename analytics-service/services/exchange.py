@@ -65,8 +65,12 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     has_withdraw = perms.get("withdraw", False)
     has_trade = perms.get("trade", False)
     has_read = perms.get("read", False)
+    probe_error = perms.get("probe_error", False)
 
     result["read_only"] = bool(has_read and not has_trade and not has_withdraw)
+    # Surface the transient flag so callers can avoid persisting a
+    # fail-CLOSED default as if it were a real probe result.
+    result["probe_error"] = bool(probe_error)
 
     if has_withdraw:
         result["error"] = "Key has withdrawal permissions. Please use a read-only key."

@@ -616,12 +616,19 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
             }).execute()
         except Exception as exc:
             # The DB-side weekly unique index (migration 051) is the
-            # authoritative race guard. A unique_violation here means
-            # a concurrent writer won — silently skip.
-            logger.warning(
-                "Failed to insert rebalance_drift alert for %s: %s",
-                portfolio_id, exc,
-            )
+            # authoritative race guard. Narrow the swallow to the
+            # unique_violation case only — anything else (RLS / FK / etc.)
+            # is a real failure that must surface to the outer catch and
+            # the caller's logs.
+            code = getattr(exc, "code", None)
+            msg = str(exc)
+            if code == "23505" or "23505" in msg or "duplicate key" in msg.lower():
+                logger.warning(
+                    "rebalance_drift dedup race for %s: %s",
+                    portfolio_id, exc,
+                )
+            else:
+                raise
     except Exception as exc:
         logger.warning(
             "rebalance_drift alert generation failed for %s: %s",

@@ -3,6 +3,7 @@
 import type { WidgetProps } from "../../lib/types";
 
 interface AlertCount {
+  critical: number;
   high: number;
   medium: number;
   low: number;
@@ -10,6 +11,7 @@ interface AlertCount {
 }
 
 const SEVERITY_CONFIG = {
+  critical: { label: "Critical", dot: "#991B1B", bg: "rgba(153,27,27,0.10)" },
   high: { label: "High", dot: "#DC2626", bg: "rgba(220,38,38,0.08)" },
   medium: { label: "Medium", dot: "#D97706", bg: "rgba(217,119,6,0.08)" },
   low: { label: "Low", dot: "#94A3B8", bg: "rgba(148,163,184,0.08)" },
@@ -30,7 +32,7 @@ export function PortfolioAlerts({ data }: WidgetProps) {
   }
 
   const entries = (
-    ["high", "medium", "low"] as const
+    ["critical", "high", "medium", "low"] as const
   ).filter((sev) => alertCount[sev] > 0);
 
   return (
