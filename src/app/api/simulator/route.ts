@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
-import { simulateAddCandidate } from "@/lib/analytics-client";
+import {
+  simulateAddCandidate,
+  AnalyticsUpstreamError,
+} from "@/lib/analytics-client";
 import { simulatorLimiter, checkLimit } from "@/lib/ratelimit";
 import { SimulatorRequestSchema } from "@/lib/api/simulatorSchema";
 
@@ -31,12 +34,19 @@ export async function POST(req: NextRequest) {
 
   const rl = await checkLimit(simulatorLimiter, `simulator:${user.id}`);
   if (!rl.success) {
+    // Expose retryAfter both as the conventional Retry-After HTTP header
+    // and in the JSON body so the client can disable the retry button for
+    // that duration instead of hammering the limiter in a loop.
     return NextResponse.json(
       {
         error:
           "Too many simulations. The portfolio impact simulator is capped at 20 runs per hour.",
+        retryAfter: rl.retryAfter,
       },
-      { status: 429 },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -84,6 +94,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result);
   } catch (err) {
     console.error("[simulator] Simulation failed:", err);
+    // Forward 4xx semantics from the Python service (e.g. 400 "already in
+    // portfolio", 404 "portfolio not found") instead of flattening every
+    // upstream error to 500. 5xx upstream stays 5xx downstream.
+    if (err instanceof AnalyticsUpstreamError && err.status >= 400 && err.status < 500) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
     const message =
       err instanceof Error ? err.message : "Portfolio impact simulation failed";
     return NextResponse.json({ error: message }, { status: 500 });

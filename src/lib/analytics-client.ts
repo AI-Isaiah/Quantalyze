@@ -29,6 +29,21 @@ export class AnalyticsTimeoutError extends Error {
 }
 
 /**
+ * Thrown when the analytics service returns a non-2xx HTTP response.
+ * Preserves the upstream status so route handlers can forward 4xx semantics
+ * (e.g. 400 "already in portfolio", 404 "not found") instead of flattening
+ * every upstream error to 500.
+ */
+export class AnalyticsUpstreamError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "AnalyticsUpstreamError";
+    this.status = status;
+  }
+}
+
+/**
  * Core fetch wrapper for the Python analytics service.
  *
  * @param path    - URL path (e.g. "/api/compute-analytics")
@@ -75,11 +90,17 @@ async function analyticsRequest(
     const contentType = res.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const error = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(error.detail ?? "Analytics service error");
+      throw new AnalyticsUpstreamError(
+        error.detail ?? "Analytics service error",
+        res.status,
+      );
     }
     // Non-JSON error (FastAPI unhandled exception returns text/plain)
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(text || `Analytics service error (${res.status})`);
+    throw new AnalyticsUpstreamError(
+      text || `Analytics service error (${res.status})`,
+      res.status,
+    );
   }
 
   const contentType = res.headers.get("content-type") ?? "";

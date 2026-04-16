@@ -178,6 +178,38 @@ describe("<PortfolioImpactPanel>", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
+  it("disables the retry button and shows a countdown on 429", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          error: "Too many simulations. Try again later.",
+          retryAfter: 2520,
+        }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "2520",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Rate limited"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    // 2520s = 42 min — surfaced to the user so they know when to come back.
+    expect(screen.getByText(/Try again in 42 min/)).toBeInTheDocument();
+  });
+
   it("renders the insufficient_data empty state", async () => {
     mockFetch(async () =>
       new Response(

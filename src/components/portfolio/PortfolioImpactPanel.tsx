@@ -16,7 +16,7 @@ interface PortfolioImpactPanelProps {
 
 type FetchState =
   | { kind: "loading" }
-  | { kind: "error"; message: string }
+  | { kind: "error"; message: string; retryAfter?: number }
   | { kind: "success"; data: SimulatorCandidate };
 
 /**
@@ -69,6 +69,26 @@ export function PortfolioImpactPanel({
           const body = await res
             .json()
             .catch(() => ({ error: "Simulation failed" }));
+          // 429 carries a retryAfter (seconds) that we surface to the UI so
+          // the retry button can be disabled for that duration instead of
+          // hammering the rate limiter in a loop.
+          if (res.status === 429) {
+            const headerRetry = Number(res.headers.get("Retry-After"));
+            const retryAfter =
+              typeof body.retryAfter === "number"
+                ? body.retryAfter
+                : Number.isFinite(headerRetry) && headerRetry > 0
+                  ? headerRetry
+                  : undefined;
+            if (!controller.signal.aborted) {
+              setState({
+                kind: "error",
+                message: body.error ?? "Too many simulations. Try again later.",
+                retryAfter,
+              });
+            }
+            return;
+          }
           throw new Error(body.error ?? `HTTP ${res.status}`);
         }
 
@@ -190,7 +210,11 @@ export function PortfolioImpactPanel({
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {state.kind === "loading" && <LoadingSkeleton />}
           {state.kind === "error" && (
-            <ErrorState message={state.message} onRetry={handleRetry} />
+            <ErrorState
+              message={state.message}
+              onRetry={handleRetry}
+              retryAfter={state.retryAfter}
+            />
           )}
           {state.kind === "success" && state.data.status !== "ok" && (
             <NonOkState data={state.data} />
@@ -237,25 +261,45 @@ function LoadingSkeleton() {
 function ErrorState({
   message,
   onRetry,
+  retryAfter,
 }: {
   message: string;
   onRetry: () => void;
+  retryAfter?: number;
 }) {
+  // When the server tells us to wait (429 Retry-After), disable retry for
+  // that duration. A re-click would just re-hit the limiter and fail again.
+  const isRateLimited =
+    typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0;
   return (
     <div
       className="rounded-lg border border-negative/20 bg-negative/5 px-4 py-3"
       role="alert"
     >
       <p className="text-sm text-negative">{message}</p>
+      {isRateLimited && (
+        <p className="mt-1 text-xs text-negative/80">
+          Try again in {formatRetryAfter(retryAfter)}.
+        </p>
+      )}
       <button
         type="button"
         onClick={onRetry}
-        className="mt-2 rounded-md border border-negative/30 bg-surface px-3 py-1 text-xs font-medium text-negative transition-colors hover:bg-negative/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-negative"
+        disabled={isRateLimited}
+        className="mt-2 rounded-md border border-negative/30 bg-surface px-3 py-1 text-xs font-medium text-negative transition-colors hover:bg-negative/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-negative disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-surface"
       >
         Retry
       </button>
     </div>
   );
+}
+
+function formatRetryAfter(seconds: number): string {
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))}s`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.ceil(minutes / 60);
+  return `${hours}h`;
 }
 
 function NonOkState({ data }: { data: SimulatorCandidate }) {
