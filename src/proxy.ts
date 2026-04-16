@@ -93,7 +93,8 @@ export const config = {
     // security.txt + the downloadable security packet PDF). The .txt bypass is
     // intentionally scoped to (security.txt|robots.txt) — a broad `.*\.txt$`
     // pattern would let any unknown .txt path bypass auth. /unknown.txt stays
-    // guarded after this change.
-    "/((?!_next/static|_next/image|favicon.ico|\\.well-known/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|pdf)$|(security|robots)\\.txt$).*)",
+    // guarded after this change. Next.js 16 rejects capturing groups in the
+    // matcher source, so the alternation uses the non-capturing `(?:…)` form.
+    "/((?!_next/static|_next/image|favicon.ico|\\.well-known/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|pdf)$|(?:security|robots)\\.txt$).*)",
   ],
 };

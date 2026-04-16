@@ -227,7 +227,7 @@ class TestReconstructPositions:
         """No fills in DB -> returns empty dict, trade_metrics all zeros."""
         mock_supabase = _make_mock_supabase(fills=[])
 
-        with patch("services.position_reconstruction.db_execute", side_effect=lambda fn: _run_sync(fn)):
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
             result = await reconstruct_positions("strat-1", mock_supabase)
 
         assert result == {}
@@ -259,7 +259,7 @@ class TestReconstructPositions:
         ]
         mock_supabase = _make_mock_supabase(fills=fills)
 
-        with patch("services.position_reconstruction.db_execute", side_effect=lambda fn: _run_sync(fn)):
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
             result = await reconstruct_positions("strat-1", mock_supabase)
 
         assert result["total_positions"] == 1
@@ -295,7 +295,7 @@ class TestReconstructPositions:
             },
         ]
 
-        with patch("services.position_reconstruction.db_execute", side_effect=lambda fn: _run_sync(fn)):
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
             mock1 = _make_mock_supabase(fills=fills)
             result1 = await reconstruct_positions("strat-1", mock1)
 

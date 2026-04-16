@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.12.1.1] - 2026-04-16
+
+Hotfix that unblocks `main` CI. Both the Python and frontend jobs had been red for
+five consecutive commits (since the Sprint 4 landing) without being noticed. Fixes
+are surgical; coverage is raised from 75.5% to 80.4% so the `--cov-fail-under=80`
+gate in CI passes. Shipped as a standalone PR before the Sprint 6 closeout
+(`v0.13.0.0`) so the follow-up ship lands on a green base.
+
+### Fixed
+- **Python `tests/test_position_reconstruction.py` — async mock regression.**
+  `unittest.mock.patch` auto-detects async targets on Python 3.12+ and substitutes
+  an `AsyncMock`. The existing `side_effect=lambda fn: _run_sync(fn)` handed
+  `AsyncMock` a coroutine as the resolved value instead of an awaitable result, so
+  `await db_execute(...)` resolved to a bare coroutine and `result.data` raised
+  `AttributeError: 'coroutine' object has no attribute 'data'`. Switched all three
+  `with patch(...)` sites to `side_effect=_run_sync` so `AsyncMock` sees a coroutine
+  *function* and awaits it correctly. The production code in
+  `analytics-service/services/position_reconstruction.py` was already correct —
+  this was purely a test-mock bug.
+- **`src/proxy.ts` middleware matcher — Next.js 16 capturing-group rejection.**
+  Next.js 16 fails the production build when a middleware `matcher` regex source
+  contains a capturing group (`Invalid source '...': Capturing groups are not
+  allowed at 95`). Rewrote the `(security|robots)\.txt$` alternation as the
+  non-capturing form `(?:security|robots)\.txt$`. The behavior is identical —
+  `security.txt` and `robots.txt` still bypass auth while arbitrary `.txt` paths
+  stay guarded — but the matcher is now valid under the new route-source validator.
+
+### Changed
+- **Test coverage floor raised from 75.5% → 80.4%.** The `pytest --cov-fail-under=80`
+  gate has been tripping on every `main` run since Sprint 3 introduced
+  `services/job_worker.py` (30% covered). Three new test modules close the highest-
+  ROI gaps without touching production code:
+  - `tests/test_position_reconstruction_edges.py` (13 tests): `compute_exposure_metrics`
+    end-to-end, FIFO overshoot / short-add / zero-qty / bad-timestamp branches,
+    `_attribute_funding` tolerance for missing fields and unparseable amounts, and
+    the outer-except when the `funding_fees` fetch raises. Brings
+    `services/position_reconstruction.py` from 72% → 96%.
+  - `tests/test_coverage_extras.py` (28 tests): `portfolio_optimizer.generate_narrative`
+    monthly-breakdown and optimizer-recommendation branches, `_compute_sharpe` /
+    `_max_drawdown` / `_avg_corr` None-guards, `bridge_scoring.find_replacement_candidates`
+    early-return guards, `simulator_scoring` helper edge cases, and `portfolio_metrics`
+    TWR / MWR / Modified Dietz boundary cases. Brings `portfolio_optimizer.py` to
+    100%, `bridge_scoring.py` to 98%, `simulator_scoring.py` to 100%, and
+    `portfolio_metrics.py` from 78% → 92%.
+  - `tests/test_benchmark_extras.py` (8 tests): an `httpx.AsyncClient` stub exercises
+    `_fetch_from_binance` (single batch + stagnant-cursor terminator), `_fetch_from_coingecko`,
+    and the `fetch_btc_daily_prices` Binance→CoinGecko fallback, plus a mocked supabase
+    covers the cache-hit and stale-cache refresh paths of `get_benchmark_returns`.
+    Brings `services/benchmark.py` from 57% → 98%.
+
+### Deferred to next ship (v0.13.0.0 — Sprint 6 closeout)
+- 7.1a Audit log pilot + deny policies.
+- 7.2 RBAC via `user_app_roles` join table.
+- 7.3 Data retention + GDPR sanitize workflow.
+- 7.1b Audit-log fanout to remaining mutation sites + Python cross-service RPC.
+
 ## [0.12.1.0] - 2026-04-16
 
 Sprint 6 intermediate ship: Bridge close-out (portfolio impact simulator) plus the
