@@ -7,6 +7,7 @@
     { "path": "/api/cron/warm-analytics", "schedule": "0 0 * * *" },
     { "path": "/api/alert-digest", "schedule": "0 9 * * *" },
     { "path": "/api/cron/sync-funding", "schedule": "0 */4 * * *" },
-    { "path": "/api/cron/reconcile-strategies", "schedule": "30 3 * * *" }
+    { "path": "/api/cron/reconcile-strategies", "schedule": "30 3 * * *" },
+    { "path": "/api/cron/cleanup-ack-tokens", "schedule": "0 3 * * 0" }
   ]
 }

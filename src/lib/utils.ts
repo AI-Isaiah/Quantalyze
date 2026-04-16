@@ -93,14 +93,16 @@ export const STRATEGY_PALETTE = [
 ] as const;
 
 /** Tailwind class map for alert severity badges. */
-export const SEVERITY_STYLES: Record<"high" | "medium" | "low", string> = {
+export const SEVERITY_STYLES: Record<"critical" | "high" | "medium" | "low", string> = {
+  critical: "bg-negative/10 text-negative",
   high: "bg-negative/10 text-negative",
   medium: "bg-badge-market-neutral/10 text-badge-market-neutral",
   low: "bg-badge-other/10 text-badge-other",
 };
 
 /** Hex colors for alert severity (for HTML emails). */
-export const SEVERITY_HEX: Record<"high" | "medium" | "low", string> = {
+export const SEVERITY_HEX: Record<"critical" | "high" | "medium" | "low", string> = {
+  critical: "#DC2626",
   high: "#DC2626",
   medium: "#D97706",
   low: "#0D9488",

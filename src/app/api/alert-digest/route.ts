@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendAlertDigest, type AlertDigestEntry } from "@/lib/email";
 import { safeCompare } from "@/lib/timing-safe-compare";
+import { signAlertAckToken } from "@/lib/alert-ack-token";
+
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
 interface PendingAlertRow {
   id: string;
   portfolio_id: string;
   alert_type: string;
-  severity: "high" | "medium" | "low";
+  severity: "critical" | "high" | "medium" | "low";
   message: string;
   triggered_at: string;
   portfolios: {
@@ -75,11 +78,27 @@ export async function POST(req: NextRequest) {
       groups.set(key, group);
     }
     group.alertIds.push(row.id);
+    // Mint a signed HMAC ack token per row. The GET handler at
+    // /api/alerts/ack verifies the token, then renders a confirm page
+    // whose POST flips acknowledged_at and stores the token hash in
+    // used_ack_tokens (migration 047b) to enforce one-time-use.
+    // If ALERT_ACK_SECRET is unset we fall back to a dashboard link so
+    // the digest still ships — log and continue. The alerts will still
+    // be reachable via the in-app banner / alerts list.
+    let ackUrl: string | undefined;
+    try {
+      const token = signAlertAckToken(row.id);
+      ackUrl = `${APP_URL}/api/alerts/ack?id=${encodeURIComponent(row.id)}&t=${encodeURIComponent(token)}`;
+    } catch (err) {
+      console.warn("[alert-digest] ALERT_ACK_SECRET missing — no ack link:", err);
+    }
     group.entries.push({
+      id: row.id,
       alert_type: row.alert_type,
       severity: row.severity,
       message: row.message,
       triggered_at: row.triggered_at,
+      ack_url: ackUrl,
     });
   }
 

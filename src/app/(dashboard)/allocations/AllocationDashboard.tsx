@@ -24,6 +24,7 @@ import { KpiStrip } from "./components/KpiStrip";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { AddWidgetModal } from "./components/AddWidgetModal";
 import { UndoToast } from "./components/UndoToast";
+import { AlertBanner } from "./components/AlertBanner";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 
@@ -351,6 +352,10 @@ export function AllocationDashboard({
         timeframe={timeframe}
         aum={aum}
       />
+
+      {/* Critical alert banner — renders above the peer strip when
+          severity='critical' + unacknowledged. See docs/notes/alert-routing-v1.md. */}
+      <AlertBanner portfolioId={portfolio.id} />
 
       {/* Insight strip — fixed above the widget grid */}
       <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">

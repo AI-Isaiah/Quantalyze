@@ -392,7 +392,7 @@ export interface PortfolioAlert {
     | "regime_shift"
     | "underperformance"
     | "concentration_creep";
-  severity: "high" | "medium" | "low";
+  severity: "critical" | "high" | "medium" | "low";
   message: string;
   metadata: Record<string, unknown> | null;
   triggered_at: string;

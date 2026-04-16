@@ -508,10 +508,19 @@ export async function notifyManagerOfAdminIntro(
 // --- Portfolio alert digest ---
 
 export interface AlertDigestEntry {
+  /** Required for ack-from-email URL generation and as a stable dedup key. */
+  id: string;
   alert_type: string;
-  severity: "high" | "medium" | "low";
+  severity: "critical" | "high" | "medium" | "low";
   message: string;
   triggered_at: string;
+  /**
+   * Signed HMAC ack URL. When present, the digest row renders an
+   * "Acknowledge" link that routes through /api/alerts/ack. The caller
+   * (src/app/api/alert-digest/route.ts) mints the token via
+   * `signAlertAckToken(row.id)` so this module stays pure-rendering.
+   */
+  ack_url?: string;
 }
 
 export async function sendAlertDigest(
@@ -530,13 +539,20 @@ export async function sendAlertDigest(
     .map(
       (a) => `
     <tr>
-      <td style="padding:12px;border-bottom:1px solid #E2E8F0;">
+      <td style="padding:12px;border-bottom:1px solid #E2E8F0;vertical-align:top;">
         <span style="display:inline-block;padding:2px 8px;background:${SEVERITY_HEX[a.severity]};color:#fff;font-size:11px;text-transform:uppercase;border-radius:4px;">
           ${escapeHtml(a.severity)}
         </span>
       </td>
       <td style="padding:12px;border-bottom:1px solid #E2E8F0;color:#1A1A2E;">
         ${escapeHtml(a.message)}
+      </td>
+      <td style="padding:12px;border-bottom:1px solid #E2E8F0;text-align:right;vertical-align:top;white-space:nowrap;">
+        ${
+          a.ack_url
+            ? `<a href="${escapeHtml(a.ack_url)}" style="color:${BRAND_COLOR};font-weight:500;font-size:13px;text-decoration:none;">Acknowledge</a>`
+            : ""
+        }
       </td>
     </tr>
   `,
