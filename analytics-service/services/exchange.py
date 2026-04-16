@@ -622,12 +622,23 @@ async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, s
     return await fetch_daily_pnl(exchange, since_ms)
 
 
-def parse_since_ms(last_sync_at: str | None) -> int | None:
-    """Parse last_sync_at ISO timestamp to milliseconds epoch."""
-    if not last_sync_at:
+def parse_since_ms(
+    last_sync_at: str | None,
+    preferred: str | None = None,
+) -> int | None:
+    """Parse an ISO timestamp to milliseconds epoch.
+
+    When `preferred` is provided and non-null, it is used in place of
+    `last_sync_at`. This is how sync_trades resumes from the
+    `last_fetched_trade_timestamp` partial-success checkpoint (migration 045)
+    while keeping `last_sync_at` fallback behavior for callers that haven't
+    adopted the new cursor.
+    """
+    value = preferred if preferred else last_sync_at
+    if not value:
         return None
     try:
-        dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return int(dt.timestamp() * 1000)
     except Exception:
         return None

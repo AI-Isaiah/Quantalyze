@@ -356,7 +356,12 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         return ctx
 
     strategy_id = job["strategy_id"]
-    since_ms = parse_since_ms(ctx.key_row.get("last_sync_at"))
+    # Prefer the partial-success checkpoint (migration 045) so a prior run
+    # that persisted fills but failed downstream doesn't re-fetch from scratch.
+    since_ms = parse_since_ms(
+        ctx.key_row.get("last_sync_at"),
+        preferred=ctx.key_row.get("last_fetched_trade_timestamp"),
+    )
 
     raw_fills: list = []
     try:
@@ -421,6 +426,18 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             "sync_trades Phase 2: persisted %d raw fills for strategy %s",
             len(raw_fills), strategy_id,
         )
+
+        # Partial-success checkpoint (migration 045): stamp
+        # last_fetched_trade_timestamp AS SOON AS fills are durably persisted,
+        # before any downstream step that could fail. On retry,
+        # parse_since_ms prefers this cursor over last_sync_at so we don't
+        # re-fetch fills we already have.
+        def _update_fetched_cursor() -> None:
+            ctx.supabase.table("api_keys").update(
+                {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", ctx.key_row["id"]).execute()
+
+        await db_execute(_update_fetched_cursor)
 
     # Advance sync cursor always (even for empty fetches).
     def _update_cursor() -> None:
