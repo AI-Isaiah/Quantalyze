@@ -7,7 +7,7 @@ month observation window (Year-2 exercise at current scale). The table
 below is a living checklist so we can point at concrete evidence when an
 allocator asks, and so we know which gaps are still open.
 
-Scope: the eight control rows below are the minimum an allocator risk
+Scope: the nine control rows below are the minimum an allocator risk
 officer expects to see. Evidence links point at in-repo code, migrations,
 runbooks, or CI config. Rows whose implementation ships later in this
 sprint reference the sprint branch with a `PLANNED` status.

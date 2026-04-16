@@ -33,5 +33,6 @@ description = "Known test fixtures and placeholder env samples"
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
+  '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)package-lock\.json$''',
 ]
