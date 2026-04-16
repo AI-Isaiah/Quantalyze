@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { trackUsageEventServer } from "@/lib/analytics/usage-events";
 
 /**
  * POST /api/alerts/[id]/acknowledge — in-app ack from the critical banner.
@@ -52,7 +53,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   // matches 0 rows, which would mask ownership mismatches).
   const { data: existing, error: lookupError } = await supabase
     .from("portfolio_alerts")
-    .select("id, acknowledged_at")
+    .select("id, acknowledged_at, alert_type")
     .eq("id", id)
     .in("portfolio_id", portfolioIds)
     .maybeSingle();
@@ -78,6 +79,14 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (updateError) {
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
+
+  // Sprint 5 Task 5.5 — usage funnel event. In-app source; the email
+  // ack path in `/api/alerts/ack` fires the same event with
+  // source: "email" using the resolved portfolio owner id.
+  void trackUsageEventServer("alert_acknowledged", user.id, {
+    alert_id: id,
+    alert_type: existing.alert_type,
+  });
 
   return new NextResponse(null, { status: 204 });
 }

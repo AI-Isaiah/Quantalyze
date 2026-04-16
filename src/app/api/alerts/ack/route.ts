@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { verifyAlertAckToken } from "@/lib/alert-ack-token";
 import { escapeHtml } from "@/lib/email";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { trackUsageEventServer } from "@/lib/analytics/usage-events";
 
 /**
  * /api/alerts/ack?id=<alertId>&t=<token>
@@ -44,7 +45,12 @@ function hashToken(token: string): string {
 
 interface GuardResult {
   ok: true;
-  alert: { id: string; alert_type: string; acknowledged_at: string | null };
+  alert: {
+    id: string;
+    alert_type: string;
+    acknowledged_at: string | null;
+    portfolio_id: string;
+  };
   tokenHash: string;
 }
 
@@ -85,7 +91,7 @@ async function runGuards(
 
   const { data: alert, error } = await admin
     .from("portfolio_alerts")
-    .select("id, alert_type, acknowledged_at")
+    .select("id, alert_type, acknowledged_at, portfolio_id")
     .eq("id", id)
     .maybeSingle();
   if (error || !alert) {
@@ -241,6 +247,32 @@ export async function POST(req: NextRequest) {
     console.error("[alerts/ack] portfolio_alerts update failed:", updateError);
     return NextResponse.redirect(ACK_REDIRECT.error, { status: 303 });
   }
+
+  // Sprint 5 Task 5.5 — usage funnel event for the email-ack path.
+  // The email link has no browser session, so we resolve the
+  // allocator id via portfolios.user_id. If the lookup fails (deleted
+  // portfolio, etc.) we still fire with a synthetic distinctId of
+  // `alert:<id>` so the funnel count stays accurate.
+  void (async () => {
+    let distinctId = `alert:${guard.alert.id}`;
+    try {
+      const { data: portfolio } = await admin
+        .from("portfolios")
+        .select("user_id")
+        .eq("id", guard.alert.portfolio_id)
+        .maybeSingle();
+      if (portfolio?.user_id) {
+        distinctId = portfolio.user_id as string;
+      }
+    } catch {
+      // Lookup failure is non-fatal — we already have the synthetic id.
+    }
+    await trackUsageEventServer("alert_acknowledged", distinctId, {
+      alert_id: guard.alert.id,
+      alert_type: guard.alert.alert_type,
+      source: "email",
+    });
+  })();
 
   return NextResponse.redirect(ACK_REDIRECT.success(guard.alert.alert_type), {
     status: 303,

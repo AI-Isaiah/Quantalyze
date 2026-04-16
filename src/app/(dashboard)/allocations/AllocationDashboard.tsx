@@ -1,7 +1,11 @@
 "use client";
 
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import type { Layout, LayoutItem } from "react-grid-layout";
+import {
+  trackUsageEventClient,
+  identifyUsageUser,
+} from "@/lib/analytics/usage-events-client";
 import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
@@ -115,6 +119,82 @@ export function AllocationDashboard({
   const [showModal, setShowModal] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [recentlyClosed, setRecentlyClosed] = useState<string[]>([]);
+
+  // ── Usage analytics: session_start + widget_viewed (Sprint 5 Task 5.5) ──
+  //
+  // session_start: fire-and-forget POST on mount. The route owns the
+  // 30-min server-side debounce against `user_metadata` so two-tabs /
+  // refresh churn is collapsed at the API layer, not here.
+  //
+  // identifyUsageUser: stitches the client posthog distinct_id to the
+  // auth user so client-only events (widget_viewed, bridge_click) join
+  // the same person record as the server events.
+  const portfolioOwnerId = portfolio.user_id;
+  useEffect(() => {
+    if (portfolioOwnerId) {
+      identifyUsageUser(portfolioOwnerId);
+    }
+    void fetch("/api/usage/session-start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }).catch(() => {
+      // Fire-and-forget: any error is non-fatal. The route's failure
+      // modes (CSRF, debounced, transient) all leave the page usable.
+    });
+    // Empty deps: fire once per mount. Re-firing on user change would
+    // be wrong — the page only ever renders for the current user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // widget_viewed: dedupe per session via a Set on a ref. Each widget
+  // tile gets a single `widget_viewed` the first time >= 50% of it
+  // crosses the viewport.
+  const widgetViewsFiredRef = useRef<Set<string>>(new Set());
+  const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const root = dashboardContainerRef.current;
+    if (!root) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const target = entry.target as HTMLElement;
+          const widgetId = target.dataset.widgetId;
+          if (!widgetId) continue;
+          if (widgetViewsFiredRef.current.has(widgetId)) continue;
+          widgetViewsFiredRef.current.add(widgetId);
+          trackUsageEventClient("widget_viewed", { widget_id: widgetId });
+          observer.unobserve(target);
+        }
+      },
+      { threshold: 0.5 },
+    );
+
+    // Observe each tile via its `[data-widget-id]` marker. The marker
+    // is added below in the renderWidget wrapper so it tracks tiles
+    // even after add/remove/resize re-renders.
+    const tiles = root.querySelectorAll<HTMLElement>("[data-widget-id]");
+    tiles.forEach((t) => observer.observe(t));
+
+    // A MutationObserver picks up tiles added later (Add Widget modal).
+    const mutation = new MutationObserver(() => {
+      const next = root.querySelectorAll<HTMLElement>("[data-widget-id]");
+      next.forEach((t) => {
+        const id = t.dataset.widgetId;
+        if (id && !widgetViewsFiredRef.current.has(id)) observer.observe(t);
+      });
+    });
+    mutation.observe(root, { childList: true, subtree: true });
+
+    return () => {
+      observer.disconnect();
+      mutation.disconnect();
+    };
+  }, []);
 
   // ── Portfolio analytics via scenario math ─────────────────────────
 
@@ -331,13 +411,22 @@ export function AllocationDashboard({
         return (
           <div
             className="flex h-full items-center justify-center text-sm"
+            data-widget-id={widgetId}
             style={{ color: "#718096" }}
           >
             Widget not found: {widgetId}
           </div>
         );
       }
-      return <Widget data={widgetData} timeframe={timeframe} width={0} height={0} />;
+      // The data-widget-id marker is what the IntersectionObserver in
+      // the usage-analytics effect above watches for. Wrapping in a
+      // div instead of mutating the widget keeps the marker stable
+      // across the React subtree's renders.
+      return (
+        <div data-widget-id={widgetId} className="h-full w-full">
+          <Widget data={widgetData} timeframe={timeframe} width={0} height={0} />
+        </div>
+      );
     },
     [widgetData, timeframe],
   );
@@ -346,7 +435,10 @@ export function AllocationDashboard({
   const activeWidgetIds = config.tiles.map((t) => t.widgetId);
 
   return (
-    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+    <main
+      ref={dashboardContainerRef}
+      className="max-w-[1280px] mx-auto p-6 pb-20"
+    >
       {/* Header */}
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>

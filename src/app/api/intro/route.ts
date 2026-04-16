@@ -15,6 +15,7 @@ import {
   computePortfolioSnapshot,
   type PortfolioSnapshotJSON,
 } from "@/lib/intro/snapshot";
+import { trackUsageEventServer } from "@/lib/analytics/usage-events";
 
 /**
  * Synchronous snapshot budget: if computePortfolioSnapshot finishes in
@@ -167,6 +168,14 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
+
+  // Fire-and-forget usage funnel event. PostHog flushAt:1 keeps this
+  // non-blocking — we don't await so the response isn't gated on the
+  // PostHog round-trip.
+  void trackUsageEventServer("intro_submitted", user.id, {
+    source,
+    strategy_id,
+  });
 
   // If snapshot compute didn't finish in time, enqueue the async worker.
   // Use the admin client — enqueue_compute_job is SECURITY DEFINER and

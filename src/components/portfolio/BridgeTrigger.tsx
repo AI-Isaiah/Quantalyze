@@ -3,6 +3,7 @@
 import { useState, useCallback } from "react";
 import type { PortfolioInsight } from "@/lib/portfolio-insights";
 import { ReplacementPanel } from "./ReplacementPanel";
+import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 
 interface BridgeTriggerProps {
   insight: PortfolioInsight;
@@ -28,8 +29,13 @@ export function BridgeTrigger({
   const [open, setOpen] = useState(false);
 
   const handleOpen = useCallback(() => {
+    // Sprint 5 Task 5.5 — bridge_click usage funnel event. Fired here
+    // (not on panel mount) so we measure intent, not exposure.
+    trackUsageEventClient("bridge_click", {
+      strategy_id: insight.strategy_id ?? null,
+    });
     setOpen(true);
-  }, []);
+  }, [insight.strategy_id]);
 
   const handleClose = useCallback(() => {
     setOpen(false);
