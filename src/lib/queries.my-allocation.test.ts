@@ -315,6 +315,7 @@ describe("getMyAllocationDashboard", () => {
     expect(result.strategies).toEqual([]);
     expect(result.apiKeys).toEqual([]);
     expect(result.alertCount).toEqual({
+      critical: 0,
       high: 0,
       medium: 0,
       low: 0,
@@ -343,6 +344,7 @@ describe("getMyAllocationDashboard", () => {
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
     expect(result.alertCount).toEqual({
+      critical: 0,
       high: 2,
       medium: 1,
       low: 1,

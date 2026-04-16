@@ -1,7 +1,11 @@
 "use client";
 
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import type { Layout, LayoutItem } from "react-grid-layout";
+import {
+  trackUsageEventClient,
+  identifyUsageUser,
+} from "@/lib/analytics/usage-events-client";
 import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
@@ -24,6 +28,7 @@ import { KpiStrip } from "./components/KpiStrip";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { AddWidgetModal } from "./components/AddWidgetModal";
 import { UndoToast } from "./components/UndoToast";
+import { AlertBanner } from "./components/AlertBanner";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 
@@ -115,6 +120,82 @@ export function AllocationDashboard({
   const [toast, setToast] = useState<ToastState | null>(null);
   const [recentlyClosed, setRecentlyClosed] = useState<string[]>([]);
 
+  // ── Usage analytics: session_start + widget_viewed ──
+  //
+  // session_start: fire-and-forget POST on mount. The route owns the
+  // 30-min server-side debounce against `user_metadata` so two-tabs /
+  // refresh churn is collapsed at the API layer, not here.
+  //
+  // identifyUsageUser: stitches the client posthog distinct_id to the
+  // auth user so client-only events (widget_viewed, bridge_click) join
+  // the same person record as the server events.
+  const portfolioOwnerId = portfolio.user_id;
+  useEffect(() => {
+    if (portfolioOwnerId) {
+      identifyUsageUser(portfolioOwnerId);
+    }
+    void fetch("/api/usage/session-start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }).catch(() => {
+      // Fire-and-forget: any error is non-fatal. The route's failure
+      // modes (CSRF, debounced, transient) all leave the page usable.
+    });
+    // Empty deps: fire once per mount. Re-firing on user change would
+    // be wrong — the page only ever renders for the current user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // widget_viewed: dedupe per session via a Set on a ref. Each widget
+  // tile gets a single `widget_viewed` the first time >= 50% of it
+  // crosses the viewport.
+  const widgetViewsFiredRef = useRef<Set<string>>(new Set());
+  const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const root = dashboardContainerRef.current;
+    if (!root) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const target = entry.target as HTMLElement;
+          const widgetId = target.dataset.widgetId;
+          if (!widgetId) continue;
+          if (widgetViewsFiredRef.current.has(widgetId)) continue;
+          widgetViewsFiredRef.current.add(widgetId);
+          trackUsageEventClient("widget_viewed", { widget_id: widgetId });
+          observer.unobserve(target);
+        }
+      },
+      { threshold: 0.5 },
+    );
+
+    // Observe each tile via its `[data-widget-id]` marker. The marker
+    // is added below in the renderWidget wrapper so it tracks tiles
+    // even after add/remove/resize re-renders.
+    const tiles = root.querySelectorAll<HTMLElement>("[data-widget-id]");
+    tiles.forEach((t) => observer.observe(t));
+
+    // A MutationObserver picks up tiles added later (Add Widget modal).
+    const mutation = new MutationObserver(() => {
+      const next = root.querySelectorAll<HTMLElement>("[data-widget-id]");
+      next.forEach((t) => {
+        const id = t.dataset.widgetId;
+        if (id && !widgetViewsFiredRef.current.has(id)) observer.observe(t);
+      });
+    });
+    mutation.observe(root, { childList: true, subtree: true });
+
+    return () => {
+      observer.disconnect();
+      mutation.disconnect();
+    };
+  }, []);
+
   // ── Portfolio analytics via scenario math ─────────────────────────
 
   const strategiesForBuilder = useMemo<StrategyForBuilder[]>(
@@ -194,6 +275,48 @@ export function AllocationDashboard({
     [strategies],
   );
   const aum = analytics?.total_aum ?? (totalAllocated > 0 ? totalAllocated : null);
+
+  // ── Rebalance drift inputs for InsightStrip ──────────────────────
+  // Target weight comes from the most-recent weight_snapshots row per
+  // strategy (null when user hasn't set targets — migration 050 seeds
+  // NULL on portfolio create). Actual weight is the live portfolio_strategies
+  // current_weight; when null we pass null through so the insight's
+  // null-target guard can skip the strategy cleanly.
+  const latestTargetByStrategy = useMemo(() => {
+    const map = new Map<string, { target: number | null; date: string }>();
+    for (const ws of weightSnapshots) {
+      const existing = map.get(ws.strategy_id);
+      if (!existing || ws.snapshot_date > existing.date) {
+        map.set(ws.strategy_id, {
+          target: ws.target_weight,
+          date: ws.snapshot_date,
+        });
+      }
+    }
+    return map;
+  }, [weightSnapshots]);
+
+  const rebalanceDriftInputs = useMemo(
+    () =>
+      strategies.map((row) => ({
+        strategy_id: row.strategy_id,
+        strategy_name: displayName(row),
+        actual_weight: row.current_weight,
+        target_weight: latestTargetByStrategy.get(row.strategy_id)?.target ?? null,
+      })),
+    [strategies, latestTargetByStrategy],
+  );
+
+  // `Date.now()` is impure — capture it once per mount so React's purity
+  // rules accept the derived age in `useMemo`. Age updates on re-mount
+  // (navigation, refresh), which is the right cadence for a honeymoon
+  // guard anyway.
+  const [nowMs] = useState(() => Date.now());
+  const portfolioAgeDays = useMemo(() => {
+    if (!portfolio.created_at) return 0;
+    const created = new Date(portfolio.created_at).getTime();
+    return Math.floor((nowMs - created) / (1000 * 60 * 60 * 24));
+  }, [portfolio.created_at, nowMs]);
 
   // ── Tile close / undo / add handlers ──────────────────────────────
 
@@ -288,13 +411,22 @@ export function AllocationDashboard({
         return (
           <div
             className="flex h-full items-center justify-center text-sm"
+            data-widget-id={widgetId}
             style={{ color: "#718096" }}
           >
             Widget not found: {widgetId}
           </div>
         );
       }
-      return <Widget data={widgetData} timeframe={timeframe} width={0} height={0} />;
+      // The data-widget-id marker is what the IntersectionObserver in
+      // the usage-analytics effect above watches for. Wrapping in a
+      // div instead of mutating the widget keeps the marker stable
+      // across the React subtree's renders.
+      return (
+        <div data-widget-id={widgetId} className="h-full w-full">
+          <Widget data={widgetData} timeframe={timeframe} width={0} height={0} />
+        </div>
+      );
     },
     [widgetData, timeframe],
   );
@@ -303,7 +435,14 @@ export function AllocationDashboard({
   const activeWidgetIds = config.tiles.map((t) => t.widgetId);
 
   return (
-    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+    <>
+      {/* Critical alert banner — full-width, sits above <main>'s padded
+          content column. See docs/notes/alert-routing-v1.md. */}
+      <AlertBanner portfolioId={portfolio.id} />
+    <main
+      ref={dashboardContainerRef}
+      className="max-w-[1280px] mx-auto p-6 pb-20"
+    >
       {/* Header */}
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -354,7 +493,13 @@ export function AllocationDashboard({
 
       {/* Insight strip — fixed above the widget grid */}
       <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
-        <InsightStrip analytics={analytics} portfolioId={portfolio.id} max={3} />
+        <InsightStrip
+          analytics={analytics}
+          portfolioId={portfolio.id}
+          max={3}
+          portfolioStrategies={rebalanceDriftInputs}
+          portfolioAgeDays={portfolioAgeDays}
+        />
       </div>
 
       {/* Grid */}
@@ -383,5 +528,6 @@ export function AllocationDashboard({
         />
       )}
     </main>
+    </>
   );
 }

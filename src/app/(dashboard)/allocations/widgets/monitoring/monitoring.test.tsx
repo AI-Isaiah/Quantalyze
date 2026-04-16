@@ -15,7 +15,7 @@ describe("PortfolioAlerts", () => {
   it("renders empty state when no alerts", () => {
     render(
       <PortfolioAlerts
-        data={{ alertCount: { high: 0, medium: 0, low: 0, total: 0 } }}
+        data={{ alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 } }}
         {...baseProps}
       />,
     );
@@ -25,7 +25,7 @@ describe("PortfolioAlerts", () => {
   it("renders severity counts correctly", () => {
     render(
       <PortfolioAlerts
-        data={{ alertCount: { high: 3, medium: 1, low: 2, total: 6 } }}
+        data={{ alertCount: { critical: 0, high: 3, medium: 1, low: 2, total: 6 } }}
         {...baseProps}
       />,
     );
@@ -38,7 +38,7 @@ describe("PortfolioAlerts", () => {
   it("renders singular alert text", () => {
     render(
       <PortfolioAlerts
-        data={{ alertCount: { high: 1, medium: 0, low: 0, total: 1 } }}
+        data={{ alertCount: { critical: 0, high: 1, medium: 0, low: 0, total: 1 } }}
         {...baseProps}
       />,
     );

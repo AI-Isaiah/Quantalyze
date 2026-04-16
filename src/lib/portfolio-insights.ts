@@ -24,7 +24,8 @@ export interface PortfolioInsight {
     | "biggest_risk_drawdown"
     | "regime_change"
     | "underperformance"
-    | "concentration_creep";
+    | "concentration_creep"
+    | "rebalance_drift";
   severity: InsightSeverity;
   sentence: string;
   /** Strategy this insight targets, if applicable. Used by Bridge triggers. */
@@ -32,6 +33,17 @@ export interface PortfolioInsight {
   /** Strategy name for display. */
   strategy_name?: string | null;
 }
+
+/** Minimal strategy+weight shape for rebalance drift computation. */
+export interface RebalanceDriftInput {
+  strategy_id: string;
+  strategy_name: string;
+  actual_weight: number | null;
+  target_weight: number | null;
+}
+
+/** Numeric severity rank — higher wins on sort (descending). */
+const SEVERITY_RANK: Record<InsightSeverity, number> = { high: 3, medium: 2, low: 1 };
 
 function formatPct2(n: number): string {
   return `${(n * 100).toFixed(2)}%`;
@@ -216,18 +228,77 @@ export function computeConcentrationCreep(
 }
 
 /**
+ * Detect rebalance drift: a single strategy whose current weight diverges
+ * from its user-set target weight by more than 5%. Picks the strategy with
+ * the LARGEST drift and returns one sentence for it — never more than one
+ * rebalance_drift insight per render.
+ *
+ * Two-layer safety against alert storms (matches Sprint 5 Task 5.4 server
+ * behavior, so the UI stays in sync with the DB alert):
+ *   1. Honeymoon: return null for the first 7 days after portfolio
+ *      creation. New portfolios routinely flash wide drifts before the
+ *      allocator sets targets; the in-app strip must not surface those.
+ *   2. Null-target guard: skip strategies where target_weight is NULL.
+ *      NULL explicitly means "user has not set a target yet" (migration
+ *      050 triggers seed NULL on portfolio creation). Treating NULL as 0
+ *      would fire drift on every unallocated strategy — exactly the alert
+ *      storm we're preventing.
+ *
+ * Severity: drift > 10% → high, 5-10% → medium. Below 5% → no insight.
+ */
+export function computeRebalanceDrift(
+  portfolioStrategies: RebalanceDriftInput[] | null | undefined,
+  portfolioAgeDays: number,
+): PortfolioInsight | null {
+  if (portfolioAgeDays < 7) return null;
+  if (!portfolioStrategies || portfolioStrategies.length === 0) return null;
+
+  type DriftRow = RebalanceDriftInput & { drift: number };
+  let worst: DriftRow | null = null;
+  for (const s of portfolioStrategies) {
+    if (s.target_weight == null || s.actual_weight == null) continue;
+    const drift = Math.abs(s.actual_weight - s.target_weight);
+    if (worst == null || drift > worst.drift) {
+      worst = { ...s, drift };
+    }
+  }
+
+  if (worst == null || worst.drift <= 0.05) return null;
+
+  const severity: InsightSeverity = worst.drift > 0.10 ? "high" : "medium";
+  return {
+    key: "rebalance_drift",
+    severity,
+    sentence: `${worst.strategy_name}'s weight is ${formatPct0(worst.actual_weight!)} (target ${formatPct0(worst.target_weight!)}) — consider rebalancing.`,
+    strategy_id: worst.strategy_id,
+    strategy_name: worst.strategy_name,
+  };
+}
+
+/**
  * Run all insight rules and return the ones that fire, ordered by severity
  * (high → low). The /demo InsightStrip renders the top 3.
+ *
+ * `portfolioStrategies` + `portfolioAgeDays` are optional so existing
+ * callers that only have `analytics` in hand keep working. When omitted,
+ * the rebalance_drift rule is simply not evaluated.
  */
 export function computeAllInsights(
   analytics: PortfolioAnalytics | null,
+  portfolioStrategies?: RebalanceDriftInput[] | null,
+  portfolioAgeDays?: number,
 ): PortfolioInsight[] {
+  const rebalance =
+    portfolioStrategies && portfolioAgeDays !== undefined
+      ? computeRebalanceDrift(portfolioStrategies, portfolioAgeDays)
+      : null;
+
   const insights = [
     computeBiggestRisk(analytics),
     computeRegimeChange(analytics),
     computeUnderperformance(analytics),
     computeConcentrationCreep(analytics),
+    rebalance,
   ].filter((i): i is PortfolioInsight => i !== null);
-  const severityRank: Record<InsightSeverity, number> = { high: 0, medium: 1, low: 2 };
-  return insights.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+  return insights.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
 }

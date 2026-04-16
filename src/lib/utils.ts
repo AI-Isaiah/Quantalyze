@@ -3,9 +3,11 @@ import type { StrategyAnalytics } from "./types";
 export function formatPercent(
   value: number | null | undefined,
   decimals = 2,
+  options?: { signed?: boolean },
 ): string {
   if (value == null) return "—";
-  const sign = value >= 0 ? "+" : "";
+  const signed = options?.signed ?? true;
+  const sign = signed && value >= 0 ? "+" : "";
   return `${sign}${(value * 100).toFixed(decimals)}%`;
 }
 
@@ -92,15 +94,20 @@ export const STRATEGY_PALETTE = [
   "#DC2626", "#059669", "#DB2777", "#4338CA",
 ] as const;
 
+/** Severity union shared across alert/email/admin paths. */
+export type AlertSeverity = "critical" | "high" | "medium" | "low";
+
 /** Tailwind class map for alert severity badges. */
-export const SEVERITY_STYLES: Record<"high" | "medium" | "low", string> = {
+export const SEVERITY_STYLES: Record<AlertSeverity, string> = {
+  critical: "bg-negative/10 text-negative",
   high: "bg-negative/10 text-negative",
   medium: "bg-badge-market-neutral/10 text-badge-market-neutral",
   low: "bg-badge-other/10 text-badge-other",
 };
 
 /** Hex colors for alert severity (for HTML emails). */
-export const SEVERITY_HEX: Record<"high" | "medium" | "low", string> = {
+export const SEVERITY_HEX: Record<AlertSeverity, string> = {
+  critical: "#DC2626",
   high: "#DC2626",
   medium: "#D97706",
   low: "#0D9488",

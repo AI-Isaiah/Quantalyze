@@ -1,3 +1,5 @@
+import type { AlertSeverity } from "./utils";
+
 export type Role = "manager" | "allocator" | "both";
 
 export const ROLES: { value: Role; label: string; description: string }[] = [
@@ -383,6 +385,11 @@ export interface PortfolioDocument {
 export interface PortfolioAlert {
   id: string;
   portfolio_id: string;
+  /**
+   * Pinned source strategy for per-strategy alert types (rebalance_drift).
+   * NULL for portfolio-wide alerts. Added in migration 050.
+   */
+  strategy_id: string | null;
   alert_type:
     | "drawdown"
     | "correlation_spike"
@@ -391,8 +398,9 @@ export interface PortfolioAlert {
     | "optimizer_suggestion"
     | "regime_shift"
     | "underperformance"
-    | "concentration_creep";
-  severity: "high" | "medium" | "low";
+    | "concentration_creep"
+    | "rebalance_drift";
+  severity: AlertSeverity;
   message: string;
   metadata: Record<string, unknown> | null;
   triggered_at: string;

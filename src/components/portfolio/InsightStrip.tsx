@@ -1,6 +1,10 @@
 import { cn } from "@/lib/utils";
 import type { PortfolioAnalytics } from "@/lib/types";
-import { computeAllInsights, type PortfolioInsight } from "@/lib/portfolio-insights";
+import {
+  computeAllInsights,
+  type PortfolioInsight,
+  type RebalanceDriftInput,
+} from "@/lib/portfolio-insights";
 import { BridgeTrigger } from "./BridgeTrigger";
 
 /**
@@ -22,6 +26,16 @@ export interface InsightStripProps {
   portfolioId?: string | null;
   /** Maximum number of insights to render. Default 3. */
   max?: number;
+  /**
+   * Optional strategy weight inputs for the rebalance_drift rule. When
+   * omitted the rule is skipped entirely.
+   */
+  portfolioStrategies?: RebalanceDriftInput[] | null;
+  /**
+   * Portfolio age in days. Rebalance drift is suppressed for the first 7
+   * days (honeymoon). Omit to skip the rule.
+   */
+  portfolioAgeDays?: number;
   className?: string;
 }
 
@@ -52,9 +66,15 @@ export function InsightStrip({
   analytics,
   portfolioId,
   max = 3,
+  portfolioStrategies,
+  portfolioAgeDays,
   className,
 }: InsightStripProps) {
-  const insights = computeAllInsights(analytics).slice(0, max);
+  const insights = computeAllInsights(
+    analytics,
+    portfolioStrategies,
+    portfolioAgeDays,
+  ).slice(0, max);
 
   return (
     <section

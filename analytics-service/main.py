@@ -25,7 +25,7 @@ if SENTRY_DSN:
     except ImportError:
         logging.getLogger("quantalyze.analytics").warning("SENTRY_DSN set but sentry-sdk not installed")
 
-from routers import analytics, cron, exchange, match, portfolio
+from routers import analytics, cron, exchange, internal, match, portfolio
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -56,6 +56,14 @@ async def verify_service_key(request: Request, call_next):
     if request.url.path == "/health":
         return await call_next(request)
 
+    # /internal/* uses its own X-Internal-Token gate (Sprint 5 Task 5.8) —
+    # validated inside routers/internal.py with secrets.compare_digest.
+    # Skipping X-Service-Key here means /internal can be hit by a caller
+    # that holds only the rotateable internal-token secret, which is the
+    # whole point of using a separate gate for the live key probe.
+    if request.url.path.startswith("/internal/"):
+        return await call_next(request)
+
     if not SERVICE_KEY:
         raise HTTPException(status_code=503, detail="Service not configured")
 
@@ -71,6 +79,7 @@ app.include_router(cron.router)
 app.include_router(exchange.router)
 app.include_router(match.router)
 app.include_router(portfolio.router)
+app.include_router(internal.router)
 
 
 @app.on_event("startup")
