@@ -120,7 +120,7 @@ export function AllocationDashboard({
   const [toast, setToast] = useState<ToastState | null>(null);
   const [recentlyClosed, setRecentlyClosed] = useState<string[]>([]);
 
-  // ── Usage analytics: session_start + widget_viewed (Sprint 5 Task 5.5) ──
+  // ── Usage analytics: session_start + widget_viewed ──
   //
   // session_start: fire-and-forget POST on mount. The route owns the
   // 30-min server-side debounce against `user_metadata` so two-tabs /
@@ -435,6 +435,10 @@ export function AllocationDashboard({
   const activeWidgetIds = config.tiles.map((t) => t.widgetId);
 
   return (
+    <>
+      {/* Critical alert banner — full-width, sits above <main>'s padded
+          content column. See docs/notes/alert-routing-v1.md. */}
+      <AlertBanner portfolioId={portfolio.id} />
     <main
       ref={dashboardContainerRef}
       className="max-w-[1280px] mx-auto p-6 pb-20"
@@ -487,10 +491,6 @@ export function AllocationDashboard({
         aum={aum}
       />
 
-      {/* Critical alert banner — renders above the peer strip when
-          severity='critical' + unacknowledged. See docs/notes/alert-routing-v1.md. */}
-      <AlertBanner portfolioId={portfolio.id} />
-
       {/* Insight strip — fixed above the widget grid */}
       <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
         <InsightStrip
@@ -528,5 +528,6 @@ export function AllocationDashboard({
         />
       )}
     </main>
+    </>
   );
 }

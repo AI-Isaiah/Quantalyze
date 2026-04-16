@@ -78,14 +78,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   );
 
   let enqueued = 0;
-  let failed = 0;
   const errors: string[] = [];
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     const row = rows[i];
     if (result.status === "rejected") {
-      failed += 1;
       const msg = result.reason instanceof Error ? result.reason.message : String(result.reason);
       errors.push(`${row.id}: ${msg}`);
       console.error(
@@ -93,7 +91,6 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         result.reason,
       );
     } else if (result.value.error) {
-      failed += 1;
       errors.push(`${row.id}: ${result.value.error.message}`);
       console.error(
         `[cron/reconcile-strategies] enqueue failed for strategy=${row.id}:`,
@@ -107,11 +104,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // If every enqueue failed, the cron run produced zero useful work —
   // surface that as a 500 so monitoring catches the regression instead
   // of treating an all-failed batch as a successful empty run.
-  const status = enqueued === 0 && failed > 0 ? 500 : 200;
+  const status = enqueued === 0 && errors.length > 0 ? 500 : 200;
   return NextResponse.json(
     {
       enqueued,
-      failed,
+      failed: errors.length,
       total_candidates: rows.length,
       ...(errors.length > 0 ? { errors: errors.slice(0, 5) } : {}),
     },

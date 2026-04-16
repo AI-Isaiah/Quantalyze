@@ -50,55 +50,22 @@ type SnapshotRaceResult =
   | { kind: "failed" };
 
 /**
- * Race the snapshot compute against a 2s timer with a small state machine
- * so a post-timer rejection can't:
- *   1. Surface as an unhandled rejection.
- *   2. Get misclassified as 'pending' (which would enqueue a backfill job
- *      for a snapshot that's never going to compute).
- *
- * The compute promise gets a `.catch()` immediately so rejections that
- * land after the timer wins are absorbed and recorded in `state`.
+ * Race the snapshot compute against a 2s timer. The compute branch carries
+ * its own `.catch` so a rejection AFTER the timer wins is observed (no
+ * unhandledRejection) and the timer branch's "pending" sentinel is the
+ * only thing that triggers the async backfill enqueue.
  */
-async function raceSnapshot(userId: string): Promise<SnapshotRaceResult> {
-  type State = "pending" | "ready" | "failed";
-  // Wrap in an object so TS doesn't narrow `state` to its initial literal
-  // across the closure boundary — the .then/.catch mutate it.
-  const box: { state: State; result: PortfolioSnapshotJSON | null } = {
-    state: "pending",
-    result: null,
-  };
-
-  const computePromise = computePortfolioSnapshot(userId)
-    .then((r) => {
-      if (box.state === "pending") {
-        box.state = "ready";
-        box.result = r;
-      }
-    })
+function raceSnapshot(userId: string): Promise<SnapshotRaceResult> {
+  const compute = computePortfolioSnapshot(userId)
+    .then((snapshot) => ({ kind: "ready" as const, snapshot }))
     .catch((err) => {
-      // Always observe rejection so it can never bubble up as
-      // unhandledRejection — even when the timer has already won.
       console.warn("[api/intro] snapshot compute rejected:", err);
-      if (box.state === "pending") {
-        box.state = "failed";
-      }
+      return { kind: "failed" as const };
     });
-
-  const timeoutPromise = new Promise<void>((resolve) => {
-    setTimeout(resolve, SNAPSHOT_BUDGET_MS);
-  });
-
-  await Promise.race([computePromise, timeoutPromise]);
-
-  if (box.state === "ready" && box.result) {
-    return { kind: "ready", snapshot: box.result };
-  }
-  if (box.state === "failed") {
-    return { kind: "failed" };
-  }
-  // Timer won AND the compute hasn't rejected (yet) — only this branch
-  // should enqueue the async backfill.
-  return { kind: "pending" };
+  const timeout = new Promise<SnapshotRaceResult>((resolve) =>
+    setTimeout(() => resolve({ kind: "pending" as const }), SNAPSHOT_BUDGET_MS),
+  );
+  return Promise.race([compute, timeout]);
 }
 
 export async function POST(req: NextRequest) {

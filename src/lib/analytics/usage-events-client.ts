@@ -1,27 +1,21 @@
 "use client";
 
+import type { UsageEvent } from "./usage-events-types";
+
 /**
  * Client-side wrapper for the allocator usage funnel. Mirrors
  * `src/lib/analytics-client.ts` (the /for-quants client wrapper).
  *
  * Split from `./usage-events` (which imports `posthog-node` via
  * `server-only`) so Client Components can't pull the Node SDK into the
- * browser bundle.
+ * browser bundle. The shared event union lives in `./usage-events-types`
+ * (no `server-only`) so both wrappers can re-export it safely.
  *
  * When NEXT_PUBLIC_POSTHOG_KEY is missing, the init promise resolves to
  * null and every capture becomes a no-op.
  */
 
-// IMPORTANT: this union is duplicated from `./usage-events`. It is NOT
-// re-exported because re-exporting would force `server-only` into the
-// client bundle. Both unions MUST stay in sync — if you add an event
-// here, add it there too (and vice versa).
-export type UsageEvent =
-  | "session_start"
-  | "widget_viewed"
-  | "intro_submitted"
-  | "bridge_click"
-  | "alert_acknowledged";
+export type { UsageEvent } from "./usage-events-types";
 
 type PostHogModule = typeof import("posthog-js").default;
 

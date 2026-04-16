@@ -1,5 +1,6 @@
 import "server-only";
 import { PostHog } from "posthog-node";
+import type { UsageEvent } from "./usage-events-types";
 
 /**
  * Server-side PostHog wrapper for allocator USAGE FUNNEL events.
@@ -19,20 +20,7 @@ import { PostHog } from "posthog-node";
  * every track call becomes a no-op and logs a single startup warning.
  */
 
-// Literal union instead of `string` so typos at call sites fail typecheck.
-// IMPORTANT: this union MUST stay in sync with the duplicate in
-// `./usage-events-client.ts`. The client file deliberately copies this
-// rather than re-exports it, because re-exporting from a `server-only`
-// module would force `server-only` into the browser bundle.
-//
-// Per the Sprint 5 plan v3, feedback_card_shown / feedback_card_dismissed
-// / feedback_submitted are CUT — feedback is deferred to Sprint 7.
-export type UsageEvent =
-  | "session_start"
-  | "widget_viewed"
-  | "intro_submitted"
-  | "bridge_click"
-  | "alert_acknowledged";
+export type { UsageEvent } from "./usage-events-types";
 
 // ---------------------------------------------------------------------------
 // Server-side PostHog client

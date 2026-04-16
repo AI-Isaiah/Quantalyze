@@ -1,6 +1,6 @@
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { SEVERITY_HEX } from "./utils";
+import { SEVERITY_HEX, type AlertSeverity } from "./utils";
 import type { ManagerIdentity } from "@/lib/types";
 
 /**
@@ -511,7 +511,7 @@ export interface AlertDigestEntry {
   /** Required for ack-from-email URL generation and as a stable dedup key. */
   id: string;
   alert_type: string;
-  severity: "critical" | "high" | "medium" | "low";
+  severity: AlertSeverity;
   message: string;
   triggered_at: string;
   /**

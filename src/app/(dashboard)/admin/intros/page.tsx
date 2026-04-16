@@ -4,6 +4,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { scrubPii } from "@/lib/admin/pii-scrub";
+import { formatNumber, formatPercent } from "@/lib/utils";
+import { PortfolioSnapshotSchema, type PortfolioSnapshotJSON } from "@/lib/intro/snapshot";
 
 /**
  * /admin/intros — founder triage for contact_requests (intro requests).
@@ -37,25 +39,7 @@ type ContactRequestRow = {
 
 type StrategyRef = { id: string; name: string };
 
-type SnapshotStrategy = { strategy_id: string; strategy_name: string; sharpe: number | null };
-
-function snapshotField<T>(raw: unknown, key: string): T | null {
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    const value = (raw as Record<string, unknown>)[key];
-    return value as T;
-  }
-  return null;
-}
-
-function formatNumber(value: number | null, fractionDigits: number): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  return value.toFixed(fractionDigits);
-}
-
-function formatPct(value: number | null): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  return `${(value * 100).toFixed(1)}%`;
-}
+type SnapshotStrategy = PortfolioSnapshotJSON["top_3_strategies"][number];
 
 function SnapshotMiniTable({ title, rows }: { title: string; rows: SnapshotStrategy[] }) {
   if (rows.length === 0) {
@@ -75,7 +59,7 @@ function SnapshotMiniTable({ title, rows }: { title: string; rows: SnapshotStrat
             <tr key={r.strategy_id}>
               <td className="pr-3 text-text-primary">{r.strategy_name}</td>
               <td className="font-metric tabular-nums text-text-secondary">
-                {formatNumber(r.sharpe, 2)}
+                {formatNumber(r.sharpe)}
               </td>
             </tr>
           ))}
@@ -184,16 +168,18 @@ export default async function AdminIntrosPage() {
                   ? strategyMap.get(row.replacement_for) ?? row.replacement_for
                   : null;
 
-                // Scrub the snapshot server-side BEFORE render.
+                // Scrub the snapshot server-side BEFORE render, then validate
+                // the shape so rendering reads typed fields rather than untyped
+                // bag-of-keys lookups.
                 const scrubbedSnapshot = scrubPii(row.portfolio_snapshot);
-                const sharpe = snapshotField<number | null>(scrubbedSnapshot, "sharpe");
-                const mdd = snapshotField<number | null>(scrubbedSnapshot, "max_drawdown");
-                const concentration = snapshotField<number | null>(scrubbedSnapshot, "concentration");
-                const alerts7d = snapshotField<number | null>(scrubbedSnapshot, "alerts_last_7d");
-                const top3 =
-                  snapshotField<SnapshotStrategy[]>(scrubbedSnapshot, "top_3_strategies") ?? [];
-                const bottom3 =
-                  snapshotField<SnapshotStrategy[]>(scrubbedSnapshot, "bottom_3_strategies") ?? [];
+                const parsed = PortfolioSnapshotSchema.safeParse(scrubbedSnapshot);
+                const snap = parsed.success ? parsed.data : null;
+                const sharpe = snap?.sharpe ?? null;
+                const mdd = snap?.max_drawdown ?? null;
+                const concentration = snap?.concentration ?? null;
+                const alerts7d = snap?.alerts_last_7d ?? null;
+                const top3 = snap?.top_3_strategies ?? [];
+                const bottom3 = snap?.bottom_3_strategies ?? [];
 
                 const createdAtDate = new Date(row.created_at);
                 const createdAtLabel = createdAtDate.toISOString().slice(0, 16).replace("T", " ");
@@ -233,13 +219,13 @@ export default async function AdminIntrosPage() {
                           {snapshotStatus}
                         </div>
                         <div className="text-text-primary font-metric tabular-nums">
-                          Sharpe {formatNumber(sharpe, 2)}
+                          Sharpe {formatNumber(sharpe)}
                         </div>
                         <div className="text-text-secondary font-metric tabular-nums">
-                          MDD {formatPct(mdd)}
+                          MDD {formatPercent(mdd, 1, { signed: false })}
                         </div>
                         <div className="text-text-secondary font-metric tabular-nums">
-                          HHI {formatNumber(concentration, 2)}
+                          HHI {formatNumber(concentration)}
                         </div>
                         <div className="text-text-secondary font-metric tabular-nums">
                           Alerts 7d {alerts7d ?? 0}

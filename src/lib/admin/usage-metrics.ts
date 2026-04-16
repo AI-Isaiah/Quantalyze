@@ -31,17 +31,13 @@ const POSTHOG_HOST = process.env.POSTHOG_HOST ?? "https://us.posthog.com";
 const POSTHOG_PROJECT_ID = process.env.POSTHOG_PROJECT_ID ?? "";
 const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY ?? "";
 
+import { USAGE_EVENTS, type UsageEvent } from "@/lib/analytics/usage-events-types";
+
 const REQUEST_TIMEOUT_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_MAX_ENTRIES = 50;
 
-const USAGE_EVENTS = [
-  "session_start",
-  "widget_viewed",
-  "intro_submitted",
-  "bridge_click",
-  "alert_acknowledged",
-] as const;
-type UsageEventName = (typeof USAGE_EVENTS)[number];
+type UsageEventName = UsageEvent;
 
 // ---------------------------------------------------------------------------
 // Public response shapes
@@ -104,7 +100,20 @@ function readCache<T>(key: string): { value: T; storedAt: number } | null {
 }
 
 function writeCache<T>(key: string, value: T): void {
-  cache.set(key, { value, storedAt: Date.now() });
+  // Sweep expired entries on write — bounds the working set during
+  // sustained PostHog incidents and keeps the LRU eviction below from
+  // dropping rows that would naturally have aged out.
+  const now = Date.now();
+  for (const [k, entry] of cache) {
+    if (now - entry.storedAt > CACHE_TTL_MS) cache.delete(k);
+  }
+  cache.set(key, { value, storedAt: now });
+  // Cap the map (Maps preserve insertion order → oldest is first).
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
 }
 
 function staleBannerMessage(storedAt: number): string {

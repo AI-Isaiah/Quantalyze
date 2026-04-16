@@ -63,7 +63,10 @@ def _cache_ttl_seconds() -> int:
 
 
 # Module-level cache: {(api_key_id, exchange_id): (expires_at_epoch, value)}
+# Bounded at _PERM_CACHE_MAX so an attacker can't spray new (api_key_id,
+# exchange_id) tuples to grow it without limit.
 _perm_cache: dict[tuple[str, str], tuple[float, PermissionDict]] = {}
+_PERM_CACHE_MAX = 100
 
 
 def _cache_get(key: tuple[str, str]) -> Optional[PermissionDict]:
@@ -83,6 +86,13 @@ def _cache_set(key: tuple[str, str], value: PermissionDict) -> None:
     if ttl <= 0:
         return
     _perm_cache[key] = (time.monotonic() + ttl, value)
+    # Bound size — dict preserves insertion order, so the oldest key is
+    # next(iter(...)). Drop it without touching the just-inserted row.
+    while len(_perm_cache) > _PERM_CACHE_MAX:
+        oldest = next(iter(_perm_cache))
+        if oldest == key:
+            break
+        _perm_cache.pop(oldest, None)
 
 
 def _cache_clear() -> None:

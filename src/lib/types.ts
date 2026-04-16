@@ -1,3 +1,5 @@
+import type { AlertSeverity } from "./utils";
+
 export type Role = "manager" | "allocator" | "both";
 
 export const ROLES: { value: Role; label: string; description: string }[] = [
@@ -398,7 +400,7 @@ export interface PortfolioAlert {
     | "underperformance"
     | "concentration_creep"
     | "rebalance_drift";
-  severity: "critical" | "high" | "medium" | "low";
+  severity: AlertSeverity;
   message: string;
   metadata: Record<string, unknown> | null;
   triggered_at: string;

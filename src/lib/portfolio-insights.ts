@@ -42,6 +42,9 @@ export interface RebalanceDriftInput {
   target_weight: number | null;
 }
 
+/** Numeric severity rank — higher wins on sort (descending). */
+const SEVERITY_RANK: Record<InsightSeverity, number> = { high: 3, medium: 2, low: 1 };
+
 function formatPct2(n: number): string {
   return `${(n * 100).toFixed(2)}%`;
 }
@@ -297,6 +300,5 @@ export function computeAllInsights(
     computeConcentrationCreep(analytics),
     rebalance,
   ].filter((i): i is PortfolioInsight => i !== null);
-  const severityRank: Record<InsightSeverity, number> = { high: 0, medium: 1, low: 2 };
-  return insights.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+  return insights.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
 }

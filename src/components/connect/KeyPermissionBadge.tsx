@@ -1,11 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { formatRelativeTime } from "@/lib/utils";
 
 /**
  * KeyPermissionBadge — live "Read / Trade / Withdraw" scope viewer.
- *
- * Sprint 5 Task 5.8 — Live Key Permission Viewer.
  *
  * Fetches /api/keys/:id/permissions on mount and renders three pill spans:
  *   - "Read ✓"     → accent (green)  — desired
@@ -13,12 +12,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *   - "Withdraw ✗" → muted, struck-through — desired
  *   - "Trade ✓"    → negative (red)  — wrong scope, key should be re-keyed
  *   - "Withdraw ✓" → negative (red)  — wrong scope, key should be re-keyed
- *
- * Visual guidance from DESIGN.md:
- *   - DM Sans 14px body type for the pills
- *   - Instrument Serif for the small heading
- *   - text-accent / text-text-primary / text-negative tokens (no invented colors)
- *   - Plain ✓ / ✗ glyphs, no icon font
  */
 
 interface Permissions {
@@ -34,20 +27,6 @@ export interface KeyPermissionBadgeProps {
   className?: string;
 }
 
-function timeAgo(iso: string): string {
-  // Lightweight local "x ago" — no date-fns dep needed for one display.
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const diffMs = Date.now() - then;
-  if (diffMs < 60_000) return "just now";
-  const mins = Math.floor(diffMs / 60_000);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
-}
-
 interface PillProps {
   label: "Read" | "Trade" | "Withdraw";
   granted: boolean;
@@ -60,28 +39,23 @@ function Pill({ label, granted }: PillProps) {
   let cls: string;
   let glyph: string;
   if (label === "Read") {
-    cls = granted
-      ? "text-accent"
-      : "text-negative";
+    cls = granted ? "text-accent" : "text-negative";
     glyph = granted ? "✓" : "✗";
+  } else if (granted) {
+    cls = "text-negative";
+    glyph = "✓";
   } else {
-    if (granted) {
-      cls = "text-negative";
-      glyph = "✓";
-    } else {
-      cls = "text-text-primary line-through opacity-70";
-      glyph = "✗";
-    }
+    cls = "text-text-primary line-through opacity-70";
+    glyph = "✗";
   }
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-sm border border-border px-2 py-0.5 text-[13px] ${cls}`}
       data-testid={`key-perm-pill-${label.toLowerCase()}`}
       data-granted={granted ? "true" : "false"}
+      aria-label={`${label} ${granted ? "granted" : "not granted"}`}
     >
-      <span>{label}</span>
-      <span aria-hidden>{glyph}</span>
-      <span className="sr-only">{granted ? "granted" : "not granted"}</span>
+      {label} <span aria-hidden>{glyph}</span>
     </span>
   );
 }
@@ -172,7 +146,7 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
           <p className="text-[12px] text-text-muted">
             Detected{" "}
             <time dateTime={perms.detected_at} title={perms.detected_at}>
-              {timeAgo(perms.detected_at)}
+              {formatRelativeTime(perms.detected_at, Date.now())}
             </time>
             {" "}from the exchange.
           </p>

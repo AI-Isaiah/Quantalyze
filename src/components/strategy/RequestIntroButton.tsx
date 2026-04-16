@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
-import { cn } from "@/lib/utils";
+import { cn, SUPPORTED_EXCHANGES } from "@/lib/utils";
 
 type RequestStatus = "pending" | "intro_made" | "completed" | "declined";
 
@@ -18,7 +18,9 @@ const STATUS_MESSAGES: Record<RequestStatus, string> = {
 };
 
 const ASSET_CLASS_OPTIONS = ["Spot", "Perp", "Mixed"] as const;
-const EXCHANGE_OPTIONS = ["Binance", "OKX", "Bybit"] as const;
+const EXCHANGE_OPTIONS = SUPPORTED_EXCHANGES.map((e) =>
+  e === "okx" ? "OKX" : e[0].toUpperCase() + e.slice(1),
+);
 const AUM_RANGE_OPTIONS = ["<$500k", "$500k-$2M", "$2M-$10M", ">$10M"] as const;
 
 type AssetClass = (typeof ASSET_CLASS_OPTIONS)[number] | "";

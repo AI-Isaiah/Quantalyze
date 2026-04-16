@@ -80,9 +80,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
-  // Sprint 5 Task 5.5 — usage funnel event. In-app source; the email
-  // ack path in `/api/alerts/ack` fires the same event with
-  // source: "email" using the resolved portfolio owner id.
+  // Usage funnel event. In-app source; the email ack path in
+  // `/api/alerts/ack` fires the same event with source: "email" using
+  // the resolved portfolio owner id.
   void trackUsageEventServer("alert_acknowledged", user.id, {
     alert_id: id,
     alert_type: existing.alert_type,

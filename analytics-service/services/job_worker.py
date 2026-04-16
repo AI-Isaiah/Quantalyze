@@ -668,17 +668,20 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
-    # Step 2: load DB fills for the same window.
+    # Step 2: load DB fills for the same window. We only select the
+    # columns that diff_strategy_fills actually reads (verified against
+    # services/reconciliation.py:_summarize + matcher key extraction).
+    # Hard cap at 50k rows so a runaway-strategy can't OOM the worker.
     def _load_db_fills() -> list[dict]:
         res = (
             ctx.supabase.table("trades")
             .select(
-                "exchange, symbol, side, price, quantity, fee, fee_currency, "
-                "timestamp, cost, exchange_fill_id, exchange_order_id, is_maker"
+                "exchange, exchange_fill_id, symbol, side, price, quantity, timestamp"
             )
             .eq("strategy_id", strategy_id)
             .eq("is_fill", True)
             .gte("timestamp", since_iso)
+            .limit(50_000)
             .execute()
         )
         return list(res.data or [])
@@ -754,69 +757,90 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         f"fills for {report.report_date}."
     )
 
-    # Severity ordering for escalation: an existing 'high' unacked alert
-    # must be promoted (UPDATE in place) when a new 'critical' finding
-    # arrives — silently skipping would let needs_manual_review hide
-    # behind a stale row.
+    if not portfolio_ids:
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # Batch the fan-out: one SELECT for every existing unacked sync_failure
+    # alert across the candidate portfolios, then a single bulk INSERT for
+    # the never-seen-before set. Escalation (existing severity < new) still
+    # loops one UPDATE per row because PostgREST can't express N different
+    # update payloads in a single statement; in practice escalations are
+    # rare so the per-row UPDATE is acceptable.
+    def _load_existing_alerts() -> dict[str, dict]:
+        res = (
+            ctx.supabase.table("portfolio_alerts")
+            .select("id, portfolio_id, severity")
+            .in_("portfolio_id", portfolio_ids)
+            .eq("alert_type", "sync_failure")
+            .is_("acknowledged_at", "null")
+            .execute()
+        )
+        return {r["portfolio_id"]: r for r in (res.data or [])}
+
+    existing_by_portfolio = await db_execute(_load_existing_alerts)
+
+    new_severity_rank = SEVERITY_RANK.get(severity, 1)
+    metadata = {
+        "strategy_id": strategy_id,
+        "report_date": report.report_date,
+        "discrepancy_count": report.discrepancy_count,
+        "status": report.status,
+    }
+
+    inserts: list[dict] = []
+    escalations: list[dict] = []
     for portfolio_id in portfolio_ids:
-        def _insert_alert(pid=portfolio_id) -> None:
-            existing = (
-                ctx.supabase.table("portfolio_alerts")
-                .select("id, severity")
-                .eq("portfolio_id", pid)
-                .eq("alert_type", "sync_failure")
-                .is_("acknowledged_at", "null")
-                .limit(1)
-                .execute()
-            )
-            if existing.data:
-                existing_row = existing.data[0]
-                existing_sev = existing_row.get("severity", "medium")
-                if (
-                    SEVERITY_RANK.get(severity, 1)
-                    > SEVERITY_RANK.get(existing_sev, 1)
-                ):
-                    ctx.supabase.table("portfolio_alerts").update({
-                        "severity": severity,
-                        "message": message,
-                        "triggered_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", existing_row["id"]).execute()
-                return
-            ctx.supabase.table("portfolio_alerts").insert({
-                "portfolio_id": pid,
+        existing = existing_by_portfolio.get(portfolio_id)
+        if existing is None:
+            inserts.append({
+                "portfolio_id": portfolio_id,
                 "alert_type": "sync_failure",
                 "severity": severity,
                 "message": message,
-                "metadata": {
-                    "strategy_id": strategy_id,
-                    "report_date": report.report_date,
-                    "discrepancy_count": report.discrepancy_count,
-                    "status": report.status,
-                },
-            }).execute()
+                "metadata": metadata,
+            })
+        elif new_severity_rank > SEVERITY_RANK.get(existing.get("severity", "medium"), 1):
+            escalations.append(existing)
+        # else: existing alert at >= severity → skip silently.
 
+    if inserts:
+        def _bulk_insert() -> None:
+            ctx.supabase.table("portfolio_alerts").insert(inserts).execute()
         try:
-            await db_execute(_insert_alert)
+            await db_execute(_bulk_insert)
         except Exception as exc:  # noqa: BLE001
-            # Narrow swallow: only the partial-unique-index race
-            # (PostgREST surfaces 23505) is benign here. Anything else is
-            # an actual failure we must surface — log at error and re-raise
-            # so the worker classifies + retries the job.
+            # Narrow swallow: the partial unique index can race two
+            # parallel reconcile runs. Anything else must surface so the
+            # worker classifies + retries.
             code = getattr(exc, "code", None)
             msg = str(exc)
             if code == "23505" or "23505" in msg or "duplicate key" in msg.lower():
                 logger.warning(
-                    "reconcile_strategy: dedup race on sync_failure alert "
-                    "for portfolio %s (strategy %s): %s",
-                    portfolio_id, strategy_id, exc,
+                    "reconcile_strategy: dedup race on bulk sync_failure insert "
+                    "(strategy %s, %d rows): %s",
+                    strategy_id, len(inserts), exc,
                 )
-                continue
-            logger.error(
-                "reconcile_strategy: failed to insert sync_failure alert "
-                "for portfolio %s (strategy %s): %s",
-                portfolio_id, strategy_id, exc,
-            )
-            raise
+            else:
+                logger.error(
+                    "reconcile_strategy: bulk sync_failure insert failed "
+                    "(strategy %s): %s",
+                    strategy_id, exc,
+                )
+                raise
+
+    if escalations:
+        triggered_at = datetime.now(timezone.utc).isoformat()
+        update_payload = {
+            "severity": severity,
+            "message": message,
+            "triggered_at": triggered_at,
+        }
+        for row in escalations:
+            def _update(rid=row["id"]) -> None:
+                ctx.supabase.table("portfolio_alerts").update(
+                    update_payload
+                ).eq("id", rid).execute()
+            await db_execute(_update)
 
     return DispatchResult(outcome=DispatchOutcome.DONE)
 

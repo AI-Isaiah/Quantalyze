@@ -55,9 +55,12 @@ logger = logging.getLogger("quantalyze.analytics")
 
 _RATE_LIMIT_MAX = 10
 _RATE_LIMIT_WINDOW_S = 60
+_CALL_LOG_MAX_KEYS = 200
 
 # {key_id: [monotonic_ts, monotonic_ts, ...]} — only entries inside the window
-# are kept; older ones are pruned on each touch.
+# are kept; older ones are pruned on each touch. Bounded at _CALL_LOG_MAX_KEYS
+# entries; oldest insertion is evicted when full so an attacker can't grow
+# the dict by spraying random key_ids.
 _call_log: dict[str, list[float]] = {}
 
 
@@ -79,6 +82,12 @@ def _consume_rate_limit(key_id: str) -> bool:
         return False
     bucket.append(now)
     _call_log[key_id] = bucket
+    # Bound the total number of tracked keys (dict preserves insertion order).
+    while len(_call_log) > _CALL_LOG_MAX_KEYS:
+        oldest = next(iter(_call_log))
+        if oldest == key_id:
+            break
+        _call_log.pop(oldest, None)
     return True
 
 

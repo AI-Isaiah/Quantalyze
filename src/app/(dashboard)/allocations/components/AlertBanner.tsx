@@ -2,25 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 
-/**
- * <AlertBanner> — the critical-only, ack-able banner that sits above the
- * peer strip on /allocations. Per docs/notes/alert-routing-v1.md:
- *   - 1 banner max. Extras collapse to "+N more" chip on the right.
- *   - Most recent critical wins; older critical rows become the chip count.
- *   - Never renders non-critical alerts — those belong in <InsightStrip>.
- *
- * Visual contract (alert-routing-v1.md §"Visual spec"):
- *   - Full-width, 56px tall, above the peer strip (not floating).
- *   - bg #FEF2F2, 1px top border #DC2626, no bottom border.
- *   - DM Sans 14px body, color #1A1A2E.
- *   - "Acknowledge" button right-aligned, 24px hit-target, plain text, no icon.
- *   - `hidden md:flex` — mobile polish deferred to Sprint 10.
- *   - No motion, no elevation, no shadow.
- *
- * Data path: GET /api/alerts/critical?portfolio_id=X returns the rows; ack
- * goes through POST /api/alerts/[id]/acknowledge. Both are RLS-enforced
- * under the caller's Supabase session cookie.
- */
+// Critical-only ack-able banner. Spec: docs/notes/alert-routing-v1.md.
 
 interface CriticalAlert {
   id: string;
@@ -133,12 +115,7 @@ export function AlertBanner({ portfolioId }: AlertBannerProps) {
     <div
       role="alert"
       aria-live="polite"
-      // Visual spec lives in alert-routing-v1.md §"Visual spec".
-      // Full-width parent wraps <main>'s max-width; we stretch within
-      // AllocationDashboard's container by spilling past the p-6 padding
-      // via negative margins so the banner remains flush with the content
-      // column without introducing a sibling at the layout root.
-      className="hidden md:flex items-center justify-between mb-6 -mx-6 px-6 border-t border-[#DC2626]"
+      className="hidden md:flex items-center justify-between mb-6 px-6 border-t border-[#DC2626]"
       style={{
         backgroundColor: "#FEF2F2",
         height: "56px",

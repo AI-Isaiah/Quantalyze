@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { sendAlertDigest, type AlertDigestEntry } from "@/lib/email";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { signAlertAckToken } from "@/lib/alert-ack-token";
+import { type AlertSeverity } from "@/lib/utils";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
@@ -10,7 +11,7 @@ interface PendingAlertRow {
   id: string;
   portfolio_id: string;
   alert_type: string;
-  severity: "critical" | "high" | "medium" | "low";
+  severity: AlertSeverity;
   message: string;
   triggered_at: string;
   portfolios: {

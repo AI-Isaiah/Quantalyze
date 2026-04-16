@@ -27,7 +27,11 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
     .select("id, portfolio_id, alert_type, severity, message, triggered_at")
     .eq("severity", "critical")
     .is("acknowledged_at", null)
-    .order("triggered_at", { ascending: false });
+    .order("triggered_at", { ascending: false })
+    // Banner shows the head row + "+N more" chip — 20 is plenty and
+    // prevents an unbounded scan when a portfolio has heavy critical
+    // backlog.
+    .limit(20);
 
   if (portfolioId) {
     if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
@@ -38,7 +42,8 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
     const { data: portfolios } = await supabase
       .from("portfolios")
       .select("id")
-      .eq("user_id", user.id);
+      .eq("user_id", user.id)
+      .limit(50);
     const portfolioIds = (portfolios ?? []).map((p) => p.id);
     if (portfolioIds.length === 0) {
       return NextResponse.json({ alerts: [] });
