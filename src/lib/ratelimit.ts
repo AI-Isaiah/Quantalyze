@@ -57,6 +57,13 @@ export const publicIpLimiter = makeLimiter(10, "60 s");
 // normal use (match queue operations, etc.). Reserved for future use.
 export const adminActionLimiter = makeLimiter(20, "60 s");
 
+// 20 requests/hour per authenticated user — for the portfolio impact
+// simulator (Sprint 6 Task 6.4). The underlying Python endpoint is
+// compute-intensive (weighted covariance + Sharpe per candidate) and
+// cost-scales with candidate count, so we cap it at ~one exploration
+// session per hour to prevent accidental or adversarial loops.
+export const simulatorLimiter = makeLimiter(20, "3600 s");
+
 export type CheckLimitResult =
   | { success: true }
   | { success: false; retryAfter: number };

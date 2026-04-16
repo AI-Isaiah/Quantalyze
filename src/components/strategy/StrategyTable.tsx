@@ -15,6 +15,7 @@ import {
 } from "./StrategyFilters";
 import { StrategyGrid } from "./StrategyGrid";
 import { SyncBadge } from "./SyncBadge";
+import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { formatPercent, formatNumber, formatCurrency, metricColor } from "@/lib/utils";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -39,6 +40,13 @@ interface StrategyTableProps {
   strategies: StrategyWithAnalytics[];
   categorySlug: string;
   basePath?: string;
+  /**
+   * Sprint 6 Task 6.4: the authenticated user's single real portfolio id.
+   * When present, each row renders a "Simulate Impact" button that opens
+   * the PortfolioImpactPanel. When null, the button is disabled with an
+   * explanatory tooltip.
+   */
+  portfolioId?: string | null;
 }
 
 // --- Range filter helper ---
@@ -77,7 +85,7 @@ function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | str
   }
 }
 
-export function StrategyTable({ strategies, categorySlug, basePath = "/discovery" }: StrategyTableProps) {
+export function StrategyTable({ strategies, categorySlug, basePath = "/discovery", portfolioId = null }: StrategyTableProps) {
   const [search, setSearch] = useState("");
   const [showExamples, setShowExamples] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("sharpe");
@@ -248,6 +256,7 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
                 ))}
                 <th className="px-4 py-3 text-left font-medium text-text-muted">Return</th>
                 <th className="px-4 py-3 text-left font-medium text-text-muted">Underwater</th>
+                <th className="px-4 py-3 text-right font-medium text-text-muted">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -312,11 +321,18 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
                       fill
                     />
                   </td>
+                  <td className="px-4 py-3 text-right">
+                    <SimulateImpactButton
+                      candidateStrategyId={s.id}
+                      candidateName={s.name}
+                      portfolioId={portfolioId}
+                    />
+                  </td>
                 </tr>
               ))}
               {paged.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="px-4 py-8 text-center text-text-muted">
+                  <td colSpan={11} className="px-4 py-8 text-center text-text-muted">
                     No strategies match your filters.
                   </td>
                 </tr>

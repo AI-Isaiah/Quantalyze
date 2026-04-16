@@ -10,6 +10,7 @@ import {
   RecomputeMatchResponseSchema,
   BridgeResponseSchema,
 } from "./analytics-schemas";
+import { SimulatorResponseSchema } from "./api/simulatorSchema";
 
 const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
@@ -173,6 +174,35 @@ export async function findReplacementCandidates(
     { timeoutMs: 15_000 },
   );
   return parseResponse(BridgeResponseSchema, data, "/api/portfolio-bridge");
+}
+
+/**
+ * Sprint 6 Task 6.4 — portfolio impact simulator (ADD scenario).
+ *
+ * Calls the Python `/api/simulator` endpoint with a 15s timeout (matching
+ * the Bridge and mirroring the 15s budget the Next.js route enforces).
+ * Response is validated against SimulatorResponseSchema — parse failures
+ * throw so contract drift is loud.
+ */
+export async function simulateAddCandidate(
+  portfolioId: string,
+  candidateStrategyId: string,
+  userId: string,
+) {
+  const data = await analyticsRequest(
+    "/api/simulator",
+    {
+      portfolio_id: portfolioId,
+      candidate_strategy_id: candidateStrategyId,
+      user_id: userId,
+    },
+    { timeoutMs: 15_000 },
+  );
+  return parseResponse(
+    SimulatorResponseSchema,
+    data,
+    "/api/simulator",
+  );
 }
 
 export async function verifyStrategy(data: {
