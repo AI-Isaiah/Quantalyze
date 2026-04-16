@@ -3,29 +3,47 @@ import Link from "next/link";
 import { LegalFooter } from "@/components/legal/LegalFooter";
 
 /**
- * `/security` — public security practices page linked from the
- * /for-quants Trust block and from `public/security.txt` (RFC 9116).
+ * `/security` — public security practices page.
  *
- * Plain Server Component with zero interactivity — no auth state, no
- * PostHog, no client JS. It needs to render for scrapers and
- * vulnerability researchers following security.txt → /security.
+ * Structure:
+ *   1. Editorial 3-block hero (Data Handling / Key Handling / Compliance
+ *      Posture) + security-packet PDF CTA. Meeting-hero layout per
+ *      DESIGN.md: hairline dividers, no cards, left-aligned prose,
+ *      ~640px max reading width.
+ *   2. Operational Reference — the Binance/OKX/Bybit walkthroughs plus
+ *      sync-timing / draft-resume / thresholds sections. Wizard error
+ *      `docsHref` values and `ConnectKeyStep` deep-link here; the
+ *      anchors must stay stable (#readonly-key, #binance-readonly,
+ *      #okx-readonly, #bybit-readonly, #regenerate-key, #egress-ips,
+ *      #sync-timing, #draft-resume, #thresholds).
+ *   3. Security contact + RFC 9116 pointer.
+ *
+ * Plain Server Component — no auth state, no PostHog, no client JS.
+ * Must render for scrapers and researchers following /.well-known/security.txt.
  */
 
 export const metadata: Metadata = {
-  title: "Security Practices | Quantalyze",
+  title: "Security — Quantalyze",
   description:
-    "How Quantalyze handles exchange API keys, envelope encryption, accredited-investor gating, and security disclosures.",
+    "How Quantalyze handles your exchange API keys, portfolio data, and compliance posture.",
   alternates: {
     canonical: "/security",
   },
   robots: { index: true, follow: true },
+  openGraph: {
+    title: "Security — Quantalyze",
+    description:
+      "How Quantalyze handles your exchange API keys, portfolio data, and compliance posture.",
+    url: "/security",
+    type: "article",
+  },
 };
 
 export default function SecurityPage() {
   return (
     <div className="min-h-full bg-white">
       <header className="border-b border-border bg-white">
-        <div className="mx-auto flex h-16 max-w-4xl items-center justify-between px-6">
+        <div className="mx-auto flex h-16 max-w-[1100px] items-center justify-between px-6">
           <Link
             href="/"
             className="inline-flex items-center py-2 font-display text-lg tracking-tight text-text-primary"
@@ -41,253 +59,350 @@ export default function SecurityPage() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-4xl px-6 py-16 md:py-20">
-        <h1 className="font-display text-4xl tracking-tight text-text-primary md:text-5xl">
-          Security practices
-        </h1>
-        <p className="mt-4 max-w-2xl text-text-secondary">
-          How Quantalyze handles exchange API keys, allocator gating, and
-          security disclosures. Every mechanism below is enforced at the
-          database or service-role layer, not only in the UI.
-        </p>
+      <main className="mx-auto max-w-[1100px] px-6 py-16 md:py-20">
+        {/* --- 1. Editorial hero: 3-block credibility document --- */}
+        <article className="max-w-[640px]">
+          <h1 className="font-display text-[32px] leading-tight tracking-tight text-text-primary">
+            Security practices
+          </h1>
+          <p className="mt-4 text-[14px] leading-relaxed text-text-secondary">
+            Quantalyze is a data-analytics platform, not a custodian. We read
+            your trade history from your exchange via a read-only API key and
+            compute verified performance metrics. We never hold funds, never
+            place trades, and never move tokens.
+          </p>
 
-        <div className="mt-12 space-y-12">
-          <Section id="read-only-keys" title="Read-only keys, enforced at submission">
-            <p>
-              Every API key is validated against its exchange the moment you
-              submit it. If the key has any trading or withdrawal permission,
-              the submission is rejected with the exact error:
-            </p>
-            <pre className="mt-3 rounded-md border border-border bg-page px-3 py-2 text-xs text-text-primary">
-              This key has trading or withdrawal permissions. Only read-only
-              keys are accepted.
-            </pre>
-            <p className="mt-3">
-              The check runs inside an atomic validate-and-encrypt round-trip
-              so there is no window where a key with broader permissions
-              could be persisted before the check completes.
-            </p>
-          </Section>
-
-          <Section id="envelope-encryption" title="Envelope encryption at rest">
-            <p>
-              Credential payloads are encrypted twice. Each row in the{" "}
-              <code className="rounded bg-page px-1 py-0.5 text-xs">api_keys</code>{" "}
-              table has its own per-row data encryption key (DEK) generated at
-              encrypt time. The DEK is wrapped by a platform-wide key
-              encryption key (KEK) stored in Supabase Vault.
-            </p>
-            <p className="mt-3">
-              Only the Python analytics service, running under the
-              service-role client, can unwrap the DEK and decrypt a key. The
-              Next.js web tier cannot. Neither can your own dashboard — the
-              encrypted columns are <em>revoked</em> at the column-grant level
-              from the{" "}
-              <code className="rounded bg-page px-1 py-0.5 text-xs">anon</code>{" "}
-              and{" "}
-              <code className="rounded bg-page px-1 py-0.5 text-xs">authenticated</code>{" "}
-              Postgres roles (see migration 027).
-            </p>
-          </Section>
-
-          <Section id="tenant-isolation" title="Tenant isolation at the database">
-            <p>
-              A BEFORE INSERT OR UPDATE trigger on the{" "}
-              <code className="rounded bg-page px-1 py-0.5 text-xs">strategies</code>{" "}
-              table refuses any attempt to link an{" "}
-              <code className="rounded bg-page px-1 py-0.5 text-xs">api_key_id</code>{" "}
-              owned by a different user (migration 028). Even if a misbehaving
-              client bypassed the application-layer RLS policy, the trigger
-              runs with SECURITY DEFINER and sees the ground-truth ownership.
-            </p>
-          </Section>
-
-          <Section id="codename-anonymization" title="Codename anonymization">
-            <p>
-              Your firm name, manager display name, bio, and LinkedIn are
-              never public. At listing time you pick a codename from a fixed
-              pool and allocators see only the codename until you explicitly
-              accept an intro.
-            </p>
-          </Section>
-
-          <Section id="allocator-gating" title="Allocator gating">
-            <p>
-              Allocators attest to accredited-investor status at sign-up. The
-              accredited attestation is persisted in the{" "}
-              <code className="rounded bg-page px-1 py-0.5 text-xs">allocator_attestations</code>{" "}
-              table (migration 008) and checked at every discovery query.
-              Retail users never see the factsheet.
-            </p>
-          </Section>
-
-          <Section id="deletion" title="Delete anytime">
-            <p>
-              You can revoke an API key from your dashboard with one click.
-              The encrypted credential row is deleted in the same transaction
-              that removes the listing reference. The Python analytics
-              service loses its decryption path immediately.
-            </p>
-          </Section>
-
-          <Section
-            id="readonly-key"
-            title="Creating a read-only API key"
+          <section
+            aria-labelledby="data-handling"
+            className="mt-12 border-t border-border pt-12"
           >
-            <p>
-              A read-only key lets our analytics service fetch your trade
-              history without ever being able to place trades or move funds.
-              Every supported exchange has a read-only scope — here is the
-              shortest path per exchange. If any step fails, the wizard will
-              reject the key with a scripted error pointing back here.
-            </p>
-            <div className="mt-4 space-y-4">
-              <SubAnchor id="binance-readonly" title="Binance">
-                <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-text-secondary">
-                  <li>
-                    Go to Binance API Management and click Create API. Pick
-                    System-generated.
-                  </li>
-                  <li>
-                    Check only <strong>Enable Reading</strong>. Leave Enable
-                    Spot &amp; Margin Trading, Enable Futures, and Enable
-                    Withdrawals unchecked.
-                  </li>
-                  <li>
-                    Save the key and copy both the key and secret. Paste
-                    them into the wizard.
-                  </li>
-                </ol>
-              </SubAnchor>
-
-              <SubAnchor id="okx-readonly" title="OKX">
-                <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-text-secondary">
-                  <li>
-                    Go to OKX API Management and click Create API Key V5.
-                  </li>
-                  <li>
-                    Set the permission to <strong>Read</strong> only. Do not
-                    enable Trade or Withdraw.
-                  </li>
-                  <li>
-                    Set a passphrase (OKX requires one). Copy the key,
-                    secret, and passphrase into the wizard.
-                  </li>
-                </ol>
-              </SubAnchor>
-
-              <SubAnchor id="bybit-readonly" title="Bybit">
-                <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-text-secondary">
-                  <li>
-                    Go to Bybit API Management and click Create New Key. Pick
-                    System-generated.
-                  </li>
-                  <li>
-                    Pick <strong>Read-Only</strong> access. Leave Trade,
-                    Derivatives, and Transfer permissions unchecked.
-                  </li>
-                  <li>Copy the key and secret into the wizard.</li>
-                </ol>
-              </SubAnchor>
+            <h2
+              id="data-handling"
+              className="font-display text-2xl tracking-tight text-text-primary"
+            >
+              Data handling
+            </h2>
+            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+              <p>
+                The data we persist is: read-only exchange API credentials
+                (encrypted), raw trade fills for the last 30 days, and
+                aggregate analytics (Sharpe, Sortino, drawdown, daily
+                returns) kept indefinitely. Raw fills older than 30 days are
+                hard-deleted by a daily job; aggregates remain because the
+                factsheet needs them.
+              </p>
+              <p>
+                Tenant isolation is enforced at the database. Row-Level
+                Security policies gate every read path, and a BEFORE INSERT
+                trigger on{" "}
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                  strategies
+                </code>{" "}
+                refuses any attempt to link an{" "}
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                  api_key_id
+                </code>{" "}
+                owned by a different user. The check runs with SECURITY
+                DEFINER, so even a client bypassing application-layer RLS
+                cannot cross tenants.
+              </p>
+              <p>
+                You can revoke a key and delete its strategy from your
+                dashboard in one click. The encrypted credential row and the
+                listing reference are removed in the same transaction; the
+                analytics service loses its decryption path immediately.
+              </p>
             </div>
-          </Section>
+          </section>
 
-          <Section
-            id="thresholds"
-            title="Trade history thresholds (5 trades, 7 days)"
+          <section
+            aria-labelledby="key-handling"
+            className="mt-12 border-t border-border pt-12"
           >
-            <p>
-              We require a minimum of 5 filled trades and 7 calendar days of
-              activity before we compute a verified factsheet. Sharpe, Sortino,
-              and drawdown numbers on smaller samples are noise, not signal.
-              The wizard refuses to advance past Step 2 until both thresholds
-              are met, and the admin review flow enforces the same gate. If
-              your draft does not pass, we save it for 30 days so you can
-              resume after trading more history.
-            </p>
-          </Section>
+            <h2
+              id="key-handling"
+              className="font-display text-2xl tracking-tight text-text-primary"
+            >
+              Key handling
+            </h2>
+            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+              <p>
+                API keys are stored read-only, enforced at submission. Every
+                key is validated against the exchange the moment you paste it
+                — if it carries any trading or withdrawal permission, the
+                submission is rejected before the ciphertext is written. The
+                check and the encrypt are a single atomic round-trip.
+              </p>
+              <p>
+                Credential payloads are encrypted at rest with AES-256-GCM
+                envelope encryption. Each row has its own data encryption key
+                (DEK) generated at encrypt time; the DEK is wrapped by a
+                platform key encryption key (KEK) stored in Supabase Vault.
+                Only the Python analytics service, running under the
+                service-role client, can unwrap the DEK. The Next.js web tier
+                cannot, and neither can your own dashboard — the encrypted
+                columns are revoked at the column-grant level from the{" "}
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                  anon
+                </code>{" "}
+                and{" "}
+                <code className="rounded bg-page px-1 py-0.5 font-mono text-[13px]">
+                  authenticated
+                </code>{" "}
+                Postgres roles.
+              </p>
+              <p>
+                We list detected scopes back to you in the wizard — Read,
+                Trade, Withdraw — so you can see what the exchange actually
+                granted. Any key with Trade or Withdraw is refused; no
+                exceptions, no admin override.
+              </p>
+            </div>
+          </section>
 
-          <Section id="regenerate-key" title="Regenerating an API key">
-            <p>
-              Some exchanges only show the secret once at creation. If you
-              cannot find it, create a fresh read-only key and paste the new
-              credentials. The old key can be deleted from your exchange
-              dashboard afterwards.
-            </p>
-          </Section>
+          <section
+            aria-labelledby="compliance-posture"
+            className="mt-12 border-t border-border pt-12"
+          >
+            <h2
+              id="compliance-posture"
+              className="font-display text-2xl tracking-tight text-text-primary"
+            >
+              Compliance posture
+            </h2>
+            <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
+              <p>
+                We are a pre-audit company. Preparing for SOC 2 Type 1;
+                internal controls — access reviews, change management,
+                vendor management, incident response — are documented and
+                followed today, with the formal attestation to follow.
+                Allocators evaluating us under diligence should engage our
+                security contact for a current posture letter under NDA.
+              </p>
+              <p>
+                The downloadable security packet below restates the
+                encryption spec, retention windows, exchange scopes, and
+                incident-response contact on one page — suitable for
+                forwarding to a risk team.
+              </p>
+              <p>
+                For coordinated vulnerability disclosure, our{" "}
+                <a
+                  href="/.well-known/security.txt"
+                  className="text-accent underline-offset-4 hover:underline"
+                >
+                  security.txt
+                </a>{" "}
+                follows RFC 9116.
+              </p>
+            </div>
+          </section>
 
-          <Section id="sync-timing" title="Sync timing and cold starts">
-            <p>
-              The first sync of the day can take up to 45 seconds while our
-              analytics service wakes up. Accounts with multi-year history can
-              take up to 3 minutes. Your draft is saved — you can leave the
-              wizard tab and come back. If sync fails, the wizard error copy
-              tells you exactly what to retry and when to contact{" "}
+          {/* --- PDF CTA --- */}
+          <div className="mt-12 border-t border-border pt-12">
+            <a
+              href="/security-packet.pdf"
+              aria-label="Download Quantalyze security packet PDF"
+              className="inline-flex h-10 items-center rounded-md bg-accent px-4 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+            >
+              Download security packet (PDF)
+            </a>
+            <p className="mt-3 text-[13px] text-text-muted">
+              One-page summary — encryption spec, scopes, retention,
+              incident-response contact. Updated when policy changes; see
+              the last-reviewed date below.
+            </p>
+          </div>
+
+          {/* --- Security contact --- */}
+          <section
+            aria-labelledby="security-contact"
+            className="mt-12 border-t border-border pt-12"
+          >
+            <h2
+              id="security-contact"
+              className="font-display text-2xl tracking-tight text-text-primary"
+            >
+              Security contact
+            </h2>
+            <p className="mt-4 text-[14px] leading-relaxed text-text-primary">
+              Allocators asking for a posture letter, researchers reporting
+              a vulnerability, and anyone with a concrete security question
+              should email{" "}
               <a
                 href="mailto:security@quantalyze.com"
-                className="underline hover:text-text-primary"
+                className="text-accent underline-offset-4 hover:underline"
               >
                 security@quantalyze.com
               </a>
-              .
+              . We reply within one business day. Acknowledgments for
+              coordinated disclosure are published on this page.
             </p>
-          </Section>
+            <p className="mt-3 text-[13px] text-text-muted">
+              Last reviewed: 2026-04-12.
+            </p>
+          </section>
+        </article>
 
-          <Section id="draft-resume" title="Resuming a wizard draft">
-            <p>
-              Wizard drafts are stored server-side and tied to your account.
-              If you close the tab, open a new one, sign in, and navigate
-              back to the wizard, you will see a Resume banner. Secrets are
-              never stored in your browser, so you will need to paste the API
-              secret one more time before sync kicks off again.
-            </p>
-          </Section>
-
-          <Section id="disclosures" title="Security disclosures">
-            <p>
-              If you found a vulnerability, please email{" "}
-              <a
-                href="mailto:security@quantalyze.com"
-                className="underline hover:text-text-primary"
-              >
-                security@quantalyze.com
-              </a>
-              . We reply within 1 business day and acknowledge researchers
-              who coordinate responsible disclosure at this page.
-            </p>
-            <p className="mt-3">
-              Our{" "}
-              <a
-                href="/security.txt"
-                className="underline hover:text-text-primary"
-              >
-                security.txt
-              </a>{" "}
-              follows RFC 9116.
-            </p>
-          </Section>
-
-          <Section id="acknowledgments" title="Researcher acknowledgments">
-            <p>
-              We thank the security researchers who have reported issues
-              responsibly. This list is updated after each coordinated
-              disclosure.
-            </p>
-            <ul className="mt-3 list-disc pl-6 text-text-secondary">
-              <li>No public acknowledgments yet.</li>
-            </ul>
-          </Section>
-        </div>
-
-        <div className="mt-16 border-t border-border pt-8 text-sm text-text-muted">
-          Last reviewed: 2026-04-10. Questions?{" "}
-          <a
-            href="mailto:security@quantalyze.com"
-            className="underline hover:text-text-primary"
+        {/* --- 2. Operational reference — wizard deep-links target these
+                 anchors; do not change without updating wizardErrors.ts. --- */}
+        <section
+          aria-labelledby="operational-reference"
+          className="mt-20 max-w-[720px] border-t border-border pt-12"
+        >
+          <h2
+            id="operational-reference"
+            className="font-display text-2xl tracking-tight text-text-primary"
           >
-            security@quantalyze.com
-          </a>
-        </div>
+            Operational reference
+          </h2>
+          <p className="mt-3 text-[14px] leading-relaxed text-text-secondary">
+            Step-by-step guides the Connect wizard links into when a key
+            fails validation, sync is slow, or a draft needs resuming. Kept
+            on one page so the wizard error surface has a stable landing
+            target.
+          </p>
+
+          <div className="mt-10 space-y-10">
+            <Section id="readonly-key" title="Creating a read-only API key">
+              <p>
+                A read-only key lets our analytics service fetch your trade
+                history without ever being able to place trades or move
+                funds. Every supported exchange has a read-only scope. If a
+                step fails, the wizard rejects the key with a scripted
+                error pointing back here.
+              </p>
+              <div className="mt-4 space-y-4">
+                <SubAnchor id="binance-readonly" title="Binance">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] text-text-secondary">
+                    <li>
+                      Go to Binance API Management and click Create API. Pick
+                      System-generated.
+                    </li>
+                    <li>
+                      Check only <strong>Enable Reading</strong>. Leave Enable
+                      Spot &amp; Margin Trading, Enable Futures, and Enable
+                      Withdrawals unchecked.
+                    </li>
+                    <li>
+                      Save the key and copy both the key and secret. Paste
+                      them into the wizard.
+                    </li>
+                  </ol>
+                </SubAnchor>
+
+                <SubAnchor id="okx-readonly" title="OKX">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] text-text-secondary">
+                    <li>
+                      Go to OKX API Management and click Create API Key V5.
+                    </li>
+                    <li>
+                      Set the permission to <strong>Read</strong> only. Do
+                      not enable Trade or Withdraw.
+                    </li>
+                    <li>
+                      Set a passphrase (OKX requires one). Copy the key,
+                      secret, and passphrase into the wizard.
+                    </li>
+                  </ol>
+                </SubAnchor>
+
+                <SubAnchor id="bybit-readonly" title="Bybit">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] text-text-secondary">
+                    <li>
+                      Go to Bybit API Management and click Create New Key.
+                      Pick System-generated.
+                    </li>
+                    <li>
+                      Pick <strong>Read-Only</strong> access. Leave Trade,
+                      Derivatives, and Transfer permissions unchecked.
+                    </li>
+                    <li>Copy the key and secret into the wizard.</li>
+                  </ol>
+                </SubAnchor>
+              </div>
+            </Section>
+
+            <Section id="regenerate-key" title="Regenerating an API key">
+              <p>
+                Some exchanges only show the secret once at creation. If you
+                cannot find it, create a fresh read-only key and paste the
+                new credentials. The old key can be deleted from your
+                exchange dashboard afterwards.
+              </p>
+            </Section>
+
+            <Section id="egress-ips" title="Egress IPs (IP-allowlist keys)">
+              <p>
+                If your exchange key is locked to an IP allowlist, allow our
+                analytics service egress range. Email{" "}
+                <a
+                  href="mailto:security@quantalyze.com"
+                  className="text-accent underline-offset-4 hover:underline"
+                >
+                  security@quantalyze.com
+                </a>{" "}
+                for the current IP set — we rotate infrequently and will
+                notify ahead of any change.
+              </p>
+            </Section>
+
+            <Section id="sync-timing" title="Sync timing and cold starts">
+              <p>
+                The first sync of the day can take up to 45 seconds while
+                the analytics service wakes up. Accounts with multi-year
+                history can take up to 3 minutes. Your draft is saved — you
+                can leave the wizard tab and come back. If sync fails, the
+                wizard error copy tells you exactly what to retry and when
+                to contact{" "}
+                <a
+                  href="mailto:security@quantalyze.com"
+                  className="text-accent underline-offset-4 hover:underline"
+                >
+                  security@quantalyze.com
+                </a>
+                .
+              </p>
+            </Section>
+
+            <Section id="draft-resume" title="Resuming a wizard draft">
+              <p>
+                Wizard drafts are stored server-side and tied to your
+                account. If you close the tab, open a new one, sign in, and
+                navigate back to the wizard, you will see a Resume banner.
+                Secrets are never stored in your browser, so you will need
+                to paste the API secret one more time before sync kicks off
+                again.
+              </p>
+            </Section>
+
+            <Section
+              id="thresholds"
+              title="Trade history thresholds (5 trades, 7 days)"
+            >
+              <p>
+                We require a minimum of 5 filled trades and 7 calendar days
+                of activity before we compute a verified factsheet. Sharpe,
+                Sortino, and drawdown numbers on smaller samples are noise,
+                not signal. The wizard refuses to advance past Step 2 until
+                both thresholds are met, and the admin review flow enforces
+                the same gate. If your draft does not pass, we save it for
+                30 days so you can resume after trading more history.
+              </p>
+            </Section>
+
+            <Section id="acknowledgments" title="Researcher acknowledgments">
+              <p>
+                We thank the security researchers who have reported issues
+                responsibly. This list is updated after each coordinated
+                disclosure.
+              </p>
+              <ul className="mt-3 list-disc pl-6 text-text-secondary">
+                <li>No public acknowledgments yet.</li>
+              </ul>
+            </Section>
+          </div>
+        </section>
       </main>
 
       <LegalFooter />
@@ -305,16 +420,18 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section id={id} className="space-y-3">
-      <h2 className="font-display text-2xl tracking-tight text-text-primary">
-        <a
-          href={`#${id}`}
-          className="transition-colors hover:text-accent"
-        >
+    <section id={id} aria-labelledby={`${id}-title`} className="space-y-3">
+      <h3
+        id={`${id}-title`}
+        className="font-display text-base font-semibold tracking-tight text-text-primary"
+      >
+        <a href={`#${id}`} className="transition-colors hover:text-accent">
           {title}
         </a>
-      </h2>
-      <div className="leading-relaxed text-text-secondary">{children}</div>
+      </h3>
+      <div className="text-[14px] leading-relaxed text-text-secondary">
+        {children}
+      </div>
     </section>
   );
 }
@@ -329,16 +446,15 @@ function SubAnchor({
   children: React.ReactNode;
 }) {
   return (
-    <div id={id} className="rounded-md border border-border bg-page px-4 py-3">
-      <h3 className="font-display text-base text-text-primary">
-        <a
-          href={`#${id}`}
-          className="transition-colors hover:text-accent"
-        >
+    <div id={id} className="border-t border-border pt-3">
+      <h4 className="font-display text-base text-text-primary">
+        <a href={`#${id}`} className="transition-colors hover:text-accent">
           {title}
         </a>
-      </h3>
-      <div className="leading-relaxed text-text-secondary">{children}</div>
+      </h4>
+      <div className="text-[14px] leading-relaxed text-text-secondary">
+        {children}
+      </div>
     </div>
   );
 }

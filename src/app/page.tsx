@@ -274,7 +274,13 @@ export default async function Home() {
                 Exchange-verified quant strategy marketplace
               </p>
             </div>
-            <div className="flex items-center gap-2 text-sm text-text-muted">
+            <nav className="flex items-center gap-2 text-sm text-text-muted">
+              <Link
+                href="/security"
+                className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
+              >
+                Security
+              </Link>
               <Link
                 href="/login"
                 className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary transition-colors"
@@ -287,7 +293,7 @@ export default async function Home() {
               >
                 Sign up
               </Link>
-            </div>
+            </nav>
           </div>
         </div>
       </footer>

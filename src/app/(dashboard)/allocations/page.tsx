@@ -51,6 +51,14 @@ export default async function MyAllocationPage() {
             >
               Browse Strategies
             </Link>
+            <p className="mt-4 text-[13px] text-text-muted">
+              <Link
+                href="/security"
+                className="text-accent underline-offset-4 hover:underline"
+              >
+                Review our security posture →
+              </Link>
+            </p>
           </Card>
         ) : null}
         <AllocatorExchangeManager initialKeys={apiKeys} />

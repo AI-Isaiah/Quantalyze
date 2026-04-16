@@ -332,14 +332,16 @@ class TestBinanceFetchDailyPnl:
 
     @pytest.mark.asyncio
     async def test_income_type_filtering(self):
-        """Only REALIZED_PNL, COMMISSION, and FUNDING_FEE income types are included."""
+        """Post Sprint 5.6 cutover: only REALIZED_PNL + COMMISSION route into
+        daily_pnl. FUNDING_FEE is handled separately via services/funding_fetch
+        into the funding_fees table. See migration 044."""
         exchange = _make_binance_exchange()
         ts = _ts(2024, 3, 10, 14)
 
         income_data = [
             _binance_income("REALIZED_PNL", "150.0", "BTCUSDT", ts),
             _binance_income("COMMISSION", "-5.0", "BTCUSDT", ts + 1000),
-            _binance_income("FUNDING_FEE", "-2.5", "ETHUSDT", ts + 2000),
+            _binance_income("FUNDING_FEE", "-2.5", "ETHUSDT", ts + 2000),  # now excluded
             _binance_income("TRANSFER", "1000.0", "USDT", ts + 3000),  # excluded
             _binance_income("INTERNAL_TRANSFER", "500.0", "USDT", ts + 4000),  # excluded
         ]
@@ -348,10 +350,29 @@ class TestBinanceFetchDailyPnl:
 
         result = await fetch_daily_pnl(exchange)
 
-        assert len(result) == 3  # only the 3 valid types
+        # Only REALIZED_PNL + COMMISSION now (funding lives in funding_fees)
+        assert len(result) == 2
         symbols = [r["symbol"] for r in result]
         assert "BTCUSDT" in symbols
-        assert "ETHUSDT" in symbols
+        # ETHUSDT was only in the FUNDING_FEE row — must NOT leak into daily_pnl
+        assert "ETHUSDT" not in symbols
+
+    @pytest.mark.asyncio
+    async def test_funding_fee_excluded_from_daily_pnl(self):
+        """Sprint 5.6 cutover regression: a Binance income response with ONLY
+        FUNDING_FEE rows must produce an empty daily_pnl list. Funding lives
+        in funding_fees, not daily_pnl — full stop."""
+        exchange = _make_binance_exchange()
+        ts = _ts(2024, 3, 10, 14)
+        income_data = [
+            _binance_income("FUNDING_FEE", "-0.01", "BTCUSDT", ts),
+            _binance_income("FUNDING_FEE", "-0.02", "ETHUSDT", ts + 1000),
+            _binance_income("FUNDING_FEE", "0.005", "BTCUSDT", ts + 2000),
+        ]
+        exchange.fapiPrivate_get_income = AsyncMock(return_value=income_data)
+
+        result = await fetch_daily_pnl(exchange)
+        assert result == []
 
     @pytest.mark.asyncio
     async def test_income_positive_and_negative(self):
@@ -402,11 +423,15 @@ class TestBinanceFetchDailyPnl:
 
     @pytest.mark.asyncio
     async def test_output_format(self):
-        """Each Binance entry has the expected schema."""
+        """Each Binance entry has the expected schema.
+
+        Post Sprint 5.6 cutover: funding_fee rows are no longer routed here,
+        so this test uses REALIZED_PNL to drive the output-format assertion.
+        """
         exchange = _make_binance_exchange()
         ts = _ts(2024, 2, 14, 9)
 
-        income_data = [_binance_income("FUNDING_FEE", "-3.0", "ETHUSDT", ts)]
+        income_data = [_binance_income("REALIZED_PNL", "-3.0", "ETHUSDT", ts)]
         exchange.fapiPrivate_get_income = AsyncMock(return_value=income_data)
 
         result = await fetch_daily_pnl(exchange)

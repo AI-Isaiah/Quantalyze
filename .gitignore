@@ -67,3 +67,6 @@ __pycache__/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Supabase CLI local state (linked project metadata)
+analytics-service/supabase/

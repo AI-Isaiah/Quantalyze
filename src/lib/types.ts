@@ -162,6 +162,28 @@ export interface Position {
   closed_at: string | null;
   duration_days: number | null;
   roi: number | null;
+  // funding_pnl is the sum of funding_fees over the position window.
+  // Total economic P&L = realized_pnl + funding_pnl (computed client-side;
+  // no generated DB column). NOT NULL DEFAULT 0 — rows without funding carry 0.
+  funding_pnl: number;
+}
+
+/**
+ * funding_fees row — one per 8-hour funding window per
+ * (strategy, exchange, symbol). Signed amount: positive = received,
+ * negative = paid. See migration 044.
+ */
+export interface FundingFee {
+  id: string;
+  strategy_id: string;
+  exchange: "binance" | "okx" | "bybit";
+  symbol: string;
+  amount: number;
+  currency: string;
+  timestamp: string;
+  match_key: string;
+  raw_data: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface ContactRequest {

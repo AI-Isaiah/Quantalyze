@@ -6,21 +6,22 @@ wraps each handler in an asyncio.wait_for timeout, classifies any
 exception into (error_kind, sanitized message), and always (on strategy-
 scoped jobs) updates the UI status bridge before returning.
 
-Supported kinds (Sprint 3 commit 3 — final worker modifications):
-  sync_trades       -> run_sync_trades_job      (5-minute timeout)
+Supported kinds:
+  sync_trades       -> run_sync_trades_job      (15-minute timeout)
   compute_analytics -> run_compute_analytics_job (15-minute timeout)
   compute_portfolio -> run_compute_portfolio_job (10-minute timeout)
   poll_positions    -> run_poll_positions_job    (3-minute timeout)
+  sync_funding      -> run_sync_funding_job      (3-minute timeout)
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
-decision. See commit 2 plan for rationale:
+decision:
   ccxt.NetworkError | RequestTimeout | RateLimitExceeded -> transient
   ccxt.AuthenticationError | PermissionDenied | BadRequest -> permanent
   cryptography.fernet.InvalidToken -> permanent (sanitized message)
   asyncio.TimeoutError -> transient (wait_for expiry)
   everything else -> unknown (retried by default)
 
-Circuit breaker (commit 3): before creating the exchange in sync_trades and
+Circuit breaker: before creating the exchange in sync_trades and
 poll_positions, check api_keys.last_429_at. If within the per-exchange
 cooldown window (Binance 120s, OKX 300s, Bybit 600s), call defer_compute_job
 RPC and return DispatchResult(outcome=DEFERRED).
@@ -109,6 +110,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "compute_analytics": 15 * 60,  # 15 minutes
     "compute_portfolio": 10 * 60,  # 10 minutes
     "poll_positions": 3 * 60,    # 3 minutes (stub; real handler lands commit 3)
+    "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
 }
 
 
@@ -481,6 +483,67 @@ async def run_compute_portfolio_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_sync_funding_job(job: dict) -> DispatchResult:
+    """Fetch funding fees from the exchange and UPSERT into funding_fees.
+
+    Uses services.funding_fetch to normalize Binance/OKX/Bybit funding
+    into a uniform shape, then upserts with on_conflict='match_key',
+    ignore_duplicates=True so re-runs are no-ops.
+
+    Pre-flight: same as sync_trades (strategy + api_key load, circuit
+    breaker, decrypt, exchange create). On 429, stamps last_429_at.
+    """
+    ctx = await _exchange_preflight(job, "run_sync_funding_job")
+    if isinstance(ctx, DispatchResult):
+        return ctx
+
+    strategy_id = job["strategy_id"]
+    exchange_name = ctx.key_row["exchange"]
+    since_ms = parse_since_ms(ctx.key_row.get("last_sync_at"))
+
+    # Import inside function to avoid hard dependency at module load
+    # (funding_fetch imports ccxt.async_support which is heavy).
+    from services.funding_fetch import (
+        fetch_funding_binance,
+        fetch_funding_okx,
+        fetch_funding_bybit,
+        upsert_funding_rows,
+    )
+
+    try:
+        if exchange_name == "binance":
+            rows = await fetch_funding_binance(ctx.exchange, strategy_id, since_ms)
+        elif exchange_name == "okx":
+            rows = await fetch_funding_okx(ctx.exchange, strategy_id, since_ms)
+        elif exchange_name == "bybit":
+            rows = await fetch_funding_bybit(ctx.exchange, strategy_id, since_ms)
+        else:
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=f"sync_funding: exchange {exchange_name} not supported",
+                error_kind="permanent",
+            )
+    except ccxt.RateLimitExceeded:
+        await _stamp_429(ctx.supabase, ctx.key_row)
+        raise
+    finally:
+        try:
+            await ctx.exchange.close()
+        except Exception:  # pragma: no cover
+            pass
+
+    if not rows:
+        logger.info("sync_funding: no funding rows for strategy %s", strategy_id)
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    result = await upsert_funding_rows(ctx.supabase, rows)
+    logger.info(
+        "sync_funding: upserted %d funding rows for strategy %s",
+        result["inserted"], strategy_id,
+    )
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 async def run_poll_positions_job(job: dict) -> DispatchResult:
     """Fetch open positions from the exchange and persist as snapshots.
 
@@ -548,6 +611,8 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_compute_portfolio_job
     elif kind == "poll_positions":
         handler = run_poll_positions_job
+    elif kind == "sync_funding":
+        handler = run_sync_funding_job
     else:
         handler = None
 

@@ -4,7 +4,9 @@ Reconstructs position lifecycles by processing fills in timestamp order
 per symbol, tracking net position, and recording closed positions with
 entry/exit prices, PnL, fees, duration, and ROI.
 
-Also computes exposure metrics from position_snapshots.
+Also computes exposure metrics from position_snapshots. After FIFO
+matching, funding_pnl is attributed to each position by summing
+funding_fees rows in [opened_at, closed_at] window.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import logging
 import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from services.db import db_execute
 
@@ -21,7 +24,10 @@ logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 async def reconstruct_positions(strategy_id: str, supabase) -> dict:
     """Reconstruct position lifecycles from raw fills using FIFO matching.
 
-    Returns trade_metrics dict for strategy_analytics JSONB.
+    Returns trade_metrics dict for strategy_analytics JSONB. Each closed
+    and open position has its funding_pnl column populated by summing
+    funding_fees rows in its [opened_at, closed_at] window for the same
+    symbol. See migration 044.
     """
     # Query fills ordered by timestamp
     def _fetch_fills():
@@ -53,6 +59,8 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
         symbol_fills.sort(key=lambda f: f.get("timestamp", ""))
         positions = _match_positions_fifo(symbol, symbol_fills, strategy_id)
         all_positions.extend(positions)
+
+    await _attribute_funding(strategy_id, all_positions, supabase)
 
     # Persist: DELETE existing positions for strategy, then INSERT new ones
     def _delete_existing():
@@ -113,6 +121,137 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
         "best_trade_roi": round(best_roi, 6),
         "worst_trade_roi": round(worst_roi, 6),
     }
+
+
+async def _attribute_funding(
+    strategy_id: str, positions: list[dict], supabase
+) -> None:
+    """Sum funding_fees into each position's funding_pnl column.
+
+    For each position, sums amounts from funding_fees rows where:
+      - strategy_id matches
+      - symbol matches
+      - timestamp is within [opened_at, closed_at] (open positions use
+        closed_at=now for the upper bound)
+
+    Mutates the positions list in place. Called after FIFO matching and
+    before DB persist in reconstruct_positions.
+
+    Failure mode: if funding_fees fetch errors (e.g. RLS misconfig, table
+    missing on a stale staging DB), each position keeps funding_pnl=0
+    rather than blocking the entire reconstruction. Logged as warning.
+    """
+    if not positions:
+        return
+
+    now = datetime.now(timezone.utc)
+
+    # Compute the date window that bounds all positions so the query is a
+    # tight range scan on the (strategy_id, timestamp DESC) index rather
+    # than a full strategy-partition scan.
+    min_opened_at = min(p["opened_at"] for p in positions if p.get("opened_at"))
+    max_closed_at = max(
+        (p.get("closed_at") or now.isoformat()) for p in positions
+    )
+
+    # Page size for funding_fees fetch. Small enough to stay well under
+    # PostgREST's per-response limit; used in tests via patching.
+    _PAGE_SIZE = 1000
+
+    funding_rows: list[dict] = []
+    page = 0
+    try:
+        while True:
+            start = page * _PAGE_SIZE
+            end = start + _PAGE_SIZE - 1
+
+            def _fetch_funding(s=start, e=end):
+                return (
+                    supabase.table("funding_fees")
+                    .select("symbol, amount, timestamp")
+                    .eq("strategy_id", strategy_id)
+                    .gte("timestamp", min_opened_at)
+                    .lte("timestamp", max_closed_at)
+                    .range(s, e)
+                    .execute()
+                )
+
+            result = await db_execute(_fetch_funding)
+            chunk = (result.data if result else None) or []
+            funding_rows.extend(chunk)
+            if len(chunk) < _PAGE_SIZE:
+                break
+            page += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "funding_fees fetch failed for strategy %s: %s — "
+            "positions will get funding_pnl=0",
+            strategy_id, exc,
+        )
+        return
+
+    if not funding_rows:
+        return
+
+    # Group funding rows by symbol for fast lookup during position scan.
+    by_symbol: dict[str, list[tuple[datetime, Decimal]]] = defaultdict(list)
+    for row in funding_rows:
+        sym = row.get("symbol", "")
+        ts_raw = row.get("timestamp")
+        amt_raw = row.get("amount")
+        if not sym or ts_raw is None or amt_raw is None:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            amt = Decimal(str(amt_raw))
+        except Exception:
+            continue
+        by_symbol[sym].append((ts, amt))
+
+    # Sort each symbol's timeline once — supports linear scan per position.
+    for sym in by_symbol:
+        by_symbol[sym].sort(key=lambda x: x[0])
+
+    now_utc = datetime.now(timezone.utc)
+
+    for pos in positions:
+        symbol = pos.get("symbol", "")
+        opened_at_raw = pos.get("opened_at")
+        closed_at_raw = pos.get("closed_at")
+        if not opened_at_raw:
+            continue
+
+        try:
+            opened_dt = datetime.fromisoformat(
+                str(opened_at_raw).replace("Z", "+00:00")
+            )
+            if opened_dt.tzinfo is None:
+                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+
+        if closed_at_raw:
+            try:
+                closed_dt = datetime.fromisoformat(
+                    str(closed_at_raw).replace("Z", "+00:00")
+                )
+                if closed_dt.tzinfo is None:
+                    closed_dt = closed_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                closed_dt = now_utc
+        else:
+            closed_dt = now_utc
+
+        total = Decimal(0)
+        for ts, amt in by_symbol.get(symbol, []):
+            if opened_dt <= ts <= closed_dt:
+                total += amt
+
+        # Round to 8 decimals (funding amounts are typically ≤ 6 places
+        # but we keep headroom to avoid premature truncation).
+        pos["funding_pnl"] = float(round(total, 8))
 
 
 def _match_positions_fifo(
@@ -236,6 +375,8 @@ def _match_positions_fifo(
                 "opened_at": position_open_time,
                 "closed_at": close_time,
                 "fill_count": len(entry_fills) + 1,  # +1 for closing fill
+                # Default 0; _attribute_funding sums in-window funding_fees rows before insert.
+                "funding_pnl": 0,
             })
 
             # If overshot (net != 0), start a new position with remainder
@@ -283,6 +424,9 @@ def _match_positions_fifo(
             "opened_at": position_open_time,
             "closed_at": None,
             "fill_count": len(entry_fills),
+            # Default 0; _attribute_funding sums funding_fees rows up to now
+            # for open positions (closed_at=None → window-end = now).
+            "funding_pnl": 0,
         })
 
     return positions

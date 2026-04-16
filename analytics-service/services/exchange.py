@@ -244,7 +244,11 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
                     params["startTime"] = since_ms
                 income = await exchange.fapiPrivate_get_income(params)
                 for item in income:
-                    if item.get("incomeType") in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
+                    # Sprint 5.6 cutover: FUNDING_FEE no longer routes into
+                    # daily_pnl. Funding is ingested separately via
+                    # services.funding_fetch → funding_fees table.
+                    # See migration 044 for the forward-only rationale.
+                    if item.get("incomeType") in ("REALIZED_PNL", "COMMISSION"):
                         daily_pnl.append({
                             "exchange": "binance",
                             "symbol": item.get("symbol", "PORTFOLIO"),

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Quantalyze Security Packet</title>
+    <!--
+      Source of the one-page PDF at public/security-packet.pdf. Kept in
+      /scripts (not /public) because only the rendered PDF should ship.
+
+      Typography and color values mirror src/app/security/page.tsx and
+      DESIGN.md: Instrument Serif display, DM Sans body, Geist Mono data,
+      institutional palette, hairline dividers.
+
+      Fonts are loaded from Google Fonts over the network during render;
+      puppeteer's waitUntil: "networkidle0" ensures they are applied
+      before the PDF snapshot is taken. If that fetch fails in CI, the
+      system-ui fallback keeps the document legible.
+    -->
+    <link
+      rel="preconnect"
+      href="https://fonts.googleapis.com"
+      crossorigin="anonymous"
+    />
+    <link
+      rel="preconnect"
+      href="https://fonts.gstatic.com"
+      crossorigin="anonymous"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --text-primary: #1a1a2e;
+        --text-secondary: #4a5568;
+        --text-muted: #718096;
+        --accent: #1b6b5a;
+        --border: #e2e8f0;
+        --page: #f8f9fa;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        color: var(--text-primary);
+        font-family: "DM Sans", system-ui, -apple-system, sans-serif;
+        font-size: 11.5pt;
+        line-height: 1.5;
+      }
+      @page {
+        size: A4;
+        margin: 16mm 18mm;
+      }
+      .doc {
+        max-width: 174mm;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8pt;
+        margin-bottom: 14pt;
+      }
+      .brand {
+        font-family: "Instrument Serif", Georgia, serif;
+        font-weight: 400;
+        font-size: 16pt;
+        letter-spacing: -0.01em;
+      }
+      .doc-label {
+        font-size: 8.5pt;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        text-align: right;
+      }
+      h1 {
+        font-family: "Instrument Serif", Georgia, serif;
+        font-weight: 400;
+        font-size: 22pt;
+        letter-spacing: -0.01em;
+        margin: 0 0 4pt 0;
+      }
+      .lede {
+        color: var(--text-secondary);
+        font-size: 10.5pt;
+        margin: 0 0 14pt 0;
+      }
+      h2 {
+        font-family: "Instrument Serif", Georgia, serif;
+        font-weight: 400;
+        font-size: 13pt;
+        letter-spacing: -0.005em;
+        margin: 0 0 4pt 0;
+        color: var(--text-primary);
+      }
+      .section {
+        border-top: 1px solid var(--border);
+        padding-top: 8pt;
+        margin-top: 10pt;
+      }
+      .section p {
+        margin: 0 0 4pt 0;
+        font-size: 10pt;
+        color: var(--text-primary);
+      }
+      dl.specs {
+        display: grid;
+        grid-template-columns: 42mm 1fr;
+        row-gap: 3pt;
+        column-gap: 6mm;
+        margin: 4pt 0 0 0;
+        font-size: 10pt;
+      }
+      dl.specs dt {
+        color: var(--text-muted);
+        font-size: 9pt;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding-top: 1pt;
+      }
+      dl.specs dd {
+        margin: 0;
+        color: var(--text-primary);
+      }
+      code,
+      .mono {
+        font-family: "Geist Mono", ui-monospace, Menlo, monospace;
+        font-size: 9.5pt;
+        font-feature-settings: "tnum" 1;
+      }
+      .scopes {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 4mm;
+        margin-top: 4pt;
+      }
+      .scope {
+        border: 1px solid var(--border);
+        border-radius: 6pt;
+        padding: 6pt 8pt;
+      }
+      .scope .k {
+        font-size: 8.5pt;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+      }
+      .scope .v {
+        font-family: "Geist Mono", ui-monospace, Menlo, monospace;
+        font-size: 10.5pt;
+        font-weight: 500;
+        color: var(--text-primary);
+        margin-top: 2pt;
+      }
+      .scope .v.rejected {
+        color: var(--accent);
+      }
+      .contact {
+        border-top: 1px solid var(--border);
+        margin-top: 12pt;
+        padding-top: 8pt;
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        font-size: 9.5pt;
+        color: var(--text-muted);
+      }
+      .contact a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="doc">
+      <div class="header">
+        <div class="brand">Quantalyze</div>
+        <div class="doc-label">
+          Security packet · one page<br />
+          Last reviewed <span class="mono">2026-04-12</span>
+        </div>
+      </div>
+
+      <h1>Security practices</h1>
+      <p class="lede">
+        Quantalyze is a data-analytics platform, not a custodian. We read
+        your trade history from your exchange via a read-only API key and
+        compute verified performance metrics. We never hold funds, never
+        place trades, and never move tokens.
+      </p>
+
+      <section class="section">
+        <h2>Key handling</h2>
+        <dl class="specs">
+          <dt>Cipher</dt>
+          <dd>AES-256-GCM envelope encryption</dd>
+          <dt>Per-row DEK</dt>
+          <dd>Generated at encrypt time, wrapped by a platform KEK</dd>
+          <dt>KEK storage</dt>
+          <dd>Supabase Vault (KMS-backed)</dd>
+          <dt>Decryption path</dt>
+          <dd>
+            Python analytics service under service-role client only; web
+            tier cannot decrypt. Encrypted columns revoked from
+            <code>anon</code> and <code>authenticated</code> roles.
+          </dd>
+          <dt>Scope enforcement</dt>
+          <dd>
+            Validated against the exchange at submission; trading or
+            withdrawal permissions rejected before ciphertext is written.
+          </dd>
+        </dl>
+
+        <div class="scopes">
+          <div class="scope">
+            <div class="k">Read</div>
+            <div class="v">Accepted</div>
+          </div>
+          <div class="scope">
+            <div class="k">Trade</div>
+            <div class="v rejected">Rejected</div>
+          </div>
+          <div class="scope">
+            <div class="k">Withdraw</div>
+            <div class="v rejected">Rejected</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Data handling</h2>
+        <dl class="specs">
+          <dt>Raw fills retention</dt>
+          <dd>30 days; hard-deleted by daily job</dd>
+          <dt>Aggregate analytics</dt>
+          <dd>Retained indefinitely (Sharpe, Sortino, drawdown, daily returns)</dd>
+          <dt>Tenant isolation</dt>
+          <dd>
+            Postgres RLS + SECURITY DEFINER trigger refusing cross-tenant
+            <code>api_key_id</code> linkage on <code>strategies</code>
+          </dd>
+          <dt>Deletion</dt>
+          <dd>
+            Key revoke + listing removal in a single transaction; decryption
+            path lost immediately
+          </dd>
+          <dt>Supported exchanges</dt>
+          <dd>Binance, OKX, Bybit (read-only scope on each)</dd>
+        </dl>
+      </section>
+
+      <section class="section">
+        <h2>Compliance posture</h2>
+        <p>
+          Preparing for SOC 2 Type 1; internal controls — access reviews,
+          change management, vendor management, incident response — are
+          documented and followed today, with the formal attestation to
+          follow. Allocators under diligence: engage the security contact
+          below for a current posture letter under NDA.
+        </p>
+        <p>
+          Coordinated vulnerability disclosure follows RFC 9116 via
+          <code>/.well-known/security.txt</code>.
+        </p>
+      </section>
+
+      <div class="contact">
+        <div>
+          Security contact ·
+          <a href="mailto:security@quantalyze.com">security@quantalyze.com</a>
+          · reply within 1 business day
+        </div>
+        <div class="mono">quantalyze.com/security</div>
+      </div>
+    </div>
+  </body>
+</html>
