@@ -202,6 +202,29 @@ class TestDispatchRouting:
         assert result.outcome == DispatchOutcome.DONE
 
     @pytest.mark.asyncio
+    async def test_dispatch_routes_compute_intro_snapshot(self) -> None:
+        """Sprint 5 Task 5.3: kind='compute_intro_snapshot' routes to
+        run_compute_intro_snapshot_job. The job carries contact_request_id
+        in metadata; the strategy_id arm of kind_target_coherence holds.
+        """
+        job = {
+            "id": "job-intro-1",
+            "kind": "compute_intro_snapshot",
+            "strategy_id": "strat-intro-1",
+            "metadata": {"contact_request_id": "cr-1"},
+        }
+        with patch(
+            "services.job_worker.run_compute_intro_snapshot_job",
+            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+        ) as mock_handler, patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await dispatch(job)
+        mock_handler.assert_awaited_once_with(job)
+        assert result.outcome == DispatchOutcome.DONE
+
+    @pytest.mark.asyncio
     async def test_dispatch_unknown_kind_returns_permanent_failed(self) -> None:
         """Unknown kind → permanent failure. Prevents an infinite retry
         storm if the DB has a row with a kind that the worker doesn't know
@@ -478,3 +501,34 @@ class TestSyncTradesFeatureFlag:
 
         assert result.outcome == DispatchOutcome.DONE
         mock_fetch_raw.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# compute_intro_snapshot handler
+# ---------------------------------------------------------------------------
+
+class TestComputeIntroSnapshot:
+    """Sprint 5 Task 5.3 — pure-DB handler that fills in
+    contact_requests.portfolio_snapshot when /api/intro's 2s synchronous
+    budget expires. Two contracts pinned here:
+
+      1. Missing contact_request_id in metadata → permanent failure
+         (otherwise the job would retry forever).
+      2. Successful path writes the JSON shape /api/intro and the TS
+         snapshot module agree on, then UPDATEs snapshot_status='ready'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_missing_contact_request_id_is_permanent_failure(self) -> None:
+        from services.job_worker import run_compute_intro_snapshot_job
+
+        job = {
+            "id": "job-x",
+            "kind": "compute_intro_snapshot",
+            "strategy_id": "strat-x",
+            "metadata": {},
+        }
+        result = await run_compute_intro_snapshot_job(job)
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
+        assert "contact_request_id" in (result.error_message or "")

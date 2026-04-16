@@ -7,12 +7,13 @@ exception into (error_kind, sanitized message), and always (on strategy-
 scoped jobs) updates the UI status bridge before returning.
 
 Supported kinds:
-  sync_trades        -> run_sync_trades_job         (15-minute timeout)
-  compute_analytics  -> run_compute_analytics_job   (15-minute timeout)
-  compute_portfolio  -> run_compute_portfolio_job   (10-minute timeout)
-  poll_positions     -> run_poll_positions_job      (3-minute timeout)
-  sync_funding       -> run_sync_funding_job        (3-minute timeout)
-  reconcile_strategy -> run_reconcile_strategy_job  (5-minute timeout)
+  sync_trades            -> run_sync_trades_job             (15-minute timeout)
+  compute_analytics      -> run_compute_analytics_job       (15-minute timeout)
+  compute_portfolio      -> run_compute_portfolio_job       (10-minute timeout)
+  poll_positions         -> run_poll_positions_job          (3-minute timeout)
+  sync_funding           -> run_sync_funding_job            (3-minute timeout)
+  reconcile_strategy     -> run_reconcile_strategy_job      (5-minute timeout)
+  compute_intro_snapshot -> run_compute_intro_snapshot_job  (2-minute timeout)
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
 decision:
@@ -113,6 +114,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "poll_positions": 3 * 60,    # 3 minutes (stub; real handler lands commit 3)
     "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
     "reconcile_strategy": 5 * 60,  # 5 minutes (fetch_my_trades + DB scan + diff)
+    "compute_intro_snapshot": 2 * 60,  # 2 minutes (pure DB; no exchange I/O)
 }
 
 
@@ -778,6 +780,234 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_compute_intro_snapshot_job(job: dict) -> DispatchResult:
+    """Compute the allocator-portfolio snapshot for a contact_request.
+
+    Triggered by /api/intro when its 2s synchronous budget expires: the
+    route inserts the contact_requests row with snapshot_status='pending'
+    and enqueues this job carrying contact_request_id in metadata. The
+    strategy_id on the job row is the intro target (required by the
+    kind_target_coherence CHECK); the snapshot itself is keyed on the
+    allocator_id we look up from contact_requests.
+
+    Pure DB — no exchange I/O, no circuit breaker, no credential decrypt.
+    The inputs are portfolios / portfolio_strategies / portfolio_analytics
+    / strategy_analytics / portfolio_alerts, all of which live in Postgres.
+
+    On success: UPDATE contact_requests SET portfolio_snapshot=<json>,
+    snapshot_status='ready'. On permanent failure (missing row, schema
+    drift): UPDATE snapshot_status='failed' and return permanent. On
+    transient (DB blip): raise so the retry path kicks in.
+
+    Shape matches src/lib/intro/snapshot.ts computePortfolioSnapshot —
+    the TS and Python writers must produce the same JSON shape so the
+    admin UI renders both paths identically.
+    """
+    metadata = job.get("metadata") or {}
+    contact_request_id = metadata.get("contact_request_id")
+    if not contact_request_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_compute_intro_snapshot_job: contact_request_id missing from metadata",
+            error_kind="permanent",
+        )
+
+    supabase = get_supabase()
+
+    def _load_contact_request() -> dict | None:
+        res = (
+            supabase.table("contact_requests")
+            .select("id, allocator_id, strategy_id")
+            .eq("id", contact_request_id)
+            .maybe_single()
+            .execute()
+        )
+        return res.data
+
+    cr = await db_execute(_load_contact_request)
+    if not cr:
+        # The contact_request was deleted before we could compute. Nothing
+        # to update — mark permanent so the job doesn't retry forever.
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"contact_request {contact_request_id} not found",
+            error_kind="permanent",
+        )
+
+    allocator_id = cr["allocator_id"]
+
+    # Primary portfolio = most recently created for this allocator.
+    def _load_portfolio() -> dict | None:
+        res = (
+            supabase.table("portfolios")
+            .select("id")
+            .eq("user_id", allocator_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+
+    portfolio = await db_execute(_load_portfolio)
+
+    snapshot: dict = {
+        "sharpe": None,
+        "max_drawdown": None,
+        "concentration": None,
+        "top_3_strategies": [],
+        "bottom_3_strategies": [],
+        "alerts_last_7d": 0,
+    }
+
+    if portfolio:
+        portfolio_id = portfolio["id"]
+
+        def _load_portfolio_analytics() -> dict | None:
+            res = (
+                supabase.table("portfolio_analytics")
+                .select("portfolio_sharpe, portfolio_max_drawdown")
+                .eq("portfolio_id", portfolio_id)
+                .order("computed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+            return rows[0] if rows else None
+
+        analytics = await db_execute(_load_portfolio_analytics)
+        if analytics:
+            snapshot["sharpe"] = analytics.get("portfolio_sharpe")
+            snapshot["max_drawdown"] = analytics.get("portfolio_max_drawdown")
+
+        # Strategy links + names
+        def _load_links() -> list[dict]:
+            res = (
+                supabase.table("portfolio_strategies")
+                .select(
+                    "strategy_id, current_weight, allocated_amount, "
+                    "strategies(id, name)"
+                )
+                .eq("portfolio_id", portfolio_id)
+                .execute()
+            )
+            return list(res.data or [])
+
+        links = await db_execute(_load_links)
+
+        # Per-strategy sharpe lookup (single query rather than N+1).
+        strategy_ids = [l["strategy_id"] for l in links if l.get("strategy_id")]
+        sharpe_map: dict[str, float | None] = {}
+        if strategy_ids:
+            def _load_strategy_sharpes() -> list[dict]:
+                res = (
+                    supabase.table("strategy_analytics")
+                    .select("strategy_id, sharpe")
+                    .in_("strategy_id", strategy_ids)
+                    .execute()
+                )
+                return list(res.data or [])
+
+            sharpe_rows = await db_execute(_load_strategy_sharpes)
+            for row in sharpe_rows:
+                sharpe_map[row["strategy_id"]] = row.get("sharpe")
+
+        # Concentration (HHI): prefer current_weight, fall back to allocated_amount.
+        weights = [
+            l.get("current_weight") for l in links
+            if isinstance(l.get("current_weight"), (int, float))
+        ]
+        if len(weights) == len(links) and len(weights) > 0:
+            total = sum(weights)
+            if total > 0:
+                snapshot["concentration"] = sum((w / total) ** 2 for w in weights)
+        else:
+            amounts = [
+                l.get("allocated_amount") for l in links
+                if isinstance(l.get("allocated_amount"), (int, float))
+                and l.get("allocated_amount") > 0
+            ]
+            if amounts:
+                total = sum(amounts)
+                snapshot["concentration"] = sum((a / total) ** 2 for a in amounts)
+
+        # Rank by sharpe for top/bottom 3 (strategies without a sharpe are
+        # excluded — a NULL ranking tells the manager nothing).
+        ranked = []
+        for l in links:
+            sid = l.get("strategy_id")
+            strat = l.get("strategies") or {}
+            name = strat.get("name") if isinstance(strat, dict) else None
+            sh = sharpe_map.get(sid)
+            if sh is not None:
+                ranked.append({
+                    "strategy_id": sid,
+                    "strategy_name": name or "Unnamed strategy",
+                    "sharpe": sh,
+                })
+        ranked.sort(key=lambda r: r["sharpe"] or 0.0, reverse=True)
+        snapshot["top_3_strategies"] = ranked[:3]
+        # Bottom 3: slice the tail, reverse so worst is first.
+        tail = ranked[-3:] if len(ranked) >= 3 else list(ranked)
+        snapshot["bottom_3_strategies"] = list(reversed(tail)) if tail else []
+
+        # Alerts last 7d
+        seven_days_ago = (
+            datetime.now(timezone.utc) - timedelta(days=7)
+        ).isoformat()
+
+        def _count_alerts() -> int:
+            res = (
+                supabase.table("portfolio_alerts")
+                .select("id", count="exact")
+                .eq("portfolio_id", portfolio_id)
+                .gte("triggered_at", seven_days_ago)
+                .execute()
+            )
+            # supabase-py returns count on res.count for 'exact'.
+            return int(res.count or 0)
+
+        snapshot["alerts_last_7d"] = await db_execute(_count_alerts)
+
+    # Write back: portfolio_snapshot + snapshot_status='ready'.
+    def _write_snapshot() -> None:
+        supabase.table("contact_requests").update({
+            "portfolio_snapshot": snapshot,
+            "snapshot_status": "ready",
+        }).eq("id", contact_request_id).execute()
+
+    await db_execute(_write_snapshot)
+    logger.info(
+        "compute_intro_snapshot: wrote snapshot for contact_request %s (allocator %s)",
+        contact_request_id, allocator_id,
+    )
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+async def _mark_intro_snapshot_failed(job: dict) -> None:
+    """On permanent handler failure, set snapshot_status='failed' so the
+    admin UI doesn't show a stale 'pending' forever. Best-effort; if
+    this itself fails we log and move on."""
+    metadata = job.get("metadata") or {}
+    contact_request_id = metadata.get("contact_request_id")
+    if not contact_request_id:
+        return
+    try:
+        supabase = get_supabase()
+
+        def _mark() -> None:
+            supabase.table("contact_requests").update({
+                "snapshot_status": "failed",
+            }).eq("id", contact_request_id).execute()
+
+        await db_execute(_mark)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to mark contact_request %s snapshot_status='failed': %s",
+            contact_request_id, exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -810,6 +1040,8 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_sync_funding_job
     elif kind == "reconcile_strategy":
         handler = run_reconcile_strategy_job
+    elif kind == "compute_intro_snapshot":
+        handler = run_compute_intro_snapshot_job
     else:
         handler = None
 
@@ -832,6 +1064,16 @@ async def dispatch(job: dict) -> DispatchResult:
             error_message=sanitized,
             error_kind=error_kind,
         )
+
+    # On permanent failure of a compute_intro_snapshot job, mark the
+    # contact_request snapshot_status='failed' so /admin/intros doesn't
+    # show 'pending' indefinitely. Skipped on transient (those will retry).
+    if (
+        kind == "compute_intro_snapshot"
+        and result.outcome == DispatchOutcome.FAILED
+        and result.error_kind == "permanent"
+    ):
+        await _mark_intro_snapshot_failed(job)
 
     # UI status bridge: after every strategy-scoped job, derive the UI
     # status from the compute_jobs aggregate and write it into
