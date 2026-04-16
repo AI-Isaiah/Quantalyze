@@ -70,8 +70,8 @@ Shipped with 12-voice adversarial review + review/simplify/ship pipeline:
 - **Orphaned `api_keys` cleanup** — Sprint 2. Sweep `api_keys` rows not referenced by any `strategies` row after the wizard draft cleanup runs.
 - **Partner pilot CSV export source filter audit** — Sprint 2. Confirm the partner-pilot export path filters by `source` or `status` so any future draft/wizard rows can never leak.
 - **Per-exchange setup screenshot walkthroughs** — Sprint 2 polish. The `/security#binance-readonly`, `#okx-readonly`, `#bybit-readonly` anchors currently ship with numbered steps only. Add 3 screenshots per exchange (API management page, edit dialog with only Read checked, save button).
-- **Downloadable security packet** — Sprint 2. 3/3 CEO voices at Task 1.2 planning wanted a single-page PDF with AES spec, permissions list, SOC 2 status, data retention policy, and the security contact.
-- **Live key permission viewer** — Sprint 2. 3/3 CEO voices wanted the wizard to show the detected scopes returned by the exchange before accepting the key (e.g., "Read ✓ Trade ✗ Withdraw ✗" with color coding). Currently we infer from the read-only check.
+- **~~Downloadable security packet~~** — ✅ DONE in v0.11.1.0 (Sprint 5 Task 5.7). Shipped as `public/security-packet.pdf` (one-page institutional layout) plus the full `/security` editorial page covering AES-256-GCM spec, permissions, SOC 2 posture, data retention, and contact. Regeneration via `scripts/build-security-packet.mjs`; runbook at `docs/runbooks/security-packet-update.md`.
+- **Live key permission viewer** — Sprint 2. 3/3 CEO voices wanted the wizard to show the detected scopes returned by the exchange before accepting the key (e.g., "Read ✓ Trade ✗ Withdraw ✗" with color coding). Currently we infer from the read-only check. **Status:** Still deferred — Sprint 5 plan v3 moved 5.8 Key Permission Viewer to a later session; `/security` page is the first half of the trust surface.
 - **Status=OPEN cleanup for legacy StrategyForm** — Sprint 3. Once the wizard has been live for a sprint and no one's using `/strategies/[id]/edit` for net-new strategies, remove the legacy StrategyForm flow entirely.
 - **Allocator intent capture surface** — Sprint 3. All 3 CEO voices flagged demand-side as the bigger risk. Ship an allocator-facing mandate-capture flow so the wizard-sourced supply has somewhere to land.
 - **Founder triage dashboard for allocator intent** — Sprint 3. Pair with the intent capture surface.
@@ -133,10 +133,8 @@ Same upgrade as Widget 26. Uses real fill data when available.
 
 ### Sprint 4 follow-ups (deferred from eng review)
 
-#### P2: Funding rate ingestion (Sprint 5+)
-- What: Fetch funding rate history per exchange (OKX account_bills FUNDING_FEE, Binance income FUNDING_FEE, Bybit closed PnL funding). Adjust position realized_pnl.
-- Why: Fill-based ROI underreports costs for perp strategies (funding can be -3% to +1% annually). Position ROI currently labeled "Price ROI (excl. funding)."
-- Blocked by: Raw fill ingestion stable in production.
+#### ~~P2: Funding rate ingestion (Sprint 5+)~~ — ✅ DONE in v0.11.1.0 (Sprint 5 Task 5.6)
+- Shipped: dedicated funding endpoints per exchange (Binance `fapiPrivate_get_income` FUNDING_FEE, OKX `account_bills` type=8, Bybit `v5/account/transaction-log` SETTLEMENT), new `funding_fees` table with 8-hour bucket match_key dedup, `positions.funding_pnl` column populated synchronously in `reconstruct_positions`. Forward-only cutover (existing `daily_pnl` aggregates retain historical funding). PositionsTab now shows "Total ROI (incl. funding)" with per-row price/funding breakdown when funding data is present.
 
 #### P3: Rollback runbook for raw fill data
 - What: Document SQL cleanup for derived positions/metrics after USE_RAW_TRADE_INGESTION flag-off.

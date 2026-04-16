@@ -6,6 +6,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.11.1.0] - 2026-04-15
+
+Sprint 5 first slice: real-time execution monitoring groundwork (funding rate ingestion)
+and the public trust surface. Perp strategies now get funding payments attributed per
+position instead of silently mixed into realized P&L. Allocators and prospects can read
+our security posture at `/security` before handing over API keys.
+
+### Added
+- **Funding rate ingestion** across Binance (`fapiPrivate_get_income` FUNDING_FEE filter),
+  OKX (`account_bills` type=8), and Bybit (`v5/account/transaction-log` settlement). New
+  `funding_fees` table dedups by 8-hour bucket match key so re-running the backfill is
+  idempotent. New `sync_funding` compute job kind + 4-hourly Vercel cron
+  (`/api/cron/sync-funding`) enqueues a job per perp strategy.
+- **`positions.funding_pnl` column** — reconstructed synchronously inside
+  `reconstruct_positions` by summing `funding_fees` rows in each position's
+  `[opened_at, closed_at]` window. Bounded by the min/max position window on the query,
+  paginated in 1000-row pages to avoid silent PostgREST truncation. Price ROI stays in
+  `realized_pnl`; total economic P&L is computed client-side as `realized_pnl + funding_pnl`.
+- **One-shot backfill script** `scripts/backfill_funding.py` — 90-day default lookback
+  (overridable via `FUNDING_BACKFILL_DAYS`), `--strategy-id` single-target mode, batch
+  api_keys resolution to avoid N round-trips.
+- **Public `/security` page** — editorial three-block layout (Data handling, Key handling,
+  Compliance posture) plus operational reference subsections that preserve all wizard
+  deep-link anchors. Statically prerendered, no auth required.
+- **Downloadable security packet PDF** (`public/security-packet.pdf`) — one page,
+  institutional typography. Regenerated via `scripts/build-security-packet.mjs` using
+  the repo's existing `puppeteer-core` (no new deps). Runbook at
+  `docs/runbooks/security-packet-update.md`.
+- **Reachability:** security posture link in the homepage footer, `LegalFooter`, the
+  Connect wizard step (new-tab, preserves flow), and the My Allocation empty state.
+
+### Changed
+- **`exchange.py`** stops routing `FUNDING_FEE` income rows into the Binance `daily_pnl`
+  aggregation. Forward-only cutover: existing aggregated rows retain their historical
+  funding component, new ingestion splits cleanly.
+- **`PositionsTab.tsx`** heading switches to "Total ROI (incl. funding)" with a per-row
+  breakdown tooltip when any position in the list has funding data. Gate now uses
+  per-row presence rather than summing (zero-sum hedged books still show the breakdown).
+- **`Position` type** gains `funding_pnl: number` (non-optional, non-null — matches DB
+  `NOT NULL DEFAULT 0`). New `FundingFee` interface.
+- **`proxy.ts` matcher** tightened — only `/security.txt`, `/robots.txt`, `.pdf` files,
+  and `/.well-known/*` bypass authentication. Previous `.*\.txt$` pattern was too
+  permissive.
+- **`/api/cron/sync-funding`** enqueues all perp strategies in parallel via
+  `Promise.allSettled` — cron handler latency stays bounded as strategy count grows.
+
+### Fixed
+- **Bridge V1 `source: "bridge"` metadata was silently dropped.** `contact_requests`
+  had no column to store it; route ignored the field. Not fixed here — deferred to
+  Sprint 5 Task 5.3. Flagged as residual in TODOS.md.
+- **Pre-existing `react-hooks/rules-of-hooks` violation** in `PositionsTab.tsx`:
+  `durationStats` was computed after an early return. Moved all hooks above the empty
+  state branch.
+- **Pre-existing `for-quants-landing.spec.ts` regressions** (`.well-known/security.txt`
+  and `/security.txt`) that were bouncing to `/login` — fixed by the proxy matcher
+  change above.
+
+### Security
+- **RLS on `funding_fees`** scopes reads strictly to the strategy owner
+  (`EXISTS (SELECT 1 FROM strategies s WHERE s.id = funding_fees.strategy_id AND s.user_id = auth.uid())`).
+  Writes are service-role only.
+- **New public `/security` page** documents the current posture (AES-256-GCM envelope
+  encryption, per-row DEK + Supabase Vault KEK, read-only API key enforcement, SOC 2
+  Type 1 preparation). Present-tense factual framing, no forward-looking promises.
+
+### Infrastructure
+- Migration `044_funding_fees.sql` — single atomic transaction: create table + indexes +
+  RLS policies + `positions.funding_pnl` column + register `sync_funding` in
+  `compute_job_kinds`. Self-verifying `DO` block at the end. No generated columns (avoids
+  table rewrite). Forward-only; no `daily_pnl` rewrite.
+- **`analytics-service/supabase/`** gitignored — Supabase CLI local state.
+
+### Tests
+- 15 new tests for funding_fetch (Binance error path, OKX archive, OKX dedup, Bybit
+  field fallback, 8-hour bucket boundary, all happy paths).
+- 5 new tests for position reconstruction funding attribution (summing, zero-funding
+  positions, price ROI independence, pagination across multiple pages, split-window
+  exclusion between positions).
+- 3 new tests for backfill idempotency (match-key conflict target, empty rows no-op,
+  batch size respect).
+- 3 new tests for `PositionsTab` funding UI (tooltip/heading switch, fallback label,
+  per-row funding detection).
+- 7 new tests for `/api/cron/sync-funding` route (GET + POST × auth/fetch/happy/failure).
+- 28 new proxy matcher assertions (bypass + guard coverage including the tightened
+  `.txt` list).
+- 4 new e2e tests for `/security` page (render, PDF link + asset, footer nav, wizard
+  anchor stability).
+
 ## [0.11.0.0] - 2026-04-12
 
 Sprint 4: Intelligence Layer + Bridge V1. Allocators now see what they didn't know
