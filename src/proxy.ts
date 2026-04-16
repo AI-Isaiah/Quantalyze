@@ -88,6 +88,12 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    // Skip Next internal assets, favicon, common image extensions, and the
+    // specific static documents the marketing surface depends on (RFC 9116
+    // security.txt + the downloadable security packet PDF). The .txt bypass is
+    // intentionally scoped to (security.txt|robots.txt) — a broad `.*\.txt$`
+    // pattern would let any unknown .txt path bypass auth. /unknown.txt stays
+    // guarded after this change.
+    "/((?!_next/static|_next/image|favicon.ico|\\.well-known/|.*\\.(?:svg|png|jpg|jpeg|gif|webp|pdf)$|(security|robots)\\.txt$).*)",
   ],
 };

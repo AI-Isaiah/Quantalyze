@@ -31,7 +31,38 @@ export function PositionsTab({
     [closedPositions],
   );
 
-  // Empty state
+  // Show funding breakdown in tooltip if ANY closed position has a non-zero
+  // funding_pnl. Use per-row presence check rather than summing — avoids
+  // false-negative when payments cancel out to zero total.
+  const hasFunding = useMemo(
+    () => closedPositions.some((p) => p.funding_pnl != null && p.funding_pnl !== 0),
+    [closedPositions],
+  );
+  const totalFundingPnl = useMemo(
+    () => closedPositions.reduce((s, p) => s + (p.funding_pnl ?? 0), 0),
+    [closedPositions],
+  );
+  const totalRealizedPnl = useMemo(
+    () => closedPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0),
+    [closedPositions],
+  );
+
+  // Duration stats from positions if available
+  const durationStats = useMemo(() => {
+    const durations = closedPositions
+      .map((p) => p.duration_days)
+      .filter((d): d is number => d != null)
+      .sort((a, b) => a - b);
+    if (durations.length === 0) return null;
+    const mean = durations.reduce((s, d) => s + d, 0) / durations.length;
+    const median = durations.length % 2 === 0
+      ? (durations[durations.length / 2 - 1] + durations[durations.length / 2]) / 2
+      : durations[Math.floor(durations.length / 2)];
+    const max = durations[durations.length - 1];
+    return { mean, median, max };
+  }, [closedPositions]);
+
+  // Empty state (AFTER all hooks — react-hooks/rules-of-hooks)
   if ((!positions || positions.length === 0) && !tm) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -55,22 +86,6 @@ export function PositionsTab({
   const avgRoi = tm?.avg_roi;
   const bestRoi = tm?.best_trade_roi ?? (bestTrades[0]?.roi ?? null);
   const worstRoi = tm?.worst_trade_roi ?? (worstTrades[0]?.roi ?? null);
-
-  // Duration stats from positions if available
-  const durationStats = useMemo(() => {
-    const durations = closedPositions
-      .map((p) => p.duration_days)
-      .filter((d): d is number => d != null)
-      .sort((a, b) => a - b);
-    if (durations.length === 0) return null;
-    const mean = durations.reduce((s, d) => s + d, 0) / durations.length;
-    const median = durations.length % 2 === 0
-      ? (durations[durations.length / 2 - 1] + durations[durations.length / 2]) / 2
-      : durations[Math.floor(durations.length / 2)];
-    const max = durations[durations.length - 1];
-    return { mean, median, max };
-  }, [closedPositions]);
-
   return (
     <>
       {/* Error state */}
@@ -163,15 +178,22 @@ export function PositionsTab({
             <div className="border-t border-border" />
             <div className="px-4 py-3">
               <div className="flex items-center gap-1 mb-2">
-                <h4 className="text-sm font-semibold text-text-primary">ROI</h4>
-                <span className="group relative">
+                <h4 className="text-sm font-semibold text-text-primary">
+                  {hasFunding ? "Total ROI (incl. funding)" : "ROI"}
+                </h4>
+                <span className="group relative" data-testid="roi-info">
                   <svg className="h-3.5 w-3.5 text-text-muted cursor-help" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                     <circle cx="8" cy="8" r="6.5" />
                     <path d="M8 7v4" />
                     <circle cx="8" cy="5" r="0.5" fill="currentColor" stroke="none" />
                   </svg>
-                  <span className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1 hidden group-hover:block w-48 rounded bg-text-primary px-2 py-1 text-[10px] text-white text-center shadow-lg z-10">
-                    Price ROI excludes funding payments
+                  <span
+                    className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1 hidden group-hover:block w-56 rounded bg-text-primary px-2 py-1 text-[10px] text-white text-center shadow-lg z-10"
+                    data-testid="roi-tooltip"
+                  >
+                    {hasFunding
+                      ? `Price ROI: ${formatNumber(totalRealizedPnl, 2)} + Funding: ${formatNumber(totalFundingPnl, 2)}`
+                      : "Price ROI excludes funding payments"}
                   </span>
                 </span>
               </div>

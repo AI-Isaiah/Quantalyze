@@ -17,6 +17,12 @@ export function LegalFooter() {
         </p>
         <nav className="flex items-center gap-1">
           <Link
+            href="/security"
+            className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
+          >
+            Security
+          </Link>
+          <Link
             href="/legal/privacy"
             className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
           >

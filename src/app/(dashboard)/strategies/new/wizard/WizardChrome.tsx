@@ -148,8 +148,16 @@ export function WizardChrome({
 
       <footer className="mt-12 border-t border-border pt-6">
         <div className="flex items-center justify-between">
-          <p className="text-[11px] text-text-muted">
-            Wizard help · <Link href="/security" className="underline-offset-4 hover:underline">Security practices</Link>
+          <p className="text-[13px] text-text-muted">
+            Wizard help ·{" "}
+            <Link
+              href="/security"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent underline-offset-4 hover:underline"
+            >
+              Review our security posture →<span className="sr-only"> (opens in new tab)</span>
+            </Link>
           </p>
           <button
             type="button"
