@@ -46,6 +46,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
 
+  docs-link-check:
+    # Task 7.4: link-check hook on docs/runbooks/soc2-readiness.md (and
+    # the rest of docs/**) to keep evidence links honest. Internal links
+    # only — external URL breakage should not fail CI because the
+    # runbooks reference third-party provider docs whose URLs we do not
+    # own. `--offline` resolves file:// and relative paths against the
+    # checked-out tree; the no-progress flag keeps CI logs quiet.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Link-check docs (internal links only)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline
+            --no-progress
+            --verbose
+            docs/runbooks/soc2-readiness.md
+            'docs/runbooks/**/*.md'
+          fail: true
+
   python:
     runs-on: ubuntu-latest
     defaults:
