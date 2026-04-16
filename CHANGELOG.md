@@ -6,6 +6,110 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.12.0.0] - 2026-04-16
+
+Sprint 5 main slice: real-time execution monitoring + allocator alerts. Allocators now
+get a reason to open Quantalyze every morning, not just at rebalance time. Trade
+reconciliation flags drift between stored fills and live exchange state. Critical alerts
+surface as a banner above the dashboard and ship via 48-hour ack-from-email tokens.
+Rebalance drift, intro flow with portfolio snapshot, usage analytics, and live key
+permission scopes all land together.
+
+### Added
+- **Trade reconciliation engine** (5.1). Nightly `reconcile-strategies` cron compares
+  stored `trades` against live exchange fills with two-stage matching: primary on
+  `(exchange, exchange_fill_id)`, secondary tuple match on
+  `(symbol, ts_30s, side, qty, price±1bp, cost, fee)` to handle Bybit ID rotation
+  without false positives. Discrepancies persist to `reconciliation_reports` and emit
+  `sync_failure` portfolio alerts (severity escalates if existing alert is stale).
+  New `last_fetched_trade_timestamp` checkpoint on `api_keys` so retries resume from
+  the last persisted fill instead of re-fetching from scratch.
+- **Critical AlertBanner + email ack tokens** (5.2). Full-width 56px banner above the
+  peer InsightStrip surfaces one critical alert at a time per the new
+  [alert-routing-v1 contract](docs/notes/alert-routing-v1.md). Email digest gains
+  per-alert "Acknowledge" links signed with HMAC-SHA256, 48-hour TTL, one-time-use
+  enforced via `used_ack_tokens`. Ack route renders a confirm page (defeats Outlook
+  Safe Links preloaders) and re-verifies HMAC + same-origin + per-IP rate limit on
+  POST. Weekly `cleanup-ack-tokens` cron prunes used tokens after 30 days.
+- **Rebalance-to-target alerts** (5.4). New `rebalance_drift` alert type fires when a
+  strategy's actual weight diverges >5% from target, with two-layer suppression:
+  7-day honeymoon for new portfolios + null-target guard. Weekly partial unique index
+  dedupes per portfolio+strategy. Triggers seed null `weight_snapshots` when a
+  portfolio or its strategies are first added.
+- **Intro flow with portfolio snapshot** (5.3). `/api/intro` now persists `source`
+  (direct vs bridge), `replacement_for`, `mandate_context`, and a server-computed
+  `portfolio_snapshot`. Snapshot races a 2-second budget; if it doesn't resolve in
+  time, the row inserts with `snapshot_status='pending'` and an async
+  `compute_intro_snapshot` job backfills it. Manager+allocator+founder notifications
+  survive function teardown via Next.js `after`. New `/admin/intros` page lists every
+  request with PII-scrubbed snapshot JSON. Fixes a Sprint 4 silent bug where the
+  Bridge ReplacementCard's `source: "bridge"` POST was discarded by the route.
+- **Usage analytics** (5.5). Server + client event catalogs (`session_start`,
+  `widget_viewed`, `intro_submitted`, `bridge_click`, `alert_acknowledged`) with
+  PostHog as sink. Server-side `session_count` lives in `auth.users.user_metadata`
+  via an atomic `increment_user_session_count` RPC with 30-min debounce. New
+  `/admin/usage` admin page renders daily funnel, widget views, and per-allocator
+  session heatmap; PostHog HTTP helper has 10s timeout, retry, and 5-min cached
+  fallback that surfaces staleness in the response. Feedback card deferred to
+  Sprint 7.
+- **Live key permission viewer** (5.8). New `analytics-service/services/key_permissions.py`
+  detects per-scope `{read, trade, withdraw}` for Binance/OKX/Bybit (15-min TTL cache)
+  via dedicated permission endpoints. New internal route at
+  `/internal/keys/{id}/permissions` is gated by `INTERNAL_API_TOKEN` (constant-time
+  compare) + per-key rate limit + audit log to `key_permission_audit`. Allocator-side
+  `<KeyPermissionBadge>` renders detected scopes in the wizard SyncPreviewStep and
+  on the strategy detail page. Existing `validate_key_permissions` shim preserves
+  the legacy `read_only` boolean for `/api/keys/validate-and-encrypt`.
+
+### Changed
+- `portfolio_alerts.alert_type` CHECK extended with `rebalance_drift`. Severity union
+  extended to allow `'critical'` (used by sync_failure escalation and AlertBanner).
+- `severity` literal `"critical" | "high" | "medium" | "low"` consolidated into a
+  shared `AlertSeverity` export from `src/lib/utils.ts` (previously duplicated 5×).
+- `_generate_alerts` (Python) now narrows its dedup-swallow to `23505` unique
+  violations only; everything else logs at `error` and re-raises. Same hardening on
+  the rebalance_drift insert.
+- `/api/alerts/critical` now caps results (`.limit(20)` per portfolio,
+  `.limit(50)` on the user-portfolios fan-out).
+- Reconcile alert fan-out batched into one bulk SELECT + bulk INSERT instead of
+  N×(SELECT+INSERT) per portfolio holding the strategy.
+- Snapshot helper parallelises its 3 independent post-portfolio queries via
+  `Promise.all` (was strictly sequential).
+- In-memory caches in `usage-metrics.ts`, `key_permissions.py`, and `internal.py`'s
+  rate-limit bucket all bounded by size to prevent unbounded growth.
+
+### Fixed
+- Sync checkpoint write now runs after every successful fetch (not only when
+  fills exist) so quiet-period strategies don't keep re-fetching the same window.
+- Snapshot route abandons in-flight compute on the 2s timer winning, with `.catch`
+  on the orphan promise to suppress unhandled rejections; true rejections after the
+  timer no longer get misclassified as `pending`.
+- `/api/alerts/ack` GET handler now rate-limited (`5/min` per IP) symmetrically
+  with POST; was previously open.
+- `unstable_cache` on `/api/keys/[id]/permissions` now wires `revalidate: 60` (was
+  unbounded — claimed 5min but never enforced).
+- AlertBanner surfaces an inline "Couldn't verify critical alerts" hint on >=500
+  responses instead of silently rendering as if no alerts exist.
+- `cron/reconcile-strategies` returns HTTP 500 when `enqueued===0 && failed>0`
+  (previously returned 200 even on total failure).
+
+### Migrations
+- `045_sync_checkpoints.sql` — `api_keys.last_fetched_trade_timestamp`
+- `046_reconciliation.sql` — `reconciliation_reports` table + `reconcile_strategy` job kind
+- `047b_used_ack_tokens.sql` — one-time-use ack token tracking (`ON DELETE SET NULL`)
+- `047c_severity_critical.sql` — extends `portfolio_alerts.severity` CHECK with `'critical'`
+- `048_contact_request_metadata.sql` — `mandate_context`, `portfolio_snapshot`, `source`,
+  `replacement_for`, `snapshot_status` + `compute_intro_snapshot` job kind
+- `050_rebalance_drift_check_and_trigger.sql` — `rebalance_drift` alert type +
+  `portfolio_alerts.strategy_id` + portfolios/portfolio_strategies seed triggers
+- `051_rebalance_drift_weekly_index.sql` — `CREATE INDEX CONCURRENTLY` for weekly dedup
+- `052_key_permission_audit.sql` — audit log for internal permission probes
+- `053_session_count_rpc.sql` — atomic `increment_user_session_count` RPC
+
+### Crons
+- `reconcile-strategies` (3:30 AM UTC daily) — enqueues `reconcile_strategy` per active strategy
+- `cleanup-ack-tokens` (3:00 AM UTC Sundays) — prunes `used_ack_tokens` older than 30 days
+
 ## [0.11.1.0] - 2026-04-15
 
 Sprint 5 first slice: real-time execution monitoring groundwork (funding rate ingestion)
