@@ -7,11 +7,12 @@ exception into (error_kind, sanitized message), and always (on strategy-
 scoped jobs) updates the UI status bridge before returning.
 
 Supported kinds:
-  sync_trades       -> run_sync_trades_job      (15-minute timeout)
-  compute_analytics -> run_compute_analytics_job (15-minute timeout)
-  compute_portfolio -> run_compute_portfolio_job (10-minute timeout)
-  poll_positions    -> run_poll_positions_job    (3-minute timeout)
-  sync_funding      -> run_sync_funding_job      (3-minute timeout)
+  sync_trades        -> run_sync_trades_job         (15-minute timeout)
+  compute_analytics  -> run_compute_analytics_job   (15-minute timeout)
+  compute_portfolio  -> run_compute_portfolio_job   (10-minute timeout)
+  poll_positions     -> run_poll_positions_job      (3-minute timeout)
+  sync_funding       -> run_sync_funding_job        (3-minute timeout)
+  reconcile_strategy -> run_reconcile_strategy_job  (5-minute timeout)
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
 decision:
@@ -37,7 +38,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 import ccxt
@@ -111,6 +112,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "compute_portfolio": 10 * 60,  # 10 minutes
     "poll_positions": 3 * 60,    # 3 minutes (stub; real handler lands commit 3)
     "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
+    "reconcile_strategy": 5 * 60,  # 5 minutes (fetch_my_trades + DB scan + diff)
 }
 
 
@@ -604,6 +606,178 @@ async def run_poll_positions_job(job: dict) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
+    """Compare live exchange fills against stored `trades` rows for the past 24h.
+
+    Pre-flight: same as sync_trades (strategy + api_key load, circuit
+    breaker, decrypt, exchange create). Then:
+      1. Fetch raw fills from the exchange via services.exchange.fetch_raw_trades
+         (the same seam sync_trades uses — fill-level, not daily aggregates).
+      2. Select `trades` rows for this strategy with is_fill=true and
+         timestamp in the past 24h.
+      3. Call services.reconciliation.diff_strategy_fills to classify
+         each mismatch (two-stage: PRIMARY by fill_id, SECONDARY by tuple
+         with id_drift/N:M review escalation).
+      4. UPSERT the report into reconciliation_reports
+         ON CONFLICT (strategy_id, report_date).
+      5. If the report is non-clean, insert one `sync_failure` alert per
+         portfolio that contains this strategy (dedup'd by migration
+         042's partial unique index on (portfolio_id, alert_type) WHERE
+         acknowledged_at IS NULL).
+
+    On ccxt.RateLimitExceeded (429), stamps api_keys.last_429_at before
+    classifying so the circuit breaker kicks in for subsequent jobs.
+    """
+    ctx = await _exchange_preflight(job, "run_reconcile_strategy_job")
+    if isinstance(ctx, DispatchResult):
+        return ctx
+
+    strategy_id = job["strategy_id"]
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=24)
+    since_iso = since.isoformat()
+    since_ms = parse_since_ms(None, preferred=since_iso)
+
+    # Step 1: fetch raw exchange fills (past 24h window).
+    from services.exchange import fetch_raw_trades
+
+    try:
+        exchange_fills = await fetch_raw_trades(
+            ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
+        )
+    except ccxt.RateLimitExceeded:
+        await _stamp_429(ctx.supabase, ctx.key_row)
+        raise
+    finally:
+        try:
+            await ctx.exchange.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+
+    # Step 2: load DB fills for the same window.
+    def _load_db_fills() -> list[dict]:
+        res = (
+            ctx.supabase.table("trades")
+            .select(
+                "exchange, symbol, side, price, quantity, fee, fee_currency, "
+                "timestamp, cost, exchange_fill_id, exchange_order_id, is_maker"
+            )
+            .eq("strategy_id", strategy_id)
+            .eq("is_fill", True)
+            .gte("timestamp", since_iso)
+            .execute()
+        )
+        return list(res.data or [])
+
+    db_fills = await db_execute(_load_db_fills)
+
+    # Step 3: run the pure-function diff.
+    from services.reconciliation import diff_strategy_fills
+
+    report = diff_strategy_fills(
+        strategy_id=strategy_id,
+        date_range=(since, now),
+        exchange_fills=exchange_fills,
+        db_fills=db_fills,
+    )
+
+    # Step 4: UPSERT the report row.
+    def _upsert_report() -> None:
+        ctx.supabase.table("reconciliation_reports").upsert(
+            {
+                "strategy_id": report.strategy_id,
+                "report_date": report.report_date,
+                "status": report.status,
+                "discrepancy_count": report.discrepancy_count,
+                "discrepancies": report.discrepancies,
+            },
+            on_conflict="strategy_id,report_date",
+        ).execute()
+
+    await db_execute(_upsert_report)
+    logger.info(
+        "reconcile_strategy: strategy=%s status=%s count=%d",
+        strategy_id, report.status, report.discrepancy_count,
+    )
+
+    # Step 5: fan out `sync_failure` alerts to every portfolio that holds
+    # this strategy. Skip on clean. We follow the select-then-insert
+    # pattern from routers/portfolio.py:_generate_alerts — PostgREST
+    # cannot reference migration 042's partial unique index in its
+    # ON CONFLICT clause, but the index itself provides race-safe dedup.
+    if report.status == "clean":
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    def _load_strategy_name() -> str:
+        res = (
+            ctx.supabase.table("strategies")
+            .select("name")
+            .eq("id", strategy_id)
+            .maybe_single()
+            .execute()
+        )
+        return (res.data or {}).get("name") or "Strategy"
+
+    def _load_portfolio_ids() -> list[str]:
+        res = (
+            ctx.supabase.table("portfolio_strategies")
+            .select("portfolio_id")
+            .eq("strategy_id", strategy_id)
+            .execute()
+        )
+        return [r["portfolio_id"] for r in (res.data or []) if r.get("portfolio_id")]
+
+    strategy_name = await db_execute(_load_strategy_name)
+    portfolio_ids = await db_execute(_load_portfolio_ids)
+
+    severity = (
+        "critical"
+        if report.status == "needs_manual_review" or report.discrepancy_count > 5
+        else "high"
+    )
+    message = (
+        f"Strategy {strategy_name} has {report.discrepancy_count} unreconciled "
+        f"fills for {report.report_date}."
+    )
+
+    for portfolio_id in portfolio_ids:
+        def _insert_alert(pid=portfolio_id) -> None:
+            existing = (
+                ctx.supabase.table("portfolio_alerts")
+                .select("id")
+                .eq("portfolio_id", pid)
+                .eq("alert_type", "sync_failure")
+                .is_("acknowledged_at", "null")
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                return
+            ctx.supabase.table("portfolio_alerts").insert({
+                "portfolio_id": pid,
+                "alert_type": "sync_failure",
+                "severity": severity,
+                "message": message,
+                "metadata": {
+                    "strategy_id": strategy_id,
+                    "report_date": report.report_date,
+                    "discrepancy_count": report.discrepancy_count,
+                    "status": report.status,
+                },
+            }).execute()
+
+        try:
+            await db_execute(_insert_alert)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reconcile_strategy: failed to insert sync_failure alert "
+                "for portfolio %s (strategy %s): %s",
+                portfolio_id, strategy_id, exc,
+            )
+
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -634,6 +808,8 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_poll_positions_job
     elif kind == "sync_funding":
         handler = run_sync_funding_job
+    elif kind == "reconcile_strategy":
+        handler = run_reconcile_strategy_job
     else:
         handler = None
 

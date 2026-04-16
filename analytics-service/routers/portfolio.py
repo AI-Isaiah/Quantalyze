@@ -357,6 +357,11 @@ def _generate_alerts(
     Uses ON CONFLICT DO NOTHING with the partial unique index
     `portfolio_alerts_dedup_unacked` (migration 042) to skip inserts when
     an unacknowledged alert of the same type already exists.
+
+    NOTE: `sync_failure` alerts are NOT generated here. They are inserted
+    by `run_reconcile_strategy_job` in services/job_worker.py, which has
+    the reconciliation diff in hand and knows which portfolios hold the
+    affected strategy. See Sprint 5 Task 5.1b and migration 046.
     """
     alerts = []
 
