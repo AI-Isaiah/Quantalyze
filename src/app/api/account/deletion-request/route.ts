@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { escapeHtml, notifyFounderGeneric } from "@/lib/email";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
+import { logAuditEvent } from "@/lib/audit";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
@@ -85,6 +86,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { error: "Failed to record deletion request" },
       { status: 500 },
     );
+  }
+
+  // Sprint 6 Task 7.1a — audit the deletion request. This is a
+  // GDPR Art. 17 intake, so a forensic trail is particularly load-bearing
+  // ("can we prove the user requested deletion on this date?"). Fire-and-
+  // forget; does not gate the response.
+  if (inserted?.id) {
+    logAuditEvent(supabase, {
+      action: "deletion.request.create",
+      entity_type: "data_deletion_request",
+      entity_id: inserted.id,
+      metadata: {
+        requested_at: inserted.requested_at,
+      },
+    });
   }
 
   // Fire-and-forget founder notification so the founder can begin manual

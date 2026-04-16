@@ -16,6 +16,7 @@ import {
   type PortfolioSnapshotJSON,
 } from "@/lib/intro/snapshot";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
+import { logAuditEvent } from "@/lib/audit";
 
 /**
  * Synchronous snapshot budget: if computePortfolioSnapshot finishes in
@@ -171,6 +172,22 @@ export async function POST(req: NextRequest) {
     source,
     strategy_id,
   });
+
+  // Sprint 6 Task 7.1a — audit the intro send. entity_id pins to the
+  // contact_requests row so a later forensic query can reconstruct "who
+  // introduced themselves to whom, when". Fire-and-forget.
+  if (inserted?.id) {
+    logAuditEvent(supabase, {
+      action: "intro.send",
+      entity_type: "contact_request",
+      entity_id: inserted.id,
+      metadata: {
+        source,
+        strategy_id,
+        replacement_for: replacement_for ?? null,
+      },
+    });
+  }
 
   // If snapshot compute didn't finish in time, enqueue the async worker.
   // Use the admin client — enqueue_compute_job is SECURITY DEFINER and
