@@ -1,5 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { after } from "next/server";
 
 /**
  * Fire-and-forget audit event emitter.
@@ -10,19 +11,26 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * cannot spoof user attribution — the only thing the TS layer provides
  * is the action/entity triple + metadata.
  *
- * Design constraints from ADR-0010 + Task 7.1a plan
- * -------------------------------------------------
- * 1. <10ms p99 per ADR-0010 (observability budget). Callers must not
- *    feel this emission in their tail latency. We achieve this by
- *    returning `void` immediately and kicking the RPC into the
- *    background via `queueMicrotask` — the caller's response flushes
- *    without waiting for the round-trip.
+ * Design constraints
+ * ------------------
+ * 1. Non-blocking emission. The caller's response must not gate on the
+ *    audit round-trip. We schedule the RPC via `after()` (Next 16) which
+ *    on Vercel uses `waitUntil(promise)` semantics — the function
+ *    instance stays alive until the promise settles even after the
+ *    response has flushed, so the event is never lost to a cold-finish.
  * 2. Never throws to the caller. An audit emission failure must NOT
  *    propagate into a 500 response or break a user-facing flow.
  *    Errors are caught and logged to stderr for operator diagnosis.
  * 3. No silent drops. Every failure path emits a `console.error` with
- *    a stable prefix `[audit]` so Sprint 7's log aggregation can grep
- *    for dropped events and surface a metric.
+ *    a stable prefix `[audit]` so log aggregation can grep for dropped
+ *    events and surface a metric.
+ *
+ * `after()` is only valid inside a request scope (route handlers, Server
+ * Actions, middleware). If this module is ever imported from a non-request
+ * server context (cron worker, Server Component prerender), `after()`
+ * throws synchronously — we catch and fall back to `queueMicrotask` so
+ * the emission still attempts a best-effort background write rather than
+ * surfacing the scheduling error to the caller.
  *
  * Taxonomy
  * --------
@@ -86,22 +94,22 @@ export interface AuditEvent {
  * user-scoped client created by `createClient()`). The RPC derives
  * user_id from `auth.uid()` internally, so passing an admin client
  * here would result in a NULL auth.uid() and the RPC would raise.
- *
- * Implementation note: we wrap the RPC in `queueMicrotask` so the
- * call is detached from the caller's awaited promise chain.
- * `queueMicrotask` flushes after the current synchronous work but
- * before I/O — in Next.js route handlers this lets the response
- * start serializing before we block on the RPC. On Vercel, the
- * runtime keeps the function warm until `queueMicrotask` drains,
- * so the event isn't lost to a cold-finish.
  */
 export function logAuditEvent(
   client: SupabaseClient,
   event: AuditEvent,
 ): void {
-  queueMicrotask(() => {
-    void emit(client, event);
-  });
+  try {
+    after(() => emit(client, event));
+  } catch {
+    // Outside a request scope (cron, prerender) `after()` throws. Fall
+    // back to a microtask so the emission still attempts a best-effort
+    // background write. The event may still drop on cold-finish here,
+    // but that path is non-route and rare.
+    queueMicrotask(() => {
+      void emit(client, event);
+    });
+  }
 }
 
 /**

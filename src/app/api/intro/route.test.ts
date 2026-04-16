@@ -14,15 +14,19 @@ import { NextRequest } from "next/server";
 // audit.ts imports "server-only" which throws under vitest+jsdom.
 vi.mock("server-only", () => ({}));
 
-// intro route imports `next/server` after which uses `waitUntil`/`after` —
-// stub `after` to a simple sync passthrough so we don't leak waiters.
+// audit.ts schedules the RPC via next/server's `after()`. In tests we
+// run the callback synchronously so the emission can be observed via
+// `STATE.rpcCalls`. In production `after()` defers the work until
+// after the response flushes using `waitUntil`.
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>(
     "next/server",
   );
   return {
     ...actual,
-    after: () => undefined,
+    after: (cb: () => void | Promise<void>) => {
+      void cb();
+    },
   };
 });
 
@@ -232,14 +236,15 @@ describe("POST /api/intro — audit-log emission (Task 7.1a)", () => {
     ).toHaveLength(0);
   });
 
-  it("does NOT emit the audit event when the contact_requests insert returns null id", async () => {
+  it("fails with 500 and emits no audit when the insert returns null id", async () => {
     STATE.insertedRow = null;
     const { POST } = await import("./route");
     const res = await POST(makeRequest({ strategy_id: STRAT_ID }));
-    // Route still returns success (inserted is unknown; upstream mock's
-    // single() returned null with no error). The pertinent assertion is
-    // that we don't attempt an audit for a row we don't have an id for.
-    expect(res.status).toBe(200);
+    // The invariant Task 7.1a locks: every 200 from this route implies
+    // an audit row exists. A null id with no error violates that (the
+    // row we would audit doesn't come back), so the route now surfaces
+    // a 500 rather than silently 200 without a forensic trail.
+    expect(res.status).toBe(500);
 
     await drainAuditMicrotasks();
     expect(

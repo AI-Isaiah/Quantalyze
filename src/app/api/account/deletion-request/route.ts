@@ -88,27 +88,39 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // Insert returned no error but also no row — treat as a failure so
+  // we never return 200 without an accompanying audit row. "Every 200
+  // implies an audit row exists" is the invariant Task 7.1a locks in
+  // for GDPR Art. 17 intake specifically.
+  if (!inserted?.id) {
+    console.error(
+      "[api/account/deletion-request] Insert returned null id with no error",
+    );
+    return NextResponse.json(
+      { error: "Failed to record deletion request" },
+      { status: 500 },
+    );
+  }
+
   // Sprint 6 Task 7.1a — audit the deletion request. This is a
   // GDPR Art. 17 intake, so a forensic trail is particularly load-bearing
   // ("can we prove the user requested deletion on this date?"). Fire-and-
   // forget; does not gate the response.
-  if (inserted?.id) {
-    logAuditEvent(supabase, {
-      action: "deletion.request.create",
-      entity_type: "data_deletion_request",
-      entity_id: inserted.id,
-      metadata: {
-        requested_at: inserted.requested_at,
-      },
-    });
-  }
+  logAuditEvent(supabase, {
+    action: "deletion.request.create",
+    entity_type: "data_deletion_request",
+    entity_id: inserted.id,
+    metadata: {
+      requested_at: inserted.requested_at,
+    },
+  });
 
   // Fire-and-forget founder notification so the founder can begin manual
   // processing. Email failure is not fatal — the row is already persisted.
   // user.email and user.id come from auth.getUser() but escape defensively.
   const safeUserLabel = escapeHtml(user.email ?? user.id);
-  const safeRequestedAt = escapeHtml(inserted?.requested_at ?? "(unknown)");
-  const safeRequestId = escapeHtml(inserted?.id ?? "(unknown)");
+  const safeRequestedAt = escapeHtml(inserted.requested_at ?? "(unknown)");
+  const safeRequestId = escapeHtml(inserted.id);
   void notifyFounderGeneric(
     `Account deletion requested: ${user.email ?? user.id}`,
     `<p>A user has requested account deletion.</p>

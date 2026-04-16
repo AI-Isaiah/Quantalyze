@@ -165,6 +165,20 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // PostgREST should return the row on success. A null id here means
+  // the insert succeeded but the select-after-insert came back empty —
+  // typically an RLS read policy mismatch. Fail the request rather
+  // than silently return 200 without an audit trail: "every 200 on
+  // this route implies an audit row exists" is the invariant Task
+  // 7.1a locks in.
+  if (!inserted?.id) {
+    console.error("[api/intro] Insert returned null id with no error");
+    return NextResponse.json(
+      { error: "Failed to create request" },
+      { status: 500 },
+    );
+  }
+
   // Fire-and-forget usage funnel event. PostHog flushAt:1 keeps this
   // non-blocking — we don't await so the response isn't gated on the
   // PostHog round-trip.
@@ -176,18 +190,16 @@ export async function POST(req: NextRequest) {
   // Sprint 6 Task 7.1a — audit the intro send. entity_id pins to the
   // contact_requests row so a later forensic query can reconstruct "who
   // introduced themselves to whom, when". Fire-and-forget.
-  if (inserted?.id) {
-    logAuditEvent(supabase, {
-      action: "intro.send",
-      entity_type: "contact_request",
-      entity_id: inserted.id,
-      metadata: {
-        source,
-        strategy_id,
-        replacement_for: replacement_for ?? null,
-      },
-    });
-  }
+  logAuditEvent(supabase, {
+    action: "intro.send",
+    entity_type: "contact_request",
+    entity_id: inserted.id,
+    metadata: {
+      source,
+      strategy_id,
+      replacement_for: replacement_for ?? null,
+    },
+  });
 
   // If snapshot compute didn't finish in time, enqueue the async worker.
   // Use the admin client — enqueue_compute_job is SECURITY DEFINER and

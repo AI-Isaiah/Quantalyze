@@ -118,21 +118,23 @@ database.
 Per ADR-0010's observability budget, audit emission must not appear in
 the request's tail latency. `logAuditEvent()` in `src/lib/audit.ts`:
 - Returns `void` synchronously (not a Promise).
-- Schedules the RPC via `queueMicrotask` so it runs AFTER the caller's
-  returned response serializes.
+- Schedules the RPC via `after()` (Next 16) so the emission runs after
+  the caller's response flushes. On Vercel, `after()` uses the
+  `waitUntil(promise)` primitive, which keeps the function instance
+  alive until the emission settles — the event is not lost to a
+  cold-finish after the response stream has closed.
 - Catches all errors and logs them to stderr with the stable prefix
   `[audit]`. Never throws to the caller.
-- On Vercel, the runtime keeps the function alive until the microtask
-  drains, so cold-finish drops are unlikely. If the RPC still fails
-  (network partition, DB down), the event is dropped and the stderr
-  log is the only signal — operators must grep `[audit]` to detect drop
-  storms.
+- Latency target: the emission adds ~0ms to caller-observed response
+  time. Because `after()` defers the RPC past response flush, the only
+  shared CPU cost is the microtask enqueue, which is ns-scale. There is
+  no fixed `p99` budget — the emitter simply never blocks the caller.
 
-The queue is implicit (the JS microtask queue), not a durable buffer.
-A crash between "caller returns" and "RPC completes" drops the event.
-Sprint 7+ may upgrade to a durable outbox if compliance requires
-stronger guarantees; today's tradeoff is "favor response latency over
-audit durability" per ADR-0010.
+The queue is implicit (`waitUntil` on Vercel, a microtask fallback
+off-platform), not a durable buffer. A crash between "caller returns"
+and "RPC completes" drops the event. Sprint 7+ may upgrade to a durable
+outbox if compliance requires stronger guarantees; today's tradeoff is
+"favor response latency over audit durability."
 
 ### 8. Cross-service emission (Python analytics-service)
 Task 7.1b extends audit emission into the Python analytics-service for
@@ -170,10 +172,10 @@ Task 7.1b picks between A1/A2 after a short Grok adversarial pass.
 - The NULL-entity_id escape hatch (disallowed here) pushes some signals
   into PostHog instead of audit_log; a future compliance auditor may
   ask "why isn't login in audit_log?" and we need to answer consistently.
-- The queueMicrotask-based emitter is not durable — a crash between
+- The `after()`-based emitter is not durable — a crash between
   response-flush and RPC-complete drops the event. Acceptable for
-  v1 given ADR-0010's stance, but tracked as tech debt if compliance
-  escalates.
+  v1 (matches the rest of the codebase's PostHog/notification fire-and-
+  forget pattern), but tracked as tech debt if compliance escalates.
 - Every new mutation site must remember to emit. There is no
   compile-time enforcement linking "you mutated X" to "you emitted an
   audit row". Code review is the only gate.
