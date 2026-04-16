@@ -19,6 +19,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+      - name: Check for banned packages (supply-chain)
+        run: node scripts/check-banned-packages.mjs
       - run: npm audit --audit-level=critical
       - run: npm run build
         env:
@@ -28,6 +30,21 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+
+  secret-scan:
+    # Task 7.6: gitleaks runs against the full commit history for PRs
+    # (fetch-depth: 0) and against the pushed commits on main. Config
+    # lives in .gitleaks.toml (extends the default ruleset with a
+    # narrow allowlist for known test fixtures).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
 
   python:
     runs-on: ubuntu-latest
