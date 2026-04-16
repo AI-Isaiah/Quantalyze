@@ -47,7 +47,17 @@ const BANNED = [
   },
 ];
 
-/** @typedef {{ name: string, version: string, source: string }} Hit */
+/** @typedef {{ name: string, version: string, source: string, reason: string, alternative: string }} Hit */
+
+/** @param {{name: string, version: string, source: string}} partial @returns {Hit} */
+function hitFor(partial) {
+  const meta = BANNED.find((b) => b.name === partial.name);
+  return {
+    ...partial,
+    reason: meta?.reason ?? "Unknown reason",
+    alternative: meta?.alternative ?? "No alternative listed.",
+  };
+}
 
 /**
  * Check package.json for any direct dependency (dependencies,
@@ -72,11 +82,11 @@ function scanPackageJson() {
     if (!deps || typeof deps !== "object") continue;
     for (const banned of BANNED) {
       if (Object.prototype.hasOwnProperty.call(deps, banned.name)) {
-        hits.push({
+        hits.push(hitFor({
           name: banned.name,
           version: String(deps[banned.name]),
           source: `package.json:${section}`,
-        });
+        }));
       }
     }
   }
@@ -110,19 +120,18 @@ function scanLockfile() {
   if (lock.packages && typeof lock.packages === "object") {
     for (const [key, entry] of Object.entries(lock.packages)) {
       if (!key || !entry || typeof entry !== "object") continue;
-      // Extract the final package name from the node_modules path.
       const marker = "node_modules/";
       const idx = key.lastIndexOf(marker);
       if (idx < 0) continue;
       const name = key.slice(idx + marker.length);
       for (const banned of BANNED) {
         if (name === banned.name) {
-          push({
+          push(hitFor({
             name: banned.name,
             // @ts-expect-error — dynamic lockfile shape
             version: String(entry.version ?? "unknown"),
             source: `package-lock.json:${key}`,
-          });
+          }));
         }
       }
     }
@@ -136,11 +145,11 @@ function scanLockfile() {
         if (!entry || typeof entry !== "object") continue;
         for (const banned of BANNED) {
           if (name === banned.name) {
-            push({
+            push(hitFor({
               name: banned.name,
               version: String(entry.version ?? "unknown"),
               source: `package-lock.json:${parentPath}${name}`,
-            });
+            }));
           }
         }
         if (entry.dependencies && typeof entry.dependencies === "object") {
@@ -163,14 +172,11 @@ function main() {
 
   console.error("check-banned-packages: BANNED PACKAGES DETECTED\n");
   for (const hit of hits) {
-    const meta = BANNED.find((b) => b.name === hit.name);
-    const reason = meta?.reason ?? "Unknown reason";
-    const alternative = meta?.alternative ?? "No alternative listed.";
     console.error(
       `  Banned package detected: ${hit.name}@${hit.version} (found in ${hit.source}).`,
     );
-    console.error(`    Reason: ${reason}`);
-    console.error(`    ${alternative}`);
+    console.error(`    Reason: ${hit.reason}`);
+    console.error(`    ${hit.alternative}`);
     console.error("");
   }
   console.error(

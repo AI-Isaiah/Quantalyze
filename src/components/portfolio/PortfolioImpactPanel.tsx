@@ -19,24 +19,6 @@ type FetchState =
   | { kind: "error"; message: string; retryAfter?: number }
   | { kind: "success"; data: SimulatorCandidate };
 
-/**
- * Sprint 6 Task 6.4 — Portfolio Impact Simulator slide-out.
- *
- * Opens from the right edge of the viewport when a user clicks
- * "Simulate Impact" on a discovery row. Fetches `/api/simulator`, renders
- * four delta chips (DeltaHero), a before/after equity-curve overlay, and
- * a partial-history warning when applicable.
- *
- * Reuses the visual structure from `ReplacementPanel` (Sprint 4) but
- * does NOT fork it — this is its own component with different body content.
- *
- * Accessibility:
- *   - role="dialog", aria-modal, aria-labelledby + aria-describedby
- *   - ARIA live region announces deltas ("Sharpe improved by +0.15")
- *   - aria-expanded wired on the trigger (see SimulateImpactButton)
- *   - Focus moves into the panel on open; Escape closes
- *   - Backdrop click closes (matches ReplacementPanel)
- */
 export function PortfolioImpactPanel({
   portfolioId,
   candidateStrategyId,
@@ -44,75 +26,72 @@ export function PortfolioImpactPanel({
   onClose,
 }: PortfolioImpactPanelProps) {
   const [state, setState] = useState<FetchState>({ kind: "loading" });
-  const [attempt, setAttempt] = useState(0);
+  const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = "portfolio-impact-panel-title";
   const descriptionId = "portfolio-impact-panel-description";
 
-  useEffect(() => {
+  const fetchImpact = useCallback(async () => {
+    abortRef.current?.abort();
     const controller = new AbortController();
+    abortRef.current = controller;
 
-    async function fetchImpact() {
-      setState({ kind: "loading" });
-      try {
-        const res = await fetch("/api/simulator", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            portfolio_id: portfolioId,
-            candidate_strategy_id: candidateStrategyId,
-          }),
-          signal: controller.signal,
-        });
+    setState({ kind: "loading" });
+    try {
+      const res = await fetch("/api/simulator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          portfolio_id: portfolioId,
+          candidate_strategy_id: candidateStrategyId,
+        }),
+        signal: controller.signal,
+      });
 
-        if (!res.ok) {
-          const body = await res
-            .json()
-            .catch(() => ({ error: "Simulation failed" }));
-          // 429 carries a retryAfter (seconds) that we surface to the UI so
-          // the retry button can be disabled for that duration instead of
-          // hammering the rate limiter in a loop.
-          if (res.status === 429) {
-            const headerRetry = Number(res.headers.get("Retry-After"));
-            const retryAfter =
-              typeof body.retryAfter === "number"
-                ? body.retryAfter
-                : Number.isFinite(headerRetry) && headerRetry > 0
-                  ? headerRetry
-                  : undefined;
-            if (!controller.signal.aborted) {
-              setState({
-                kind: "error",
-                message: body.error ?? "Too many simulations. Try again later.",
-                retryAfter,
-              });
-            }
-            return;
+      if (!res.ok) {
+        const body = await res
+          .json()
+          .catch(() => ({ error: "Simulation failed" }));
+        if (res.status === 429) {
+          const headerRetry = Number(res.headers.get("Retry-After"));
+          const retryAfter =
+            typeof body.retryAfter === "number"
+              ? body.retryAfter
+              : Number.isFinite(headerRetry) && headerRetry > 0
+                ? headerRetry
+                : undefined;
+          if (!controller.signal.aborted) {
+            setState({
+              kind: "error",
+              message: body.error ?? "Too many simulations. Try again later.",
+              retryAfter,
+            });
           }
-          throw new Error(body.error ?? `HTTP ${res.status}`);
+          return;
         }
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
 
-        const data = (await res.json()) as SimulatorCandidate;
-        if (!controller.signal.aborted) {
-          setState({ kind: "success", data });
-        }
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        if (!controller.signal.aborted) {
-          setState({
-            kind: "error",
-            message:
-              err instanceof Error ? err.message : "Failed to simulate impact",
-          });
-        }
+      const data = (await res.json()) as SimulatorCandidate;
+      if (!controller.signal.aborted) {
+        setState({ kind: "success", data });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      if (!controller.signal.aborted) {
+        setState({
+          kind: "error",
+          message:
+            err instanceof Error ? err.message : "Failed to simulate impact",
+        });
       }
     }
+  }, [portfolioId, candidateStrategyId]);
 
+  useEffect(() => {
     fetchImpact();
-    return () => {
-      controller.abort();
-    };
-  }, [portfolioId, candidateStrategyId, attempt]);
+    return () => abortRef.current?.abort();
+  }, [fetchImpact]);
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -133,14 +112,10 @@ export function PortfolioImpactPanel({
     [onClose],
   );
 
-  const handleRetry = useCallback(() => {
-    setAttempt((a) => a + 1);
-  }, []);
-
-  const announcement = useMemo(() => {
-    if (state.kind !== "success" || state.data.status !== "ok") return "";
-    return buildDeltaAnnouncement(state.data.deltas);
-  }, [state]);
+  const announcement =
+    state.kind === "success" && state.data.status === "ok"
+      ? buildDeltaAnnouncement(state.data.deltas)
+      : "";
 
   return (
     <div
@@ -212,7 +187,7 @@ export function PortfolioImpactPanel({
           {state.kind === "error" && (
             <ErrorState
               message={state.message}
-              onRetry={handleRetry}
+              onRetry={fetchImpact}
               retryAfter={state.retryAfter}
             />
           )}
@@ -466,6 +441,8 @@ function EquityOverlay({
   // Build a merged x-axis of all unique dates across both series so the
   // overlay stays aligned even when the proposed curve starts later
   // (candidate has a shorter history).
+  // Merged x-axis of all unique dates across both series keeps the overlay
+  // aligned when the proposed curve starts later (candidate has shorter history).
   const merged = useMemo(() => {
     const mapCurrent = new Map(current.map((p) => [p.date, p.value]));
     const mapProposed = new Map(proposed.map((p) => [p.date, p.value]));
@@ -529,11 +506,6 @@ interface MergedPoint {
 }
 
 function EquityOverlayChart({ merged }: { merged: MergedPoint[] }) {
-  // Dependency-free inline SVG. Keeps the panel light and avoids
-  // lightweight-charts boot cost inside a modal. The shape renders the
-  // same data a cleaner chart would — 2 overlaid polylines on a shared
-  // axis — just without tooltips or brushing. That's deliberate: this is
-  // a preview, not a detailed analytic surface.
   const width = 360;
   const height = 140;
   const padding = { top: 8, right: 8, bottom: 18, left: 8 };
@@ -607,8 +579,7 @@ function buildPath(points: ([number, number] | null)[]): string | null {
   let started = false;
   for (const p of points) {
     if (!p) {
-      // Break in the line; if we restart, the next segment will begin
-      // with M again.
+      // Null points create a gap: next valid point starts a new M segment.
       started = false;
       continue;
     }

@@ -359,16 +359,13 @@ export interface BridgeCandidate {
 }
 
 /**
- * Sprint 6 Task 6.4 — Portfolio impact simulator (ADD scenario).
- *
- * Status semantics:
- *   - `ok`: the simulation ran; deltas, curves, and metrics are populated.
- *   - `insufficient_data`: the candidate did not meet the 30-day overlap
- *     floor. Current metrics are populated; proposed metrics are null and
- *     `equity_curve_proposed` is empty.
- *   - `already_in_portfolio`: candidate is already a portfolio constituent;
- *     the ADD scenario is undefined.
- *   - `empty_portfolio`: there is nothing to add to.
+ * Portfolio impact simulator (ADD scenario) status.
+ *   - `ok`: simulation ran; deltas, curves, and metrics are populated.
+ *   - `insufficient_data`: candidate failed the 30-day overlap floor. Current
+ *     metrics are populated; proposed metrics are null and the proposed curve
+ *     is empty.
+ *   - `already_in_portfolio`: candidate is already a constituent; ADD is undefined.
+ *   - `empty_portfolio`: nothing to add to.
  */
 export type SimulatorStatus =
   | "ok"

@@ -1,15 +1,9 @@
 /**
- * Zod contract for the portfolio impact simulator (Sprint 6 Task 6.4).
+ * Zod contract for POST /api/simulator.
  *
- * Validates the response shape returned by POST /api/simulator. The
- * Next.js route calls the Python `/api/simulator` endpoint and parses the
- * raw JSON through this schema before returning it to the client. Parse
- * failures throw (strict contract) so UI bugs from shape drift are loud
- * rather than silent.
- *
- * Deltas follow the "positive = improvement" sign convention — see
- * `analytics-service/services/simulator_scoring.py` for the canonical
- * definition.
+ * The Next.js route proxies Python `/api/simulator` and parses the response
+ * through `SimulatorResponseSchema` — parse failures throw so shape drift
+ * surfaces loudly. See `SimulatorDeltas` in ../types.ts for the sign convention.
  */
 
 import { z } from "zod";
