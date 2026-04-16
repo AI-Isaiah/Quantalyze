@@ -427,17 +427,21 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             len(raw_fills), strategy_id,
         )
 
-        # Partial-success checkpoint (migration 045): stamp
-        # last_fetched_trade_timestamp AS SOON AS fills are durably persisted,
-        # before any downstream step that could fail. On retry,
-        # parse_since_ms prefers this cursor over last_sync_at so we don't
-        # re-fetch fills we already have.
-        def _update_fetched_cursor() -> None:
-            ctx.supabase.table("api_keys").update(
-                {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
-            ).eq("id", ctx.key_row["id"]).execute()
+    # Checkpoint cursor after any successful fetch (empty or not). Survives
+    # downstream analytics/reconstruction failure. Best-effort — a missed
+    # stamp just means re-fetching one window next run.
+    def _update_fetched_cursor() -> None:
+        ctx.supabase.table("api_keys").update(
+            {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", ctx.key_row["id"]).execute()
 
+    try:
         await db_execute(_update_fetched_cursor)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to stamp last_fetched_trade_timestamp for api_key %s: %s",
+            ctx.key_row.get("id"), exc,
+        )
 
     # Advance sync cursor always (even for empty fetches).
     def _update_cursor() -> None:

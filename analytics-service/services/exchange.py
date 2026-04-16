@@ -634,7 +634,7 @@ def parse_since_ms(
     while keeping `last_sync_at` fallback behavior for callers that haven't
     adopted the new cursor.
     """
-    value = preferred if preferred else last_sync_at
+    value = preferred if preferred is not None else last_sync_at
     if not value:
         return None
     try:

@@ -54,19 +54,14 @@ COMMENT ON COLUMN api_keys.last_fetched_trade_timestamp IS
 -- --------------------------------------------------------------------------
 DO $$
 BEGIN
-  IF NOT EXISTS(
+  IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'api_keys'
       AND column_name = 'last_fetched_trade_timestamp'
-      AND data_type = 'timestamp with time zone'
-      AND is_nullable = 'YES'
   ) THEN
-    RAISE EXCEPTION 'Migration 045 failed: api_keys.last_fetched_trade_timestamp missing or wrong type/nullability';
+    RAISE EXCEPTION 'Migration 045: last_fetched_trade_timestamp column was not created';
   END IF;
-
-  RAISE NOTICE 'Migration 045: api_keys.last_fetched_trade_timestamp installed and verified.';
-END
-$$;
+END $$;
 
 COMMIT;
