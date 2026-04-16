@@ -6,6 +6,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.12.1.0] - 2026-04-16
+
+Sprint 6 intermediate ship: Bridge close-out (portfolio impact simulator) plus the
+light half of Security Hardening (CI supply-chain + secret scanning, /security page
+depth, SOC 2 readiness doc). The heavy half (audit log, RBAC, GDPR) is deferred to
+a follow-up ship which will bump to `0.13.0.0` once 7.1a + 7.2 + 7.3 land.
+
+### Added
+- **Portfolio impact simulator (ADD scenario)** (6.4). New `/api/simulator` route
+  backed by `analytics-service/routers/simulator.py` + `services/simulator_scoring.py`
+  (~180 LOC ADD math extending the Sprint 4 bridge primitives). Click "Simulate
+  Impact" on any `/discovery` row to open a `PortfolioImpactPanel` slide-out with
+  four delta chips (Sharpe / MaxDD / correlation / concentration), a before/after
+  equity-curve overlay (muted `#94A3B8` current vs `#1B6B5A` proposed), and an ARIA
+  live region announcing deltas ("Sharpe improved by +0.15"). Math is server-side
+  (preserves correlation privacy); dual-layer ownership check matches the Bridge
+  precedent. Rate-limited 20/hour/user via new `simulatorLimiter`. Keyboard-primary
+  per WCAG 2.1.1; Escape/backdrop-click close. Next.js proxy forwards upstream
+  Python 4xx status codes (`AnalyticsUpstreamError` extends Error, backward-compatible
+  for the 9 existing callers). 429 responses surface `Retry-After` to the client so
+  the retry button disables for the cooldown duration. Mobile deferred to Sprint 10.
+- **CI supply-chain + secret scanning** (7.6). New `scripts/check-banned-packages.mjs`
+  greps `package.json` + `package-lock.json` (v1/v2/v3) against the CLAUDE.md banned
+  list (`axios`, `react-native-international-phone-number`,
+  `react-native-country-select`, `@openclaw-ai/openclawai`) and fails CI with the
+  listed safe alternative. New `secret-scan` job runs `gitleaks v2` with a narrow
+  `.gitleaks.toml` allowlist (`.env.example`, `pii-scrub.test.ts`,
+  `test_encryption.py`, `package-lock.json`). Existing `npm audit --audit-level=critical`
+  retained. New `docs-link-check` job runs `lychee` in `--offline` mode on
+  `docs/runbooks/**/*.md` so internal links can't rot unnoticed.
+- **`/security` page depth** (7.5). TLS 1.3 in-transit paragraph, 72-hour GDPR
+  breach-notification SLA (Article 33), `DataHandlingMatrix` table in Geist Mono
+  (In Transit / At Rest / Access). Additive only — existing Sprint 5.7 e2e
+  regression anchors preserved.
+- **SOC 2 Type 1 readiness checklist** (7.4). New `docs/runbooks/soc2-readiness.md`
+  as a spreadsheet-style table (9 rows × Control/Owner/Evidence/Status/Notes) so
+  allocator diligence teams can point at concrete in-repo evidence per control.
+  Scoped as a readiness signal, not a formal audit package (Type 1 needs a licensed
+  auditor + 3-6 month window, deferred to Year 2).
+
+### Changed
+- `src/components/strategy/StrategyTable.tsx` — new optional `portfolioId` prop and
+  per-row Actions column wiring `SimulateImpactButton`. Non-breaking for existing
+  non-allocator callers (prop defaults to `null`; button renders disabled with
+  explanatory tooltip when absent).
+- `src/app/(dashboard)/discovery/[slug]/page.tsx` — now fetches the viewer's real
+  portfolio via `Promise.all` alongside strategies, passes `portfolioId` to the table.
+
+### Deferred to next ship (will bump to 0.13.0.0)
+- 7.1a Audit log hardening (SECURITY DEFINER writer + deny policies + 3 pilot events)
+- 7.2 RBAC via `user_app_roles` join table + `requireRole`/`withRole` helpers
+- 7.3 Data retention + GDPR export/sanitize workflow + retention crons
+- 7.1b Audit-log fanout to remaining mutation sites + Python cross-service RPC
+  (originally Sprint 7 scope — folded back into the Sprint 7 plan)
+
 ## [0.12.0.0] - 2026-04-16
 
 Sprint 5 main slice: real-time execution monitoring + allocator alerts. Allocators now
