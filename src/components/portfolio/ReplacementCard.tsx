@@ -20,7 +20,7 @@ function deltaColor(value: number, invertedBetter: boolean): string {
   return value >= 0 ? "text-positive" : "text-negative";
 }
 
-function formatDelta(value: number, label: string, invertedBetter: boolean): string {
+function formatDelta(value: number, label: string): string {
   const sign = value >= 0 ? "+" : "";
   if (label === "MaxDD" || label === "Corr") {
     return `${sign}${(value * 100).toFixed(1)}% ${label}`;
@@ -102,7 +102,7 @@ export function ReplacementCard({ candidate, replacementFor }: ReplacementCardPr
               deltaColor(d.value, d.invertedBetter),
             )}
           >
-            {formatDelta(d.value, d.label, d.invertedBetter)}
+            {formatDelta(d.value, d.label)}
           </span>
         ))}
       </div>
