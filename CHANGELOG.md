@@ -6,6 +6,110 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.13.0.0] - 2026-04-17
+
+Sprint 6 closeout. Earns the right to hold allocator data with production-grade
+security hardening, and locks tamper-proof forensic accountability at the DB
+layer. Builds on the Bridge close-out light-half shipped in v0.12.1.0 + the CI
+red-fix in v0.12.1.1 — the heavy half (audit RLS, RBAC, GDPR workflow, full
+instrumentation fanout) ships here.
+
+### Added
+
+- **Tamper-proof audit log.** Allocator actions, API-key accesses, intro
+  requests, GDPR intake, and admin mutations now write to `audit_log` with
+  DB-enforced attribution (`auth.uid()` derived inside a SECURITY DEFINER RPC —
+  a compromised route cannot spoof who did what). Append-only at two layers:
+  RLS `USING (false)` deny policies on UPDATE/DELETE + a table-level REVOKE.
+  Two-stage retention: 2-year hot table, then moved to an append-only cold
+  archive for 5 more years, purged at 7y total. 33 instrumented action strings
+  across a namespaced `<subject>.<verb>` taxonomy (see ADR-0023).
+- **Role-based access control.** New `user_app_roles` join table with four
+  roles (`admin`, `allocator`, `quant_manager`, `analyst`), RLS gated via a
+  SECURITY DEFINER helper, and a `withRole("admin")` route wrapper that threads
+  Next 16 dynamic-route params. Backfilled from the legacy `is_admin` boolean
+  and `profiles.role` so dual-role users (admin + allocator) get both grants.
+  Admin-only role provisioning modal at `/admin/users/[id]` emits audit events
+  on every grant/revoke (see ADR-0005).
+- **GDPR Art. 15 data export.** `/api/account/export` streams the user's full
+  data bundle via a signed Supabase Storage URL (1 hour expiry, 100MB UTF-8
+  byte cap, 1/day rate limit). A CI hook (`scripts/check-gdpr-export-coverage.ts`)
+  greps every migration for `user_id` columns and fails the build if the export
+  manifest drifts — so adding a user-owned table without export coverage is a
+  build-time error.
+- **GDPR Art. 17 deletion workflow.** Admin review UI at
+  `/admin/deletion-requests` lists pending intake with approve/reject actions.
+  Approval calls a new `sanitize_user(user_id)` RPC that anonymizes PII rather
+  than hard-deleting, preserving `user_id` in `audit_log` + `contact_requests`
+  for forensic continuity. Idempotent via a sentinel probe (re-approval is a
+  no-op). Self-approval is blocked server-side — another admin must act
+  (see ADR-0024).
+- **Cross-service audit emission.** Python analytics service now emits audit
+  events for bridge scoring, simulator runs, optimizer runs, and reconciliation
+  via a service-role-only RPC variant (`log_audit_event_service`, migration 058).
+- **Grep-based audit coverage gate.** New `src/__tests__/audit-coverage.test.ts`
+  scans every `.insert/.update/.delete` call across `src/app/api/**/*.ts` and
+  fails CI if the mutation lacks a nearby `logAuditEvent` call or an explicit
+  `@audit-skip: <reason>` pragma. Catches the "I shipped a new route but
+  forgot to audit it" drift mode.
+- **Test coverage.** Net +120 tests across the sprint (1005 → 1130 vitest
+  passing + 23 live-DB-gated skips). 13 new Python tests for the audit
+  wrapper + cross-service emission.
+
+### Changed
+
+- **`data_deletion_requests`** gained `rejected_at` + `rejection_reason`
+  columns. Admin reject path records a reason; approve path still marks
+  `completed_at`.
+- **`organizations.created_by`** relaxed from `NOT NULL` (migration 057) so
+  the sanitize flow can null the FK without violating the constraint. Orgs
+  survive their creator's deletion with anonymized attribution.
+- **`ReplacementCard`**: dead `invertedBetter` parameter removed from
+  `formatDelta`. Gets the repo to a 0-warning lint baseline.
+
+### Fixed
+
+- Middleware matcher → `after()` primitive. The Task 7.1a pilot initially
+  used `queueMicrotask` for fire-and-forget audit emission, which drops events
+  on Vercel Fluid Compute when the function instance terminates after response
+  flush. Switched to `after()` from `next/server` (→ `waitUntil` on Vercel)
+  with a `queueMicrotask` fallback for non-request contexts (cron, prerender).
+- **Silent 200 on `/api/intro` + `/api/account/deletion-request`** when
+  PostgREST returned `{data: null, error: null}` — the route previously
+  returned success without writing an audit row. Promoted to 500 so the
+  invariant "every 200 implies an audit row exists" holds.
+- Admin self-approve gap on GDPR deletion requests. Mirrors the Sprint 7.2
+  self-revoke precedent — you cannot approve or reject your own deletion.
+
+### Deferred to next sprint
+
+`/simplify` backlog carried over from v0.12.1.0 plus two new items surfaced
+during this ship:
+
+- Extract `SlideOutPanel` primitive shared by `ReplacementPanel` +
+  `PortfolioImpactPanel` (~50 LOC scaffold duplication).
+- Relocate `SimulatorResponseSchema` + child schemas from
+  `src/lib/api/simulatorSchema.ts` to `src/lib/analytics-schemas.ts`
+  alongside `BridgeResponseSchema`.
+- Move `_records_to_series` helper from `routers/{match,portfolio,simulator}.py`
+  to `services/timeseries.py`.
+- Split `routers/simulator.py` fat-handler into
+  `services/simulator_data.py::load_simulator_context` + a thin orchestrator.
+- `PortfolioImpactPanel.tsx` (620 LOC) extract `EquityOverlayChart.tsx` +
+  `buildDeltaAnnouncement.ts` (~130 relocatable LOC).
+- Full 4-role × ~40-route RBAC matrix test (Sprint 6 shipped helper-level
+  16-case + 5 integration; full fanout is Sprint 7 alongside the broad
+  `withRole` migration).
+- Broad `withAdminAuth` → `withRole("admin")` migration across ~14 existing
+  admin routes (Sprint 6 piloted the wrapper on 3 new routes only).
+- Broad RLS fan-out to 14 user-owned tables using the
+  `current_user_has_app_role()` helper (Sprint 6 piloted on `portfolios`
+  only).
+- Wire the `api_key_rotation_reminder` cron's consumer (queue-writer ships
+  here; email consumer is Sprint 7).
+- Extend `withAdminAuth` wrapper to thread the acting user's id to handlers
+  so admin routes don't need to re-`createClient()` for audit emission.
+
 ## [0.12.1.1] - 2026-04-16
 
 Hotfix that unblocks `main` CI. Both the Python and frontend jobs had been red for
