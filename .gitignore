@@ -39,6 +39,11 @@ yarn-error.log*
 # gstack security reports and local state
 .gstack/
 
+# Claude Code local session state (settings.local.json, worktrees, locks) and
+# gstack planning artifacts — both are per-developer tooling, never in the repo.
+.claude/
+.planning/
+
 # supabase CLI local state
 supabase/.temp/
 
