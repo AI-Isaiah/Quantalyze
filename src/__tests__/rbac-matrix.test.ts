@@ -272,10 +272,12 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     });
     expect(opts).toMatchObject({ onConflict: "user_id,role" });
 
-    // Audit emission — give the microtask queue a turn.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    // Audit emission — wait for the microtask deferred by `after()` to
+    // settle. vi.waitFor polls a predicate with a bounded timeout and
+    // fails loudly if the call never lands (unlike a triple
+    // Promise.resolve chain that would silently green on an async
+    // emission regression).
+    await vi.waitFor(() => expect(logAuditRpcMock).toHaveBeenCalled());
     expect(logAuditRpcMock).toHaveBeenCalledWith(
       "log_audit_event",
       expect.objectContaining({
@@ -307,9 +309,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
       role: "analyst",
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(logAuditRpcMock).toHaveBeenCalled());
     expect(logAuditRpcMock).toHaveBeenCalledWith(
       "log_audit_event",
       expect.objectContaining({

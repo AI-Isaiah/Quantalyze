@@ -3,6 +3,15 @@ import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { APP_ROLES, type AppRole } from "@/lib/auth-types";
+
+// Re-export so existing server-side callers (routes, tests) keep
+// resolving `import { AppRole, APP_ROLES } from "@/lib/auth"` without a
+// rewrite. The /review follow-up (T2-I2) extracted the raw types into a
+// client-importable module; this file now owns the server-only surface
+// (Supabase client, NextResponse, etc.) while keeping the single-import
+// ergonomics for existing server-side consumers.
+export { APP_ROLES, type AppRole };
 
 /**
  * Role-Based Access Control (RBAC) helpers.
@@ -41,23 +50,18 @@ import { assertSameOrigin } from "@/lib/csrf";
  */
 
 /**
- * Canonical app role union. Kept in sync with the
- * `user_app_roles_role_check` constraint in migration 054. Adding a new
- * role requires:
- *   1. Updating the CHECK constraint (new migration).
- *   2. Adding the literal to `APP_ROLES` and this union.
- *   3. Updating ADR-0005's role table.
+ * Canonical role primitives (`AppRole` + `APP_ROLES`) live in
+ * `@/lib/auth-types` so client components can import from the same
+ * source of truth — the admin UI's `UserRolesPanel` is a client
+ * component and can't reach any `server-only` module. They are
+ * re-exported above so server-side callers keep using
+ * `import { AppRole, APP_ROLES } from "@/lib/auth"` unchanged.
+ *
+ * Adding a new role still requires three updates:
+ *   1. The `user_app_roles_role_check` CHECK constraint in a new migration.
+ *   2. The `AppRole` union + `APP_ROLES` array in `src/lib/auth-types.ts`.
+ *   3. The role table in ADR-0005.
  */
-export type AppRole = "admin" | "allocator" | "quant_manager" | "analyst";
-
-/** Runtime array of all valid role strings. Useful for validation in
- * admin UIs that build a checkbox list from this source of truth. */
-export const APP_ROLES: readonly AppRole[] = [
-  "admin",
-  "allocator",
-  "quant_manager",
-  "analyst",
-] as const;
 
 /**
  * Fetch the role set for a specific user. Returns an empty array if the

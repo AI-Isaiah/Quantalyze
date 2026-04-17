@@ -46,8 +46,9 @@ events in the last 30 days for user X") without parsing free-form
 strings.
 
 ### 2. TypeScript enum, synced with this ADR
-The authoritative enum lives in `src/lib/audit.ts`. Task 7.1b fans it
-out from 9 → 30 values:
+The authoritative enum lives in `src/lib/audit.ts`. Task 7.1b fanned it
+out from 9 → 30 values; the /review follow-up added 3 more (lead
+processing + sync.start) for 33 total:
 
 ```ts
 export type AuditAction =
@@ -81,6 +82,10 @@ export type AuditAction =
   | "api_key.revoke"
   | "trades.upload"
   | "admin.partner_import"
+  // /review follow-up (T4-C1 + T4-M6)
+  | "lead.process"
+  | "lead.unprocess"
+  | "sync.start"
   // 7.1b Python cross-service (via log_audit_event_service)
   | "bridge.score_candidates"
   | "simulator.run"
@@ -136,6 +141,9 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `api_key.revoke` | `api_key` | `api_keys.id` | reason, strategy_id? |
 | `trades.upload` | `strategy` | `strategies.id` (trades.upload is a bulk insert; strategy is the ownership anchor) | inserted, batches |
 | `admin.partner_import` | `partner_import` | deterministic hash UUID of `partner_tag` + timestamp (no DB row for the import batch) | partner_tag, managers_created, strategies_created, allocators_created |
+| `lead.process` | `for_quants_lead` | `for_quants_leads.id` of the lead being marked processed | — |
+| `lead.unprocess` | `for_quants_lead` | `for_quants_leads.id` of the lead being unmarked | — |
+| `sync.start` | `sync` | `strategies.id` — the strategy whose trades + analytics are being synced | path (queue / legacy) |
 | `bridge.score_candidates` | `bridge_run` | `portfolios.id` — the portfolio the bridge was run against | underperformer_strategy_id, candidate_count |
 | `simulator.run` | `simulator_run` | `portfolios.id` — the portfolio the ADD scenario targeted | candidate_strategy_id |
 | `optimizer.run` | `optimizer_run` | `portfolios.id` | suggestion_count |
@@ -206,9 +214,9 @@ the full 7-year retention window. Only superuser SQL (the
 from the cold table — same escape hatch as the hot table, same
 justification.
 
-### 7. Fire-and-forget emission, <10ms p99
-Per ADR-0010's observability budget, audit emission must not appear in
-the request's tail latency. `logAuditEvent()` in `src/lib/audit.ts`:
+### 7. Fire-and-forget emission (non-blocking)
+Audit emission must not appear in the request's tail latency.
+`logAuditEvent()` in `src/lib/audit.ts`:
 - Returns `void` synchronously (not a Promise).
 - Schedules the RPC via `after()` (Next 16) so the emission runs after
   the caller's response flushes. On Vercel, `after()` uses the
@@ -280,8 +288,13 @@ the admin client but still have a trusted acting-user id (e.g., the
 email-ack path at `/api/alerts/ack` where the HMAC-signed token is the
 proof of the acting user, not a browser JWT).
 
-Emission sites (4 Python, 1 TS email-ack)
------------------------------------------
+Emission sites
+--------------
+Task 7.1b added 4 new Python emission sites; the TS email-ack path
+(`alerts/ack` POST) was extended with `logAuditEventAsUser` (not a new
+emission site — `alert.acknowledge` was already emitted from
+`portfolio-alerts` PATCH for the in-app path).
+
 - `analytics-service/routers/portfolio.py::portfolio_bridge`
   → `bridge.score_candidates`
 - `analytics-service/routers/simulator.py::portfolio_simulator`
@@ -290,7 +303,8 @@ Emission sites (4 Python, 1 TS email-ack)
   → `optimizer.run`
 - `analytics-service/services/job_worker.py::run_reconcile_strategy_job`
   → `reconcile.compare`
-- `src/app/api/alerts/ack/route.ts` → `alert.acknowledge` (email path)
+- `src/app/api/alerts/ack/route.ts` → `alert.acknowledge` (email path;
+  extends the existing in-app emission with a service-role variant)
 
 ## Consequences
 
@@ -331,7 +345,7 @@ Emission sites (4 Python, 1 TS email-ack)
   - `src/app/api/intro/route.ts` (`intro.send`)
   - `src/app/api/account/deletion-request/route.ts`
     (`deletion.request.create`)
-- ADR-0010 observability budget (context for <10ms p99):
+- ADR-0010 observability budget (context for error-log routing):
   `docs/architecture/adr-0010-observability.md`.
 - ADR-0014 secret handling (context for why `api_key.decrypt` exists):
   `docs/architecture/adr-0014-secret-handling.md`.

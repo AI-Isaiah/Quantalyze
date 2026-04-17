@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
+import { APP_ROLES, type AppRole } from "@/lib/auth-types";
 
 /**
  * Role-provisioning panel. Client component rendered inside
@@ -16,51 +17,84 @@ import { Button } from "@/components/ui/Button";
  * current admin's own admin role is blocked on both client (disabled
  * button) and server (400 response). Design system: DM Sans body, navy
  * text, accent teal for the action button.
+ *
+ * Role source-of-truth: `APP_ROLES` + `AppRole` are imported from
+ * `@/lib/auth-types` (server-only-free) so this client component reads
+ * the same list as the server-side guard. The labels + descriptions
+ * below are UX copy; they're keyed on the `AppRole` literals so adding
+ * a new role will fail TypeScript here until a matching `ROLE_META`
+ * entry is added.
  */
 
-// Keep the literal list in sync with `AppRole` in src/lib/auth.ts.
-// Client components can't import from a "server-only" module so we
-// duplicate the runtime array here. The server-side Zod schema in the
-// API route is the authoritative gate — this client list is UX only.
-const ROLE_DEFINITIONS: Array<{ role: AppRole; label: string; description: string }> = [
-  {
-    role: "admin",
+// UX copy per role. Keyed by `AppRole` so `satisfies Record<AppRole, …>`
+// catches any role added to the union without a corresponding entry.
+const ROLE_META = {
+  admin: {
     label: "Admin",
     description: "Full back-office access. Can grant and revoke roles.",
   },
-  {
-    role: "allocator",
+  allocator: {
     label: "Allocator",
     description:
       "LP-side user. Can request intros, own portfolios, and see factsheets.",
   },
-  {
-    role: "quant_manager",
+  quant_manager: {
     label: "Quant manager",
     description:
       "Publishes strategies. Manages their own API keys and analytics.",
   },
-  {
-    role: "analyst",
+  analyst: {
     label: "Analyst",
     description:
       "Read-only analyst seat. No mutation surface; views discovery + factsheets.",
   },
-];
+} as const satisfies Record<AppRole, { label: string; description: string }>;
 
-type AppRole = "admin" | "allocator" | "quant_manager" | "analyst";
+// Derive the rendered list from `APP_ROLES` so the display order
+// matches the server-side ordering exactly (admin first, analyst last).
+const ROLE_DEFINITIONS: ReadonlyArray<{
+  role: AppRole;
+  label: string;
+  description: string;
+}> = APP_ROLES.map((role) => ({
+  role,
+  label: ROLE_META[role].label,
+  description: ROLE_META[role].description,
+}));
+
+/** Render a `granted_at` ISO timestamp as YYYY-MM-DD in UTC. Using UTC
+ * avoids the timezone-jitter that would make "Granted 2026-04-16" on
+ * the west coast display as "Granted 2026-04-15" — the grant date is a
+ * server-side fact, not a local-time event. */
+function formatGrantDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toISOString().slice(0, 10);
+}
 
 interface UserRolesPanelProps {
   targetUserId: string;
   currentRoles: AppRole[];
   /** true when the admin is viewing their own page — prevents self-revoke of admin. */
   isSelf: boolean;
+  /** Per-role grant metadata for currently-held roles. Undefined or empty
+   * when no active roles exist. Keyed by the role literal. */
+  roleMetadata?: Partial<
+    Record<
+      AppRole,
+      {
+        granted_at: string | null;
+        granter_email: string | null;
+      }
+    >
+  >;
 }
 
 export function UserRolesPanel({
   targetUserId,
   currentRoles,
   isSelf,
+  roleMetadata,
 }: UserRolesPanelProps) {
   const router = useRouter();
   const [pendingRole, setPendingRole] = useState<AppRole | null>(null);
@@ -121,6 +155,7 @@ export function UserRolesPanel({
           const has = currentRoles.includes(role);
           const selfAdminBlock = isSelf && role === "admin" && has;
           const disabled = pendingRole !== null || selfAdminBlock;
+          const grantInfo = has ? roleMetadata?.[role] : undefined;
           return (
             <li
               key={role}
@@ -141,6 +176,17 @@ export function UserRolesPanel({
                   )}
                 </div>
                 <p className="text-xs text-text-muted mt-1">{description}</p>
+                {has && grantInfo && (grantInfo.granted_at || grantInfo.granter_email) && (
+                  <p className="text-[11px] text-text-muted mt-1.5">
+                    Granted
+                    {grantInfo.granted_at
+                      ? ` ${formatGrantDate(grantInfo.granted_at)}`
+                      : ""}
+                    {grantInfo.granter_email
+                      ? ` by ${grantInfo.granter_email}`
+                      : ""}
+                  </p>
+                )}
                 {selfAdminBlock && (
                   <p className="text-[11px] text-text-muted mt-2 italic">
                     You cannot revoke your own admin role. Ask another admin.

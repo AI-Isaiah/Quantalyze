@@ -85,6 +85,15 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
 }));
 
+// `@/lib/audit` pulls in `server-only` which throws under vitest+jsdom.
+// The route emits `sync.start` on both branches (legacy + queue); the
+// coverage regression test asserts the imports, but this unit test
+// only cares about the compute-path logic — stub the emission out.
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/audit", () => ({
+  logAuditEvent: vi.fn(),
+}));
+
 // Mock next/server — preserve NextRequest/NextResponse, capture after()
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>("next/server");

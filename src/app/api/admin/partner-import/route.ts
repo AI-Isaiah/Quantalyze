@@ -338,8 +338,17 @@ export async function POST(request: Request): Promise<NextResponse> {
     .createHash("sha256")
     .update(`${partner_tag}:${Date.now()}`)
     .digest("hex");
-  // Collapse the 64-char hex to a UUID string so entity_id satisfies
-  // the audit_log.entity_id UUID column constraint.
+  // Collapse the 64-char hex to a UUID-shaped string so entity_id
+  // satisfies the audit_log.entity_id UUID column constraint.
+  //
+  // NOTE (/review T4-M4): this is NOT a cryptographic v4 UUID — the
+  // variant+version nybbles are hand-stamped (`"4"` + `"8"`) so the
+  // string parses as a valid UUID shape, but the underlying payload is
+  // a deterministic sha256 slice, not 122 bits of randomness. The
+  // uniqueness guarantee is sha256 collision-resistance (2^128 level)
+  // rather than RFC 4122 v4 randomness. Fine for an audit anchor —
+  // we need a stable identifier the operator can grep against, not an
+  // unguessable token.
   const importUuid = [
     importRunId.slice(0, 8),
     importRunId.slice(8, 12),

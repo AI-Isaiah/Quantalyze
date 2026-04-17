@@ -44,7 +44,11 @@ import * as path from "node:path";
  * where the audit lands.
  */
 
-const API_DIR = path.resolve(__dirname, "../../src/app/api");
+// __dirname is src/__tests__ at test time, so the API dir is one
+// directory up + into app/api. The previous literal referenced
+// ../../src/app/api, which only worked by accident because path.resolve
+// collapsed the redundant src prefix against the test runner's cwd.
+const API_DIR = path.resolve(__dirname, "../app/api");
 
 interface Mutation {
   file: string;
@@ -137,13 +141,66 @@ function findMutations(file: string, src: string): Mutation[] {
 }
 
 /**
+ * Strip `//`-prefixed comment content so a comment mentioning
+ * `logAuditEvent` (e.g., "// TODO: add logAuditEvent here") does not
+ * falsely satisfy the coverage check. /review follow-up (T4-M2).
+ *
+ * Conservative: only strips `// …` to end of line. Doesn't attempt to
+ * parse `/* … *\/` block comments or JSX comments — in practice the
+ * route files don't use block comments around logAuditEvent mentions,
+ * and single-line comments are where the false-positive risk lives.
+ * If this ever matters more, switch to a proper tokenizer.
+ */
+function stripLineComment(line: string): string {
+  const idx = line.indexOf("//");
+  if (idx < 0) return line;
+  return line.slice(0, idx);
+}
+
+/**
+ * Known helper modules whose exports mutate DB tables but whose callers
+ * typically inline the mutation in a route file via a helper call
+ * rather than a `.from(...).update(...)` chain. The grep-based mutation
+ * scan can't see those helper calls because the mutation is one hop
+ * away in a different file. /review follow-up (T4-C1).
+ *
+ * For each entry, if a route file `import`s the module and calls one of
+ * the listed helper names, we synthesize a virtual "mutation" on the
+ * import line so the audit-coverage check can still pass/fail the
+ * route. The author can either emit `logAuditEvent` in the route or
+ * add an `@audit-skip` pragma above the import — the same contract as
+ * for inline mutations.
+ */
+const HELPER_MUTATORS: Array<{ module: string; names: string[] }> = [
+  {
+    module: "@/lib/for-quants-leads-admin",
+    names: ["markLeadProcessed", "unmarkLeadProcessed"],
+  },
+];
+
+/**
  * Check whether a given mutation is "covered" — either an audit call
- * within the ±25-line window, OR an `@audit-skip:` pragma within 3
- * lines above.
+ * within a forward window, OR an `@audit-skip:` pragma within 8 lines
+ * above the mutation chain's start line.
+ *
+ * Window shape:
+ *   - Pragma lookback: 8 lines ABOVE `chainStart` (accommodates a
+ *     multi-line comment block explaining the skip reason).
+ *   - Audit-call lookforward: 60 lines AFTER the mutation method line
+ *     (`.insert(…)` / `.update(…)` / …) plus 3 lines above chainStart
+ *     for the rare "audit-before-mutation" pattern.
+ *
+ * Empirical basis: the intro.send pilot sits 48 lines after its insert;
+ * deletion.request.create pilot sits ~30 lines after. A 60-line window
+ * covers both with margin, without allowing a mutation at line 10 to
+ * be "covered" by an audit call in a different function at line 500.
  *
  * The window is asymmetric (mostly forward) because audit emissions
  * conventionally follow the mutation they audit (so caller-error
  * branches can return before the emission fires).
+ *
+ * /review follow-up (T4-M2): strips `//` comments before scanning so a
+ * comment mentioning `logAuditEvent` doesn't falsely satisfy coverage.
  */
 function isCovered(
   mutation: Mutation,
@@ -168,16 +225,57 @@ function isCovered(
   // Audit call check: logAuditEvent / logAuditEventAsUser within a
   // 60-line forward window from the mutation method line. We also
   // search 3 lines above the chain start for the rare
-  // "audit-before-mutation" pattern.
+  // "audit-before-mutation" pattern. Comment content is stripped so a
+  // `// TODO: logAuditEvent(…)` mention doesn't satisfy coverage.
   const windowStart = Math.max(0, chainStartIdx - 3);
   const windowEnd = Math.min(lines.length, lineIdx + 60);
   for (let j = windowStart; j < windowEnd; j++) {
-    if (/logAuditEvent(AsUser)?\s*\(/.test(lines[j])) {
+    if (/logAuditEvent(AsUser)?\s*\(/.test(stripLineComment(lines[j]))) {
       return { covered: true, reason: "audit-call" };
     }
   }
 
   return { covered: false, reason: "uncovered" };
+}
+
+/**
+ * Find DB-mutating helper calls — see HELPER_MUTATORS above. Returns a
+ * synthesized Mutation for each call so the same coverage check can
+ * run. The mutation `line` is the helper-call line; `chainStart` is the
+ * same (helper calls are not method chains, so pragma-above works from
+ * the same anchor). /review follow-up (T4-C1).
+ */
+function findHelperMutations(file: string, src: string): Mutation[] {
+  const lines = src.split("\n");
+  const out: Mutation[] = [];
+
+  for (const helper of HELPER_MUTATORS) {
+    // Must import from the helper module for its calls to count.
+    const importRe = new RegExp(
+      `from\\s+["']${helper.module.replace(/[./]/g, "\\$&")}["']`,
+    );
+    const imports = lines.some((l) => importRe.test(l));
+    if (!imports) continue;
+
+    for (const name of helper.names) {
+      const callRe = new RegExp(`\\b${name}\\s*\\(`);
+      for (let i = 0; i < lines.length; i++) {
+        const line = stripLineComment(lines[i]);
+        if (!callRe.test(line)) continue;
+        // Skip the import declaration itself — the `import { foo } from ...`
+        // line doesn't count as a call site.
+        if (/^\s*import\s/.test(lines[i])) continue;
+        out.push({
+          file,
+          line: i + 1,
+          chainStart: i + 1,
+          snippet: line.trim(),
+        });
+      }
+    }
+  }
+
+  return out;
 }
 
 describe("audit coverage: every mutation site in src/app/api must emit or skip", () => {
@@ -194,7 +292,13 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
     for (const file of routeFiles) {
       const src = fs.readFileSync(file, "utf8");
       const lines = src.split("\n");
-      const mutations = findMutations(file, src);
+      const mutations = [
+        ...findMutations(file, src),
+        // /review follow-up (T4-C1): helper-indirection coverage.
+        // Routes that delegate their mutation to a named helper export
+        // must still emit an audit event in the route file.
+        ...findHelperMutations(file, src),
+      ];
       for (const m of mutations) {
         const check = isCovered(m, lines);
         if (!check.covered) {

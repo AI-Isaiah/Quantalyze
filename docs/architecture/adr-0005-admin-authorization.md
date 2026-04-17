@@ -159,6 +159,22 @@ eliminates the env-var dependency and the per-request DB query.
   (new migration), `AppRole` union, ADR-0005 table. Same constraint
   as the `AuditAction` enum per ADR-0023.
 
+### /review follow-up (post-Task 7.2): role-type extraction
+The /review pass on Task 7.2 flagged a 3-copy drift surface for the
+role list (migration 054 CHECK constraint, `src/lib/auth.ts`, and
+`src/components/admin/UserRolesPanel.tsx`). The third copy existed
+because the client component can't import from the `server-only`
+`auth.ts`.
+
+Resolution: `AppRole` + `APP_ROLES` now live in
+`src/lib/auth-types.ts` (no `server-only` directive). `src/lib/auth.ts`
+re-exports them so existing server-side imports are unchanged.
+`UserRolesPanel.tsx` now imports from the shared module and derives
+its UI metadata from `APP_ROLES` — adding a new role without a
+matching `ROLE_META` entry is a TypeScript error at the
+`satisfies Record<AppRole, …>` constraint. Drift surface: 3 → 2 (the
+migration SQL stays as ground truth; the TS side is one file).
+
 ## Evidence
 - Pattern A (proxy): `src/proxy.ts` (lines 63-82).
 - Pattern B (email helper): `src/lib/admin.ts` (lines 13-16).

@@ -873,7 +873,24 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
 
+    # /review follow-up (T4-I1): emit the audit event BEFORE the empty-
+    # candidates fast-path. "User ran the bridge, got zero candidates"
+    # is still a user-intent event worth auditing (especially for abuse
+    # detection — a caller who triggers many empty-candidate runs is
+    # interesting signal). We compute candidates separately below for
+    # the non-empty branch; the empty branch reports candidate_count=0
+    # and returns a 200 with an empty list.
     if not candidate_returns:
+        log_audit_event(
+            user_id=req.user_id,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=req.portfolio_id,
+            metadata={
+                "underperformer_strategy_id": req.underperformer_strategy_id,
+                "candidate_count": 0,
+            },
+        )
         return {
             "status": "complete",
             "portfolio_id": req.portfolio_id,

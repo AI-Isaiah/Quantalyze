@@ -58,6 +58,42 @@ export default async function AdminUserDetailPage({
       ["admin", "allocator", "quant_manager", "analyst"].includes(r),
     );
 
+  // Resolve granter emails so the panel can render "Granted YYYY-MM-DD
+  // by <email>" under each active role chip. One SELECT IN(...) — the
+  // distinct granter set is small (typically 1-3 admins in the pilot).
+  // NULL granted_by rows (backfilled historical rows) are skipped.
+  const granterIds = Array.from(
+    new Set(
+      (roleRows ?? [])
+        .map((r) => r.granted_by)
+        .filter((gid): gid is string => typeof gid === "string" && gid.length > 0),
+    ),
+  );
+  const granterEmailById = new Map<string, string>();
+  if (granterIds.length > 0) {
+    const { data: granterRows } = await admin
+      .from("profiles")
+      .select("id, email")
+      .in("id", granterIds);
+    for (const row of granterRows ?? []) {
+      if (row.email) granterEmailById.set(row.id, row.email);
+    }
+  }
+
+  const roleMetadata: Partial<
+    Record<AppRole, { granted_at: string | null; granter_email: string | null }>
+  > = {};
+  for (const r of roleRows ?? []) {
+    const role = r.role as AppRole;
+    if (!currentRoles.includes(role)) continue;
+    roleMetadata[role] = {
+      granted_at: (r.granted_at as string | null) ?? null,
+      granter_email: r.granted_by
+        ? (granterEmailById.get(r.granted_by as string) ?? null)
+        : null,
+    };
+  }
+
   const isSelf = profile.id === user.id;
 
   return (
@@ -123,6 +159,7 @@ export default async function AdminUserDetailPage({
             targetUserId={profile.id}
             currentRoles={currentRoles}
             isSelf={isSelf}
+            roleMetadata={roleMetadata}
           />
         </Card>
       </div>

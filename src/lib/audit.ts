@@ -113,6 +113,10 @@ export type AuditAction =
   | "api_key.revoke"
   | "trades.upload"
   | "admin.partner_import"
+  // --- /review follow-up (T4-C1 + T4-M6) ------------------------------
+  | "lead.process"
+  | "lead.unprocess"
+  | "sync.start"
   // --- 7.1b Python cross-service (via log_audit_event_service) --------
   | "bridge.score_candidates"
   | "simulator.run"
@@ -145,6 +149,9 @@ export type AuditEntityType =
   | "portfolio_note"
   | "investor_attestation"
   | "trades_upload"
+  // --- /review follow-up (T4-C1 + T4-M6) ------------------------------
+  | "for_quants_lead"
+  | "sync"
   // --- 7.1b Python cross-service entities -----------------------------
   | "bridge_run"
   | "simulator_run"
