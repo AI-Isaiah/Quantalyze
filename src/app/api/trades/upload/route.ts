@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
+import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -105,6 +107,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   for (let i = 0; i < sanitized.length; i += batchSize) {
     const batch = sanitized.slice(i, i + batchSize);
+    // @audit-skip: per-batch insert within a bulk user-upload flow.
+    // Rolled up into a single trades.upload audit event after all
+    // batches succeed — one event per upload, not per 500-row batch.
     const { error } = await supabase.from("trades").insert(batch);
     if (error) {
       return NextResponse.json({
@@ -114,6 +119,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
     inserted += batch.length;
   }
+
+  // Sprint 6 Task 7.1b — one rollup audit event per upload call.
+  // entity_id pins to the strategy the trades were uploaded against.
+  const auditSupabase = await createClient();
+  logAuditEvent(auditSupabase, {
+    action: "trades.upload",
+    entity_type: "strategy",
+    entity_id: strategy_id,
+    metadata: { inserted, batches: Math.ceil(inserted / batchSize) },
+  });
 
   return NextResponse.json({ inserted, strategy_id });
 });

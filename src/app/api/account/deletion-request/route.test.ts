@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
+// Task 7.1a added a `logAuditEvent` call to the route. audit.ts imports
+// "server-only" which throws under vitest+jsdom — neuter it.
+vi.mock("server-only", () => ({}));
+
 /**
  * Tests for the GDPR Art. 17 deletion-request intake.
  *
@@ -53,10 +57,12 @@ const supabaseState = vi.hoisted(
     }>;
     insertCalls: number;
     selectCalls: number;
+    rpcCalls: Array<{ name: string; args: Record<string, unknown> }>;
   } => ({
     rows: [],
     insertCalls: 0,
     selectCalls: 0,
+    rpcCalls: [],
   }),
 );
 
@@ -70,6 +76,10 @@ vi.mock("@/lib/supabase/server", () => {
           data: { user: authUser },
           error: null,
         }),
+      },
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        supabaseState.rpcCalls.push({ name, args });
+        return { data: null, error: null };
       },
       from: () => {
         const builder = {
@@ -150,7 +160,21 @@ describe("POST /api/account/deletion-request", () => {
     supabaseState.rows = [];
     supabaseState.insertCalls = 0;
     supabaseState.selectCalls = 0;
+    supabaseState.rpcCalls = [];
   });
+
+  /**
+   * Drain the microtask queue. logAuditEvent schedules its RPC via
+   * queueMicrotask (so the caller doesn't wait), which means the RPC
+   * only fires after the route handler's returned Promise settles and
+   * the current task yields. Awaiting three resolved promises is enough
+   * to let both the microtask AND the inner `await client.rpc(...)` land.
+   */
+  async function drainAuditMicrotasks() {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
 
   it("inserts on the first request and returns the new row", async () => {
     const { POST } = await import("./route");
@@ -232,6 +256,58 @@ describe("POST /api/account/deletion-request", () => {
       const res = await POST(makeRequest({ origin: "http://localhost:3000" }));
       expect(res.status).toBe(200);
       expect(supabaseState.insertCalls).toBe(1);
+    });
+  });
+
+  // Sprint 6 Task 7.1a — audit log pilot. The 3 pilot events are fire-and-
+  // forget (queueMicrotask-scheduled) so they do NOT block the response, but
+  // they MUST still fire on the happy path.
+  describe("audit-log emission (Task 7.1a)", () => {
+    it("emits deletion.request.create via log_audit_event RPC after insert", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest());
+      expect(res.status).toBe(200);
+
+      // The audit RPC is scheduled via queueMicrotask — drain so it fires
+      // before we assert on supabaseState.rpcCalls.
+      await drainAuditMicrotasks();
+
+      const auditCall = supabaseState.rpcCalls.find(
+        (c) => c.name === "log_audit_event",
+      );
+      expect(auditCall).toBeDefined();
+      expect(auditCall!.args).toMatchObject({
+        p_action: "deletion.request.create",
+        p_entity_type: "data_deletion_request",
+        p_entity_id: "req-1",
+      });
+      expect(auditCall!.args.p_metadata).toMatchObject({
+        requested_at: expect.any(String),
+      });
+    });
+
+    it("does NOT emit the audit event when the dedup path short-circuits", async () => {
+      const { POST } = await import("./route");
+
+      // First POST inserts + emits.
+      const first = await POST(makeRequest());
+      expect(first.status).toBe(200);
+      await drainAuditMicrotasks();
+      expect(
+        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event"),
+      ).toHaveLength(1);
+
+      // Second POST hits the dedup branch — no new insert, no new audit.
+      const second = await POST(makeRequest());
+      expect(second.status).toBe(200);
+      const secondBody = await second.json();
+      expect(secondBody.request_id).toBe("req-1");
+      await drainAuditMicrotasks();
+
+      // Still only one audit emission.
+      expect(
+        supabaseState.rpcCalls.filter((c) => c.name === "log_audit_event"),
+      ).toHaveLength(1);
     });
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "quantalyze",
-  "version": "0.12.1.1",
+  "version": "0.13.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
@@ -17,6 +17,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@nivo/boxplot": "^0.99.0",
+    "@opentelemetry/otlp-transformer": "0.215.0",
     "@sentry/nextjs": "^10.48.0",
     "@sparticuz/chromium": "^133.0.0",
     "@supabase/ssr": "^0.10.0",
@@ -52,6 +53,7 @@
     "jsdom": "^29.0.1",
     "knip": "^6.3.1",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5",
     "vitest": "^4.1.2"
   }

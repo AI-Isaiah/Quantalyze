@@ -5,6 +5,7 @@ import { verifyAlertAckToken } from "@/lib/alert-ack-token";
 import { escapeHtml } from "@/lib/email";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 /**
  * /api/alerts/ack?id=<alertId>&t=<token>
@@ -229,10 +230,10 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient();
 
-  // Insert the token hash first. If two tabs submit the same token
-  // concurrently, the second insert hits the PK and we treat it as a
-  // replay — no need for an explicit row lock. Cascade on alert-delete
-  // keeps the table clean.
+  // @audit-skip: internal one-time-use token tracking. The used_ack_tokens
+  // row exists purely to block replay of the HMAC-signed email link; it
+  // is not a user-visible state change. The user-intent audit event is
+  // the alert.acknowledge emission below.
   const { error: insertError } = await admin
     .from("used_ack_tokens")
     .insert({ token_hash: guard.tokenHash, alert_id: guard.alert.id });
@@ -260,27 +261,61 @@ export async function POST(req: NextRequest) {
     return NextResponse.redirect(ACK_REDIRECT.error, { status: 303 });
   }
 
-  // Sprint 5 Task 5.5 — usage funnel event for the email-ack path.
-  // The email link has no browser session, so we resolve the
-  // allocator id via portfolios.user_id. If the lookup fails (deleted
-  // portfolio, etc.) we still fire with a synthetic distinctId of
-  // `alert:<id>` so the funnel count stays accurate. Wrapped in `after`
-  // (≈ Vercel waitUntil) so the runtime doesn't reap the post-response
-  // PostHog roundtrip.
-  after(async () => {
-    let distinctId = `alert:${guard.alert.id}`;
-    try {
-      const { data: portfolio } = await admin
-        .from("portfolios")
-        .select("user_id")
-        .eq("id", guard.alert.portfolio_id)
-        .maybeSingle();
-      if (portfolio?.user_id) {
-        distinctId = portfolio.user_id as string;
-      }
-    } catch {
-      // Lookup failure is non-fatal — we already have the synthetic id.
+  // Resolve the portfolio owner id ONCE and share it across both the
+  // audit emission (Task 7.1b) and the usage-funnel event (Task 5.5).
+  // Previously these did two separate lookups for the same (portfolio_id)
+  // → (user_id) mapping.
+  //
+  // Failure semantics preserved:
+  //   - Audit: skip emission on null user_id (do NOT attribute to NULL).
+  //   - Funnel: fall back to `alert:<id>` synthetic distinctId.
+  // A try/catch around the lookup keeps both paths non-blocking; a
+  // warning is logged only for the audit-side concern so the operator
+  // signal is unchanged.
+  let ownerUserId: string | null = null;
+  try {
+    const { data: portfolioRow } = await admin
+      .from("portfolios")
+      .select("user_id")
+      .eq("id", guard.alert.portfolio_id)
+      .maybeSingle();
+    if (portfolioRow?.user_id) {
+      ownerUserId = portfolioRow.user_id as string;
     }
+  } catch (err) {
+    console.warn(
+      "[alerts/ack] audit-resolve portfolio owner failed (non-blocking):",
+      err,
+    );
+  }
+
+  // Sprint 6 Task 7.1b — audit the email-path ack. This route runs with
+  // the admin (service-role) client because the email link carries no
+  // JWT; the HMAC token is the proof of the acting user. We resolve the
+  // portfolio owner id from portfolio_alerts.portfolio_id → portfolios.user_id
+  // and emit via logAuditEventAsUser (which calls log_audit_event_service,
+  // migration 058 — service_role-only EXECUTE). If the lookup failed we
+  // skip the emission rather than attribute to a NULL user_id.
+  if (ownerUserId) {
+    logAuditEventAsUser(admin, ownerUserId, {
+      action: "alert.acknowledge",
+      entity_type: "alert",
+      entity_id: guard.alert.id,
+      metadata: {
+        source: "email",
+        alert_type: guard.alert.alert_type,
+      },
+    });
+  }
+
+  // Sprint 5 Task 5.5 — usage funnel event for the email-ack path.
+  // The email link has no browser session, so we reuse the allocator id
+  // resolved above. If the lookup failed (deleted portfolio, etc.) we
+  // still fire with a synthetic distinctId of `alert:<id>` so the funnel
+  // count stays accurate. Wrapped in `after` (≈ Vercel waitUntil) so the
+  // runtime doesn't reap the post-response PostHog roundtrip.
+  const distinctId = ownerUserId ?? `alert:${guard.alert.id}`;
+  after(async () => {
     await trackUsageEventServer("alert_acknowledged", distinctId, {
       alert_id: guard.alert.id,
       alert_type: guard.alert.alert_type,

@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
 import { notifyManagerApproved } from "@/lib/email";
 import { checkStrategyGate } from "@/lib/strategyGate";
+import { logAuditEvent } from "@/lib/audit";
 
 export const POST = withAdminAuth(async (body, admin) => {
   const { id, action, review_note } = body;
@@ -51,6 +53,41 @@ export const POST = withAdminAuth(async (body, admin) => {
   if (error) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the approve/reject decision. Use a
+  // user-scoped client so log_audit_event resolves auth.uid() to the
+  // acting admin (withAdminAuth hands us the service-role `admin` client
+  // only). The outer handler has already verified the caller is admin.
+  //
+  // /review follow-up (T4-M3): truncate review_note to 2000 chars
+  // before stashing it in metadata. audit_log.metadata is JSONB and
+  // practically unbounded, but an admin pasting a 500KB review note
+  // would bloat the audit table and break the small-row assumption the
+  // rest of the audit tooling makes. We record whether truncation
+  // happened in `review_note_truncated` so forensic analysis can flag
+  // "the full note lives in [elsewhere]" if one ever shows up.
+  const REVIEW_NOTE_AUDIT_CAP = 2000;
+  const auditSupabase = await createClient();
+  const rawReviewNote = (review_note as string) || null;
+  const reviewNoteForAudit =
+    rawReviewNote !== null
+      ? rawReviewNote.slice(0, REVIEW_NOTE_AUDIT_CAP)
+      : null;
+  const reviewNoteTruncated =
+    rawReviewNote !== null && rawReviewNote.length > REVIEW_NOTE_AUDIT_CAP;
+  logAuditEvent(auditSupabase, {
+    action: action === "approve" ? "strategy.approve" : "strategy.reject",
+    entity_type: "strategy",
+    entity_id: id as string,
+    metadata:
+      action === "approve"
+        ? { new_status: "published" }
+        : {
+            new_status: "draft",
+            review_note: reviewNoteForAudit,
+            review_note_truncated: reviewNoteTruncated,
+          },
+  });
 
   if (action === "approve") {
     const sd = strategyData!;

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { userActionLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { assertSameOrigin } from "@/lib/csrf";
+import { logAuditEvent } from "@/lib/audit";
 
 const ATTESTATION_VERSION = "2026-04-07";
 
@@ -90,6 +91,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 500 },
     );
   }
+
+  // Sprint 6 Task 7.1b — audit the attestation. entity_id is the user's
+  // own id (investor_attestations keys on user_id). Forensic trail for
+  // "when did this user accept the accredited-investor attestation?"
+  logAuditEvent(supabase, {
+    action: "attestation.accept",
+    entity_type: "investor_attestation",
+    entity_id: user.id,
+    metadata: { version: ATTESTATION_VERSION, has_ip: ipAddress !== null },
+  });
 
   return NextResponse.json({ ok: true, attestation });
 }

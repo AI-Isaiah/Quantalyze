@@ -7,6 +7,7 @@ import {
   getOwnPreferences,
 } from "@/lib/preferences";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 
 export async function GET(): Promise<NextResponse> {
   const supabase = await createClient();
@@ -84,9 +85,19 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
   }
 
-  // Mark on profile so we can show "preferences set" indicators.
-  // The preferences_updated_at column is added by migration 011 — silently
-  // skip the profile update if the column doesn't exist yet.
+  // Sprint 6 Task 7.1b — audit the preferences update. entity_id is the
+  // caller's own user id (allocator_preferences has user_id as its PK).
+  logAuditEvent(supabase, {
+    action: "notification_preferences.update",
+    entity_type: "user",
+    entity_id: user.id,
+    metadata: { fields: Object.keys(fields), self_edit: true },
+  });
+
+  // @audit-skip: denormalization cache touch. The preferences_updated_at
+  // column is a UI-badge hint for "preferences set" state on the profiles
+  // row. The user-intent audit event was emitted above on the
+  // allocator_preferences upsert; this second write is internal bookkeeping.
   const { error: profileErr } = await supabase
     .from("profiles")
     .update({ preferences_updated_at: new Date().toISOString() })

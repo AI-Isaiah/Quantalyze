@@ -16,6 +16,7 @@ import {
   type PortfolioSnapshotJSON,
 } from "@/lib/intro/snapshot";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
+import { logAuditEvent } from "@/lib/audit";
 
 /**
  * Synchronous snapshot budget: if computePortfolioSnapshot finishes in
@@ -164,12 +165,40 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // PostgREST should return the row on success. A null id here means
+  // the insert succeeded but the select-after-insert came back empty —
+  // typically an RLS read policy mismatch. Fail the request rather
+  // than silently return 200 without an audit trail: "every 200 on
+  // this route implies an audit row exists" is the invariant Task
+  // 7.1a locks in.
+  if (!inserted?.id) {
+    console.error("[api/intro] Insert returned null id with no error");
+    return NextResponse.json(
+      { error: "Failed to create request" },
+      { status: 500 },
+    );
+  }
+
   // Fire-and-forget usage funnel event. PostHog flushAt:1 keeps this
   // non-blocking — we don't await so the response isn't gated on the
   // PostHog round-trip.
   void trackUsageEventServer("intro_submitted", user.id, {
     source,
     strategy_id,
+  });
+
+  // Sprint 6 Task 7.1a — audit the intro send. entity_id pins to the
+  // contact_requests row so a later forensic query can reconstruct "who
+  // introduced themselves to whom, when". Fire-and-forget.
+  logAuditEvent(supabase, {
+    action: "intro.send",
+    entity_type: "contact_request",
+    entity_id: inserted.id,
+    metadata: {
+      source,
+      strategy_id,
+      replacement_for: replacement_for ?? null,
+    },
   });
 
   // If snapshot compute didn't finish in time, enqueue the async worker.
@@ -202,6 +231,11 @@ export async function POST(req: NextRequest) {
     // backfill snapshot is unavailable.
     if (!enqueueOk) {
       const admin = createAdminClient();
+      // @audit-skip: internal snapshot-enqueue recovery path. The user-visible
+      // intro.send event was already emitted on the insert above; this
+      // UPDATE only promotes the row's snapshot_status from 'pending' to
+      // 'failed' so the client-facing UI reflects the background enqueue
+      // failure. Not a user-intent mutation.
       const { error: updateErr } = await admin
         .from("contact_requests")
         .update({ snapshot_status: "failed" })

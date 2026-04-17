@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -97,6 +98,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       `[keys/sync] enqueued sync_trades job=${rpcData} for strategy=${strategy_id}`,
     );
 
+    // /review follow-up (T4-M6): audit the user-intent "start a sync"
+    // action. The downstream compute_jobs queue write + worker state
+    // transitions are internal state machine, but "user X kicked off a
+    // sync for strategy Y at time Z" is a user-intent event worth
+    // capturing in the audit trail.
+    logAuditEvent(supabase, {
+      action: "sync.start",
+      entity_type: "sync",
+      entity_id: strategy_id,
+      metadata: { path: "queue" },
+    });
+
     return NextResponse.json(
       { accepted: true, strategy_id, status: "syncing" },
       { status: 202 },
@@ -109,6 +122,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // canonical states, so we reuse `computing` rather than adding a
   // distinct `syncing` value.
   const admin = createAdminClient();
+  // @audit-skip: compute-job state tracking. `strategy_analytics.computation_status`
+  // is an internal state machine for the Railway worker pipeline, not a
+  // user-visible state change. The user-facing action is "start a key
+  // sync" which dispatches via enqueue_compute_job (no direct mutation
+  // on this path).
   const { error: upsertErr } = await admin
     .from("strategy_analytics")
     .upsert(
@@ -130,6 +148,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // /review follow-up (T4-M6): audit the user-intent "start a sync"
+  // on the legacy path too. The downstream `after()` block is the
+  // compute machinery; the user-intent event fires synchronously here.
+  logAuditEvent(supabase, {
+    action: "sync.start",
+    entity_type: "sync",
+    entity_id: strategy_id,
+    metadata: { path: "legacy" },
+  });
+
   after(async () => {
     try {
       await fetchTrades(strategy_id);
@@ -145,6 +173,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         err,
       );
       try {
+        // @audit-skip: compute-job state tracking, failure branch.
+        // Internal state machine, not user-intent.
         await admin
           .from("strategy_analytics")
           .upsert(

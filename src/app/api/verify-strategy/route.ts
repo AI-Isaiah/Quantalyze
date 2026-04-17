@@ -106,6 +106,11 @@ export async function POST(req: NextRequest) {
   const publicToken = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
+  // @audit-skip: unauthenticated public endpoint (no user session). The
+  // `verification_requests` row is internal-state plumbing for the
+  // landing-page "verify my track record" flow; audit_log requires a
+  // user_id and this caller has none. Follow-up landing-page-lead audit
+  // would land in PostHog, not audit_log, per ADR-0023 §3.
   const { error: updateError } = await admin
     .from("verification_requests")
     .update({ public_token: publicToken, expires_at: expiresAt })

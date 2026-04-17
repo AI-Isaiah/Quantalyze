@@ -3,6 +3,7 @@ import { unstable_cache } from "next/cache";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -125,6 +126,20 @@ export const GET = withAuth(
     try {
       const fetcher = makeCachedFetcher(keyId);
       const payload = await fetcher();
+
+      // Sprint 6 Task 7.1a — audit the decrypt event. Each permissions
+      // probe causes the Python service to decrypt the stored credential
+      // to call the exchange (see migration 052 header). Fire-and-forget;
+      // does not affect response latency or success.
+      logAuditEvent(supabase, {
+        action: "api_key.decrypt",
+        entity_type: "api_key",
+        entity_id: keyId,
+        metadata: {
+          route: "/api/keys/[id]/permissions",
+        },
+      });
+
       return NextResponse.json(payload);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Probe failed";

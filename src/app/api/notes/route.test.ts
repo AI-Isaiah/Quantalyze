@@ -1,13 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
+// audit.ts imports "server-only" which throws under vitest+jsdom.
+vi.mock("server-only", () => ({}));
+
+// audit.ts schedules the RPC via next/server's `after()`. Pass through
+// synchronously so emission is observable + doesn't throw outside a
+// request scope under vitest.
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (cb: () => void | Promise<void>) => {
+      void cb();
+    },
+  };
+});
+
 const PORTFOLIO_ID = "pppppppp-pppp-pppp-pppp-pppppppppppp";
 
-const { TEST_USER, mockFrom, authResult } = vi.hoisted(() => {
+const { TEST_USER, mockFrom, mockRpc, authResult } = vi.hoisted(() => {
   const user = { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" };
   return {
     TEST_USER: user,
     mockFrom: vi.fn(),
+    mockRpc: vi.fn().mockResolvedValue({ data: null, error: null }),
     authResult: {
       data: { user: user as { id: string } | null },
       error: null,
@@ -21,6 +40,7 @@ vi.mock("@/lib/supabase/server", () => ({
       getUser: async () => authResult,
     },
     from: mockFrom,
+    rpc: mockRpc,
   }),
 }));
 

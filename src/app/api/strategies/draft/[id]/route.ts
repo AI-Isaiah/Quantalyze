@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 
 /**
  * GET  /api/strategies/draft/[id] — fetch a specific wizard draft for
@@ -140,6 +141,16 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
     );
   }
 
+  // Sprint 6 Task 7.1b — audit the wizard-draft deletion. Even though
+  // the row is gone, the audit trail pins the acting user + draft id
+  // for forensic reconstruction.
+  logAuditEvent(supabase, {
+    action: "strategy.delete",
+    entity_type: "strategy",
+    entity_id: id,
+    metadata: { source: "wizard", status_before_delete: "draft" },
+  });
+
   // Hard-delete the linked api_keys row ONLY if no other strategy
   // still references it. Otherwise the FK's ON DELETE SET NULL would
   // silently break another strategy that happened to share the same
@@ -150,10 +161,14 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
       .select("id", { count: "exact", head: true })
       .eq("api_key_id", draft.api_key_id);
     if ((refCount ?? 0) === 0) {
+      // Capture the api_key_id in a const so TS narrows it inside the
+      // audit emission below (the if-guard already established it's
+      // non-null, but the closure below loses that narrowing).
+      const keyToRevoke = draft.api_key_id;
       const { error: delKeyErr } = await supabase
         .from("api_keys")
         .delete()
-        .eq("id", draft.api_key_id);
+        .eq("id", keyToRevoke);
       if (delKeyErr) {
         // Non-fatal: the strategy row is gone, the dangling api_key is
         // a cosmetic issue the Sprint 2 cleanup cron will sweep.
@@ -161,6 +176,16 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
           "[strategies/draft DELETE] api_keys cleanup failed (non-fatal):",
           delKeyErr,
         );
+      } else {
+        // Audit the key revoke alongside the strategy delete so the
+        // forensic record shows "wizard-draft delete cascaded into
+        // api_key revoke".
+        logAuditEvent(supabase, {
+          action: "api_key.revoke",
+          entity_type: "api_key",
+          entity_id: keyToRevoke,
+          metadata: { reason: "wizard_draft_cleanup", strategy_id: id },
+        });
       }
     }
   }

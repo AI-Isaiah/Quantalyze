@@ -9,6 +9,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from models.schemas import BridgeRequest, PortfolioAnalyticsRequest, PortfolioOptimizerRequest, VerifyStrategyRequest
+from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import get_supabase
 from services.encryption import decrypt_credentials, encrypt_credentials, get_kek
@@ -57,6 +58,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
     """
     supabase = get_supabase()
 
+    # @audit-skip: compute-job state row. portfolio_analytics is the
+    # immutable-history table backing the dashboard; each compute run
+    # writes a new row. Not a user-intent mutation — the user's
+    # "compute my portfolio analytics" intent doesn't map 1:1 to this
+    # row (the row is internal bookkeeping).
     insert_result = supabase.table("portfolio_analytics").insert(
         {"portfolio_id": portfolio_id, "computation_status": "computing"}
     ).execute()
@@ -67,6 +73,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict:
     analytics_id = insert_result.data[0]["id"]
 
     def _fail(error_msg: str):
+        # @audit-skip: compute-job failure state.
         supabase.table("portfolio_analytics").update(
             {"computation_status": "failed", "computation_error": error_msg}
         ).eq("id", analytics_id).execute()
@@ -683,13 +690,15 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     """Find diversification candidates for a portfolio."""
     supabase = get_supabase()
 
-    # Verify portfolio exists
-    portfolio_result = supabase.table("portfolios").select("id").eq(
+    # Verify portfolio exists + capture owner id for audit attribution
+    portfolio_result = supabase.table("portfolios").select("id, user_id").eq(
         "id", req.portfolio_id
     ).single().execute()
 
     if not portfolio_result.data:
         raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    portfolio_owner_id = portfolio_result.data.get("user_id")
 
     ps_result = supabase.table("portfolio_strategies").select(
         "strategy_id, current_weight"
@@ -754,9 +763,25 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     ).eq("computation_status", "complete").order("computed_at", desc=True).limit(1).execute()
 
     if latest.data:
+        # @audit-skip: internal cache write (optimizer_suggestions is
+        # denormalized onto the most recent portfolio_analytics row for
+        # the UI to read in one fetch). User-intent audit emitted below
+        # after the compute completes.
         supabase.table("portfolio_analytics").update(
             {"optimizer_suggestions": suggestions}
         ).eq("id", latest.data[0]["id"]).execute()
+
+    # Sprint 6 Task 7.1b — audit the optimizer run. entity is the
+    # portfolio the optimizer ran against. user_id is the portfolio
+    # owner (resolved via the portfolios row above).
+    if portfolio_owner_id:
+        log_audit_event(
+            user_id=portfolio_owner_id,
+            action="optimizer.run",
+            entity_type="optimizer_run",
+            entity_id=req.portfolio_id,
+            metadata={"suggestion_count": len(suggestions)},
+        )
 
     return {
         "status": "complete",
@@ -848,7 +873,24 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
 
+    # /review follow-up (T4-I1): emit the audit event BEFORE the empty-
+    # candidates fast-path. "User ran the bridge, got zero candidates"
+    # is still a user-intent event worth auditing (especially for abuse
+    # detection — a caller who triggers many empty-candidate runs is
+    # interesting signal). We compute candidates separately below for
+    # the non-empty branch; the empty branch reports candidate_count=0
+    # and returns a 200 with an empty list.
     if not candidate_returns:
+        log_audit_event(
+            user_id=req.user_id,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=req.portfolio_id,
+            metadata={
+                "underperformer_strategy_id": req.underperformer_strategy_id,
+                "candidate_count": 0,
+            },
+        )
         return {
             "status": "complete",
             "portfolio_id": req.portfolio_id,
@@ -863,6 +905,20 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     # Hydrate with strategy names (allocator-safe, no emails/profiles)
     for c in candidates:
         c["strategy_name"] = candidate_names.get(c["strategy_id"], c["strategy_id"])
+
+    # Sprint 6 Task 7.1b — audit the bridge scoring. entity is the
+    # portfolio the bridge was run against; user_id is carried in the
+    # request shape (BridgeRequest.user_id).
+    log_audit_event(
+        user_id=req.user_id,
+        action="bridge.score_candidates",
+        entity_type="bridge_run",
+        entity_id=req.portfolio_id,
+        metadata={
+            "underperformer_strategy_id": req.underperformer_strategy_id,
+            "candidate_count": len(candidates),
+        },
+    )
 
     return {
         "status": "complete",

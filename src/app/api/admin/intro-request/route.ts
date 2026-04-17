@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
 import { notifyAllocatorIntroStatus } from "@/lib/email";
+import { logAuditEvent } from "@/lib/audit";
 
 const VALID_STATUSES = ["pending", "intro_made", "completed", "declined"] as const;
 
@@ -27,6 +29,23 @@ export const POST = withAdminAuth(async (body, admin) => {
   if (error) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the admin-driven status transition. We
+  // need a USER-scoped client for log_audit_event (derives acting admin
+  // from auth.uid()); withAdminAuth only hands us the service-role
+  // `admin` client, so read the user client locally for the audit
+  // emission. isAdminUser() already ran inside withAdminAuth so the
+  // session is guaranteed valid by the time we get here.
+  const auditSupabase = await createClient();
+  logAuditEvent(auditSupabase, {
+    action: "contact_request.status_change",
+    entity_type: "contact_request",
+    entity_id: id as string,
+    metadata: {
+      new_status: status as string,
+      has_note: typeof admin_note === "string" && admin_note.length > 0,
+    },
+  });
 
   if (status !== "pending") {
     Promise.resolve(

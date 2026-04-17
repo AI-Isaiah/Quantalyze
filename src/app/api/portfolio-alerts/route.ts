@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership } from "@/lib/queries";
+import { logAuditEvent } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 export const GET = withAuth(async (req: NextRequest, user: User) => {
@@ -71,5 +72,16 @@ export const PATCH = withAuth(async (req: NextRequest, user: User) => {
   if (!data || data.length === 0) {
     return NextResponse.json({ error: "Alert not found or forbidden" }, { status: 404 });
   }
+
+  // Sprint 6 Task 7.1b — audit the in-app ack. The email-ack path in
+  // /api/alerts/ack emits the same action via logAuditEventAsUser
+  // (resolved owner id via the HMAC token, no JWT on the wire).
+  logAuditEvent(supabase, {
+    action: "alert.acknowledge",
+    entity_type: "alert",
+    entity_id: alert_id,
+    metadata: { source: "in_app_list" },
+  });
+
   return NextResponse.json({ success: true });
 });
