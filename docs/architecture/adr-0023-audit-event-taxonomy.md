@@ -54,7 +54,11 @@ export type AuditAction =
   | "intro.send"
   | "deletion.request.create"
   | "role.grant"
-  | "role.revoke";
+  | "role.revoke"
+  | "account.sanitize"
+  | "account.export"
+  | "deletion.request.approve"
+  | "deletion.request.reject";
 ```
 
 Adding a new action requires:
@@ -84,6 +88,10 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `deletion.request.create` | `data_deletion_request` | `data_deletion_requests.id` (the intake row) | — |
 | `role.grant` | `user_app_role` | target user's `auth.users.id` (NOT a user_app_roles row id — the (user_id, role) composite PK has no standalone UUID) | role, granted_by |
 | `role.revoke` | `user_app_role` | target user's `auth.users.id` | role, revoked_by, removed_rows |
+| `account.sanitize` | `user` | target user's `auth.users.id` (the account being anonymized) | request_id, mutated_rows |
+| `account.export` | `user` | target user's `auth.users.id` (the exporter — may be the same as the caller or a different user when an admin exports on their behalf) | storage_path, expires_at, table_count |
+| `deletion.request.approve` | `data_deletion_request` | the `data_deletion_requests.id` being approved | target_user_id, approved_by |
+| `deletion.request.reject` | `data_deletion_request` | the `data_deletion_requests.id` being rejected | target_user_id, rejected_by, reason |
 
 Task 7.1b (Sprint 6 later, ~27 additional events) will extend this
 table. Keep the update atomic with the emission-site PR so a grep for
@@ -93,6 +101,16 @@ Sprint 6 closeout Task 7.2 added `role.grant` + `role.revoke` +
 `user_app_role` entity_type. The grant/revoke emitter lives in
 `src/app/api/admin/users/[id]/roles/route.ts`; see ADR-0005 for the
 full RBAC architecture.
+
+Sprint 6 closeout Task 7.3 added the four GDPR actions above plus
+the `user` entity_type anchor (used when the "entity" is the target
+user themselves — `account.sanitize`, `account.export`). Emission
+sites:
+- `src/app/api/account/export/route.ts` (`account.export`)
+- `src/app/api/admin/deletion-requests/[id]/approve/route.ts`
+  (`deletion.request.approve` + `account.sanitize`)
+- `src/app/api/admin/deletion-requests/[id]/reject/route.ts`
+  (`deletion.request.reject`)
 
 ### 5. user_id is derived from `auth.uid()` in the RPC
 `log_audit_event` is SECURITY DEFINER (migration 049). Inside the

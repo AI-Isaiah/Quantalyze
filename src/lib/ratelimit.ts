@@ -60,6 +60,18 @@ export const adminActionLimiter = makeLimiter(20, "60 s");
 // exploration session per hour.
 export const simulatorLimiter = makeLimiter(20, "3600 s");
 
+// 1/day per authenticated user — GDPR export (Task 7.3). The export route
+// streams a JSON bundle of the user's entire data footprint, which is
+// relatively expensive to assemble (tens of tables, potentially hundreds
+// of MB of raw fills). One call per user per 24h is the regulatory cadence
+// we commit to: a user who needs their bundle more often can ask an admin.
+//
+// Upstash's sliding window accepts arbitrary second-scale durations, so
+// `86400 s` is a valid window literal. A separate limiter (not piggybacked
+// onto userActionLimiter) keeps the export quota isolated from the 5/min
+// budget the rest of the sensitive-action surface shares.
+export const exportLimiter = makeLimiter(1, "86400 s");
+
 export type CheckLimitResult =
   | { success: true }
   | { success: false; retryAfter: number };

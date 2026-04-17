@@ -21,6 +21,8 @@ jobs:
       - run: npm test
       - name: Check for banned packages (supply-chain)
         run: node scripts/check-banned-packages.mjs
+      - name: Check GDPR export coverage (Task 7.3)
+        run: npx tsx scripts/check-gdpr-export-coverage.ts
       - run: npm audit --audit-level=critical
       - run: npm run build
         env:

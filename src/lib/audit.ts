@@ -61,8 +61,9 @@ import { after } from "next/server";
  * The canonical action string enum. Namespaced `subject.verb` so the
  * taxonomy stays grep-able and we can fan out later without colliding.
  *
- * Sprint 6 ships the 3 pilot actions. Task 7.1b (Sprint 6 later) fans
- * out ~27 more. Keep this union in sync with
+ * Sprint 6 ships the pilot actions (7.1a) + RBAC grant/revoke (7.2) +
+ * GDPR workflow actions (7.3). Task 7.1b (Sprint 6 later) fans out ~27
+ * more. Keep this union in sync with
  * `docs/architecture/adr-0023-audit-event-taxonomy.md`.
  */
 export type AuditAction =
@@ -70,17 +71,26 @@ export type AuditAction =
   | "intro.send"
   | "deletion.request.create"
   | "role.grant"
-  | "role.revoke";
+  | "role.revoke"
+  | "account.sanitize"
+  | "account.export"
+  | "deletion.request.approve"
+  | "deletion.request.reject";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
  * Kept as a string literal union so a typo fails at compile time.
+ *
+ * `user` is the anchor for account-wide actions where the "entity" is
+ * the target user themselves (account.sanitize, account.export). The
+ * entity_id in that case is the target user's auth.users.id.
  */
 export type AuditEntityType =
   | "api_key"
   | "contact_request"
   | "data_deletion_request"
-  | "user_app_role";
+  | "user_app_role"
+  | "user";
 
 export interface AuditEvent {
   action: AuditAction;
