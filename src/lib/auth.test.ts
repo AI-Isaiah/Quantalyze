@@ -4,8 +4,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * Unit tests for src/lib/auth.ts — the RBAC helpers shipped in Task 7.2.
  *
  *   - `getUserRoles` returns the user's role set from user_app_roles.
- *   - `requireRole` returns 401 (no user), 403 (no intersection), or null.
- *   - `withRole` wraps a NextRequest handler with CSRF + auth + role gate.
+ *   - `requireRole` returns either `{ forbidden }` (401 no user / 403 no
+ *     intersection) or `{ roles }` (the caller's resolved role set).
+ *   - `withRole` wraps a NextRequest handler with CSRF + auth + role gate,
+ *     threads Next 16 `{ params }` through, and reuses the resolved role
+ *     set so the wrapper itself issues exactly ONE getUserRoles round-trip.
  *
  * Mocks: Supabase server client, CSRF helper, user/role DB fetches.
  */
@@ -153,51 +156,61 @@ describe("requireRole", () => {
     typeof requireRole
   >[1];
 
-  it("returns 401 when user is null", async () => {
-    const res = await requireRole(
-      makeFromOnly(),
-      null,
-      "admin",
-    );
-    expect(res?.status).toBe(401);
+  it("returns { forbidden: 401 } when user is null", async () => {
+    const result = await requireRole(makeFromOnly(), null, "admin");
+    expect("forbidden" in result).toBe(true);
+    if ("forbidden" in result) {
+      expect(result.forbidden.status).toBe(401);
+    }
   });
 
-  it("returns null (pass-through) when roles list is empty", async () => {
-    const res = await requireRole(makeFromOnly(), mockUser);
-    expect(res).toBeNull();
-    // Crucially, getUserRoles is NOT called — saving a DB round-trip.
-    expect(userRolesQueryMock).not.toHaveBeenCalled();
-  });
-
-  it("returns 403 when user has NONE of the requested roles", async () => {
-    userRolesQueryMock.mockResolvedValueOnce({
-      data: [{ role: "quant_manager" }],
-      error: null,
-    });
-    const res = await requireRole(
-      makeFromOnly(),
-      mockUser,
-      "admin",
-    );
-    expect(res?.status).toBe(403);
-    expect(await res!.json()).toEqual({ error: "Forbidden" });
-  });
-
-  it("returns null when user has AT LEAST ONE requested role", async () => {
+  it("returns { roles } pass-through when roles list is empty", async () => {
     userRolesQueryMock.mockResolvedValueOnce({
       data: [{ role: "allocator" }],
       error: null,
     });
-    const res = await requireRole(
+    const result = await requireRole(makeFromOnly(), mockUser);
+    expect("roles" in result).toBe(true);
+    if ("roles" in result) {
+      expect(result.roles).toEqual(["allocator"]);
+    }
+  });
+
+  it("returns { forbidden: 403 } when user has NONE of the requested roles", async () => {
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "quant_manager" }],
+      error: null,
+    });
+    const result = await requireRole(
+      makeFromOnly(),
+      mockUser,
+      "admin",
+    );
+    expect("forbidden" in result).toBe(true);
+    if ("forbidden" in result) {
+      expect(result.forbidden.status).toBe(403);
+      expect(await result.forbidden.json()).toEqual({ error: "Forbidden" });
+    }
+  });
+
+  it("returns { roles } when user has AT LEAST ONE requested role", async () => {
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
+    const result = await requireRole(
       makeFromOnly(),
       mockUser,
       "admin",
       "allocator",
     );
-    expect(res).toBeNull();
+    expect("roles" in result).toBe(true);
+    if ("roles" in result) {
+      expect(result.roles).toEqual(["allocator"]);
+    }
   });
 
-  it("returns null when user has ALL requested roles (superset)", async () => {
+  it("returns { roles } including the full resolved set (superset)", async () => {
     userRolesQueryMock.mockResolvedValueOnce({
       data: [
         { role: "admin" },
@@ -206,13 +219,20 @@ describe("requireRole", () => {
       ],
       error: null,
     });
-    const res = await requireRole(
+    const result = await requireRole(
       makeFromOnly(),
       mockUser,
       "admin",
       "quant_manager",
     );
-    expect(res).toBeNull();
+    expect("roles" in result).toBe(true);
+    if ("roles" in result) {
+      expect(result.roles.sort()).toEqual([
+        "admin",
+        "allocator",
+        "quant_manager",
+      ]);
+    }
   });
 });
 
@@ -233,12 +253,8 @@ describe("withRole", () => {
     getUserMock.mockResolvedValue({
       data: { user: { id: "u-admin", email: "a@t.com" } },
     });
-    userRolesQueryMock.mockResolvedValueOnce({
-      data: [{ role: "admin" }],
-      error: null,
-    });
-    // Second call inside wrapped handler — getUserRoles runs twice (once in
-    // requireRole, once in the wrapper's pre-handler fetch).
+    // Only ONE getUserRoles call per request now — the wrapper reuses the
+    // role set resolved inside requireRole.
     userRolesQueryMock.mockResolvedValueOnce({
       data: [{ role: "admin" }],
       error: null,
@@ -289,13 +305,13 @@ describe("withRole", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("invokes the handler with user + resolved role set on pass", async () => {
+  it("invokes the handler with user + resolved role set on pass, via a single DB round-trip", async () => {
     getUserMock.mockResolvedValue({
       data: { user: { id: "u-admin", email: "a@t.com" } },
     });
-    // Call #1: inside requireRole. Call #2: the follow-up getUserRoles to
-    // supply the handler context.
-    userRolesQueryMock.mockResolvedValue({
+    // Exactly ONE call — the wrapper reuses the role set resolved by
+    // requireRole instead of re-fetching.
+    userRolesQueryMock.mockResolvedValueOnce({
       data: [{ role: "admin" }, { role: "allocator" }],
       error: null,
     });
@@ -310,17 +326,72 @@ describe("withRole", () => {
     );
     expect(res.status).toBe(200);
     expect(handler).toHaveBeenCalledTimes(1);
+    expect(userRolesQueryMock).toHaveBeenCalledTimes(1);
     const [reqArg, ctxArg] = handler.mock.calls[0];
     expect(reqArg.method).toBe("POST");
     expect(ctxArg.user.id).toBe("u-admin");
     expect(ctxArg.roles.sort()).toEqual(["admin", "allocator"]);
+    // Wrapper supplies the user-scoped supabase client in the context so
+    // handlers don't re-import createClient.
+    expect(ctxArg.supabase).toBeDefined();
+    expect(ctxArg.supabase.auth).toBeDefined();
+  });
+
+  it("threads Next 16 dynamic-route params through to the handler context", async () => {
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-admin", email: "a@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole<{ id: string }>("admin")(
+      handler as never,
+    );
+
+    // Next 16 hands the handler `{ params: Promise<{ id: string }> }`.
+    // The wrapper must await the promise and pass the resolved object
+    // through to the handler.
+    const res = await wrapped(
+      makeRequest({ body: {} }) as never,
+      { params: Promise.resolve({ id: "target-user-id" }) } as never,
+    );
+    expect(res.status).toBe(200);
+    const [, ctxArg] = handler.mock.calls[0];
+    expect(ctxArg.params).toEqual({ id: "target-user-id" });
+  });
+
+  it("defaults params to {} when the wrapper is invoked without a Next context", async () => {
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "u-admin", email: "a@t.com" } },
+    });
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: [{ role: "admin" }],
+      error: null,
+    });
+
+    const handler = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    const wrapped = withRole("admin")(handler as never);
+
+    const res = await wrapped(
+      makeRequest({ body: {} }) as never,
+    );
+    expect(res.status).toBe(200);
+    const [, ctxArg] = handler.mock.calls[0];
+    expect(ctxArg.params).toEqual({});
   });
 
   it("accepts multiple role choices (OR semantics)", async () => {
     getUserMock.mockResolvedValue({
       data: { user: { id: "u-mgr", email: "m@t.com" } },
     });
-    userRolesQueryMock.mockResolvedValue({
+    userRolesQueryMock.mockResolvedValueOnce({
       data: [{ role: "quant_manager" }],
       error: null,
     });
@@ -395,21 +466,29 @@ describe("RBAC back-compat matrix (simulated post-backfill state)", () => {
       for (const role of APP_ROLES) {
         const shouldPass = shape.expectedRoles.includes(role);
         it(
-          `requireRole("${role}") → ${shouldPass ? "pass (null)" : "403"}`,
+          `requireRole("${role}") → ${shouldPass ? "pass ({ roles })" : "403 ({ forbidden })"}`,
           async () => {
             userRolesQueryMock.mockResolvedValueOnce({
               data: shape.expectedRoles.map((r) => ({ role: r })),
               error: null,
             });
-            const res = await requireRole(
+            const result = await requireRole(
               makeFromOnly(),
               { id: "u", email: "e" } as Parameters<typeof requireRole>[1],
               role,
             );
             if (shouldPass) {
-              expect(res).toBeNull();
+              expect("roles" in result).toBe(true);
+              if ("roles" in result) {
+                expect(result.roles.sort()).toEqual(
+                  [...shape.expectedRoles].sort(),
+                );
+              }
             } else {
-              expect(res?.status).toBe(403);
+              expect("forbidden" in result).toBe(true);
+              if ("forbidden" in result) {
+                expect(result.forbidden.status).toBe(403);
+              }
             }
           },
         );

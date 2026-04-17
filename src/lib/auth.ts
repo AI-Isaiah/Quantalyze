@@ -19,14 +19,19 @@ import { assertSameOrigin } from "@/lib/csrf";
  *     out across all admin routes. This file ships the new path; the
  *     old path keeps working in parallel.
  *
- * The three exports below form the Task 7.2 public surface:
+ * The exports below form the Task 7.2 public surface:
  *
  *   - `AppRole`          — the closed TS union of role strings.
+ *   - `RoleContext<P>`   — the context a `withRole` handler receives.
+ *   - `RoleHandler<P>`   — the handler signature `withRole` expects.
  *   - `getUserRoles(id)` — DB fetch of a specific user's role set.
- *   - `requireRole(...)` — server-side guard returning a 403 NextResponse
- *                          when the caller lacks the required roles.
+ *   - `requireRole(...)` — server-side guard returning EITHER a 401/403
+ *                          NextResponse OR the caller's resolved role set.
  *   - `withRole(role)`   — route wrapper alongside `withAdminAuth` for
- *                          routes that need role-gated access.
+ *                          routes that need role-gated access. Threads
+ *                          the Next 16 `{ params }` context through to
+ *                          the handler alongside the resolved user /
+ *                          role set / user-scoped supabase client.
  *
  * The SQL helper `current_user_has_app_role(TEXT[])` (migration 054) is
  * the counterpart of `requireRole` at the Postgres layer. Both consult
@@ -97,50 +102,95 @@ export async function getUserRoles(
 }
 
 /**
+ * Discriminated-union result of {@link requireRole}. Either the caller
+ * failed the guard (`forbidden` holds the 401/403 NextResponse to return)
+ * or they passed (`roles` holds their resolved role set so the caller can
+ * skip a second `getUserRoles` round-trip).
+ */
+export type RequireRoleResult =
+  | { forbidden: NextResponse }
+  | { roles: AppRole[] };
+
+/**
  * Server-side role guard. Call at the top of a Route Handler after
- * `createClient()` + `auth.getUser()`; returns a `NextResponse` with
- * status 403 if the caller lacks ANY of the requested roles, or `null`
- * on pass-through.
+ * `createClient()` + `auth.getUser()`; returns either a `forbidden`
+ * NextResponse (401 if unauthenticated, 403 if the caller lacks ANY of
+ * the requested roles) or the caller's full resolved role set.
  *
- * Why a response-or-null shape: mirrors `assertSameOrigin` in src/lib/csrf.ts
- * so the call-site idiom is identical.
+ * The role set is returned so callers (notably {@link withRole}) can
+ * build a handler context without issuing a second `getUserRoles` call.
  *
- *   const forbidden = await requireRole(supabase, user, "admin");
- *   if (forbidden) return forbidden;
+ *   const result = await requireRole(supabase, user, "admin");
+ *   if ("forbidden" in result) return result.forbidden;
+ *   const { roles } = result; // caller's resolved roles
  *
- * If `user` is null (unauthenticated), returns 401 — matches `withAuth`.
+ * If `user` is null (unauthenticated), returns a 401 — matches `withAuth`.
+ * If `roles` is empty the caller is treated as "must be authenticated but
+ * no specific role required" and the resolved role set is still fetched
+ * (one round-trip, consistent with the documented contract).
  */
 export async function requireRole(
   supabase: SupabaseClient,
   user: User | null,
   ...roles: AppRole[]
-): Promise<NextResponse | null> {
+): Promise<RequireRoleResult> {
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  if (roles.length === 0) {
-    // Caller passed no roles — treat as "must be authenticated but no
-    // specific role required". Return null so the caller proceeds.
-    // This is the conservative read of requireRole(user, /* nothing */).
-    return null;
+    return {
+      forbidden: NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 401 },
+      ),
+    };
   }
 
   const userRoles = await getUserRoles(supabase, user.id);
-  const hasAny = roles.some((r) => userRoles.includes(r));
-  if (!hasAny) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  if (roles.length === 0) {
+    // Caller passed no roles — treat as "must be authenticated but no
+    // specific role required". Return the resolved set so the caller
+    // can still branch on role membership without another round-trip.
+    return { roles: userRoles };
   }
 
-  return null;
+  const hasAny = roles.some((r) => userRoles.includes(r));
+  if (!hasAny) {
+    return {
+      forbidden: NextResponse.json(
+        { error: "Forbidden" },
+        { status: 403 },
+      ),
+    };
+  }
+
+  return { roles: userRoles };
 }
 
+/**
+ * Context object passed to a `withRole`-wrapped handler.
+ *
+ * - `user`: the authenticated caller (non-null once the wrapper passes).
+ * - `roles`: the caller's full resolved role set (superset of the required roles).
+ * - `supabase`: the user-scoped Supabase client the wrapper already created.
+ *   Reuse this for DB reads/writes that should run under the caller's JWT
+ *   (RLS-scoped queries, audit-event emission where `auth.uid()` matters).
+ *   For cross-tenant admin writes, still use `createAdminClient()`.
+ * - `params`: the resolved Next 16 dynamic-route params — generic over
+ *   the route's param shape, defaults to `unknown`.
+ */
+export type RoleContext<P = unknown> = {
+  user: User;
+  roles: AppRole[];
+  supabase: SupabaseClient;
+  params: P;
+};
+
 /** Handler signature for `withRole`. Mirrors `withAuth` (Next 16
- * `NextRequest` → `NextResponse`) plus the user + resolved role set so
- * the handler doesn't re-query the DB. */
-export type RoleHandler = (
+ * `NextRequest` → `NextResponse`) plus a {@link RoleContext} so the
+ * handler gets the user, resolved role set, user-scoped Supabase
+ * client, and resolved dynamic-route params in one object. */
+export type RoleHandler<P = unknown> = (
   req: NextRequest,
-  ctx: { user: User; roles: AppRole[] },
+  ctx: RoleContext<P>,
 ) => Promise<NextResponse>;
 
 /**
@@ -148,12 +198,24 @@ export type RoleHandler = (
  * Mutating methods (POST/PUT/PATCH/DELETE) also get the CSRF same-origin
  * check via `assertSameOrigin`, matching `withAuth`.
  *
- * Usage:
+ * Threads the Next 16 dynamic-route `{ params }` context through so
+ * dynamic routes don't need to re-parse `req.url` manually. The generic
+ * `P` is the shape of the resolved params for a given route.
+ *
+ * Usage (static route):
  *
  *   export const POST = withRole("admin")(async (req, { user }) => {
- *     // ... only admins reach here
  *     return NextResponse.json({ ok: true });
  *   });
+ *
+ * Usage (dynamic route — `app/api/admin/users/[id]/roles/route.ts`):
+ *
+ *   export const POST = withRole<{ id: string }>("admin")(
+ *     async (req, { user, params, supabase }) => {
+ *       const { id } = params;
+ *       // ...
+ *     },
+ *   );
  *
  *   // Multiple allowed roles:
  *   export const POST = withRole("admin", "quant_manager")(async (...) => { ... });
@@ -161,9 +223,14 @@ export type RoleHandler = (
  * This wrapper is a PEER to `withAdminAuth`, not a replacement. See
  * ADR-0005 for the sprint-over-sprint migration plan.
  */
-export function withRole(...roles: AppRole[]) {
-  return function (handler: RoleHandler) {
-    return async (req: NextRequest): Promise<NextResponse> => {
+export function withRole<P = unknown>(...roles: AppRole[]) {
+  return function (handler: RoleHandler<P>) {
+    return async (
+      req: NextRequest,
+      rawCtx: { params: Promise<P> } = {
+        params: Promise.resolve({} as P),
+      },
+    ): Promise<NextResponse> => {
       // CSRF defense-in-depth on mutating requests. GET/HEAD/OPTIONS
       // are safe and skip the origin check.
       if (
@@ -180,15 +247,18 @@ export function withRole(...roles: AppRole[]) {
         data: { user },
       } = await supabase.auth.getUser();
 
-      const forbidden = await requireRole(supabase, user, ...roles);
-      if (forbidden) return forbidden;
+      const result = await requireRole(supabase, user, ...roles);
+      if ("forbidden" in result) return result.forbidden;
 
-      // `user` is guaranteed non-null here — requireRole returns 401 above.
-      // Fetch the full role set once so the handler can branch on it
-      // without a second round-trip.
-      const userRoles = await getUserRoles(supabase, user!.id);
-
-      return handler(req, { user: user!, roles: userRoles });
+      // `user` is guaranteed non-null here — requireRole returns the 401
+      // branch above when user is null, which we already returned.
+      const params = await rawCtx.params;
+      return handler(req, {
+        user: user!,
+        roles: result.roles,
+        supabase,
+        params,
+      });
     };
   };
 }

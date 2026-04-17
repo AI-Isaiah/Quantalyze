@@ -17,9 +17,10 @@ import { logAuditEvent } from "@/lib/audit";
  * ----------------------------------
  * Task 7.2's spec scopes broad `withRole` adoption to Sprint 7 — this
  * route is the single end-to-end proof of the wrapper's integration with
- * the Next 16 route handler shape, CSRF check, and audit-event emission
- * path. The rest of the admin surface continues to use `withAdminAuth`
- * (which reads `profiles.is_admin` via `isAdminUser()`) unchanged.
+ * the Next 16 route handler shape (dynamic `{ params }` threaded through
+ * the wrapper's context), CSRF check, and audit-event emission path. The
+ * rest of the admin surface continues to use `withAdminAuth` (which reads
+ * `profiles.is_admin` via `isAdminUser()`) unchanged.
  *
  * Audit emission
  * --------------
@@ -29,8 +30,8 @@ import { logAuditEvent } from "@/lib/audit";
  * a (user_id, role) composite-key row doesn't have a stable UUID to
  * anchor on. Metadata carries the {role, granted_by|revoked_by} tuple.
  *
- * We emit through the USER-scoped supabase client (from `createClient()`
- * inside `withRole`) so that `auth.uid()` inside the log_audit_event
+ * We emit through the USER-scoped supabase client supplied by `withRole`
+ * via the handler context so that `auth.uid()` inside the log_audit_event
  * RPC resolves to the acting admin's id. `createAdminClient()` is used
  * only for the user_app_roles mutation itself (service-role bypasses
  * the user_app_roles_service_insert policy).
@@ -41,23 +42,12 @@ const BODY_SCHEMA = z.object({
   role: z.enum(APP_ROLES as unknown as [AppRole, ...AppRole[]]),
 });
 
-export const POST = withRole("admin")(
+export const POST = withRole<{ id: string }>("admin")(
   async (
     req: NextRequest,
-    { user },
+    { user, supabase, params },
   ) => {
-    // Next 16 dynamic route params are async — we read via req.url rather
-    // than the params context arg because `withRole` does not thread the
-    // Next 16 `{ params }` context into the wrapped handler (pilot-scope
-    // constraint; broader `withRole` evolution is Sprint 7).
-    const url = new URL(req.url);
-    // Path shape: /api/admin/users/<id>/roles
-    const segments = url.pathname.split("/").filter(Boolean);
-    const usersIdx = segments.indexOf("users");
-    const targetUserId =
-      usersIdx >= 0 && segments.length > usersIdx + 1
-        ? segments[usersIdx + 1]
-        : undefined;
+    const targetUserId = params?.id;
 
     if (!targetUserId) {
       return NextResponse.json(
@@ -123,14 +113,10 @@ export const POST = withRole("admin")(
       }
 
       // Audit. Fire-and-forget — logAuditEvent returns void.
-      // We reuse the user-scoped client captured by withRole via a fresh
-      // createClient() call path — but since logAuditEvent takes the
-      // supabase client arg and the audit RPC derives user_id from
-      // auth.uid(), we need a client that carries the admin's JWT. The
-      // simplest path is to re-import createClient here.
-      const { createClient } = await import("@/lib/supabase/server");
-      const userClient = await createClient();
-      logAuditEvent(userClient, {
+      // The supabase client here is the user-scoped client supplied by
+      // withRole: auth.uid() inside log_audit_event resolves to the
+      // acting admin's id, which is the audit-trail invariant.
+      logAuditEvent(supabase, {
         action: "role.grant",
         entity_type: "user_app_role",
         entity_id: targetUserId,
@@ -160,9 +146,7 @@ export const POST = withRole("admin")(
       );
     }
 
-    const { createClient } = await import("@/lib/supabase/server");
-    const userClient = await createClient();
-    logAuditEvent(userClient, {
+    logAuditEvent(supabase, {
       action: "role.revoke",
       entity_type: "user_app_role",
       entity_id: targetUserId,

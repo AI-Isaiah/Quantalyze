@@ -119,55 +119,19 @@ COMMENT ON COLUMN user_app_roles.granted_at IS
 CREATE INDEX IF NOT EXISTS idx_user_app_roles_role ON user_app_roles (role);
 
 -- --------------------------------------------------------------------------
--- STEP 2: RLS policies
--- --------------------------------------------------------------------------
--- Four policies, matching the pattern in migration 011 (allocator_preferences):
---   - owner_read: authenticated user reads their own rows
---   - admin_read: authenticated user reads all rows if they themselves have
---     the admin role (via the helper function — NOT profiles.is_admin, so
---     this policy remains correct after the is_admin → user_app_roles
---     migration in Sprint 7).
---   - service_insert: service_role only (admin client, not user JWT)
---   - service_delete: service_role only
--- UPDATE is intentionally NOT allowed — rotate by DELETE + INSERT. granted_at
--- is immutable by design.
-ALTER TABLE user_app_roles ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS user_app_roles_owner_read ON user_app_roles;
-CREATE POLICY user_app_roles_owner_read ON user_app_roles
-  FOR SELECT USING (user_id = auth.uid());
-
-DROP POLICY IF EXISTS user_app_roles_admin_read ON user_app_roles;
-CREATE POLICY user_app_roles_admin_read ON user_app_roles
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM user_app_roles uar
-      WHERE uar.user_id = auth.uid()
-        AND uar.role = 'admin'
-    )
-  );
-
-DROP POLICY IF EXISTS user_app_roles_service_insert ON user_app_roles;
-CREATE POLICY user_app_roles_service_insert ON user_app_roles
-  FOR INSERT WITH CHECK (auth.role() = 'service_role');
-
-DROP POLICY IF EXISTS user_app_roles_service_delete ON user_app_roles;
-CREATE POLICY user_app_roles_service_delete ON user_app_roles
-  FOR DELETE USING (auth.role() = 'service_role');
-
--- No UPDATE policy: the absence of any UPDATE policy under ENABLE ROW LEVEL
--- SECURITY means every UPDATE is rejected at the planner level. This keeps
--- granted_at immutable without needing a DENY policy pair.
-
--- --------------------------------------------------------------------------
--- STEP 3: current_user_has_app_role helper (SECURITY DEFINER)
+-- STEP 2: current_user_has_app_role helper (SECURITY DEFINER)
 -- --------------------------------------------------------------------------
 -- Callable from other RLS policies and from TS via supabase.rpc. Returns
 -- TRUE if the current auth.uid() has any role in `p_roles`. SECURITY DEFINER
 -- so the function reads `user_app_roles` under the owner role (postgres),
--- which bypasses the `user_app_roles_owner_read` RLS constraint — important
--- because an RLS policy on a target table calling this function may have
--- already filtered out the caller's visibility into user_app_roles.
+-- which bypasses RLS on `user_app_roles` entirely — important because the
+-- helper is called from inside `user_app_roles`'s OWN admin_read policy
+-- (STEP 3 below). Without SECURITY DEFINER that would be a circular RLS
+-- dependency; with it, the helper reads user_app_roles as postgres and
+-- returns the membership boolean safely.
+--
+-- The helper is defined BEFORE the policies in STEP 3 so the CREATE POLICY
+-- statements can reference it without forward-declaration hacks.
 --
 -- search_path is pinned per the project's SECURITY DEFINER convention.
 CREATE OR REPLACE FUNCTION public.current_user_has_app_role(p_roles TEXT[])
@@ -199,6 +163,45 @@ COMMENT ON FUNCTION public.current_user_has_app_role(TEXT[]) IS
 REVOKE ALL ON FUNCTION public.current_user_has_app_role(TEXT[]) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.current_user_has_app_role(TEXT[]) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.current_user_has_app_role(TEXT[]) TO service_role;
+
+-- --------------------------------------------------------------------------
+-- STEP 3: RLS policies
+-- --------------------------------------------------------------------------
+-- Four policies, matching the pattern in migration 011 (allocator_preferences):
+--   - owner_read: authenticated user reads their own rows
+--   - admin_read: authenticated user reads all rows if they themselves have
+--     the admin role. Uses the SECURITY DEFINER helper above, which bypasses
+--     RLS on user_app_roles when checking membership — so this policy does
+--     NOT self-reference the table's own RLS (avoiding the fragile
+--     "owner_read-OR-saves-us" dependence of an inline EXISTS). After the
+--     is_admin → user_app_roles migration in Sprint 7 this policy still
+--     reads the right column because the helper reads user_app_roles, NOT
+--     profiles.is_admin.
+--   - service_insert: service_role only (admin client, not user JWT)
+--   - service_delete: service_role only
+-- UPDATE is intentionally NOT allowed — rotate by DELETE + INSERT. granted_at
+-- is immutable by design.
+ALTER TABLE user_app_roles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS user_app_roles_owner_read ON user_app_roles;
+CREATE POLICY user_app_roles_owner_read ON user_app_roles
+  FOR SELECT USING (user_id = auth.uid());
+
+DROP POLICY IF EXISTS user_app_roles_admin_read ON user_app_roles;
+CREATE POLICY user_app_roles_admin_read ON user_app_roles
+  FOR SELECT USING (public.current_user_has_app_role(ARRAY['admin']));
+
+DROP POLICY IF EXISTS user_app_roles_service_insert ON user_app_roles;
+CREATE POLICY user_app_roles_service_insert ON user_app_roles
+  FOR INSERT WITH CHECK (auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS user_app_roles_service_delete ON user_app_roles;
+CREATE POLICY user_app_roles_service_delete ON user_app_roles
+  FOR DELETE USING (auth.role() = 'service_role');
+
+-- No UPDATE policy: the absence of any UPDATE policy under ENABLE ROW LEVEL
+-- SECURITY means every UPDATE is rejected at the planner level. This keeps
+-- granted_at immutable without needing a DENY policy pair.
 
 -- --------------------------------------------------------------------------
 -- STEP 4: backfill from profiles

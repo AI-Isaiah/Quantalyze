@@ -129,6 +129,16 @@ function makeRequest(
 }
 
 /**
+ * Build the Next 16 `{ params }` context object a dynamic-route handler
+ * receives. Next wraps the resolved param shape in a Promise per the
+ * app-router file-convention contract (see node_modules/next/dist/docs/
+ * 01-app/03-api-reference/03-file-conventions/route.md).
+ */
+function makeParamsCtx<P>(params: P): { params: Promise<P> } {
+  return { params: Promise.resolve(params) };
+}
+
+/**
  * The full parametrized matrix for `withRole`: for every combination of
  * {caller holds role X} × {required role Y}, assert the wrapper either
  * passes through (200) or returns 403. Compact N×N table — 16 cases —
@@ -149,8 +159,10 @@ describe("RBAC matrix — withRole(role) × caller.roles", () => {
       it(
         `caller=[${callerRole}] required=${requiredRole} → ${shouldPass ? "pass" : "403"}`,
         async () => {
-          // The wrapper calls getUserRoles twice: once inside requireRole,
-          // once to build the handler ctx. Return the same data both times.
+          // The wrapper issues exactly ONE getUserRoles call per request
+          // now — requireRole returns the resolved role set alongside the
+          // pass/fail discriminant, and withRole reuses it for the
+          // handler context.
           userRolesQueryMock.mockResolvedValue({
             data: [{ role: callerRole }],
             error: null,
@@ -244,7 +256,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
   it("grants a role, calls upsert, emits an audit event", async () => {
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "grant", role: "allocator" });
-    const res = await POST(req);
+    const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       success: true,
@@ -281,7 +293,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
   it("revokes a role, calls delete, emits an audit event", async () => {
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "revoke", role: "analyst" });
-    const res = await POST(req);
+    const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({
@@ -319,7 +331,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
       { action: "revoke", role: "admin" },
       "http://localhost:3000/api/admin/users/admin-user-id/roles",
     );
-    const res = await POST(req);
+    const res = await POST(req, makeParamsCtx({ id: "admin-user-id" }));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/cannot revoke (your|their) own admin/i);
     expect(userAppRolesDeleteMock).not.toHaveBeenCalled();
@@ -332,7 +344,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     });
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "grant", role: "analyst" });
-    const res = await POST(req);
+    const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(403);
     expect(userAppRolesInsertMock).not.toHaveBeenCalled();
   });
@@ -340,7 +352,7 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
   it("rejects invalid body with 400 (Zod)", async () => {
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "grant", role: "super_admin" });
-    const res = await POST(req);
+    const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(400);
     expect(userAppRolesInsertMock).not.toHaveBeenCalled();
   });
@@ -349,11 +361,12 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     const { POST } = await loadRoute();
     const req = makeRequest(
       { action: "grant", role: "allocator" },
-      // Path without /users/<id>/ — wrapper passes through, route handler
-      // short-circuits on the path parse.
-      "http://localhost:3000/api/admin/xxx/roles",
+      // The wrapper now reads `id` from the resolved params context, not
+      // from the URL. Simulate a router that failed to wire the segment
+      // through by passing an empty params object.
+      "http://localhost:3000/api/admin/users//roles",
     );
-    const res = await POST(req);
+    const res = await POST(req, makeParamsCtx({ id: "" }));
     expect(res.status).toBe(400);
     expect(userAppRolesInsertMock).not.toHaveBeenCalled();
   });
