@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.13.1.0] - 2026-04-17
+
+Unblocks production deploys. PR 57, 58, 61 all silently failed the Vercel check
+with `vercel.link/...` redirecting to the cron-jobs pricing docs — the Hobby
+plan's 2-cron cap was breached when Sprint 5 added `sync-funding`,
+`reconcile-strategies`, and `cleanup-ack-tokens`. Last live build was Sprint 4
+(v0.11.0.0); Sprint 5 + Sprint 6 never reached production.
+
+### Fixed
+
+- **Production deployments resume.** `vercel.json` trimmed to 2 daily crons
+  (`warm-analytics`, `alert-digest`) so Vercel stops rejecting the config
+  upfront. Any merge to `main` can deploy again.
+
+### Changed
+
+- **Three daily crons moved off Vercel and onto the Railway worker.**
+  `sync-funding`, `reconcile-strategies`, and `cleanup-ack-tokens` now run as
+  daily loops in `analytics-service/main_worker.py` via a new
+  `services/scheduled_tasks.py` module. The Next.js routes at
+  `src/app/api/cron/*` stay in place for manual incident-response via curl,
+  but are no longer on any schedule. `sync-funding` drops from 4-hourly to
+  daily while on Hobby — restore to any cadence after the Pro upgrade.
+
+### Added
+
+- **Regression test**: `src/__tests__/vercel-cron-limits.test.ts` fails the
+  build if anyone adds a third cron or a sub-daily schedule while still on
+  Hobby. Proven to catch the exact breach that blocked PRs 57/58/61.
+- **Runbook**: `docs/runbooks/vercel-cron-upgrade.md` — one-page playbook
+  for re-consolidating all 5 crons back onto Vercel when the project
+  upgrades to Pro.
+
 ## [0.13.0.0] - 2026-04-17
 
 Sprint 6 closeout. Earns the right to hold allocator data with production-grade
