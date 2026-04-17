@@ -70,6 +70,7 @@ function buildNavSections(
           heading: "ADMIN",
           items: [
             { label: "Dashboard", href: "/admin", icon: BarChartIcon },
+            { label: "Users", href: "/admin/users", icon: UserIcon },
             { label: "Match queue", href: "/admin/match", icon: MatchIcon },
             { label: "For-quants leads", href: "/admin/for-quants-leads", icon: MailIcon },
           ],

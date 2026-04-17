@@ -52,7 +52,9 @@ The authoritative enum lives in `src/lib/audit.ts`:
 export type AuditAction =
   | "api_key.decrypt"
   | "intro.send"
-  | "deletion.request.create";
+  | "deletion.request.create"
+  | "role.grant"
+  | "role.revoke";
 ```
 
 Adding a new action requires:
@@ -73,17 +75,24 @@ We do NOT smuggle a sentinel UUID. If an action has no entity, the
 action doesn't belong in audit_log — it belongs in product analytics
 (PostHog).
 
-### 4. Action → entity_type mapping (Sprint 6 closeout pilot)
+### 4. Action → entity_type mapping (Sprint 6 closeout pilot + RBAC)
 
-| Action | entity_type | entity_id source |
-|--------|-------------|------------------|
-| `api_key.decrypt` | `api_key` | `api_keys.id` (the key whose ciphertext was decrypted) |
-| `intro.send` | `contact_request` | `contact_requests.id` (the newly inserted intro row) |
-| `deletion.request.create` | `data_deletion_request` | `data_deletion_requests.id` (the intake row) |
+| Action | entity_type | entity_id source | Metadata keys |
+|--------|-------------|------------------|---------------|
+| `api_key.decrypt` | `api_key` | `api_keys.id` (the key whose ciphertext was decrypted) | route, reason |
+| `intro.send` | `contact_request` | `contact_requests.id` (the newly inserted intro row) | source, strategy_id, replacement_for |
+| `deletion.request.create` | `data_deletion_request` | `data_deletion_requests.id` (the intake row) | — |
+| `role.grant` | `user_app_role` | target user's `auth.users.id` (NOT a user_app_roles row id — the (user_id, role) composite PK has no standalone UUID) | role, granted_by |
+| `role.revoke` | `user_app_role` | target user's `auth.users.id` | role, revoked_by, removed_rows |
 
 Task 7.1b (Sprint 6 later, ~27 additional events) will extend this
 table. Keep the update atomic with the emission-site PR so a grep for
 `audit.ts` action strings returns the same list as this ADR.
+
+Sprint 6 closeout Task 7.2 added `role.grant` + `role.revoke` +
+`user_app_role` entity_type. The grant/revoke emitter lives in
+`src/app/api/admin/users/[id]/roles/route.ts`; see ADR-0005 for the
+full RBAC architecture.
 
 ### 5. user_id is derived from `auth.uid()` in the RPC
 `log_audit_event` is SECURITY DEFINER (migration 049). Inside the

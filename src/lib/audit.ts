@@ -68,7 +68,9 @@ import { after } from "next/server";
 export type AuditAction =
   | "api_key.decrypt"
   | "intro.send"
-  | "deletion.request.create";
+  | "deletion.request.create"
+  | "role.grant"
+  | "role.revoke";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
@@ -77,7 +79,8 @@ export type AuditAction =
 export type AuditEntityType =
   | "api_key"
   | "contact_request"
-  | "data_deletion_request";
+  | "data_deletion_request"
+  | "user_app_role";
 
 export interface AuditEvent {
   action: AuditAction;
