@@ -201,6 +201,45 @@ describe("collectUserExportBundle — mocked client", () => {
     );
   });
 
+  it("binary-search trimmer packs optimally — fills the cap without under-packing (I3)", async () => {
+    // Regression guard for I3: the prior halving loop stopped at the
+    // first pivot that fit, potentially leaving 30-50% of the cap
+    // unused. With proper binary search, the fitting row_count should
+    // pack the cap tightly.
+    //
+    // Construct ~10 rows each sized so that 6 rows fit under the cap
+    // but 7 don't. A halving-only loop would find `pivot=5` (half of
+    // 10) on first try, which fits → it stops, leaving row 6 on the
+    // floor. Binary search finds 6. We verify the row_count reflects
+    // the tight pack.
+    const rowBytes = Math.floor((EXPORT_SIZE_CAP_BYTES / 6) * 0.95);
+    const tightlyPackableRows = Array.from({ length: 10 }, (_, i) => ({
+      id: `row${i}`,
+      blob: "x".repeat(rowBytes),
+    }));
+    const mock = makeMockClient({
+      allocator_preferences: tightlyPackableRows,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u1");
+    expect(bundle.truncated_at_size_cap).toBe(true);
+
+    const trimmedTable = bundle.tables.find(
+      (t) => t.table === "allocator_preferences",
+    );
+    expect(trimmedTable).toBeDefined();
+    // With halving-only logic, row_count would have been 5 (or fewer).
+    // Binary search should yield 6 — the exact tight-pack target.
+    expect(trimmedTable!.row_count).toBeGreaterThanOrEqual(6);
+    expect(trimmedTable!.truncated_at_cap).toBe(true);
+
+    const serializedBytes = new TextEncoder().encode(JSON.stringify(bundle))
+      .byteLength;
+    expect(serializedBytes).toBeLessThanOrEqual(
+      EXPORT_SIZE_CAP_BYTES + 1_000_000,
+    );
+  });
+
   it("returns zero rows for a user with no data (happy empty path)", async () => {
     const mock = makeMockClient({});
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -301,8 +340,11 @@ describe("GDPR export — live DB integration", () => {
     60_000,
   );
 
-  it("advertises skip reason when live DB is unavailable", () => {
-    advertiseLiveDbSkipReason("gdpr-export");
-    expect(true).toBe(true);
-  });
+  it.skipIf(HAS_LIVE_DB)(
+    "advertises skip reason when live DB is unavailable",
+    () => {
+      advertiseLiveDbSkipReason("gdpr-export");
+      expect(true).toBe(true);
+    },
+  );
 });

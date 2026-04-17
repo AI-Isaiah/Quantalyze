@@ -72,6 +72,20 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
 
+    // Self-action guard: admins cannot reject their own deletion
+    // request — another admin must act. Mirrors the self-approve block
+    // in the sibling route; both apply the Sprint 7.2 self-revoke
+    // precedent to the GDPR approve/reject surface.
+    if (reqRow.user_id === user.id) {
+      return NextResponse.json(
+        {
+          error:
+            "Admins cannot reject their own deletion request — another admin must act.",
+        },
+        { status: 403 },
+      );
+    }
+
     if (reqRow.completed_at) {
       return NextResponse.json(
         { error: "Deletion request is already completed — cannot reject" },

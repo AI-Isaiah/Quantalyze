@@ -220,9 +220,40 @@ cron architecture.
   the UNION is straightforward, but no wrapper view exists today.
   Tech debt candidate.
 
+## Open questions / Sprint 7
+
+- **`api_key_rotation_reminder` consumer is NOT yet wired.** Migration 056
+  JOB 6 captures rotation-due signals into `notification_dispatches` with
+  type `api_key_rotation_reminder` and status `queued` — but no consumer
+  reads those rows. Sprint 7 must ship the consumer (outbound mail or
+  in-app banner) before the 180-day `notification_dispatches` retention
+  cron starts purging them (~6-month window from the first cron tick
+  after migration 056 is applied). If the consumer slips past that
+  window, queued rows age out silently and rotation reminders for
+  already-signalled users won't re-fire until the 60-day dedup guard
+  lapses.
+- **90-day terminal-state cleanup for `data_deletion_requests`** is
+  planned but not in 056. The admin /admin/deletion-requests page will
+  accumulate completed + rejected rows until Sprint 7 adds a retention
+  cron scoped to terminal states.
+- **Cron-heartbeat monitoring for retention jobs**: migration 013's
+  cron_runs probe doesn't yet cover the 056 retention family. Adding
+  heartbeat assertions for these jobs is tech debt (listed under
+  "Negative consequences" above).
+- **Cold-to-hot recovery view**: no UNION wrapper across
+  `audit_log` + `audit_log_cold` yet. A 5+ year forensic query has to
+  query both tables explicitly. Low priority — the UNION is trivial
+  to type manually and the query volume is near-zero.
+
 ## Evidence
 - Migration 056: cold table + append-only policies + 6 cron jobs.
   `supabase/migrations/056_retention_crons.sql`.
+- Migration 057: relax `organizations.created_by NOT NULL` (required
+  for `sanitize_user` to succeed when the target user created an org),
+  add `idx_audit_log_cold_created_at` for the cold-purge cron, and
+  install the `test_force_hot_to_cold_move` service_role-only RPC used
+  by the live-DB integration test.
+  `supabase/migrations/057_relax_organizations_created_by.sql`.
 - Migration 055: `sanitize_user` RPC and its PRESERVE-audit_log decision
   in the per-table matrix.
   `supabase/migrations/055_sanitize_user.sql`.

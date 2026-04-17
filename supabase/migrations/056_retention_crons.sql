@@ -26,11 +26,25 @@
 -- Two-stage audit retention (the cold archive)
 -- --------------------------------------------
 -- audit_log has a two-stage retention. At 2y, rows are MOVED from the hot
--- table to `audit_log_cold` (INSERT ... ON CONFLICT (id) DO NOTHING, then
--- DELETE from hot). At 7y total (5y in cold), the cold row is DELETEd.
--- Both jobs run against the same UTC timestamp space (`created_at` is
--- preserved across the move), so the 7y cold-purge threshold is measured
--- from the row's original birth, not from when it was archived.
+-- table to `audit_log_cold` via a single `DELETE … RETURNING → INSERT …
+-- ON CONFLICT (id) DO NOTHING` CTE. At 7y total (5y in cold), the cold
+-- row is DELETEd. Both jobs run against the same UTC timestamp space
+-- (`created_at` is preserved across the move), so the 7y cold-purge
+-- threshold is measured from the row's original birth, not from when it
+-- was archived.
+--
+-- Why the CTE (and not INSERT-SELECT + DELETE)
+-- --------------------------------------------
+-- The obvious formulation — `INSERT INTO cold SELECT ... FROM hot WHERE
+-- age > 2y; DELETE FROM hot WHERE age > 2y;` — has a subtle race: a
+-- backdated row inserted between the INSERT-SELECT and the DELETE with a
+-- created_at older than 2y would be DELETEd without being archived.
+-- The append-only deny policies block the scenario from PostgREST, but
+-- service_role-or-superuser paths (e.g., a future manual recovery
+-- import) could still produce it. The CTE fixes the race by making the
+-- DELETE the source-of-truth: its RETURNING captures exactly the rows
+-- removed, and the INSERT sees only those. Whatever the snapshot of
+-- "rows older than 2y" was at DELETE time is the set that lands in cold.
 --
 -- The cold table inherits the hot table's append-only invariant: owner
 -- SELECT + admin SELECT, with FOR UPDATE USING (false) + FOR DELETE
@@ -68,12 +82,13 @@
 --
 --      Name                              | Schedule       | Action
 --      ----------------------------------|----------------|-----------------
---      audit_log_hot_to_cold             | 0 3 * * *      | INSERT cold + DELETE hot at 2y
+--      audit_log_hot_to_cold             | 0 3 * * *      | CTE move to cold at 2y
 --      audit_log_cold_purge              | 5 3 * * *      | DELETE cold at 7y
 --      retention_notification_dispatches | 10 3 * * *     | 180 days
 --      retention_compute_jobs_done       | 20 3 * * *     | 30 days
 --      retention_compute_jobs_failed     | 30 3 * * *     | 90 days
---      api_key_rotation_reminder         | 0 4 * * *      | 90-day reminder emails
+--      api_key_rotation_reminder         | 0 4 * * *      | capture rotation-due signals
+--                                                          (consumer wired in Sprint 7)
 --
 -- 3. Self-verifying DO block asserting the cold table + indexes + policies
 --    + every cron job is registered.
@@ -170,16 +185,15 @@ BEGIN
 
   ------------------------------------------------------------------
   -- JOB 1: audit_log_hot_to_cold — move rows >2y old from audit_log
-  -- into audit_log_cold, then delete them from the hot table. The
-  -- INSERT and DELETE run in a single pg_cron transaction (pg_cron
-  -- wraps each command string in an implicit BEGIN/COMMIT), so a
-  -- crash between the two statements rolls the whole move back; no
-  -- row can be in both tables permanently.
+  -- into audit_log_cold via a single CTE. The DELETE's RETURNING is
+  -- the authoritative snapshot: only rows it removed feed the INSERT,
+  -- so a concurrent backdated insert between the two ops cannot be
+  -- deleted-without-archive.
   --
-  -- ON CONFLICT (id) DO NOTHING makes re-runs idempotent: if the
-  -- move inserted a row but the DELETE hadn't run yet before a prior
-  -- crash, the next run skips the INSERT for that row and the DELETE
-  -- sweeps it on the retry.
+  -- ON CONFLICT (id) DO NOTHING makes the CTE idempotent on re-run:
+  -- if a prior crash left a row in cold without removing it from hot,
+  -- the next run's DELETE RETURNING re-emits the row, the INSERT
+  -- no-ops on the existing cold id, and everything converges.
   ------------------------------------------------------------------
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'audit_log_hot_to_cold') THEN
     PERFORM cron.unschedule('audit_log_hot_to_cold');
@@ -195,13 +209,15 @@ BEGIN
     'audit_log_hot_to_cold',
     '0 3 * * *',
     $cron$
+    WITH archived AS (
+      DELETE FROM audit_log
+      WHERE created_at < now() - interval '2 years'
+      RETURNING id, user_id, action, entity_type, entity_id, metadata, created_at
+    )
     INSERT INTO audit_log_cold (id, user_id, action, entity_type, entity_id, metadata, created_at)
     SELECT id, user_id, action, entity_type, entity_id, metadata, created_at
-    FROM audit_log
-    WHERE created_at < now() - interval '2 years'
+    FROM archived
     ON CONFLICT (id) DO NOTHING;
-    DELETE FROM audit_log
-    WHERE created_at < now() - interval '2 years';
     $cron$
   );
 
@@ -289,13 +305,26 @@ BEGIN
   );
 
   ------------------------------------------------------------------
-  -- JOB 6: 90-day API key rotation reminder. Queues a row into
-  -- notification_dispatches for every user whose most recent api_keys
-  -- row was created >90d ago AND they do NOT already have a recent
-  -- reminder dispatch row in the last 60d (so a rotating user doesn't
-  -- get re-nagged until the clock resets). api_keys has no
-  -- `rotated_at` column — rotation means DELETE + INSERT, so the new
-  -- row's `created_at` is the effective rotation timestamp.
+  -- JOB 6: 90-day API key rotation-due SIGNAL capture. Writes a
+  -- notification_dispatches row (type='api_key_rotation_reminder',
+  -- status='queued') for every user whose most recent api_keys row
+  -- was created >90d ago AND they do NOT already have a recent
+  -- reminder dispatch row in the last 60d.
+  --
+  -- IMPORTANT: This job CAPTURES signals but does NOT send mail. There
+  -- is no consumer in Sprint 6 that reads these queued rows — the
+  -- reminder pipeline is scheduled for Sprint 7. We ship the capture
+  -- job now because (a) the rows accumulating today form the backlog
+  -- the Sprint 7 consumer will drain, and (b) api_keys has no
+  -- `rotated_at` column (rotation is DELETE+INSERT, the new row's
+  -- `created_at` is the effective rotation timestamp), so anchoring
+  -- the 90d clock today is important.
+  --
+  -- The 180-day notification_dispatches retention cron (JOB 3) gives
+  -- us a comfortable ~6-month buffer before queued rows start aging
+  -- out, which is more than enough time for the Sprint 7 consumer to
+  -- land — see ADR-0024 "Open questions / Sprint 7" for the tracking
+  -- item.
   ------------------------------------------------------------------
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'api_key_rotation_reminder') THEN
     PERFORM cron.unschedule('api_key_rotation_reminder');
@@ -346,7 +375,6 @@ END $$;
 -- `supabase db reset` works cleanly. The cold-table assertions always run.
 DO $$
 DECLARE
-  has_cold_table           BOOLEAN;
   has_cold_idx_user        BOOLEAN;
   has_cold_idx_entity      BOOLEAN;
   has_cold_no_updates      BOOLEAN;
@@ -366,17 +394,12 @@ DECLARE
   jobname_probe TEXT;
   missing_count INT := 0;
 BEGIN
-  -- 1. audit_log_cold table exists
-  SELECT EXISTS(
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_name = 'audit_log_cold'
-  ) INTO has_cold_table;
-  IF NOT has_cold_table THEN
-    RAISE EXCEPTION 'Migration 056 failed: audit_log_cold table missing';
-  END IF;
+  -- Table existence is tautological: the CREATE TABLE IF NOT EXISTS at
+  -- STEP 1 either succeeds or the whole migration rolls back. We skip
+  -- the information_schema probe and jump straight to the non-
+  -- tautological checks (indexes, policies, grants, crons) below.
 
-  -- 2. Indexes exist
+  -- Indexes exist
   SELECT EXISTS(
     SELECT 1 FROM pg_indexes
     WHERE schemaname = 'public'

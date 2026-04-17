@@ -92,6 +92,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // Sign for 1 hour. `createSignedUrl` returns `null` data on failure.
+  // If signing fails, we MUST remove the just-uploaded object — otherwise
+  // an orphan bundle sits in the bucket forever (the 1-per-day rate limit
+  // means the user can't retry and trigger an `upsert: true` overwrite).
   const { data: signedData, error: signedErr } = await admin.storage
     .from(EXPORTS_BUCKET)
     .createSignedUrl(objectKey, SIGNED_URL_EXPIRY_SECONDS);
@@ -100,6 +103,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       "[api/account/export] sign failed:",
       signedErr?.message ?? "no signedUrl in response",
     );
+    // Best-effort cleanup. Swallow any remove error so it doesn't shadow
+    // the original signing failure — the user sees the useful "sign
+    // failed" message, and the orphan (if any) is rare enough to leave
+    // to the next retry cycle.
+    try {
+      const { error: removeErr } = await admin.storage
+        .from(EXPORTS_BUCKET)
+        .remove([objectKey]);
+      if (removeErr) {
+        console.error(
+          "[api/account/export] orphan cleanup failed after sign failure:",
+          removeErr.message,
+        );
+      }
+    } catch (cleanupErr) {
+      console.error(
+        "[api/account/export] orphan cleanup threw after sign failure:",
+        cleanupErr instanceof Error ? cleanupErr.message : cleanupErr,
+      );
+    }
     return NextResponse.json(
       { error: "Failed to sign export URL" },
       { status: 500 },

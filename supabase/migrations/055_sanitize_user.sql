@@ -62,8 +62,16 @@
 -- strategies              | ANONYMIZE    | NULL name, description, codename,
 --                         |              | public_contact_email, review_note, partner_tag.
 --                         |              | Keep id, category_id, created_at, markets[],
---                         |              | aum, status. Drops raw_fills via the trades
---                         |              | purge below (trades cascade from strategy).
+--                         |              | aum, status. status: KEEP (intentional) —
+--                         |              | sanitized strategies remain published with
+--                         |              | name='[deleted strategy]' so historical
+--                         |              | performance data stays queryable for allocators
+--                         |              | who previously matched. Product confirmation
+--                         |              | needed before Sprint 7 promotes any role
+--                         |              | (analyst-view masking) that would benefit from
+--                         |              | status='archived'. Drops raw_fills via the
+--                         |              | trades purge below (trades cascade from
+--                         |              | strategy).
 -- trades (raw fills)      | ANONYMIZE    | NULL raw_data (JSON may contain exchange
 --                         |              | account ids), exchange_order_id,
 --                         |              | exchange_fill_id. Keeps price/qty/side rows
@@ -126,13 +134,16 @@
 -- sync_checkpoints        | PRESERVE     | Ingestion bookkeeping.
 -- compute_jobs            | PRESERVE     | Internal queue observability.
 -- key_permission_audit    | PRESERVE     | Historical audit.
--- deck_strategies         | CASCADE      | FK ON DELETE CASCADE from decks; decks
---                         |              | itself is kept (the deck concept transcends
---                         |              | authorship for discovery). Anonymizing the
---                         |              | deck owner's profiles row is sufficient.
--- decks                   | ANONYMIZE    | NULL the deck-level descriptive text if
---                         |              | user-scoped. (Decks may be system-scoped,
---                         |              | the owner FK is nullable in migration 005.)
+-- decks                   | SKIPPED — no user FK today. Migration 005 declares
+--                         |  `decks(id, name, description, slug, created_at)` with
+--                         |  no `created_by`/`user_id` column; decks are system-
+--                         |  curated admin content, not user-authored. If a future
+--                         |  migration adds a user FK, update this matrix + the
+--                         |  sanitize_user body AND extend EXCLUDED_TABLES in
+--                         |  scripts/check-gdpr-export-coverage.ts accordingly.
+-- deck_strategies         | SKIPPED — no user FK today. Inherits decks' system-
+--                         |  curated posture. If `decks` gains a user FK in a
+--                         |  future migration, revisit this row too.
 -- portfolio_strategies    | PRESERVE     | Link table, no PII.
 -- notification_dispatches | PRESERVE     | Contains recipient_email but audit trail;
 --                         |              | retention cron (migration 056) purges rows
@@ -157,6 +168,17 @@
 -- doing work. A second call against an already-sanitized user is a no-op.
 -- Every NULL-assignment is guarded with a WHERE to avoid re-doing work on a
 -- re-run.
+--
+-- Return contract
+-- ---------------
+-- Returns BOOLEAN: TRUE when this invocation actually performed the
+-- anonymize (first run — the sentinel probe flipped display_name to
+-- '[deleted]'), FALSE when it was a no-op (the profile was already
+-- sanitized, or no profiles row existed). Callers use this to distinguish
+-- "first sanitize" from "re-run" in audit metadata — a much cleaner
+-- contract than the prior `INT v_mutated_rows` counter which only
+-- incremented on two of ~15 mutation statements and produced
+-- forensically-useless "mutated_rows=0 or 1" values.
 
 BEGIN;
 SET lock_timeout = '3s';
@@ -221,23 +243,23 @@ CREATE POLICY gdpr_exports_admin_read ON storage.objects FOR SELECT
 --
 -- Idempotency strategy: the very first statement probes whether the
 -- profile is already sanitized (display_name = '[deleted]'). If yes, the
--- function returns 0 immediately — no error, no duplicate writes. Every
--- subsequent write also probes its own WHERE guard, so even a partial
--- prior run (e.g., process crashed between step 5 and step 6) converges
--- on the fully-sanitized state on re-run.
+-- function returns FALSE immediately — no error, no duplicate writes.
+-- Every subsequent write also probes its own WHERE guard, so even a
+-- partial prior run (e.g., process crashed between step 5 and step 6)
+-- converges on the fully-sanitized state on re-run.
 --
--- The function returns the count of rows actually mutated this invocation.
--- Observability: callers can log the count to tell "this was the first
--- sanitize" (count > 0) from "this was a re-run on an already-sanitized
--- user" (count = 0).
+-- The function returns BOOLEAN: TRUE when this invocation did the
+-- anonymize (first run — sentinel transitioned), FALSE when the profile
+-- was already sanitized or absent. This is simpler and more honest than
+-- the prior INT counter which only reflected two of the many mutation
+-- statements and could not be trusted as a row-count signal.
 CREATE OR REPLACE FUNCTION public.sanitize_user(p_user_id UUID)
-RETURNS INT
+RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $$
 DECLARE
-  v_mutated_rows INT := 0;
   v_already_sanitized BOOLEAN;
   v_target_email TEXT;
 BEGIN
@@ -254,13 +276,13 @@ BEGIN
 
   IF v_already_sanitized IS NULL THEN
     -- No profiles row; user either never existed or auth.users row was
-    -- hard-deleted elsewhere. Nothing to anonymize — return 0.
-    RETURN 0;
+    -- hard-deleted elsewhere. Nothing to anonymize.
+    RETURN FALSE;
   END IF;
 
   IF v_already_sanitized THEN
     -- Already fully sanitized. No-op. This is the re-run path.
-    RETURN 0;
+    RETURN FALSE;
   END IF;
 
   -- Capture the email BEFORE we null it so verification_requests can
@@ -287,13 +309,11 @@ BEGIN
     aum_range     = NULL
   WHERE id = p_user_id
     AND display_name IS DISTINCT FROM '[deleted]';
-  GET DIAGNOSTICS v_mutated_rows = ROW_COUNT;
 
   -- --------------------------------------------------------------------
   -- 3b. api_keys — PURGE. The row IS the credential.
   -- --------------------------------------------------------------------
   DELETE FROM api_keys WHERE user_id = p_user_id;
-  v_mutated_rows := v_mutated_rows + (CASE WHEN FOUND THEN 1 ELSE 0 END);
 
   -- --------------------------------------------------------------------
   -- 3c. strategies — ANONYMIZE user-facing text. Keep the row so
@@ -366,10 +386,16 @@ BEGIN
   DELETE FROM organization_invites WHERE invited_by = p_user_id;
 
   -- --------------------------------------------------------------------
-  -- 3g. organizations created by this user. Not all orgs have a
-  -- non-null created_by after ON DELETE SET NULL wouldn't work (FK
-  -- doesn't declare it), but we SET created_by = NULL defensively so
-  -- the historical org record survives without attribution.
+  -- 3g. organizations created by this user. We SET created_by = NULL
+  -- defensively so the historical org record survives without
+  -- attribution.
+  --
+  -- Nullability caveat: migration 006 originally declared created_by as
+  -- NOT NULL. Migration 057 relaxes that constraint — without 057 this
+  -- UPDATE raises `not_null_violation` on the first sanitize against
+  -- any user who ever created an org, and the deletion request is stuck
+  -- in "pending" forever. Migrations 055 and 057 MUST land together for
+  -- the GDPR flow to be sound end-to-end.
   -- --------------------------------------------------------------------
   UPDATE organizations SET created_by = NULL WHERE created_by = p_user_id;
 
@@ -385,17 +411,17 @@ BEGIN
   -- service_role grantee).
   -- --------------------------------------------------------------------
 
-  -- Return the count as a liveness signal. We increment v_mutated_rows
-  -- conservatively: the profile update is the canonical "first run"
-  -- marker, the DELETE statements rarely hit zero in a real sanitize
-  -- so their ROW_COUNT would over-count. The return is for
-  -- observability, not correctness.
-  RETURN v_mutated_rows;
+  -- First-run path: the sentinel probe at the top confirmed the profile
+  -- was not yet sanitized, and every mutation above has now executed.
+  -- Return TRUE so the caller can record "was_first_run" in audit
+  -- metadata (useful for distinguishing "real" sanitizes from idempotent
+  -- re-plays in forensic review).
+  RETURN TRUE;
 END;
 $$;
 
 COMMENT ON FUNCTION public.sanitize_user(UUID) IS
-  'GDPR Art. 17 anonymize-not-delete RPC. SECURITY DEFINER. Idempotent. service_role-only EXECUTE. See migration 055 for the per-table matrix.';
+  'GDPR Art. 17 anonymize-not-delete RPC. SECURITY DEFINER. Idempotent. service_role-only EXECUTE. Returns TRUE on first-run anonymize, FALSE on re-run or missing profile. See migration 055 for the per-table matrix.';
 
 REVOKE ALL ON FUNCTION public.sanitize_user(UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sanitize_user(UUID) TO service_role;
@@ -469,7 +495,9 @@ BEGIN
     RAISE EXCEPTION 'Migration 055 failed: gdpr_exports_admin_read policy missing';
   END IF;
 
-  -- 5. sanitize_user function exists and is SECURITY DEFINER
+  -- 5. sanitize_user function exists, is SECURITY DEFINER, and returns
+  -- BOOLEAN (not INT — the BOOLEAN signature is the locked contract per
+  -- the Sprint 6 code-review fix I4).
   SELECT EXISTS(
     SELECT 1
     FROM pg_proc p
@@ -478,9 +506,10 @@ BEGIN
       AND p.proname = 'sanitize_user'
       AND p.prosecdef = TRUE
       AND pg_get_function_arguments(p.oid) ILIKE '%uuid%'
+      AND pg_get_function_result(p.oid) = 'boolean'
   ) INTO has_fn;
   IF NOT has_fn THEN
-    RAISE EXCEPTION 'Migration 055 failed: sanitize_user(uuid) SECURITY DEFINER function missing';
+    RAISE EXCEPTION 'Migration 055 failed: sanitize_user(uuid) SECURITY DEFINER function missing or does not return boolean';
   END IF;
 
   -- 6. EXECUTE granted only to service_role (not authenticated / PUBLIC)

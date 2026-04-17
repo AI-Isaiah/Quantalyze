@@ -69,33 +69,120 @@ const MANIFEST_FILE = join(REPO_ROOT, "src", "lib", "gdpr-export.ts");
  * can flag the manifest gap. Silence-via-defensive-exclusion is the
  * exact failure mode we want to avoid for a GDPR coverage invariant.
  */
-const EXCLUDED_TABLES = new Set<string>([
+/**
+ * Each entry names the reason inline (per M5 of the Sprint 6 code-review
+ * fixes). `reason` is a free-form string for humans; `addedIn` points at
+ * the migration or sprint that introduced the exclusion so the diff
+ * reviewer can trace the decision back to its context.
+ */
+const EXCLUDED_TABLES: Record<string, { reason: string; addedIn: string }> = {
   // Cross-party / internal-only tables that don't need direct user scoping.
-  "organization_invites",
-  "organizations",
-  "relationship_documents",
-  "for_quants_leads",
-  "key_permission_audit",
-  "trades",
+  organization_invites: {
+    reason:
+      "Cross-party invite state (sent BY a user TO an email). Sanitize-time PURGE by invited_by covers the one-sided PII. Inviter's email deleted by profiles anonymize.",
+    addedIn: "migration 006",
+  },
+  organizations: {
+    reason:
+      "Cross-party org entity. Anonymize sets created_by=NULL; other members retain access. The org itself is not user-owned data to export.",
+    addedIn: "migration 006",
+  },
+  relationship_documents: {
+    reason:
+      "Cross-party uploads (allocator-manager). Reachable indirectly via contact_requests in the export; not directly user-scoped.",
+    addedIn: "Sprint 4",
+  },
+  for_quants_leads: {
+    reason:
+      "Public-landing-page lead capture; keyed by email_hash with no user FK. Pre-authenticated data, out of scope for user exports.",
+    addedIn: "Sprint 2",
+  },
+  key_permission_audit: {
+    reason:
+      "Internal audit trail of key-permission probes (staff-authored). Not user-owned data.",
+    addedIn: "migration 052",
+  },
+  trades: {
+    reason:
+      "Indirect-owned via strategies — appears in the manifest as an IndirectUserTable. Excluded from direct-column regex sweep because its FK is strategy_id, not user_id.",
+    addedIn: "migration 003",
+  },
   // Legacy landing-page intake — keyed by email, not user_id.
-  "verification_requests",
+  verification_requests: {
+    reason:
+      "Legacy pre-auth landing-page intake. Keyed by `email` TEXT, no user FK. Sanitize-time PURGE by email-match handles PII; not exportable.",
+    addedIn: "migration 009",
+  },
   // System / observability tables with no per-user data to export.
-  "cron_runs",
-  "notification_dispatches",
-  "compute_jobs",
-  "compute_job_kinds",
-  "reconciliation_reports",
-  "system_flags",
-  "sync_checkpoints",
-  "position_snapshots",
-  "positions",
-  "used_ack_tokens",
-  "funding_fees",
-  "benchmark_prices",
-  "discovery_categories",
-  "decks",
-  "deck_strategies",
-]);
+  cron_runs: {
+    reason: "System observability (cron heartbeat). No user data.",
+    addedIn: "migration 013",
+  },
+  notification_dispatches: {
+    reason:
+      "Outbound email ledger with recipient_email PII, but it's a system-authored audit trail — not user-owned. Retention policy (ADR-0024) purges at 180d.",
+    addedIn: "migration 020",
+  },
+  compute_jobs: {
+    reason: "System job queue. No user-owned row-level data.",
+    addedIn: "migration 032",
+  },
+  compute_job_kinds: {
+    reason: "Queue metadata lookup. System-level; no user data.",
+    addedIn: "migration 032",
+  },
+  reconciliation_reports: {
+    reason:
+      "Indirect-owned via strategies. Present in the manifest as an IndirectUserTable; direct regex excludes because FK is strategy_id.",
+    addedIn: "Sprint 5",
+  },
+  system_flags: {
+    reason: "Feature-flag / ops switches. No user data.",
+    addedIn: "Sprint 5",
+  },
+  sync_checkpoints: {
+    reason: "Ingestion bookkeeping per strategy. System-owned.",
+    addedIn: "migration 045",
+  },
+  position_snapshots: {
+    reason:
+      "Portfolio-scoped historical snapshots. Indirect via portfolios; not a direct user table.",
+    addedIn: "Sprint 3",
+  },
+  positions: {
+    reason:
+      "Portfolio-scoped holdings. Indirect via portfolios; not a direct user table.",
+    addedIn: "Sprint 3",
+  },
+  used_ack_tokens: {
+    reason:
+      "Idempotency guard for alert-ack tokens. System bookkeeping; no user PII.",
+    addedIn: "migration 047b",
+  },
+  funding_fees: {
+    reason:
+      "Strategy-scoped historical. Present in manifest as IndirectUserTable; direct regex excludes because FK is strategy_id.",
+    addedIn: "migration 044",
+  },
+  benchmark_prices: {
+    reason: "Reference-data time-series. System-owned; no user data.",
+    addedIn: "Sprint 3",
+  },
+  discovery_categories: {
+    reason: "Admin-curated discovery taxonomy. No user-owned data.",
+    addedIn: "Sprint 2",
+  },
+  decks: {
+    reason:
+      "System-curated admin content. Migration 005 declares no user_id/created_by column. If a future migration adds a user FK, REMOVE this entry and add the table to USER_EXPORT_TABLES.",
+    addedIn: "migration 005",
+  },
+  deck_strategies: {
+    reason:
+      "Link table between system-curated decks and strategies. Inherits decks' no-user-FK posture.",
+    addedIn: "migration 005",
+  },
+};
 
 /**
  * Read the manifest file as text, then extract the list of `table: "..."`
@@ -157,7 +244,7 @@ function scanMigrationsForUserTables(): Map<string, string> {
       const tableName = match[1];
       const body = match[2];
 
-      if (EXCLUDED_TABLES.has(tableName)) continue;
+      if (tableName in EXCLUDED_TABLES) continue;
       if (declarations.has(tableName)) continue; // first decl wins
 
       if (userColumnRe.test(body)) {

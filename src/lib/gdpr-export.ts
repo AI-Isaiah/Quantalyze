@@ -254,37 +254,42 @@ export async function collectUserExportBundle(
       .byteLength;
     if (totalBytes + approxBytes > EXPORT_SIZE_CAP_BYTES) {
       truncatedAtSizeCap = true;
-      // Truncate THIS table's rows so we fit under the cap. Conservative:
-      // halve until we're under.
-      let pivot = Math.floor(payload.rows.length / 2);
-      let trimmed = payload;
-      while (pivot > 0) {
+      // Binary-search for the largest row-count whose serialized size
+      // keeps totalBytes under the cap. The prior halving loop
+      // under-packed: after the first pivot that fit, it stopped
+      // searching, so the bundle lost rows between (fitting_pivot,
+      // last_failed_pivot]. Proper binary search converges on the exact
+      // boundary.
+      let low = 0;
+      let high = payload.rows.length;
+      let bestRows = 0;
+      let bestBytes = 0;
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2);
         const candidate = {
           ...payload,
-          rows: payload.rows.slice(0, pivot),
-          row_count: pivot,
+          rows: payload.rows.slice(0, mid),
+          row_count: mid,
           truncated_at_cap: true,
         };
-        if (
-          totalBytes +
-            new TextEncoder().encode(JSON.stringify(candidate)).byteLength <=
-          EXPORT_SIZE_CAP_BYTES
-        ) {
-          trimmed = candidate;
-          break;
+        const candidateBytes = new TextEncoder().encode(
+          JSON.stringify(candidate),
+        ).byteLength;
+        if (totalBytes + candidateBytes <= EXPORT_SIZE_CAP_BYTES) {
+          bestRows = mid;
+          bestBytes = candidateBytes;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
         }
-        pivot = Math.floor(pivot / 2);
       }
-      if (pivot === 0) {
-        trimmed = {
-          ...payload,
-          rows: [],
-          row_count: 0,
-          truncated_at_cap: true,
-        };
-      }
-      totalBytes += new TextEncoder().encode(JSON.stringify(trimmed))
-        .byteLength;
+      const trimmed: ExportTablePayload = {
+        ...payload,
+        rows: payload.rows.slice(0, bestRows),
+        row_count: bestRows,
+        truncated_at_cap: true,
+      };
+      totalBytes += bestBytes;
       totalRowCount += trimmed.row_count;
       tables.push(trimmed);
     } else {

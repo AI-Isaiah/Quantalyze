@@ -1,5 +1,12 @@
 "use client";
 
+// Uses native window.confirm/prompt for Sprint 6 pilot velocity. Sprint 7
+// will promote these flows to a proper Modal component (DESIGN.md pattern
+// TBD) when the admin surface gains broader adoption and deserves a
+// consistent dialog shell. The native prompts are acceptable here because
+// the only user of /admin/deletion-requests is the founder running a
+// pilot-scale deletion queue.
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";

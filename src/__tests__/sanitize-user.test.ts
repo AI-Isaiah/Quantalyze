@@ -97,13 +97,14 @@ describe("Migration 055 — sanitize_user RPC", () => {
 
         await seedApiKey(admin, userId, "idem-key");
 
-        // First call — should mutate at least the profiles row.
+        // First call — BOOLEAN contract (migration 055 I4 fix):
+        // TRUE means this invocation did the anonymize.
         const { data: firstResult, error: firstErr } = await admin.rpc(
           "sanitize_user",
           { p_user_id: userId },
         );
         expect(firstErr).toBeNull();
-        expect(firstResult).toBeGreaterThanOrEqual(1);
+        expect(firstResult).toBe(true);
 
         // Profile should now be anonymized
         const { data: profile } = await admin
@@ -114,13 +115,13 @@ describe("Migration 055 — sanitize_user RPC", () => {
         expect(profile?.display_name).toBe("[deleted]");
         expect(profile?.email).toBeNull();
 
-        // Second call — idempotent no-op
+        // Second call — idempotent no-op; returns FALSE (not first run).
         const { data: secondResult, error: secondErr } = await admin.rpc(
           "sanitize_user",
           { p_user_id: userId },
         );
         expect(secondErr).toBeNull();
-        expect(secondResult).toBe(0);
+        expect(secondResult).toBe(false);
 
         // Profile still anonymized (unchanged)
         const { data: profileAfter } = await admin
@@ -131,6 +132,103 @@ describe("Migration 055 — sanitize_user RPC", () => {
         expect(profileAfter?.display_name).toBe("[deleted]");
         expect(profileAfter?.email).toBeNull();
       } finally {
+        await cleanupLiveDbRow(admin, cleanup);
+      }
+    },
+    60_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "organization owner: sanitize succeeds, org survives with created_by=NULL, other members remain (C1 regression)",
+    async () => {
+      // Prior bug: `UPDATE organizations SET created_by = NULL` raised
+      // not_null_violation because migration 006 declared created_by
+      // as NOT NULL. Migration 057 drops the NOT NULL; this test
+      // guards that the sanitize completes and the org row is intact.
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const cleanup: { userIds: string[] } = { userIds: [] };
+      const orgIds: string[] = [];
+
+      try {
+        const ownerId = await createTestUser(
+          admin,
+          `sanitize-org-owner-${ts}@test.sec`,
+        );
+        const secondMemberId = await createTestUser(
+          admin,
+          `sanitize-org-member-${ts}@test.sec`,
+        );
+        cleanup.userIds.push(ownerId, secondMemberId);
+
+        // Seed an organization owned by `ownerId` with `secondMemberId`
+        // as a non-owner member. Unique slug to avoid collision across
+        // test runs.
+        const slug = `org-c1-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+        const { data: org, error: orgErr } = await admin
+          .from("organizations")
+          .insert({
+            name: `C1 Probe Org ${ts}`,
+            slug,
+            created_by: ownerId,
+          })
+          .select("id, created_by")
+          .single();
+        if (orgErr || !org) {
+          throw new Error(`organizations seed: ${orgErr?.message}`);
+        }
+        orgIds.push(org.id);
+        expect(org.created_by).toBe(ownerId);
+
+        const { error: memErr } = await admin
+          .from("organization_members")
+          .insert([
+            { organization_id: org.id, user_id: ownerId, role: "owner" },
+            { organization_id: org.id, user_id: secondMemberId, role: "member" },
+          ]);
+        if (memErr) {
+          throw new Error(`organization_members seed: ${memErr.message}`);
+        }
+
+        // Sanitize the owner. Before migration 057 this call would fail
+        // with not_null_violation on organizations.created_by. After
+        // 057, the UPDATE sets created_by=NULL and returns TRUE.
+        const { data: firstRun, error: rpcErr } = await admin.rpc(
+          "sanitize_user",
+          { p_user_id: ownerId },
+        );
+        expect(rpcErr).toBeNull();
+        expect(firstRun).toBe(true);
+
+        // Organization row still exists with created_by = NULL
+        const { data: orgAfter, error: orgReadErr } = await admin
+          .from("organizations")
+          .select("id, created_by, name, slug")
+          .eq("id", org.id)
+          .single();
+        expect(orgReadErr).toBeNull();
+        expect(orgAfter?.id).toBe(org.id);
+        expect(orgAfter?.created_by).toBeNull();
+        expect(orgAfter?.slug).toBe(slug);
+
+        // The other member's membership is intact. The owner's own
+        // membership was purged by sanitize (PURGE per migration 055
+        // matrix), so only the second member remains.
+        const { data: membersAfter, error: mReadErr } = await admin
+          .from("organization_members")
+          .select("user_id, role")
+          .eq("organization_id", org.id);
+        expect(mReadErr).toBeNull();
+        const memberIds = (membersAfter ?? []).map((m) => m.user_id);
+        expect(memberIds).toContain(secondMemberId);
+        expect(memberIds).not.toContain(ownerId);
+      } finally {
+        // Clean up the organization (FK cascades wipe the remaining
+        // organization_members row). Users deleted by the cleanup
+        // helper.
+        for (const id of orgIds) {
+          await admin.from("organizations").delete().eq("id", id);
+        }
         await cleanupLiveDbRow(admin, cleanup);
       }
     },
@@ -303,8 +401,11 @@ describe("Migration 055 — sanitize_user RPC", () => {
     60_000,
   );
 
-  it("advertises skip reason when live DB is unavailable", () => {
-    advertiseLiveDbSkipReason("sanitize-user");
-    expect(true).toBe(true);
-  });
+  it.skipIf(HAS_LIVE_DB)(
+    "advertises skip reason when live DB is unavailable",
+    () => {
+      advertiseLiveDbSkipReason("sanitize-user");
+      expect(true).toBe(true);
+    },
+  );
 });

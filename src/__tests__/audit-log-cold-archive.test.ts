@@ -57,28 +57,6 @@ import {
  * via the supabase-js query builder API, which supports all three.
  */
 
-async function seedHotAuditRow(
-  admin: ReturnType<typeof createLiveAdminClient>,
-  userId: string,
-  marker: string,
-): Promise<string> {
-  const { data, error } = await admin
-    .from("audit_log")
-    .insert({
-      user_id: userId,
-      action: `__cold_test_${marker}`,
-      entity_type: "test_probe",
-      entity_id: crypto.randomUUID(),
-      metadata: { marker },
-    })
-    .select("id")
-    .single();
-  if (error || !data) {
-    throw new Error(`seedHotAuditRow failed: ${error?.message}`);
-  }
-  return data.id as string;
-}
-
 async function deleteColdRowDirect(
   admin: ReturnType<typeof createLiveAdminClient>,
   rowId: string,
@@ -254,44 +232,30 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
   );
 
   it.skipIf(!HAS_LIVE_DB)(
-    "hot→cold move: a >2y old audit_log row lands in audit_log_cold with preserved id + created_at, and the hot row is gone",
+    "hot→cold move (full CTE): backdated hot row lands in cold AND is removed from hot via test_force_hot_to_cold_move RPC (I5 + I6)",
     async () => {
+      // This test now exercises BOTH halves of the move — the INSERT
+      // into cold AND the DELETE from hot. It does so by calling the
+      // test_force_hot_to_cold_move RPC (migration 057), which runs the
+      // exact same CTE body as the pg_cron audit_log_hot_to_cold job.
+      // The RPC is SECURITY DEFINER + service_role EXECUTE, so it
+      // bypasses the migration-049 DELETE deny that PostgREST sees.
       const admin = createLiveAdminClient();
       const ts = Date.now();
-      const row: {
-        userIds: string[];
-        hotRowId: string | null;
-      } = {
-        userIds: [],
-        hotRowId: null,
-      };
+      const row: { userIds: string[] } = { userIds: [] };
       const marker = `move-${ts}`;
 
       try {
         const userId = await createTestUser(admin, `cold-mov-${ts}@test.sec`);
         row.userIds.push(userId);
-        row.hotRowId = await seedHotAuditRow(admin, userId, marker);
 
-        // Backdate the hot row to 3 years ago so the 2y threshold fires.
-        // audit_log has append-only deny policies that block UPDATE via
-        // PostgREST, so we use the `pg_temp_backdate_audit_row` escape:
-        // a service_role RPC would need to exist to do this in SQL.
-        // Since no such RPC exists, we achieve the same via the migration
-        // self-verify pattern — INSERT directly with a backdated
-        // created_at using a second service-role INSERT path.
-        //
-        // But service_role INSERT into audit_log only sets created_at
-        // via DEFAULT unless we pass it explicitly. Check if we can.
+        // Seed a row with an explicitly-backdated created_at. The hot
+        // audit_log allows service_role INSERT with a non-default
+        // created_at — we leverage that to simulate a 3-year-old row
+        // without waiting.
         const threeYearsAgo = new Date(
           Date.now() - 3 * 365 * 24 * 60 * 60 * 1000,
         ).toISOString();
-
-        // Delete the first row we seeded (it has DEFAULT now()) and
-        // re-insert with explicit created_at.
-        // audit_log DELETE is also denied by migration 049 — so this
-        // cleanup can't happen via PostgREST either. Skip the hot-row
-        // delete and just re-insert a second row with explicit
-        // created_at; the assertion is about the backdated row.
         const { data: backdatedInsert, error: backdatedErr } = await admin
           .from("audit_log")
           .insert({
@@ -305,9 +269,6 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
           .select("id, created_at")
           .single();
         if (backdatedErr || !backdatedInsert) {
-          // If the DB rejects explicit created_at on insert (some
-          // hardening policies force it to DEFAULT), we can't run
-          // this test path — skip with a loud warning.
           console.warn(
             "[audit-log-cold-archive] backdated INSERT rejected; cannot test hot→cold move:",
             backdatedErr?.message,
@@ -317,46 +278,17 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
 
         const backdatedId = backdatedInsert.id as string;
 
-        // Execute the hot→cold SQL directly via the supabase-js builder.
-        // The cron job's INSERT statement:
-        //   INSERT INTO audit_log_cold (...) SELECT ... FROM audit_log
-        //   WHERE created_at < now() - interval '2 years'
-        //   ON CONFLICT (id) DO NOTHING;
-        //
-        // supabase-js can't run cross-table INSERT...SELECT directly,
-        // so we fetch matching hot rows and INSERT them into cold
-        // manually. This mirrors the cron SQL exactly.
-        const { data: hotMatches, error: fetchErr } = await admin
-          .from("audit_log")
-          .select("id, user_id, action, entity_type, entity_id, metadata, created_at")
-          .eq("id", backdatedId)
-          .lt(
-            "created_at",
-            new Date(Date.now() - 2 * 365 * 24 * 60 * 60 * 1000).toISOString(),
-          );
-        expect(fetchErr).toBeNull();
-        expect(hotMatches).not.toBeNull();
-        expect(hotMatches!.length).toBe(1);
+        // Invoke the test-only RPC that runs the cron's CTE body.
+        const { data: moveCount, error: rpcErr } = await admin.rpc(
+          "test_force_hot_to_cold_move",
+        );
+        expect(rpcErr).toBeNull();
+        // At least our seeded row was moved (other rows from other
+        // tests or real 2y+ production data may also be in flight).
+        expect(typeof moveCount).toBe("number");
+        expect(moveCount as number).toBeGreaterThanOrEqual(1);
 
-        const toMove = hotMatches![0];
-
-        const { error: coldInsertErr } = await admin
-          .from("audit_log_cold")
-          .upsert(
-            {
-              id: toMove.id,
-              user_id: toMove.user_id,
-              action: toMove.action,
-              entity_type: toMove.entity_type,
-              entity_id: toMove.entity_id,
-              metadata: toMove.metadata,
-              created_at: toMove.created_at,
-            },
-            { onConflict: "id", ignoreDuplicates: true },
-          );
-        expect(coldInsertErr).toBeNull();
-
-        // Read the cold row and assert identity + created_at preservation.
+        // Cold side: row is present with preserved id + created_at.
         const { data: coldRow, error: coldReadErr } = await admin
           .from("audit_log_cold")
           .select("id, user_id, action, created_at")
@@ -367,32 +299,38 @@ describe("Migration 056 — audit_log_cold table + append-only invariant", () =>
         expect(coldRow!.id).toBe(backdatedId);
         expect(coldRow!.user_id).toBe(userId);
         expect(coldRow!.action).toBe(`__cold_test_${marker}_backdated`);
-        // created_at preserved within a 1-second window (timestamp
-        // round-trips through JSON can drift by <1s due to millisecond
-        // rounding differences).
         const coldTs = new Date(coldRow!.created_at).getTime();
         const expectedTs = new Date(threeYearsAgo).getTime();
         expect(Math.abs(coldTs - expectedTs)).toBeLessThan(1000);
 
-        // Note: we DO NOT attempt to DELETE from the hot table here —
-        // migration 049's deny policies prevent PostgREST DELETE. The
-        // cron job runs as postgres superuser and bypasses the policy;
-        // this test proves the INSERT half of the move. The DELETE half
-        // is exercised by the migration self-verify + cron scheduler in
-        // production; a live test of superuser DELETE would require
-        // additional infrastructure (raw psql, not PostgREST).
+        // Hot side: the row must be GONE. This is the I6-critical
+        // assertion that the prior test could not make — PostgREST
+        // DELETE is denied, so only the superuser-bypassing CTE can
+        // produce this end-state.
+        const { data: hotAfter, error: hotReadErr } = await admin
+          .from("audit_log")
+          .select("id")
+          .eq("id", backdatedId)
+          .maybeSingle();
+        expect(hotReadErr).toBeNull();
+        expect(hotAfter).toBeNull();
       } finally {
-        // Cleanup: can't DELETE from hot or cold via PostgREST. These
-        // test-scoped rows sit with `__cold_test_` markers. A separate
-        // maintenance window or a superuser cleanup script handles them.
+        // We can't clean up the cold row via PostgREST (deny policies +
+        // REVOKE), and the test-forced move leaves our seeded row in
+        // cold. Marker-prefix isolation (`__cold_test_move-<ts>`) keeps
+        // runs non-interfering. Production cleanup via the 7y cold purge
+        // cron OR a manual superuser sweep.
         await cleanupLiveDbRow(admin, { userIds: row.userIds });
       }
     },
     45_000,
   );
 
-  it("advertises skip reason when live DB is unavailable", () => {
-    advertiseLiveDbSkipReason("audit-log-cold-archive");
-    expect(true).toBe(true);
-  });
+  it.skipIf(HAS_LIVE_DB)(
+    "advertises skip reason when live DB is unavailable",
+    () => {
+      advertiseLiveDbSkipReason("audit-log-cold-archive");
+      expect(true).toBe(true);
+    },
+  );
 });

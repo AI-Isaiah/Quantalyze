@@ -69,6 +69,20 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
 
+    // Self-action guard: admins cannot approve their own deletion
+    // request — another admin must act. Sprint 7.2 set the precedent
+    // with the self-revoke block on /api/admin/users/[id]/roles; this
+    // applies the same principle to GDPR approve.
+    if (reqRow.user_id === user.id) {
+      return NextResponse.json(
+        {
+          error:
+            "Admins cannot approve their own deletion request — another admin must act.",
+        },
+        { status: 403 },
+      );
+    }
+
     if (reqRow.completed_at) {
       return NextResponse.json(
         { error: "Deletion request is already completed" },
@@ -83,10 +97,11 @@ export const POST = withRole<{ id: string }>("admin")(
       );
     }
 
-    // Fire the anonymize RPC. Returns the count of rows mutated — 0 if
-    // the user was already sanitized (idempotent re-run), >0 on first
-    // run. Either is success.
-    const { data: mutatedRows, error: rpcErr } = await admin.rpc(
+    // Fire the anonymize RPC. Returns BOOLEAN: TRUE on the first-run
+    // anonymize, FALSE on idempotent re-run (already sanitized). Either
+    // is success — the audit event records `was_first_run` so forensic
+    // review can distinguish.
+    const { data: wasFirstRun, error: rpcErr } = await admin.rpc(
       "sanitize_user",
       { p_user_id: reqRow.user_id },
     );
@@ -130,14 +145,19 @@ export const POST = withRole<{ id: string }>("admin")(
       },
     });
 
-    // Audit: the sanitize itself (anchored to the target user)
+    // Audit: the sanitize itself (anchored to the target user).
+    // `was_first_run` is the honest forensic signal from sanitize_user's
+    // BOOLEAN return (migration 055): TRUE means this call did the
+    // anonymize, FALSE means it was a no-op re-run or the profile was
+    // absent. Replaces the prior `mutated_rows` metadata which was
+    // forensically useless (only incremented for 2 of ~15 mutations).
     logAuditEvent(supabase, {
       action: "account.sanitize",
       entity_type: "user",
       entity_id: reqRow.user_id,
       metadata: {
         request_id: requestId,
-        mutated_rows: mutatedRows ?? 0,
+        was_first_run: wasFirstRun === true,
       },
     });
 
@@ -145,7 +165,7 @@ export const POST = withRole<{ id: string }>("admin")(
       success: true,
       request_id: requestId,
       target_user_id: reqRow.user_id,
-      mutated_rows: mutatedRows ?? 0,
+      was_first_run: wasFirstRun === true,
     });
   },
 );

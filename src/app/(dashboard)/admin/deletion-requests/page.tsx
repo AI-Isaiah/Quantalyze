@@ -1,3 +1,8 @@
+// Pagination: this page takes the first 200 rows ordered by pending-first
+// then recency. At >200 pending requests, switch to cursor-based
+// pagination (Sprint 7). The 90-day terminal-state cleanup cron referenced
+// in the design note below is NOT yet implemented in migration 056 — also
+// Sprint 7 (see ADR-0024 "Open questions / Sprint 7").
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
