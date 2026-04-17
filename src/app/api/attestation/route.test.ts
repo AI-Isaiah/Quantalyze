@@ -17,6 +17,21 @@ import { NextRequest } from "next/server";
  * covering missing/wrong-origin rejection.
  */
 
+// audit.ts imports "server-only" which throws under vitest+jsdom.
+vi.mock("server-only", () => ({}));
+
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (cb: () => void | Promise<void>) => {
+      void cb();
+    },
+  };
+});
+
 const VALID_ORIGIN = { origin: "http://localhost:3000" };
 
 const authUser = vi.hoisted(() => ({
@@ -36,6 +51,8 @@ vi.mock("@/lib/supabase/server", () => ({
     auth: {
       getUser: async () => ({ data: { user: authUser }, error: null }),
     },
+    // log_audit_event RPC stub — always succeeds.
+    rpc: async () => ({ data: null, error: null }),
     from: () => {
       supabaseState.callCount += 1;
       supabaseState.lastAttestedAt = new Date().toISOString();

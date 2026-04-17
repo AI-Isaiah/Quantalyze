@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { logAuditEvent } from "@/lib/audit";
 
 // GET — returns { enabled: boolean }
 // POST — body { enabled: boolean }, flips the flag. Admin only.
@@ -72,6 +73,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     console.error("[api/admin/match/kill-switch] error:", error);
     return NextResponse.json({ error: "Failed to update flag" }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the kill switch flip. entity_id anchors
+  // to the acting admin's id because system_flags rows are keyed by
+  // `key` (text) — there's no UUID to point at. The acting admin IS
+  // the forensic anchor ("admin X flipped the match engine on/off at
+  // time Y"). Metadata carries the semantic payload.
+  logAuditEvent(supabase, {
+    action: "admin.kill_switch",
+    entity_type: "system_flag",
+    entity_id: user!.id,
+    metadata: { flag: "match_engine_enabled", new_value: body.enabled },
+  });
 
   return NextResponse.json({ success: true, enabled: body.enabled });
 }

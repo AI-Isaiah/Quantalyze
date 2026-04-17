@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { logAuditEvent } from "@/lib/audit";
 
 /**
  * PATCH /api/portfolio-strategies/alias
@@ -97,6 +98,16 @@ export async function PATCH(req: Request) {
   if (updateErr) {
     return NextResponse.json({ error: updateErr.message }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the alias rename. entity_id pins to the
+  // portfolio row (the top-level ownership anchor) since portfolio_strategies
+  // has a (portfolio_id, strategy_id) composite PK with no standalone UUID.
+  logAuditEvent(supabase, {
+    action: "allocation.update",
+    entity_type: "allocation",
+    entity_id: portfolioId,
+    metadata: { strategy_id: strategyId, alias },
+  });
 
   return NextResponse.json({ ok: true, alias });
 }

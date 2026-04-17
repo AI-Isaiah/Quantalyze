@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
@@ -7,6 +8,7 @@ import { isValidPartnerTag } from "@/lib/partner";
 import { parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
 import type { DisclosureTier } from "@/lib/types";
 
 // POST /api/admin/partner-import
@@ -233,6 +235,10 @@ export async function POST(request: Request): Promise<NextResponse> {
     await mapConcurrent(uniqueManagerEmails, IMPORT_CONCURRENCY, async (row) => {
       const userId = await ensureAuthUser(admin, { email: row.manager_email });
 
+      // @audit-skip: bulk-import row; rolled up into a single
+      // admin.partner_import audit event after the whole import completes.
+      // Per-row events would generate O(N) audit log rows with no forensic
+      // gain over the summary event.
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
           id: userId,
@@ -257,6 +263,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           `partner-import: missing user id for manager ${row.manager_email} (phase 1 should have resolved it)`,
         );
       }
+      // @audit-skip: bulk-import row; rolled up into admin.partner_import.
       const { error: strategyErr } = await admin.from("strategies").insert({
         user_id: userId,
         name: row.strategy_name,
@@ -279,6 +286,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         email: row.allocator_email,
       });
 
+      // @audit-skip: bulk-import row; rolled up into admin.partner_import.
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
           id: userId,
@@ -293,6 +301,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       if (profileErr) throw profileErr;
       allocators_created += 1;
 
+      // @audit-skip: bulk-import row; rolled up into admin.partner_import.
       const { error: prefErr } = await admin
         .from("allocator_preferences")
         .upsert(
@@ -317,6 +326,38 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 500 },
     );
   }
+
+  // Sprint 6 Task 7.1b — single rollup audit event for the whole
+  // partner import. Per-row events would generate 10s-100s of audit
+  // rows per import run with identical metadata; the summary is more
+  // useful as a forensic anchor ("which admin imported partner X, when,
+  // and how many rows landed"). entity_id is a deterministic hash of
+  // partner_tag + timestamp so the event is traceable without needing
+  // a synthesized DB row.
+  const importRunId = crypto
+    .createHash("sha256")
+    .update(`${partner_tag}:${Date.now()}`)
+    .digest("hex");
+  // Collapse the 64-char hex to a UUID string so entity_id satisfies
+  // the audit_log.entity_id UUID column constraint.
+  const importUuid = [
+    importRunId.slice(0, 8),
+    importRunId.slice(8, 12),
+    "4" + importRunId.slice(13, 16),
+    "8" + importRunId.slice(17, 20),
+    importRunId.slice(20, 32),
+  ].join("-");
+  logAuditEvent(supabase, {
+    action: "admin.partner_import",
+    entity_type: "partner_import",
+    entity_id: importUuid,
+    metadata: {
+      partner_tag,
+      managers_created,
+      strategies_created,
+      allocators_created,
+    },
+  });
 
   return NextResponse.json({
     managers_created,

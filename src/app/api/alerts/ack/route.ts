@@ -5,6 +5,7 @@ import { verifyAlertAckToken } from "@/lib/alert-ack-token";
 import { escapeHtml } from "@/lib/email";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
+import { logAuditEventAsUser } from "@/lib/audit";
 
 /**
  * /api/alerts/ack?id=<alertId>&t=<token>
@@ -229,10 +230,10 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient();
 
-  // Insert the token hash first. If two tabs submit the same token
-  // concurrently, the second insert hits the PK and we treat it as a
-  // replay — no need for an explicit row lock. Cascade on alert-delete
-  // keeps the table clean.
+  // @audit-skip: internal one-time-use token tracking. The used_ack_tokens
+  // row exists purely to block replay of the HMAC-signed email link; it
+  // is not a user-visible state change. The user-intent audit event is
+  // the alert.acknowledge emission below.
   const { error: insertError } = await admin
     .from("used_ack_tokens")
     .insert({ token_hash: guard.tokenHash, alert_id: guard.alert.id });
@@ -258,6 +259,37 @@ export async function POST(req: NextRequest) {
   if (updateError) {
     console.error("[alerts/ack] portfolio_alerts update failed:", updateError);
     return NextResponse.redirect(ACK_REDIRECT.error, { status: 303 });
+  }
+
+  // Sprint 6 Task 7.1b — audit the email-path ack. This route runs with
+  // the admin (service-role) client because the email link carries no
+  // JWT; the HMAC token is the proof of the acting user. We resolve the
+  // portfolio owner id from portfolio_alerts.portfolio_id → portfolios.user_id
+  // and emit via logAuditEventAsUser (which calls log_audit_event_service,
+  // migration 058 — service_role-only EXECUTE). If the lookup fails we
+  // skip the emission rather than attribute to a NULL user_id.
+  try {
+    const { data: portfolioRow } = await admin
+      .from("portfolios")
+      .select("user_id")
+      .eq("id", guard.alert.portfolio_id)
+      .maybeSingle();
+    if (portfolioRow?.user_id) {
+      logAuditEventAsUser(admin, portfolioRow.user_id as string, {
+        action: "alert.acknowledge",
+        entity_type: "alert",
+        entity_id: guard.alert.id,
+        metadata: {
+          source: "email",
+          alert_type: guard.alert.alert_type,
+        },
+      });
+    }
+  } catch (err) {
+    console.warn(
+      "[alerts/ack] audit-resolve portfolio owner failed (non-blocking):",
+      err,
+    );
   }
 
   // Sprint 5 Task 5.5 — usage funnel event for the email-ack path.

@@ -142,6 +142,11 @@ export async function POST(req: NextRequest) {
 
   // Mark sent alerts as emailed
   if (sentAlertIds.length > 0) {
+    // @audit-skip: cron-triggered batch-email tracking. `emailed_at` is an
+    // internal dedup timestamp so the next cron run doesn't re-email the
+    // same alert; the alert itself isn't changing state from the user's
+    // perspective. The user-observable acks land via /api/alerts/ack or
+    // /api/alerts/[id]/acknowledge, which both emit alert.acknowledge.
     const { error: updateError } = await admin
       .from("portfolio_alerts")
       .update({ emailed_at: new Date().toISOString() })

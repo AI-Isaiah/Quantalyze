@@ -109,6 +109,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // canonical states, so we reuse `computing` rather than adding a
   // distinct `syncing` value.
   const admin = createAdminClient();
+  // @audit-skip: compute-job state tracking. `strategy_analytics.computation_status`
+  // is an internal state machine for the Railway worker pipeline, not a
+  // user-visible state change. The user-facing action is "start a key
+  // sync" which dispatches via enqueue_compute_job (no direct mutation
+  // on this path).
   const { error: upsertErr } = await admin
     .from("strategy_analytics")
     .upsert(
@@ -145,6 +150,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         err,
       );
       try {
+        // @audit-skip: compute-job state tracking, failure branch.
+        // Internal state machine, not user-intent.
         await admin
           .from("strategy_analytics")
           .upsert(

@@ -26,7 +26,13 @@ vi.mock("next/server", () => ({
   after: (cb: () => void | Promise<void>) => afterSpy(cb),
 }));
 
-import { logAuditEvent, emit, type AuditEvent } from "./audit";
+import {
+  logAuditEvent,
+  logAuditEventAsUser,
+  emit,
+  emitAsUser,
+  type AuditEvent,
+} from "./audit";
 
 const DUMMY_USER = "00000000-0000-0000-0000-000000000001";
 const DUMMY_ENTITY = "00000000-0000-0000-0000-0000000000a0";
@@ -210,5 +216,117 @@ describe("logAuditEvent — fire-and-forget contract", () => {
     // synchronously, but the RPC body is async so its completion
     // still lands after the caller's sync push.
     expect(callOrder).toEqual(["after-call"]);
+  });
+});
+
+describe("logAuditEventAsUser — service-role path with caller-supplied user_id", () => {
+  // Task 7.1b — this variant calls `log_audit_event_service` (migration
+  // 058) with an explicit user_id. EXECUTE on that RPC is locked to
+  // service_role only, so the TS wrapper must pass through the admin
+  // client AND the user_id unchanged. Same fire-and-forget contract as
+  // `logAuditEvent`.
+  let consoleErrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleErrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    afterSpy.mockClear();
+  });
+
+  afterEach(() => {
+    consoleErrSpy.mockRestore();
+  });
+
+  it("invokes log_audit_event_service with the caller-supplied user_id", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+    const adminClient = { rpc };
+
+    logAuditEventAsUser(
+      adminClient as unknown as Parameters<typeof logAuditEventAsUser>[0],
+      DUMMY_USER,
+      {
+        action: "alert.acknowledge",
+        entity_type: "alert",
+        entity_id: DUMMY_ENTITY,
+        metadata: { source: "email" },
+      },
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith("log_audit_event_service", {
+      p_user_id: DUMMY_USER,
+      p_action: "alert.acknowledge",
+      p_entity_type: "alert",
+      p_entity_id: DUMMY_ENTITY,
+      p_metadata: { source: "email" },
+    });
+  });
+
+  it("never throws when the RPC rejects", async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error("network down"));
+    const adminClient = { rpc };
+
+    expect(() =>
+      logAuditEventAsUser(
+        adminClient as unknown as Parameters<typeof logAuditEventAsUser>[0],
+        DUMMY_USER,
+        event(),
+      ),
+    ).not.toThrow();
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(consoleErrSpy).toHaveBeenCalledWith(
+      "[audit] log_audit_event_service call threw (dropping):",
+      expect.objectContaining({
+        action: "intro.send",
+        user_id: DUMMY_USER,
+        message: "network down",
+      }),
+    );
+  });
+
+  it("never throws when the RPC returns an error payload", async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied" },
+    });
+    const adminClient = { rpc };
+
+    expect(() =>
+      logAuditEventAsUser(
+        adminClient as unknown as Parameters<typeof logAuditEventAsUser>[0],
+        DUMMY_USER,
+        event(),
+      ),
+    ).not.toThrow();
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(consoleErrSpy).toHaveBeenCalledWith(
+      "[audit] log_audit_event_service RPC returned error (dropping):",
+      expect.objectContaining({
+        code: "42501",
+        user_id: DUMMY_USER,
+      }),
+    );
+  });
+
+  it("emitAsUser() also never throws when the RPC rejects (unit contract)", async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error("boom"));
+    const adminClient = { rpc };
+
+    await expect(
+      emitAsUser(
+        adminClient as unknown as Parameters<typeof emitAsUser>[0],
+        DUMMY_USER,
+        event(),
+      ),
+    ).resolves.toBeUndefined();
   });
 });

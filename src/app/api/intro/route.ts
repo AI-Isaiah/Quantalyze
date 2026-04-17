@@ -231,6 +231,11 @@ export async function POST(req: NextRequest) {
     // backfill snapshot is unavailable.
     if (!enqueueOk) {
       const admin = createAdminClient();
+      // @audit-skip: internal snapshot-enqueue recovery path. The user-visible
+      // intro.send event was already emitted on the insert above; this
+      // UPDATE only promotes the row's snapshot_status from 'pending' to
+      // 'failed' so the client-facing UI reflects the background enqueue
+      // failure. Not a user-intent mutation.
       const { error: updateErr } = await admin
         .from("contact_requests")
         .update({ snapshot_status: "failed" })

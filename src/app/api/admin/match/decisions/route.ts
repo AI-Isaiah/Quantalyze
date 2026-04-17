@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { logAuditEvent } from "@/lib/audit";
 
 type Decision = "thumbs_up" | "thumbs_down" | "snoozed";
 const VALID: Decision[] = ["thumbs_up", "thumbs_down", "snoozed"];
@@ -46,14 +47,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const admin = createAdminClient();
-  const { error } = await admin.from("match_decisions").insert({
-    allocator_id: body.allocator_id,
-    strategy_id: body.strategy_id,
-    candidate_id: body.candidate_id ?? null,
-    decision: body.decision,
-    founder_note: body.founder_note ?? null,
-    decided_by: user!.id,
-  });
+  const { data: inserted, error } = await admin
+    .from("match_decisions")
+    .insert({
+      allocator_id: body.allocator_id,
+      strategy_id: body.strategy_id,
+      candidate_id: body.candidate_id ?? null,
+      decision: body.decision,
+      founder_note: body.founder_note ?? null,
+      decided_by: user!.id,
+    })
+    .select("id")
+    .single();
 
   if (error) {
     // 23505 = unique violation; the partial indexes catch repeated thumbs_up etc.
@@ -63,6 +68,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     console.error("[api/admin/match/decisions] error:", error);
     return NextResponse.json({ error: "Failed to save decision" }, { status: 500 });
+  }
+
+  // Sprint 6 Task 7.1b — audit the match decision. entity_id pins to
+  // the inserted match_decisions row so the forensic trail records
+  // "admin X thumbs-up/down'd allocator Y's match with strategy Z".
+  if (inserted?.id) {
+    logAuditEvent(supabase, {
+      action: "match.decision_record",
+      entity_type: "match_decision",
+      entity_id: inserted.id as string,
+      metadata: {
+        allocator_id: body.allocator_id,
+        strategy_id: body.strategy_id,
+        decision: body.decision,
+      },
+    });
   }
 
   return NextResponse.json({ success: true });
@@ -95,14 +116,29 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   }
 
   const admin = createAdminClient();
-  const { error } = await admin
+  const { data: deleted, error } = await admin
     .from("match_decisions")
     .delete()
-    .match({ allocator_id, strategy_id, decision });
+    .match({ allocator_id, strategy_id, decision })
+    .select("id");
 
   if (error) {
     console.error("[api/admin/match/decisions] delete error:", error);
     return NextResponse.json({ error: "Failed to delete decision" }, { status: 500 });
+  }
+
+  // Sprint 6 Task 7.1b — audit the decision removal. entity_id pins to
+  // the deleted row id so the forensic trail records what was un-done.
+  // If multiple rows matched (shouldn't with the composite filter but
+  // hypothetically), emit one event per row.
+  const deletedRows = deleted ?? [];
+  for (const row of deletedRows) {
+    logAuditEvent(supabase, {
+      action: "match.decision_delete",
+      entity_type: "match_decision",
+      entity_id: row.id as string,
+      metadata: { allocator_id, strategy_id, decision },
+    });
   }
 
   return NextResponse.json({ success: true });

@@ -12,6 +12,22 @@ import { NextRequest } from "next/server";
  *   5. Happy path: inserts sanitized rows for owned strategies.
  */
 
+// audit.ts imports "server-only" which throws under vitest+jsdom.
+vi.mock("server-only", () => ({}));
+
+// audit.ts uses next/server's `after()` — pass through synchronously.
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (cb: () => void | Promise<void>) => {
+      void cb();
+    },
+  };
+});
+
 const ownedStrategyId = "strat-owned-001";
 const otherStrategyId = "strat-other-002";
 
@@ -36,6 +52,8 @@ vi.mock("@/lib/supabase/server", () => ({
         error: null,
       }),
     },
+    // log_audit_event RPC stub — always succeeds.
+    rpc: async () => ({ data: null, error: null }),
   }),
 }));
 

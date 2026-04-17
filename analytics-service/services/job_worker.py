@@ -46,6 +46,7 @@ import ccxt
 from cryptography.fernet import InvalidToken
 
 from services.analytics_status import sync_strategy_analytics_status
+from services.audit import log_audit_event
 from services.db import db_execute, get_supabase
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
@@ -716,6 +717,34 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
         "reconcile_strategy: strategy=%s status=%s count=%d",
         strategy_id, report.status, report.discrepancy_count,
     )
+
+    # Sprint 6 Task 7.1b — audit the reconcile run. user_id is the
+    # strategy owner (strategies.user_id); entity is the strategy being
+    # reconciled. Best-effort owner lookup — if the strategy was deleted
+    # between the job enqueue and now, drop the audit event rather than
+    # failing the whole reconcile path.
+    def _load_strategy_owner() -> str | None:
+        res = (
+            ctx.supabase.table("strategies")
+            .select("user_id")
+            .eq("id", strategy_id)
+            .maybe_single()
+            .execute()
+        )
+        return (res.data or {}).get("user_id") if res.data else None
+
+    owner_id = await db_execute(_load_strategy_owner)
+    if owner_id:
+        log_audit_event(
+            user_id=owner_id,
+            action="reconcile.compare",
+            entity_type="reconcile_run",
+            entity_id=strategy_id,
+            metadata={
+                "status": report.status,
+                "discrepancy_count": report.discrepancy_count,
+            },
+        )
 
     # Step 5: fan out `sync_failure` alerts to every portfolio that holds
     # this strategy. Skip on clean. We follow the select-then-insert

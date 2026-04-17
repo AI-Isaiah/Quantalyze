@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { logAuditEvent } from "@/lib/audit";
 
 const MAX_CONTENT_BYTES = 100 * 1024; // 100 KB
 
@@ -107,6 +108,16 @@ export async function PATCH(request: NextRequest) {
       { status: 500 },
     );
   }
+
+  // Sprint 6 Task 7.1b — audit the note update. user_notes has a
+  // (user_id, portfolio_id) composite PK; anchor entity_id to portfolio_id
+  // since the note is scoped to the portfolio.
+  logAuditEvent(supabase, {
+    action: "portfolio_note.update",
+    entity_type: "portfolio_note",
+    entity_id: portfolio_id,
+    metadata: { content_length: content.length },
+  });
 
   return NextResponse.json({ updated_at: data?.updated_at });
 }

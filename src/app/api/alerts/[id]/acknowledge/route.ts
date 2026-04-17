@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
+import { logAuditEvent } from "@/lib/audit";
 
 /**
  * POST /api/alerts/[id]/acknowledge — in-app ack from the critical banner.
@@ -79,6 +80,14 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (updateError) {
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the in-app critical-banner ack.
+  logAuditEvent(supabase, {
+    action: "alert.acknowledge",
+    entity_type: "alert",
+    entity_id: id,
+    metadata: { source: "in_app_banner", alert_type: existing.alert_type },
+  });
 
   // Usage funnel event. In-app source; the email ack path in
   // `/api/alerts/ack` fires the same event with source: "email" using

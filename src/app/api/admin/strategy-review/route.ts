@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
 import { notifyManagerApproved } from "@/lib/email";
 import { checkStrategyGate } from "@/lib/strategyGate";
+import { logAuditEvent } from "@/lib/audit";
 
 export const POST = withAdminAuth(async (body, admin) => {
   const { id, action, review_note } = body;
@@ -51,6 +53,21 @@ export const POST = withAdminAuth(async (body, admin) => {
   if (error) {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the approve/reject decision. Use a
+  // user-scoped client so log_audit_event resolves auth.uid() to the
+  // acting admin (withAdminAuth hands us the service-role `admin` client
+  // only). The outer handler has already verified the caller is admin.
+  const auditSupabase = await createClient();
+  logAuditEvent(auditSupabase, {
+    action: action === "approve" ? "strategy.approve" : "strategy.reject",
+    entity_type: "strategy",
+    entity_id: id as string,
+    metadata:
+      action === "approve"
+        ? { new_status: "published" }
+        : { new_status: "draft", review_note: (review_note as string) || null },
+  });
 
   if (action === "approve") {
     const sd = strategyData!;

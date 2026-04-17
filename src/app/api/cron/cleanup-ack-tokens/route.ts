@@ -35,6 +35,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // PostgREST filter.
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
+  // @audit-skip: cron garbage collection, no user attribution. Deletes
+  // 30-day-old used_ack_tokens rows; nothing user-visible changes.
   const { data, error } = await admin
     .from("used_ack_tokens")
     .delete()

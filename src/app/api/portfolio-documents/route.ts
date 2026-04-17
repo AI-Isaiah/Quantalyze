@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
 import { assertPortfolioOwnership } from "@/lib/queries";
+import { logAuditEvent } from "@/lib/audit";
 import { DOC_TYPES } from "@/lib/utils";
 import type { User } from "@supabase/supabase-js";
 
@@ -78,5 +79,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+
+  // Sprint 6 Task 7.1b — audit the document upload. Forensic trail for
+  // "what documents did this allocator upload for this portfolio?"
+  if (data?.id) {
+    logAuditEvent(supabase, {
+      action: "portfolio_document.create",
+      entity_type: "portfolio_document",
+      entity_id: data.id as string,
+      metadata: {
+        portfolio_id,
+        strategy_id: strategy_id || null,
+        doc_type,
+      },
+    });
+  }
+
   return NextResponse.json({ document: data });
 });

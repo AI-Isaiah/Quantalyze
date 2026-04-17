@@ -159,6 +159,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
     const results = await Promise.allSettled([
       notifyFounderNewStrategy(name, managerName),
+      // @audit-skip: denormalization timestamp. api_keys.last_sync_at
+      // is a sync-state hint, not a user-visible state change. The
+      // user-intent event for this flow is the finalize_wizard_strategy
+      // RPC call that promoted the draft to pending_review (which is a
+      // stored-procedure call, not a .insert/.update/.delete — not
+      // reached by the grep test).
       keyLink?.api_key_id
         ? admin
             .from("api_keys")

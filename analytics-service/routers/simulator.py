@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from services.audit import log_audit_event
 from services.db import get_supabase
 from services.simulator_scoring import simulate_add_candidate
 
@@ -183,5 +184,16 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest):
     # UI can render it without a second round-trip.
     result["candidate_name"] = candidate_name
     result["portfolio_id"] = req.portfolio_id
+
+    # Sprint 6 Task 7.1b — audit the simulator run. entity is the
+    # portfolio the ADD scenario targeted; user_id carried in the
+    # request shape (SimulatorRequest.user_id).
+    log_audit_event(
+        user_id=req.user_id,
+        action="simulator.run",
+        entity_type="simulator_run",
+        entity_id=req.portfolio_id,
+        metadata={"candidate_strategy_id": req.candidate_strategy_id},
+    )
 
     return result

@@ -150,6 +150,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // @audit-skip: unauthenticated public landing-page form. audit_log
+  // requires a user_id; this caller has no user session. Lead-capture
+  // funnel metrics live in PostHog (trackForQuantsEventServer below)
+  // per ADR-0023 §3.
   const { data: inserted, error: insertErr } = await admin
     .from("for_quants_leads")
     .insert({

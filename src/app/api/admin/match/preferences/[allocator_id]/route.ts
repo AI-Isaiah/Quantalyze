@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { pickAdminEditableFields, validateAdminEditableInput } from "@/lib/preferences";
+import { logAuditEvent } from "@/lib/audit";
 
 // PUT /api/admin/match/preferences/[allocator_id]
 // Admin can edit both self-editable AND admin-only fields.
@@ -54,7 +55,23 @@ export async function PUT(
     return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
   }
 
-  // Update profile's preferences_updated_at
+  // Sprint 6 Task 7.1b — audit the admin-edited preferences. user-scoped
+  // `supabase` client already bound to the acting admin; log_audit_event
+  // derives the acting admin from auth.uid().
+  logAuditEvent(supabase, {
+    action: "notification_preferences.update",
+    entity_type: "user",
+    entity_id: allocator_id,
+    metadata: {
+      fields: Object.keys(fields),
+      self_edit: false,
+      edited_by: user!.id,
+    },
+  });
+
+  // @audit-skip: denormalization cache touch. The preferences_updated_at
+  // column on profiles is a UI-badge hint; the user-intent audit event
+  // was emitted above on the allocator_preferences upsert.
   await admin
     .from("profiles")
     .update({ preferences_updated_at: new Date().toISOString() })
