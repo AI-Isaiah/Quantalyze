@@ -17,6 +17,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@nivo/boxplot": "^0.99.0",
+    "@opentelemetry/otlp-transformer": "0.215.0",
     "@sentry/nextjs": "^10.48.0",
     "@sparticuz/chromium": "^133.0.0",
     "@supabase/ssr": "^0.10.0",

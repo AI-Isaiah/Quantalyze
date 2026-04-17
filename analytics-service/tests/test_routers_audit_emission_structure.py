@@ -122,24 +122,27 @@ def test_bridge_score_candidates_emission_structure():
         if _unparse(_extract_kwarg_value(c, "action") or ast.Constant(value=""))
         == "'bridge.score_candidates'"
     ]
-    assert len(bridge_calls) == 1, (
+    # /review per-task fix split the emission so BOTH branches emit (empty
+    # candidates fast-return + full candidates happy path). Accept 1-or-2
+    # call sites, and enforce the shape-invariants on every site.
+    assert 1 <= len(bridge_calls) <= 2, (
         "portfolio_bridge must call log_audit_event with action='bridge.score_candidates' "
-        f"exactly once; found {len(bridge_calls)}"
-    )
-    call = bridge_calls[0]
-
-    # entity_type literal
-    entity_type_val = _extract_kwarg_value(call, "entity_type")
-    assert isinstance(entity_type_val, ast.Constant) and entity_type_val.value == "bridge_run", (
-        "bridge.score_candidates emission must set entity_type='bridge_run' "
-        f"(see ADR-0023); got {entity_type_val!r}"
+        f"at least once (once per branch); found {len(bridge_calls)}"
     )
 
-    # user_id + entity_id + metadata kwargs present
-    for required_kw in ("user_id", "entity_id", "metadata"):
-        assert _extract_kwarg_value(call, required_kw) is not None, (
-            f"bridge.score_candidates emission is missing keyword arg '{required_kw}'"
+    for call in bridge_calls:
+        # entity_type literal
+        entity_type_val = _extract_kwarg_value(call, "entity_type")
+        assert isinstance(entity_type_val, ast.Constant) and entity_type_val.value == "bridge_run", (
+            "bridge.score_candidates emission must set entity_type='bridge_run' "
+            f"(see ADR-0023); got {entity_type_val!r}"
         )
+
+        # user_id + entity_id + metadata kwargs present
+        for required_kw in ("user_id", "entity_id", "metadata"):
+            assert _extract_kwarg_value(call, required_kw) is not None, (
+                f"bridge.score_candidates emission is missing keyword arg '{required_kw}'"
+            )
 
 
 # ---------------------------------------------------------------------------
