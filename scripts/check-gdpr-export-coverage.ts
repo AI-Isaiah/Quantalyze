@@ -56,6 +56,18 @@ const MANIFEST_FILE = join(REPO_ROOT, "src", "lib", "gdpr-export.ts");
 /**
  * Tables whose rows are NOT user-owned in a way the GDPR export should
  * surface — keeping these out of USER_EXPORT_TABLES is intentional.
+ *
+ * Forward-compatibility note
+ * --------------------------
+ * Some entries (e.g. `trades`, `funding_fees`, `reconciliation_reports`)
+ * are listed defensively. They have no direct `user_id` column today —
+ * they're indirect-scoped via `strategy_id` — so the regex scan in
+ * `scanMigrationsForUserTables` below wouldn't match them anyway, and
+ * including them here does NOT cause false negatives today. The
+ * defensiveness is for the future: if a migration adds a `user_id`
+ * column to `trades` (or similar), REMOVE it from this list so the hook
+ * can flag the manifest gap. Silence-via-defensive-exclusion is the
+ * exact failure mode we want to avoid for a GDPR coverage invariant.
  */
 const EXCLUDED_TABLES = new Set<string>([
   // Cross-party / internal-only tables that don't need direct user scoping.

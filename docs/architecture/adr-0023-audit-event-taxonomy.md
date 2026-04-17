@@ -141,6 +141,18 @@ eventually). That's an intentional escape hatch for operator use; the
 audit is against *application-layer* tampering, not against a compromised
 database.
 
+**Cold archive (`audit_log_cold`) shares the same invariant.** Migration
+056 creates the cold table with the identical pattern: deny policies
+(`audit_log_cold_no_updates`, `audit_log_cold_no_deletes` — both
+`USING (false)`) plus `REVOKE UPDATE, DELETE ON audit_log_cold FROM
+authenticated, service_role`. Rows move hot→cold via the
+`audit_log_hot_to_cold` cron at 2y without changing `id` or
+`created_at`, so the append-only contract is preserved end-to-end across
+the full 7-year retention window. Only superuser SQL (the
+`audit_log_cold_purge` cron, which runs as postgres) can delete rows
+from the cold table — same escape hatch as the hot table, same
+justification.
+
 ### 7. Fire-and-forget emission, <10ms p99
 Per ADR-0010's observability budget, audit emission must not appear in
 the request's tail latency. `logAuditEvent()` in `src/lib/audit.ts`:

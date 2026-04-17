@@ -1,4 +1,4 @@
--- Migration 056: data retention pg_cron jobs.
+-- Migration 056: data retention pg_cron jobs + audit_log cold archive.
 --
 -- Sprint 6 closeout Task 7.3 — Data retention + GDPR workflow (part 2 of 2).
 --
@@ -6,27 +6,47 @@
 -- -------------------------
 -- The product accumulates ephemeral observability rows (notification
 -- dispatches, compute job outcomes) and forensic rows (audit log) that must
--- be pruned on a regulatory-grounded schedule. Per ADR-0008 (data retention
+-- be pruned on a regulatory-grounded schedule. Per ADR-0024 (data retention
 -- policy) the thresholds are:
 --
---   * audit_log                     — 2y hot retention + 5y cold archive (7y total)
+--   * audit_log (hot)               — 2y retention, moved to audit_log_cold
+--   * audit_log_cold                — 5y retention (7y total from birth)
 --   * notification_dispatches       — 180d
 --   * compute_jobs status='done'    — 30d
 --   * compute_jobs failed/cancelled — 90d
 --
--- This migration registers four pg_cron jobs that enforce those thresholds
--- nightly. Each job is idempotent via `DELETE WHERE created_at < now() -
--- interval '…'` — re-running at 3 AM when yesterday's run already purged
--- the crossover rows simply finds zero rows to delete.
+-- This migration:
+--   1. Creates the `audit_log_cold` table with the SAME schema + indexes +
+--      append-only invariant as the hot audit_log (migration 010 + 049).
+--   2. Registers five pg_cron jobs that enforce those thresholds nightly.
+--      Each job is idempotent via `DELETE WHERE created_at < now() -
+--      interval '…'` — re-running when yesterday's run already purged the
+--      crossover rows simply finds zero rows to delete.
+--
+-- Two-stage audit retention (the cold archive)
+-- --------------------------------------------
+-- audit_log has a two-stage retention. At 2y, rows are MOVED from the hot
+-- table to `audit_log_cold` (INSERT ... ON CONFLICT (id) DO NOTHING, then
+-- DELETE from hot). At 7y total (5y in cold), the cold row is DELETEd.
+-- Both jobs run against the same UTC timestamp space (`created_at` is
+-- preserved across the move), so the 7y cold-purge threshold is measured
+-- from the row's original birth, not from when it was archived.
+--
+-- The cold table inherits the hot table's append-only invariant: owner
+-- SELECT + admin SELECT, with FOR UPDATE USING (false) + FOR DELETE
+-- USING (false) deny policies + REVOKE UPDATE, DELETE at the grant level.
+-- Superuser SQL (the cold-purge cron runs as postgres) retains the ability
+-- to DELETE rows older than 7y — the deny policies bind PostgREST roles,
+-- not the OWNER.
 --
 -- Scope decisions (locked)
 -- ------------------------
---   * Hot/cold split for audit_log is NOT implemented in the DB. The 2y
---     hot bucket is enforced here as a DELETE at 7y total (2y hot + 5y
---     cold = 7y). An operator-run archive-to-S3 job (future sprint) would
---     ingest the rows older than 2y before the 7y DELETE purges them.
---     For Task 7.3 we ship the 7y delete threshold; the cold archive is
---     tracked as tech debt in docs/architecture/adr-0008-data-retention.md.
+--   * Cold archive lives in the same Postgres database, not in S3/Glacier.
+--     S3 was considered but rejected for two reasons: (a) preserving RLS
+--     means the existing owner-read path for audit_log keeps working for
+--     rows old enough to have migrated; (b) the operational cost of two
+--     storage surfaces exceeds the storage-cost delta at our volume for
+--     the next 5+ years.
 --   * Compute-job retention uses `created_at`, not `claimed_at` or
 --     `updated_at`. created_at is the row's birth and is monotonic; using
 --     a claim/update column would let a job with a long retry history
@@ -41,26 +61,103 @@
 --
 -- What this migration ships
 -- -------------------------
--- Four cron jobs, all scheduled daily UTC with distinct timeslots so they
--- don't contend for the same compute window or overlap the 01:00 match
--- engine cron (migration 015):
+-- 1. `audit_log_cold` table + indexes + RLS policies + append-only grants.
+-- 2. Six cron jobs, all scheduled daily UTC with distinct timeslots so they
+--    don't contend for the same compute window or overlap the 01:00 match
+--    engine cron (migration 015):
 --
---   Name                              | Schedule       | Keep-window
---   ----------------------------------|----------------|-----------------
---   retention_audit_log               | 0 3 * * *      | 7 years
---   retention_notification_dispatches | 10 3 * * *     | 180 days
---   retention_compute_jobs_done       | 20 3 * * *     | 30 days
---   retention_compute_jobs_failed     | 30 3 * * *     | 90 days
+--      Name                              | Schedule       | Action
+--      ----------------------------------|----------------|-----------------
+--      audit_log_hot_to_cold             | 0 3 * * *      | INSERT cold + DELETE hot at 2y
+--      audit_log_cold_purge              | 5 3 * * *      | DELETE cold at 7y
+--      retention_notification_dispatches | 10 3 * * *     | 180 days
+--      retention_compute_jobs_done       | 20 3 * * *     | 30 days
+--      retention_compute_jobs_failed     | 30 3 * * *     | 90 days
+--      api_key_rotation_reminder         | 0 4 * * *      | 90-day reminder emails
 --
--- Self-verifying DO block asserts all four jobs are registered in cron.job.
+-- 3. Self-verifying DO block asserting the cold table + indexes + policies
+--    + every cron job is registered.
 --
 -- Caller impact
 -- -------------
--- Zero at apply time. The jobs' first DELETE fires at 03:00 UTC on the next
--- cron tick. Before then, no row is deleted.
+-- Zero at apply time. The jobs' first run fires at 03:00 UTC on the next
+-- cron tick. Before then, no row is moved or deleted. The cold table is
+-- empty until the first hot→cold run has data to migrate.
 
 BEGIN;
 
+-- --------------------------------------------------------------------------
+-- STEP 1: audit_log_cold table
+-- --------------------------------------------------------------------------
+-- Mirrors the hot audit_log schema (migration 010) exactly. Same columns,
+-- same nullability, same PK. The `id` PK carries across from hot to cold
+-- so a row's identity is preserved; ON CONFLICT (id) DO NOTHING in the
+-- move job makes re-runs a no-op.
+CREATE TABLE IF NOT EXISTS audit_log_cold (
+  id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id UUID NOT NULL,
+  metadata JSONB,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+COMMENT ON TABLE audit_log_cold IS
+  'Cold archive of audit_log rows older than 2y. Rows land here via the audit_log_hot_to_cold cron and are deleted at 7y by audit_log_cold_purge. Same append-only invariants as audit_log — see migration 056.';
+
+-- Mirror the hot table's indexes. Queries against the cold archive follow
+-- the same access patterns (by user, by entity).
+CREATE INDEX IF NOT EXISTS idx_audit_log_cold_user   ON audit_log_cold (user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_cold_entity ON audit_log_cold (entity_type, entity_id);
+
+-- --------------------------------------------------------------------------
+-- STEP 2: RLS + append-only invariant on audit_log_cold
+-- --------------------------------------------------------------------------
+-- Match the hot table's posture:
+--   * Owner SELECTs own rows (user_id = auth.uid()).
+--   * Admins SELECT all rows (via current_user_has_app_role, matching the
+--     pattern used by the gdpr-exports bucket policy in migration 055).
+--   * INSERT is service_role-only (used by the hot→cold cron, which runs
+--     as postgres and bypasses RLS regardless — the policy is defense
+--     against a future direct client-side insert slipping through).
+--   * UPDATE + DELETE are denied at the RLS layer AND at the grant layer
+--     (REVOKE UPDATE, DELETE from authenticated, service_role), per
+--     migration 049's pattern for the hot table.
+--
+-- The cold-purge cron runs as the superuser postgres which is unaffected
+-- by the DELETE grants/policies; that's the intentional escape hatch
+-- documented in ADR-0023 §6.
+ALTER TABLE audit_log_cold ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS audit_log_cold_owner_read ON audit_log_cold;
+CREATE POLICY audit_log_cold_owner_read ON audit_log_cold FOR SELECT
+  USING (user_id = auth.uid());
+
+DROP POLICY IF EXISTS audit_log_cold_admin_read ON audit_log_cold;
+CREATE POLICY audit_log_cold_admin_read ON audit_log_cold FOR SELECT
+  USING (public.current_user_has_app_role(ARRAY['admin']));
+
+DROP POLICY IF EXISTS audit_log_cold_service_insert ON audit_log_cold;
+CREATE POLICY audit_log_cold_service_insert ON audit_log_cold FOR INSERT
+  WITH CHECK (auth.role() = 'service_role');
+
+-- Deny policies — mirror migration 049 for the hot table.
+DROP POLICY IF EXISTS audit_log_cold_no_updates ON audit_log_cold;
+CREATE POLICY audit_log_cold_no_updates ON audit_log_cold
+  FOR UPDATE USING (false);
+
+DROP POLICY IF EXISTS audit_log_cold_no_deletes ON audit_log_cold;
+CREATE POLICY audit_log_cold_no_deletes ON audit_log_cold
+  FOR DELETE USING (false);
+
+-- Grant-level defense-in-depth. Even if RLS is disabled in a future
+-- migration (or by operator error), PostgREST cannot UPDATE/DELETE.
+REVOKE UPDATE, DELETE ON audit_log_cold FROM authenticated, service_role;
+
+-- --------------------------------------------------------------------------
+-- STEP 3: cron jobs
+-- --------------------------------------------------------------------------
 -- Idempotent re-scheduling: each job's registration block unschedules any
 -- prior version first, then schedules. The outer DO block handles the
 -- pg_cron-missing case gracefully so local dev applies cleanly.
@@ -72,25 +169,67 @@ BEGIN
   END IF;
 
   ------------------------------------------------------------------
-  -- JOB 1: audit_log — 7-year retention (2y hot + 5y cold, both
-  -- enforced by the same DELETE until the cold-archive ingest job
-  -- ships in a future sprint — see ADR-0008).
+  -- JOB 1: audit_log_hot_to_cold — move rows >2y old from audit_log
+  -- into audit_log_cold, then delete them from the hot table. The
+  -- INSERT and DELETE run in a single pg_cron transaction (pg_cron
+  -- wraps each command string in an implicit BEGIN/COMMIT), so a
+  -- crash between the two statements rolls the whole move back; no
+  -- row can be in both tables permanently.
+  --
+  -- ON CONFLICT (id) DO NOTHING makes re-runs idempotent: if the
+  -- move inserted a row but the DELETE hadn't run yet before a prior
+  -- crash, the next run skips the INSERT for that row and the DELETE
+  -- sweeps it on the retry.
   ------------------------------------------------------------------
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'audit_log_hot_to_cold') THEN
+    PERFORM cron.unschedule('audit_log_hot_to_cold');
+  END IF;
+  -- Also unschedule the legacy single-stage job name from the pre-cold
+  -- version of this migration, in case we're re-applying over a DB that
+  -- had the earlier 7y DELETE registered.
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retention_audit_log') THEN
     PERFORM cron.unschedule('retention_audit_log');
   END IF;
 
   PERFORM cron.schedule(
-    'retention_audit_log',
+    'audit_log_hot_to_cold',
     '0 3 * * *',
     $cron$
+    INSERT INTO audit_log_cold (id, user_id, action, entity_type, entity_id, metadata, created_at)
+    SELECT id, user_id, action, entity_type, entity_id, metadata, created_at
+    FROM audit_log
+    WHERE created_at < now() - interval '2 years'
+    ON CONFLICT (id) DO NOTHING;
     DELETE FROM audit_log
+    WHERE created_at < now() - interval '2 years';
+    $cron$
+  );
+
+  ------------------------------------------------------------------
+  -- JOB 2: audit_log_cold_purge — delete cold rows >7y old (5y in
+  -- cold after 2y in hot). created_at is preserved through the move,
+  -- so this threshold is measured from birth, not from archival.
+  --
+  -- This runs as the postgres superuser inside pg_cron, which bypasses
+  -- the audit_log_cold_no_deletes RLS policy AND the REVOKE DELETE at
+  -- the grant layer (superuser owns the table). Documented escape
+  -- hatch per ADR-0023 §6.
+  ------------------------------------------------------------------
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'audit_log_cold_purge') THEN
+    PERFORM cron.unschedule('audit_log_cold_purge');
+  END IF;
+
+  PERFORM cron.schedule(
+    'audit_log_cold_purge',
+    '5 3 * * *',
+    $cron$
+    DELETE FROM audit_log_cold
     WHERE created_at < now() - interval '7 years';
     $cron$
   );
 
   ------------------------------------------------------------------
-  -- JOB 2: notification_dispatches — 180-day retention.
+  -- JOB 3: notification_dispatches — 180-day retention.
   ------------------------------------------------------------------
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retention_notification_dispatches') THEN
     PERFORM cron.unschedule('retention_notification_dispatches');
@@ -106,7 +245,7 @@ BEGIN
   );
 
   ------------------------------------------------------------------
-  -- JOB 3: compute_jobs status='done' — 30-day retention.
+  -- JOB 4: compute_jobs status='done' — 30-day retention.
   -- Done-state queue rows are observability. 30 days is plenty for the
   -- admin compute-jobs dashboard retrospective queries.
   ------------------------------------------------------------------
@@ -125,7 +264,7 @@ BEGIN
   );
 
   ------------------------------------------------------------------
-  -- JOB 4: compute_jobs failed_final / cancelled — 90-day retention.
+  -- JOB 5: compute_jobs failed_final / cancelled — 90-day retention.
   -- The plan text says "failed_final/cancelled" but the schema's
   -- status enum is ('pending','running','done','done_pending_children',
   -- 'failed_retry','failed_final'). There is no 'cancelled' state
@@ -150,7 +289,7 @@ BEGIN
   );
 
   ------------------------------------------------------------------
-  -- JOB 5: 90-day API key rotation reminder. Queues a row into
+  -- JOB 6: 90-day API key rotation reminder. Queues a row into
   -- notification_dispatches for every user whose most recent api_keys
   -- row was created >90d ago AND they do NOT already have a recent
   -- reminder dispatch row in the last 60d (so a rotating user doesn't
@@ -194,19 +333,31 @@ BEGIN
     $cron$
   );
 
-  RAISE NOTICE 'Migration 056: 5 retention/reminder cron jobs scheduled (4x retention + 1x api_key_rotation_reminder).';
+  RAISE NOTICE 'Migration 056: 6 retention/reminder cron jobs scheduled (2x audit two-stage + 3x retention + 1x api_key_rotation_reminder).';
 END $$;
 
 -- --------------------------------------------------------------------------
--- Self-verifying DO block
+-- STEP 4: self-verifying DO block
 -- --------------------------------------------------------------------------
--- Asserts every job is registered in cron.job IF pg_cron is installed.
--- If pg_cron is missing (local dev), we skip the assertion so `supabase
--- db reset` works cleanly.
+-- Asserts:
+--   * audit_log_cold table + indexes + append-only policies exist.
+--   * All six cron jobs are registered (when pg_cron is installed).
+-- If pg_cron is missing (local dev), cron.job assertions are skipped so
+-- `supabase db reset` works cleanly. The cold-table assertions always run.
 DO $$
 DECLARE
+  has_cold_table           BOOLEAN;
+  has_cold_idx_user        BOOLEAN;
+  has_cold_idx_entity      BOOLEAN;
+  has_cold_no_updates      BOOLEAN;
+  has_cold_no_deletes      BOOLEAN;
+  authed_can_update_cold   BOOLEAN;
+  authed_can_delete_cold   BOOLEAN;
+  svc_can_update_cold      BOOLEAN;
+  svc_can_delete_cold      BOOLEAN;
   expected_jobs TEXT[] := ARRAY[
-    'retention_audit_log',
+    'audit_log_hot_to_cold',
+    'audit_log_cold_purge',
     'retention_notification_dispatches',
     'retention_compute_jobs_done',
     'retention_compute_jobs_failed',
@@ -215,23 +366,94 @@ DECLARE
   jobname_probe TEXT;
   missing_count INT := 0;
 BEGIN
+  -- 1. audit_log_cold table exists
+  SELECT EXISTS(
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'audit_log_cold'
+  ) INTO has_cold_table;
+  IF NOT has_cold_table THEN
+    RAISE EXCEPTION 'Migration 056 failed: audit_log_cold table missing';
+  END IF;
+
+  -- 2. Indexes exist
+  SELECT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = 'audit_log_cold'
+      AND indexname = 'idx_audit_log_cold_user'
+  ) INTO has_cold_idx_user;
+  IF NOT has_cold_idx_user THEN
+    RAISE EXCEPTION 'Migration 056 failed: idx_audit_log_cold_user missing';
+  END IF;
+
+  SELECT EXISTS(
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = 'audit_log_cold'
+      AND indexname = 'idx_audit_log_cold_entity'
+  ) INTO has_cold_idx_entity;
+  IF NOT has_cold_idx_entity THEN
+    RAISE EXCEPTION 'Migration 056 failed: idx_audit_log_cold_entity missing';
+  END IF;
+
+  -- 3. Deny policies exist and have USING(false)
+  SELECT EXISTS(
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'audit_log_cold'
+      AND policyname = 'audit_log_cold_no_updates'
+      AND cmd = 'UPDATE'
+      AND qual = 'false'
+  ) INTO has_cold_no_updates;
+  IF NOT has_cold_no_updates THEN
+    RAISE EXCEPTION 'Migration 056 failed: audit_log_cold_no_updates policy missing or does not deny (qual != false)';
+  END IF;
+
+  SELECT EXISTS(
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'audit_log_cold'
+      AND policyname = 'audit_log_cold_no_deletes'
+      AND cmd = 'DELETE'
+      AND qual = 'false'
+  ) INTO has_cold_no_deletes;
+  IF NOT has_cold_no_deletes THEN
+    RAISE EXCEPTION 'Migration 056 failed: audit_log_cold_no_deletes policy missing or does not deny (qual != false)';
+  END IF;
+
+  -- 4. UPDATE/DELETE grants revoked from authenticated + service_role
+  SELECT has_table_privilege('authenticated', 'public.audit_log_cold', 'UPDATE')
+    INTO authed_can_update_cold;
+  SELECT has_table_privilege('authenticated', 'public.audit_log_cold', 'DELETE')
+    INTO authed_can_delete_cold;
+  SELECT has_table_privilege('service_role', 'public.audit_log_cold', 'UPDATE')
+    INTO svc_can_update_cold;
+  SELECT has_table_privilege('service_role', 'public.audit_log_cold', 'DELETE')
+    INTO svc_can_delete_cold;
+  IF authed_can_update_cold OR authed_can_delete_cold OR svc_can_update_cold OR svc_can_delete_cold THEN
+    RAISE EXCEPTION
+      'Migration 056 failed: audit_log_cold UPDATE/DELETE still granted — authed=%/% svc=%/%',
+      authed_can_update_cold, authed_can_delete_cold, svc_can_update_cold, svc_can_delete_cold;
+  END IF;
+
+  -- 5. Cron jobs (skipped if pg_cron missing)
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
     RAISE NOTICE 'Migration 056 self-verify: pg_cron not installed, skipping cron.job assertions.';
-    RETURN;
-  END IF;
+  ELSE
+    FOREACH jobname_probe IN ARRAY expected_jobs LOOP
+      IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = jobname_probe) THEN
+        RAISE WARNING 'Migration 056 self-verify: cron.job % not registered', jobname_probe;
+        missing_count := missing_count + 1;
+      END IF;
+    END LOOP;
 
-  FOREACH jobname_probe IN ARRAY expected_jobs LOOP
-    IF NOT EXISTS (SELECT 1 FROM cron.job WHERE jobname = jobname_probe) THEN
-      RAISE WARNING 'Migration 056 self-verify: cron.job % not registered', jobname_probe;
-      missing_count := missing_count + 1;
+    IF missing_count > 0 THEN
+      RAISE EXCEPTION 'Migration 056 failed: % expected cron.job rows missing', missing_count;
     END IF;
-  END LOOP;
-
-  IF missing_count > 0 THEN
-    RAISE EXCEPTION 'Migration 056 failed: % expected cron.job rows missing', missing_count;
   END IF;
 
-  RAISE NOTICE 'Migration 056 self-verify: all 5 retention/reminder cron jobs present.';
+  RAISE NOTICE 'Migration 056 self-verify: audit_log_cold + 6 retention/reminder cron jobs present.';
 END $$;
 
 COMMIT;

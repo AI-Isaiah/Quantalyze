@@ -190,8 +190,13 @@ describe("collectUserExportBundle — mocked client", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const bundle = await collectUserExportBundle(mock as any, "u1");
     expect(bundle.truncated_at_size_cap).toBe(true);
-    // Total serialized size should remain under the cap
-    expect(JSON.stringify(bundle).length).toBeLessThanOrEqual(
+    // Total serialized UTF-8 byte size should remain under the cap.
+    // We assert against TextEncoder byteLength (not JSON.stringify(...).length)
+    // so the test matches the cap enforcement in collectUserExportBundle,
+    // which uses TextEncoder to handle non-ASCII content correctly.
+    const serializedBytes = new TextEncoder().encode(JSON.stringify(bundle))
+      .byteLength;
+    expect(serializedBytes).toBeLessThanOrEqual(
       EXPORT_SIZE_CAP_BYTES + 1_000_000, // small grace for the envelope
     );
   });

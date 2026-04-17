@@ -245,11 +245,13 @@ export async function collectUserExportBundle(
       truncated_at_cap: rows.length >= EXPORT_PER_TABLE_ROW_CAP,
     };
 
-    // Approximate the serialized size so we can enforce the 100MB cap
-    // without double-encoding. JSON.stringify here is load-bearing — the
-    // rough count catches the cap before the final JSON.stringify would
-    // OOM the function.
-    const approxBytes = JSON.stringify(payload).length;
+    // Approximate the serialized UTF-8 byte size so we can enforce the
+    // 100MB cap without double-encoding. JSON.stringify(x).length counts
+    // UTF-16 code units, which undercounts non-ASCII bytes (e.g. accented
+    // display_name or emoji in bio) and would let the cap be exceeded.
+    // TextEncoder.encode(...).byteLength returns true UTF-8 byte size.
+    const approxBytes = new TextEncoder().encode(JSON.stringify(payload))
+      .byteLength;
     if (totalBytes + approxBytes > EXPORT_SIZE_CAP_BYTES) {
       truncatedAtSizeCap = true;
       // Truncate THIS table's rows so we fit under the cap. Conservative:
@@ -264,7 +266,8 @@ export async function collectUserExportBundle(
           truncated_at_cap: true,
         };
         if (
-          totalBytes + JSON.stringify(candidate).length <=
+          totalBytes +
+            new TextEncoder().encode(JSON.stringify(candidate)).byteLength <=
           EXPORT_SIZE_CAP_BYTES
         ) {
           trimmed = candidate;
@@ -280,7 +283,8 @@ export async function collectUserExportBundle(
           truncated_at_cap: true,
         };
       }
-      totalBytes += JSON.stringify(trimmed).length;
+      totalBytes += new TextEncoder().encode(JSON.stringify(trimmed))
+        .byteLength;
       totalRowCount += trimmed.row_count;
       tables.push(trimmed);
     } else {

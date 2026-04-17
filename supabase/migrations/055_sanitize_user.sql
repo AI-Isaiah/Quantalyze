@@ -52,7 +52,9 @@
 -- profiles                | ANONYMIZE    | NULL display_name, email, telegram, website,
 --                         |              | linkedin, avatar_url, description, company,
 --                         |              | bio, years_trading, aum_range. Keep id,
---                         |              | created_at, is_admin=false, role kept as-is
+--                         |              | created_at. is_admin: UNTOUCHED (intentional
+--                         |              | — see body comment at lines 269-271; sanitize
+--                         |              | removes PII, not privileges). role kept as-is
 --                         |              | (non-PII category label).
 -- api_keys                | PURGE        | The row IS the credential. DEK + ciphertext
 --                         |              | are the PII — no anonymization short of
