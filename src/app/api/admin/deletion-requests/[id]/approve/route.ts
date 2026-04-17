@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
+import { loadDeletionRequestForAction } from "../_shared";
 
 /**
  * POST /api/admin/deletion-requests/[id]/approve
@@ -37,65 +38,19 @@ export const POST = withRole<{ id: string }>("admin")(
     { user, supabase, params },
   ) => {
     const requestId = params?.id;
-    if (!requestId) {
-      return NextResponse.json(
-        { error: "Missing deletion-request id in path" },
-        { status: 400 },
-      );
-    }
-
     const admin = createAdminClient();
 
-    // Load the row. We need target_user_id to pass to sanitize_user and
-    // the terminal-state guards to avoid double-processing.
-    const { data: reqRow, error: readErr } = await admin
-      .from("data_deletion_requests")
-      .select("id, user_id, requested_at, completed_at, rejected_at")
-      .eq("id", requestId)
-      .maybeSingle();
-
-    if (readErr) {
-      console.error("[admin/deletion-requests/approve] load failed:", readErr);
-      return NextResponse.json(
-        { error: "Failed to load deletion request" },
-        { status: 500 },
-      );
-    }
-
-    if (!reqRow) {
-      return NextResponse.json(
-        { error: "Deletion request not found" },
-        { status: 404 },
-      );
-    }
-
-    // Self-action guard: admins cannot approve their own deletion
-    // request — another admin must act. Sprint 7.2 set the precedent
-    // with the self-revoke block on /api/admin/users/[id]/roles; this
-    // applies the same principle to GDPR approve.
-    if (reqRow.user_id === user.id) {
-      return NextResponse.json(
-        {
-          error:
-            "Admins cannot approve their own deletion request — another admin must act.",
-        },
-        { status: 403 },
-      );
-    }
-
-    if (reqRow.completed_at) {
-      return NextResponse.json(
-        { error: "Deletion request is already completed" },
-        { status: 409 },
-      );
-    }
-
-    if (reqRow.rejected_at) {
-      return NextResponse.json(
-        { error: "Deletion request was rejected — cannot approve" },
-        { status: 409 },
-      );
-    }
+    // Load the row + run the 7-check preamble (missing id / 500 / 404 /
+    // self-action / terminal-state). The self-action guard fires before
+    // the terminal-state guards — see _shared.ts.
+    const loaded = await loadDeletionRequestForAction(
+      admin,
+      requestId,
+      user.id,
+      "approve",
+    );
+    if (!loaded.ok) return loaded.res;
+    const reqRow = loaded.row;
 
     // Fire the anonymize RPC. Returns BOOLEAN: TRUE on the first-run
     // anonymize, FALSE on idempotent re-run (already sanitized). Either

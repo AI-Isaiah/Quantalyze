@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withRole, APP_ROLES, type AppRole } from "@/lib/auth";
+import { withRole, APP_ROLES } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
 
 /**
@@ -39,7 +39,7 @@ import { logAuditEvent } from "@/lib/audit";
 
 const BODY_SCHEMA = z.object({
   action: z.enum(["grant", "revoke"]),
-  role: z.enum(APP_ROLES as unknown as [AppRole, ...AppRole[]]),
+  role: z.enum(APP_ROLES),
 });
 
 export const POST = withRole<{ id: string }>("admin")(

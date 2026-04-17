@@ -12,6 +12,20 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { DeletionRequestActions } from "@/components/admin/DeletionRequestActions";
 
+/** Map a row's (completed_at, rejected_at) terminal timestamps to a
+ * human-readable status label. A row has at most one terminal timestamp
+ * set at a time (mutually exclusive per the admin flow in ADR-0024), so
+ * the precedence here is arbitrary — completed wins if both are somehow
+ * set, but that's a data-integrity bug to log rather than silently pick. */
+function statusOf(row: {
+  completed_at: string | null;
+  rejected_at: string | null;
+}): string {
+  if (row.completed_at) return "Sanitized";
+  if (row.rejected_at) return "Rejected";
+  return "Pending";
+}
+
 /**
  * /admin/deletion-requests — admin-only list of GDPR Art. 17 deletion
  * requests with approve/reject buttons.
@@ -103,11 +117,7 @@ export default async function AdminDeletionRequestsPage() {
               <tbody>
                 {rows.map((r) => {
                   const profile = profileById.get(r.user_id);
-                  const status = r.completed_at
-                    ? "Sanitized"
-                    : r.rejected_at
-                      ? "Rejected"
-                      : "Pending";
+                  const status = statusOf(r);
                   const terminalAt = r.completed_at ?? r.rejected_at;
                   return (
                     <tr

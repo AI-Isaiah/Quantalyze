@@ -50,18 +50,6 @@ const ROLE_META = {
   },
 } as const satisfies Record<AppRole, { label: string; description: string }>;
 
-// Derive the rendered list from `APP_ROLES` so the display order
-// matches the server-side ordering exactly (admin first, analyst last).
-const ROLE_DEFINITIONS: ReadonlyArray<{
-  role: AppRole;
-  label: string;
-  description: string;
-}> = APP_ROLES.map((role) => ({
-  role,
-  label: ROLE_META[role].label,
-  description: ROLE_META[role].description,
-}));
-
 /** Render a `granted_at` ISO timestamp as YYYY-MM-DD in UTC. Using UTC
  * avoids the timezone-jitter that would make "Granted 2026-04-16" on
  * the west coast display as "Granted 2026-04-15" — the grant date is a
@@ -151,7 +139,8 @@ export function UserRolesPanel({
       )}
 
       <ul className="space-y-2">
-        {ROLE_DEFINITIONS.map(({ role, label, description }) => {
+        {APP_ROLES.map((role) => {
+          const { label, description } = ROLE_META[role];
           const has = currentRoles.includes(role);
           const selfAdminBlock = isSelf && role === "admin" && has;
           const disabled = pendingRole !== null || selfAdminBlock;

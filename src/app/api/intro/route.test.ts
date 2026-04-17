@@ -18,6 +18,12 @@ vi.mock("server-only", () => ({}));
 // run the callback synchronously so the emission can be observed via
 // `STATE.rpcCalls`. In production `after()` defers the work until
 // after the response flushes using `waitUntil`.
+//
+// NOTE: unlike the sibling deletion-request / permissions tests, this
+// route ALSO calls `after()` directly (for email fanout at line 256)
+// so we cannot rely on audit.ts's `try { after } catch { queueMicrotask }`
+// fallback alone — the route itself would throw under vitest without
+// this mock.
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>(
     "next/server",

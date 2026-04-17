@@ -50,20 +50,6 @@ export { APP_ROLES, type AppRole };
  */
 
 /**
- * Canonical role primitives (`AppRole` + `APP_ROLES`) live in
- * `@/lib/auth-types` so client components can import from the same
- * source of truth — the admin UI's `UserRolesPanel` is a client
- * component and can't reach any `server-only` module. They are
- * re-exported above so server-side callers keep using
- * `import { AppRole, APP_ROLES } from "@/lib/auth"` unchanged.
- *
- * Adding a new role still requires three updates:
- *   1. The `user_app_roles_role_check` CHECK constraint in a new migration.
- *   2. The `AppRole` union + `APP_ROLES` array in `src/lib/auth-types.ts`.
- *   3. The role table in ADR-0005.
- */
-
-/**
  * Fetch the role set for a specific user. Returns an empty array if the
  * user has no roles (or doesn't exist — we don't distinguish those two
  * cases here, callers that need to shouldn't use this helper).

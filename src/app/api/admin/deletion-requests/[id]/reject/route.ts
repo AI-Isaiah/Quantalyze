@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
+import { loadDeletionRequestForAction } from "../_shared";
 
 /**
  * POST /api/admin/deletion-requests/[id]/reject
@@ -32,12 +33,6 @@ export const POST = withRole<{ id: string }>("admin")(
     { user, supabase, params },
   ) => {
     const requestId = params?.id;
-    if (!requestId) {
-      return NextResponse.json(
-        { error: "Missing deletion-request id in path" },
-        { status: 400 },
-      );
-    }
 
     const rawBody = await req.json().catch(() => ({}));
     const parsed = BODY_SCHEMA.safeParse(rawBody);
@@ -51,54 +46,17 @@ export const POST = withRole<{ id: string }>("admin")(
 
     const admin = createAdminClient();
 
-    const { data: reqRow, error: readErr } = await admin
-      .from("data_deletion_requests")
-      .select("id, user_id, requested_at, completed_at, rejected_at")
-      .eq("id", requestId)
-      .maybeSingle();
-
-    if (readErr) {
-      console.error("[admin/deletion-requests/reject] load failed:", readErr);
-      return NextResponse.json(
-        { error: "Failed to load deletion request" },
-        { status: 500 },
-      );
-    }
-
-    if (!reqRow) {
-      return NextResponse.json(
-        { error: "Deletion request not found" },
-        { status: 404 },
-      );
-    }
-
-    // Self-action guard: admins cannot reject their own deletion
-    // request — another admin must act. Mirrors the self-approve block
-    // in the sibling route; both apply the Sprint 7.2 self-revoke
-    // precedent to the GDPR approve/reject surface.
-    if (reqRow.user_id === user.id) {
-      return NextResponse.json(
-        {
-          error:
-            "Admins cannot reject their own deletion request — another admin must act.",
-        },
-        { status: 403 },
-      );
-    }
-
-    if (reqRow.completed_at) {
-      return NextResponse.json(
-        { error: "Deletion request is already completed — cannot reject" },
-        { status: 409 },
-      );
-    }
-
-    if (reqRow.rejected_at) {
-      return NextResponse.json(
-        { error: "Deletion request is already rejected" },
-        { status: 409 },
-      );
-    }
+    // Load the row + run the 7-check preamble (missing id / 500 / 404 /
+    // self-action / terminal-state). Self-guard fires before terminal
+    // guards — see _shared.ts.
+    const loaded = await loadDeletionRequestForAction(
+      admin,
+      requestId,
+      user.id,
+      "reject",
+    );
+    if (!loaded.ok) return loaded.res;
+    const reqRow = loaded.row;
 
     const { error: updateErr } = await admin
       .from("data_deletion_requests")

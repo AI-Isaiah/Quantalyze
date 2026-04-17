@@ -137,7 +137,6 @@ export const GET = withAuth(
         entity_id: keyId,
         metadata: {
           route: "/api/keys/[id]/permissions",
-          exchange: null,
         },
       });
 
