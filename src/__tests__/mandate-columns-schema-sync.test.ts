@@ -45,6 +45,8 @@ describe("MANDATE-07: allocator_preferences schema sync", () => {
     expect(EXPECTED_COLUMNS_SET.has("style_exclusions")).toBe(true);
     expect(EXPECTED_COLUMNS_SET.has("mandate_edited_at")).toBe(true);
     expect(EXPECTED_COLUMNS_SET.has("edited_by_user_id")).toBe(true);
+    // Phase 3 (migration 062)
+    expect(EXPECTED_COLUMNS_SET.has("scoring_weight_overrides")).toBe(true);
   });
 
   it.skipIf(!HAS_LIVE_DB)(
