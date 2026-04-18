@@ -60,7 +60,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   // D-07: 24-hour TTL snooze. Upsert on unique (allocator_id, strategy_id)
   // bumps expires_at on repeat dismissals without violating the unique constraint.
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  // dismissed_at is included explicitly so re-dismissals refresh the anchor
+  // timestamp — omitting it would leave the original INSERT value intact on
+  // UPDATE, causing analytics queries to misread "time since last snooze".
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
 
   const { data: inserted, error } = await supabase
     .from("bridge_outcome_dismissals")
@@ -68,6 +72,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         allocator_id: user.id,
         strategy_id: parsed.data.strategy_id,
+        dismissed_at: now.toISOString(),
         expires_at: expiresAt,
       },
       { onConflict: "allocator_id,strategy_id" },
