@@ -132,6 +132,9 @@ describe("useMandateAutoSave", () => {
     // After the retry succeeds, fieldErrors should be cleared and saveState=saved.
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(result.current.saveState).toBe("saved");
+    // WR-01 regression: stale "Saving too fast. Will retry in Ns." must be cleared
+    // when the retried save succeeds.
+    expect(result.current.fieldErrors.max_weight).toBeUndefined();
   });
 
   it("TC6 5xx with exponential backoff — 3x 500 then 200 succeeds", async () => {

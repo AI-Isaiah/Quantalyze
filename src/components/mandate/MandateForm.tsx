@@ -17,6 +17,10 @@ interface Props {
   initial: AllocatorPreferences | null;
 }
 
+function toggleIn<T extends string>(list: T[], value: T): T[] {
+  return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
+}
+
 type StrategyType = (typeof STRATEGY_TYPES)[number];
 type Subtype = (typeof SUBTYPES)[number];
 type Exchange = (typeof EXCHANGES)[number];
@@ -68,12 +72,6 @@ export function MandateForm({ initial }: Props) {
   const [styleExclusions, setStyleExclusions] = useState<Subtype[]>(
     (initial?.style_exclusions as Subtype[] | null) ?? [],
   );
-
-  // ---- Helpers
-
-  function toggleIn<T extends string>(list: T[], value: T): T[] {
-    return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
-  }
 
   // ---- Field handlers (each handler: update local state THEN save)
 

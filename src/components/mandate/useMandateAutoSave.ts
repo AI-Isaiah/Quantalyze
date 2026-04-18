@@ -79,19 +79,24 @@ export function useMandateAutoSave(
 
       let attempt = 0;
       const MAX_ATTEMPTS = 4; // 1 initial + 3 retries (1s, 2s, 4s backoff)
+      const FETCH_TIMEOUT_MS = 12_000;
       while (attempt < MAX_ATTEMPTS) {
         attempt += 1;
 
         let res: Response;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
         try {
           res = await fetch("/api/preferences", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ [fieldName]: value }),
             credentials: "same-origin",
+            signal: controller.signal,
           });
         } catch {
-          // Network error — backoff if we still have attempts left.
+          // Network error or AbortError (hung request hit the 12s timeout) —
+          // backoff if we still have attempts left.
           if (attempt < MAX_ATTEMPTS) {
             await wait(1000 * Math.pow(2, attempt - 1));
             if (generationRef.current[fieldName] !== gen) return;
@@ -107,6 +112,8 @@ export function useMandateAutoSave(
             });
           }
           return;
+        } finally {
+          clearTimeout(timeout);
         }
 
         // Drop stale response for an older generation of this field.
@@ -120,6 +127,7 @@ export function useMandateAutoSave(
             n.delete(fieldName);
             return n;
           });
+          clearError(fieldName); // WR-01: clear any stale 429-retry error on retried success
           return;
         }
 

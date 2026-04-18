@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { KeyboardEvent, PointerEvent, TouchEvent } from "react";
 
 interface Props {
@@ -48,6 +48,11 @@ export function MandateSlider({
   const fillPct = ((renderValue - min) / (max - min)) * 100;
 
   const keyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (keyTimerRef.current) clearTimeout(keyTimerRef.current);
+    };
+  }, []);
   function handleKeyUp(e: KeyboardEvent<HTMLInputElement>) {
     if (keyTimerRef.current) clearTimeout(keyTimerRef.current);
     const v = Number((e.currentTarget as HTMLInputElement).value);
