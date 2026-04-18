@@ -42,6 +42,7 @@ function populatedPrefs(): AllocatorPreferences {
     liquidity_preference: null,
     style_exclusions: null,
     mandate_edited_at: "2026-04-18T10:00:00Z",
+    scoring_weight_overrides: null,
   };
 }
 

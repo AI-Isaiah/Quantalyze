@@ -16,6 +16,13 @@ DEFAULT_PREFERENCES: dict[str, Any] = {
     "preferred_markets": [],           # empty = no filter
     "excluded_exchanges": [],          # empty = no exclusions
     "mandate_archetype": None,
+    # Phase 3 mandate keys (migrations 061 + 062). merge_with_defaults skips
+    # None-valued keys so first-visit allocators keep semantic clarity.
+    "max_weight": None,
+    "correlation_ceiling": None,
+    "liquidity_preference": None,
+    "style_exclusions": [],
+    "scoring_weight_overrides": None,
 }
 
 

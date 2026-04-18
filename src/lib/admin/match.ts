@@ -37,7 +37,9 @@ export const ALLOCATOR_PREFERENCES_COLUMNS =
   "max_aum_concentration, preferred_strategy_types, preferred_markets, " +
   "founder_notes, edited_by_user_id, updated_at, " +
   // Phase 2 mandate fields (migration 061)
-  "max_weight, correlation_ceiling, liquidity_preference, style_exclusions, mandate_edited_at";
+  "max_weight, correlation_ceiling, liquidity_preference, style_exclusions, mandate_edited_at, " +
+  // Phase 3 (migration 062)
+  "scoring_weight_overrides";
 
 // --- Return type -----------------------------------------------------------
 // Kept deliberately loose (Record<string, unknown> for the batch JSONB fields

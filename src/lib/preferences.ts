@@ -36,6 +36,9 @@ export interface AllocatorPreferences {
   liquidity_preference: "high" | "medium" | "low" | null;
   style_exclusions: string[] | null;
   mandate_edited_at: string | null;
+  // Phase 3 — scoring weight overrides (migration 062). Phase 4 writes this
+  // via the feedback engine; not exposed in SELF_EDITABLE_PREFERENCE_FIELDS.
+  scoring_weight_overrides: Record<string, number> | null;
 }
 
 /** Fields a regular allocator can write to about themselves. */

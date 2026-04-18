@@ -41,9 +41,10 @@ max_drawdown = _max_drawdown
 
 
 # Versioning for the engine + weight set. Bump on any change to the scoring math
-# so historical batches are reproducible / debuggable.
-ENGINE_VERSION = "v1.0.0"
-WEIGHTS_VERSION = "v1.0.0"
+# so historical batches are reproducible / debuggable. Phase 3 bumps both to
+# v2.0.0 in lockstep — SCORING-01.
+ENGINE_VERSION = "v2.0.0"
+WEIGHTS_VERSION = "v2.0.0"
 
 # Top-N candidates returned per batch
 TOP_N_CANDIDATES = 30
@@ -143,6 +144,7 @@ SOFT_EXCLUSION_REASONS = {
     "below_min_track_record",
     "exceeds_max_dd",
     "off_mandate_type",
+    "style_excluded",  # Phase 3 / D-06 — SUBTYPE match against allocator mandate
 }
 
 
@@ -190,6 +192,17 @@ def _eligibility_check(
         cand_type = candidate.get("strategy_type")
         if cand_type and cand_type not in pref_types:
             return ("off_mandate_type", cand_type)
+
+    # Phase 3 / D-06: style_exclusions SOFT exclude. Candidate's subtype
+    # (populated from strategies.subtypes[0] in routers/match.py per Phase 3
+    # Plan 03-02) is compared against the allocator's SUBTYPES list. SOFT
+    # because <5-eligible relaxation drops it — preserves "show SOMETHING"
+    # invariant on sparse universes without breaking full-universe exclusions.
+    style_exclusions = preferences.get("style_exclusions") or []
+    if style_exclusions:
+        cand_subtype = candidate.get("subtype")
+        if cand_subtype and cand_subtype in style_exclusions:
+            return ("style_excluded", cand_subtype)
 
     return (None, None)
 
@@ -248,6 +261,115 @@ def _compute_preference_fit(
     if not sub_scores:
         return 0.5
     return sum(sub_scores) / len(sub_scores)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 / D-01: mandate_fit_score — AVERAGE of four per-dimension
+# contributions (max_weight, correlation_ceiling, liquidity_preference,
+# style_exclusions). Each contribution ∈ [0, 1]. Empty mandates → each
+# dimension returns 1.0 → mandate_fit_score = 1.0 (SCORING-04 graceful
+# degradation). style_exclusions does NOT contribute numerically —
+# excluded candidates never reach this helper (SOFT exclusion drops them
+# before scoring). The dimension reports True for the `_honored` flag
+# purely for debuggability.
+# ---------------------------------------------------------------------------
+
+# Liquidity tier thresholds (D-05). Allocator tier order for gap math:
+# high > medium > low. Gap = allocator_rank - candidate_rank; penalize only
+# when candidate tier is LOWER than allocator's (more liquid is strictly
+# better, per D-05 gap direction).
+_LIQUIDITY_TIER_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _liquidity_tier_from_aum(manager_aum: Optional[float]) -> Optional[str]:
+    """Map candidate manager_aum → tier string or None when unknown/zero.
+    Thresholds per D-05: >=$10M high, >=$1M medium, >0 low, else None.
+    """
+    if manager_aum is None or manager_aum <= 0:
+        return None
+    if manager_aum >= 10_000_000:
+        return "high"
+    if manager_aum >= 1_000_000:
+        return "medium"
+    return "low"
+
+
+def _compute_mandate_fit_score(
+    candidate: dict[str, Any],
+    preferences: dict[str, Any],
+    corr_with_portfolio: Optional[float],
+    add_weight: float,
+    mode: str,
+) -> tuple[float, dict[str, Any]]:
+    """Four per-dimension contributions averaged. Returns (score, breakdown).
+
+    breakdown keys: max_weight, correlation_ceiling, liquidity_preference,
+    style_exclusions_honored (always True for scored rows). D-01..D-05.
+    """
+    # Dimension 1 — max_weight linear taper (D-03). add_weight is clamped to
+    # [0.01, 0.5] in score_candidates for personalized mode; screening mode
+    # defaults to 0.10. Taper reaches 0 at 2× ceiling.
+    max_w = preferences.get("max_weight")
+    if max_w is None:
+        mw_score = 1.0
+    elif add_weight <= max_w:
+        mw_score = 1.0
+    else:
+        mw_score = max(0.0, 1 - (add_weight - max_w) / max_w)
+
+    # Dimension 2 — correlation_ceiling smooth degradation (D-04). Reuses
+    # the corr_with_portfolio scalar already produced by
+    # _compute_portfolio_fit_components. Neutral 1.0 when ceiling is NULL,
+    # corr is None (sparse overlap — don't penalize data sparseness), or
+    # in screening mode (no portfolio to correlate against).
+    ceiling = preferences.get("correlation_ceiling")
+    if ceiling is None or corr_with_portfolio is None or mode == "screening":
+        cc_score = 1.0
+    elif corr_with_portfolio <= ceiling:
+        cc_score = 1.0
+    else:
+        denom = 1.0 - ceiling
+        if denom > 0:
+            cc_score = max(0.0, 1 - (corr_with_portfolio - ceiling) / denom)
+        else:
+            # ceiling == 1.0 — no headroom, any corr above it means breach.
+            cc_score = 0.0
+
+    # Dimension 3 — liquidity_preference tier-gap (D-05). Gap direction
+    # matters: allocator wants high and gets low → penalty; allocator wants
+    # low and gets high → 1.0 (more liquid is strictly better).
+    allocator_pref = preferences.get("liquidity_preference")
+    if allocator_pref is None:
+        lp_score = 1.0
+    else:
+        cand_tier = _liquidity_tier_from_aum(candidate.get("manager_aum"))
+        if cand_tier is None:
+            lp_score = 1.0
+        else:
+            a_rank = _LIQUIDITY_TIER_RANK[allocator_pref]
+            c_rank = _LIQUIDITY_TIER_RANK[cand_tier]
+            gap = a_rank - c_rank  # positive only when candidate is LOWER
+            if gap <= 0:
+                lp_score = 1.0
+            elif gap == 1:
+                lp_score = 0.5
+            else:
+                lp_score = 0.0
+
+    # Dimension 4 — style_exclusions_honored: always 1.0 for scored rows
+    # (excluded rows don't reach this helper; see SOFT_EXCLUSION_REASONS).
+    se_score = 1.0
+
+    contribs = [mw_score, cc_score, lp_score, se_score]
+    score = sum(contribs) / len(contribs)
+
+    breakdown: dict[str, Any] = {
+        "max_weight": mw_score,
+        "correlation_ceiling": cc_score,
+        "liquidity_preference": lp_score,
+        "style_exclusions_honored": True,
+    }
+    return (score, breakdown)
 
 
 def _compute_track_record_score(candidate: dict[str, Any]) -> float:
@@ -623,25 +745,64 @@ def score_candidates(
             portfolio_fit = 0.0
 
         preference_fit = _compute_preference_fit(cand, prefs)
+
+        # Phase 3 / D-02 composition — 0.6 * preference_fit + 0.4 *
+        # mandate_fit_score lives INSIDE the W_PREFERENCE_FIT term. Applies
+        # in both modes (screening mode still uses the composed value —
+        # only the outer top-level weight constants differ).
+        mandate_fit_score, mandate_fit_raw = _compute_mandate_fit_score(
+            cand, prefs, rc["corr_with_portfolio"], add_weight, mode,
+        )
+        effective_preference_fit = 0.6 * preference_fit + 0.4 * mandate_fit_score
+
         track_record = _compute_track_record_score(cand)
         capacity_fit = _compute_capacity_fit(cand, prefs)
 
         if mode == "personalized":
+            # Phase 3 / D-08 — multiplicative scoring_weight_overrides on the
+            # four top-level weights (personalized mode only per D-09). Clamp
+            # each scale to [0.5, 1.5], then renormalize so sum == 1.0.
+            # Missing keys default to 1.0 (no scaling). Screening weights
+            # are NOT overridable.
+            overrides = prefs.get("scoring_weight_overrides") or {}
+            scaled = {
+                "W_PORTFOLIO_FIT":  W_PORTFOLIO_FIT
+                    * _clamp(overrides.get("W_PORTFOLIO_FIT", 1.0), 0.5, 1.5),
+                "W_PREFERENCE_FIT": W_PREFERENCE_FIT
+                    * _clamp(overrides.get("W_PREFERENCE_FIT", 1.0), 0.5, 1.5),
+                "W_TRACK_RECORD":   W_TRACK_RECORD
+                    * _clamp(overrides.get("W_TRACK_RECORD", 1.0), 0.5, 1.5),
+                "W_CAPACITY_FIT":   W_CAPACITY_FIT
+                    * _clamp(overrides.get("W_CAPACITY_FIT", 1.0), 0.5, 1.5),
+            }
+            total = sum(scaled.values())
+            # Pitfall 3 guard — clamp floor 0.5 × min(weights) = 0.075 > 0,
+            # so this assertion never fires in practice. Defense in depth
+            # against any future weight constant change or adversarial input.
+            assert total > 0, (
+                "scoring_weight_overrides renormalization produced non-positive sum"
+            )
+            effective = {k: v / total for k, v in scaled.items()}
+
             final_score = 100 * (
-                W_PORTFOLIO_FIT * portfolio_fit
-                + W_PREFERENCE_FIT * preference_fit
-                + W_TRACK_RECORD * track_record
-                + W_CAPACITY_FIT * capacity_fit
+                effective["W_PORTFOLIO_FIT"]   * portfolio_fit
+                + effective["W_PREFERENCE_FIT"] * effective_preference_fit
+                + effective["W_TRACK_RECORD"]   * track_record
+                + effective["W_CAPACITY_FIT"]   * capacity_fit
             )
         else:
+            # Screening mode — overrides not applied (D-09). Composition
+            # still uses effective_preference_fit so mandate math contributes
+            # in cold-start runs too.
             final_score = 100 * (
-                W_SCREENING_PREFERENCE_FIT * preference_fit
+                W_SCREENING_PREFERENCE_FIT * effective_preference_fit
                 + W_SCREENING_TRACK_RECORD * track_record
                 + W_SCREENING_CAPACITY_FIT * capacity_fit
             )
 
         score_breakdown: dict[str, Any] = {
             "preference_fit": preference_fit,
+            "mandate_fit_score": mandate_fit_score,  # Phase 3 / SCORING-02
             "track_record": track_record,
             "capacity_fit": capacity_fit,
             "raw": {
@@ -653,6 +814,7 @@ def score_candidates(
                 "ticket_concentration": rc["ticket_concentration"],
                 "sharpe": cand.get("sharpe"),
                 "max_drawdown_pct": cand.get("max_drawdown_pct"),
+                "mandate_fit_raw": mandate_fit_raw,  # Phase 3 per-dimension detail
             },
         }
         # Only include portfolio_fit when in personalized mode — guards against
@@ -714,6 +876,10 @@ def _top_excluded(
             max_dd = abs(cand.get("max_drawdown_pct") or 0)
             tol = preferences.get("max_drawdown_tolerance") or 1
             return _clamp(2 - max_dd / tol, 0, 1)
+        if reason == "style_excluded":
+            # Phase 3 / D-06: treat like off_mandate_type — neutral ~0.5 so
+            # excluded rows sort reasonably in TOP_N_EXCLUDED.
+            return 0.5
         return 0.5
 
     excluded_sorted = sorted(excluded, key=_almost_passed_score, reverse=True)
