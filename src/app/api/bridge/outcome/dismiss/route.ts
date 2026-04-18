@@ -1,43 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { assertSameOrigin } from "@/lib/csrf";
+import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
-
-/**
- * POST /api/bridge/outcome/dismiss
- *
- * Records a 24-hour snooze for a Bridge outcome banner. Upserts into
- * `bridge_outcome_dismissals` with `expires_at = now() + 24h` on the
- * unique (allocator_id, strategy_id) index — re-dismissing a strategy
- * just bumps the expiry.
- *
- * No eligibility check here: if the strategy has an existing outcome,
- * the banner won't render anyway (eligible_for_outcome=false from
- * getMyAllocationDashboard). Dismissing a non-eligible strategy is a
- * harmless no-op.
- *
- * Pipeline: CSRF → auth → rate-limit → Zod → upsert → audit
- *
- * Sprint 8 Phase 1 — Plan 01-02
- */
 
 const BODY_SCHEMA = z.object({
   strategy_id: z.string().uuid(),
 });
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  const csrfError = assertSameOrigin(req);
-  if (csrfError) return csrfError;
-
+export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextResponse> => {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
 
   const rl = await checkLimit(
     userActionLimiter,
@@ -58,11 +32,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // D-07: 24-hour TTL snooze. Upsert on unique (allocator_id, strategy_id)
-  // bumps expires_at on repeat dismissals without violating the unique constraint.
-  // dismissed_at is included explicitly so re-dismissals refresh the anchor
-  // timestamp — omitting it would leave the original INSERT value intact on
-  // UPDATE, causing analytics queries to misread "time since last snooze".
+  // dismissed_at is set on every upsert so re-dismissals refresh the anchor
+  // timestamp; omitting it would leave the original INSERT value intact on
+  // UPDATE and analytics queries would misread "time since last snooze".
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
 
@@ -85,8 +57,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Failed to dismiss" }, { status: 500 });
   }
 
-  // Audit emission inline within 60 lines of the mutation so
-  // audit-coverage.test.ts sentinel can detect it.
   logAuditEvent(supabase, {
     action: "bridge_outcome.dismiss",
     entity_type: "bridge_outcome_dismissal",
@@ -98,4 +68,4 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   });
 
   return NextResponse.json({ success: true, dismissal: inserted });
-}
+});

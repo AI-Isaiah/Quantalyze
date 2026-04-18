@@ -1,23 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { assertSameOrigin } from "@/lib/csrf";
+import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { REJECTION_REASONS } from "@/lib/bridge-outcome-schema";
 
 /**
- * POST /api/bridge/outcome
- *
  * Records or updates a bridge outcome (allocated / rejected) for a
- * strategy that the allocator received as an intro. Defense-in-depth
- * eligibility check (OUTCOME-04): route verifies a `match_decisions`
- * row with `decision='sent_as_intro'` exists before inserting, even
- * though server-side eligibility filter in getMyAllocationDashboard
- * should prevent the banner from rendering for ineligible rows.
- *
- * Pipeline: CSRF → auth → rate-limit → Zod → eligibility check → upsert → audit
- *
- * Sprint 8 Phase 1 — Plan 01-02
+ * strategy that the allocator received as an intro. RLS does not enforce
+ * "must have been introduced" — that's a product rule, not an ownership
+ * rule — so the `sent_as_intro` verification lives here at the route layer
+ * on top of the server-side eligibility filter in getMyAllocationDashboard.
  */
 
 const BODY_SCHEMA = z
@@ -25,16 +20,8 @@ const BODY_SCHEMA = z
     strategy_id: z.string().uuid(),
     kind: z.enum(["allocated", "rejected"]),
     percent_allocated: z.number().min(0.1).max(50).optional(),
-    allocated_at: z.string().date().optional(), // YYYY-MM-DD
-    rejection_reason: z
-      .enum([
-        "mandate_conflict",
-        "already_owned",
-        "timing_wrong",
-        "underperforming_peers",
-        "other",
-      ])
-      .optional(),
+    allocated_at: z.string().date().optional(),
+    rejection_reason: z.enum(REJECTION_REASONS).optional(),
     note: z.string().max(2000).nullish(),
   })
   .superRefine((val, ctx) => {
@@ -101,17 +88,8 @@ const BODY_SCHEMA = z
     }
   });
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  const csrfError = assertSameOrigin(req);
-  if (csrfError) return csrfError;
-
+export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextResponse> => {
   const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
 
   const rl = await checkLimit(userActionLimiter, `bridge_outcome:${user.id}`);
   if (!rl.success) {
@@ -129,10 +107,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // OUTCOME-04 defense-in-depth (D-04): belt-and-suspenders over the
-  // server-side eligibility filter in getMyAllocationDashboard. RLS does
-  // not enforce "must have been introduced" — that's a product rule, not
-  // an ownership rule, so it lives here at the route layer.
   const { data: decision } = await supabase
     .from("match_decisions")
     .select("id")
@@ -150,9 +124,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // D-17: outcomes are editable by owner. Upsert on the unique index
-  // (allocator_id, strategy_id) so a second POST for the same strategy
-  // updates rather than violating the unique constraint.
   const { data: inserted, error } = await supabase
     .from("bridge_outcomes")
     .upsert(
@@ -182,24 +153,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Discriminate insert vs. update by comparing created_at vs updated_at
-  // (OQ3 default — no extra round-trip). The trigger on UPDATE flips
-  // updated_at so the two values diverge on the second upsert.
-  //
-  // NOTE: Postgres now() returns the transaction start time, not wall-clock.
-  // In a single-statement HTTP path (one request = one transaction) this is
-  // reliable. Do NOT rely on this heuristic in batch inserts or direct-DB
-  // callers that issue multiple upserts within the same transaction — both
-  // created_at and updated_at will match on the second call, misfiring the
-  // audit action as bridge_outcome.record instead of bridge_outcome.update.
+  // created_at === updated_at iff this is a fresh insert (the BEFORE UPDATE
+  // trigger flips updated_at on every update). Postgres now() is transaction-
+  // start time — reliable only within one-statement HTTP paths, NOT batch
+  // callers that issue multiple upserts per transaction.
   const isInsert =
     typeof inserted.created_at === "string" &&
     typeof inserted.updated_at === "string" &&
     inserted.created_at === inserted.updated_at;
 
-  // Audit emission MUST remain inline within ~60 lines of the mutation so
-  // audit-coverage.test.ts (regex: logAuditEvent\(supabase,\s*\{[\s\S]{0,400}bridge_outcome\.)
-  // can find the pair.
+  // Inline within ~60 lines of the mutation — audit-coverage.test.ts sentinel
+  // checks logAuditEvent follows the upsert within a 400-char window.
   logAuditEvent(supabase, {
     action: isInsert ? "bridge_outcome.record" : "bridge_outcome.update",
     entity_type: "bridge_outcome",
@@ -213,4 +177,4 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   });
 
   return NextResponse.json({ success: true, outcome: inserted });
-}
+});
