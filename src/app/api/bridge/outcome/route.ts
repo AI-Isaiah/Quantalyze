@@ -185,6 +185,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Discriminate insert vs. update by comparing created_at vs updated_at
   // (OQ3 default — no extra round-trip). The trigger on UPDATE flips
   // updated_at so the two values diverge on the second upsert.
+  //
+  // NOTE: Postgres now() returns the transaction start time, not wall-clock.
+  // In a single-statement HTTP path (one request = one transaction) this is
+  // reliable. Do NOT rely on this heuristic in batch inserts or direct-DB
+  // callers that issue multiple upserts within the same transaction — both
+  // created_at and updated_at will match on the second call, misfiring the
+  // audit action as bridge_outcome.record instead of bridge_outcome.update.
   const isInsert =
     typeof inserted.created_at === "string" &&
     typeof inserted.updated_at === "string" &&
