@@ -125,7 +125,10 @@ export type AuditAction =
   // --- Bridge outcome tracker -----------------------
   | "bridge_outcome.record"
   | "bridge_outcome.update"
-  | "bridge_outcome.dismiss";
+  | "bridge_outcome.dismiss"
+  // --- Sprint 8 Phase 2: Mandate profile builder ----------------------
+  | "mandate_preference.update"
+  | "mandate_preference.admin_update";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
@@ -163,7 +166,9 @@ export type AuditEntityType =
   | "reconcile_run"
   // --- Bridge outcome tracker -----------------------
   | "bridge_outcome"
-  | "bridge_outcome_dismissal";
+  | "bridge_outcome_dismissal"
+  // --- Sprint 8 Phase 2: Mandate profile builder ----------------------
+  | "allocator_preference_mandate";
 
 export interface AuditEvent {
   action: AuditAction;
