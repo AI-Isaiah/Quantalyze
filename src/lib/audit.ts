@@ -121,7 +121,11 @@ export type AuditAction =
   | "bridge.score_candidates"
   | "simulator.run"
   | "optimizer.run"
-  | "reconcile.compare";
+  | "reconcile.compare"
+  // --- Sprint 8 Phase 1: Bridge outcome tracker -----------------------
+  | "bridge_outcome.record"
+  | "bridge_outcome.update"
+  | "bridge_outcome.dismiss";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
@@ -156,7 +160,10 @@ export type AuditEntityType =
   | "bridge_run"
   | "simulator_run"
   | "optimizer_run"
-  | "reconcile_run";
+  | "reconcile_run"
+  // --- Sprint 8 Phase 1: Bridge outcome tracker -----------------------
+  | "bridge_outcome"
+  | "bridge_outcome_dismissal";
 
 export interface AuditEvent {
   action: AuditAction;

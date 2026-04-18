@@ -148,6 +148,9 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `simulator.run` | `simulator_run` | `portfolios.id` — the portfolio the ADD scenario targeted | candidate_strategy_id |
 | `optimizer.run` | `optimizer_run` | `portfolios.id` | suggestion_count |
 | `reconcile.compare` | `reconcile_run` | `strategies.id` — the strategy being reconciled | status, discrepancy_count |
+| `bridge_outcome.record` | `bridge_outcome` | inserted `bridge_outcomes.id` | `strategy_id`, `kind`, `percent_allocated?`, `rejection_reason?` |
+| `bridge_outcome.update` | `bridge_outcome` | updated `bridge_outcomes.id` | `strategy_id`, `fields_changed` |
+| `bridge_outcome.dismiss` | `bridge_outcome_dismissal` | inserted `bridge_outcome_dismissals.id` | `strategy_id`, `expires_at` |
 
 Entity-id choice rationale (Python cross-service): bridge, simulator,
 optimizer anchor on portfolio_id because the portfolio is the persistent
