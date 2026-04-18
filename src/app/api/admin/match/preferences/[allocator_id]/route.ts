@@ -55,12 +55,12 @@ export async function PUT(
     return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
   }
 
-  // Sprint 6 Task 7.1b — audit the admin-edited preferences. user-scoped
+  // Sprint 8 Phase 2 — audit the admin-edited mandate. user-scoped
   // `supabase` client already bound to the acting admin; log_audit_event
   // derives the acting admin from auth.uid().
   logAuditEvent(supabase, {
-    action: "notification_preferences.update",
-    entity_type: "user",
+    action: "mandate_preference.admin_update",
+    entity_type: "allocator_preference_mandate",
     entity_id: allocator_id,
     metadata: {
       fields: Object.keys(fields),
