@@ -15,18 +15,20 @@ export function MandateAdvancedSection({ trigger, children }: Props) {
   const [open, setOpen] = useState(false);
   const panelId = "mandate-advanced-panel";
   return (
-    <div className="mt-8 border-t border-border pt-6">
+    <div className="mt-8 border-t border-border pt-5">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-controls={panelId}
-        className="flex w-full items-center justify-between py-1 text-sm font-medium text-text-primary hover:text-accent transition-colors"
+        className="flex w-full items-center justify-between py-1 text-text-primary hover:text-accent transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
       >
-        <span>{trigger}</span>
+        <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted group-hover:text-accent">
+          {trigger}
+        </span>
         <svg
-          width="16"
-          height="16"
+          width="14"
+          height="14"
           viewBox="0 0 16 16"
           fill="none"
           aria-hidden="true"
@@ -42,7 +44,7 @@ export function MandateAdvancedSection({ trigger, children }: Props) {
           />
         </svg>
       </button>
-      <div id={panelId} hidden={!open} className="mt-4 space-y-6">
+      <div id={panelId} hidden={!open} className="mt-5 space-y-6">
         {children}
       </div>
     </div>

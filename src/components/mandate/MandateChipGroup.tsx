@@ -40,7 +40,7 @@ export function MandateChipGroup<T extends string>({
           <button
             type="button"
             onClick={onReset}
-            className="text-xs text-text-muted hover:text-text-primary transition-colors"
+            className="text-xs text-text-muted hover:text-text-primary transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
           >
             Reset
           </button>
@@ -56,10 +56,10 @@ export function MandateChipGroup<T extends string>({
               role="checkbox"
               aria-checked={active}
               onClick={() => onToggle(value)}
-              className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
+              className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20 ${
                 active
-                  ? activeClass
-                  : "border-border bg-surface text-text-secondary hover:border-border-focus"
+                  ? `${activeClass} font-medium`
+                  : "border-border bg-surface text-text-secondary hover:border-border-focus hover:text-text-primary"
               }`}
             >
               {value}

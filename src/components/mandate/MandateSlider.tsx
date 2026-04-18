@@ -45,6 +45,7 @@ export function MandateSlider({
   const displayValue = value !== null ? formatValue(value) : null;
   // When unset, render the thumb at the midpoint but do not show a value pill.
   const renderValue = value !== null ? value : (min + max) / 2;
+  const fillPct = ((renderValue - min) / (max - min)) * 100;
 
   const keyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   function handleKeyUp(e: KeyboardEvent<HTMLInputElement>) {
@@ -62,22 +63,30 @@ export function MandateSlider({
   }
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-2">
       <div className="flex items-baseline justify-between">
         <label htmlFor={id} className="text-sm font-medium text-text-primary">
           {label}
         </label>
-        {value !== null && onReset && (
-          <button
-            type="button"
-            onClick={onReset}
-            className="text-xs text-text-muted hover:text-text-primary transition-colors"
-          >
-            Reset
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {saving && (
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse"
+            />
+          )}
+          {value !== null && onReset && (
+            <button
+              type="button"
+              onClick={onReset}
+              className="text-xs text-text-muted hover:text-text-primary transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
+            >
+              Reset
+            </button>
+          )}
+        </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="mandate-slider flex items-center gap-4 pt-1">
         <input
           id={id}
           type="range"
@@ -91,11 +100,19 @@ export function MandateSlider({
           onKeyUp={handleKeyUp}
           aria-valuetext={displayValue ?? "unset"}
           aria-busy={saving ? true : undefined}
-          className="flex-1 accent-accent"
+          style={{ ["--slider-fill" as string]: `${fillPct}%` }}
+          className="flex-1"
         />
-        {displayValue !== null && (
-          <span className="font-metric text-[13px] tabular-nums text-text-primary min-w-[48px] text-right">
+        {displayValue !== null ? (
+          <span className="font-metric text-[13px] tabular-nums text-text-primary min-w-[52px] text-right tracking-tight">
             {displayValue}
+          </span>
+        ) : (
+          <span
+            aria-hidden="true"
+            className="font-metric text-[13px] tabular-nums text-text-muted min-w-[52px] text-right tracking-tight"
+          >
+            —
           </span>
         )}
       </div>

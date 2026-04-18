@@ -177,7 +177,15 @@ export function MandateForm({ initial }: Props) {
       </div>
       <Card>
         <div className="space-y-6">
-          <p className="text-sm font-medium text-text-primary">Basics</p>
+          <div className="flex items-center gap-3 border-b border-border pb-3 -mx-6 px-6 -mt-6 pt-6">
+            <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-text-muted">
+              Basics
+            </p>
+            <span
+              aria-hidden="true"
+              className="h-px flex-1 bg-border"
+            />
+          </div>
 
           <MandateSlider
             label="Max weight per strategy"
@@ -227,22 +235,31 @@ export function MandateForm({ initial }: Props) {
                 <button
                   type="button"
                   onClick={onTicketSizeReset}
-                  className="text-xs text-text-muted hover:text-text-primary transition-colors"
+                  className="text-xs text-text-muted hover:text-text-primary transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
                 >
                   Reset
                 </button>
               )}
             </div>
-            <Input
-              id="mandate-ticket-size"
-              type="number"
-              placeholder="50000"
-              value={ticketSize}
-              onChange={(e) => setTicketSize(e.target.value)}
-              onBlur={onTicketSizeBlur}
-              min={0}
-              aria-busy={savingFields.has("target_ticket_size_usd") ? true : undefined}
-            />
+            <div className="relative">
+              <span
+                aria-hidden="true"
+                className="absolute left-3 top-1/2 -translate-y-1/2 font-metric text-[13px] text-text-muted tabular-nums pointer-events-none"
+              >
+                $
+              </span>
+              <Input
+                id="mandate-ticket-size"
+                type="number"
+                placeholder="50000"
+                value={ticketSize}
+                onChange={(e) => setTicketSize(e.target.value)}
+                onBlur={onTicketSizeBlur}
+                min={0}
+                aria-busy={savingFields.has("target_ticket_size_usd") ? true : undefined}
+                className="pl-7 font-metric tabular-nums"
+              />
+            </div>
             <p className="text-sm text-text-secondary">
               Roughly the dollar amount you allocate per strategy.
             </p>
@@ -265,7 +282,7 @@ export function MandateForm({ initial }: Props) {
                 <button
                   type="button"
                   onClick={onArchetypeReset}
-                  className="text-xs text-text-muted hover:text-text-primary transition-colors"
+                  className="text-xs text-text-muted hover:text-text-primary transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
                 >
                   Reset
                 </button>
@@ -281,7 +298,7 @@ export function MandateForm({ initial }: Props) {
               maxLength={500}
               aria-busy={savingFields.has("mandate_archetype") ? true : undefined}
             />
-            <p className="text-xs text-text-muted font-metric text-right">
+            <p className="text-xs text-text-muted font-metric tabular-nums text-right tracking-tight">
               {archetypeLen} / 500
             </p>
             {fieldErrors.mandate_archetype && (

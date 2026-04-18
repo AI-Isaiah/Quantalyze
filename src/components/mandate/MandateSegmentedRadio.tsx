@@ -30,13 +30,17 @@ export function MandateSegmentedRadio({ label, helper, value, onChange, error }:
           <button
             type="button"
             onClick={() => onChange(null)}
-            className="text-xs text-text-muted hover:text-text-primary transition-colors"
+            className="text-xs text-text-muted hover:text-text-primary transition-colors rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
           >
             Reset
           </button>
         )}
       </div>
-      <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-2">
+      <div
+        role="radiogroup"
+        aria-label={label}
+        className="inline-flex rounded-md border border-border bg-surface overflow-hidden divide-x divide-border"
+      >
         {OPTIONS.map((opt) => {
           const active = value === opt.value;
           return (
@@ -46,10 +50,10 @@ export function MandateSegmentedRadio({ label, helper, value, onChange, error }:
               role="radio"
               aria-checked={active}
               onClick={() => onChange(active ? null : opt.value)}
-              className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
+              className={`px-3 py-1.5 text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/20 ${
                 active
-                  ? "border-accent bg-accent/10 text-accent"
-                  : "border-border bg-surface text-text-secondary hover:border-border-focus"
+                  ? "bg-accent/10 text-accent font-medium"
+                  : "text-text-secondary hover:text-text-primary hover:bg-page"
               }`}
             >
               {opt.label}
