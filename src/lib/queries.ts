@@ -615,12 +615,15 @@ export const getMyAllocationDashboard = cache(
       };
     }
 
-    // Step 2: parallel fetch everything. The admin client is used only for
-    // portfolio_analytics and portfolio_strategies — both need daily_returns
-    // which is column-level REVOKE'd from anon/authenticated (migration 010).
-    // the three eligibility fan-outs (match_decisions,
-    // bridge_outcomes, bridge_outcome_dismissals) use the user-scoped client
-    // so RLS enforces the allocator_id ownership gate as a second defence.
+    // Step 2: parallel fetch everything. The admin client is used for
+    // portfolio_analytics and portfolio_strategies (daily_returns is
+    // column-level REVOKE'd from anon/authenticated per migration 010) and
+    // for the match_decisions read — that table does not have an allocator-
+    // self-SELECT RLS policy, so a user-scoped client returns 0 rows even for
+    // the allocator's own intros. The bridge_outcomes and bridge_outcome_dismissals
+    // fan-outs run through the user-scoped client because migration 059 gave
+    // each table an owner-select policy; RLS then enforces the allocator_id
+    // gate as defence-in-depth.
     const nowIso = new Date().toISOString();
     const [
       analyticsRes,
@@ -673,10 +676,11 @@ export const getMyAllocationDashboard = cache(
         .eq("portfolio_id", portfolio.id)
         .is("acknowledged_at", null),
       // fan-out: strategies introduced to this allocator.
-      // Uses user-scoped client — RLS owns the allocator_id gate as a
-      // second defence; admin client would silently return all rows if the
-      // .eq("allocator_id", userId) filter were ever accidentally dropped.
-      supabase
+      // Uses admin client because match_decisions has no allocator-self-SELECT
+      // RLS policy (reads are admin-only at the table level). The explicit
+      // .eq("allocator_id", userId) is the ownership gate; keep it inline
+      // with the query so a reviewer can't accidentally drop it.
+      admin
         .from("match_decisions")
         .select("strategy_id")
         .eq("allocator_id", userId)

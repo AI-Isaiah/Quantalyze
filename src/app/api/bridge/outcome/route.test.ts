@@ -56,22 +56,6 @@ vi.mock("@/lib/supabase/server", () => ({
       return { data: null, error: null };
     },
     from: (table: string) => {
-      if (table === "match_decisions") {
-        return {
-          select: () => ({
-            eq: (col1: string, _val1: unknown) => ({
-              eq: (col2: string, _val2: unknown) => ({
-                eq: (col3: string, _val3: unknown) => ({
-                  maybeSingle: async () => ({
-                    data: STATE.sentAsIntroDecision,
-                    error: null,
-                  }),
-                }),
-              }),
-            }),
-          }),
-        };
-      }
       if (table === "bridge_outcomes") {
         return {
           upsert: () => ({
@@ -84,7 +68,33 @@ vi.mock("@/lib/supabase/server", () => ({
           }),
         };
       }
-      throw new Error(`unexpected from(${table})`);
+      throw new Error(`unexpected from(${table}) on user-scoped client`);
+    },
+  }),
+}));
+
+// The match_decisions eligibility check uses the admin client because the
+// table has no allocator-self-SELECT RLS policy. Mock it here.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: (table: string) => {
+      if (table === "match_decisions") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                eq: () => ({
+                  maybeSingle: async () => ({
+                    data: STATE.sentAsIntroDecision,
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      throw new Error(`unexpected from(${table}) on admin client`);
     },
   }),
 }));

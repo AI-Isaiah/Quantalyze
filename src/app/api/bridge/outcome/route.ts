@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
@@ -107,7 +108,11 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     );
   }
 
-  const { data: decision } = await supabase
+  // match_decisions has no allocator-self-SELECT RLS policy, so this check
+  // runs through the admin client. The .eq("allocator_id", user.id) is the
+  // ownership gate — it MUST stay inline with the query.
+  const admin = createAdminClient();
+  const { data: decision } = await admin
     .from("match_decisions")
     .select("id")
     .eq("allocator_id", user.id)
