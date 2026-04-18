@@ -157,11 +157,21 @@ COMMENT ON INDEX compute_jobs_one_inflight_per_kind_allocator IS
   'Partial unique enforcing one in-flight job per (allocator_id, kind) for allocator-scoped kinds (rescore_allocator). Mirrors compute_jobs_one_inflight_per_kind_strategy / _portfolio. Phase 3 / D-12 Option B.';
 
 -- --------------------------------------------------------------------------
--- STEP 7: CREATE OR REPLACE _enqueue_compute_job_internal + enqueue_compute_job
+-- STEP 7: Redefine _enqueue_compute_job_internal + enqueue_compute_job with
+--         trailing p_allocator_id parameter
 -- --------------------------------------------------------------------------
--- Extends both functions with p_allocator_id. Internal function grows a
--- 3-way XOR dispatch; public wrapper gains a branch for allocator-scoped
--- calls. Backwards-compat preserved for existing strategy-scoped callers.
+-- CREATE OR REPLACE treats a different parameter count as a NEW function
+-- (Postgres overload resolution is strict on count + types), so we must
+-- DROP the existing signatures first to avoid an ambiguous overload. The
+-- explicit arg list on DROP FUNCTION is the key — plain "DROP FUNCTION foo"
+-- is ambiguous if multiple overloads exist.
+DROP FUNCTION IF EXISTS _enqueue_compute_job_internal(uuid, uuid, text, text, uuid[], text, jsonb);
+DROP FUNCTION IF EXISTS enqueue_compute_job(uuid, text, text, uuid[], text, jsonb);
+
+-- Redefine with new p_allocator_id trailing param. Internal function grows
+-- a 3-way XOR dispatch; public wrapper gains a branch for allocator-scoped
+-- calls. Backwards-compat preserved for existing strategy-scoped callers
+-- (p_allocator_id defaults to NULL).
 CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
@@ -566,15 +576,16 @@ BEGIN
     RAISE EXCEPTION 'Migration 062 failed: anon has EXECUTE on enqueue_compute_job — ADR-0001 violated';
   END IF;
 
-  -- (j) SAVEPOINTed full RPC wrapper probe. Exercises enqueue_compute_job →
+  -- (j) Full RPC wrapper probe. Exercises enqueue_compute_job →
   --     _enqueue_compute_job_internal → INSERT path and the partial unique
   --     index end-to-end. Catches f2-class bugs (undeclared variable, wrong
-  --     signature, missing GRANT) at migration-apply time.
-  SAVEPOINT verify_rescore_allocator;
+  --     signature, missing GRANT) at migration-apply time. Probe state is
+  --     cleaned up explicitly at the end because PL/pgSQL does NOT allow
+  --     SAVEPOINT/ROLLBACK TO inside a DO block (transaction-control
+  --     statements are reserved for the outer BEGIN/COMMIT brackets).
 
   -- Need an auth.users row for the FK on compute_jobs.allocator_id. Insert a
-  -- sentinel user for the probe — this is rolled back via the SAVEPOINT so
-  -- never lands in production data.
+  -- sentinel user for the probe. Cleaned up at the end of the DO block.
   INSERT INTO auth.users (id, email) VALUES (v_probe_allocator, 'migration-062-probe@invalid.local')
     ON CONFLICT (id) DO NOTHING;
 
@@ -605,7 +616,9 @@ BEGIN
       v_second_call_id, v_inserted_job_id;
   END IF;
 
-  -- Raw duplicate INSERT must trip the partial unique index.
+  -- Raw duplicate INSERT must trip the partial unique index. The BEGIN
+  -- block below acts as a subtransaction so the caught unique_violation
+  -- does not abort the outer DO block.
   BEGIN
     INSERT INTO compute_jobs (allocator_id, kind, status)
       VALUES (v_probe_allocator, 'rescore_allocator', 'pending');
@@ -616,7 +629,12 @@ BEGIN
       NULL;
   END;
 
-  ROLLBACK TO SAVEPOINT verify_rescore_allocator;
+  -- Explicit cleanup: remove probe job rows + sentinel user. Order matters
+  -- — compute_jobs.allocator_id FK ON DELETE CASCADE would also clean up
+  -- the job rows when we delete the auth.users row, but deleting job rows
+  -- first keeps intent explicit.
+  DELETE FROM compute_jobs WHERE allocator_id = v_probe_allocator;
+  DELETE FROM auth.users WHERE id = v_probe_allocator;
 
   RAISE NOTICE 'Migration 062: scoring_weight_overrides + compute_jobs allocator_id + rescore_allocator kind verified.';
 END
