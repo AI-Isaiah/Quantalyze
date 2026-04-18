@@ -175,4 +175,20 @@ describe("POST /api/bridge/outcome/dismiss", () => {
       STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
     ).toHaveLength(0);
   });
+
+  it("TC4 — 400 Zod: invalid strategy_id → issues array", async () => {
+    const { POST } = await import("./route");
+
+    const res = await POST(makeRequest({ strategy_id: "not-a-uuid" }));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid request body");
+    expect(Array.isArray(body.issues)).toBe(true);
+
+    await drainAuditMicrotasks();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+  });
 });
