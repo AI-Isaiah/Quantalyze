@@ -86,6 +86,8 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "allocator_preferences", user_column: "user_id" },
   { kind: "direct", table: "api_keys", user_column: "user_id" },
   { kind: "direct", table: "audit_log", user_column: "user_id" },
+  { kind: "direct", table: "bridge_outcome_dismissals", user_column: "allocator_id" },
+  { kind: "direct", table: "bridge_outcomes", user_column: "allocator_id" },
   { kind: "direct", table: "contact_requests", user_column: "allocator_id" },
   { kind: "direct", table: "data_deletion_requests", user_column: "user_id" },
   { kind: "direct", table: "investor_attestations", user_column: "user_id" },
