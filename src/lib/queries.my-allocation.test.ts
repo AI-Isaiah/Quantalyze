@@ -51,6 +51,36 @@ const state = vi.hoisted(() => ({
     severity: string;
     acknowledged_at: string | null;
   }>,
+  // Sprint 8 Phase 1: outcome eligibility fan-out state.
+  // Types include allocator_id + decision because the mock buildChain
+  // applies eq() filters for those columns from the fan-out queries.
+  sentAsIntroDecisions: [] as Array<{
+    strategy_id: string;
+    allocator_id?: string;
+    decision?: string;
+  }>,
+  bridgeOutcomes: [] as Array<{
+    id: string;
+    strategy_id: string;
+    allocator_id?: string;
+    kind: string;
+    percent_allocated: number | null;
+    allocated_at: string | null;
+    rejection_reason: string | null;
+    note: string | null;
+    delta_30d: number | null;
+    delta_90d: number | null;
+    delta_180d: number | null;
+    estimated_delta_bps: number | null;
+    estimated_days: number | null;
+    needs_recompute: boolean;
+    created_at: string;
+  }>,
+  bridgeDismissals: [] as Array<{
+    strategy_id: string;
+    allocator_id?: string;
+    expires_at: string;
+  }>,
 }));
 
 function resetState() {
@@ -59,6 +89,9 @@ function resetState() {
   state.analytics = [];
   state.apiKeys = [];
   state.alerts = [];
+  state.sentAsIntroDecisions = [];
+  state.bridgeOutcomes = [];
+  state.bridgeDismissals = [];
 }
 
 type Filter = { column: string; value: unknown; op: "eq" | "in" | "is" };
@@ -97,6 +130,25 @@ function buildChain(table: string) {
         return applyFilters(state.apiKeys);
       case "portfolio_alerts":
         return applyFilters(state.alerts);
+      // Sprint 8 Phase 1: outcome eligibility fan-out tables
+      case "match_decisions":
+        return applyFilters(
+          state.sentAsIntroDecisions as Array<Record<string, unknown>>,
+        );
+      case "bridge_outcomes":
+        return applyFilters(
+          state.bridgeOutcomes as Array<Record<string, unknown>>,
+        );
+      case "bridge_outcome_dismissals":
+        // For dismissals, the chain uses .gt("expires_at", nowIso).
+        // We simulate this by returning rows whose expires_at is in the future
+        // relative to the current time at test execution.
+        return applyFilters(
+          state.bridgeDismissals as Array<Record<string, unknown>>,
+        ).filter((r) => {
+          const row = r as { expires_at: string };
+          return new Date(row.expires_at) > new Date();
+        });
       default:
         return [];
     }
@@ -116,6 +168,10 @@ function buildChain(table: string) {
       filters.push({ column, value, op: "is" });
       return chain;
     },
+    // .gt() is used by bridge_outcome_dismissals to filter active rows.
+    // The rowsFor() implementation handles the actual filtering; this
+    // method just returns chain to allow chaining.
+    gt: (_column: string, _value: unknown) => chain,
     order: () => chain,
     limit: (n: number) => {
       limitN = n;
@@ -350,5 +406,157 @@ describe("getMyAllocationDashboard", () => {
       low: 1,
       total: 4,
     });
+  });
+});
+
+// Sprint 8 Phase 1: outcome eligibility fan-out tests.
+// Each test builds a minimal fixture and verifies eligible_for_outcome
+// and existing_outcome per D-03.
+const PORTFOLIO_FIXTURE = {
+  id: "real-1",
+  user_id: "user-1",
+  name: "Active Allocation",
+  description: null,
+  created_at: "2024-06-01T00:00:00Z",
+  is_test: false,
+};
+
+// A strategy that is part of the portfolio
+const PS_S1 = {
+  portfolio_id: "real-1",
+  strategy_id: "s1",
+  current_weight: 0.2,
+  allocated_amount: 50000,
+  strategy: {
+    id: "s1",
+    name: "Strategy Alpha",
+    codename: null,
+    disclosure_tier: "exploratory",
+    strategy_types: [],
+    markets: [],
+    start_date: null,
+    strategy_analytics: null,
+  },
+  alias: null,
+};
+
+const PS_S2 = { ...PS_S1, strategy_id: "s2", strategy: { ...PS_S1.strategy, id: "s2", name: "Strategy Beta" } };
+const PS_S3 = { ...PS_S1, strategy_id: "s3", strategy: { ...PS_S1.strategy, id: "s3", name: "Strategy Gamma" } };
+const PS_S5 = { ...PS_S1, strategy_id: "s5", strategy: { ...PS_S1.strategy, id: "s5", name: "Strategy Delta" } };
+
+const EXISTING_OUTCOME_S2 = {
+  id: "outcome-s2",
+  strategy_id: "s2",
+  kind: "allocated",
+  percent_allocated: 10,
+  allocated_at: "2026-04-01",
+  rejection_reason: null,
+  note: null,
+  delta_30d: null,
+  delta_90d: null,
+  delta_180d: null,
+  estimated_delta_bps: null,
+  estimated_days: null,
+  needs_recompute: true,
+  created_at: "2026-04-01T00:00:00Z",
+};
+
+describe("getMyAllocationDashboard — outcome eligibility fan-out (Sprint 8 Phase 1)", () => {
+  beforeEach(() => {
+    resetState();
+    // Common portfolio fixture
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  it("TC1 — eligible row: sent_as_intro, no outcome, no active dismissal → eligible_for_outcome=true, existing_outcome=null", async () => {
+    state.portfolioStrategies = [PS_S1 as unknown as typeof state.portfolioStrategies[number]];
+    state.sentAsIntroDecisions = [{ strategy_id: "s1", allocator_id: "user-1", decision: "sent_as_intro" }];
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const row = result.strategies.find((s) => s.strategy_id === "s1");
+    expect(row).toBeDefined();
+    expect(row!.eligible_for_outcome).toBe(true);
+    expect(row!.existing_outcome).toBeNull();
+  });
+
+  it("TC2 — already-outcomed row: sent_as_intro + existing outcome → eligible_for_outcome=false, existing_outcome populated", async () => {
+    state.portfolioStrategies = [PS_S2 as unknown as typeof state.portfolioStrategies[number]];
+    state.sentAsIntroDecisions = [{ strategy_id: "s2", allocator_id: "user-1", decision: "sent_as_intro" }];
+    state.bridgeOutcomes = [{ ...EXISTING_OUTCOME_S2, allocator_id: "user-1" }];
+    state.bridgeDismissals = [];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const row = result.strategies.find((s) => s.strategy_id === "s2");
+    expect(row).toBeDefined();
+    expect(row!.eligible_for_outcome).toBe(false);
+    expect(row!.existing_outcome).not.toBeNull();
+    expect(row!.existing_outcome!.id).toBe("outcome-s2");
+    expect(row!.existing_outcome!.kind).toBe("allocated");
+    expect(row!.existing_outcome!.percent_allocated).toBe(10);
+  });
+
+  it("TC3 — snoozed row: sent_as_intro + active dismissal → eligible_for_outcome=false, existing_outcome=null", async () => {
+    state.portfolioStrategies = [PS_S3 as unknown as typeof state.portfolioStrategies[number]];
+    state.sentAsIntroDecisions = [{ strategy_id: "s3", allocator_id: "user-1", decision: "sent_as_intro" }];
+    state.bridgeOutcomes = [];
+    // Active dismissal: expires_at in the future
+    state.bridgeDismissals = [
+      {
+        strategy_id: "s3",
+        allocator_id: "user-1",
+        expires_at: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const row = result.strategies.find((s) => s.strategy_id === "s3");
+    expect(row).toBeDefined();
+    expect(row!.eligible_for_outcome).toBe(false);
+    expect(row!.existing_outcome).toBeNull();
+  });
+
+  it("TC4 — expired dismissal: sent_as_intro + expired dismissal → eligible_for_outcome=true", async () => {
+    state.portfolioStrategies = [PS_S3 as unknown as typeof state.portfolioStrategies[number]];
+    state.sentAsIntroDecisions = [{ strategy_id: "s3", allocator_id: "user-1", decision: "sent_as_intro" }];
+    state.bridgeOutcomes = [];
+    // Expired dismissal: expires_at in the past — should NOT hide the row
+    state.bridgeDismissals = [
+      {
+        strategy_id: "s3",
+        allocator_id: "user-1",
+        expires_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const row = result.strategies.find((s) => s.strategy_id === "s3");
+    expect(row).toBeDefined();
+    expect(row!.eligible_for_outcome).toBe(true);
+    expect(row!.existing_outcome).toBeNull();
+  });
+
+  it("TC5 — no sent_as_intro: no match_decisions row → eligible_for_outcome=false regardless", async () => {
+    state.portfolioStrategies = [PS_S5 as unknown as typeof state.portfolioStrategies[number]];
+    state.sentAsIntroDecisions = []; // no sent_as_intro for s5
+    state.bridgeOutcomes = [];
+    state.bridgeDismissals = [];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const row = result.strategies.find((s) => s.strategy_id === "s5");
+    expect(row).toBeDefined();
+    expect(row!.eligible_for_outcome).toBe(false);
+    expect(row!.existing_outcome).toBeNull();
   });
 });

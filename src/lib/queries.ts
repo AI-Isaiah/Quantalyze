@@ -509,6 +509,27 @@ export const getRealPortfolio = cache(
  * `daily_returns` for the scenario math. `apiKeys` drives the
  * inline "Add Investment" / "Connected exchanges" section.
  */
+/**
+ * An existing bridge outcome row attached to a strategy row in the dashboard.
+ * Populated by getMyAllocationDashboard's fan-out select on bridge_outcomes.
+ * null when no outcome has been recorded for this (allocator, strategy) pair.
+ */
+export type ExistingBridgeOutcome = {
+  id: string;
+  kind: "allocated" | "rejected";
+  percent_allocated: number | null;
+  allocated_at: string | null;
+  rejection_reason: string | null;
+  note: string | null;
+  delta_30d: number | null;
+  delta_90d: number | null;
+  delta_180d: number | null;
+  estimated_delta_bps: number | null;
+  estimated_days: number | null;
+  needs_recompute: boolean;
+  created_at: string;
+};
+
 export interface MyAllocationDashboardPayload {
   portfolio: Portfolio | null;
   analytics: PortfolioAnalytics | null;
@@ -517,6 +538,19 @@ export interface MyAllocationDashboardPayload {
     current_weight: number | null;
     allocated_amount: number | null;
     alias: string | null;
+    /**
+     * True when:
+     *   - the allocator has a match_decisions row with decision='sent_as_intro' for this strategy, AND
+     *   - no bridge_outcomes row exists for (allocator, strategy), AND
+     *   - no active (non-expired) bridge_outcome_dismissals row exists.
+     * The banner should only render when this is true (D-03).
+     */
+    eligible_for_outcome: boolean;
+    /**
+     * The existing bridge_outcomes row, if any. Non-null implies
+     * eligible_for_outcome===false (the banner has already been actioned).
+     */
+    existing_outcome: ExistingBridgeOutcome | null;
     strategy: {
       id: string;
       name: string;
@@ -604,19 +638,29 @@ export const getMyAllocationDashboard = cache(
     // strategy_analytics because the analytics daily_returns are only
     // exposed to service role (migration 010 revokes SELECT on that
     // column from anon/authenticated for column-level privacy).
-    const [analyticsRes, strategiesRes, apiKeys, alertsRes] =
-      await Promise.all([
-        admin
-          .from("portfolio_analytics")
-          .select("*")
-          .eq("portfolio_id", portfolio.id)
-          .order("computed_at", { ascending: false })
-          .limit(1)
-          .maybeSingle(),
-        admin
-          .from("portfolio_strategies")
-          .select(
-            `
+    // Sprint 8 Phase 1: three additional fan-out selects for outcome
+    // eligibility (sent_as_intro decisions, existing outcomes, active dismissals).
+    const nowIso = new Date().toISOString();
+    const [
+      analyticsRes,
+      strategiesRes,
+      apiKeys,
+      alertsRes,
+      sentAsIntroRes,
+      existingOutcomesRes,
+      activeDismissalsRes,
+    ] = await Promise.all([
+      admin
+        .from("portfolio_analytics")
+        .select("*")
+        .eq("portfolio_id", portfolio.id)
+        .order("computed_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      admin
+        .from("portfolio_strategies")
+        .select(
+          `
           strategy_id,
           current_weight,
           allocated_amount,
@@ -638,16 +682,35 @@ export const getMyAllocationDashboard = cache(
             )
           )
           `,
-          )
-          .eq("portfolio_id", portfolio.id)
-          .order("current_weight", { ascending: false }),
-        getUserApiKeys(userId),
-        supabase
-          .from("portfolio_alerts")
-          .select("id, severity")
-          .eq("portfolio_id", portfolio.id)
-          .is("acknowledged_at", null),
-      ]);
+        )
+        .eq("portfolio_id", portfolio.id)
+        .order("current_weight", { ascending: false }),
+      getUserApiKeys(userId),
+      supabase
+        .from("portfolio_alerts")
+        .select("id, severity")
+        .eq("portfolio_id", portfolio.id)
+        .is("acknowledged_at", null),
+      // Sprint 8 Phase 1 fan-out: strategies introduced to this allocator
+      admin
+        .from("match_decisions")
+        .select("strategy_id")
+        .eq("allocator_id", userId)
+        .eq("decision", "sent_as_intro"),
+      // Sprint 8 Phase 1 fan-out: existing outcome records for this allocator
+      admin
+        .from("bridge_outcomes")
+        .select(
+          "id, strategy_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at",
+        )
+        .eq("allocator_id", userId),
+      // Sprint 8 Phase 1 fan-out: active (non-expired) dismissals for this allocator
+      admin
+        .from("bridge_outcome_dismissals")
+        .select("strategy_id, expires_at")
+        .eq("allocator_id", userId)
+        .gt("expires_at", nowIso),
+    ]);
 
     // Normalize the strategies join: Supabase returns the embedded
     // strategy as either an object or an array depending on the embed
@@ -655,6 +718,25 @@ export const getMyAllocationDashboard = cache(
     // used. Alias + current_weight + allocated_amount carry through
     // from the join row.
     type StrategyPayload = MyAllocationDashboardPayload["strategies"][number]["strategy"];
+
+    // Sprint 8 Phase 1: build lookup structures for outcome eligibility.
+    // D-03: eligibility filter runs server-side; client never needs to filter.
+    const sentAsIntroSet = new Set<string>(
+      (sentAsIntroRes.data ?? []).map(
+        (r) => (r as { strategy_id: string }).strategy_id,
+      ),
+    );
+    const existingOutcomesByStrategy = new Map<string, ExistingBridgeOutcome>();
+    for (const row of existingOutcomesRes.data ?? []) {
+      const r = row as { strategy_id: string } & ExistingBridgeOutcome;
+      existingOutcomesByStrategy.set(r.strategy_id, r);
+    }
+    const activeDismissalSet = new Set<string>(
+      (activeDismissalsRes.data ?? []).map(
+        (r) => (r as { strategy_id: string }).strategy_id,
+      ),
+    );
+
     const strategies = (strategiesRes.data ?? []).map((row) => {
       const rawStrategy = castRow<{ strategy: unknown }>(row, "strategy-join").strategy;
       const strategy = (
@@ -665,11 +747,26 @@ export const getMyAllocationDashboard = cache(
       const analytics = Array.isArray(rawAnalytics)
         ? rawAnalytics[0]
         : rawAnalytics;
+
+      // Sprint 8 Phase 1 eligibility: a strategy is eligible for outcome
+      // recording only when:
+      //   1. it was sent_as_intro to this allocator
+      //   2. no outcome has been recorded yet
+      //   3. no active (non-expired) dismissal exists
+      const existing_outcome =
+        existingOutcomesByStrategy.get(row.strategy_id as string) ?? null;
+      const eligible_for_outcome =
+        sentAsIntroSet.has(row.strategy_id as string) &&
+        existing_outcome === null &&
+        !activeDismissalSet.has(row.strategy_id as string);
+
       return {
         strategy_id: row.strategy_id,
         current_weight: row.current_weight,
         allocated_amount: row.allocated_amount,
         alias: castRow<{ alias: string | null }>(row, "alias").alias ?? null,
+        eligible_for_outcome,
+        existing_outcome,
         strategy: {
           ...strategy,
           strategy_analytics: (analytics ?? null) as
