@@ -108,6 +108,13 @@ export interface AllocatorPreferences {
   preferred_markets: string[] | null;
   founder_notes: string | null;
   updated_at: string;
+  // Phase 2 mandate fields (migration 061)
+  max_weight?: number | null;
+  correlation_ceiling?: number | null;
+  liquidity_preference?: "high" | "medium" | "low" | null;
+  style_exclusions?: string[] | null;
+  mandate_edited_at?: string | null;
+  edited_by_user_id?: string | null;
 }
 
 interface Decision {
