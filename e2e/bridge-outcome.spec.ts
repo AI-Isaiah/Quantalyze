@@ -22,13 +22,16 @@ test.describe("Phase 1 — Bridge Outcome recording", () => {
     page,
   }) => {
     // Login as the seeded allocator
-    await page.goto("/signin");
+    await page.goto("/login");
     await page.getByLabel(/email/i).fill(process.env.SEEDED_ALLOCATOR_EMAIL!);
     await page
       .getByLabel(/password/i)
       .fill(process.env.SEEDED_ALLOCATOR_PASSWORD!);
     await page.getByRole("button", { name: /sign in/i }).click();
-    await page.waitForURL(/\/allocations/);
+    // Post-login lands on the allocator's default surface (discovery page),
+    // not /allocations. Wait for the login form to unmount before navigating.
+    await page.waitForURL((url) => !url.pathname.startsWith("/login"));
+    await page.goto("/allocations");
 
     // Banner must be visible on at least one eligible row
     const banner = page.getByTestId("bridge-outcome-banner").first();
@@ -57,13 +60,16 @@ test.describe("Phase 1 — Bridge Outcome recording", () => {
     page,
   }) => {
     // Login as the seeded allocator
-    await page.goto("/signin");
+    await page.goto("/login");
     await page.getByLabel(/email/i).fill(process.env.SEEDED_ALLOCATOR_EMAIL!);
     await page
       .getByLabel(/password/i)
       .fill(process.env.SEEDED_ALLOCATOR_PASSWORD!);
     await page.getByRole("button", { name: /sign in/i }).click();
-    await page.waitForURL(/\/allocations/);
+    // Post-login lands on the allocator's default surface (discovery page),
+    // not /allocations. Wait for the login form to unmount before navigating.
+    await page.waitForURL((url) => !url.pathname.startsWith("/login"));
+    await page.goto("/allocations");
 
     // Banner must be visible on at least one eligible row
     const banner = page.getByTestId("bridge-outcome-banner").first();
@@ -90,13 +96,16 @@ test.describe("Phase 1 — Bridge Outcome recording", () => {
 
   test("dismiss button hides the banner for the session", async ({ page }) => {
     // Login as the seeded allocator
-    await page.goto("/signin");
+    await page.goto("/login");
     await page.getByLabel(/email/i).fill(process.env.SEEDED_ALLOCATOR_EMAIL!);
     await page
       .getByLabel(/password/i)
       .fill(process.env.SEEDED_ALLOCATOR_PASSWORD!);
     await page.getByRole("button", { name: /sign in/i }).click();
-    await page.waitForURL(/\/allocations/);
+    // Post-login lands on the allocator's default surface (discovery page),
+    // not /allocations. Wait for the login form to unmount before navigating.
+    await page.waitForURL((url) => !url.pathname.startsWith("/login"));
+    await page.goto("/allocations");
 
     const banner = page.getByTestId("bridge-outcome-banner").first();
     await expect(banner).toBeVisible();
