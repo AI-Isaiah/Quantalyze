@@ -634,12 +634,12 @@ export const getMyAllocationDashboard = cache(
       };
     }
 
-    // Step 2: parallel fetch everything. Uses the admin client for
-    // strategy_analytics because the analytics daily_returns are only
-    // exposed to service role (migration 010 revokes SELECT on that
-    // column from anon/authenticated for column-level privacy).
-    // Sprint 8 Phase 1: three additional fan-out selects for outcome
-    // eligibility (sent_as_intro decisions, existing outcomes, active dismissals).
+    // Step 2: parallel fetch everything. The admin client is used only for
+    // portfolio_analytics and portfolio_strategies — both need daily_returns
+    // which is column-level REVOKE'd from anon/authenticated (migration 010).
+    // Sprint 8 Phase 1: the three eligibility fan-outs (match_decisions,
+    // bridge_outcomes, bridge_outcome_dismissals) use the user-scoped client
+    // so RLS enforces the allocator_id ownership gate as a second defence.
     const nowIso = new Date().toISOString();
     const [
       analyticsRes,
@@ -691,21 +691,26 @@ export const getMyAllocationDashboard = cache(
         .select("id, severity")
         .eq("portfolio_id", portfolio.id)
         .is("acknowledged_at", null),
-      // Sprint 8 Phase 1 fan-out: strategies introduced to this allocator
-      admin
+      // Sprint 8 Phase 1 fan-out: strategies introduced to this allocator.
+      // Uses user-scoped client — RLS owns the allocator_id gate as a
+      // second defence; admin client would silently return all rows if the
+      // .eq("allocator_id", userId) filter were ever accidentally dropped.
+      supabase
         .from("match_decisions")
         .select("strategy_id")
         .eq("allocator_id", userId)
         .eq("decision", "sent_as_intro"),
-      // Sprint 8 Phase 1 fan-out: existing outcome records for this allocator
-      admin
+      // Sprint 8 Phase 1 fan-out: existing outcome records for this allocator.
+      // User-scoped client — same defence-in-depth rationale as above.
+      supabase
         .from("bridge_outcomes")
         .select(
           "id, strategy_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at",
         )
         .eq("allocator_id", userId),
-      // Sprint 8 Phase 1 fan-out: active (non-expired) dismissals for this allocator
-      admin
+      // Sprint 8 Phase 1 fan-out: active (non-expired) dismissals for this allocator.
+      // User-scoped client — same defence-in-depth rationale as above.
+      supabase
         .from("bridge_outcome_dismissals")
         .select("strategy_id, expires_at")
         .eq("allocator_id", userId)
