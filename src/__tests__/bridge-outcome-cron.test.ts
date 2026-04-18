@@ -128,19 +128,16 @@ describe("bridge-outcome-cron (live-DB)", () => {
     // Seed sent_as_intro match_decisions rows for both strategies.
     // match_decisions.decided_by is NOT NULL; use allocatorId as a synthetic value.
     // The unique partial index uniq_match_dec_sent_per_pair is a WHERE partial index —
-    // PostgREST upsert cannot target partial indexes, so we insert with ignoreDuplicates
-    // to handle idempotent re-runs gracefully.
+    // PostgREST upsert cannot target partial indexes, so insert and tolerate
+    // the 23505 unique_violation on idempotent re-runs.
     for (const stratId of [STRATEGY_A_ID, STRATEGY_B_ID]) {
-      const mdIns = await admin.from("match_decisions").insert(
-        {
-          allocator_id: allocatorId,
-          strategy_id: stratId,
-          decision: "sent_as_intro",
-          decided_by: allocatorId,
-        },
-        { ignoreDuplicates: true },
-      );
-      if (mdIns.error) {
+      const mdIns = await admin.from("match_decisions").insert({
+        allocator_id: allocatorId,
+        strategy_id: stratId,
+        decision: "sent_as_intro",
+        decided_by: allocatorId,
+      });
+      if (mdIns.error && mdIns.error.code !== "23505") {
         throw new Error(
           `Failed to seed match_decisions for ${stratId}: ${mdIns.error.message}`,
         );
