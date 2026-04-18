@@ -7,6 +7,7 @@ import {
   identifyUsageUser,
 } from "@/lib/analytics/usage-events-client";
 import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
+import type { ExistingBridgeOutcome } from "@/lib/queries";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
@@ -41,6 +42,10 @@ interface StrategyRow {
   current_weight: number | null;
   allocated_amount: number | null;
   alias: string | null;
+  /** Sprint 8 Phase 1: true when eligible for outcome recording (D-03). */
+  eligible_for_outcome: boolean;
+  /** Sprint 8 Phase 1: the existing bridge_outcomes row, if any. */
+  existing_outcome: ExistingBridgeOutcome | null;
   strategy: {
     id: string;
     name: string;
@@ -390,6 +395,10 @@ export function AllocationDashboard({
         weight: row.current_weight ?? 0,
         allocated_amount: row.allocated_amount,
         alias: row.alias,
+        // Sprint 8 Phase 1: thread eligibility + existing outcome into widget data
+        // so PositionsTable can render BridgeOutcomeBanner beneath eligible rows.
+        eligible_for_outcome: row.eligible_for_outcome,
+        existing_outcome: row.existing_outcome,
         strategy: row.strategy,
       })),
       apiKeys,

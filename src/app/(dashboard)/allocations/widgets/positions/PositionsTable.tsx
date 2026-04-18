@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useRef, useEffect, useCallback } from "react";
+import { useMemo, useState, useRef, useEffect, useCallback, Fragment } from "react";
 import type { WidgetProps } from "../../lib/types";
 import {
   useReactTable,
@@ -13,6 +13,11 @@ import {
   type ColumnDef,
 } from "@tanstack/react-table";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
+import { BridgeOutcomeBanner } from "../../components/BridgeOutcomeBanner";
+import { AllocatedForm, type RecordedOutcome } from "../../components/AllocatedForm";
+import { RejectedForm } from "../../components/RejectedForm";
+import { OutcomeRecordedRow } from "../../components/OutcomeRecordedRow";
+import type { ExistingBridgeOutcome } from "@/lib/queries";
 
 // ---------------------------------------------------------------------------
 // Row type — one row per strategy in the portfolio
@@ -31,6 +36,10 @@ interface PositionRow {
   calmar: number | null;
   alpha: number | null;
   beta: number | null;
+  // Sprint 8 Phase 1: outcome eligibility metadata (not rendered as columns)
+  strategy_id: string;
+  eligible_for_outcome: boolean;
+  existing_outcome: ExistingBridgeOutcome | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +271,88 @@ function ColumnVisibilityDropdown({
 }
 
 // ---------------------------------------------------------------------------
+// BannerSubRow — per-row inline banner/form/recorded state
+// Renders as a full-width <tr colSpan> beneath each eligible Holdings row.
+// ---------------------------------------------------------------------------
+
+type BannerMode = "banner" | "allocated" | "rejected" | "dismissed";
+
+function BannerSubRow({
+  colSpan,
+  strategyId,
+  initialOutcome,
+}: {
+  colSpan: number;
+  strategyId: string;
+  initialOutcome: ExistingBridgeOutcome | null;
+}) {
+  const [mode, setMode] = useState<BannerMode>("banner");
+  const [localOutcome, setLocalOutcome] = useState<RecordedOutcome | null>(
+    initialOutcome as RecordedOutcome | null,
+  );
+
+  // If there's already a recorded outcome from the server, show it immediately
+  if (localOutcome) {
+    return (
+      <tr>
+        <td colSpan={colSpan} className="p-0">
+          <OutcomeRecordedRow outcome={localOutcome} />
+        </td>
+      </tr>
+    );
+  }
+
+  if (mode === "dismissed") return null;
+
+  if (mode === "allocated") {
+    return (
+      <tr>
+        <td colSpan={colSpan} className="p-0">
+          <AllocatedForm
+            strategyId={strategyId}
+            maxWeight={null}
+            onRecorded={(outcome) => {
+              setLocalOutcome(outcome);
+            }}
+            onCancel={() => setMode("banner")}
+          />
+        </td>
+      </tr>
+    );
+  }
+
+  if (mode === "rejected") {
+    return (
+      <tr>
+        <td colSpan={colSpan} className="p-0">
+          <RejectedForm
+            strategyId={strategyId}
+            onRecorded={(outcome) => {
+              setLocalOutcome(outcome);
+            }}
+            onCancel={() => setMode("banner")}
+          />
+        </td>
+      </tr>
+    );
+  }
+
+  // Default: banner mode
+  return (
+    <tr>
+      <td colSpan={colSpan} className="p-0">
+        <BridgeOutcomeBanner
+          strategyId={strategyId}
+          onAllocatedClick={() => setMode("allocated")}
+          onRejectedClick={() => setMode("rejected")}
+          onDismiss={() => setMode("dismissed")}
+        />
+      </td>
+    </tr>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main PositionsTable widget
 // ---------------------------------------------------------------------------
 
@@ -282,6 +373,8 @@ export default function PositionsTable({ data, width }: WidgetProps) {
       current_weight: number | null;
       allocated_amount: number | null;
       alias: string | null;
+      eligible_for_outcome?: boolean;
+      existing_outcome?: ExistingBridgeOutcome | null;
       strategy: {
         name: string;
         codename: string | null;
@@ -319,6 +412,10 @@ export default function PositionsTable({ data, width }: WidgetProps) {
         calmar: a?.calmar ?? null,
         alpha: a?.alpha ?? null,
         beta: a?.beta ?? null,
+        // Sprint 8 Phase 1: outcome eligibility — thread through for BannerSubRow
+        strategy_id: row.strategy_id,
+        eligible_for_outcome: row.eligible_for_outcome ?? false,
+        existing_outcome: row.existing_outcome ?? null,
       };
     });
   }, [data]);
@@ -353,6 +450,9 @@ export default function PositionsTable({ data, width }: WidgetProps) {
       </div>
     );
   }
+
+  // Count visible columns for colSpan on sub-rows
+  const visibleColCount = table.getVisibleLeafColumns().length;
 
   return (
     <div className="flex h-full flex-col">
@@ -404,21 +504,32 @@ export default function PositionsTable({ data, width }: WidgetProps) {
           </thead>
           <tbody>
             {table.getRowModel().rows.map((row) => (
-              <tr
-                key={row.id}
-                className="border-b border-[#E2E8F0] last:border-b-0 hover:bg-[#F8F9FA] transition-colors"
-                style={{ height: 44 }}
-              >
-                {row.getVisibleCells().map((cell) => (
-                  <td
-                    key={cell.id}
-                    className="px-3 py-2 whitespace-nowrap"
-                    style={{ width: cell.column.getSize() }}
-                  >
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
+              <Fragment key={row.id}>
+                <tr
+                  className="border-b border-[#E2E8F0] last:border-b-0 hover:bg-[#F8F9FA] transition-colors"
+                  style={{ height: 44 }}
+                >
+                  {row.getVisibleCells().map((cell) => (
+                    <td
+                      key={cell.id}
+                      className="px-3 py-2 whitespace-nowrap"
+                      style={{ width: cell.column.getSize() }}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+                {/* Sprint 8 Phase 1: render outcome banner/form/recorded-row beneath
+                    eligible rows. BannerSubRow owns its own mode state per strategy_id. */}
+                {(row.original.eligible_for_outcome || row.original.existing_outcome) && (
+                  <BannerSubRow
+                    key={`banner-${row.original.strategy_id}`}
+                    colSpan={visibleColCount}
+                    strategyId={row.original.strategy_id}
+                    initialOutcome={row.original.existing_outcome}
+                  />
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
