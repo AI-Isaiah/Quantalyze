@@ -36,7 +36,7 @@ interface PositionRow {
   calmar: number | null;
   alpha: number | null;
   beta: number | null;
-  // Sprint 8 Phase 1: outcome eligibility metadata (not rendered as columns)
+  // outcome eligibility metadata (not rendered as columns)
   strategy_id: string;
   eligible_for_outcome: boolean;
   existing_outcome: BridgeOutcome | null;
@@ -412,7 +412,7 @@ export default function PositionsTable({ data, width }: WidgetProps) {
         calmar: a?.calmar ?? null,
         alpha: a?.alpha ?? null,
         beta: a?.beta ?? null,
-        // Sprint 8 Phase 1: outcome eligibility — thread through for BannerSubRow
+        // outcome eligibility — thread through for BannerSubRow
         strategy_id: row.strategy_id,
         eligible_for_outcome: row.eligible_for_outcome ?? false,
         existing_outcome: row.existing_outcome ?? null,
@@ -519,7 +519,7 @@ export default function PositionsTable({ data, width }: WidgetProps) {
                     </td>
                   ))}
                 </tr>
-                {/* Sprint 8 Phase 1: render outcome banner/form/recorded-row beneath
+                {/* render outcome banner/form/recorded-row beneath
                     eligible rows. BannerSubRow owns its own mode state per strategy_id. */}
                 {(row.original.eligible_for_outcome || row.original.existing_outcome) && (
                   <BannerSubRow

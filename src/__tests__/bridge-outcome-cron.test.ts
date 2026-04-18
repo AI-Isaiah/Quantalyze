@@ -1,7 +1,7 @@
 /**
  * Integration test — Migration 060 compute_bridge_outcome_deltas.
  *
- * Sprint 8 Phase 1 Plan 04. Verifies the daily delta-compute cron function
+ *  Verifies the daily delta-compute cron function
  * against a live Supabase database. Seeds a synthetic linear equity curve
  * (1.00 → 1.30 across 180 days) and proves:
  *

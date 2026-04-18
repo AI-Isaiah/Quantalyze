@@ -13,7 +13,6 @@ import { test, expect } from "@playwright/test";
  *   (i.e. match_decisions.decision='sent_as_intro' + no existing bridge_outcomes row
  *   + no active dismissal) so the banner renders.
  *
- * Sprint 8 Phase 1 — Plan 01-03
  */
 
 test.describe("Phase 1 — Bridge Outcome recording", () => {

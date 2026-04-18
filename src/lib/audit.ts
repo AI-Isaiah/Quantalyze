@@ -122,7 +122,7 @@ export type AuditAction =
   | "simulator.run"
   | "optimizer.run"
   | "reconcile.compare"
-  // --- Sprint 8 Phase 1: Bridge outcome tracker -----------------------
+  // --- Bridge outcome tracker -----------------------
   | "bridge_outcome.record"
   | "bridge_outcome.update"
   | "bridge_outcome.dismiss";
@@ -161,7 +161,7 @@ export type AuditEntityType =
   | "simulator_run"
   | "optimizer_run"
   | "reconcile_run"
-  // --- Sprint 8 Phase 1: Bridge outcome tracker -----------------------
+  // --- Bridge outcome tracker -----------------------
   | "bridge_outcome"
   | "bridge_outcome_dismissal";
 

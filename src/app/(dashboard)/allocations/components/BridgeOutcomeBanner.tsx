@@ -21,7 +21,6 @@ export type BridgeOutcomeBannerProps = {
  * D-05/D-07: dismiss POSTs to /api/bridge/outcome/dismiss with a 24h TTL.
  * DESIGN.md tokens: bg-page, border-border, text-text-secondary, font-sans.
  *
- * Sprint 8 Phase 1 — Plan 01-03
  */
 export function BridgeOutcomeBanner({
   strategyId,

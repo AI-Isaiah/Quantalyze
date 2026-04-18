@@ -42,9 +42,9 @@ interface StrategyRow {
   current_weight: number | null;
   allocated_amount: number | null;
   alias: string | null;
-  /** Sprint 8 Phase 1: true when eligible for outcome recording (D-03). */
+  /** true when eligible for outcome recording (D-03). */
   eligible_for_outcome: boolean;
-  /** Sprint 8 Phase 1: the existing bridge_outcomes row, if any. */
+  /** the existing bridge_outcomes row, if any. */
   existing_outcome: BridgeOutcome | null;
   strategy: {
     id: string;
@@ -395,7 +395,7 @@ export function AllocationDashboard({
         weight: row.current_weight ?? 0,
         allocated_amount: row.allocated_amount,
         alias: row.alias,
-        // Sprint 8 Phase 1: thread eligibility + existing outcome into widget data
+        // thread eligibility + existing outcome into widget data
         // so PositionsTable can render BridgeOutcomeBanner beneath eligible rows.
         eligible_for_outcome: row.eligible_for_outcome,
         existing_outcome: row.existing_outcome,

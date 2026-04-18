@@ -51,7 +51,7 @@ const state = vi.hoisted(() => ({
     severity: string;
     acknowledged_at: string | null;
   }>,
-  // Sprint 8 Phase 1: outcome eligibility fan-out state.
+  // outcome eligibility fan-out state.
   // Types include allocator_id + decision because the mock buildChain
   // applies eq() filters for those columns from the fan-out queries.
   sentAsIntroDecisions: [] as Array<{
@@ -130,7 +130,7 @@ function buildChain(table: string) {
         return applyFilters(state.apiKeys);
       case "portfolio_alerts":
         return applyFilters(state.alerts);
-      // Sprint 8 Phase 1: outcome eligibility fan-out tables
+      // outcome eligibility fan-out tables
       case "match_decisions":
         return applyFilters(
           state.sentAsIntroDecisions as Array<Record<string, unknown>>,
@@ -409,7 +409,7 @@ describe("getMyAllocationDashboard", () => {
   });
 });
 
-// Sprint 8 Phase 1: outcome eligibility fan-out tests.
+// outcome eligibility fan-out tests.
 // Each test builds a minimal fixture and verifies eligible_for_outcome
 // and existing_outcome per D-03.
 const PORTFOLIO_FIXTURE = {
@@ -461,7 +461,7 @@ const EXISTING_OUTCOME_S2 = {
   created_at: "2026-04-01T00:00:00Z",
 };
 
-describe("getMyAllocationDashboard — outcome eligibility fan-out (Sprint 8 Phase 1)", () => {
+describe("getMyAllocationDashboard — outcome eligibility fan-out", () => {
   beforeEach(() => {
     resetState();
     // Common portfolio fixture

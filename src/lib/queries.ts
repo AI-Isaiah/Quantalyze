@@ -618,7 +618,7 @@ export const getMyAllocationDashboard = cache(
     // Step 2: parallel fetch everything. The admin client is used only for
     // portfolio_analytics and portfolio_strategies — both need daily_returns
     // which is column-level REVOKE'd from anon/authenticated (migration 010).
-    // Sprint 8 Phase 1: the three eligibility fan-outs (match_decisions,
+    // the three eligibility fan-outs (match_decisions,
     // bridge_outcomes, bridge_outcome_dismissals) use the user-scoped client
     // so RLS enforces the allocator_id ownership gate as a second defence.
     const nowIso = new Date().toISOString();
@@ -672,7 +672,7 @@ export const getMyAllocationDashboard = cache(
         .select("id, severity")
         .eq("portfolio_id", portfolio.id)
         .is("acknowledged_at", null),
-      // Sprint 8 Phase 1 fan-out: strategies introduced to this allocator.
+      // fan-out: strategies introduced to this allocator.
       // Uses user-scoped client — RLS owns the allocator_id gate as a
       // second defence; admin client would silently return all rows if the
       // .eq("allocator_id", userId) filter were ever accidentally dropped.
@@ -681,7 +681,7 @@ export const getMyAllocationDashboard = cache(
         .select("strategy_id")
         .eq("allocator_id", userId)
         .eq("decision", "sent_as_intro"),
-      // Sprint 8 Phase 1 fan-out: existing outcome records for this allocator.
+      // fan-out: existing outcome records for this allocator.
       // User-scoped client — same defence-in-depth rationale as above.
       supabase
         .from("bridge_outcomes")
@@ -689,7 +689,7 @@ export const getMyAllocationDashboard = cache(
           "id, strategy_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at",
         )
         .eq("allocator_id", userId),
-      // Sprint 8 Phase 1 fan-out: active (non-expired) dismissals for this allocator.
+      // fan-out: active (non-expired) dismissals for this allocator.
       // User-scoped client — same defence-in-depth rationale as above.
       supabase
         .from("bridge_outcome_dismissals")
@@ -705,7 +705,7 @@ export const getMyAllocationDashboard = cache(
     // from the join row.
     type StrategyPayload = MyAllocationDashboardPayload["strategies"][number]["strategy"];
 
-    // Sprint 8 Phase 1: build lookup structures for outcome eligibility.
+    // build lookup structures for outcome eligibility.
     // D-03: eligibility filter runs server-side; client never needs to filter.
     const sentAsIntroSet = new Set<string>(
       (sentAsIntroRes.data ?? []).map(
@@ -734,7 +734,7 @@ export const getMyAllocationDashboard = cache(
         ? rawAnalytics[0]
         : rawAnalytics;
 
-      // Sprint 8 Phase 1 eligibility: a strategy is eligible for outcome
+      // eligibility: a strategy is eligible for outcome
       // recording only when:
       //   1. it was sent_as_intro to this allocator
       //   2. no outcome has been recorded yet

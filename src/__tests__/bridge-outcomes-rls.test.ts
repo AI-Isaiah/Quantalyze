@@ -2,7 +2,6 @@
  * Live-DB integration test — Migration 059 RLS policies on
  * bridge_outcomes + bridge_outcome_dismissals.
  *
- * Sprint 8 Phase 1 — Plan 01-02.
  *
  * Verifies migration 059 RLS policies against a live Postgres — mocked
  * clients would silently pass a broken policy. Each test exercises a
