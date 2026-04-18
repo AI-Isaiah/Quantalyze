@@ -5,29 +5,18 @@ import {
   REJECTION_REASONS,
   REJECTION_REASON_LABELS,
   REJECTED_FIELDS,
+  postBridgeOutcome,
+  type BridgeOutcome,
   type RejectionReason,
 } from "@/lib/bridge-outcome-schema";
 import { Button } from "@/components/ui/Button";
-import type { RecordedOutcome } from "./AllocatedForm";
 
 export type RejectedFormProps = {
   strategyId: string;
-  onRecorded: (outcome: RecordedOutcome) => void;
+  onRecorded: (outcome: BridgeOutcome) => void;
   onCancel: () => void;
 };
 
-/**
- * Inline rejected-outcome form.
- *
- * Fields: rejection_reason (enum select, 5 options), note (optional; required when reason=other).
- * Client-side Zod symmetrical with route (D-10).
- * POSTs to /api/bridge/outcome with kind="rejected".
- * On success, calls onRecorded(outcome).
- *
- * DESIGN.md tokens: bg-surface, border-border, font-sans, text-text-secondary, text-negative.
- *
- * Sprint 8 Phase 1 — Plan 01-03
- */
 export function RejectedForm({
   strategyId,
   onRecorded,
@@ -54,32 +43,17 @@ export function RejectedForm({
     }
 
     setSubmitting(true);
-    try {
-      const res = await fetch("/api/bridge/outcome", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          strategy_id: strategyId,
-          kind: "rejected",
-          ...parsed.data,
-        }),
-        credentials: "same-origin",
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        if (res.status === 429) {
-          setError("Too many submissions — try again in a moment");
-        } else {
-          setError(body.error ?? "Couldn't record outcome — try again");
-        }
-        return;
-      }
-      onRecorded(body.outcome as RecordedOutcome);
-    } catch {
-      setError("Couldn't record outcome — try again");
-    } finally {
-      setSubmitting(false);
+    const result = await postBridgeOutcome({
+      strategyId,
+      kind: "rejected",
+      values: parsed.data,
+    });
+    setSubmitting(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
     }
+    onRecorded(result.outcome);
   }
 
   return (

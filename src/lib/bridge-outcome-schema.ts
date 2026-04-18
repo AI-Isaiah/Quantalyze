@@ -1,13 +1,6 @@
-/**
- * Shared Zod schemas and labels for bridge outcome forms.
- *
- * Duplicated from the server-side route schema (src/app/api/bridge/outcome/route.ts)
- * so client-side forms can validate symmetrically with the server (OQ4).
- * Both copies must stay in sync — the route is authoritative; this module is
- * the consumer-facing mirror.
- *
- * Sprint 8 Phase 1 — Plan 01-03
- */
+// Shared constants, Zod schemas, and types for the bridge outcome feature.
+// Single source of truth for REJECTION_REASONS (consumed by the server route
+// too) and the BridgeOutcome row shape.
 
 import { z } from "zod";
 
@@ -29,12 +22,22 @@ export const REJECTION_REASON_LABELS: Record<RejectionReason, string> = {
   other: "Other",
 };
 
-/**
- * Client-side Zod schema for the AllocatedForm fields.
- * Mirrors the server-side BODY_SCHEMA for kind="allocated".
- * Note: date range validation (not future, not > 365d past) matches
- * the superRefine constraint in the server route.
- */
+export type BridgeOutcome = {
+  id: string;
+  kind: "allocated" | "rejected";
+  percent_allocated: number | null;
+  allocated_at: string | null;
+  rejection_reason: RejectionReason | null;
+  note: string | null;
+  delta_30d: number | null;
+  delta_90d: number | null;
+  delta_180d: number | null;
+  estimated_delta_bps: number | null;
+  estimated_days: number | null;
+  needs_recompute: boolean;
+  created_at: string;
+};
+
 export const ALLOCATED_FIELDS = z
   .object({
     percent_allocated: z.number().min(0.1).max(50),
@@ -61,10 +64,6 @@ export const ALLOCATED_FIELDS = z
     }
   });
 
-/**
- * Client-side Zod schema for the RejectedForm fields.
- * Mirrors the server-side BODY_SCHEMA for kind="rejected".
- */
 export const REJECTED_FIELDS = z
   .object({
     rejection_reason: z.enum(REJECTION_REASONS),
@@ -82,3 +81,38 @@ export const REJECTED_FIELDS = z
 
 export type AllocatedFormValues = z.infer<typeof ALLOCATED_FIELDS>;
 export type RejectedFormValues = z.infer<typeof REJECTED_FIELDS>;
+
+type PostBridgeOutcomeArgs =
+  | { strategyId: string; kind: "allocated"; values: AllocatedFormValues }
+  | { strategyId: string; kind: "rejected"; values: RejectedFormValues };
+
+type PostBridgeOutcomeResult =
+  | { ok: true; outcome: BridgeOutcome }
+  | { ok: false; error: string };
+
+export async function postBridgeOutcome(
+  args: PostBridgeOutcomeArgs,
+): Promise<PostBridgeOutcomeResult> {
+  try {
+    const res = await fetch("/api/bridge/outcome", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        strategy_id: args.strategyId,
+        kind: args.kind,
+        ...args.values,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 429) {
+        return { ok: false, error: "Too many submissions — try again in a moment" };
+      }
+      return { ok: false, error: body.error ?? "Couldn't record outcome — try again" };
+    }
+    return { ok: true, outcome: body.outcome as BridgeOutcome };
+  } catch {
+    return { ok: false, error: "Couldn't record outcome — try again" };
+  }
+}

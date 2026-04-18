@@ -3,31 +3,18 @@
 import { deriveOutcomeLabel } from "@/lib/bridge-outcome-label";
 import {
   REJECTION_REASON_LABELS,
-  type RejectionReason,
+  type BridgeOutcome,
 } from "@/lib/bridge-outcome-schema";
-import type { RecordedOutcome } from "./AllocatedForm";
 
 export type OutcomeRecordedRowProps = {
-  outcome: RecordedOutcome;
+  outcome: BridgeOutcome;
 };
 
-/**
- * Status line shown after a successful outcome record.
- *
- * D-11 exact copy:
- *   Allocated: "Recorded: Allocated {N}% on {date} • {label.value}"
- *   Rejected:  "Recorded: Rejected — {reasonLabel}"
- *
- * D-13 tone: text-positive / text-negative only on realized windows (30d/90d/180d).
- * DESIGN.md tokens: bg-page, border-border, font-sans, font-metric, text-text-primary,
- * text-positive, text-negative, text-accent.
- *
- * Sprint 8 Phase 1 — Plan 01-03
- */
 export function OutcomeRecordedRow({ outcome }: OutcomeRecordedRowProps) {
   if (outcome.kind === "rejected") {
-    const reasonKey = (outcome.rejection_reason ?? "other") as RejectionReason;
-    const reasonLabel = REJECTION_REASON_LABELS[reasonKey] ?? "Other";
+    const reasonLabel = outcome.rejection_reason
+      ? REJECTION_REASON_LABELS[outcome.rejection_reason]
+      : "Other";
     return (
       <div
         data-testid="outcome-recorded-row"
@@ -42,7 +29,6 @@ export function OutcomeRecordedRow({ outcome }: OutcomeRecordedRowProps) {
     );
   }
 
-  // Allocated outcome — derive the D-12 label progression
   const label = deriveOutcomeLabel({
     kind: outcome.kind,
     allocated_at: outcome.allocated_at,

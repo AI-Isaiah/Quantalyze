@@ -7,7 +7,7 @@ import {
   identifyUsageUser,
 } from "@/lib/analytics/usage-events-client";
 import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
-import type { ExistingBridgeOutcome } from "@/lib/queries";
+import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
@@ -45,7 +45,7 @@ interface StrategyRow {
   /** Sprint 8 Phase 1: true when eligible for outcome recording (D-03). */
   eligible_for_outcome: boolean;
   /** Sprint 8 Phase 1: the existing bridge_outcomes row, if any. */
-  existing_outcome: ExistingBridgeOutcome | null;
+  existing_outcome: BridgeOutcome | null;
   strategy: {
     id: string;
     name: string;

@@ -509,26 +509,7 @@ export const getRealPortfolio = cache(
  * `daily_returns` for the scenario math. `apiKeys` drives the
  * inline "Add Investment" / "Connected exchanges" section.
  */
-/**
- * An existing bridge outcome row attached to a strategy row in the dashboard.
- * Populated by getMyAllocationDashboard's fan-out select on bridge_outcomes.
- * null when no outcome has been recorded for this (allocator, strategy) pair.
- */
-export type ExistingBridgeOutcome = {
-  id: string;
-  kind: "allocated" | "rejected";
-  percent_allocated: number | null;
-  allocated_at: string | null;
-  rejection_reason: string | null;
-  note: string | null;
-  delta_30d: number | null;
-  delta_90d: number | null;
-  delta_180d: number | null;
-  estimated_delta_bps: number | null;
-  estimated_days: number | null;
-  needs_recompute: boolean;
-  created_at: string;
-};
+import type { BridgeOutcome } from "./bridge-outcome-schema";
 
 export interface MyAllocationDashboardPayload {
   portfolio: Portfolio | null;
@@ -550,7 +531,7 @@ export interface MyAllocationDashboardPayload {
      * The existing bridge_outcomes row, if any. Non-null implies
      * eligible_for_outcome===false (the banner has already been actioned).
      */
-    existing_outcome: ExistingBridgeOutcome | null;
+    existing_outcome: BridgeOutcome | null;
     strategy: {
       id: string;
       name: string;
@@ -731,9 +712,9 @@ export const getMyAllocationDashboard = cache(
         (r) => (r as { strategy_id: string }).strategy_id,
       ),
     );
-    const existingOutcomesByStrategy = new Map<string, ExistingBridgeOutcome>();
+    const existingOutcomesByStrategy = new Map<string, BridgeOutcome>();
     for (const row of existingOutcomesRes.data ?? []) {
-      const r = row as { strategy_id: string } & ExistingBridgeOutcome;
+      const r = row as { strategy_id: string } & BridgeOutcome;
       existingOutcomesByStrategy.set(r.strategy_id, r);
     }
     const activeDismissalSet = new Set<string>(

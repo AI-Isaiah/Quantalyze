@@ -1,51 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { ALLOCATED_FIELDS } from "@/lib/bridge-outcome-schema";
+import {
+  ALLOCATED_FIELDS,
+  postBridgeOutcome,
+  type BridgeOutcome,
+} from "@/lib/bridge-outcome-schema";
 import { Button } from "@/components/ui/Button";
-
-/**
- * Shape returned from POST /api/bridge/outcome.
- * Exported so AllocatedForm, RejectedForm, OutcomeRecordedRow, and
- * PositionsTable all share one canonical type definition.
- */
-export type RecordedOutcome = {
-  id: string;
-  kind: "allocated" | "rejected";
-  percent_allocated: number | null;
-  allocated_at: string | null;         // YYYY-MM-DD
-  rejection_reason: string | null;
-  note: string | null;
-  delta_30d: number | null;
-  delta_90d: number | null;
-  delta_180d: number | null;
-  estimated_delta_bps: number | null;
-  estimated_days: number | null;
-  needs_recompute: boolean;
-  created_at: string;
-};
 
 export type AllocatedFormProps = {
   strategyId: string;
-  /** From Phase 2 mandate — may be null; soft-warn only (D-09). */
+  /** Allocator's Phase 2 max_weight — soft-warn only (D-09). */
   maxWeight: number | null;
-  onRecorded: (outcome: RecordedOutcome) => void;
+  onRecorded: (outcome: BridgeOutcome) => void;
   onCancel: () => void;
 };
 
-/**
- * Inline allocated-outcome form.
- *
- * Fields: percent_allocated (0.1–50%), allocated_at (date, not future, not > 365d), note (optional).
- * Client-side Zod symmetrical with route (D-09).
- * POSTs to /api/bridge/outcome with kind="allocated".
- * On success, calls onRecorded(outcome) so the parent can swap to OutcomeRecordedRow.
- *
- * DESIGN.md tokens: bg-surface, border-border, font-sans, font-mono, text-text-secondary,
- * text-text-muted, text-negative.
- *
- * Sprint 8 Phase 1 — Plan 01-03
- */
 export function AllocatedForm({
   strategyId,
   maxWeight,
@@ -81,32 +51,17 @@ export function AllocatedForm({
     }
 
     setSubmitting(true);
-    try {
-      const res = await fetch("/api/bridge/outcome", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          strategy_id: strategyId,
-          kind: "allocated",
-          ...parsed.data,
-        }),
-        credentials: "same-origin",
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        if (res.status === 429) {
-          setError("Too many submissions — try again in a moment");
-        } else {
-          setError(body.error ?? "Couldn't record outcome — try again");
-        }
-        return;
-      }
-      onRecorded(body.outcome as RecordedOutcome);
-    } catch {
-      setError("Couldn't record outcome — try again");
-    } finally {
-      setSubmitting(false);
+    const result = await postBridgeOutcome({
+      strategyId,
+      kind: "allocated",
+      values: parsed.data,
+    });
+    setSubmitting(false);
+    if (!result.ok) {
+      setError(result.error);
+      return;
     }
+    onRecorded(result.outcome);
   }
 
   return (

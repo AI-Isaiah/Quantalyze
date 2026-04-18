@@ -14,10 +14,10 @@ import {
 } from "@tanstack/react-table";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import { BridgeOutcomeBanner } from "../../components/BridgeOutcomeBanner";
-import { AllocatedForm, type RecordedOutcome } from "../../components/AllocatedForm";
+import { AllocatedForm } from "../../components/AllocatedForm";
 import { RejectedForm } from "../../components/RejectedForm";
 import { OutcomeRecordedRow } from "../../components/OutcomeRecordedRow";
-import type { ExistingBridgeOutcome } from "@/lib/queries";
+import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 
 // ---------------------------------------------------------------------------
 // Row type — one row per strategy in the portfolio
@@ -39,7 +39,7 @@ interface PositionRow {
   // Sprint 8 Phase 1: outcome eligibility metadata (not rendered as columns)
   strategy_id: string;
   eligible_for_outcome: boolean;
-  existing_outcome: ExistingBridgeOutcome | null;
+  existing_outcome: BridgeOutcome | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,11 +284,11 @@ function BannerSubRow({
 }: {
   colSpan: number;
   strategyId: string;
-  initialOutcome: ExistingBridgeOutcome | null;
+  initialOutcome: BridgeOutcome | null;
 }) {
   const [mode, setMode] = useState<BannerMode>("banner");
-  const [localOutcome, setLocalOutcome] = useState<RecordedOutcome | null>(
-    initialOutcome as RecordedOutcome | null,
+  const [localOutcome, setLocalOutcome] = useState<BridgeOutcome | null>(
+    initialOutcome as BridgeOutcome | null,
   );
 
   // If there's already a recorded outcome from the server, show it immediately
@@ -374,7 +374,7 @@ export default function PositionsTable({ data, width }: WidgetProps) {
       allocated_amount: number | null;
       alias: string | null;
       eligible_for_outcome?: boolean;
-      existing_outcome?: ExistingBridgeOutcome | null;
+      existing_outcome?: BridgeOutcome | null;
       strategy: {
         name: string;
         codename: string | null;
