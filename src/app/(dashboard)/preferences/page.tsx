@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { PreferenceForm } from "@/components/preferences/PreferenceForm";
+import { MandateForm } from "@/components/mandate/MandateForm";
 import { createClient } from "@/lib/supabase/server";
 import { getOwnPreferences } from "@/lib/preferences";
 
@@ -14,10 +14,10 @@ export default async function PreferencesPage() {
   return (
     <>
       <PageHeader
-        title="Preferences"
-        description="Tell us about your mandate so we can send better strategy recommendations."
+        title="My Allocation Settings"
+        description="Tell us about your mandate. Changes save automatically."
       />
-      <PreferenceForm initial={initial} />
+      <MandateForm initial={initial} />
     </>
   );
 }
