@@ -445,13 +445,14 @@ export function AllocationDashboard({
 
   return (
     <>
-      {/* Critical alert banner — full-width, sits above <main>'s padded
-          content column. See docs/notes/alert-routing-v1.md. */}
+      {/* Alert banner renders above the padded main content column intentionally —
+          it is full-width and not a dashboard widget, so it sits outside the
+          IntersectionObserver root (dashboardContainerRef). */}
       <AlertBanner portfolioId={portfolio.id} />
-    <main
-      ref={dashboardContainerRef}
-      className="max-w-[1280px] mx-auto p-6 pb-20"
-    >
+      <main
+        ref={dashboardContainerRef}
+        className="max-w-[1280px] mx-auto p-6 pb-20"
+      >
       {/* Header */}
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
