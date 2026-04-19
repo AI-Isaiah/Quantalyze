@@ -90,6 +90,7 @@ Version and changelog live in `VERSION` (4-digit `MAJOR.MINOR.PATCH.MICRO`) and
 | `npm run typecheck` | Run TypeScript type checker |
 | `npm test` | Run Vitest tests |
 | `npm run test:e2e` | Run Playwright E2E tests |
+| `npm run worker:dev` | Run the analytics worker locally against `analytics-service/.env` |
 
 ## Analytics Service (Optional)
 
