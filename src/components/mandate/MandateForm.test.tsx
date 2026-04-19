@@ -86,6 +86,15 @@ describe("MandateForm", () => {
     expect(screen.getAllByRole("button", { name: "Reset" }).length).toBeGreaterThanOrEqual(3);
   });
 
+  it("sliders expose aria-label for automated accessibility scanners (QA 2026-04-19)", () => {
+    // The visible <label htmlFor> already associates the name, but some a11y
+    // scanners only read attributes on the input itself. aria-label on the
+    // range input is redundant with the label but satisfies those checks.
+    render(<MandateForm initial={BLANK_PREFS} />);
+    const maxWeight = screen.getByRole("slider", { name: "Max weight per strategy" });
+    expect(maxWeight).toHaveAttribute("aria-label", "Max weight per strategy");
+  });
+
   it("clicking Advanced accordion expands the panel", () => {
     render(<MandateForm initial={BLANK_PREFS} />);
     const trigger = screen.getByRole("button", { name: "Advanced constraints" });

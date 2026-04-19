@@ -128,6 +128,7 @@ export function MandateSlider({
           onPointerUp={handlePointerUp}
           onTouchEnd={handleTouchEnd}
           onKeyUp={handleKeyUp}
+          aria-label={label}
           aria-valuetext={displayValue ?? "unset"}
           aria-busy={saving ? true : undefined}
           style={{ ["--slider-fill" as string]: `${fillPct}%` }}
