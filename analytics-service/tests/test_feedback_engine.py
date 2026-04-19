@@ -947,17 +947,124 @@ def test_golden_snapshot(monkeypatch):
     - ceiling: 5 allocated-positive with portfolio_fit dominant -> {"W_PORTFOLIO_FIT": 1.5}.
     - floor:   5 rejected+mandate_conflict -> {"W_PREFERENCE_FIT": 0.5}.
 
-    Sentinel guard: REGENERATE_GOLDEN=1 fails if ceiling/floor regenerate to {}.
-    Wave 0 placeholder body — Wave 1-C fills in real mock setup.
+    D2 sentinel guard: REGENERATE_GOLDEN=1 fails if ceiling/floor regenerate to {}
+    (broken attribution math — silent accept forbidden).
     """
     if not IMPORTS_OK:
         pytest.skip("wave 0 placeholder")
-    # Wave 0 placeholder sentinel: sentinel fixtures guarantee any real
-    # compute_adjusted_weights output fails equality against {"__placeholder": ...}.
-    # Wave 1-C will iterate GOLDEN_SCENARIOS (cold/ceiling/floor) and seed
-    # mocked Supabase per-scenario, then compare json.dumps to each fixture.
-    _ = GOLDEN_SCENARIOS  # explicit reference — placeholder until Wave 1-C body lands
-    pytest.fail("Wave 0 red — Wave 1-C golden regen needed")
+
+    def _seed_cold() -> tuple[list[dict], list[dict], dict[str, dict]]:
+        # CONTEXT.md Specifics seed (post-D-08 SQL filters: 10 of 12 rows reach Python):
+        #   3 rejected+mandate_conflict       -> W_PREFERENCE_FIT failures (3)
+        #   2 rejected+underperforming_peers  -> W_TRACK_RECORD failures (2)
+        #   3 allocated+delta_180d > 0, portfolio_fit-dominant breakdown -> W_PORTFOLIO_FIT wins (3)
+        #   2 allocated+delta_180d < 0, track_record-dominant breakdown  -> W_TRACK_RECORD failures (2)
+        # Per-dim counts: W_PREFERENCE_FIT=3, W_TRACK_RECORD=4, W_PORTFOLIO_FIT=3, W_CAPACITY_FIT=0.
+        # None reach MIN_OUTCOMES_PER_DIMENSION=5 -> {}
+        rejected = [
+            _make_outcome(strategy_id=f"r{i}", kind="rejected",
+                          rejection_reason="mandate_conflict",
+                          delta_180d=None, delta_90d=None, delta_30d=None,
+                          percent_allocated=None) for i in range(3)
+        ] + [
+            _make_outcome(strategy_id=f"r{i+3}", kind="rejected",
+                          rejection_reason="underperforming_peers",
+                          delta_180d=None, delta_90d=None, delta_30d=None,
+                          percent_allocated=None) for i in range(2)
+        ]
+        allocated_pos = [
+            _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                          delta_180d=0.05, percent_allocated=10.0) for i in range(3)
+        ]
+        allocated_neg = [
+            _make_outcome(strategy_id=f"a{i+3}", kind="allocated",
+                          delta_180d=-0.03, percent_allocated=10.0) for i in range(2)
+        ]
+        allocated = allocated_pos + allocated_neg
+        breakdowns: dict[str, dict] = {}
+        for i in range(3):
+            breakdowns[f"a{i}"] = {
+                "portfolio_fit": 0.9, "preference_fit": 0.5,
+                "track_record": 0.4, "capacity_fit": 0.5,
+            }
+        for i in range(2):
+            breakdowns[f"a{i+3}"] = {
+                "portfolio_fit": 0.3, "preference_fit": 0.4,
+                "track_record": 0.9, "capacity_fit": 0.5,
+            }
+        return rejected, allocated, breakdowns
+
+    def _seed_ceiling() -> tuple[list[dict], list[dict], dict[str, dict]]:
+        # 5 allocated-positive, portfolio_fit dominant -> {"W_PORTFOLIO_FIT": 1.5} (rate=1.0 > 0.7)
+        allocated = [
+            _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                          delta_180d=0.05, percent_allocated=10.0) for i in range(5)
+        ]
+        breakdowns = {
+            f"a{i}": {
+                "portfolio_fit": 0.9, "preference_fit": 0.4,
+                "track_record": 0.3, "capacity_fit": 0.5,
+            } for i in range(5)
+        }
+        return [], allocated, breakdowns
+
+    def _seed_floor() -> tuple[list[dict], list[dict], dict[str, dict]]:
+        # 5 rejected+mandate_conflict -> attributed to W_PREFERENCE_FIT, all failures
+        # -> {"W_PREFERENCE_FIT": 0.5} (rate=0.0 < 0.4)
+        rejected = [
+            _make_outcome(strategy_id=f"r{i}", kind="rejected",
+                          rejection_reason="mandate_conflict",
+                          delta_180d=None, delta_90d=None, delta_30d=None,
+                          percent_allocated=None) for i in range(5)
+        ]
+        return rejected, [], {}
+
+    seeders = {"cold": _seed_cold, "ceiling": _seed_ceiling, "floor": _seed_floor}
+    regen = bool(os.environ.get("REGENERATE_GOLDEN"))
+    regenerated_any = False
+
+    for scenario_name, fixture_name in GOLDEN_SCENARIOS:
+        rejected_rows, allocated_rows, score_breakdowns = seeders[scenario_name]()
+        breakdown_rows = [
+            {"strategy_id": sid, "score_breakdown": sb, "created_at": "2026-01-01T00:00:00Z"}
+            for sid, sb in score_breakdowns.items()
+        ]
+        mock_sb = _make_mock_supabase(
+            rejected_rows=rejected_rows,
+            allocated_rows=allocated_rows,
+            breakdown_rows=breakdown_rows,
+        )
+        monkeypatch.setattr("services.feedback_engine.get_supabase", lambda _sb=mock_sb: _sb)
+        monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+        result = compute_adjusted_weights(f"golden-{scenario_name}")
+        actual = json.dumps(result, sort_keys=True)
+
+        expected_path = FIXTURES_DIR / fixture_name
+        if regen:
+            # D2 guard: ceiling/floor scenarios MUST NOT regenerate to {} — that would
+            # indicate broken attribution math and silent accept is forbidden.
+            if scenario_name in ("ceiling", "floor") and result == {}:
+                pytest.fail(
+                    f"REGENERATE_GOLDEN=1 refused: scenario '{scenario_name}' regenerated "
+                    f"to empty dict {{}} — attribution math is broken (D2 finding). "
+                    f"Expected non-empty override for {scenario_name}."
+                )
+            expected_path.write_text(actual + "\n")
+            regenerated_any = True
+            continue
+
+        expected = expected_path.read_text().strip()
+        assert actual == expected, (
+            f"Golden snapshot drift on scenario '{scenario_name}' — "
+            f"regen via REGENERATE_GOLDEN=1 if math change is intentional. "
+            f"expected={expected!r} actual={actual!r}"
+        )
+
+    if regen and regenerated_any:
+        pytest.skip(
+            "Regenerated golden fixtures for all scenarios — re-run without REGENERATE_GOLDEN to assert"
+        )
 
 
 # ---------------------------------------------------------------------------
