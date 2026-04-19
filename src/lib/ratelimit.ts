@@ -72,6 +72,15 @@ export const simulatorLimiter = makeLimiter(20, "3600 s");
 // budget the rest of the sensitive-action surface shares.
 export const exportLimiter = makeLimiter(1, "86400 s");
 
+// 60/minute per authenticated user — Phase 5 curves endpoint (Voice-D10,
+// 2026-04-19). Widget expand-row triggers 1 fetch per
+// (outcomeId, windowId) combo; ~60 expansions per exploration session
+// is realistic. Kept distinct from userActionLimiter (5/min sensitive
+// POSTs) so curve-exploration does not burn budget reserved for
+// attestation / deletion / GDPR actions. See
+// .planning/phases/05-outcomes-dashboard/VOICES-ACCEPTED.md D10.
+export const bridgeOutcomeCurvesLimiter = makeLimiter(60, "60 s");
+
 export type CheckLimitResult =
   | { success: true }
   | { success: false; retryAfter: number };

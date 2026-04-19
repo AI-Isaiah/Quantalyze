@@ -151,6 +151,9 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `bridge_outcome.record` | `bridge_outcome` | inserted `bridge_outcomes.id` | `strategy_id`, `kind`, `percent_allocated?`, `rejection_reason?` |
 | `bridge_outcome.update` | `bridge_outcome` | updated `bridge_outcomes.id` | `strategy_id`, `fields_changed` |
 | `bridge_outcome.dismiss` | `bridge_outcome_dismissal` | inserted `bridge_outcome_dismissals.id` | `strategy_id`, `expires_at` |
+| `mandate_preference.update` | `allocator_preference_mandate` | allocator's own `profiles.id` (`allocator_preferences` keys on user_id; matches profiles.id) | `fields` (changed field names), `self_edit: true` |
+| `mandate_preference.admin_update` | `allocator_preference_mandate` | target allocator's `profiles.id` | `fields`, `self_edit: false`, `edited_by` (admin user id) |
+| `feedback.overrides_updated` | `allocator_preference_feedback` | allocator's own `profiles.id` (matches `allocator_preferences.user_id` — Phase 4 feedback engine persists `scoring_weight_overrides` on the same row) | `dimensions_updated` (list of W_* keys whose scale was written), `engine_version` (feedback rule format version, e.g. `"v1"`) |
 
 Entity-id choice rationale (Python cross-service): bridge, simulator,
 optimizer anchor on portfolio_id because the portfolio is the persistent

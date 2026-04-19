@@ -42,3 +42,36 @@ def test_default_preferences_unchanged_after_merge():
     snapshot = dict(DEFAULT_PREFERENCES)
     merge_with_defaults({"min_sharpe": 1.5})
     assert DEFAULT_PREFERENCES == snapshot
+
+
+# =========================================================================
+# Phase 3 / D-15 — DEFAULT_PREFERENCES mandate key extension tests
+# =========================================================================
+# These 5 stubs assert DEFAULT_PREFERENCES has the 5 new mandate keys added by
+# Wave 1 (match_defaults.py extension). Intentional red during Wave 0.
+# =========================================================================
+
+
+def test_default_includes_max_weight_none():
+    assert "max_weight" in DEFAULT_PREFERENCES
+    assert DEFAULT_PREFERENCES["max_weight"] is None
+
+
+def test_default_includes_correlation_ceiling_none():
+    assert "correlation_ceiling" in DEFAULT_PREFERENCES
+    assert DEFAULT_PREFERENCES["correlation_ceiling"] is None
+
+
+def test_default_includes_liquidity_preference_none():
+    assert "liquidity_preference" in DEFAULT_PREFERENCES
+    assert DEFAULT_PREFERENCES["liquidity_preference"] is None
+
+
+def test_default_includes_style_exclusions_empty_list():
+    assert "style_exclusions" in DEFAULT_PREFERENCES
+    assert DEFAULT_PREFERENCES["style_exclusions"] == []
+
+
+def test_default_includes_scoring_weight_overrides_none():
+    assert "scoring_weight_overrides" in DEFAULT_PREFERENCES
+    assert DEFAULT_PREFERENCES["scoring_weight_overrides"] is None

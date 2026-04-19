@@ -1,0 +1,21 @@
+{
+  "description": "Phase 5 D-21 cross-runtime parity fixture. Matches Phase 4 feedback_engine.py::_fetch_eligible_outcomes + _success_value filter rules. Mirror from Python when Phase 4 D-08 filters change (SAME PR required). Voice-D2 2026-04-19: avgRealizedDelta value is 0.0033... via most-mature delta (_success_value iterates delta_180d -> delta_90d -> delta_30d); RESEARCH.md Q4's earlier 0.02333 figure was wrong and has been corrected.",
+  "today": "2026-04-19",
+  "outcomes": [
+    {"id":"o1","kind":"allocated","percent_allocated":10,"delta_30d":0.04,"delta_90d":null,"delta_180d":null,"rejection_reason":null,"allocated_at":"2025-10-01","estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-10-01T00:00:00Z","note":null},
+    {"id":"o2","kind":"allocated","percent_allocated":0.5,"delta_30d":0.05,"delta_90d":null,"delta_180d":null,"rejection_reason":null,"allocated_at":"2025-10-05","estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-10-05T00:00:00Z","note":null},
+    {"id":"o3","kind":"allocated","percent_allocated":15,"delta_30d":null,"delta_90d":null,"delta_180d":null,"rejection_reason":null,"allocated_at":"2025-10-10","estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-10-10T00:00:00Z","note":null},
+    {"id":"o4","kind":"rejected","percent_allocated":null,"delta_30d":null,"delta_90d":null,"delta_180d":null,"rejection_reason":"already_owned","allocated_at":null,"estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-10-11T00:00:00Z","note":null},
+    {"id":"o5","kind":"rejected","percent_allocated":null,"delta_30d":null,"delta_90d":null,"delta_180d":null,"rejection_reason":"mandate_conflict","allocated_at":null,"estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-10-12T00:00:00Z","note":null},
+    {"id":"o6","kind":"allocated","percent_allocated":5,"delta_30d":null,"delta_90d":0.12,"delta_180d":null,"rejection_reason":null,"allocated_at":"2025-06-01","estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-06-01T00:00:00Z","note":null},
+    {"id":"o7","kind":"allocated","percent_allocated":8,"delta_30d":-0.03,"delta_90d":-0.08,"delta_180d":-0.15,"rejection_reason":null,"allocated_at":"2025-04-01","estimated_delta_bps":null,"estimated_days":null,"needs_recompute":false,"created_at":"2025-04-01T00:00:00Z","note":null}
+  ],
+  "expected": {
+    "totalOutcomes": 7,
+    "winRate": 0.6666666666666666,
+    "avgRealizedDelta": 0.003333333333333334,
+    "pendingCount": 1
+  },
+  "phase4_success_values": {"o1":1,"o6":1,"o7":0},
+  "phase4_mature_survivors": ["o1","o6","o7"]
+}

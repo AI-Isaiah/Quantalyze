@@ -3,6 +3,10 @@
 // (D-14) because the cron failed or the delta column is still null.
 
 import { formatPercent } from "./utils";
+import {
+  REJECTION_REASON_LABELS,
+  type BridgeOutcome,
+} from "./bridge-outcome-schema";
 
 export type OutcomeLabelInput = {
   kind: "allocated" | "rejected";
@@ -85,4 +89,78 @@ export function deriveOutcomeLabel(input: OutcomeLabelInput): OutcomeLabel {
   }
 
   return PENDING;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 D-02 revised (Voice-D6, 2026-04-19) — deriveOutcomeStatusPill
+// ---------------------------------------------------------------------------
+
+export type OutcomeStatusPill = {
+  state: "allocated-win" | "allocated-loss" | "allocated-pending" | "rejected";
+  text: string;
+  tone: "positive" | "negative" | "neutral";
+};
+
+/**
+ * Phase 5 D-02 revised (Voice-D6, 2026-04-19): derive the 4-state status
+ * pill for a bridge_outcomes row.
+ *
+ * - Rejected rows: `Rejected \u2014 {REJECTION_REASON_LABELS[reason] || "Other"}`.
+ * - Allocated rows: `Allocated {percent}% \u2014 {win|loss|pending}` with
+ *   win/loss/pending determined by the sign of the most-mature non-NULL
+ *   delta (D-12 revised: delta_180d -> delta_90d -> delta_30d).
+ *   Strict > 0 for win (matches Phase 4 _success_value); <= 0 INCLUDING
+ *   EXACTLY ZERO -> loss. This INTENTIONALLY overrides Phase 1 D-13
+ *   (D-13 = neutral-on-zero) for the status pill only. Best Available
+ *   Delta cell continues to honor D-13 (neutral on zero). Divergence is
+ *   intentional: pill binary-classifies success/failure for RL parity;
+ *   delta cell displays raw magnitude without classification.
+ *   All-NULL deltas -> pending.
+ */
+export function deriveOutcomeStatusPill(
+  outcome: BridgeOutcome,
+): OutcomeStatusPill {
+  if (outcome.kind === "rejected") {
+    const label = outcome.rejection_reason
+      ? REJECTION_REASON_LABELS[outcome.rejection_reason]
+      : "Other";
+    return {
+      state: "rejected",
+      text: `Rejected \u2014 ${label}`,
+      tone: "neutral",
+    };
+  }
+
+  const pct = outcome.percent_allocated ?? 0;
+  const prefix = `Allocated ${pct}%`;
+
+  const mostMature =
+    outcome.delta_180d !== null
+      ? outcome.delta_180d
+      : outcome.delta_90d !== null
+        ? outcome.delta_90d
+        : outcome.delta_30d;
+
+  if (mostMature === null) {
+    return {
+      state: "allocated-pending",
+      text: `${prefix} \u2014 pending`,
+      tone: "neutral",
+    };
+  }
+  // Voice-D6: strict > 0 for win; zero OR negative = loss.
+  // This is the Phase-4 _success_value parity rule and INTENTIONALLY
+  // overrides Phase 1 D-13 (neutral on zero) for the pill only.
+  if (mostMature > 0) {
+    return {
+      state: "allocated-win",
+      text: `${prefix} \u2014 win`,
+      tone: "positive",
+    };
+  }
+  return {
+    state: "allocated-loss",
+    text: `${prefix} \u2014 loss`,
+    tone: "negative",
+  };
 }

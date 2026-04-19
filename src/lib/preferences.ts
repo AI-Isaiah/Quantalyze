@@ -12,10 +12,11 @@
 // See docs/superpowers/plans/2026-04-07-perfect-match-engine.md Phase 1 Task 2.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { STRATEGY_TYPES, SUBTYPES } from "./constants";
 
 export interface AllocatorPreferences {
   user_id: string;
-  // Self-editable
+  // Self-editable (v1)
   mandate_archetype: string | null;
   target_ticket_size_usd: number | null;
   excluded_exchanges: string[] | null;
@@ -29,6 +30,15 @@ export interface AllocatorPreferences {
   founder_notes: string | null;
   edited_by_user_id: string | null;
   updated_at: string;
+  // Phase 2 — mandate columns (migration 061)
+  max_weight: number | null;
+  correlation_ceiling: number | null;
+  liquidity_preference: "high" | "medium" | "low" | null;
+  style_exclusions: string[] | null;
+  mandate_edited_at: string | null;
+  // Phase 3 — scoring weight overrides (migration 062). Phase 4 writes this
+  // via the feedback engine; not exposed in SELF_EDITABLE_PREFERENCE_FIELDS.
+  scoring_weight_overrides: Record<string, number> | null;
 }
 
 /** Fields a regular allocator can write to about themselves. */
@@ -36,15 +46,20 @@ export const SELF_EDITABLE_PREFERENCE_FIELDS = [
   "mandate_archetype",
   "target_ticket_size_usd",
   "excluded_exchanges",
+  // Phase 2 promotions (D-03, D-06, D-07)
+  "max_weight",
+  "preferred_strategy_types",
+  "correlation_ceiling",
+  "max_drawdown_tolerance",
+  "liquidity_preference",
+  "style_exclusions",
 ] as const;
 
 /** Fields only the admin (founder) can write to about another user. */
 export const ADMIN_ONLY_PREFERENCE_FIELDS = [
-  "max_drawdown_tolerance",
   "min_track_record_days",
   "min_sharpe",
   "max_aum_concentration",
-  "preferred_strategy_types",
   "preferred_markets",
   "founder_notes",
 ] as const;
@@ -99,6 +114,47 @@ export function validateSelfEditableInput(input: Partial<AllocatorPreferences>):
     if (!Array.isArray(input.excluded_exchanges)) return "excluded_exchanges must be an array";
     if (input.excluded_exchanges.some((e) => typeof e !== "string")) return "excluded_exchanges must be string[]";
   }
+  // max_weight — Phase 2 (MANDATE-01). 0.05-0.50 per D-17.
+  if (input.max_weight !== undefined && input.max_weight !== null) {
+    if (typeof input.max_weight !== "number") return "max_weight must be a number";
+    if (!Number.isFinite(input.max_weight)) return "max_weight must be finite";
+    if (input.max_weight < 0.05 || input.max_weight > 0.50) return "max_weight must be between 0.05 and 0.50";
+  }
+  // correlation_ceiling — 0-1 per D-17.
+  if (input.correlation_ceiling !== undefined && input.correlation_ceiling !== null) {
+    if (typeof input.correlation_ceiling !== "number") return "correlation_ceiling must be a number";
+    if (!Number.isFinite(input.correlation_ceiling)) return "correlation_ceiling must be finite";
+    if (input.correlation_ceiling < 0 || input.correlation_ceiling > 1) return "correlation_ceiling must be between 0 and 1";
+  }
+  // max_drawdown_tolerance — now self-editable (D-06). 0-1 per D-17.
+  if (input.max_drawdown_tolerance !== undefined && input.max_drawdown_tolerance !== null) {
+    if (typeof input.max_drawdown_tolerance !== "number") return "max_drawdown_tolerance must be a number";
+    if (!Number.isFinite(input.max_drawdown_tolerance)) return "max_drawdown_tolerance must be finite";
+    if (input.max_drawdown_tolerance < 0 || input.max_drawdown_tolerance > 1) return "max_drawdown_tolerance must be between 0 and 1";
+  }
+  // liquidity_preference — enum per D-05.
+  if (input.liquidity_preference !== undefined && input.liquidity_preference !== null) {
+    if (typeof input.liquidity_preference !== "string") return "liquidity_preference must be a string";
+    if (!["high", "medium", "low"].includes(input.liquidity_preference)) return "liquidity_preference must be high, medium, or low";
+  }
+  // style_exclusions — subset of SUBTYPES per D-04.
+  if (input.style_exclusions !== undefined && input.style_exclusions !== null) {
+    if (!Array.isArray(input.style_exclusions)) return "style_exclusions must be an array";
+    const allowed: readonly string[] = SUBTYPES;
+    for (const v of input.style_exclusions) {
+      if (typeof v !== "string") return "style_exclusions must be string[]";
+      if (!allowed.includes(v)) return `style_exclusions contains invalid value: ${v}`;
+    }
+  }
+  // preferred_strategy_types — now self-editable (D-03). Subset of STRATEGY_TYPES.
+  if (input.preferred_strategy_types !== undefined && input.preferred_strategy_types !== null) {
+    if (!Array.isArray(input.preferred_strategy_types)) return "preferred_strategy_types must be an array";
+    const allowed: readonly string[] = STRATEGY_TYPES;
+    for (const v of input.preferred_strategy_types) {
+      if (typeof v !== "string") return "preferred_strategy_types must be string[]";
+      if (!allowed.includes(v)) return `preferred_strategy_types contains invalid value: ${v}`;
+    }
+  }
   return null;
 }
 
@@ -108,9 +164,10 @@ export function validateAdminEditableInput(input: Partial<AllocatorPreferences>)
   const selfError = validateSelfEditableInput(input);
   if (selfError) return selfError;
 
-  // Admin-only numeric bounds
+  // Admin-only numeric bounds. max_drawdown_tolerance moved to
+  // validateSelfEditableInput (D-06); it's validated via the selfError
+  // path above.
   const numericFields: [keyof AllocatorPreferences, number, number][] = [
-    ["max_drawdown_tolerance", 0, 1],
     ["min_sharpe", -5, 10],
     ["min_track_record_days", 0, 10_000],
     ["max_aum_concentration", 0, 1],
@@ -123,9 +180,10 @@ export function validateAdminEditableInput(input: Partial<AllocatorPreferences>)
     if (value < lo || value > hi) return `${field} must be between ${lo} and ${hi}`;
   }
 
-  // Admin-only array fields
+  // Admin-only array fields. preferred_strategy_types moved to
+  // validateSelfEditableInput (D-03); it's validated via the selfError
+  // path above.
   const arrayFields: (keyof AllocatorPreferences)[] = [
-    "preferred_strategy_types",
     "preferred_markets",
   ];
   for (const field of arrayFields) {

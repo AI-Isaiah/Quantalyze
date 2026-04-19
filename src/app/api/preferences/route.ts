@@ -50,61 +50,57 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  // Whitelist to only the 3 self-editable fields. Anything else is silently dropped.
+  // Whitelist + validate (TS-layer mirror of RPC bounds per D-18).
   const fields = pickSelfEditableFields(body);
   const validationError = validateSelfEditableInput(fields);
   if (validationError) {
     return NextResponse.json({ error: validationError }, { status: 400 });
   }
 
-  // Defense-in-depth: ownership is enforced by binding user_id to the
-  // authenticated user.id. RLS on allocator_preferences is the DB-layer
-  // gate, but even if the policy breaks, this upsert can only affect the
-  // caller's own row because user_id is hardcoded from the session.
-  const { error } = await supabase
-    .from("allocator_preferences")
-    .upsert(
-      {
-        user_id: user.id,
-        ...fields,
-        edited_by_user_id: null, // Self-edit
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" },
-    );
-
-  if (error) {
-    console.error("[api/preferences] upsert error:", error);
-    // Surface the schema-not-applied case explicitly so the founder knows what to do
-    if (error.code === "PGRST205") {
-      return NextResponse.json(
-        { error: "Preferences are not available yet. Migration 011 needs to be applied to the database." },
-        { status: 503 },
-      );
+  // Null-to-clear transform (Pitfall 1 in RESEARCH.md): the COALESCE UPSERT
+  // inside update_allocator_mandates treats a NULL parameter as "preserve
+  // existing value". For the Reset affordance (D-11) we need an explicit
+  // signal. Split `fields` into (a) non-null values passed as p_<field>
+  // named parameters, and (b) keys the caller explicitly sent as null,
+  // collected into `p_clear_fields`.
+  const clearFields: string[] = [];
+  const rpcArgs: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === null) {
+      clearFields.push(key);
+    } else {
+      rpcArgs[`p_${key}`] = value;
     }
-    return NextResponse.json({ error: "Failed to save preferences" }, { status: 500 });
+  }
+  if (clearFields.length > 0) {
+    rpcArgs.p_clear_fields = clearFields;
   }
 
-  // Sprint 6 Task 7.1b — audit the preferences update. entity_id is the
-  // caller's own user id (allocator_preferences has user_id as its PK).
+  // @audit-skip: rpc write path — logAuditEvent is called within 60 lines
+  // below. audit-coverage.test.ts scans .insert/.update/.upsert/.delete
+  // and does not see .rpc(); this pragma documents the audit path for
+  // future maintainers. Remove if audit-coverage.test.ts is updated to
+  // scan .rpc(.
+  const { error } = await supabase.rpc("update_allocator_mandates", rpcArgs);
+
+  if (error) {
+    console.error("[api/preferences] update_allocator_mandates RPC error:", error);
+    if (error.code === "28000") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (error.code === "22023") {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    return NextResponse.json({ error: "Failed to save mandate" }, { status: 500 });
+  }
+
+  // Audit emission — fire-and-forget; grepped by audit-coverage.test.ts.
   logAuditEvent(supabase, {
-    action: "notification_preferences.update",
-    entity_type: "user",
+    action: "mandate_preference.update",
+    entity_type: "allocator_preference_mandate",
     entity_id: user.id,
     metadata: { fields: Object.keys(fields), self_edit: true },
   });
-
-  // @audit-skip: denormalization cache touch. The preferences_updated_at
-  // column is a UI-badge hint for "preferences set" state on the profiles
-  // row. The user-intent audit event was emitted above on the
-  // allocator_preferences upsert; this second write is internal bookkeeping.
-  const { error: profileErr } = await supabase
-    .from("profiles")
-    .update({ preferences_updated_at: new Date().toISOString() })
-    .eq("id", user.id);
-  if (profileErr && profileErr.code !== "42703") {
-    console.error("[api/preferences] profile update error:", profileErr);
-  }
 
   return NextResponse.json({ success: true });
 }

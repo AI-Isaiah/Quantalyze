@@ -1,6 +1,6 @@
 {
   "name": "quantalyze",
-  "version": "0.13.1.0",
+  "version": "0.14.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

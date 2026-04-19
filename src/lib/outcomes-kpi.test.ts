@@ -1,0 +1,131 @@
+import { describe, it, expect } from "vitest";
+import { computeOutcomeKPIs } from "./outcomes-kpi";
+import type { BridgeOutcome } from "./bridge-outcome-schema";
+import fixture from "../../tests/fixtures/outcomes-kpi-parity.json";
+
+// Fixed-clock-equivalent: computeOutcomeKPIs does not consume "today"; it
+// derives KPIs from row data alone. Phase 4 _success_value parity is the
+// authoritative rule set (D-11 / D-12 revised / D-21 revised).
+
+function makeOutcome(overrides: Partial<BridgeOutcome>): BridgeOutcome {
+  return {
+    id: "o",
+    kind: "allocated",
+    percent_allocated: 10,
+    allocated_at: "2026-01-01",
+    rejection_reason: null,
+    note: null,
+    delta_30d: null,
+    delta_90d: null,
+    delta_180d: null,
+    estimated_delta_bps: null,
+    estimated_days: null,
+    needs_recompute: false,
+    created_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  } as BridgeOutcome;
+}
+
+describe("computeOutcomeKPIs", () => {
+  it("case 1 — empty outcomes -> { totalOutcomes: 0, winRate: null, avgRealizedDelta: null, pendingCount: 0 }", () => {
+    const result = computeOutcomeKPIs([]);
+    expect(result).toEqual({
+      totalOutcomes: 0,
+      winRate: null,
+      avgRealizedDelta: null,
+      pendingCount: 0,
+    });
+  });
+
+  it("case 2 — single allocated win (delta_30d=0.04, percent=12) -> totalOutcomes=1, winRate=1.0, avgRealizedDelta=0.04, pendingCount=0", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({ id: "o1", percent_allocated: 12, delta_30d: 0.04 }),
+    ]);
+    expect(result).toEqual({
+      totalOutcomes: 1,
+      winRate: 1.0,
+      avgRealizedDelta: 0.04,
+      pendingCount: 0,
+    });
+  });
+
+  it("case 3 — single allocated loss (delta_30d=-0.03) -> winRate=0.0, avgRealizedDelta=-0.03", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({ id: "o1", percent_allocated: 12, delta_30d: -0.03 }),
+    ]);
+    expect(result).toEqual({
+      totalOutcomes: 1,
+      winRate: 0.0,
+      avgRealizedDelta: -0.03,
+      pendingCount: 0,
+    });
+  });
+
+  it("case 4 — mixed 3-win/1-loss/0-pending -> winRate=0.75, avgRealizedDelta=mean", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({ id: "o1", percent_allocated: 10, delta_30d: 0.02 }),
+      makeOutcome({ id: "o2", percent_allocated: 10, delta_30d: 0.04 }),
+      makeOutcome({ id: "o3", percent_allocated: 10, delta_30d: 0.06 }),
+      makeOutcome({ id: "o4", percent_allocated: 10, delta_30d: -0.08 }),
+    ]);
+    expect(result.totalOutcomes).toBe(4);
+    expect(result.winRate).toBe(0.75);
+    expect(result.avgRealizedDelta).toBeCloseTo(0.01, 10); // (0.02+0.04+0.06-0.08)/4
+    expect(result.pendingCount).toBe(0);
+  });
+
+  it("case 5 — allocated pending (all deltas null) -> excluded from denominator; pendingCount=1, totalOutcomes counted", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({
+        id: "o1",
+        percent_allocated: 12,
+        delta_30d: null,
+        delta_90d: null,
+        delta_180d: null,
+      }),
+    ]);
+    expect(result).toEqual({
+      totalOutcomes: 1,
+      winRate: null,
+      avgRealizedDelta: null,
+      pendingCount: 1,
+    });
+  });
+
+  it("case 6 — allocated <1% percent_allocated -> excluded from denominator (D-08 step 2)", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({ id: "o1", percent_allocated: 0.5, delta_30d: 0.04 }),
+    ]);
+    expect(result).toEqual({
+      totalOutcomes: 1,
+      winRate: null,
+      avgRealizedDelta: null,
+      pendingCount: 0,
+    });
+  });
+
+  it("case 7 — rejected rows -> excluded from win-rate denominator AND numerator; counted in totalOutcomes (D-13)", () => {
+    const result = computeOutcomeKPIs([
+      makeOutcome({
+        id: "o1",
+        kind: "rejected",
+        percent_allocated: null,
+        allocated_at: null,
+        rejection_reason: "mandate_conflict",
+      }),
+      makeOutcome({ id: "o2", percent_allocated: 10, delta_30d: 0.04 }),
+    ]);
+    expect(result).toEqual({
+      totalOutcomes: 2,
+      winRate: 1.0,
+      avgRealizedDelta: 0.04,
+      pendingCount: 0,
+    });
+  });
+
+  it("case 8 — parity fixture", () => {
+    const outcomes = fixture.outcomes as unknown as BridgeOutcome[];
+    const result = computeOutcomeKPIs(outcomes);
+    expect(result).toEqual(fixture.expected);
+  });
+});

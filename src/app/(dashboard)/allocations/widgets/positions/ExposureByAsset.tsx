@@ -67,7 +67,7 @@ export default function ExposureByAsset({ data }: WidgetProps) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height="100%">
+    <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
       <BarChart data={rows} layout="vertical">
         <CartesianGrid strokeDasharray="3 3" stroke={CHART_BORDER} horizontal={false} />
         <XAxis

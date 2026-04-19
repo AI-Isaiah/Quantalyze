@@ -31,11 +31,15 @@ import { castRow, castRows } from "@/lib/supabase/cast";
 // If you add a new column that the queue reads, add it here too — the
 // TypeScript type on `AllocatorPreferences` in AllocatorMatchQueue.tsx is the
 // source of truth.
-const ALLOCATOR_PREFERENCES_COLUMNS =
+export const ALLOCATOR_PREFERENCES_COLUMNS =
   "user_id, mandate_archetype, target_ticket_size_usd, excluded_exchanges, " +
   "max_drawdown_tolerance, min_track_record_days, min_sharpe, " +
   "max_aum_concentration, preferred_strategy_types, preferred_markets, " +
-  "founder_notes, updated_at";
+  "founder_notes, edited_by_user_id, updated_at, " +
+  // Phase 2 mandate fields (migration 061)
+  "max_weight, correlation_ceiling, liquidity_preference, style_exclusions, mandate_edited_at, " +
+  // Phase 3 (migration 062)
+  "scoring_weight_overrides";
 
 // --- Return type -----------------------------------------------------------
 // Kept deliberately loose (Record<string, unknown> for the batch JSONB fields

@@ -128,6 +128,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "sync_funding": 3 * 60,      # 3 minutes (funding volume << trade volume)
     "reconcile_strategy": 5 * 60,  # 5 minutes (fetch_my_trades + DB scan + diff)
     "compute_intro_snapshot": 2 * 60,  # 2 minutes (pure DB; no exchange I/O)
+    "rescore_allocator": 5 * 60,  # Phase 3 / D-12 Option B — full universe scan per allocator
 }
 
 
@@ -1102,6 +1103,54 @@ async def _mark_intro_snapshot_failed(job: dict) -> None:
         )
 
 
+async def run_rescore_allocator_job(job: dict) -> DispatchResult:
+    """Phase 3 / D-12 Option B — Dispatch handler for allocator-scoped
+    rescore jobs enqueued by update_allocator_mandates RPC. Calls
+    _score_one_allocator to produce a fresh v2.0.0 batch.
+
+    The enqueue itself signals intent — no force flag is needed.
+    _should_skip_allocator already returned False (mandate_edited_at >
+    last computed_at triggered the enqueue). _score_one_allocator does
+    not accept a force parameter; the skip gate fires only in the HTTP
+    entry path and the daily cron's enqueue phase.
+
+    NOTE: If a future refactor pushes _should_skip_allocator INTO
+    _score_one_allocator, this handler MUST pass force=True so proactive
+    rescore jobs don't silently no-op.
+    """
+    # Deferred import to avoid circular dependency — routers/match.py
+    # imports from services.match_engine, which is a peer of services.job_worker.
+    from routers.match import _load_candidate_universe, _score_one_allocator
+
+    allocator_id = job.get("allocator_id")
+    if not allocator_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_kind="permanent",
+            error_message="rescore_allocator job missing allocator_id — check migration 062 kind_target_coherence",
+        )
+
+    universe = await asyncio.to_thread(_load_candidate_universe)
+    if not universe["strategies_by_id"]:
+        # No eligible strategies — no-op success (not a failure).
+        # Mirrors routers/match.cron_recompute's empty_universe short-circuit.
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    try:
+        await _score_one_allocator(allocator_id, universe)
+    except Exception as exc:  # noqa: BLE001
+        # Let the dispatcher's classify_exception bucket this; return FAILED
+        # so the job row updates rather than leaving it in 'running'.
+        logger.exception("run_rescore_allocator_job failed for allocator=%s", allocator_id)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_kind="transient",  # assume retry-safe; allocator scoring is idempotent
+            error_message=f"rescore failed: {exc}",
+        )
+
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -1136,6 +1185,8 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_reconcile_strategy_job
     elif kind == "compute_intro_snapshot":
         handler = run_compute_intro_snapshot_job
+    elif kind == "rescore_allocator":
+        handler = run_rescore_allocator_job
     else:
         handler = None
 

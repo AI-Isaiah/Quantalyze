@@ -6,6 +6,117 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.14.0.0] - 2026-04-19
+
+Sprint 8 Bridge V2 ships. Four new phases close the Bridge feedback loop end-to-end:
+allocators set explicit mandates, scoring respects them, the feedback engine learns
+from realized outcomes, and allocators finally see their Bridge-driven results on a
+dedicated widget. First allocator-facing release where the loop is genuinely closed.
+
+### Added
+
+- **Mandate profile builder (Phase 2).** Allocators self-serve max weight, correlation
+  ceiling, style exclusions, liquidity preference, risk budget, and strategy preferences
+  on `/profile?tab=mandate` (legacy `/preferences` redirects). Auto-save on blur,
+  "Last saved" label with self-tick, per-field validation. Writes go through a
+  SECURITY DEFINER `update_allocator_mandates` RPC; direct SQL UPDATE is rejected.
+- **Mandate-aware scoring engine (Phase 3).** `match_engine.py` v2.0.0 adds
+  `mandate_fit_score` composed inside `W_PREFERENCE_FIT` (no top-level rebalance).
+  Linear-taper for `max_weight`, correlation-ceiling reuse, tier-gap liquidity
+  penalty, SOFT `style_exclusions`. `allocator_preferences.scoring_weight_overrides`
+  JSONB column + `effective_preferences` snapshot in `match_batches`.
+- **Feedback loop (Phase 4).** New `analytics-service/services/feedback_engine.py`
+  reads each allocator's `bridge_outcomes` history and writes per-dimension weight
+  overrides (rule-based v1: floor 0.5x, ceiling 1.5x, minimum 5 outcomes, step
+  function). D-08 percent-allocated floor filters out token dabbles. Audit entries
+  + ADR-0023 taxonomy updated. Fast-path probe skips cold allocators in one
+  Supabase round-trip.
+- **Outcomes dashboard (Phase 5).** New `Bridge Outcomes` widget on `/allocations`:
+  KPI strip (total + win rate + avg realized delta in Geist Mono tabular-nums),
+  timeline table with 4-state status pill, caret-expand for 30d/90d/180d delta
+  sparklines rebased to 100 at `allocated_at`. Empty / loading / error / pending
+  states. Admin SendIntroPanel gains a holdings dropdown so every new match
+  decision persists an `original_strategy_id` (Option A).
+- **New admin endpoint** `GET /api/admin/allocators/[id]/holdings` returns the
+  allocator's current portfolio strategies for the SendIntroPanel dropdown.
+- **New allocator endpoint** `GET /api/bridge/outcome/[id]/curves` lazily fetches
+  sparkline curves rebased to 100 at allocated_at. Rate-limited via a dedicated
+  `bridgeOutcomeCurvesLimiter` (60/min/user) so curve exploration doesn't share
+  budget with sensitive POSTs.
+- **`worker:dev`** npm script runs the analytics worker locally against
+  `analytics-service/.env`. The worker now calls `load_dotenv()` at startup
+  (no-op on Railway where env vars are injected directly), so local runs
+  pick up credentials without a separate `export` step.
+
+### Changed
+
+- **`POST /api/admin/match/send-intro`** now requires `original_strategy_id`
+  in the body and forwards it as the 6-arg RPC's `p_original_strategy_id`.
+  Old 5-arg callers fail loud ("too few arguments") — intentional breaking
+  behavior so the admin path and RPC stay in sync.
+- **`send_intro_with_decision` RPC** replaced with a 6-arg signature that persists
+  the underperformer identity on `match_decisions.original_strategy_id`. Old
+  5-arg overload dropped.
+- **`getMyAllocationDashboard()`** fan-out extended: 8th `Promise.all` entry for
+  `bridge_outcomes` with nested `match_decisions` + `strategies` embed,
+  `.limit(200)` truncation cap, inline `.eq("allocator_id", userId)` ownership
+  gate.
+- **`match_decisions` schema.** New `original_strategy_id UUID NOT NULL REFERENCES
+  strategies(id) ON DELETE RESTRICT` (migration 064 adds nullable, migration 065
+  tightens to NOT NULL after the admin UI is shipping values). New index
+  `(allocator_id, original_strategy_id)` supports future per-underperformer
+  attribution queries.
+- **`compute_bridge_outcome_deltas`** (migration 063) now enqueues
+  `rescore_allocator` compute jobs via a two-phase CTE that fires only on
+  NULL → non-NULL transitions (not every touched row).
+
+### Fixed
+
+- **Analytics worker watchdog silently failed.** `reset_stalled_compute_jobs`
+  was receiving `p_per_kind_overrides` as a `json.dumps()` string, which
+  PostgREST coerced to a JSONB scalar; `jsonb_object_keys()` inside the RPC
+  then raised "cannot call ... on a scalar" every cycle. Worker now passes
+  the native dict so PostgREST can coerce it to a JSONB object. Regression
+  test asserts `isinstance(params["p_per_kind_overrides"], dict)`.
+- **Feedback engine looked up score breakdowns by a nonexistent column.**
+  `_fetch_score_breakdowns` ordered `match_candidates` by `created_at`, a
+  column that does not exist on that table. Rewrite resolves batches
+  newest-first via `match_batches.computed_at`, then filters candidates by
+  `batch_id`. "First-seen-wins" dedup preserved through batch-ordered
+  iteration; all 41 feedback-engine + main-worker tests pass through the
+  new chain.
+- **Dashboard chart widgets flashed a blank frame on mount.** 15
+  `<ResponsiveContainer>` widgets across the allocation / attribution /
+  performance / positions / risk tabs now seed `initialDimension={{
+  width: 100, height: 100 }}`. Previously each chart held a blank frame
+  until recharts' ResizeObserver reported real dimensions; charts now
+  paint immediately and snap to real size.
+- **MandateSlider lacked an accessible name for automated scanners.** The
+  visible `<label htmlFor>` already associated a name, but some a11y
+  scanners only read attributes on the input itself. Added `aria-label={label}`
+  to every slider with a regression test asserting the attribute.
+- **OutcomesWidget was stuck in a loading skeleton** because the `outcomes` key
+  from `getMyAllocationDashboard()` was dropped by `page.tsx` destructure and
+  never threaded through `AllocationDashboard` into `widgetData`. Found by /qa,
+  fixed with the 4-point wiring, locked in by a static-file regression test.
+- **MandateForm chip toggles** dropped rapid successive clicks because the click
+  handler closed over stale React state. Fix uses ref-backed latest values so
+  rapid clicks compose correctly (3 regression tests).
+- **MandateSaveStatus "Last saved" label** froze at "just now" because it had no
+  self-tick. Fix adds a 15s interval with fixed-`now` test seam (4 regression
+  tests).
+- **MandateSlider** snapped back mid-drag because the native range input was
+  controlled without draft state. Fix decouples draft from parent state so
+  drag updates render live; commits flow on pointerUp / touchEnd / keyUp.
+- **`style_exclusions` chip variant** was accent (green), implying a positive
+  preference. Flipped to negative (red) for color-semantic parity with
+  `excluded_exchanges`.
+
+### Removed
+
+- **Legacy `/preferences` route** no longer renders the mandate form directly;
+  permanent redirect to `/profile?tab=mandate` so bookmarks still land correctly.
+
 ## [0.13.1.0] - 2026-04-17
 
 Unblocks production deploys. PR 57, 58, 61 all silently failed the Vercel check

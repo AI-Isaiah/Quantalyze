@@ -18,7 +18,7 @@ export interface DashboardConfig {
 export interface WidgetMeta {
   id: string;
   name: string;
-  category: "performance" | "risk" | "allocation" | "attribution" | "positions" | "monitoring" | "intelligence" | "meta";
+  category: "performance" | "risk" | "allocation" | "attribution" | "positions" | "monitoring" | "intelligence" | "meta" | "outcomes";
   icon: string;        // Unicode icon
   defaultW: number;    // default width in grid columns
   defaultH: number;    // default height in grid rows

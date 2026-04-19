@@ -188,8 +188,13 @@ class TestWatchdogTick:
         assert call_args.args[0] == "reset_stalled_compute_jobs"
         params = call_args.args[1]
         assert params["p_stale_threshold"] == "10 minutes"
-        # Per-kind overrides must match the module-level constant
-        overrides = json.loads(params["p_per_kind_overrides"])
+        # Per-kind overrides must be passed as a native dict so PostgREST
+        # coerces it to a JSONB object. A stringified JSON would land as a
+        # JSONB scalar and break jsonb_object_keys() inside the RPC.
+        overrides = params["p_per_kind_overrides"]
+        assert isinstance(overrides, dict), (
+            f"overrides must be dict (not str) to coerce to JSONB object; got {type(overrides).__name__}"
+        )
         assert overrides["sync_trades"] == "10 minutes"
         assert overrides["compute_analytics"] == "20 minutes"
         assert overrides["poll_positions"] == "5 minutes"

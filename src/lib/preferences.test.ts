@@ -11,11 +11,17 @@ import {
 
 describe("preferences helpers", () => {
   describe("SELF_EDITABLE_PREFERENCE_FIELDS", () => {
-    it("contains exactly the 3 v1 self-editable fields", () => {
+    it("contains exactly the Phase 2 self-editable fields", () => {
       expect(SELF_EDITABLE_PREFERENCE_FIELDS).toEqual([
         "mandate_archetype",
         "target_ticket_size_usd",
         "excluded_exchanges",
+        "max_weight",
+        "preferred_strategy_types",
+        "correlation_ceiling",
+        "max_drawdown_tolerance",
+        "liquidity_preference",
+        "style_exclusions",
       ]);
     });
 
@@ -44,12 +50,12 @@ describe("preferences helpers", () => {
   });
 
   describe("pickSelfEditableFields", () => {
-    it("keeps only the 3 self-editable fields", () => {
+    it("keeps the self-editable fields, drops admin-only", () => {
       const input = {
         mandate_archetype: "diversified crypto SMA",
         target_ticket_size_usd: 50000,
         excluded_exchanges: ["bybit"],
-        max_drawdown_tolerance: 0.2, // admin-only, should be dropped
+        max_drawdown_tolerance: 0.2, // Phase 2: now self-editable (D-06), kept
         founder_notes: "private note", // admin-only, should be dropped
         min_sharpe: 1.5, // admin-only, should be dropped
       };
@@ -58,6 +64,7 @@ describe("preferences helpers", () => {
         mandate_archetype: "diversified crypto SMA",
         target_ticket_size_usd: 50000,
         excluded_exchanges: ["bybit"],
+        max_drawdown_tolerance: 0.2,
       });
     });
 
@@ -176,6 +183,126 @@ describe("preferences helpers", () => {
         validateSelfEditableInput({ target_ticket_size_usd: NaN }),
       ).toMatch(/must be finite/);
     });
+
+    // ------------------------------------------------------------------
+    // Phase 2 mandate validation — MANDATE-01..MANDATE-03 bounds per D-17
+    // ------------------------------------------------------------------
+    describe("Phase 2 mandate validation", () => {
+      // max_weight — 0.05-0.50 per D-17
+      it("accepts valid max_weight: 0.25", () => {
+        expect(validateSelfEditableInput({ max_weight: 0.25 })).toBeNull();
+      });
+      it("accepts max_weight: null", () => {
+        expect(validateSelfEditableInput({ max_weight: null })).toBeNull();
+      });
+      it("rejects max_weight below 0.05", () => {
+        expect(
+          validateSelfEditableInput({ max_weight: 0.04 }),
+        ).toMatch(/between 0\.05 and 0\.50/);
+      });
+      it("rejects max_weight above 0.50", () => {
+        expect(
+          validateSelfEditableInput({ max_weight: 0.51 }),
+        ).toMatch(/between 0\.05 and 0\.50/);
+      });
+      it("rejects NaN max_weight", () => {
+        expect(
+          validateSelfEditableInput({ max_weight: NaN }),
+        ).toMatch(/must be finite/);
+      });
+      it("rejects non-number max_weight", () => {
+        expect(
+          validateSelfEditableInput({ max_weight: "0.25" as unknown as number }),
+        ).toMatch(/must be a number/);
+      });
+
+      // correlation_ceiling — 0-1 per D-17
+      it("accepts valid correlation_ceiling: 0.6", () => {
+        expect(
+          validateSelfEditableInput({ correlation_ceiling: 0.6 }),
+        ).toBeNull();
+      });
+      it("rejects correlation_ceiling above 1", () => {
+        expect(
+          validateSelfEditableInput({ correlation_ceiling: 1.1 }),
+        ).toMatch(/between 0 and 1/);
+      });
+
+      // max_drawdown_tolerance — now self-editable (D-06)
+      it("accepts max_drawdown_tolerance: 0.2 via self-editable input", () => {
+        expect(
+          validateSelfEditableInput({ max_drawdown_tolerance: 0.2 }),
+        ).toBeNull();
+      });
+      it("rejects max_drawdown_tolerance: 1.5 via self-editable", () => {
+        expect(
+          validateSelfEditableInput({ max_drawdown_tolerance: 1.5 }),
+        ).toMatch(/between 0 and 1/);
+      });
+
+      // liquidity_preference — enum per D-05
+      it("accepts liquidity_preference: high", () => {
+        expect(
+          validateSelfEditableInput({ liquidity_preference: "high" }),
+        ).toBeNull();
+      });
+      it("accepts liquidity_preference: medium", () => {
+        expect(
+          validateSelfEditableInput({ liquidity_preference: "medium" }),
+        ).toBeNull();
+      });
+      it("accepts liquidity_preference: low", () => {
+        expect(
+          validateSelfEditableInput({ liquidity_preference: "low" }),
+        ).toBeNull();
+      });
+      it("rejects liquidity_preference: ultra", () => {
+        expect(
+          validateSelfEditableInput({
+            liquidity_preference: "ultra" as unknown as "high",
+          }),
+        ).toMatch(/must be high, medium, or low/);
+      });
+
+      // style_exclusions — subset of SUBTYPES
+      it("accepts valid style_exclusions subset", () => {
+        expect(
+          validateSelfEditableInput({
+            style_exclusions: ["Trend Following", "Momentum"],
+          }),
+        ).toBeNull();
+      });
+      it("rejects style_exclusions with unknown value", () => {
+        expect(
+          validateSelfEditableInput({
+            style_exclusions: ["UnknownStyle"],
+          }),
+        ).toMatch(/contains invalid value/);
+      });
+      it("rejects non-array style_exclusions", () => {
+        expect(
+          validateSelfEditableInput({
+            style_exclusions: "not-an-array" as unknown as string[],
+          }),
+        ).toMatch(/must be an array/);
+      });
+
+      // preferred_strategy_types — now self-editable (D-03), subset of STRATEGY_TYPES
+      it("accepts preferred_strategy_types: [Long-Only]", () => {
+        expect(
+          validateSelfEditableInput({
+            preferred_strategy_types: ["Long-Only"],
+          }),
+        ).toBeNull();
+      });
+      it("rejects preferred_strategy_types with unknown value", () => {
+        expect(
+          validateSelfEditableInput({
+            preferred_strategy_types: ["NotAType"],
+          }),
+        ).toMatch(/contains invalid value/);
+      });
+    });
   });
 
   describe("validateAdminEditableInput", () => {
@@ -188,7 +315,10 @@ describe("preferences helpers", () => {
           min_sharpe: 1.0,
           min_track_record_days: 365,
           max_aum_concentration: 0.15,
-          preferred_strategy_types: ["Trend Following"],
+          // Phase 2: preferred_strategy_types now validated as subset of
+          // STRATEGY_TYPES (D-03); "Trend Following" is a SUBTYPE, not a
+          // STRATEGY_TYPE. Use a real STRATEGY_TYPES entry.
+          preferred_strategy_types: ["Long-Short"],
           preferred_markets: ["Crypto Spot"],
           founder_notes: "Met at the YC dinner last week.",
         }),

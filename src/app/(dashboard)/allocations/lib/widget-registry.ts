@@ -413,6 +413,18 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     description: "One-click shortcuts: rebalance, export, share, snapshot.",
     status: "ready",
   },
+
+  // ── Outcomes (1) ─────────────────────────────────────────────────
+  "outcomes-timeline": {
+    id: "outcomes-timeline",
+    name: "Bridge Outcomes",
+    category: "outcomes",
+    icon: "\u25C8",
+    defaultW: 12,
+    defaultH: 5,
+    description: "Timeline of recorded Bridge outcomes with win-rate KPIs and delta sparklines.",
+    status: "ready",
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -428,4 +440,5 @@ export const WIDGET_CATEGORIES = [
   { id: "monitoring" as const, name: "Monitoring", icon: "●" },
   { id: "intelligence" as const, name: "Intelligence", icon: "◈" },
   { id: "meta" as const, name: "Meta", icon: "≡" },
+  { id: "outcomes" as const, name: "Outcomes", icon: "\u25C8" },
 ];

@@ -42,7 +42,7 @@ export default function ReturnDistribution({ data }: WidgetProps) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height="100%">
+    <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
       <BarChart data={histogramData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="label"

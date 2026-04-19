@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
-import { EXCHANGES, STRATEGY_TYPES, MARKETS } from "@/lib/constants";
+import { EXCHANGES, STRATEGY_TYPES, MARKETS, SUBTYPES } from "@/lib/constants";
 import type { AllocatorPreferences } from "@/components/admin/AllocatorMatchQueue";
 
 interface Props {
@@ -57,6 +57,20 @@ export function PreferencesPanel({
   );
   const [founderNotes, setFounderNotes] = useState(preferences?.founder_notes ?? "");
 
+  // Phase 2 mandate fields
+  const [maxWeight, setMaxWeight] = useState<string>(
+    preferences?.max_weight != null ? String(preferences.max_weight) : "",
+  );
+  const [correlationCeiling, setCorrelationCeiling] = useState<string>(
+    preferences?.correlation_ceiling != null ? String(preferences.correlation_ceiling) : "",
+  );
+  const [liquidityPreference, setLiquidityPreference] = useState<string>(
+    preferences?.liquidity_preference ?? "",
+  );
+  const [styleExclusions, setStyleExclusions] = useState<string[]>(
+    preferences?.style_exclusions ?? [],
+  );
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
@@ -96,6 +110,8 @@ export function PreferencesPanel({
       ["min_track_record_days", minTrack],
       ["min_sharpe", minSharpe],
       ["max_aum_concentration", maxConcentration],
+      ["max_weight", maxWeight],
+      ["correlation_ceiling", correlationCeiling],
     ];
     for (const [name, raw] of numericFields) {
       if (raw.trim() && !Number.isFinite(Number(raw))) {
@@ -116,6 +132,11 @@ export function PreferencesPanel({
       preferred_strategy_types: preferredTypes,
       preferred_markets: preferredMarkets,
       founder_notes: founderNotes.trim() || null,
+      // Phase 2 mandate fields
+      max_weight: parseNum(maxWeight),
+      correlation_ceiling: parseNum(correlationCeiling),
+      liquidity_preference: liquidityPreference || null,
+      style_exclusions: styleExclusions,
     };
 
     try {
@@ -242,6 +263,96 @@ export function PreferencesPanel({
             />
           </div>
 
+          {/* Phase 2 mandate fields */}
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Max weight (0.05-0.50)"
+              type="number"
+              step="0.01"
+              value={maxWeight}
+              onChange={(e) => setMaxWeight(e.target.value)}
+              min={0.05}
+              max={0.50}
+            />
+            <Input
+              label="Correlation ceiling (0-1)"
+              type="number"
+              step="0.05"
+              value={correlationCeiling}
+              onChange={(e) => setCorrelationCeiling(e.target.value)}
+              min={0}
+              max={1}
+            />
+          </div>
+
+          {/* Liquidity preference — 3-button segmented radio */}
+          <div>
+            <p className="text-sm font-medium text-text-primary mb-2">
+              Liquidity preference
+            </p>
+            <div
+              role="radiogroup"
+              aria-label="Liquidity preference"
+              className="flex gap-2"
+            >
+              {(["high", "medium", "low"] as const).map((value) => {
+                const active = liquidityPreference === value;
+                const label =
+                  value === "high"
+                    ? "High (AUM > $10M)"
+                    : value === "medium"
+                      ? "Medium ($1M-$10M)"
+                      : "Low (<$1M)";
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() =>
+                      setLiquidityPreference(active ? "" : value)
+                    }
+                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                      active
+                        ? "border-accent bg-accent/10 text-accent"
+                        : "border-border bg-surface text-text-secondary hover:border-border-focus"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Excluded styles — chip multi-select */}
+          <div>
+            <p className="text-sm font-medium text-text-primary mb-2">
+              Excluded styles
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {SUBTYPES.map((subtype) => {
+                const active = styleExclusions.includes(subtype);
+                return (
+                  <button
+                    key={subtype}
+                    type="button"
+                    onClick={() =>
+                      toggle(styleExclusions, subtype, setStyleExclusions)
+                    }
+                    className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                      active
+                        ? "border-accent bg-accent/10 text-accent"
+                        : "border-border bg-surface text-text-secondary hover:border-border-focus"
+                    }`}
+                  >
+                    {subtype}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Universe */}
           <div>
             <p className="text-sm font-medium text-text-primary mb-2">
@@ -330,6 +441,15 @@ export function PreferencesPanel({
           {error && <p className="text-sm text-negative">{error}</p>}
           {savedMessage && !error && (
             <p className="text-sm text-positive">{savedMessage}</p>
+          )}
+
+          {preferences?.mandate_edited_at && (
+            <p className="text-xs text-text-muted font-metric">
+              Mandate last edited by:{" "}
+              {preferences.edited_by_user_id == null ? "allocator" : "admin"}{" "}
+              {String.fromCharCode(183)}{" "}
+              {new Date(preferences.mandate_edited_at).toLocaleDateString()}
+            </p>
           )}
 
           <div className="sticky bottom-0 bg-surface border-t border-border -mx-6 px-6 pt-4 pb-0 flex items-center gap-2">

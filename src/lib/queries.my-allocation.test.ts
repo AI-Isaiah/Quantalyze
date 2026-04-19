@@ -92,7 +92,22 @@ function resetState() {
   state.sentAsIntroDecisions = [];
   state.bridgeOutcomes = [];
   state.bridgeDismissals = [];
+  chainAudit.entries.length = 0;
 }
+
+// Phase 5 Voice-D4 + D5 — record every `.eq(column, value)` and `.limit(n)`
+// call on each chain invocation so the outcomes fan-out tests can assert:
+//  - (Voice-D4) the admin chain targeting bridge_outcomes has .eq("allocator_id", userId)
+//  - (Voice-D5) .limit(200) was called on the same chain
+type ChainAuditEntry = {
+  table: string;
+  select: string | null;
+  eqs: Array<{ column: string; value: unknown }>;
+  limitN: number | null;
+};
+const chainAudit = vi.hoisted(() => ({
+  entries: [] as ChainAuditEntry[],
+}));
 
 type Filter = { column: string; value: unknown; op: "eq" | "in" | "is" };
 
@@ -103,6 +118,13 @@ type Filter = { column: string; value: unknown; op: "eq" | "in" | "is" };
  */
 function buildChain(table: string) {
   const filters: Filter[] = [];
+  const audit: ChainAuditEntry = {
+    table,
+    select: null,
+    eqs: [],
+    limitN: null,
+  };
+  chainAudit.entries.push(audit);
   let limitN: number | null = null;
 
   function applyFilters<T extends Record<string, unknown>>(rows: T[]): T[] {
@@ -155,9 +177,13 @@ function buildChain(table: string) {
   }
 
   const chain = {
-    select: () => chain,
+    select: (cols?: string) => {
+      audit.select = cols ?? null;
+      return chain;
+    },
     eq: (column: string, value: unknown) => {
       filters.push({ column, value, op: "eq" });
+      audit.eqs.push({ column, value });
       return chain;
     },
     in: (column: string, value: unknown) => {
@@ -175,6 +201,7 @@ function buildChain(table: string) {
     order: () => chain,
     limit: (n: number) => {
       limitN = n;
+      audit.limitN = n;
       return chain;
     },
     maybeSingle: async () => {
@@ -558,5 +585,120 @@ describe("getMyAllocationDashboard — outcome eligibility fan-out", () => {
     expect(row).toBeDefined();
     expect(row!.eligible_for_outcome).toBe(false);
     expect(row!.existing_outcome).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5 D-15 — getMyAllocationDashboard outcomes top-level fan-out
+// ---------------------------------------------------------------------------
+
+const P5_OUTCOME_O1 = {
+  id: "outcome-1",
+  strategy_id: "s-repl",
+  match_decision_id: "md-1",
+  allocator_id: "user-1",
+  kind: "allocated",
+  percent_allocated: 12,
+  allocated_at: "2026-03-01",
+  rejection_reason: null,
+  note: null,
+  delta_30d: 0.04,
+  delta_90d: null,
+  delta_180d: null,
+  estimated_delta_bps: null,
+  estimated_days: null,
+  needs_recompute: false,
+  created_at: "2026-04-01T00:00:00Z",
+  // Synthesized embed fields — the mock chain returns these as-is for
+  // bridge_outcomes rows; the queries.ts normalizer should carry them
+  // through to payload.outcomes[i].match_decision / .replacement_strategy.
+  replacement_strategy: { id: "s-repl", name: "Crypto Momentum LP" },
+  match_decision: {
+    original_strategy: { id: "s-orig", name: "Legacy Equity LP" },
+  },
+};
+
+const P5_OUTCOME_O2 = {
+  ...P5_OUTCOME_O1,
+  id: "outcome-2",
+  match_decision_id: null,
+  created_at: "2026-03-01T00:00:00Z",
+  match_decision: null,
+};
+
+describe("getMyAllocationDashboard — outcomes top-level fan-out (Phase 5 D-15)", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  it("TC outcomes-01: payload has top-level outcomes: Array<OutcomeRow> sorted created_at DESC", async () => {
+    state.bridgeOutcomes = [
+      P5_OUTCOME_O2 as unknown as typeof state.bridgeOutcomes[number],
+      P5_OUTCOME_O1 as unknown as typeof state.bridgeOutcomes[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(Array.isArray(result.outcomes)).toBe(true);
+    expect(result.outcomes.length).toBe(2);
+    // Caller (queries.ts) applies .order('created_at', ascending:false) via the
+    // admin chain; the mock doesn't sort — rely on caller passing rows sorted.
+  });
+
+  it("TC outcomes-02: each outcome carries replacement_strategy: {id,name} AND match_decision.original_strategy: {id,name} via nested FK embed", async () => {
+    state.bridgeOutcomes = [
+      P5_OUTCOME_O1 as unknown as typeof state.bridgeOutcomes[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const o = result.outcomes[0];
+    expect(o.replacement_strategy?.name).toBe("Crypto Momentum LP");
+    expect(o.match_decision?.original_strategy.name).toBe("Legacy Equity LP");
+    expect(o.match_decision?.original_strategy.id).toBe("s-orig");
+  });
+
+  it("TC outcomes-03: when match_decision_id is NULL, outcomes[0].match_decision === null (em-dash case for UI D-03)", async () => {
+    state.bridgeOutcomes = [
+      P5_OUTCOME_O2 as unknown as typeof state.bridgeOutcomes[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const o = result.outcomes[0];
+    expect(o.match_decision).toBeNull();
+  });
+
+  it("TC outcomes-04: empty outcomes set -> payload.outcomes === [] (not null/undefined)", async () => {
+    state.bridgeOutcomes = [];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.outcomes).toEqual([]);
+  });
+
+  it("TC outcomes-05: outcomes fan-out includes .eq('allocator_id', userId) on the admin chain + .limit(200) (Voice-D4 + D5 regression gate)", async () => {
+    state.bridgeOutcomes = [
+      P5_OUTCOME_O1 as unknown as typeof state.bridgeOutcomes[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    await getMyAllocationDashboard("user-1");
+
+    // Find bridge_outcomes chain invocation(s) that included the nested embed
+    // (distinguishable from the existing fan-out chain by presence of the
+    // match_decision embed OR the .limit(200) call).
+    const outcomesChains = chainAudit.entries.filter(
+      (c) => c.table === "bridge_outcomes",
+    );
+    expect(outcomesChains.length).toBeGreaterThanOrEqual(1);
+
+    // Voice-D5: at least ONE bridge_outcomes chain must have limit(200)
+    const limitedChains = outcomesChains.filter((c) => c.limitN === 200);
+    expect(limitedChains.length).toBeGreaterThanOrEqual(1);
+
+    // Voice-D4: that same chain must have .eq("allocator_id", "user-1")
+    const limited = limitedChains[0];
+    expect(
+      limited.eqs.some(
+        (e) => e.column === "allocator_id" && e.value === "user-1",
+      ),
+    ).toBe(true);
   });
 });

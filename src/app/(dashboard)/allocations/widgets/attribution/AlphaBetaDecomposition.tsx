@@ -147,7 +147,7 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
 
       {/* Stacked bar chart */}
       <div className="flex-1 min-h-0">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
           <BarChart
             data={result.chartData}
             margin={{ top: 4, right: 8, bottom: 4, left: 8 }}

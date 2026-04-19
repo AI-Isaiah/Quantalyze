@@ -117,3 +117,95 @@ body {
   font-family: var(--font-serif);
   font-weight: 400;
 }
+
+/* --- MandateForm range slider — institutional track + precise thumb.
+   Uses --slider-fill (0-100) inline style for the accent-fill ratio; all
+   colors flow through DESIGN.md tokens via var(--color-*) + color-mix().
+   Reference aesthetic: FactSet factsheet slider controls. */
+.mandate-slider input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  width: 100%;
+  height: 28px;
+  outline: none;
+}
+.mandate-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0%,
+    var(--color-accent) var(--slider-fill, 0%),
+    var(--color-border) var(--slider-fill, 0%),
+    var(--color-border) 100%
+  );
+}
+.mandate-slider input[type="range"]::-moz-range-track {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-border);
+}
+.mandate-slider input[type="range"]::-moz-range-progress {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-accent);
+}
+.mandate-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--color-surface);
+  border: 2px solid var(--color-accent);
+  margin-top: -6px;
+  transition: box-shadow 150ms ease-out, background-color 150ms ease-out;
+}
+.mandate-slider input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: var(--color-surface);
+  border: 2px solid var(--color-accent);
+  transition: box-shadow 150ms ease-out, background-color 150ms ease-out;
+}
+.mandate-slider input[type="range"]:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+.mandate-slider input[type="range"]:hover::-moz-range-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+.mandate-slider input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+.mandate-slider input[type="range"]:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+.mandate-slider input[type="range"]:active::-webkit-slider-thumb {
+  background: var(--color-accent);
+}
+.mandate-slider input[type="range"]:active::-moz-range-thumb {
+  background: var(--color-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mandate-slider input[type="range"]::-webkit-slider-thumb,
+  .mandate-slider input[type="range"]::-moz-range-thumb {
+    transition: none;
+  }
+}
+
+/* MandateSaveStatus — subtle fade for the transient "Mandate saved ✓" flash. */
+.mandate-saved-flash {
+  animation: mandate-saved-flash 2s ease-out forwards;
+}
+@keyframes mandate-saved-flash {
+  0% { opacity: 0; transform: translateY(-2px); }
+  12% { opacity: 1; transform: translateY(0); }
+  88% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mandate-saved-flash { animation: none; opacity: 1; }
+}

@@ -89,7 +89,7 @@ def _load_candidate_universe() -> dict[str, Any]:
     strategies_result = (
         supabase.table("strategies")
         .select(
-            "id, name, codename, strategy_types, supported_exchanges, "
+            "id, name, codename, strategy_types, subtypes, supported_exchanges, "
             "status, aum, max_capacity, user_id, start_date"
         )
         .eq("status", "published")
@@ -140,6 +140,11 @@ def _load_candidate_universe() -> dict[str, Any]:
         exchanges = strategy.get("supported_exchanges") or []
         primary_exchange = exchanges[0] if exchanges else None
 
+        # First subtype as primary (Phase 3 / Pitfall 1 — SUBTYPES enum,
+        # compared against allocator.style_exclusions in match_engine._eligibility_check)
+        subtypes = strategy.get("subtypes") or []
+        primary_subtype = subtypes[0] if subtypes else None
+
         strategies_by_id[sid] = {
             "strategy_id": sid,
             "name": strategy.get("name"),
@@ -147,6 +152,7 @@ def _load_candidate_universe() -> dict[str, Any]:
             "manager_id": strategy.get("user_id"),
             "manager_aum": float(strategy.get("aum")) if strategy.get("aum") else None,
             "strategy_type": primary_type,
+            "subtype": primary_subtype,  # Phase 3 / SCORING-07
             "exchange": primary_exchange,
             "sharpe": analytics.get("sharpe"),
             "max_drawdown_pct": analytics.get("max_drawdown"),
@@ -247,10 +253,24 @@ async def _score_one_allocator(
     universe: dict[str, Any],
 ) -> dict[str, Any]:
     """Score a single allocator and persist the batch + candidates."""
+    # Phase 4 / D-06 + D-09 + D-10 — compute feedback overrides BEFORE scoring.
+    # D6: this import is intentionally body-placed (4-space function-body indent)
+    # to stay lazy — services.feedback_engine MUST NOT appear in sys.modules at
+    # module load time, only when a scoring call lands here. D3 fast-path guard
+    # inside compute_adjusted_weights short-circuits allocators with no
+    # bridge_outcomes (at most 1 Supabase round-trip before returning {}).
+    # Pitfall 1: ctx["preferences"] can be None when the allocator has no
+    # allocator_preferences row — normalize to {} before merging.
+    from services.feedback_engine import compute_adjusted_weights
     async with _scoring_semaphore:
         start = time.monotonic()
 
         ctx = await asyncio.to_thread(_load_allocator_context, allocator_id)
+
+        overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
+        if ctx["preferences"] is None:
+            ctx["preferences"] = {}
+        ctx["preferences"]["scoring_weight_overrides"] = overrides or None
 
         # Build the candidate list from the cached universe
         candidate_strategies = list(universe["strategies_by_id"].values())
@@ -347,13 +367,19 @@ async def _score_one_allocator(
 
 
 async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
-    """Skip if last batch is younger than RECOMPUTE_MIN_AGE_HOURS unless forced."""
+    """D-11 triple check — return False (don't skip) when ANY of:
+      1. force == True (caller explicit override)
+      2. last_batch.engine_version != ENGINE_VERSION (v1→v2 cutover or future bump)
+      3. allocator_preferences.mandate_edited_at > last_batch.computed_at (mandate edit)
+    Otherwise apply the RECOMPUTE_MIN_AGE_HOURS age guard.
+    Phase 3 / SCORING-05.
+    """
     if force:
         return False
     supabase = get_supabase()
     result = await asyncio.to_thread(
         lambda: supabase.table("match_batches")
-        .select("computed_at")
+        .select("computed_at, engine_version")
         .eq("allocator_id", allocator_id)
         .order("computed_at", desc=True)
         .limit(1)
@@ -362,10 +388,35 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     rows = result.data or []
     if not rows:
         return False
+    last_row = rows[0]
+    # Trigger 2: engine_version mismatch — invalidate v1 batches for the
+    # v1→v2 cutover and any future bump. Short-circuits BEFORE the age
+    # check so a fresh v1 batch is still recomputed.
+    if last_row.get("engine_version") != ENGINE_VERSION:
+        return False
     try:
-        last_at = datetime.fromisoformat(rows[0]["computed_at"].replace("Z", "+00:00"))
+        last_at = datetime.fromisoformat(last_row["computed_at"].replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return False
+    # Trigger 3: mandate_edited_at > computed_at — mandate edit invalidates
+    # the cached batch. One extra query against allocator_preferences
+    # (indexed by user_id PK, O(1) lookup).
+    prefs_result = await asyncio.to_thread(
+        lambda: supabase.table("allocator_preferences")
+        .select("mandate_edited_at")
+        .eq("user_id", allocator_id)
+        .maybe_single()
+        .execute()
+    )
+    prefs = (prefs_result.data or {}) if prefs_result else {}
+    edited_raw = prefs.get("mandate_edited_at") if isinstance(prefs, dict) else None
+    if edited_raw:
+        try:
+            edited_at = datetime.fromisoformat(edited_raw.replace("Z", "+00:00"))
+            if edited_at > last_at:
+                return False
+        except (ValueError, AttributeError):
+            pass
     age_hours = (datetime.now(timezone.utc) - last_at).total_seconds() / 3600
     return age_hours < RECOMPUTE_MIN_AGE_HOURS
 

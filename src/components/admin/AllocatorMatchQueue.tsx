@@ -8,6 +8,7 @@ import { ScopedBanner } from "@/components/ui/ScopedBanner";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
+import type { AllocatorPreferences } from "@/lib/preferences";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { CandidateDetail } from "@/components/admin/CandidateDetail";
@@ -95,20 +96,7 @@ interface Profile {
   preferences_updated_at: string | null;
 }
 
-export interface AllocatorPreferences {
-  user_id: string;
-  mandate_archetype: string | null;
-  target_ticket_size_usd: number | null;
-  excluded_exchanges: string[] | null;
-  max_drawdown_tolerance: number | null;
-  min_track_record_days: number | null;
-  min_sharpe: number | null;
-  max_aum_concentration: number | null;
-  preferred_strategy_types: string[] | null;
-  preferred_markets: string[] | null;
-  founder_notes: string | null;
-  updated_at: string;
-}
+export type { AllocatorPreferences } from "@/lib/preferences";
 
 interface Decision {
   id: string;
