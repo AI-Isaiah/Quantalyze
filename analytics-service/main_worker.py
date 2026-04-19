@@ -29,12 +29,17 @@ WORKER_ID identifies this replica: worker-{hostname}-{pid}.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import signal
 import socket
 import time
+
+from dotenv import load_dotenv
+
+# Load analytics-service/.env for local dev. In prod (Railway), env vars are
+# injected directly and no .env file exists, so load_dotenv() is a no-op.
+load_dotenv()
 
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
@@ -183,14 +188,15 @@ async def watchdog_tick() -> None:
     """Call reset_stalled_compute_jobs with per-kind thresholds."""
     supabase = get_supabase()
 
-    overrides_json = json.dumps(WATCHDOG_PER_KIND_OVERRIDES)
-
+    # Pass the overrides dict directly; PostgREST coerces a JSON object to
+    # JSONB. json.dumps() would send a JSON string, which becomes a JSONB
+    # scalar and trips jsonb_object_keys() with "cannot call ... on a scalar".
     def _reset():
         return supabase.rpc(
             "reset_stalled_compute_jobs",
             {
                 "p_stale_threshold": "10 minutes",
-                "p_per_kind_overrides": overrides_json,
+                "p_per_kind_overrides": WATCHDOG_PER_KIND_OVERRIDES,
             },
         ).execute()
 

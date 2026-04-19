@@ -131,25 +131,40 @@ def _fetch_score_breakdowns(
     strategy_ids: list[str],
 ) -> dict[str, dict[str, Any]]:
     """Batch-load match_candidates.score_breakdown for this allocator's eligible outcomes.
-    Keeps only the most recent row per strategy_id (highest created_at).
+    Keeps only the most recent row per strategy_id — temporal ordering lives on
+    match_batches.computed_at (match_candidates has no timestamp column), so we
+    resolve batches newest-first and then walk candidates in that order.
     """
     if not strategy_ids:
         return {}
     supabase = get_supabase()
-    result = (
-        supabase.table("match_candidates")
-        .select("strategy_id, score_breakdown, created_at")
+    batches_result = (
+        supabase.table("match_batches")
+        .select("id")
         .eq("allocator_id", allocator_id)
-        .in_("strategy_id", strategy_ids)
-        .order("created_at", desc=True)
+        .order("computed_at", desc=True)
         .execute()
     )
-    rows = result.data or []
+    batch_ids = [b["id"] for b in (batches_result.data or [])]
+    if not batch_ids:
+        return {}
+    cand_result = (
+        supabase.table("match_candidates")
+        .select("batch_id, strategy_id, score_breakdown")
+        .in_("batch_id", batch_ids)
+        .in_("strategy_id", strategy_ids)
+        .execute()
+    )
+    by_batch: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in cand_result.data or []:
+        if not row.get("score_breakdown"):
+            continue
+        by_batch.setdefault(row["batch_id"], {})[row["strategy_id"]] = row["score_breakdown"]
     out: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        sid = row["strategy_id"]
-        if sid not in out and row.get("score_breakdown"):
-            out[sid] = row["score_breakdown"]
+    for bid in batch_ids:
+        for sid, bd in by_batch.get(bid, {}).items():
+            if sid not in out:
+                out[sid] = bd
     return out
 
 

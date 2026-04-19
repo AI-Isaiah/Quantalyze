@@ -113,9 +113,21 @@ def _make_mock_supabase(
     # .table().select().eq().eq().gte().execute()
     mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.return_value.execute.return_value = MagicMock(data=allocated_rows or [])
 
-    # _fetch_score_breakdowns chain:
-    # .table().select().eq().in_().order().execute()
-    mock_sb.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value.execute.return_value = MagicMock(data=breakdown_rows or [])
+    # _fetch_score_breakdowns chains. match_candidates has no created_at, so the
+    # engine resolves ordering via match_batches.computed_at (newest batch first)
+    # and then fetches candidates filtered by (batch_id, strategy_id).
+    #   1. match_batches.select("id").eq().order().execute() -> one batch-id per
+    #      breakdown row, emitted newest-first so "first seen wins" is preserved.
+    #   2. match_candidates.select().in_().in_().execute() -> candidate rows
+    #      tagged with the synthetic batch_id so by-batch dedup matches input order.
+    _breakdowns = breakdown_rows or []
+    _batch_ids = [f"mock-batch-{i}" for i in range(len(_breakdowns))]
+    mock_sb.table.return_value.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+        data=[{"id": bid} for bid in _batch_ids]
+    )
+    mock_sb.table.return_value.select.return_value.in_.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=[{**row, "batch_id": bid} for bid, row in zip(_batch_ids, _breakdowns)]
+    )
 
     # _persist_overrides UPDATE chain:
     # .table().update().eq().execute()
