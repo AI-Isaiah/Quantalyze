@@ -98,4 +98,7 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   "quick-actions": lazy(() =>
     import("./meta/QuickActions").then((m) => ({ default: m.QuickActions })),
   ),
+
+  // ── Outcomes (1) ───────────────────────────────────────────────────
+  "outcomes-timeline": lazy(() => import("./outcomes/OutcomesWidget")),
 };
