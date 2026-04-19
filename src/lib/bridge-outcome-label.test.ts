@@ -259,9 +259,9 @@ describe("deriveOutcomeLabel", () => {
 // ---------------------------------------------------------------------------
 
 function makeBridgeOutcome(
-  overrides: Partial<BridgeOutcome> & Pick<BridgeOutcome, "kind">,
+  overrides: Partial<BridgeOutcome>,
 ): BridgeOutcome {
-  return {
+  const base: BridgeOutcome = {
     id: "o1",
     kind: "allocated",
     percent_allocated: 12,
@@ -275,8 +275,8 @@ function makeBridgeOutcome(
     estimated_days: null,
     needs_recompute: false,
     created_at: "2026-01-01T00:00:00Z",
-    ...overrides,
   } as BridgeOutcome;
+  return { ...base, ...overrides } as BridgeOutcome;
 }
 
 describe("deriveOutcomeStatusPill", () => {
