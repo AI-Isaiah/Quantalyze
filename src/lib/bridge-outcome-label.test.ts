@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { deriveOutcomeLabel } from "./bridge-outcome-label";
+import { deriveOutcomeLabel, deriveOutcomeStatusPill } from "./bridge-outcome-label";
+import type { BridgeOutcome } from "./bridge-outcome-schema";
 
 // Fixed clock override — all 15 cases use today: "2026-04-17" for determinism.
 const TODAY = "2026-04-17";
@@ -250,5 +251,147 @@ describe("deriveOutcomeLabel", () => {
       today: TODAY,
     });
     expect(result).toEqual({ label: "Pending", value: "Pending", tone: "neutral" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5 D-02 revised (Voice-D6) — deriveOutcomeStatusPill
+// ---------------------------------------------------------------------------
+
+function makeBridgeOutcome(
+  overrides: Partial<BridgeOutcome> & Pick<BridgeOutcome, "kind">,
+): BridgeOutcome {
+  return {
+    id: "o1",
+    kind: "allocated",
+    percent_allocated: 12,
+    allocated_at: "2026-01-01",
+    rejection_reason: null,
+    note: null,
+    delta_30d: null,
+    delta_90d: null,
+    delta_180d: null,
+    estimated_delta_bps: null,
+    estimated_days: null,
+    needs_recompute: false,
+    created_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  } as BridgeOutcome;
+}
+
+describe("deriveOutcomeStatusPill", () => {
+  it("case 1 — allocated-win: kind=allocated, percent=12, delta_180d=0.05 -> { state:'allocated-win', text:'Allocated 12% \u2014 win', tone:'positive' }", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "allocated",
+        percent_allocated: 12,
+        delta_180d: 0.05,
+      }),
+    );
+    expect(result).toEqual({
+      state: "allocated-win",
+      text: "Allocated 12% \u2014 win",
+      tone: "positive",
+    });
+  });
+
+  it("case 2 — allocated-loss: kind=allocated, percent=15, delta_180d=-0.03 -> { state:'allocated-loss', text:'Allocated 15% \u2014 loss', tone:'negative' }", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "allocated",
+        percent_allocated: 15,
+        delta_180d: -0.03,
+      }),
+    );
+    expect(result).toEqual({
+      state: "allocated-loss",
+      text: "Allocated 15% \u2014 loss",
+      tone: "negative",
+    });
+  });
+
+  it("case 3 — allocated-pending: kind=allocated, percent=8, all deltas null -> { state:'allocated-pending', text:'Allocated 8% \u2014 pending', tone:'neutral' }", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "allocated",
+        percent_allocated: 8,
+        delta_30d: null,
+        delta_90d: null,
+        delta_180d: null,
+      }),
+    );
+    expect(result).toEqual({
+      state: "allocated-pending",
+      text: "Allocated 8% \u2014 pending",
+      tone: "neutral",
+    });
+  });
+
+  it("case 4 — allocated-loss on zero delta: delta_180d=0 -> state='allocated-loss' (Voice-D6 Phase-4 _success_value parity; strict > 0 for win INTENTIONALLY overrides Phase 1 D-13 neutral-on-zero for the status pill only)", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "allocated",
+        percent_allocated: 10,
+        delta_180d: 0,
+      }),
+    );
+    expect(result.state).toBe("allocated-loss");
+    expect(result.tone).toBe("negative");
+  });
+
+  it("case 5 — rejected-mandate_conflict: kind=rejected, rejection_reason='mandate_conflict' -> { state:'rejected', text:'Rejected \u2014 Mandate conflict', tone:'neutral' }", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "rejected",
+        percent_allocated: null,
+        allocated_at: null,
+        rejection_reason: "mandate_conflict",
+      }),
+    );
+    expect(result).toEqual({
+      state: "rejected",
+      text: "Rejected \u2014 Mandate conflict",
+      tone: "neutral",
+    });
+  });
+
+  it("case 6 — rejected-already_owned: text='Rejected \u2014 Already owned'", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "rejected",
+        percent_allocated: null,
+        allocated_at: null,
+        rejection_reason: "already_owned",
+      }),
+    );
+    expect(result.text).toBe("Rejected \u2014 Already owned");
+    expect(result.tone).toBe("neutral");
+  });
+
+  it("case 7 — rejected with null reason: text='Rejected \u2014 Other'", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "rejected",
+        percent_allocated: null,
+        allocated_at: null,
+        rejection_reason: null,
+      }),
+    );
+    expect(result.text).toBe("Rejected \u2014 Other");
+    expect(result.tone).toBe("neutral");
+  });
+
+  it("case 8 — most-mature wins: delta_180d=0.05 overrides delta_30d=-0.10 -> allocated-win (D-12 revised)", () => {
+    const result = deriveOutcomeStatusPill(
+      makeBridgeOutcome({
+        kind: "allocated",
+        percent_allocated: 10,
+        delta_30d: -0.1,
+        delta_90d: null,
+        delta_180d: 0.05,
+      }),
+    );
+    expect(result.state).toBe("allocated-win");
+    expect(result.tone).toBe("positive");
   });
 });
