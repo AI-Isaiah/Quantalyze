@@ -8,6 +8,7 @@ import {
 } from "@/lib/analytics/usage-events-client";
 import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+import type { OutcomeRow } from "@/lib/queries";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
@@ -93,6 +94,8 @@ interface AllocationDashboardProps {
   alertCount?: AlertCount;
   weightSnapshots?: WeightSnapshot[];
   positionSnapshots?: PositionSnapshot[];
+  /** Phase 5 — bridge outcomes for the OutcomesWidget. */
+  outcomes?: OutcomeRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +119,7 @@ export function AllocationDashboard({
   alertCount,
   weightSnapshots = [],
   positionSnapshots = [],
+  outcomes = [],
 }: AllocationDashboardProps) {
   const { config, addTile, removeTile, updateLayout, restoreTile } =
     useDashboardConfig();
@@ -407,8 +411,9 @@ export function AllocationDashboard({
       compositeReturns,
       weightSnapshots,
       positionSnapshots,
+      outcomes,
     }),
-    [portfolio, analytics, strategies, apiKeys, alertCount, metrics, compositeReturns, weightSnapshots, positionSnapshots],
+    [portfolio, analytics, strategies, apiKeys, alertCount, metrics, compositeReturns, weightSnapshots, positionSnapshots, outcomes],
   );
 
   // ── Widget renderer ─────────────────────────────────────────────
