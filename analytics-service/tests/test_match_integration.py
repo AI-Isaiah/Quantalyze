@@ -226,6 +226,17 @@ async def test_worker_reads_latest_allocator_preferences(monkeypatch):
         MagicMock(data=[{"id": "batch-fresh"}])
     monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
 
+    # Phase 4 / Plan 04-01: _score_one_allocator now also calls
+    # services.feedback_engine.compute_adjusted_weights via asyncio.to_thread.
+    # Stub its Supabase client so the D3 fast-path probe returns empty
+    # (allocator has no bridge_outcomes history -> compute returns {} with
+    # one round-trip; no further fetches, no UPDATE).
+    mock_fb_sb = MagicMock()
+    mock_fb_sb.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = \
+        MagicMock(data=[])
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_fb_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
     # Invoke the handler directly — bypass dispatch() to isolate
     from services.job_worker import run_rescore_allocator_job
 

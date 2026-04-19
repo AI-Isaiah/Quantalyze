@@ -253,10 +253,24 @@ async def _score_one_allocator(
     universe: dict[str, Any],
 ) -> dict[str, Any]:
     """Score a single allocator and persist the batch + candidates."""
+    # Phase 4 / D-06 + D-09 + D-10 — compute feedback overrides BEFORE scoring.
+    # D6: this import is intentionally body-placed (4-space function-body indent)
+    # to stay lazy — services.feedback_engine MUST NOT appear in sys.modules at
+    # module load time, only when a scoring call lands here. D3 fast-path guard
+    # inside compute_adjusted_weights short-circuits allocators with no
+    # bridge_outcomes (at most 1 Supabase round-trip before returning {}).
+    # Pitfall 1: ctx["preferences"] can be None when the allocator has no
+    # allocator_preferences row — normalize to {} before merging.
+    from services.feedback_engine import compute_adjusted_weights
     async with _scoring_semaphore:
         start = time.monotonic()
 
         ctx = await asyncio.to_thread(_load_allocator_context, allocator_id)
+
+        overrides = await asyncio.to_thread(compute_adjusted_weights, allocator_id)
+        if ctx["preferences"] is None:
+            ctx["preferences"] = {}
+        ctx["preferences"]["scoring_weight_overrides"] = overrides or None
 
         # Build the candidate list from the cached universe
         candidate_strategies = list(universe["strategies_by_id"].values())

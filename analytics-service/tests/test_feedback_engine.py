@@ -263,14 +263,22 @@ def test_no_change_in_band(monkeypatch):
 
 
 @pytest.mark.parametrize("n_pos,n_neg,expected_scale", [
-    # rate 0.39 (below 0.4) -> 0.5
-    (2, 3, 0.5),   # rate = 0.4 exactly? Let's compute cleanly: 2/5 = 0.4 -> omit (strict <)
-    # Actually we need concrete boundaries. Use 5 outcomes each.
-    # rate 0.0 (0 wins, 5 losses) -> 0.5 (floor)
-    (0, 5, 0.5),
-    # rate 0.4 exactly (2 wins, 3 losses) -> omit (strict < 0.4 for floor)
-    # rate 1.0 (5 wins, 0 losses) -> 1.5 (ceiling)
-    (5, 0, 1.5),
+    # Boundary sweep per plan + D-13 strict inequality spec.
+    # Use 10 outcomes (not 5) so fractions like 0.3, 0.5, 0.7, 0.8 are exact.
+    # rate 0.0 (0 wins, 10 losses) -> strict < 0.4 -> floor 0.5
+    (0, 10, 0.5),
+    # rate 0.3 -> strict < 0.4 -> floor 0.5
+    (3, 7, 0.5),
+    # rate 0.4 exactly -> NOT strictly < 0.4 -> omit
+    (4, 6, None),
+    # rate 0.5 -> in-band -> omit
+    (5, 5, None),
+    # rate 0.7 exactly -> NOT strictly > 0.7 -> omit
+    (7, 3, None),
+    # rate 0.8 -> strict > 0.7 -> ceiling 1.5
+    (8, 2, 1.5),
+    # rate 1.0 -> ceiling 1.5
+    (10, 0, 1.5),
 ])
 def test_step_function_boundaries(monkeypatch, n_pos, n_neg, expected_scale):
     """FEEDBACK-02 / D-13 — rate < 0.4 -> 0.5, 0.4 <= rate <= 0.7 -> omit, rate > 0.7 -> 1.5.
@@ -1213,21 +1221,36 @@ def test_fastpath_skip_no_outcomes(monkeypatch):
 
 
 def test_lazy_import_not_triggered_at_module_load():
-    """D6 — Remove services.feedback_engine from sys.modules if present;
-    similarly pop routers.match. Import routers.match afresh. Assert
-    'services.feedback_engine' not in sys.modules — proves the Phase 4 import
-    is body-placed (lazy), not module-level."""
-    # Isolate: remove both modules so the import below is a cold load.
-    sys.modules.pop("services.feedback_engine", None)
-    sys.modules.pop("routers.match", None)
+    """D6 — Subprocess-level check: import routers.match in a clean Python
+    interpreter and assert 'services.feedback_engine' is NOT in sys.modules
+    afterward. Proves the Phase 4 import is body-placed (lazy), not
+    module-level.
 
-    # Import routers.match. The Phase 4 seam must NOT trigger a feedback_engine
-    # import at module scope — only inside _score_one_allocator body.
-    import routers.match  # noqa: F401
+    Subprocess-based to avoid polluting pytest's sys.modules state — an
+    in-process sys.modules.pop + re-import pattern corrupts cached module
+    references held by the test file itself (it imports compute_adjusted_weights
+    at collection time), which in turn breaks subsequent tests' monkeypatches.
+    """
+    import subprocess
 
-    assert "services.feedback_engine" not in sys.modules, (
+    script = (
+        "import sys\n"
+        "import routers.match\n"
+        "leaked = 'services.feedback_engine' in sys.modules\n"
+        "# Exit code 0 = pass, 1 = fail (feedback_engine imported at module load).\n"
+        "sys.exit(1 if leaked else 0)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parent.parent,  # analytics-service/
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, (
         "services.feedback_engine was imported at module load — import must be "
-        "body-placed (4-space indent) inside _score_one_allocator (D6 finding)."
+        "body-placed (4-space indent) inside _score_one_allocator (D6 finding). "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
 
 
