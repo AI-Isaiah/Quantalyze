@@ -32,6 +32,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let body: {
     allocator_id?: string;
     strategy_id?: string;
+    original_strategy_id?: string;
     candidate_id?: string | null;
     admin_note?: string;
   };
@@ -47,6 +48,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!body.strategy_id || typeof body.strategy_id !== "string") {
     return NextResponse.json({ error: "strategy_id is required" }, { status: 400 });
   }
+  // Phase 5 D-20b revised — underperformer-being-replaced is captured at intro-send
+  // time. Migration 064 ships the column as NULL-allowed, but the route still enforces
+  // body-shape presence to avoid silently writing NULL rows once admin UI has shipped.
+  if (!body.original_strategy_id || typeof body.original_strategy_id !== "string") {
+    return NextResponse.json({ error: "original_strategy_id is required" }, { status: 400 });
+  }
   if (!body.admin_note || typeof body.admin_note !== "string") {
     return NextResponse.json({ error: "admin_note is required" }, { status: 400 });
   }
@@ -55,6 +62,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const { data, error } = await admin.rpc("send_intro_with_decision", {
     p_allocator_id: body.allocator_id,
     p_strategy_id: body.strategy_id,
+    p_original_strategy_id: body.original_strategy_id,
     p_candidate_id: body.candidate_id ?? null,
     p_admin_note: body.admin_note,
     p_decided_by: user!.id,
