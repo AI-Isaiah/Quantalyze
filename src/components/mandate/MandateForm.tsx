@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
@@ -73,6 +73,18 @@ export function MandateForm({ initial }: Props) {
     (initial?.style_exclusions as Subtype[] | null) ?? [],
   );
 
+  // Ref-backed latest values for multi-select chip fields. Closure over the
+  // React state reads stale values when clicks fire faster than React's
+  // commit cycle, causing successive toggles to read the same snapshot and
+  // each save to overwrite the previous. Refs update synchronously in the
+  // click handler so rapid clicks compose correctly.
+  const preferredTypesRef = useRef(preferredTypes);
+  const excludedExchangesRef = useRef(excludedExchanges);
+  const styleExclusionsRef = useRef(styleExclusions);
+  preferredTypesRef.current = preferredTypes;
+  excludedExchangesRef.current = excludedExchanges;
+  styleExclusionsRef.current = styleExclusions;
+
   // ---- Field handlers (each handler: update local state THEN save)
 
   function onMaxWeightCommit(v: number) {
@@ -85,21 +97,25 @@ export function MandateForm({ initial }: Props) {
   }
 
   function onPreferredTypesToggle(type: StrategyType) {
-    const next = toggleIn(preferredTypes, type);
+    const next = toggleIn(preferredTypesRef.current, type);
+    preferredTypesRef.current = next;
     setPreferredTypes(next);
     void save("preferred_strategy_types", next);
   }
   function onPreferredTypesReset() {
+    preferredTypesRef.current = [];
     setPreferredTypes([]);
     void save("preferred_strategy_types", null);
   }
 
   function onExcludedExchangesToggle(exchange: Exchange) {
-    const next = toggleIn(excludedExchanges, exchange);
+    const next = toggleIn(excludedExchangesRef.current, exchange);
+    excludedExchangesRef.current = next;
     setExcludedExchanges(next);
     void save("excluded_exchanges", next);
   }
   function onExcludedExchangesReset() {
+    excludedExchangesRef.current = [];
     setExcludedExchanges([]);
     void save("excluded_exchanges", null);
   }
@@ -155,11 +171,13 @@ export function MandateForm({ initial }: Props) {
   }
 
   function onStyleExclusionsToggle(subtype: Subtype) {
-    const next = toggleIn(styleExclusions, subtype);
+    const next = toggleIn(styleExclusionsRef.current, subtype);
+    styleExclusionsRef.current = next;
     setStyleExclusions(next);
     void save("style_exclusions", next);
   }
   function onStyleExclusionsReset() {
+    styleExclusionsRef.current = [];
     setStyleExclusions([]);
     void save("style_exclusions", null);
   }
@@ -349,7 +367,7 @@ export function MandateForm({ initial }: Props) {
               options={SUBTYPES}
               selected={styleExclusions}
               onToggle={onStyleExclusionsToggle}
-              variant="accent"
+              variant="negative"
               onReset={onStyleExclusionsReset}
               error={fieldErrors.style_exclusions}
             />

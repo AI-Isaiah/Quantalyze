@@ -1,23 +1,12 @@
 import { redirect } from "next/navigation";
-import { PageHeader } from "@/components/layout/PageHeader";
-import { MandateForm } from "@/components/mandate/MandateForm";
-import { createClient } from "@/lib/supabase/server";
-import { getOwnPreferences } from "@/lib/preferences";
 
-export default async function PreferencesPage() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const initial = await getOwnPreferences(supabase, user.id);
-
-  return (
-    <>
-      <PageHeader
-        title="My Allocation Settings"
-        description="Tell us about your mandate. Changes save automatically."
-      />
-      <MandateForm initial={initial} />
-    </>
-  );
+/**
+ * Legacy `/preferences` route → canonical home is now the Mandate tab on
+ * `/profile`. Existing bookmarks and inbound links keep working via this
+ * permanent redirect. Pre-2026-04-19 this route rendered the mandate form
+ * directly; the form itself lives in `<MandateForm />` and is wired into
+ * `<ProfileTabs />` under the `?tab=mandate` param.
+ */
+export default function PreferencesPage() {
+  redirect("/profile?tab=mandate");
 }

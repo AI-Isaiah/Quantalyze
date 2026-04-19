@@ -13,8 +13,11 @@ interface Props<T extends string> {
 }
 
 /**
- * Reusable chip multi-select for `preferred_strategy_types` (accent),
- * `excluded_exchanges` (negative — red), and `style_exclusions` (accent).
+ * Reusable chip multi-select for `preferred_strategy_types` (accent — green,
+ * a positive preference), `excluded_exchanges` (negative — red, an exclusion),
+ * and `style_exclusions` (negative — red, same semantic category as
+ * excluded_exchanges). Exclusion fields use the negative variant so the
+ * color reinforces the semantics at a glance.
  * Uses `role="checkbox" aria-checked` for proper a11y (NOT native
  * `<input type="checkbox">` inside a `<label>`).
  */

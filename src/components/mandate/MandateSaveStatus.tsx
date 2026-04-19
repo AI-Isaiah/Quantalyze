@@ -1,13 +1,18 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { SaveState } from "./useMandateAutoSave";
 import { formatRelativeTime } from "./formatRelativeTime";
 
 interface Props {
   saveState: SaveState;
   lastSavedAt: Date | null;
-  /** Test seam: inject a fixed `now` for deterministic rendering under jsdom. */
+  /** Test seam: inject a fixed `now` for deterministic rendering under jsdom.
+   *  When undefined, the component self-ticks every 15s so the relative
+   *  label ("just now" → "1 min ago" → ...) advances without a reload. */
   now?: number;
+  /** Test seam: override the tick interval. Default 15s. */
+  tickIntervalMs?: number;
 }
 
 /**
@@ -15,8 +20,25 @@ interface Props {
  * "toast" is an inline region — no floating-toast dependency. The text
  * briefly flashes "Mandate saved" (2s) then reverts to the relative
  * timestamp, preserving the toast UX shape.
+ *
+ * The relative timestamp ("Last saved: N min ago") self-refreshes via an
+ * internal tick. Without it, React never re-renders on wall-clock advance
+ * and the label stays stuck at "just now" until the next save or reload.
  */
-export function MandateSaveStatus({ saveState, lastSavedAt, now }: Props) {
+export function MandateSaveStatus({
+  saveState,
+  lastSavedAt,
+  now,
+  tickIntervalMs = 15_000,
+}: Props) {
+  const [tickNow, setTickNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (now !== undefined) return; // Fixed `now` supplied by tests — do not tick.
+    if (!lastSavedAt) return; // No timestamp yet — nothing to refresh.
+    const id = setInterval(() => setTickNow(Date.now()), tickIntervalMs);
+    return () => clearInterval(id);
+  }, [now, lastSavedAt, tickIntervalMs]);
+  const effectiveNow = now ?? tickNow;
   const showSavedFlash = saveState === "saved";
   return (
     <div
@@ -45,7 +67,7 @@ export function MandateSaveStatus({ saveState, lastSavedAt, now }: Props) {
         </span>
       )}
       {!showSavedFlash && lastSavedAt && (
-        <span>Last saved: {formatRelativeTime(lastSavedAt.getTime(), now)}</span>
+        <span>Last saved: {formatRelativeTime(lastSavedAt.getTime(), effectiveNow)}</span>
       )}
       {!showSavedFlash && !lastSavedAt && <span>Not saved yet</span>}
     </div>

@@ -114,6 +114,34 @@ describe("MandateForm", () => {
     expect(binance.className).toContain("border-negative");
   });
 
+  // Regression: style_exclusions was shipped with variant="accent" so the
+  // selected chips rendered GREEN, identical to preferred_strategy_types
+  // (a positive preference). Users expected red to signal "excluded" — the
+  // same color treatment as excluded_exchanges. Fix flips the variant to
+  // "negative". Reported 2026-04-19.
+  it("style_exclusions chip uses negative variant class when selected (parity with excluded_exchanges)", () => {
+    render(<MandateForm initial={BLANK_PREFS} />);
+    // Expand Advanced to mount the style_exclusions chips.
+    fireEvent.click(screen.getByRole("button", { name: "Advanced constraints" }));
+    const trend = screen.getByRole("checkbox", { name: "Trend Following" });
+    expect(trend.className).toContain("border-border");
+    fireEvent.click(trend);
+    expect(trend).toHaveAttribute("aria-checked", "true");
+    // The critical assertion: same negative styling as excluded_exchanges,
+    // NOT the accent (green) styling of preferred_strategy_types.
+    expect(trend.className).toContain("border-negative");
+    expect(trend.className).not.toContain("border-accent");
+  });
+
+  it("preferred_strategy_types chip stays accent (positive preference, not exclusion)", () => {
+    render(<MandateForm initial={BLANK_PREFS} />);
+    const longOnly = screen.getByRole("checkbox", { name: "Long-Only" });
+    fireEvent.click(longOnly);
+    expect(longOnly).toHaveAttribute("aria-checked", "true");
+    expect(longOnly.className).toContain("border-accent");
+    expect(longOnly.className).not.toContain("border-negative");
+  });
+
   it("mandate_archetype char counter reflects length", () => {
     render(<MandateForm initial={BLANK_PREFS} />);
     const textarea = screen.getByLabelText("Mandate in one sentence");
@@ -136,6 +164,94 @@ describe("MandateForm", () => {
     expect(screen.getByLabelText("Max drawdown tolerance")).toBeInTheDocument();
     expect(screen.getByText("Liquidity preference")).toBeInTheDocument();
     expect(screen.getByText("Excluded styles")).toBeInTheDocument();
+  });
+
+  // Regression: G-01 — chip toggle handlers closed over stale React state,
+  // so rapid successive clicks each read the same initial snapshot and each
+  // save overwrote the previous. Fix uses ref-backed latest-value pattern
+  // in MandateForm.tsx. Found by /qa on 2026-04-19.
+  // Report: .planning/phases/02-mandate-profile-builder/02-UAT.md (Gap G-01)
+  it("rapid successive preferred_strategy_types clicks send cumulative values (not overwrite)", () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<MandateForm initial={BLANK_PREFS} />);
+    const longOnly = screen.getByRole("checkbox", { name: "Long-Only" });
+    const marketNeutral = screen.getByRole("checkbox", { name: "Market Neutral" });
+
+    // Fire synchronously — simulates two clicks within a single React batch
+    // (before any re-render commits). With the stale-closure bug, the second
+    // click would read `preferredTypes = []` and send `["Market Neutral"]`
+    // alone, overwriting the first save.
+    fireEvent.click(longOnly);
+    fireEvent.click(marketNeutral);
+
+    // Both saves must be POSTed — and the second must carry both values.
+    const bodies = fetchMock.mock.calls
+      .filter((c) => c[0] === "/api/preferences")
+      .map((c) => JSON.parse(c[1].body as string));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual({ preferred_strategy_types: ["Long-Only"] });
+    expect(bodies[1]).toEqual({
+      preferred_strategy_types: ["Long-Only", "Market Neutral"],
+    });
+    expect(longOnly).toHaveAttribute("aria-checked", "true");
+    expect(marketNeutral).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("rapid successive excluded_exchanges clicks send cumulative values (not overwrite)", () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<MandateForm initial={BLANK_PREFS} />);
+    const binance = screen.getByRole("checkbox", { name: "Binance" });
+    const okx = screen.getByRole("checkbox", { name: "OKX" });
+
+    fireEvent.click(binance);
+    fireEvent.click(okx);
+
+    const bodies = fetchMock.mock.calls
+      .filter((c) => c[0] === "/api/preferences")
+      .map((c) => JSON.parse(c[1].body as string));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual({ excluded_exchanges: ["Binance"] });
+    expect(bodies[1]).toEqual({ excluded_exchanges: ["Binance", "OKX"] });
+  });
+
+  it("rapid successive style_exclusions clicks send cumulative values (not overwrite)", () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<MandateForm initial={BLANK_PREFS} />);
+    // Expand Advanced to reach style_exclusions chips.
+    fireEvent.click(screen.getByRole("button", { name: "Advanced constraints" }));
+    const trend = screen.getByRole("checkbox", { name: "Trend Following" });
+    const momentum = screen.getByRole("checkbox", { name: "Momentum" });
+
+    fireEvent.click(trend);
+    fireEvent.click(momentum);
+
+    const bodies = fetchMock.mock.calls
+      .filter((c) => c[0] === "/api/preferences")
+      .map((c) => JSON.parse(c[1].body as string));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].style_exclusions).toEqual(["Trend Following"]);
+    expect(bodies[1].style_exclusions).toEqual(["Trend Following", "Momentum"]);
   });
 });
 
@@ -172,5 +288,95 @@ describe("MandateSlider keyboard debounce (W-09 regression)", () => {
     expect(onCommit).toHaveBeenCalledTimes(0);
     vi.advanceTimersByTime(300);
     expect(onCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Regression: controlled-input drag — the slider used
+ *   <input value={renderValue} onChange={() => {}}>
+ * which made the native range input behave as read-only in React 19. The
+ * DOM reset the thumb on every drag/arrow event, so users believed the
+ * slider was broken ("max weight per strategy cannot be changed" — 2026-04-19
+ * bug report). Fix decoupled local draft state from parent state so drag
+ * updates the DOM live, commits flow on pointerUp / touchEnd / keyUp.
+ */
+describe("MandateSlider drag-responsiveness (controlled-input regression)", () => {
+  it("user input changes the rendered value and pill (not frozen on parent prop)", () => {
+    const onCommit = vi.fn();
+    const { container, rerender } = render(
+      <MandateSlider
+        label="Max weight per strategy"
+        helper="h"
+        value={0.28}
+        min={0.05}
+        max={0.5}
+        step={0.01}
+        formatValue={(v) => `${Math.round(v * 100)}%`}
+        onCommit={onCommit}
+      />,
+    );
+    const input = container.querySelector("input[type='range']") as HTMLInputElement;
+    expect(input.value).toBe("0.28");
+    // Simulate a drag step: native input dispatches `change` with the new value.
+    fireEvent.change(input, { target: { value: "0.15" } });
+    // The DOM must reflect the user's input — NOT snap back to the parent prop.
+    expect(input.value).toBe("0.15");
+    // Before pointerUp, parent has not been notified (no commit yet).
+    expect(onCommit).toHaveBeenCalledTimes(0);
+    // Commit via pointerUp.
+    fireEvent.pointerUp(input);
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith(0.15);
+    // When the parent acknowledges the commit and re-renders with the new
+    // value, the slider continues to display the committed value.
+    rerender(
+      <MandateSlider
+        label="Max weight per strategy"
+        helper="h"
+        value={0.15}
+        min={0.05}
+        max={0.5}
+        step={0.01}
+        formatValue={(v) => `${Math.round(v * 100)}%`}
+        onCommit={onCommit}
+      />,
+    );
+    expect(input.value).toBe("0.15");
+  });
+
+  it("external prop change syncs to the draft (Reset resets the thumb position)", () => {
+    const onCommit = vi.fn();
+    const { container, rerender } = render(
+      <MandateSlider
+        label="Max weight per strategy"
+        helper="h"
+        value={0.4}
+        min={0.05}
+        max={0.5}
+        step={0.01}
+        formatValue={(v) => `${Math.round(v * 100)}%`}
+        onCommit={onCommit}
+      />,
+    );
+    const input = container.querySelector("input[type='range']") as HTMLInputElement;
+    expect(input.value).toBe("0.4");
+    // User drags to 0.1 but parent resets to null before commit (Reset pressed
+    // mid-drag, or external update).
+    fireEvent.change(input, { target: { value: "0.1" } });
+    expect(input.value).toBe("0.1");
+    rerender(
+      <MandateSlider
+        label="Max weight per strategy"
+        helper="h"
+        value={null}
+        min={0.05}
+        max={0.5}
+        step={0.01}
+        formatValue={(v) => `${Math.round(v * 100)}%`}
+        onCommit={onCommit}
+      />,
+    );
+    // renderValue falls back to midpoint ((0.05+0.5)/2 = 0.275); draft syncs.
+    expect(input.value).toBe("0.275");
   });
 });

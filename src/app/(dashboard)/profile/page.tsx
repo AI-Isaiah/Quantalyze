@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { ProfileTabs } from "@/components/auth/ProfileTabs";
 import { SignOutButton } from "@/components/auth/SignOutButton";
+import { getOwnPreferences } from "@/lib/preferences";
 import { redirect } from "next/navigation";
 
 export default async function ProfilePage() {
@@ -28,14 +29,24 @@ export default async function ProfilePage() {
 
   if (!profile) redirect("/onboarding");
 
+  // Allocator mandate tab — only fetch for allocator / both roles.
+  const isAllocator = profile.role === "allocator" || profile.role === "both";
+  const initialPreferences = isAllocator
+    ? await getOwnPreferences(supabase, user.id)
+    : null;
+
   return (
     <>
       <PageHeader
         title="Profile Settings"
-        description="Manage your account and organizations."
+        description="Manage your account, organizations, and allocation mandate."
         actions={<SignOutButton />}
       />
-      <ProfileTabs profile={profile} />
+      <ProfileTabs
+        profile={profile}
+        initialPreferences={initialPreferences}
+        isAllocator={isAllocator}
+      />
     </>
   );
 }
