@@ -76,14 +76,12 @@ export function MandateForm({ initial }: Props) {
   // Ref-backed latest values for multi-select chip fields. Closure over the
   // React state reads stale values when clicks fire faster than React's
   // commit cycle, causing successive toggles to read the same snapshot and
-  // each save to overwrite the previous. Refs update synchronously in the
-  // click handler so rapid clicks compose correctly.
+  // each save to overwrite the previous. The handlers update these refs
+  // synchronously so rapid clicks compose correctly; state only mutates
+  // via the handlers themselves, so no render-body sync is needed.
   const preferredTypesRef = useRef(preferredTypes);
   const excludedExchangesRef = useRef(excludedExchanges);
   const styleExclusionsRef = useRef(styleExclusions);
-  preferredTypesRef.current = preferredTypes;
-  excludedExchangesRef.current = excludedExchanges;
-  styleExclusionsRef.current = styleExclusions;
 
   // ---- Field handlers (each handler: update local state THEN save)
 
