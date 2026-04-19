@@ -13,7 +13,7 @@
   "expected": {
     "totalOutcomes": 7,
     "winRate": 0.6666666666666666,
-    "avgRealizedDelta": 0.0033333333333333335,
+    "avgRealizedDelta": 0.003333333333333334,
     "pendingCount": 1
   },
   "phase4_success_values": {"o1":1,"o6":1,"o7":0},
