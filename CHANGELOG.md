@@ -43,6 +43,10 @@ dedicated widget. First allocator-facing release where the loop is genuinely clo
   sparkline curves rebased to 100 at allocated_at. Rate-limited via a dedicated
   `bridgeOutcomeCurvesLimiter` (60/min/user) so curve exploration doesn't share
   budget with sensitive POSTs.
+- **`worker:dev`** npm script runs the analytics worker locally against
+  `analytics-service/.env`. The worker now calls `load_dotenv()` at startup
+  (no-op on Railway where env vars are injected directly), so local runs
+  pick up credentials without a separate `export` step.
 
 ### Changed
 
@@ -68,6 +72,29 @@ dedicated widget. First allocator-facing release where the loop is genuinely clo
 
 ### Fixed
 
+- **Analytics worker watchdog silently failed.** `reset_stalled_compute_jobs`
+  was receiving `p_per_kind_overrides` as a `json.dumps()` string, which
+  PostgREST coerced to a JSONB scalar; `jsonb_object_keys()` inside the RPC
+  then raised "cannot call ... on a scalar" every cycle. Worker now passes
+  the native dict so PostgREST can coerce it to a JSONB object. Regression
+  test asserts `isinstance(params["p_per_kind_overrides"], dict)`.
+- **Feedback engine looked up score breakdowns by a nonexistent column.**
+  `_fetch_score_breakdowns` ordered `match_candidates` by `created_at`, a
+  column that does not exist on that table. Rewrite resolves batches
+  newest-first via `match_batches.computed_at`, then filters candidates by
+  `batch_id`. "First-seen-wins" dedup preserved through batch-ordered
+  iteration; all 41 feedback-engine + main-worker tests pass through the
+  new chain.
+- **Dashboard chart widgets flashed a blank frame on mount.** 15
+  `<ResponsiveContainer>` widgets across the allocation / attribution /
+  performance / positions / risk tabs now seed `initialDimension={{
+  width: 100, height: 100 }}`. Previously each chart held a blank frame
+  until recharts' ResizeObserver reported real dimensions; charts now
+  paint immediately and snap to real size.
+- **MandateSlider lacked an accessible name for automated scanners.** The
+  visible `<label htmlFor>` already associated a name, but some a11y
+  scanners only read attributes on the input itself. Added `aria-label={label}`
+  to every slider with a regression test asserting the attribute.
 - **OutcomesWidget was stuck in a loading skeleton** because the `outcomes` key
   from `getMyAllocationDashboard()` was dropped by `page.tsx` destructure and
   never threaded through `AllocationDashboard` into `widgetData`. Found by /qa,
