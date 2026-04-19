@@ -102,7 +102,7 @@ export function TailRisk({ data }: WidgetProps) {
       </div>
 
       <div className="flex-1">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
           <BarChart
             data={histogram}
             margin={{ top: 5, right: 10, bottom: 5, left: 0 }}

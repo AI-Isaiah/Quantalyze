@@ -154,7 +154,7 @@ export function CorrelationOverTime({ data }: WidgetProps) {
 
   return (
     <div data-testid="correlation-over-time" className="h-full">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
         <LineChart
           data={chartData}
           margin={{ top: 5, right: 10, bottom: 5, left: 0 }}

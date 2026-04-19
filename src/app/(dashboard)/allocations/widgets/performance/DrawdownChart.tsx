@@ -42,7 +42,7 @@ export default function DrawdownChart({ data }: WidgetProps) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height="100%">
+    <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
       <AreaChart data={drawdownData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <defs>
           <linearGradient id="dd-fill" x1="0" y1="0" x2="0" y2="1">

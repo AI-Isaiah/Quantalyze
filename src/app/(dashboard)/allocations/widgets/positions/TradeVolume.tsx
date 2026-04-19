@@ -77,7 +77,7 @@ export default function TradeVolume({ data }: WidgetProps) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
           <BarChart data={volumeByDay}>
             <CartesianGrid strokeDasharray="3 3" stroke={CHART_BORDER} vertical={false} />
             <XAxis

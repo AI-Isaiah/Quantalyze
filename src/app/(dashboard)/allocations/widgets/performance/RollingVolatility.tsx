@@ -51,7 +51,7 @@ export default function RollingVolatility({ data }: WidgetProps) {
   }
 
   return (
-    <ResponsiveContainer width="100%" height="100%">
+    <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
       <LineChart data={merged} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="date"
