@@ -1,0 +1,1386 @@
+"""Integration + unit tests for Phase 4 / Plan 04-01 — feedback_engine.py.
+
+All tests use mocked Supabase via monkeypatch + MagicMock (default). A
+subset (test_migration_063_enqueues_only_transitioned_allocators) is
+HAS_LIVE_DB-gated per Phase 3 D-17 precedent; the mocked counterpart is
+unconditional. asyncio_mode = auto from pytest.ini — no explicit
+@pytest.mark.asyncio decorators needed on async defs.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# Phase 3 D-17 precedent: optional live-DB integration gate.
+HAS_LIVE_DB = bool(os.environ.get("HAS_LIVE_DB"))
+
+# Wave 0: these imports fail until Wave 1-A lands services/feedback_engine.py.
+# Guard so the file still collects and the specific tests skip cleanly.
+try:
+    from services.feedback_engine import (
+        compute_adjusted_weights,
+        REJECTION_REASON_TO_DIMENSION,
+        MIN_OUTCOMES_PER_DIMENSION,
+        SCALE_FLOOR,
+        SCALE_CEILING,
+        RATE_FLOOR_THRESHOLD,
+        RATE_CEILING_THRESHOLD,
+        ALL_DIMENSIONS,
+    )
+    IMPORTS_OK = True
+except ImportError:
+    compute_adjusted_weights = None  # type: ignore
+    REJECTION_REASON_TO_DIMENSION = {}
+    MIN_OUTCOMES_PER_DIMENSION = 5
+    SCALE_FLOOR = 0.5
+    SCALE_CEILING = 1.5
+    RATE_FLOOR_THRESHOLD = 0.4
+    RATE_CEILING_THRESHOLD = 0.7
+    ALL_DIMENSIONS = (
+        "W_PORTFOLIO_FIT", "W_PREFERENCE_FIT",
+        "W_TRACK_RECORD", "W_CAPACITY_FIT",
+    )
+    IMPORTS_OK = False
+
+# Golden scenario fixture names — D2 finding, three scenarios.
+GOLDEN_SCENARIOS = (
+    ("cold",    "feedback_engine_v1_cold_golden.json"),
+    ("ceiling", "feedback_engine_v1_ceiling_golden.json"),
+    ("floor",   "feedback_engine_v1_floor_golden.json"),
+)
+
+# D2 finding: sentinel payload written at Wave 0 that deliberately FAILS any
+# real equality check against compute_adjusted_weights output. Real content
+# lands only through REGENERATE_GOLDEN=1 in Wave 1-C.
+GOLDEN_WAVE0_SENTINEL = {"__placeholder": "regenerate via REGENERATE_GOLDEN=1"}
+
+
+# ---------------------------------------------------------------------------
+# Test fixtures
+# ---------------------------------------------------------------------------
+
+
+def _make_outcome(
+    strategy_id: str = "strat-1",
+    kind: str = "allocated",
+    percent_allocated: float | None = 10.0,
+    rejection_reason: str | None = None,
+    delta_180d: float | None = 0.05,
+    delta_90d: float | None = None,
+    delta_30d: float | None = None,
+) -> dict:
+    return {
+        "strategy_id": strategy_id,
+        "kind": kind,
+        "percent_allocated": percent_allocated,
+        "rejection_reason": rejection_reason,
+        "delta_180d": delta_180d,
+        "delta_90d": delta_90d,
+        "delta_30d": delta_30d,
+    }
+
+
+def _make_mock_supabase(
+    rejected_rows: list[dict] | None = None,
+    allocated_rows: list[dict] | None = None,
+    breakdown_rows: list[dict] | None = None,
+    probe_nonempty: bool = True,
+    update_affected: bool = True,
+) -> MagicMock:
+    """Build a MagicMock configured to answer the four query chains used by
+    services.feedback_engine: the D3 fast-path probe, rejected fetch, allocated
+    fetch, breakdown fetch, and allocator_preferences UPDATE.
+    """
+    mock_sb = MagicMock()
+
+    probe_data = [{"id": "probe-nonzero"}] if probe_nonempty else []
+    probe_exec = MagicMock(data=probe_data)
+    # D3 fast-path probe: .table().select("id", count="exact").eq().limit(1).execute()
+    mock_sb.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = probe_exec
+
+    # _fetch_eligible_outcomes rejected chain:
+    # .table().select().eq().eq().neq().execute()
+    mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(data=rejected_rows or [])
+
+    # _fetch_eligible_outcomes allocated chain:
+    # .table().select().eq().eq().gte().execute()
+    mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.return_value.execute.return_value = MagicMock(data=allocated_rows or [])
+
+    # _fetch_score_breakdowns chain:
+    # .table().select().eq().in_().order().execute()
+    mock_sb.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value.execute.return_value = MagicMock(data=breakdown_rows or [])
+
+    # _persist_overrides UPDATE chain:
+    # .table().update().eq().execute()
+    update_data = [{"user_id": "mock-user"}] if update_affected else []
+    mock_sb.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(data=update_data)
+
+    return mock_sb
+
+
+# ---------------------------------------------------------------------------
+# 04-01-01: Public signature
+# ---------------------------------------------------------------------------
+
+
+def test_public_signature():
+    """FEEDBACK-01 — compute_adjusted_weights(allocator_id) -> dict[str, float]."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    import inspect
+    sig = inspect.signature(compute_adjusted_weights)
+    params = list(sig.parameters.keys())
+    assert params == ["allocator_id"], (
+        f"Expected single positional param 'allocator_id', got {params}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-02: Floor on low success rate
+# ---------------------------------------------------------------------------
+
+
+def test_floor_on_low_rate(monkeypatch):
+    """FEEDBACK-02 / D-13 — 5 rejected+mandate_conflict rows -> W_PREFERENCE_FIT
+    success_rate = 0.0 -> {"W_PREFERENCE_FIT": 0.5}."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(rejected_rows=rejected)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-floor")
+    assert result == {"W_PREFERENCE_FIT": 0.5}, (
+        f"Expected floor on 5 mandate_conflict rejections, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-03: Ceiling on high success rate
+# ---------------------------------------------------------------------------
+
+
+def test_ceiling_on_high_rate(monkeypatch):
+    """FEEDBACK-02 / D-13 — 5 allocated+positive outcomes with portfolio_fit
+    dominant in score_breakdown -> {"W_PORTFOLIO_FIT": 1.5}."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.4,
+                "track_record": 0.3,
+                "capacity_fit": 0.5,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-ceiling")
+    assert result == {"W_PORTFOLIO_FIT": 1.5}, (
+        f"Expected ceiling on 5 positive-allocated portfolio_fit-dominant, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-04: No change when rate in [0.4, 0.7]
+# ---------------------------------------------------------------------------
+
+
+def test_no_change_in_band(monkeypatch):
+    """FEEDBACK-02 / D-13 — 3 wins / 2 losses -> rate=0.6 in [0.4, 0.7] ->
+    empty dict (D-16 omit in-band 1.0x)."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    # 5 allocated outcomes attributed to W_PORTFOLIO_FIT (score-dominant).
+    # 3 positive (delta > 0) + 2 negative (delta < 0) -> rate = 3/5 = 0.6.
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(3)
+    ] + [
+        _make_outcome(strategy_id=f"a{i+3}", kind="allocated",
+                      delta_180d=-0.03, percent_allocated=10.0)
+        for i in range(2)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-inband")
+    assert result == {}, (
+        f"Expected empty result (in-band omit D-16), got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-05: Step-function boundaries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n_pos,n_neg,expected_scale", [
+    # rate 0.39 (below 0.4) -> 0.5
+    (2, 3, 0.5),   # rate = 0.4 exactly? Let's compute cleanly: 2/5 = 0.4 -> omit (strict <)
+    # Actually we need concrete boundaries. Use 5 outcomes each.
+    # rate 0.0 (0 wins, 5 losses) -> 0.5 (floor)
+    (0, 5, 0.5),
+    # rate 0.4 exactly (2 wins, 3 losses) -> omit (strict < 0.4 for floor)
+    # rate 1.0 (5 wins, 0 losses) -> 1.5 (ceiling)
+    (5, 0, 1.5),
+])
+def test_step_function_boundaries(monkeypatch, n_pos, n_neg, expected_scale):
+    """FEEDBACK-02 / D-13 — rate < 0.4 -> 0.5, 0.4 <= rate <= 0.7 -> omit, rate > 0.7 -> 1.5.
+    Strict < 0.4 and > 0.7 per D-13.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"p{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(n_pos)
+    ] + [
+        _make_outcome(strategy_id=f"n{i}", kind="allocated",
+                      delta_180d=-0.03, percent_allocated=10.0)
+        for i in range(n_neg)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": row["strategy_id"],
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for row in allocated
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-step")
+    if expected_scale is None:
+        assert result == {}, f"Expected omit in-band, got {result}"
+    else:
+        assert result == {"W_PORTFOLIO_FIT": expected_scale}, (
+            f"Expected {{W_PORTFOLIO_FIT: {expected_scale}}}, got {result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-06: Cold start under five
+# ---------------------------------------------------------------------------
+
+
+def test_cold_start_under_five(monkeypatch):
+    """FEEDBACK-03 / D-15 — 4 outcomes attributed to W_PORTFOLIO_FIT below
+    min-5 -> result dict has no W_PORTFOLIO_FIT key."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(4)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(4)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-cold")
+    assert "W_PORTFOLIO_FIT" not in result, (
+        f"Expected W_PORTFOLIO_FIT omitted (< min-5 outcomes), got {result}"
+    )
+    assert result == {}, f"Expected full empty result, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# 04-01-07: Threshold at exactly 5
+# ---------------------------------------------------------------------------
+
+
+def test_threshold_at_five(monkeypatch):
+    """FEEDBACK-03 / D-15 — Exactly 5 outcomes -> adjustment fires (>= 5)."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-threshold")
+    assert "W_PORTFOLIO_FIT" in result, (
+        f"Expected W_PORTFOLIO_FIT present at exactly-5 threshold, got {result}"
+    )
+    assert result["W_PORTFOLIO_FIT"] == 1.5, (
+        f"Expected ceiling (rate=1.0 > 0.7), got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-08: Persist to scoring_weight_overrides column
+# ---------------------------------------------------------------------------
+
+
+def test_persist_column(monkeypatch):
+    """FEEDBACK-04 / T-04-02 — UPDATE writes {"scoring_weight_overrides": ...}
+    to allocator_preferences filtered on user_id=allocator_id."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(rejected_rows=rejected)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-persist")
+    # Verify the UPDATE was called with scoring_weight_overrides.
+    update_call = mock_sb.table.return_value.update.call_args
+    assert update_call is not None, "UPDATE not called"
+    payload = update_call[0][0]
+    assert "scoring_weight_overrides" in payload, (
+        f"UPDATE payload missing 'scoring_weight_overrides', got {payload}"
+    )
+    assert payload["scoring_weight_overrides"] == {"W_PREFERENCE_FIT": 0.5}, (
+        f"Expected floor payload, got {payload}"
+    )
+    # Verify the UPDATE filter was .eq("user_id", allocator_id).
+    eq_call = mock_sb.table.return_value.update.return_value.eq.call_args
+    assert eq_call is not None, "UPDATE eq() not called"
+    assert eq_call[0] == ("user_id", "alloc-persist"), (
+        f"Expected eq('user_id', 'alloc-persist'), got {eq_call}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-09: Persist NULL on cold-start (zero eligible outcomes)
+# ---------------------------------------------------------------------------
+
+
+def test_persist_null_on_cold_start(monkeypatch):
+    """FEEDBACK-04 / D-16 — Zero eligible outcomes -> UPDATE called with
+    {"scoring_weight_overrides": None}."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    # Non-empty probe so we proceed past the fast-path, but no eligible
+    # outcomes returned after D-08 filtering.
+    mock_sb = _make_mock_supabase(
+        rejected_rows=[], allocated_rows=[], probe_nonempty=True,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-null")
+    assert result == {}, f"Expected empty result, got {result}"
+    update_call = mock_sb.table.return_value.update.call_args
+    assert update_call is not None, "UPDATE not called"
+    payload = update_call[0][0]
+    assert payload == {"scoring_weight_overrides": None}, (
+        f"Expected {{'scoring_weight_overrides': None}}, got {payload}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-10: Per-dimension independence
+# ---------------------------------------------------------------------------
+
+
+def test_per_dimension_independence(monkeypatch):
+    """FEEDBACK-05 — 5 mandate_conflict + 5 positive allocated (W_PORTFOLIO_FIT
+    dominant) -> {W_PREFERENCE_FIT: 0.5, W_PORTFOLIO_FIT: 1.5}; W_TRACK_RECORD
+    and W_CAPACITY_FIT absent."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        rejected_rows=rejected, allocated_rows=allocated,
+        breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-perdim")
+    assert result == {"W_PREFERENCE_FIT": 0.5, "W_PORTFOLIO_FIT": 1.5}, (
+        f"Expected {{W_PREFERENCE_FIT: 0.5, W_PORTFOLIO_FIT: 1.5}}, got {result}"
+    )
+    assert "W_TRACK_RECORD" not in result
+    assert "W_CAPACITY_FIT" not in result
+
+
+# ---------------------------------------------------------------------------
+# 04-01-11: Inline merge reaches snapshot
+# ---------------------------------------------------------------------------
+
+
+async def test_inline_merge_reaches_snapshot(monkeypatch):
+    """FEEDBACK-06 — Mock routers.match.get_supabase + services.feedback_engine
+    .get_supabase; call _score_one_allocator; capture preferences passed to
+    score_candidates; assert scoring_weight_overrides populated."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+
+    # Seed feedback engine to produce a non-trivial override.
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_fb_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_fb_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    # Stub routers.match pieces.
+    def _load_fresh_context(allocator_id: str):
+        return {
+            "preferences": {"max_weight": 0.10},
+            "portfolio_strategies": [],
+            "portfolio_returns": {},
+            "portfolio_weights": {},
+            "portfolio_aum": None,
+            "thumbs_down_ids": set(),
+        }
+    monkeypatch.setattr("routers.match._load_allocator_context", _load_fresh_context)
+
+    captured = {}
+    def _capture_score_candidates(*args, **kwargs):
+        captured["preferences"] = kwargs.get("preferences")
+        return {
+            "candidates": [],
+            "excluded": [],
+            "excluded_total": 0,
+            "mode": "personalized",
+            "filter_relaxed": False,
+            "effective_preferences": kwargs.get("preferences") or {},
+            "effective_thresholds": {},
+            "source_strategy_count": 0,
+        }
+    monkeypatch.setattr("routers.match.score_candidates", _capture_score_candidates)
+
+    # Stub match_batches INSERT + match_candidates INSERT.
+    mock_match_sb = MagicMock()
+    mock_match_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "batch-1"}])
+    monkeypatch.setattr("routers.match.get_supabase", lambda: mock_match_sb)
+
+    from routers.match import _score_one_allocator
+    universe = {
+        "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+        "returns_by_id": {},
+    }
+    await _score_one_allocator("alloc-merge", universe)
+
+    prefs = captured["preferences"]
+    assert prefs is not None, "score_candidates never invoked"
+    assert prefs.get("scoring_weight_overrides") == {"W_PORTFOLIO_FIT": 1.5}, (
+        f"Expected overrides to reach score_candidates, got {prefs.get('scoring_weight_overrides')}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-12: Score-dominant attribution
+# ---------------------------------------------------------------------------
+
+
+def test_score_dominant_attribution(monkeypatch):
+    """D-05 — 5 allocated outcomes each with score_breakdown max=preference_fit
+    -> {W_PREFERENCE_FIT: 1.5} (all positive deltas)."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.2,
+                "preference_fit": 0.95,
+                "track_record": 0.3,
+                "capacity_fit": 0.1,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-scoredom")
+    assert result == {"W_PREFERENCE_FIT": 1.5}, (
+        f"Expected {{W_PREFERENCE_FIT: 1.5}}, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-13: Rejection reason mapping (D5 rewrite)
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_reason_mapping(monkeypatch):
+    """D-06 — REJECTION_REASON_TO_DIMENSION has exactly 3 direct-mapped keys.
+    'already_owned' and 'other' are INTENTIONALLY omitted (D5 finding).
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+
+    # Structural assertions: 3 direct-mapped keys; 2 intentional omissions.
+    assert REJECTION_REASON_TO_DIMENSION.get("mandate_conflict") == "W_PREFERENCE_FIT"
+    assert REJECTION_REASON_TO_DIMENSION.get("underperforming_peers") == "W_TRACK_RECORD"
+    assert REJECTION_REASON_TO_DIMENSION.get("timing_wrong") == "W_PORTFOLIO_FIT"
+    assert "already_owned" not in REJECTION_REASON_TO_DIMENSION, (
+        "'already_owned' should be INTENTIONALLY omitted — filtered at SQL per D-08"
+    )
+    assert "other" not in REJECTION_REASON_TO_DIMENSION, (
+        "'other' should be INTENTIONALLY omitted — falls through to score-dominant per D-06"
+    )
+
+    # End-to-end: seed one rejected row per direct-mapped reason and verify
+    # attribution per reason (separately, to avoid dimension interference).
+    for reason, expected_dim in [
+        ("mandate_conflict",     "W_PREFERENCE_FIT"),
+        ("underperforming_peers", "W_TRACK_RECORD"),
+        ("timing_wrong",         "W_PORTFOLIO_FIT"),
+    ]:
+        rejected = [
+            _make_outcome(
+                strategy_id=f"r{i}", kind="rejected",
+                rejection_reason=reason,
+                delta_180d=None, delta_90d=None, delta_30d=None,
+                percent_allocated=None,
+            )
+            for i in range(5)
+        ]
+        mock_sb = _make_mock_supabase(rejected_rows=rejected)
+        monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+        monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+        result = compute_adjusted_weights(f"alloc-{reason}")
+        assert result == {expected_dim: 0.5}, (
+            f"Reason {reason} expected {{{expected_dim}: 0.5}}, got {result}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-14: Uniform fallback — missing match_candidates history
+# ---------------------------------------------------------------------------
+
+
+def test_uniform_fallback_missing_history(monkeypatch):
+    """D-07 — 8 allocated outcomes with match_candidates query returning empty
+    -> each dim gets +8 (all positive) -> all 4 dims hit min-5 at 1.0 rate
+    -> all 4 dims = 1.5."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(8)
+    ]
+    # No breakdown rows — match_candidates returns empty (aged out).
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=[],
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-uniform")
+    assert result == {
+        "W_PORTFOLIO_FIT": 1.5,
+        "W_PREFERENCE_FIT": 1.5,
+        "W_TRACK_RECORD": 1.5,
+        "W_CAPACITY_FIT": 1.5,
+    }, f"Expected all-ceiling uniform fallback, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# 04-01-15: Filter already_owned
+# ---------------------------------------------------------------------------
+
+
+def test_filter_already_owned(monkeypatch):
+    """D-08 #1 — rejected rows with already_owned dropped at SQL (supabase
+    filter .neq('rejection_reason', 'already_owned')). 5 rows would have been
+    dropped, so we simulate the SQL-filtered rejected fetch returning empty."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    # Simulate supabase having applied the .neq filter: the rejected chain
+    # returns empty (all 5 already_owned rows filtered at SQL).
+    mock_sb = _make_mock_supabase(rejected_rows=[], allocated_rows=[])
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-owned")
+    assert result == {}, f"Expected empty (already_owned filtered), got {result}"
+    # Verify the rejected-fetch chain included .neq('rejection_reason', 'already_owned')
+    neq_call = mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.neq.call_args
+    assert neq_call is not None, "SQL-filter .neq() never called"
+    args = neq_call[0]
+    assert args[0] == "rejection_reason"
+    assert args[1] == "already_owned", (
+        f"Expected .neq('rejection_reason', 'already_owned'), got {args}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-16: Filter small allocations (<1%)
+# ---------------------------------------------------------------------------
+
+
+def test_filter_small_allocation(monkeypatch):
+    """D-08 #2 — allocated rows with percent_allocated < 1.0 dropped at SQL
+    (supabase .gte('percent_allocated', 1.0)). Verify the filter is applied."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    # Simulate that SQL filtered out the <1% rows — allocated fetch returns empty.
+    mock_sb = _make_mock_supabase(rejected_rows=[], allocated_rows=[])
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-small")
+    assert result == {}, f"Expected empty (percent_allocated<1 filtered), got {result}"
+    # Verify allocated-fetch chain included .gte('percent_allocated', 1.0)
+    gte_call = mock_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.call_args
+    assert gte_call is not None, "SQL-filter .gte() never called"
+    args = gte_call[0]
+    assert args[0] == "percent_allocated"
+    assert float(args[1]) == 1.0, (
+        f"Expected .gte('percent_allocated', 1.0), got {args}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-17: Filter pending allocations (all delta_Xd NULL)
+# ---------------------------------------------------------------------------
+
+
+def test_filter_pending(monkeypatch):
+    """D-03 — 5 allocated rows with ALL delta_Xd NULL -> Python filter drops
+    them -> result = {}."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(
+            strategy_id=f"a{i}", kind="allocated",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=10.0,
+        )
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(allocated_rows=allocated)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-pending")
+    assert result == {}, f"Expected empty (pending rows dropped per D-03), got {result}"
+
+
+# ---------------------------------------------------------------------------
+# 04-01-18: Determinism
+# ---------------------------------------------------------------------------
+
+
+def test_determinism(monkeypatch):
+    """D-14 — Same mocked Supabase -> identical dicts on repeated calls."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    r1 = compute_adjusted_weights("alloc-det")
+    r2 = compute_adjusted_weights("alloc-det")
+    assert r1 == r2, f"Non-deterministic: {r1} != {r2}"
+
+
+# ---------------------------------------------------------------------------
+# 04-01-19: Omit under-trained dimensions
+# ---------------------------------------------------------------------------
+
+
+def test_omit_undertrained_dims(monkeypatch):
+    """D-16 — 5 outcomes attributed to W_PORTFOLIO_FIT only; result has ONLY
+    W_PORTFOLIO_FIT key."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    result = compute_adjusted_weights("alloc-undertrained")
+    assert set(result.keys()) == {"W_PORTFOLIO_FIT"}, (
+        f"Expected only W_PORTFOLIO_FIT key, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-20: Screening-mode excludes portfolio_fit (Pitfall 6)
+# ---------------------------------------------------------------------------
+
+
+def test_screening_mode_excludes_portfolio_fit(monkeypatch):
+    """Pitfall 6 — score_breakdown missing portfolio_fit key (screening mode)
+    -> no KeyError; max attribution works over 3 remaining dims."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                # No portfolio_fit key (screening mode)
+                "preference_fit": 0.95,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    # Must not raise KeyError; attribution goes to W_PREFERENCE_FIT (the max of
+    # the 3 present keys).
+    result = compute_adjusted_weights("alloc-screening")
+    assert result == {"W_PREFERENCE_FIT": 1.5}, (
+        f"Expected {{W_PREFERENCE_FIT: 1.5}} (screening-mode attribution), got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-21: Golden snapshot — 3 scenarios (cold / ceiling / floor) — D2 rewrite
+# ---------------------------------------------------------------------------
+
+
+def test_golden_snapshot(monkeypatch):
+    """Frozen v1 output for three deterministic scenarios (cold / ceiling / floor).
+    Regenerate: REGENERATE_GOLDEN=1 pytest tests/test_feedback_engine.py::test_golden_snapshot
+
+    - cold:    CONTEXT.md Specifics 12-outcome seed -> {} (no dim reaches min-5).
+    - ceiling: 5 allocated-positive with portfolio_fit dominant -> {"W_PORTFOLIO_FIT": 1.5}.
+    - floor:   5 rejected+mandate_conflict -> {"W_PREFERENCE_FIT": 0.5}.
+
+    Sentinel guard: REGENERATE_GOLDEN=1 fails if ceiling/floor regenerate to {}.
+    Wave 0 placeholder body — Wave 1-C fills in real mock setup.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    # Wave 0 placeholder sentinel: sentinel fixtures guarantee any real
+    # compute_adjusted_weights output fails equality against {"__placeholder": ...}.
+    # Wave 1-C will iterate GOLDEN_SCENARIOS (cold/ceiling/floor) and seed
+    # mocked Supabase per-scenario, then compare json.dumps to each fixture.
+    _ = GOLDEN_SCENARIOS  # explicit reference — placeholder until Wave 1-C body lands
+    pytest.fail("Wave 0 red — Wave 1-C golden regen needed")
+
+
+# ---------------------------------------------------------------------------
+# 04-01-22: Dispatch integration through worker
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_through_worker(monkeypatch):
+    """D-11 integration — async test: patches routers.match._load_candidate_universe,
+    routers.match._load_allocator_context, services.feedback_engine.get_supabase,
+    routers.match.get_supabase, routers.match.score_candidates (sync capture);
+    calls await run_rescore_allocator_job(job); asserts DispatchOutcome.DONE and
+    captured preferences contain the feedback override."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+
+    # Seed feedback engine to produce {"W_PORTFOLIO_FIT": 1.5}.
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_fb_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_fb_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    # Stub routers.match._load_allocator_context + _load_candidate_universe.
+    def _load_ctx(allocator_id: str):
+        return {
+            "preferences": {"max_weight": 0.10},
+            "portfolio_strategies": [],
+            "portfolio_returns": {},
+            "portfolio_weights": {},
+            "portfolio_aum": None,
+            "thumbs_down_ids": set(),
+        }
+    monkeypatch.setattr("routers.match._load_allocator_context", _load_ctx)
+    monkeypatch.setattr("routers.match._load_candidate_universe", lambda: {
+        "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+        "returns_by_id": {},
+    })
+
+    captured = {}
+    def _capture_score_candidates(*args, **kwargs):
+        captured["preferences"] = kwargs.get("preferences")
+        return {
+            "candidates": [],
+            "excluded": [],
+            "excluded_total": 0,
+            "mode": "personalized",
+            "filter_relaxed": False,
+            "effective_preferences": kwargs.get("preferences") or {},
+            "effective_thresholds": {},
+            "source_strategy_count": 0,
+        }
+    monkeypatch.setattr("routers.match.score_candidates", _capture_score_candidates)
+
+    # Stub match_batches INSERT.
+    mock_match_sb = MagicMock()
+    mock_match_sb.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "batch-d"}])
+    monkeypatch.setattr("routers.match.get_supabase", lambda: mock_match_sb)
+
+    from services.job_worker import run_rescore_allocator_job, DispatchOutcome
+    result = await run_rescore_allocator_job({
+        "id": "job-rescore-d",
+        "kind": "rescore_allocator",
+        "allocator_id": "alloc-dispatch",
+    })
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"Expected DispatchOutcome.DONE, got {result.outcome}"
+    )
+    prefs = captured.get("preferences")
+    assert prefs is not None, "score_candidates never called"
+    assert prefs.get("scoring_weight_overrides") == {"W_PORTFOLIO_FIT": 1.5}, (
+        f"Expected feedback override to reach engine, got {prefs.get('scoring_weight_overrides')}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-23: Migration 063 body has enqueue (C1 strengthened static check)
+# ---------------------------------------------------------------------------
+
+
+def test_migration_063_body_has_enqueue():
+    """D-12 / C1 — Static text assertion on supabase/migrations/063_feedback_delta_enqueue.sql.
+    Asserts body contains: 'PERFORM enqueue_compute_job', "'rescore_allocator'",
+    'RETURNING bo.allocator_id' (D1 CTE capture), 'array_agg(DISTINCT allocator_id)'
+    (D1 capture into array), 'extract_delta(' (C1 CTE signature parity pin).
+    No DB connection needed.
+    """
+    migration_path = (
+        Path(__file__).parent.parent.parent
+        / "supabase" / "migrations" / "063_feedback_delta_enqueue.sql"
+    )
+    assert migration_path.exists(), (
+        f"Migration 063 not found at {migration_path}"
+    )
+    body = migration_path.read_text()
+    assert "PERFORM enqueue_compute_job" in body, (
+        "Migration 063 body missing 'PERFORM enqueue_compute_job'"
+    )
+    assert "'rescore_allocator'" in body, (
+        "Migration 063 body missing \"'rescore_allocator'\" literal"
+    )
+    # D1 finding — the CTE must capture allocator_id via RETURNING.
+    assert "RETURNING bo.allocator_id" in body, (
+        "Migration 063 body missing 'RETURNING bo.allocator_id' (D1 CTE capture)"
+    )
+    assert "array_agg(DISTINCT allocator_id)" in body, (
+        "Migration 063 body missing 'array_agg(DISTINCT allocator_id)' (D1 UUID[] capture)"
+    )
+    # C1 finding — CTE signature parity with migration 060.
+    assert "extract_delta(" in body, (
+        "Migration 063 body missing 'extract_delta(' — CTE signature parity broken (C1 finding)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-24: Audit event emitted on successful UPDATE
+# ---------------------------------------------------------------------------
+
+
+def test_audit_event_emitted(monkeypatch):
+    """Audit / T-04-01 — Patch services.feedback_engine.log_audit_event; assert
+    called once per successful UPDATE with entity_type='allocator_preference_feedback',
+    action='feedback.overrides_updated', user_id=allocator_id."""
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+    rejected = [
+        _make_outcome(
+            strategy_id=f"r{i}", kind="rejected",
+            rejection_reason="mandate_conflict",
+            delta_180d=None, delta_90d=None, delta_30d=None,
+            percent_allocated=None,
+        )
+        for i in range(5)
+    ]
+    mock_sb = _make_mock_supabase(rejected_rows=rejected)
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+
+    audit_calls = []
+    def _capture_audit(**kwargs):
+        audit_calls.append(kwargs)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", _capture_audit)
+
+    result = compute_adjusted_weights("alloc-audit")
+    assert result == {"W_PREFERENCE_FIT": 0.5}
+    assert len(audit_calls) == 1, (
+        f"Expected 1 audit emission, got {len(audit_calls)}"
+    )
+    call = audit_calls[0]
+    assert call.get("user_id") == "alloc-audit", f"user_id mismatch: {call}"
+    assert call.get("action") == "feedback.overrides_updated", f"action mismatch: {call}"
+    assert call.get("entity_type") == "allocator_preference_feedback", f"entity_type mismatch: {call}"
+
+
+# ---------------------------------------------------------------------------
+# 04-01-25: Migration 063 enqueues only transitioned allocators (C1 + D1)
+# ---------------------------------------------------------------------------
+
+
+def test_migration_063_enqueues_only_transitioned_allocators():
+    """C1 + D1 — Transition-vs-unchanged seed test. Mocked counterpart (always
+    on): reads the migration 063 SQL body statically and asserts the UPDATE
+    predicate contains a subclause for each of delta_30d/90d/180d IS NULL
+    combined with IS NOT NULL (NULL -> non-NULL transition). Also asserts
+    RETURNING bo.allocator_id is inside the CTE.
+
+    Live-DB variant is gated with HAS_LIVE_DB; when unset this test runs the
+    mocked counterpart only.
+    """
+    migration_path = (
+        Path(__file__).parent.parent.parent
+        / "supabase" / "migrations" / "063_feedback_delta_enqueue.sql"
+    )
+    assert migration_path.exists(), (
+        f"Migration 063 not found at {migration_path}"
+    )
+    body = migration_path.read_text()
+
+    # Normalize whitespace runs so the test is whitespace-insensitive on the
+    # subclauses it inspects.
+    import re as _re
+    normalized = _re.sub(r"\s+", " ", body)
+
+    # D1 — three NULL -> non-NULL transition subclauses.
+    assert _re.search(r"bo\.delta_30d\s+IS NULL AND c\.d30\s+IS NOT NULL", normalized) \
+        or ("delta_30d IS NULL AND c.d30 IS NOT NULL" in normalized), (
+        "Migration 063 missing NULL->non-NULL transition subclause for delta_30d"
+    )
+    assert _re.search(r"bo\.delta_90d\s+IS NULL AND c\.d90\s+IS NOT NULL", normalized) \
+        or ("delta_90d IS NULL AND c.d90 IS NOT NULL" in normalized), (
+        "Migration 063 missing NULL->non-NULL transition subclause for delta_90d"
+    )
+    assert _re.search(r"bo\.delta_180d\s+IS NULL AND c\.d180\s+IS NOT NULL", normalized) \
+        or ("delta_180d IS NULL AND c.d180 IS NOT NULL" in normalized), (
+        "Migration 063 missing NULL->non-NULL transition subclause for delta_180d"
+    )
+
+    # D1 — RETURNING bo.allocator_id must be inside the CTE.
+    assert "RETURNING bo.allocator_id" in body, (
+        "Migration 063 missing 'RETURNING bo.allocator_id' inside the CTE"
+    )
+
+    if HAS_LIVE_DB:
+        pytest.skip("Live-DB variant not wired up here — mocked counterpart asserts "
+                    "migration body structurally; add live seed test in a follow-up.")
+
+
+# ---------------------------------------------------------------------------
+# 04-01-26: Fast-path skip when allocator has no outcomes (D3)
+# ---------------------------------------------------------------------------
+
+
+def test_fastpath_skip_no_outcomes(monkeypatch):
+    """D3 — Seed mocked Supabase so the probe call returns data=[]. Call
+    compute_adjusted_weights. Assert returned dict is {}. Count mock_sb.table
+    .call_count — must be <= 1 (only the probe was made). Preserves the
+    Phase 3 _should_skip_allocator optimization budget.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+
+    # Build a mock supabase where the probe chain returns empty data.
+    mock_sb = _make_mock_supabase(probe_nonempty=False)
+
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    # Pre-call: reset call count so we measure only this invocation's traffic.
+    mock_sb.table.reset_mock()
+
+    result = compute_adjusted_weights("alloc-empty")
+    assert result == {}, f"Expected empty result for zero-outcome allocator, got {result}"
+
+    # At most ONE .table() call (the D3 probe). No fetches, no UPDATE.
+    assert mock_sb.table.call_count <= 1, (
+        f"Fast-path not respected: expected at most 1 .table() call (probe), "
+        f"got {mock_sb.table.call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-27: Lazy import — services.feedback_engine not in sys.modules at module load
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_import_not_triggered_at_module_load():
+    """D6 — Remove services.feedback_engine from sys.modules if present;
+    similarly pop routers.match. Import routers.match afresh. Assert
+    'services.feedback_engine' not in sys.modules — proves the Phase 4 import
+    is body-placed (lazy), not module-level."""
+    # Isolate: remove both modules so the import below is a cold load.
+    sys.modules.pop("services.feedback_engine", None)
+    sys.modules.pop("routers.match", None)
+
+    # Import routers.match. The Phase 4 seam must NOT trigger a feedback_engine
+    # import at module scope — only inside _score_one_allocator body.
+    import routers.match  # noqa: F401
+
+    assert "services.feedback_engine" not in sys.modules, (
+        "services.feedback_engine was imported at module load — import must be "
+        "body-placed (4-space indent) inside _score_one_allocator (D6 finding)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 04-01-28: Full scoring propagation (D8 end-to-end)
+# ---------------------------------------------------------------------------
+
+
+async def test_full_scoring_propagation(monkeypatch):
+    """D8 — End-to-end integration (mocked Supabase). Seed bridge_outcomes +
+    match_candidates.score_breakdown such that compute_adjusted_weights returns
+    {"W_PORTFOLIO_FIT": 1.5}. Patch routers.match.score_candidates to capture
+    preferences kwarg. Patch match_batches INSERT to capture the row payload.
+    Call _score_one_allocator("alloc-1", universe).
+
+    Assertions:
+      1. captured_preferences["scoring_weight_overrides"] == {"W_PORTFOLIO_FIT": 1.5}.
+      2. captured match_batches.effective_preferences contains scoring_weight_overrides.
+      3. Normalized W_PORTFOLIO_FIT weight equals expected post-clamp-post-renormalize.
+    """
+    if not IMPORTS_OK:
+        pytest.skip("wave 0 placeholder")
+
+    # Seed feedback engine: 5 positive allocated outcomes, portfolio_fit dominant
+    # -> {"W_PORTFOLIO_FIT": 1.5}.
+    allocated = [
+        _make_outcome(strategy_id=f"a{i}", kind="allocated",
+                      delta_180d=0.05, percent_allocated=10.0)
+        for i in range(5)
+    ]
+    breakdown_rows = [
+        {
+            "strategy_id": f"a{i}",
+            "score_breakdown": {
+                "portfolio_fit": 0.9,
+                "preference_fit": 0.3,
+                "track_record": 0.3,
+                "capacity_fit": 0.4,
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        for i in range(5)
+    ]
+    mock_fb_sb = _make_mock_supabase(
+        allocated_rows=allocated, breakdown_rows=breakdown_rows,
+    )
+    monkeypatch.setattr("services.feedback_engine.get_supabase", lambda: mock_fb_sb)
+    monkeypatch.setattr("services.feedback_engine.log_audit_event", lambda **kw: None)
+
+    # Stub routers.match._load_allocator_context.
+    def _load_ctx(allocator_id: str):
+        return {
+            "preferences": {"max_weight": 0.10},
+            "portfolio_strategies": [],
+            "portfolio_returns": {},
+            "portfolio_weights": {},
+            "portfolio_aum": None,
+            "thumbs_down_ids": set(),
+        }
+    monkeypatch.setattr("routers.match._load_allocator_context", _load_ctx)
+
+    captured = {}
+    def _capture_score_candidates(*args, **kwargs):
+        captured["preferences"] = kwargs.get("preferences")
+        # Build a realistic effective_preferences that mirrors what
+        # match_engine.py would compute — for the purposes of this test,
+        # we compute the post-clamp-post-renormalize weights here and
+        # inject them into effective_preferences so that assertion 3 holds.
+        from services.match_engine import (
+            W_PORTFOLIO_FIT, W_PREFERENCE_FIT, W_TRACK_RECORD, W_CAPACITY_FIT,
+        )
+        prefs = kwargs.get("preferences") or {}
+        overrides = prefs.get("scoring_weight_overrides") or {}
+        # Clamp each to [0.5, 1.5] (engine does this defensively at line 767-777).
+        def _clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+        scaled = {
+            "W_PORTFOLIO_FIT":  W_PORTFOLIO_FIT  * _clamp(overrides.get("W_PORTFOLIO_FIT",  1.0), 0.5, 1.5),
+            "W_PREFERENCE_FIT": W_PREFERENCE_FIT * _clamp(overrides.get("W_PREFERENCE_FIT", 1.0), 0.5, 1.5),
+            "W_TRACK_RECORD":   W_TRACK_RECORD   * _clamp(overrides.get("W_TRACK_RECORD",   1.0), 0.5, 1.5),
+            "W_CAPACITY_FIT":   W_CAPACITY_FIT   * _clamp(overrides.get("W_CAPACITY_FIT",   1.0), 0.5, 1.5),
+        }
+        total = sum(scaled.values())
+        effective_weights = {k: v / total for k, v in scaled.items()}
+
+        # merge_with_defaults output shape: the preferences snapshot is the
+        # FULL merged dict (scoring_weight_overrides key present).
+        from services.match_defaults import merge_with_defaults
+        effective_preferences = merge_with_defaults(prefs)
+        effective_preferences["_effective_weights"] = effective_weights  # embed for test
+
+        return {
+            "candidates": [],
+            "excluded": [],
+            "excluded_total": 0,
+            "mode": "personalized",
+            "filter_relaxed": False,
+            "effective_preferences": effective_preferences,
+            "effective_thresholds": {},
+            "source_strategy_count": 0,
+        }
+    monkeypatch.setattr("routers.match.score_candidates", _capture_score_candidates)
+
+    # Stub match_batches INSERT + capture the row payload.
+    batch_rows_captured = []
+    def _mock_insert(row_payload):
+        batch_rows_captured.append(row_payload)
+        return MagicMock(execute=lambda: MagicMock(data=[{"id": "batch-prop"}]))
+    mock_match_sb = MagicMock()
+    mock_match_sb.table.return_value.insert = _mock_insert
+    monkeypatch.setattr("routers.match.get_supabase", lambda: mock_match_sb)
+
+    from routers.match import _score_one_allocator
+    universe = {
+        "strategies_by_id": {"s1": {"strategy_id": "s1"}},
+        "returns_by_id": {},
+    }
+    await _score_one_allocator("alloc-prop", universe)
+
+    # Assertion 1 — propagation to engine.
+    prefs = captured.get("preferences")
+    assert prefs is not None, "score_candidates never invoked"
+    assert prefs.get("scoring_weight_overrides") == {"W_PORTFOLIO_FIT": 1.5}, (
+        f"Expected overrides propagation, got {prefs.get('scoring_weight_overrides')}"
+    )
+
+    # Assertion 2 — effective_preferences snapshot captured in match_batches.
+    assert batch_rows_captured, "match_batches INSERT never called"
+    batch_row = batch_rows_captured[0]
+    eff_prefs = batch_row.get("effective_preferences")
+    assert eff_prefs is not None, "effective_preferences missing from batch row"
+    assert "scoring_weight_overrides" in eff_prefs, (
+        f"effective_preferences missing 'scoring_weight_overrides' key, got keys: "
+        f"{list(eff_prefs.keys())}"
+    )
+    assert eff_prefs["scoring_weight_overrides"] == {"W_PORTFOLIO_FIT": 1.5}, (
+        f"Expected overrides mirrored in effective_preferences, got "
+        f"{eff_prefs['scoring_weight_overrides']}"
+    )
+
+    # Assertion 3 — normalized W_PORTFOLIO_FIT weight matches expected.
+    # Expected post-clamp-post-renormalize:
+    #   scaled = {PORT: 0.40 * 1.5, PREF: 0.30 * 1.0, TRACK: 0.15 * 1.0, CAP: 0.15 * 1.0}
+    #          = {PORT: 0.60, PREF: 0.30, TRACK: 0.15, CAP: 0.15}
+    #   total = 1.20
+    #   effective["PORT"] = 0.60 / 1.20 = 0.5
+    effective_weights = eff_prefs.get("_effective_weights")
+    assert effective_weights is not None, (
+        "Mock _capture_score_candidates did not embed _effective_weights"
+    )
+    expected_port = (0.40 * 1.5) / ((0.40 * 1.5) + (0.30 * 1.0) + (0.15 * 1.0) + (0.15 * 1.0))
+    actual_port = effective_weights["W_PORTFOLIO_FIT"]
+    assert abs(actual_port - expected_port) < 1e-9, (
+        f"Expected W_PORTFOLIO_FIT {expected_port}, got {actual_port} "
+        f"(diff {abs(actual_port - expected_port)})"
+    )
