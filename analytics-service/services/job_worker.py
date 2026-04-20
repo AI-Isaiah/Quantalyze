@@ -129,6 +129,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "reconcile_strategy": 5 * 60,  # 5 minutes (fetch_my_trades + DB scan + diff)
     "compute_intro_snapshot": 2 * 60,  # 2 minutes (pure DB; no exchange I/O)
     "rescore_allocator": 5 * 60,  # Phase 3 / D-12 Option B — full universe scan per allocator
+    "poll_allocator_positions": 3 * 60,  # Phase 06 / INGEST-03 — same envelope as poll_positions
 }
 
 
@@ -352,6 +353,112 @@ async def _exchange_preflight(
         strategy_row=strategy_row,
         key_row=key_row,
         exchange=exchange,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Allocator-side preflight (Phase 06 — INGEST-03)
+# ---------------------------------------------------------------------------
+# f8 — Rate-limit contagion note:
+# _check_circuit_breaker is per-exchange, shared with strategy-side
+# poll_positions. A strategy-side 429 on Binance triggers a 120s cooldown
+# (or up to 600s on Bybit per EXCHANGE_COOLDOWNS) that ALSO blocks allocator
+# poll_allocator_positions on the same exchange. When this happens,
+# _check_circuit_breaker returns DispatchResult(outcome=DispatchOutcome.DEFERRED,
+# next_attempt_at=…) — a valid terminal state for THIS invocation that leaves
+# the pending compute_jobs row queued with api_keys.sync_status='syncing'. The
+# UI surfaces the queue state via the sync route's next_attempt_at (Plan 04
+# helper text: "Queued — retry in {N}s"). Per-(exchange, api_key_id) breaker
+# splitting is NOT in Phase 06 scope — tracked in PROJECT.md "Active —
+# Inherited deferrals" for a future phase.
+
+
+async def _allocator_key_preflight(
+    job: dict, handler_name: str
+) -> DispatchResult | _ExchangeContext:
+    """D-05: Allocator worker preflight — skips the strategy hop.
+
+    The allocator side does not own a strategy, so we load the api_key
+    directly via job['api_key_id']. Still runs the per-exchange circuit
+    breaker (f8 contagion accepted) and decrypts credentials before
+    constructing the CCXT exchange.
+    """
+    api_key_id = job.get("api_key_id")
+    if not api_key_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"{handler_name}: api_key_id missing",
+            error_kind="permanent",
+        )
+
+    kek = get_kek()
+    supabase = get_supabase()
+
+    def _load_key() -> dict | None:
+        res = (
+            supabase.table("api_keys")
+            .select("*")
+            .eq("id", api_key_id)
+            .maybe_single()
+            .execute()
+        )
+        return res.data
+
+    key_row = await db_execute(_load_key)
+    if not key_row:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"{handler_name}: api_key {api_key_id} not found",
+            error_kind="permanent",
+        )
+    if not key_row.get("is_active"):
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"{handler_name}: api_key {api_key_id} is inactive",
+            error_kind="permanent",
+        )
+
+    # f8 — this may return DEFERRED if the per-exchange breaker is cooling
+    # down from a strategy-side 429; that's valid and the UI surfaces it via
+    # next_attempt_at.
+    defer_result = await _check_circuit_breaker(supabase, job, key_row)
+    if defer_result is not None:
+        return defer_result
+
+    api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
+    exchange = create_exchange(
+        key_row["exchange"], api_key, api_secret, passphrase
+    )
+
+    return _ExchangeContext(
+        supabase=supabase,
+        strategy_row=None,      # allocator path has no strategy — reuse dataclass with None
+        key_row=key_row,
+        exchange=exchange,
+    )
+
+
+def _emit_audit(
+    allocator_id: str,
+    api_key_id: str,
+    action: str,
+    metadata: dict | None = None,
+) -> None:
+    """f7 — Route allocator.holdings.sync_* audit events through
+    services.audit.log_audit_event (NOT a local no-op).
+
+    Fire-and-forget; log_audit_event swallows all errors internally so
+    an audit drop never fails the compute path. The function is
+    re-imported locally rather than referenced at module scope so test
+    monkeypatches on services.audit.log_audit_event resolve correctly.
+    """
+    from services import audit as audit_module
+    audit_module.log_audit_event(
+        user_id=allocator_id,
+        action=action,
+        entity_type="api_key",
+        entity_id=api_key_id,
+        metadata=metadata or {},
     )
 
 
@@ -617,6 +724,157 @@ async def run_poll_positions_job(job: dict) -> DispatchResult:
     logger.info(
         "poll_positions: persisted %d position snapshots for strategy %s",
         count, strategy_id,
+    )
+
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
+    """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
+    and upsert into allocator_holdings.
+
+    Preflight via _allocator_key_preflight — no strategy hop. On
+    fetch_allocator_holdings failure, map the exception to
+    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error')
+    and emit an ``allocator.holdings.sync_failed`` audit event (f7). On
+    DONE, update sync_status / last_sync_at and emit
+    ``allocator.holdings.sync_completed`` with row_count +
+    holding_type_counts metadata.
+
+    f8: _check_circuit_breaker shares the per-exchange cooldown with
+    strategy-side poll_positions — if it's cooling down, preflight
+    returns DispatchResult(outcome=DEFERRED) and we pass it straight
+    through without touching api_keys (the job stays queued).
+    """
+    from services.allocator_positions import (
+        fetch_allocator_holdings,
+        persist_allocator_holdings,
+        _map_exception_to_sync_status,
+    )
+
+    ctx = await _allocator_key_preflight(job, "run_poll_allocator_positions_job")
+    if isinstance(ctx, DispatchResult):
+        # f8: DEFERRED passes through unchanged; api_keys.sync_status
+        # stays 'syncing' and compute_jobs stays pending.
+        return ctx
+
+    api_key_id = job["api_key_id"]
+    allocator_id = ctx.key_row["user_id"]
+    venue = ctx.key_row["exchange"]
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    try:
+        try:
+            rows, warning = await fetch_allocator_holdings(venue, ctx.exchange)
+        except ccxt.RateLimitExceeded as exc:
+            await _stamp_429(ctx.supabase, ctx.key_row)
+            error_kind, msg = classify_exception(exc)
+            sanitized = msg[:500]
+
+            def _update_rate_limited():
+                return (
+                    ctx.supabase.table("api_keys")
+                    .update({"sync_status": "rate_limited", "sync_error": sanitized})
+                    .eq("id", api_key_id)
+                    .execute()
+                )
+
+            try:
+                await db_execute(_update_rate_limited)
+            except Exception as upd_exc:  # noqa: BLE001
+                logger.warning(
+                    "poll_allocator_positions: failed to stamp sync_status='rate_limited' "
+                    "for api_key %s: %s",
+                    api_key_id, upd_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.sync_failed",
+                {"error_kind": error_kind, "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind=error_kind,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_kind, msg = classify_exception(exc)
+            sanitized = msg[:500]
+            status_target = _map_exception_to_sync_status(exc)
+
+            def _update_err():
+                return (
+                    ctx.supabase.table("api_keys")
+                    .update({"sync_status": status_target, "sync_error": sanitized})
+                    .eq("id", api_key_id)
+                    .execute()
+                )
+
+            try:
+                await db_execute(_update_err)
+            except Exception as upd_exc:  # noqa: BLE001
+                logger.warning(
+                    "poll_allocator_positions: failed to stamp sync_status='%s' "
+                    "for api_key %s: %s",
+                    status_target, api_key_id, upd_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.sync_failed",
+                {"error_kind": error_kind, "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind=error_kind,
+            )
+    finally:
+        try:
+            await ctx.exchange.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+
+    # Persist + success status update
+    count = await persist_allocator_holdings(
+        ctx.supabase, rows, allocator_id, api_key_id, today_str
+    )
+
+    spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
+    deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
+
+    final_status = "complete_with_warnings" if warning else "complete"
+
+    def _update_ok():
+        return (
+            ctx.supabase.table("api_keys")
+            .update({
+                "sync_status": final_status,
+                "sync_error": warning,
+                "last_sync_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("id", api_key_id)
+            .execute()
+        )
+
+    try:
+        await db_execute(_update_ok)
+    except Exception as upd_exc:  # noqa: BLE001
+        logger.warning(
+            "poll_allocator_positions: failed to stamp sync_status='%s' "
+            "for api_key %s: %s",
+            final_status, api_key_id, upd_exc,
+        )
+
+    _emit_audit(
+        allocator_id, api_key_id, "allocator.holdings.sync_completed",
+        {
+            "row_count": count,
+            "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
+        },
+    )
+
+    logger.info(
+        "poll_allocator_positions: persisted %d rows for allocator %s "
+        "(spot=%d, derivative=%d, status=%s)",
+        count, allocator_id, spot_count, deriv_count, final_status,
     )
 
     return DispatchResult(outcome=DispatchOutcome.DONE)
@@ -1187,6 +1445,8 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_compute_intro_snapshot_job
     elif kind == "rescore_allocator":
         handler = run_rescore_allocator_job
+    elif kind == "poll_allocator_positions":
+        handler = run_poll_allocator_positions_job
     else:
         handler = None
 
