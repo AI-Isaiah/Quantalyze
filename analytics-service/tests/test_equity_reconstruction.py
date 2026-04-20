@@ -853,3 +853,110 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
     )
     # Both keys reference the same allocator
     assert today_rows[0]["allocator_id"] == ALLOCATOR_ID
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — WR-03 regression: CCXT linear-perp symbols strip the :settle
+# suffix from the quote side so the quantities dict doesn't leak a
+# phantom "USDT:USDT" key (or similar) that never gets priced.
+# ---------------------------------------------------------------------------
+
+
+def test_wr03_compute_daily_equity_strips_settle_suffix_from_perp_symbol():
+    """WR-03 regression: CCXT normalises a Binance/Bybit linear perpetual
+    as symbol 'BTC/USDT:USDT'. The previous implementation did
+    `split('/')[-1]` which returned 'USDT:USDT' — the buy-side cost flowed
+    into a phantom 'USDT:USDT' key in `quantities` while the base 'BTC'
+    side was credited normally, producing spurious base-only balances on
+    the reconstructed equity row.
+
+    Post-fix: `split('/')[-1].split(':')[0]` yields the canonical 'USDT',
+    so the buy debit lands on the real USDT balance and offsets the base
+    credit as expected."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    asof = date(2026, 4, 15)
+    ts_ms = int(
+        datetime(asof.year, asof.month, asof.day, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+    # CCXT-style linear perp (Binance/Bybit) — symbol has a `:settle` suffix.
+    trades = [
+        {
+            "timestamp": ts_ms,
+            "symbol": "BTC/USDT:USDT",
+            "side": "buy",
+            "amount": 1.0,
+            "cost": 50_000.0,
+        }
+    ]
+    # Priced via exchange OHLCV for BTC at $50k.
+    ohlcv_by_symbol = {
+        "BTC": [(asof.isoformat(), 50_000.0)],
+    }
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=[],
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=asof,
+        end_date=asof,
+    )
+
+    assert len(rows) == 1, f"expected exactly one row for {asof}; got {rows!r}"
+    breakdown = rows[0]["breakdown"]
+    # Phantom key must NOT exist post-fix
+    assert "USDT:USDT" not in breakdown, (
+        f"expected :settle suffix to be stripped from quote side; "
+        f"breakdown leaked phantom key: {breakdown!r}"
+    )
+    # USDT is a stablecoin priced at 1.0; after a buy of 1 BTC at $50k the
+    # USDT quantity goes to -50_000 and is EXCLUDED from the breakdown only
+    # if qty==0 (see the `if qty == 0: continue` guard). It's non-zero, so
+    # it SHOULD be represented — verifying the quote side landed on USDT
+    # (not 'USDT:USDT') via a value_usd that reflects the offset.
+    # BTC side: +1 @ $50k = +$50,000; USDT side: -$50,000 @ $1 = -$50,000.
+    # Net value_usd == 0.
+    assert rows[0]["value_usd"] == 0.0, (
+        f"expected buy of 1 BTC at $50k to net to $0 equity "
+        f"(base credit offset by quote debit); got {rows[0]!r}"
+    )
+
+
+def test_wr03_compute_daily_equity_spot_symbol_unchanged():
+    """Spot pair 'BTC/USDT' (no `:settle` suffix) must continue to behave
+    correctly — the WR-03 fix must not regress the common case."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    asof = date(2026, 4, 15)
+    ts_ms = int(
+        datetime(asof.year, asof.month, asof.day, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+    trades = [
+        {
+            "timestamp": ts_ms,
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "amount": 1.0,
+            "cost": 50_000.0,
+        }
+    ]
+    ohlcv_by_symbol = {"BTC": [(asof.isoformat(), 50_000.0)]}
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=[],
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=asof,
+        end_date=asof,
+    )
+    assert len(rows) == 1
+    breakdown = rows[0]["breakdown"]
+    assert "USDT:USDT" not in breakdown
+    # Same buy-at-fair-value net-zero invariant holds for the spot symbol.
+    assert rows[0]["value_usd"] == 0.0

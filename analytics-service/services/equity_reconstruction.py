@@ -440,7 +440,17 @@ def _compute_daily_equity(
                 cost = float(ev.get("cost") or 0.0)
                 if not sym:
                     continue
-                quote = (ev.get("symbol") or "").split("/")[-1].upper() if "/" in (ev.get("symbol") or "") else "USDT"
+                # WR-03: CCXT normalises linear perpetuals as "BTC/USDT:USDT"
+                # and inverse contracts as "BTC/USD:BTC". A naive split("/")[-1]
+                # would yield "USDT:USDT" and leak non-existent symbols into
+                # the quantities dict, producing unpriced base balances that
+                # never offset the buy side. Strip the `:settle` suffix so
+                # the quote side lands on the canonical currency code.
+                raw_symbol = ev.get("symbol") or ""
+                if "/" in raw_symbol:
+                    quote = raw_symbol.split("/")[-1].split(":")[0].upper()
+                else:
+                    quote = "USDT"
                 if side == "buy":
                     quantities[sym] = quantities.get(sym, 0.0) + amt
                     quantities[quote] = quantities.get(quote, 0.0) - cost
