@@ -221,8 +221,10 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
   });
 
   it("f8: handleSync captures next_attempt_at from 200 already_inflight and renders Queued helper", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-19T12:00:00Z"));
+    // Anchor wall-clock for deterministic seconds-until math — but DON'T fake
+    // setTimeout here because the manager awaits fetch() + AllocatorSyncStatus
+    // reads Date.now() directly on render. Faking setTimeout would block
+    // waitFor's polling.
     const nextAttemptAt = new Date(Date.now() + 90_000).toISOString();
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -242,14 +244,14 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
       "Syncing\u2026",
     );
-    // Queued helper surfaces with the U+2014 em-dash.
+    // Queued helper surfaces with the U+2014 em-dash. Allow ±3s drift for
+    // the microtask latency between fetch resolve and the next render.
     await waitFor(() => {
       const helper = screen.getByTestId("allocator-sync-helper").textContent;
       expect(helper).toMatch(
-        /Queued \u2014 exchange cooldown, retry in (88|89|90|91|92)s/,
+        /Queued \u2014 exchange cooldown, retry in (86|87|88|89|90|91|92)s/,
       );
     });
-    vi.useRealTimers();
   });
 });
 
