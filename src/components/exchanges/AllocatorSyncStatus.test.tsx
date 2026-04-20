@@ -203,6 +203,36 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     const helper = screen.getByTestId("allocator-sync-helper");
     expect(helper.textContent).toBe("Binance cooldown remaining");
   });
+
+  // ISSUE-007: generic titleCase turned "okx" into "Okx" and "bnb" into
+  // "Bnb" — acronym exchanges need an explicit display-name map.
+  it.each([
+    ["okx", "OKX cooldown remaining"],
+    ["OKX", "OKX cooldown remaining"],
+    ["binance", "Binance cooldown remaining"],
+    ["bybit", "Bybit cooldown remaining"],
+    // Unknown venue falls through to titleCase — graceful degradation.
+    ["kraken", "Kraken cooldown remaining"],
+  ])(
+    "ISSUE-007: rate_limited helper for exchange=%s renders '%s'",
+    (exchange, expected) => {
+      render(
+        <AllocatorSyncStatus
+          syncStatus="rate_limited"
+          syncError={null}
+          lastSyncAt={null}
+          exchange={exchange}
+          retryAtSeconds={15}
+        />,
+      );
+      const helper = screen.getByTestId("allocator-sync-helper");
+      expect(helper.textContent).toBe(expected);
+      // Guard against the pre-fix "Okx" regression sneaking back in.
+      if (exchange.toLowerCase() === "okx") {
+        expect(helper.textContent).not.toContain("Okx cooldown");
+      }
+    },
+  );
 });
 
 describe("AllocatorSyncStatus — pill color class map", () => {

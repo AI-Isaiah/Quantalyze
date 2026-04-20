@@ -103,6 +103,23 @@ function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// ISSUE-007: "OKX" is an acronym, not a title-case proper noun. Plain
+// `titleCase("okx")` produces "Okx", which is wrong. The table below is
+// the authoritative display name per exchange; fall through to titleCase
+// for unknown exchanges so we degrade gracefully on the next venue.
+const EXCHANGE_DISPLAY_NAME: Record<string, string> = {
+  okx: "OKX",
+  binance: "Binance",
+  bybit: "Bybit",
+};
+
+export function exchangeDisplayName(exchange: string): string {
+  if (!exchange) return exchange;
+  return (
+    EXCHANGE_DISPLAY_NAME[exchange.toLowerCase()] ?? titleCase(exchange)
+  );
+}
+
 function secondsUntil(iso: string | null | undefined): number | null {
   if (!iso) return null;
   const target = new Date(iso).getTime();
@@ -227,7 +244,7 @@ export function AllocatorSyncStatus({
   } else if (normalized === "revoked") {
     helperText = REVOKED_HELPER;
   } else if (normalized === "rate_limited") {
-    helperText = `${titleCase(exchange)} cooldown remaining`;
+    helperText = `${exchangeDisplayName(exchange)} cooldown remaining`;
   } else if (normalized === "error" || normalized === "complete_with_warnings") {
     helperText = syncError ?? "";
   } else if (normalized === "syncing") {
