@@ -1105,3 +1105,185 @@ async def test_wr05_persist_equity_snapshots_depth_by_source(monkeypatch):
     assert by_asof["2026-04-03"]["history_depth_months"] is None, (
         "coingecko_fallback row must receive NULL history_depth_months"
     )
+
+
+# ---------------------------------------------------------------------------
+# Adversarial review regression tests (2026-04-20)
+#   WR-ADV-01: per-day source flags must reset each iteration (not latch)
+#   WR-ADV-02: _fetch_transfers must paginate within each 90-day window
+#   WR-ADV-03: persist_equity_snapshots must write in a single atomic upsert
+# ---------------------------------------------------------------------------
+
+
+def test_wr_adv_01_source_flags_reset_per_day():
+    """Adversarial: `used_exchange` / `used_coingecko` must NOT latch across
+    days. A day with only exchange_primary pricing that FOLLOWS a day with
+    CoinGecko pricing must still be stamped source="exchange_primary",
+    otherwise WR-05 NULLs out `history_depth_months` on all subsequent
+    rows and the dashboard's warm-up copy breaks."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    day1 = date(2026, 4, 1)  # CoinGecko-only (SYMX deposit)
+    day2 = date(2026, 4, 2)  # Exchange-only (pre-existing BTC position)
+
+    ts_day1 = int(datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    ts_day2 = int(datetime(2026, 4, 2, tzinfo=timezone.utc).timestamp() * 1000)
+
+    # Day 1: a deposit of SYMX (priced via CoinGecko only).
+    deposits = [{"timestamp": ts_day1, "currency": "SYMX", "amount": 10.0}]
+    # Day 2: a BTC trade (priced via exchange OHLCV).
+    trades = [{"timestamp": ts_day2, "symbol": "BTC/USDT", "side": "buy", "amount": 1.0, "cost": 0.0}]
+
+    ohlcv_by_symbol = {
+        "BTC": [(day1.isoformat(), 50_000.0), (day2.isoformat(), 51_000.0)],
+    }
+    coingecko_by_symbol = {
+        "SYMX": {day1.isoformat(): 5.0, day2.isoformat(): 5.0},
+    }
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol=coingecko_by_symbol,
+        start_date=day1,
+        end_date=day2,
+    )
+
+    by_asof = {r["asof"]: r for r in rows}
+
+    # Day 1: only SYMX held, CoinGecko-only pricing.
+    assert by_asof[day1.isoformat()]["source"] in {"coingecko_fallback", "mixed"}
+    # Day 2: SYMX still held (deposit persists) + new BTC position. BTC
+    # comes from OHLCV, SYMX from CoinGecko — this day IS mixed legitimately.
+    # So to isolate the latching bug we also test a day where only BTC is
+    # active (SYMX gone via withdrawal). That's the ADV-01b test below.
+
+
+def test_wr_adv_01b_source_flags_reset_after_symbol_removal():
+    """Adversarial (latching flags): day 3 has ONLY exchange_primary pricing
+    because the CoinGecko symbol was fully withdrawn. Pre-fix, the
+    used_coingecko flag set on day 1 latched through to day 3 and produced
+    source="mixed" there; post-fix, day 3 is source="exchange_primary"."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    day1 = date(2026, 4, 1)  # SYMX deposit (CG pricing)
+    day2 = date(2026, 4, 2)  # SYMX withdrawal — zeroes quantity
+    day3 = date(2026, 4, 3)  # BTC-only (OHLCV pricing) — must NOT latch as mixed
+
+    ts = lambda d: int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)  # noqa: E731
+
+    deposits = [{"timestamp": ts(day1), "currency": "SYMX", "amount": 10.0}]
+    withdrawals = [{"timestamp": ts(day2), "currency": "SYMX", "amount": 10.0}]
+    trades = [{"timestamp": ts(day1), "symbol": "BTC/USDT", "side": "buy", "amount": 1.0, "cost": 50_000.0}]
+
+    ohlcv_by_symbol = {
+        "BTC": [(d.isoformat(), 50_000.0) for d in (day1, day2, day3)],
+    }
+    coingecko_by_symbol = {
+        "SYMX": {d.isoformat(): 5.0 for d in (day1, day2, day3)},
+    }
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=withdrawals,
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol=coingecko_by_symbol,
+        start_date=day1,
+        end_date=day3,
+    )
+
+    by_asof = {r["asof"]: r for r in rows}
+
+    assert by_asof[day3.isoformat()]["source"] == "exchange_primary", (
+        "Day 3 holds only BTC (priced via OHLCV). used_coingecko must have "
+        "reset after day 2 — otherwise the flag latches from day 1's SYMX "
+        "deposit and day 3 is mis-stamped as 'mixed', then WR-05 NULLs out "
+        f"history_depth_months. Got: {by_asof[day3.isoformat()]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wr_adv_02_fetch_transfers_paginates_within_window():
+    """Adversarial: _fetch_transfers must paginate WITHIN each 90-day window.
+    Pre-fix, a window containing >500 rows dropped everything past row 500
+    when the loop advanced cursor_ms += window_ms unconditionally."""
+    from services.equity_reconstruction import _fetch_transfers
+
+    # Simulate a single 90-day window with 750 deposits, forcing within-
+    # window pagination. Two pages of 500 then 250.
+    window_start_ms = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)  # <90d
+    day_ms = 24 * 60 * 60 * 1000
+
+    # Each deposit 2 hours apart; fully inside the single window.
+    all_events = [
+        {"timestamp": window_start_ms + i * (2 * 60 * 60 * 1000), "currency": "USDT", "amount": 1.0}
+        for i in range(750)
+    ]
+
+    call_log: list[tuple[int, int]] = []
+
+    async def _fake_fetch_deposits(_unused_symbol, since_ms, limit):
+        call_log.append((since_ms, limit))
+        # Filter events whose timestamp >= since_ms, return up to limit.
+        matching = [e for e in all_events if e["timestamp"] >= since_ms]
+        return matching[:limit]
+
+    mock_exchange = MagicMock()
+    mock_exchange.fetch_deposits = _fake_fetch_deposits
+
+    rows = await _fetch_transfers(mock_exchange, "deposits", window_start_ms, now_ms)
+
+    assert len(rows) == 750, (
+        f"expected all 750 in-window deposits to be collected; got {len(rows)}. "
+        f"Pre-fix this was 500 because the outer loop advanced the window "
+        f"without paginating inside. Call log: {call_log!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wr_adv_03_persist_equity_snapshots_is_atomic(monkeypatch):
+    """Adversarial: persist_equity_snapshots must write all rows in ONE
+    upsert call. A multi-batch approach (what I added then reverted)
+    leaves partial state if an interior batch fails, and the outer
+    existing>0 idempotency short-circuit then permanently truncates the
+    allocator's history on retry."""
+    from services.equity_reconstruction import persist_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+
+    rows = [
+        {"asof": f"2026-04-{day:02d}", "value_usd": 100.0 + day, "breakdown": {"BTC": 100.0}, "source": "exchange_primary"}
+        for day in range(1, 31)  # 30 days
+    ]
+
+    upsert_call_count = {"n": 0}
+    orig_table = fake_supabase.table
+
+    def _counting_table(name: str):
+        tbl = orig_table(name)
+        real_upsert = tbl.upsert
+
+        def _wrapped(*args, **kwargs):
+            upsert_call_count["n"] += 1
+            return real_upsert(*args, **kwargs)
+
+        tbl.upsert = _wrapped
+        return tbl
+
+    monkeypatch.setattr(fake_supabase, "table", _counting_table)
+
+    count = await persist_equity_snapshots(
+        fake_supabase, rows, ALLOCATOR_ID, history_depth_months=24
+    )
+
+    assert count == 30
+    assert upsert_call_count["n"] == 1, (
+        f"persist_equity_snapshots must make exactly ONE upsert call (atomic). "
+        f"Got {upsert_call_count['n']} — re-introducing batching breaks the "
+        f"existing>0 idempotency contract: a mid-run failure leaves rows>0 "
+        f"with history truncated, and retries short-circuit permanently."
+    )

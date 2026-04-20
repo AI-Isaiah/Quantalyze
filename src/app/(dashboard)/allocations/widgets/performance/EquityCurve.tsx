@@ -43,16 +43,22 @@ export default function EquityCurve({ data, equityDailyPoints }: EquityCurveProp
       if (equityDailyPoints.length === 0) {
         return { composite: [] as DailyPoint[], strategies: [] as StrategySeries[] };
       }
-      // Normalise to cumulative wealth multiplier (value = usd[i]/usd[0])
-      // so the axis is percent-of-inception and aligns with the
-      // strategies-path composite semantics.
-      const base = equityDailyPoints[0].value;
-      const comp: DailyPoint[] = base > 0
-        ? equityDailyPoints.map((p) => ({
-            date: p.date,
-            value: Number((p.value / base).toFixed(6)),
-          }))
-        : equityDailyPoints;
+      // Skip leading 0 / negative points before anchoring. A derivative
+      // margin-below-zero first day would otherwise either (a) divide by
+      // <=0 and fall through to raw USD values, or (b) anchor the whole
+      // series to a non-positive base — either way producing a mixed-
+      // scale chart where wealth multipliers and absolute dollars share
+      // an axis. Re-anchor from the first positive value instead.
+      const firstPositiveIdx = equityDailyPoints.findIndex((p) => p.value > 0);
+      if (firstPositiveIdx < 0) {
+        return { composite: [] as DailyPoint[], strategies: [] as StrategySeries[] };
+      }
+      const anchored = equityDailyPoints.slice(firstPositiveIdx);
+      const base = anchored[0].value;
+      const comp: DailyPoint[] = anchored.map((p) => ({
+        date: p.date,
+        value: Number((p.value / base).toFixed(6)),
+      }));
       return { composite: comp, strategies: [] as StrategySeries[] };
     }
 

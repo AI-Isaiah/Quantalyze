@@ -226,27 +226,41 @@ async def _fetch_transfers(
         return []
 
     window_ms = 90 * 24 * 60 * 60 * 1000
+    page_limit = 500
     all_rows: list[dict] = []
-    cursor_ms = since_ms
-    while cursor_ms < now_ms:
-        # WR-04: only catch ccxt.NotSupported here (feature detection —
-        # the exchange cannot enumerate transfers at all). All other
-        # exceptions (auth revoked mid-backfill, rate limit, network
-        # failure) MUST bubble to the outer handler so they land in
-        # classify_exception + _emit_audit rather than being silently
-        # swallowed — the previous `break` returned a truncated list
-        # that looked identical to "allocator has no transfers", which
-        # caused zero-activity rows with no audit trail.
-        try:
-            page = await fetcher(None, cursor_ms, 500)
-        except ccxt.NotSupported:
-            return all_rows
-        page = page or []
-        all_rows.extend(page)
-        cursor_ms += window_ms
-        if not page:
-            # Advance one window; continue in case the tape is sparse.
-            continue
+    window_start = since_ms
+    while window_start < now_ms:
+        window_end = min(window_start + window_ms, now_ms)
+        # Paginate WITHIN each 90-day window so a bursty allocator with
+        # >500 transfers per window doesn't lose rows past row 500.
+        inner_cursor = window_start
+        for _ in range(100):  # safety ceiling: 100 × 500 = 50k per window
+            # WR-04: only catch ccxt.NotSupported here (feature detection —
+            # the exchange cannot enumerate transfers at all). All other
+            # exceptions (auth revoked mid-backfill, rate limit, network
+            # failure) MUST bubble to the outer handler so they land in
+            # classify_exception + _emit_audit rather than being silently
+            # swallowed — the previous `break` returned a truncated list
+            # that looked identical to "allocator has no transfers", which
+            # caused zero-activity rows with no audit trail.
+            try:
+                page = await fetcher(None, inner_cursor, page_limit)
+            except ccxt.NotSupported:
+                return all_rows
+            page = page or []
+            if not page:
+                break
+            all_rows.extend(page)
+            if len(page) < page_limit:
+                break
+            max_ts = max(
+                (int(r.get("timestamp") or 0) for r in page), default=inner_cursor
+            )
+            if max_ts <= inner_cursor or max_ts >= window_end:
+                break
+            inner_cursor = max_ts + 1
+            await _rate_limit_sleep(exchange)
+        window_start += window_ms
         await _rate_limit_sleep(exchange)
     return all_rows
 
@@ -462,10 +476,14 @@ def _compute_daily_equity(
 
     rows: list[dict] = []
     cur = start_date
-    used_exchange = False
-    used_coingecko = False
     while cur <= end_date:
         iso = cur.isoformat()
+        # Source flags are per-day. Initialising outside the loop caused
+        # them to latch: once CoinGecko was used on ANY day, every
+        # subsequent day stamped source="mixed" — which WR-05 then NULL-ed
+        # out history_depth_months on, wiping the venue warm-up signal.
+        used_exchange = False
+        used_coingecko = False
         for ev in events_by_date.get(iso, []):
             kind = ev.get("kind")
             if kind == "trade":
@@ -601,21 +619,21 @@ async def persist_equity_snapshots(
             "history_depth_months": row_depth,
         })
 
-    # Chunk the upsert so a multi-year backfill (≤730 rows) never bundles
-    # one giant PostgREST payload. 100-row chunks keep each request small
-    # and bound peak memory during the serialize step.
-    BATCH = 100
-    for i in range(0, len(stamped), BATCH):
-        batch = stamped[i : i + BATCH]
+    # Single atomic upsert — chunked batching would leave partial state if
+    # an interior batch failed. The caller's `existing > 0` idempotency
+    # short-circuit assumes "any rows exist ⇒ reconstruction completed";
+    # splitting into multiple round-trips breaks that invariant because a
+    # mid-run failure (network blip, SIGKILL) leaves row count above zero
+    # with the history truncated, and retries short-circuit permanently.
+    # 730 rows × ~150B is ≈110KB — well within PostgREST payload limits.
+    def _upsert():
+        return supabase.table("allocator_equity_snapshots").upsert(
+            stamped,
+            on_conflict="allocator_id,asof",
+            ignore_duplicates=True,
+        ).execute()
 
-        def _upsert(batch=batch):
-            return supabase.table("allocator_equity_snapshots").upsert(
-                batch,
-                on_conflict="allocator_id,asof",
-                ignore_duplicates=True,
-            ).execute()
-
-        await db_execute(_upsert)
+    await db_execute(_upsert)
     return len(stamped)
 
 
@@ -625,9 +643,12 @@ async def persist_equity_snapshots(
 
 async def _existing_snapshot_count(supabase: Any, allocator_id: str) -> int:
     def _sel():
+        # head=True tells PostgREST to return only the count header and no
+        # row bodies — for an idempotency check that cares only whether
+        # count > 0, we don't need to ship N rows across the wire.
         return (
             supabase.table("allocator_equity_snapshots")
-            .select("asof", count="exact")
+            .select("asof", count="exact", head=True)
             .eq("allocator_id", allocator_id)
             .execute()
         )
@@ -688,8 +709,21 @@ async def _fetch_and_price_window(
     trades, hit_terminus = await _fetch_trades_with_pagination(
         exchange, venue, start_ms, now_ms
     )
-    deposits = await _fetch_transfers(exchange, "deposits", start_ms, now_ms)
-    withdrawals = await _fetch_transfers(exchange, "withdrawals", start_ms, now_ms)
+    # When the trade window was clamped to the OKX 90-day terminus, pre-
+    # terminus deposits/withdrawals would arrive with no matching trades
+    # to offset them — producing phantom quantities for assets long
+    # since sold outside the recorded trade window. Clamp transfers to
+    # the same terminus so the replay stays consistent.
+    transfers_since_ms = start_ms
+    if hit_terminus:
+        okx_terminus_ms = now_ms - OKX_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000
+        transfers_since_ms = max(start_ms, okx_terminus_ms)
+    deposits = await _fetch_transfers(
+        exchange, "deposits", transfers_since_ms, now_ms
+    )
+    withdrawals = await _fetch_transfers(
+        exchange, "withdrawals", transfers_since_ms, now_ms
+    )
 
     # Collect symbols from trades + transfers
     symbols: set[str] = set()

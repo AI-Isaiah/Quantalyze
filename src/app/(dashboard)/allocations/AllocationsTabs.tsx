@@ -6,9 +6,11 @@ import { AllocationDashboard } from "./AllocationDashboard";
 import { ScenarioStub } from "./ScenarioStub";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
-// Live-refresh polling inherits the Phase 06 D-11 cadence. Named so cross-page
-// audits of polling behaviour can grep for a single symbol.
-const PERFORMANCE_POLL_INTERVAL_MS = 5_000;
+// Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
+// Phase 07 is a monitoring surface where data changes slowly (daily equity,
+// periodic trades) so 30s is enough for a timely read without re-fetching the
+// whole `getMyAllocationDashboard` payload 720× per hour on an open tab.
+const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 
 /**
  * Phase 07 Plan 04 / PURGE-07 / D-04 — Tabs shell for /allocations.
