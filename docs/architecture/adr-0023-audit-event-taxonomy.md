@@ -154,6 +154,9 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `mandate_preference.update` | `allocator_preference_mandate` | allocator's own `profiles.id` (`allocator_preferences` keys on user_id; matches profiles.id) | `fields` (changed field names), `self_edit: true` |
 | `mandate_preference.admin_update` | `allocator_preference_mandate` | target allocator's `profiles.id` | `fields`, `self_edit: false`, `edited_by` (admin user id) |
 | `feedback.overrides_updated` | `allocator_preference_feedback` | allocator's own `profiles.id` (matches `allocator_preferences.user_id` — Phase 4 feedback engine persists `scoring_weight_overrides` on the same row) | `dimensions_updated` (list of W_* keys whose scale was written), `engine_version` (feedback rule format version, e.g. `"v1"`) |
+| `allocator.holdings.sync_requested` | `api_key` | `api_keys.id` — the allocator-owned exchange key whose poll is being kicked off | — (the request is the event; no additional metadata required) |
+| `allocator.holdings.sync_completed` | `api_key` | `api_keys.id` — the key whose poll just finished | `row_count` (integer — total holdings rows upserted), `holding_type_counts` (`{ spot: int, derivative: int }` — per-`holding_type` breakdown) |
+| `allocator.holdings.sync_failed` | `api_key` | `api_keys.id` — the key whose poll terminated in failure | `error_kind` (`'permanent' \| 'transient' \| 'unknown'` — output of `classify_exception`), `sanitized_message` (string ≤ 500 chars, truncated by worker) |
 
 Entity-id choice rationale (Python cross-service): bridge, simulator,
 optimizer anchor on portfolio_id because the portfolio is the persistent
@@ -178,6 +181,34 @@ TS mutation sites and 4 Python cross-service sites (bridge, simulator,
 optimizer, reconcile). The Python sites call `log_audit_event_service`
 (migration 058) directly via supabase-py; see §8 for the cross-service
 contract.
+
+Phase 06 (allocator API ingestion, migration 066) added three
+`allocator.holdings.*` actions per D-18. They all anchor on
+`entity_type = 'api_key'` and `entity_id = api_keys.id` — the key
+being polled is the natural entity for every stage of the sync
+lifecycle:
+
+- `allocator.holdings.sync_requested` is emitted by the Next route
+  `POST /api/allocator/holdings/sync` when the allocator kicks off a
+  manual poll (or when a newly added key auto-enqueues its first
+  sync). The user-scoped RPC path (`logAuditEvent`) is used because
+  `auth.uid()` is the allocator.
+- `allocator.holdings.sync_completed` is emitted by the Python worker
+  on `DispatchOutcome.DONE`. Metadata captures the normalized row
+  count + a per-`holding_type` breakdown (`{ spot, derivative }`) so
+  operators can distinguish balance-only polls from full polls
+  without replaying worker logs.
+- `allocator.holdings.sync_failed` is emitted by the Python worker on
+  `DispatchOutcome.FAILED`. Metadata carries the
+  `classify_exception` taxonomy bucket + the worker-sanitized message
+  (capped at 500 chars by `classify_exception` itself). The cap
+  matches the `sync_error` column ceiling documented on migration
+  066 — the event is a forensic mirror of what `api_keys.sync_error`
+  holds at the same moment.
+
+Worker-side emission goes through `log_audit_event_service` because
+the Python path has no `auth.uid()` context; the caller-supplied
+`user_id` is the allocator that owns the key (`api_keys.user_id`).
 
 ### 5. user_id is derived from `auth.uid()` in the RPC
 `log_audit_event` is SECURITY DEFINER (migration 049). Inside the
