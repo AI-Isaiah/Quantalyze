@@ -164,6 +164,61 @@ class TestDispatchTick:
         assert "mark_compute_job_done" not in rpc_names
         assert "mark_compute_job_failed" not in rpc_names
 
+    # Regression: ISSUE-001 — healthz reported "stale" forever when the
+    # worker was polling an empty queue. dispatch_tick used to early-return
+    # at `if not jobs: return` before updating main_worker_healthz.LAST_TICK_AT.
+    # Found by /qa on 2026-04-20
+    # Report: .gstack/qa-reports/qa-report-quantalyze-phase-06-2026-04-20.md
+    @pytest.mark.asyncio
+    async def test_empty_claim_still_bumps_healthz_last_tick(self) -> None:
+        """Idle worker (zero claimed jobs) must still update
+        main_worker_healthz.LAST_TICK_AT — an empty queue is a healthy state,
+        not a stale one."""
+        import main_worker_healthz
+
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=[])
+        mock_supabase.rpc.return_value = chain
+
+        main_worker_healthz.LAST_TICK_AT = 0.0
+        before = main_worker_healthz.LAST_TICK_AT
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            await dispatch_tick("worker-test-idle")
+
+        after = main_worker_healthz.LAST_TICK_AT
+        assert after > before, (
+            "dispatch_tick with zero claimed jobs must still update "
+            "LAST_TICK_AT; otherwise healthz lies about liveness."
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_empty_claim_bumps_healthz_last_tick(self) -> None:
+        """Positive control for the idle test above — non-empty batch also
+        updates LAST_TICK_AT."""
+        import main_worker_healthz
+
+        jobs = [{"id": "job-healthy", "kind": "sync_trades", "strategy_id": "s-1"}]
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=jobs)
+        mock_supabase.rpc.return_value = chain
+
+        main_worker_healthz.LAST_TICK_AT = 0.0
+        before = main_worker_healthz.LAST_TICK_AT
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-busy")
+
+        after = main_worker_healthz.LAST_TICK_AT
+        assert after > before
+
 
 # ---------------------------------------------------------------------------
 # watchdog_tick
