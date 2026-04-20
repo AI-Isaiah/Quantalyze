@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   EnqueueComputeJobResponseSchema,
+  EncryptKeyResponseSchema,
   TickJobsResponseSchema,
 } from "./analytics-schemas";
 
@@ -128,6 +129,63 @@ describe("TickJobsResponseSchema", () => {
       ...valid,
       contract_version: 0,
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+// Regression: ISSUE-002 — EncryptKeyResponseSchema used legacy flat field
+// names (encrypted_key, encrypted_secret) but analytics-service returns
+// envelope-encryption field names (api_key_encrypted, api_secret_encrypted
+// ALWAYS null, dek_encrypted, etc.). Add-key modal could never submit.
+// Found by /qa on 2026-04-20 in /exchanges add-key modal.
+// Report: .gstack/qa-reports/qa-report-quantalyze-phase-06-2026-04-20.md
+describe("EncryptKeyResponseSchema (envelope-encryption contract)", () => {
+  // Exact response shape produced by analytics-service/services/encryption.py
+  // -> encrypt_credentials(). All credentials bundled into api_key_encrypted;
+  // api_secret_encrypted / passphrase_encrypted / nonce stay null by design.
+  const realPayload = {
+    api_key_encrypted: "gAAAAABp5fDh...ciphertext...",
+    api_secret_encrypted: null,
+    passphrase_encrypted: null,
+    dek_encrypted: "gAAAAABp5fDh...dek...",
+    nonce: null,
+    kek_version: 1,
+  };
+
+  it("accepts the real analytics-service envelope-encryption payload", () => {
+    const result = EncryptKeyResponseSchema.safeParse(realPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts kek_version as a string (legacy compatibility)", () => {
+    const result = EncryptKeyResponseSchema.safeParse({
+      ...realPayload,
+      kek_version: "1",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects response missing api_key_encrypted (no ciphertext = unrecoverable)", () => {
+    const { api_key_encrypted: _unused, ...rest } = realPayload;
+    const result = EncryptKeyResponseSchema.safeParse(rest);
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects response missing dek_encrypted (no DEK = cannot decrypt payload)", () => {
+    const { dek_encrypted: _unused, ...rest } = realPayload;
+    const result = EncryptKeyResponseSchema.safeParse(rest);
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects the old flat schema shape that caused the add-key 400", () => {
+    // If anyone reverts the schema to the legacy flat names, this fails
+    // loudly instead of silently breaking the add-key modal in production.
+    const legacyFlat = {
+      encrypted_key: "ciphertext",
+      encrypted_secret: "ciphertext",
+      kek_version: 1,
+    };
+    const result = EncryptKeyResponseSchema.safeParse(legacyFlat);
     expect(result.success).toBe(false);
   });
 });
