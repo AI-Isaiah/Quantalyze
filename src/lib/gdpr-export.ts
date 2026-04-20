@@ -83,6 +83,11 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // ------------------------------------------------------------------
   // Directly owned (has a user-id column)
   // ------------------------------------------------------------------
+  // Phase 06 (migration 066): allocator_holdings is user-owned via
+  // allocator_id (= api_keys.user_id, enforced by the f5 owner-coherence
+  // trigger). Exchange positions + balances are personal data —
+  // GDPR Art. 15 requires they be part of the user's export.
+  { kind: "direct", table: "allocator_holdings", user_column: "allocator_id" },
   { kind: "direct", table: "allocator_preferences", user_column: "user_id" },
   { kind: "direct", table: "api_keys", user_column: "user_id" },
   { kind: "direct", table: "audit_log", user_column: "user_id" },
