@@ -4,20 +4,31 @@
  * Allocator-facing exchange connection manager.
  *
  * Lists the allocator's connected read-only exchange API keys, shows sync
- * status, and lets them add new ones. Clicking "Sync now" triggers a
- * background sync via the analytics service that reads positions/trades
- * from the exchange and derives:
- *   - portfolio_strategies rows (which strategies are currently held)
- *   - allocation_events rows (invest/divest events, source='auto')
+ * status via AllocatorSyncStatus (7-state pill + helper line per UI-SPEC
+ * D-08), and lets them add new ones. Phase 06 Plan 04 wires:
  *
- * For the seed-backed demo, the two pre-seeded keys (Binance + OKX) are
- * already wired up and the sync endpoint is a no-op that refreshes
- * `last_sync_at` — the Active Allocation portfolio is already populated.
- * Adding a new key uses the same encrypt + validate path as the
- * strategy-side ApiKeyManager so the production flow is identical.
+ *   - Real "Sync now" button that POSTs to /api/allocator/holdings/sync
+ *     (INGEST-06 / D-10) with optimistic sync_status='syncing' and
+ *     graceful 4xx / 5xx / network-error surfacing via the row-scoped
+ *     aria-live helper line.
+ *   - AWAITED first-run sync inside handleAddKey (INGEST-07 / D-09 / f4):
+ *     after the api_keys INSERT succeeds, the client awaits the POST so
+ *     a 403/500 surfaces in the row's helper line — NOT a silent stuck
+ *     "Syncing…" pill. On failure, pill reverts to 'idle' and
+ *     helper_override is set to "Sync request failed — click Sync now
+ *     to retry".
+ *   - f8: on 200 already_inflight responses, next_attempt_at is captured
+ *     into row state and surfaces via AllocatorSyncStatus's Queued helper
+ *     when the cooldown is ≥30s out. This covers the per-exchange
+ *     circuit-breaker contagion from strategy-side 429s.
+ *   - 5s router.refresh() polling loop (D-11) active only while any row
+ *     is syncing; cleared on unmount.
+ *   - Landmine 8: useEffect(() => setKeys(...), [initialKeys]) MERGE
+ *     effect syncs server-refreshed rows into local state while preserving
+ *     client-only fields (queued_next_attempt_at, helper_override).
  */
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -25,22 +36,47 @@ import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "@/components/strategy/ApiKeyForm";
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
   id: string;
   exchange: string;
   label: string;
   is_active: boolean;
-  // Nullable to match the DB column (api_keys.sync_status is nullable
-  // — rows freshly inserted before the first sync tick have null).
+  // Nullable to match the DB column (api_keys.sync_status is nullable —
+  // rows freshly inserted before the first sync tick have null).
   sync_status: string | null;
   last_sync_at: string | null;
   account_balance_usdt: number | null;
   created_at: string;
+  // Landmine 3: sync_error surfaces under the pill in the aria-live helper
+  // line for `error` / `complete_with_warnings` states.
+  sync_error: string | null;
+  // f8 (client-only — NOT persisted to DB): captured from the sync route's
+  // `already_inflight` response. When syncing AND ≥30s out, the pill renders
+  // the Queued helper via AllocatorSyncStatus.
+  queued_next_attempt_at: string | null;
+  // f4 (client-only — NOT persisted to DB): explicit helper-line override.
+  // Populated on handleAddKey / handleSync failure paths. Passed through to
+  // AllocatorSyncStatus.helperOverride so it takes precedence over computed
+  // helper text.
+  helper_override: string | null;
 }
 
+/**
+ * `initialKeys` may arrive from the server-side `getUserApiKeys` query
+ * which (pre Plan 01) projects columns without sync_error. Accept a wider
+ * input shape and default missing client-only fields in the merge effect.
+ */
+type InitialKey = Omit<
+  ExchangeConnection,
+  "sync_error" | "queued_next_attempt_at" | "helper_override"
+> & {
+  sync_error?: string | null;
+};
+
 interface Props {
-  initialKeys: ExchangeConnection[];
+  initialKeys: InitialKey[];
 }
 
 // Exchange tag: 3-letter code, tier-colored. No emoji in the UI per
@@ -78,15 +114,143 @@ function formatUsd(n: number | null): string {
   return `$${n.toFixed(0)}`;
 }
 
+const SYNC_FAILED_HELPER =
+  "Sync request failed — click Sync now to retry";
+
+function normalizeInitialKey(
+  k: InitialKey,
+  prev?: ExchangeConnection,
+): ExchangeConnection {
+  return {
+    id: k.id,
+    exchange: k.exchange,
+    label: k.label,
+    is_active: k.is_active,
+    sync_status: k.sync_status,
+    last_sync_at: k.last_sync_at,
+    account_balance_usdt: k.account_balance_usdt,
+    created_at: k.created_at,
+    sync_error: k.sync_error ?? null,
+    // Landmine 8 + f8/f4 preservation: client-only fields carry over across
+    // router.refresh() server-state cycles when the row id matches.
+    queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
+    helper_override: prev?.helper_override ?? null,
+  };
+}
+
 export function AllocatorExchangeManager({ initialKeys }: Props) {
   const router = useRouter();
-  const [keys, setKeys] = useState(initialKeys);
+  const [keys, setKeys] = useState<ExchangeConnection[]>(() =>
+    initialKeys.map((k) => normalizeInitialKey(k)),
+  );
   const [showForm, setShowForm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formLoading, setFormLoading] = useState(false);
   const [, startTransition] = useTransition();
 
   const supabase = createClient();
+
+  // Landmine 8: router.refresh() re-renders the server component which
+  // passes new initialKeys, but useState(initialKeys) only runs on mount.
+  // Merge here so server truth wins on sync_status/last_sync_at/sync_error
+  // while preserving client-only queued_next_attempt_at + helper_override
+  // for matching ids (f8 / f4).
+  useEffect(() => {
+    setKeys((prev) => {
+      const byId = new Map(prev.map((k) => [k.id, k]));
+      return initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
+    });
+  }, [initialKeys]);
+
+  // D-11: 5s router.refresh() polling while any row is syncing. The poll
+  // is transparent — the pill IS the live region; no visual "refreshing"
+  // chrome. setInterval is cleared when no rows remain syncing OR on
+  // unmount (cleanup function).
+  useEffect(() => {
+    const hasSyncing = keys.some((k) => k.sync_status === "syncing");
+    if (!hasSyncing) return;
+    const id = setInterval(() => {
+      startTransition(() => router.refresh());
+    }, 5000);
+    return () => clearInterval(id);
+  }, [keys, router, startTransition]);
+
+  async function handleSync(apiKeyId: string) {
+    // D-10 optimistic syncing: pill flips immediately so the click feels
+    // responsive. Clear prior helper_override / queued_next_attempt_at so a
+    // fresh click restarts the UX cleanly.
+    setKeys((prev) =>
+      prev.map((k) =>
+        k.id === apiKeyId
+          ? {
+              ...k,
+              sync_status: "syncing",
+              sync_error: null,
+              queued_next_attempt_at: null,
+              helper_override: null,
+            }
+          : k,
+      ),
+    );
+    try {
+      const res = await fetch("/api/allocator/holdings/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key_id: apiKeyId }),
+      });
+      const json = (await res.json().catch(() => null)) ?? {};
+      if (!res.ok) {
+        // 4xx/5xx — row-scoped error surfaced via aria-live helper line.
+        // Revert optimistic syncing so the Sync now button re-enables.
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.id === apiKeyId
+              ? {
+                  ...k,
+                  sync_status:
+                    k.sync_status === "syncing" ? "idle" : k.sync_status,
+                  helper_override: SYNC_FAILED_HELPER,
+                }
+              : k,
+          ),
+        );
+        return;
+      }
+      // f8: on 200 already_inflight the server includes next_attempt_at
+      // from the queued job. Capture so AllocatorSyncStatus can render
+      // "Queued — exchange cooldown, retry in {N}s" when ≥30s out.
+      if (json.already_inflight && typeof json.next_attempt_at === "string") {
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.id === apiKeyId
+              ? {
+                  ...k,
+                  sync_status: "syncing",
+                  queued_next_attempt_at: json.next_attempt_at,
+                  helper_override: null,
+                }
+              : k,
+          ),
+        );
+        return;
+      }
+      // 200 { ok: true, job_id } — pill stays syncing; the 5s poll tick
+      // advances to `complete` once the worker lands.
+    } catch {
+      // Network error — revert optimistic syncing and surface the error.
+      setKeys((prev) =>
+        prev.map((k) =>
+          k.id === apiKeyId
+            ? {
+                ...k,
+                sync_status: "idle",
+                helper_override: SYNC_FAILED_HELPER,
+              }
+            : k,
+        ),
+      );
+    }
+  }
 
   async function handleAddKey(data: {
     exchange: string;
@@ -150,21 +314,80 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
         setFormLoading(false);
         return;
       }
-      setKeys((prev) => [inserted as ExchangeConnection, ...prev]);
+
+      // Optimistically render the new row as syncing, then close the modal
+      // BEFORE awaiting the POST (so the f4 error surfaces on the row's
+      // aria-live helper line rather than blocking the modal). Finally,
+      // await the sync request per f4.
+      const newRow = normalizeInitialKey(inserted as InitialKey);
+      newRow.sync_status = "syncing";
+      setKeys((prev) => [newRow, ...prev]);
       setShowForm(false);
       setFormLoading(false);
+
+      // D-09 / INGEST-07 / f4: AWAIT the POST. On non-2xx / network error,
+      // revert pill to 'idle' and surface "Sync request failed" via the
+      // row's aria-live helper line. No more fire-and-forget.
+      try {
+        const syncRes = await fetch("/api/allocator/holdings/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key_id: inserted.id }),
+        });
+        const syncJson = (await syncRes.json().catch(() => null)) ?? {};
+        if (!syncRes.ok) {
+          setKeys((prev) =>
+            prev.map((k) =>
+              k.id === inserted.id
+                ? {
+                    ...k,
+                    sync_status: "idle",
+                    helper_override: SYNC_FAILED_HELPER,
+                  }
+                : k,
+            ),
+          );
+        } else if (
+          syncJson.already_inflight &&
+          typeof syncJson.next_attempt_at === "string"
+        ) {
+          // f8: first-run landed in already_inflight due to per-exchange
+          // circuit-breaker contagion. Surface the Queued helper.
+          setKeys((prev) =>
+            prev.map((k) =>
+              k.id === inserted.id
+                ? {
+                    ...k,
+                    sync_status: "syncing",
+                    queued_next_attempt_at: syncJson.next_attempt_at,
+                  }
+                : k,
+            ),
+          );
+        }
+        // 200 { ok, job_id } — row already syncing; next poll tick advances.
+      } catch {
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.id === inserted.id
+              ? {
+                  ...k,
+                  sync_status: "idle",
+                  helper_override: SYNC_FAILED_HELPER,
+                }
+              : k,
+          ),
+        );
+      }
+
+      // Pull server truth so sync_status transitions (syncing → complete)
+      // propagate into the manager's state.
       startTransition(() => router.refresh());
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Unknown error");
       setFormLoading(false);
     }
   }
-
-  // NOTE: Real-time exchange sync is not yet implemented. The sync button
-  // is disabled until a backend endpoint exists that queues a trade pull
-  // and recomputes allocation_events. Do NOT fake last_sync_at updates
-  // from the browser client — it misrepresents sync state and breaks
-  // downstream staleness logic. See HIGH-09 in audit/tech-debt-round-1.md.
 
   return (
     <div className="mt-6 space-y-4">
@@ -232,12 +455,26 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                       {formatRelative(key.last_sync_at)}
                     </p>
                   </div>
+                  <AllocatorSyncStatus
+                    syncStatus={key.sync_status}
+                    syncError={key.sync_error}
+                    lastSyncAt={key.last_sync_at}
+                    exchange={key.exchange}
+                    queuedNextAttemptAt={key.queued_next_attempt_at}
+                    helperOverride={key.helper_override}
+                  />
                   <Button
-                    variant="secondary"
-                    disabled
-                    title="Exchange sync is not yet available"
+                    variant="primary"
+                    disabled={key.sync_status === "syncing"}
+                    aria-label={`Sync ${key.exchange} now`}
+                    title={
+                      key.sync_status === "syncing"
+                        ? "Sync in progress"
+                        : undefined
+                    }
+                    onClick={() => handleSync(key.id)}
                   >
-                    Auto-synced
+                    Sync now
                   </Button>
                 </div>
               );
