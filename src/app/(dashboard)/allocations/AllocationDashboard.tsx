@@ -136,6 +136,54 @@ interface AllocationDashboardProps {
 }
 
 // ---------------------------------------------------------------------------
+// Widget gating — per VOICES-ACCEPTED f2
+// ---------------------------------------------------------------------------
+//
+// The 18 widgets below render from the per-strategy composite return path
+// (buildCompositeReturns / computeScenario, which read
+// strategies[].strategy_analytics.daily_returns). When an allocator has
+// zero strategies (`strategies.length === 0` — zero-holdings + post-first-
+// connect state in Phase 07), these widgets render stale data or crash.
+// HIDE them entirely instead.
+//
+// KpiStrip + EquityCurve + DrawdownChart + InsightStrip always render;
+// they consume equity-snapshot-derived inputs via the f7 parallel-prop
+// path and work fine with zero strategies.
+//
+// Authoritative widget name list (also referenced by the
+// AllocationDashboard.widget-gating.test.tsx spec for grep verification):
+//   RollingSharpe, RollingVolatility, CumulativeVsBenchmark, TailRisk,
+//   RiskDecomposition, CorrelationMatrix, CorrelationOverTime,
+//   AlphaBetaDecomposition, TrackingError, RegimeDetector,
+//   StrategyComparison, MonthlyReturns, AnnualReturns, ReturnDistribution,
+//   WinRateProfitFactor, BestWorstPeriods, PerformanceByPeriod,
+//   VarExpectedShortfall.
+//
+// The runtime Set uses the kebab-case `widgetId` values (matches the keys
+// in WIDGET_REGISTRY + WIDGET_COMPONENTS).
+
+const STRATEGY_COMPOSITE_WIDGETS = new Set<string>([
+  "rolling-sharpe",           // RollingSharpe
+  "rolling-volatility",       // RollingVolatility
+  "cumulative-vs-benchmark",  // CumulativeVsBenchmark
+  "tail-risk",                // TailRisk
+  "risk-decomposition",       // RiskDecomposition
+  "correlation-matrix",       // CorrelationMatrix
+  "correlation-over-time",    // CorrelationOverTime
+  "alpha-beta-decomposition", // AlphaBetaDecomposition
+  "tracking-error",           // TrackingError
+  "regime-detector",          // RegimeDetector
+  "strategy-comparison",      // StrategyComparison
+  "monthly-returns",          // MonthlyReturns
+  "annual-returns",           // AnnualReturns
+  "return-distribution",      // ReturnDistribution
+  "win-rate-profit-factor",   // WinRateProfitFactor
+  "best-worst-periods",       // BestWorstPeriods
+  "performance-by-period",    // PerformanceByPeriod
+  "var-expected-shortfall",   // VarExpectedShortfall
+]);
+
+// ---------------------------------------------------------------------------
 // Toast state
 // ---------------------------------------------------------------------------
 
@@ -157,7 +205,22 @@ export function AllocationDashboard({
   weightSnapshots = [],
   positionSnapshots = [],
   outcomes = [],
+  // Phase 07 / 07-04 (VOICES-ACCEPTED f2 + f7 + f9) — forwarded to
+  // KpiStrip (warm-up context) and EquityCurve + DrawdownChart
+  // (parallel-prop path). All optional with sensible defaults so Phase 5/9
+  // call sites and the existing regression test stay source-compatible.
+  snapshotCount = 30,
+  allKeysStale = false,
+  minHistoryDepthMonths = null,
+  activeVenues = [],
+  equityDailyPoints,
 }: AllocationDashboardProps) {
+  // Phase 07 / VOICES-ACCEPTED f2 — one gate for every strategy-composite
+  // widget decision below. A Bridge allocator (post-Phase-09) has
+  // `strategies.length > 0` and sees the full widget grid; a zero-
+  // holdings allocator sees only the always-render core (KPI + Equity +
+  // Drawdown + Insight).
+  const hasStrategies = strategies.length > 0;
   const { config, addTile, removeTile, updateLayout, restoreTile } =
     useDashboardConfig();
   const [timeframe, setTimeframe] = useTimeframe("YTD");
@@ -472,17 +535,52 @@ export function AllocationDashboard({
           </div>
         );
       }
+      // Per VOICES-ACCEPTED f7 — only EquityCurve + DrawdownChart
+      // receive `equityDailyPoints` as a direct prop (those are the two
+      // widgets with the parallel-prop branch landed in 07-03 Task 4).
+      // Every other widget is source-compatible with the base WidgetProps
+      // shape and ignores extra props, but passing the prop
+      // unconditionally keeps the generic `<Widget ... />` call simple
+      // and JSX-typed (WidgetProps allows unknown extras via the `data`
+      // pass-through; the compiler doesn't warn).
+      const forwardEquityPoints =
+        widgetId === "equity-curve" || widgetId === "drawdown-chart";
       // The data-widget-id marker is what the IntersectionObserver in
       // the usage-analytics effect above watches for. Wrapping in a
       // div instead of mutating the widget keeps the marker stable
       // across the React subtree's renders.
       return (
         <div data-widget-id={widgetId} className="h-full w-full">
-          <Widget data={widgetData} timeframe={timeframe} width={0} height={0} />
+          <Widget
+            data={widgetData}
+            timeframe={timeframe}
+            width={0}
+            height={0}
+            {...(forwardEquityPoints
+              ? { equityDailyPoints }
+              : {})}
+          />
         </div>
       );
     },
-    [widgetData, timeframe],
+    [widgetData, timeframe, equityDailyPoints],
+  );
+
+  // Per VOICES-ACCEPTED f2 — filter out strategy-composite widgets when
+  // `strategies.length === 0`. Bridge allocators (D-05) keep the full
+  // grid unchanged; zero-holdings allocators see only the always-render
+  // core (equity-curve + drawdown-chart + anything not in the gate list).
+  const visibleConfig = useMemo(
+    () =>
+      hasStrategies
+        ? config
+        : {
+            ...config,
+            tiles: config.tiles.filter(
+              (t) => !STRATEGY_COMPOSITE_WIDGETS.has(t.widgetId),
+            ),
+          },
+    [config, hasStrategies],
   );
 
   // Active widget IDs for the modal
@@ -540,12 +638,18 @@ export function AllocationDashboard({
         </div>
       </header>
 
-      {/* KPI strip */}
+      {/* KPI strip — Phase 07 / 07-04 forwards snapshotCount + allKeysStale
+          + minHistoryDepthMonths + activeVenues so the 07-03 warm-up + stale
+          rendering kicks in correctly for zero-holdings allocators. */}
       <KpiStrip
         analytics={analytics}
         metrics={metrics}
         timeframe={timeframe}
         aum={aum}
+        snapshotCount={snapshotCount}
+        allKeysStale={allKeysStale}
+        minHistoryDepthMonths={minHistoryDepthMonths}
+        activeVenues={activeVenues}
       />
 
       {/* Insight strip — fixed above the widget grid */}
@@ -559,9 +663,13 @@ export function AllocationDashboard({
         />
       </div>
 
-      {/* Grid */}
+      {/* Grid — Phase 07 / 07-04 / f2: `visibleConfig` filters out the 18
+          strategy-composite widgets when `strategies.length === 0`, so
+          zero-holdings allocators never see stale or crashing widgets
+          reading empty daily_returns. Bridge allocators (D-05) see the
+          full grid unchanged. */}
       <DashboardGrid
-        config={config}
+        config={visibleConfig}
         onLayoutChange={handleLayoutChange}
         onClose={handleClose}
         renderWidget={renderWidget}
