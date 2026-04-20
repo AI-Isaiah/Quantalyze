@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.14.2.0] - 2026-04-20
+
+Phase 06 UAT scope delta. After the 0.14.1.0 post-QA fixes, UAT surfaced
+two information-architecture issues and one missing destructive action.
+
+### Added
+
+- **Remove exchange key.** Allocators can now remove a connected exchange
+  key from the Exchanges surface. A confirmation modal first checks how
+  many imported holdings are tied to the key (RLS grants owners SELECT on
+  `allocator_holdings`), then requires an explicit "also remove N
+  holdings" choice before proceeding. The delete goes through migration
+  069's `delete_allocator_api_key(p_api_key_id, p_cascade_holdings)` — a
+  SECURITY DEFINER RPC that verifies caller ownership via `auth.uid()`,
+  optionally cascade-deletes the matching holdings rows, then deletes the
+  key atomically. The user-scoped Supabase client can't delete keys
+  directly once holdings exist (ON DELETE RESTRICT FK from migration
+  066), so this RPC is the only safe path.
+- **Exchanges tab under /profile.** Exchange management moved from a
+  standalone `/exchanges` route into `/profile?tab=exchanges` so the
+  allocator's account surface is one page with Personal, Mandate,
+  Exchanges, Organizations, and Account tabs. Server pre-fetches keys +
+  active portfolio so the tab renders without a client-side flash.
+
+### Removed
+
+- **`/connections` page.** Never wired up after Phase 05 and not
+  referenced anywhere in the nav.
+- **`/exchanges` page.** Collapsed into the Exchanges tab on `/profile`.
+  `AllocatorExchangeManager` stays route-agnostic — only the wrapper
+  component moved.
+
 ## [0.14.1.0] - 2026-04-20
 
 Post-QA bug-fix pass for Phase 06 (allocator API ingestion). Four defects from
