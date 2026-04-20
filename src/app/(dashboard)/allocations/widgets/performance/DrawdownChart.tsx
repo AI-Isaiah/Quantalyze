@@ -25,23 +25,34 @@ interface DrawdownChartProps extends WidgetProps {
   equityDailyPoints?: DailyPoint[];
 }
 
+/**
+ * Phase 07 / WR-01 — derive drawdown series from a cumulative USD snapshot
+ * series. Seeds peak at `max(first, 0)` so a leading 0 or negative value
+ * (e.g. an allocator whose first reconstructed day has no priceable
+ * holdings, or a derivative margin account below zero) does NOT emit
+ * NaN/Infinity via (0-0)/0. Exported for direct unit testing.
+ */
+export function deriveSnapshotDrawdowns(
+  points: DailyPoint[],
+): { date: string; value: number }[] {
+  if (points.length === 0) return [];
+  let peak = Math.max(points[0].value, 0);
+  const result: { date: string; value: number }[] = [];
+  for (const d of points) {
+    if (d.value > peak) peak = d.value;
+    const dd = peak > 0 ? (d.value - peak) / peak : 0;
+    result.push({ date: d.date, value: dd });
+  }
+  return result;
+}
+
 export default function DrawdownChart({ data, equityDailyPoints }: DrawdownChartProps) {
   const drawdownData = useMemo(() => {
     // Parallel-prop: prefer snapshot-derived points when explicitly
     // provided (including empty []). Only fall back to strategies-
     // derived compute when the prop is undefined.
     if (equityDailyPoints !== undefined) {
-      if (equityDailyPoints.length === 0) return [];
-      // Snapshot values are cumulative USD totals; drawdown is
-      // (current / peak) - 1 directly over the raw series.
-      let peak = equityDailyPoints[0].value;
-      const result: { date: string; value: number }[] = [];
-      for (const d of equityDailyPoints) {
-        if (d.value > peak) peak = d.value;
-        const dd = peak > 0 ? (d.value - peak) / peak : 0;
-        result.push({ date: d.date, value: dd });
-      }
-      return result;
+      return deriveSnapshotDrawdowns(equityDailyPoints);
     }
 
     const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);

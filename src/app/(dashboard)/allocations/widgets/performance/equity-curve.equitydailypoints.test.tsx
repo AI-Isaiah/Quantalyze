@@ -4,7 +4,7 @@ import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import EquityCurve from "./EquityCurve";
-import DrawdownChart from "./DrawdownChart";
+import DrawdownChart, { deriveSnapshotDrawdowns } from "./DrawdownChart";
 
 /**
  * Phase 07 / 07-03 — parallel-prop test coverage for the f7 equityDailyPoints
@@ -142,5 +142,55 @@ describe("DrawdownChart — equityDailyPoints parallel-prop (f7)", () => {
       />,
     );
     expect(queryByText(/no drawdown data/i)).not.toBeNull();
+  });
+
+});
+
+// Phase 07 / WR-01 regression — direct unit tests for the pure drawdown
+// derivation. Under the pre-fix logic `let peak = points[0].value`, a
+// leading 0 or negative value makes the first iteration's
+// `(d.value - peak) / peak` evaluate to NaN (0/0) or Infinity (-50/0 →
+// Infinity would feed to recharts and distort axes). Seeding peak at
+// `max(first, 0)` keeps the series finite and clamps the first drawdown
+// to 0 (no loss from a zero/negative baseline).
+describe("deriveSnapshotDrawdowns — WR-01 boundary regression", () => {
+  it("leading 0 value produces a finite series starting at 0", () => {
+    const result = deriveSnapshotDrawdowns([
+      { date: "2026-03-01", value: 0 },
+      { date: "2026-03-02", value: 0 },
+      { date: "2026-03-03", value: 100 },
+      { date: "2026-03-04", value: 90 },
+    ]);
+    for (const p of result) {
+      expect(Number.isFinite(p.value)).toBe(true);
+      expect(Number.isNaN(p.value)).toBe(false);
+    }
+    // First drawdown is 0 (peak seeded at max(0,0)=0, then `peak > 0`
+    // guard short-circuits to 0 before a new peak is established).
+    expect(result[0].value).toBe(0);
+    // Once a positive value establishes a real peak (100 on day 3),
+    // subsequent drops compute correctly: 90 vs peak 100 → -0.10.
+    expect(result[3].value).toBeCloseTo(-0.1, 10);
+  });
+
+  it("leading negative value produces a finite series (no Infinity)", () => {
+    const result = deriveSnapshotDrawdowns([
+      { date: "2026-03-01", value: -50 },
+      { date: "2026-03-02", value: 100 },
+      { date: "2026-03-03", value: 80 },
+    ]);
+    for (const p of result) {
+      expect(Number.isFinite(p.value)).toBe(true);
+      expect(Number.isNaN(p.value)).toBe(false);
+    }
+    // Seeded peak is max(-50, 0) = 0. The first point value=-50 with
+    // peak=0 takes the `peak > 0 ? ... : 0` branch → 0 (not Infinity).
+    expect(result[0].value).toBe(0);
+    // Then peak becomes 100 on day 2, so day 3 drawdown is (80-100)/100.
+    expect(result[2].value).toBeCloseTo(-0.2, 10);
+  });
+
+  it("empty input returns empty array", () => {
+    expect(deriveSnapshotDrawdowns([])).toEqual([]);
   });
 });
