@@ -1,25 +1,29 @@
+import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Card } from "@/components/ui/Card";
 import { getMyAllocationDashboard } from "@/lib/queries";
-import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchangeManager";
-import { AllocationDashboard } from "./AllocationDashboard";
-import Link from "next/link";
+import { AllocationsTabs } from "./AllocationsTabs";
 import { redirect } from "next/navigation";
 
+export const dynamic = "force-dynamic";
+
 /**
- * My Allocation — the allocator's live view of their actual investments.
+ * My Allocation — tabbed dashboard.
  *
- * v0.4.0 pivot: Scenarios-style dashboard (KPI strip + equity curve +
- * investment list) driven by real data from exchange-sync'd portfolio
- * strategies. No favorites, no test portfolios, no what-if toggles —
- * that surface is /scenarios. Each row is a real investment made by
- * connecting a team to the allocator's exchange account via a
- * read-only API key.
+ * Phase 07 / PURGE-07 / D-04. Two surfaces: Performance (default, real
+ * exchange-verified data) and Scenario (Phase 10 stub). URL state is
+ * governed by the `?tab=` query param — handled inside AllocationsTabs.
  *
- * Empty state (no real portfolio yet): shows the inline
- * AllocatorExchangeManager directly so the allocator can connect their
- * first exchange without navigating anywhere.
+ * The AllocationsTabs client component calls `useSearchParams`, which
+ * triggers Next.js 16's CSR-bailout rule for the route unless the
+ * component is wrapped in a `<Suspense>` boundary at a parent — we wrap
+ * it here with a minimal fallback so the route stays statically
+ * optimizable and the build produces no useSearchParams/Suspense warning.
+ *
+ * Empty-state handling (zero holdings) migrates into the AllocationDashboard
+ * render path in 07-05 (WarningBanner + minimal 4-widget view). Phase 06
+ * moved the "Connect Exchange" key-management flow to `/profile?tab=exchanges`;
+ * the inline exchange-manager widget no longer lives on this page.
  */
 export default async function MyAllocationPage() {
   const supabase = await createClient();
@@ -28,52 +32,17 @@ export default async function MyAllocationPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { portfolio, analytics, strategies, apiKeys, alertCount, outcomes } =
-    await getMyAllocationDashboard(user.id);
-
-  if (!portfolio) {
-    return (
-      <main className="max-w-[1280px] mx-auto p-6 pb-20">
-        <PageHeader
-          title="My Allocation"
-          description="Connect a read-only exchange API key to start tracking your real investments."
-        />
-        {apiKeys.length === 0 ? (
-          <Card className="text-center py-12">
-            <p className="text-text-muted mb-4">
-              No exchange connections yet. Add a read-only API key from your
-              exchange account to start tracking investments you&apos;ve made
-              with external teams.
-            </p>
-            <Link
-              href="/strategies"
-              className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-            >
-              Browse Strategies
-            </Link>
-            <p className="mt-4 text-[13px] text-text-muted">
-              <Link
-                href="/security"
-                className="text-accent underline-offset-4 hover:underline"
-              >
-                Review our security posture →
-              </Link>
-            </p>
-          </Card>
-        ) : null}
-        <AllocatorExchangeManager initialKeys={apiKeys} />
-      </main>
-    );
-  }
+  const payload = await getMyAllocationDashboard(user.id);
 
   return (
-    <AllocationDashboard
-      portfolio={portfolio}
-      analytics={analytics}
-      strategies={strategies}
-      apiKeys={apiKeys}
-      alertCount={alertCount}
-      outcomes={outcomes}
-    />
+    <main className="max-w-[1280px] mx-auto p-6 pb-20">
+      <PageHeader
+        title="My Allocation"
+        description="Your live exchange-verified portfolio."
+      />
+      <Suspense fallback={<div />}>
+        <AllocationsTabs {...payload} />
+      </Suspense>
+    </main>
   );
 }
