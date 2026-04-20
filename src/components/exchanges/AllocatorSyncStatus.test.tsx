@@ -83,6 +83,45 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     expect(pill.textContent).toBe("Synced 2m ago");
   });
 
+  // Regression: ISSUE-004 — when the pill label used a React fragment
+  // (<> "Synced " <span>{formatRelative}</span> </>), the outer `inline-flex
+  // items-center` container treated the text node and the span as separate
+  // flex items and collapsed the whitespace between them — the pill rendered
+  // "Synced1m ago" visually while textContent was still "Synced 1m ago".
+  // Wrapping both pieces in a single <span> reduces it to one flex item and
+  // preserves the space. This test pins that structure.
+  // Found by /qa on 2026-04-20 on /exchanges.
+  // Report: .gstack/qa-reports/qa-report-quantalyze-phase-06-2026-04-20.md
+  it("complete/rate_limited pill render as a SINGLE flex child (visible whitespace)", () => {
+    const oneMinAgo = new Date(Date.now() - 60_000).toISOString();
+    const { rerender } = render(
+      <AllocatorSyncStatus
+        syncStatus="complete"
+        syncError={null}
+        lastSyncAt={oneMinAgo}
+        exchange="okx"
+      />,
+    );
+    const completePill = screen.getByTestId("allocator-sync-pill");
+    // Exactly one direct element child — the wrapping span that holds
+    // "Synced " plus the relative-time span as ordinary inline flow.
+    expect(completePill.children.length).toBe(1);
+    expect(completePill.textContent).toBe("Synced 1m ago");
+
+    rerender(
+      <AllocatorSyncStatus
+        syncStatus="rate_limited"
+        syncError={null}
+        lastSyncAt={null}
+        exchange="okx"
+        retryAtSeconds={42}
+      />,
+    );
+    const rlPill = screen.getByTestId("allocator-sync-pill");
+    expect(rlPill.children.length).toBe(1);
+    expect(rlPill.textContent).toBe("Rate limited \u2014 retry in 42s");
+  });
+
   it("renders 'Synced (warnings)' for complete_with_warnings + helper with sync_error", () => {
     render(
       <AllocatorSyncStatus
