@@ -83,6 +83,11 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // ------------------------------------------------------------------
   // Directly owned (has a user-id column)
   // ------------------------------------------------------------------
+  // Phase 07 (migration 070): allocator_equity_snapshots is user-owned via
+  // allocator_id (= api_keys.user_id, enforced by the same owner-coherence
+  // trigger as allocator_holdings). Per-day equity history is personal data —
+  // GDPR Art. 15 requires it be part of the user's export.
+  { kind: "direct", table: "allocator_equity_snapshots", user_column: "allocator_id" },
   // Phase 06 (migration 066): allocator_holdings is user-owned via
   // allocator_id (= api_keys.user_id, enforced by the f5 owner-coherence
   // trigger). Exchange positions + balances are personal data —

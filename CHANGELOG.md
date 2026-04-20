@@ -6,6 +6,125 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.0.0] - 2026-04-20
+
+Phase 07 — Demo-Mode Purge. The `/allocations` dashboard now derives every
+number from real exchange-verified data: no seed portfolios, no fake snapshots.
+A brand-new allocator with zero holdings sees a real empty state with one
+"Connect Exchange" CTA. Existing allocators see a tabbed Performance (default)
+and Scenario (Phase 10 stub) layout, with historical equity reconstructed
+from ccxt trades + deposits + withdrawals + OHLCV, CoinGecko as fallback for
+unlisted symbols.
+
+### Added
+
+- **Historical equity reconstruction.** A new `equity_reconstruction` worker
+  replays per-allocator trade + transfer history against daily OHLCV to
+  produce a wealth curve anchored at first-connect. Runs once per (allocator,
+  api_key) on connect, then a daily `refresh_allocator_equity_daily` job
+  appends today's row. Per-venue history caps (Binance 24mo, OKX 3mo, Bybit
+  24mo) feed the KpiStrip warm-up copy so allocators see "only 3 months of
+  history available on OKX" instead of empty state. CoinGecko powers the
+  fallback for symbols without venue OHLCV (e.g. small-cap deposits), with
+  a 2s inter-call throttle and cached prices in `token_price_history`.
+- **Allocations tabs.** `/allocations` is now a two-tab shell. Performance
+  is the default, Scenario is a Phase-10 stub. URL state lives in
+  `?tab=performance|scenario` and back/forward is derived on every render
+  (no snapshotted local state).
+- **Empty state.** Zero-holdings allocators see a single-CTA empty state
+  that routes to `/profile?tab=exchanges` (the new Phase 06 IA). Syncing-
+  key allocators see an inline InfoBanner + the normal dashboard with the
+  18 strategy-composite widgets gated off until strategies exist.
+- **Stale-data banner.** When all active keys are >24h since last sync,
+  a WarningBanner renders above the KPI strip and charts get a contrast-
+  safe overlay pill ("Data may be stale") so staleness is communicated
+  independently of any single widget.
+- **Accessible tabs.** `AllocationsTabs` implements the full WAI-ARIA tab
+  pattern — `aria-controls` / `role="tabpanel"` / `id` / `aria-labelledby`
+  / roving `tabIndex` / Arrow+Home+End keyboard nav — so screen-reader
+  and keyboard users can navigate the Performance/Scenario surfaces.
+
+### Changed
+
+- **`getMyAllocationDashboard` now reads real allocator data.** Adds 9
+  new payload fields (equitySnapshots, equityDailyPoints, snapshotCount,
+  holdingsSummary, allKeysStale, lastSyncAt, hasSyncing, minHistory-
+  DepthMonths, activeVenues). Phase 06/07 allocators with api_keys +
+  snapshots but no portfolio row get a real dashboard instead of the
+  legacy empty-state early return. EquityCurve and DrawdownChart accept
+  the snapshot-derived points via a `equityDailyPoints` parallel prop so
+  Bridge allocators can keep the strategies-composite path until Phase 09
+  wires bridge portfolios to allocator_holdings.
+- **KpiStrip warm-up copy** surfaces venue-specific context: "Need N more
+  days of synced data on Binance" / "on OKX" instead of a generic message,
+  using `activeVenues` + `minHistoryDepthMonths` from the payload.
+- **AllocationDashboard widget-gating** filters out the 18 strategy-
+  composite widgets when `strategies.length === 0`, so zero-holdings
+  allocators never render widgets that would crash on empty
+  `daily_returns`.
+- **Onboarding.** Signup no longer seeds a portfolio or demo holdings —
+  new allocators land at `/allocations` and see the Phase 07 empty state.
+- **Polling.** `/allocations` Performance-tab polling is 30s (down from
+  5s) — the surface shows slow-changing data (daily equity, periodic
+  trades), so a 6× load reduction on `router.refresh()` is free.
+
+### Fixed
+
+- **CoinGecko rate limit honoured.** The 2s inter-call throttle on
+  CoinGecko fallback pricing was a no-op (`asyncio.sleep(0)`), so a
+  backfill with >30 unlisted symbols could burn through the free-tier
+  30 RPM cap and start returning 429s mid-reconstruction.
+- **Multi-venue `_fetch_transfers` pagination.** Deposits / withdrawals
+  inside a 90-day window past row 500 were silently dropped, producing
+  phantom quantities for bursty allocators. Now paginates within each
+  window, with a 50k-row-per-window safety ceiling.
+- **Latched source flags in per-day equity.** The `used_exchange` /
+  `used_coingecko` flags in `_compute_daily_equity` latched across days
+  — once CoinGecko priced any day, every subsequent day stamped
+  `source="mixed"`, which WR-05 then NULL-ed out `history_depth_months`
+  on. The per-venue warm-up copy ("Only N months on Binance") broke
+  silently for any allocator whose history touched CoinGecko.
+- **OKX trade-terminus transfer clamp.** When the trade window was
+  clamped to OKX's 90-day terminus, pre-terminus deposits/withdrawals
+  were still applied forward with no matching trades to offset them,
+  producing phantom quantities for long-sold assets.
+- **Atomic `persist_equity_snapshots`.** A single upsert (not batched)
+  so the `existing > 0` idempotency short-circuit stays consistent with
+  actual history completeness. A mid-run failure now leaves zero rows
+  (rolled back by the upsert) instead of partial truncation.
+- **EquityCurve zero-start handling.** Leading 0 / negative points are
+  skipped before anchoring the wealth multiplier, so a derivative
+  margin-below-zero first day doesn't mix absolute-dollar and wealth-
+  multiplier scales on the axis.
+- **Allocator-equity hot loop.** Pre-sorted CoinGecko and OHLCV keys +
+  `bisect_right` replace per-cell `sorted(keys())` / `reversed(series)`
+  walks, dropping the inner compute from O(days × symbols × keys) to
+  O(days × symbols × log keys).
+- **Concurrent OHLCV fetches.** Per-symbol OHLCV requests now fan out
+  via `asyncio.gather` (CCXT's per-exchange rate limiter still throttles)
+  instead of running sequentially, so a 10-symbol backfill doesn't
+  serialise 10 × 200-500ms round trips.
+- **Dashboard query waterfall.** `getRealPortfolio` now runs in parallel
+  with the Phase 07 fan-out instead of waiting for it sequentially —
+  one fewer cold-cache round trip on every dashboard render.
+- **Hardcoded design hex values.** `AllocationDashboard` header controls
+  and the `KpiStrip` warm-up helper use design-system tokens
+  (`border-border`, `text-text-muted`, `focus-visible:outline-accent`)
+  instead of inline `#1B6B5A` / `#718096` hex.
+- **Duplicate `<h1>`.** The PageHeader on `page.tsx` owns the page title;
+  `AllocationDashboard` no longer renders its own `<h1>My Allocation>`,
+  and the inner `<main>` wrappers (×2) are now `<section>` elements so
+  there is exactly one `<main>` landmark per document.
+
+### Removed
+
+- **Seed portfolios on signup.** `OnboardingWizard` no longer inserts
+  portfolios, holdings, or snapshots — it updates the profile row only.
+  Demo constants (`ALLOCATOR_ACTIVE_ID`, seed UUIDs) are confined to
+  an explicit allowlist of demo-mode files; a new `seed-integrity` test
+  walks the import graph and fails CI if a demo constant leaks into
+  authenticated paths.
+
 ## [0.14.2.0] - 2026-04-20
 
 Phase 06 UAT scope delta. After the 0.14.1.0 post-QA fixes, UAT surfaced

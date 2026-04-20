@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -318,5 +321,163 @@ describe("approximateMwr", () => {
     expect(approximateMwr(0.18)).toBe(0.18);
     expect(approximateMwr(-0.04)).toBe(-0.04);
     expect(approximateMwr(0)).toBe(0);
+  });
+});
+
+// ---------- PURGE-01 / PURGE-06 import-graph scan (Phase 07 Plan 06) ----------
+//
+// These blocks mechanically enforce that demo-seed constants stay confined to
+// /demo routes + test fixtures. Any new authenticated code path that imports
+// `@/lib/demo` or references `ALLOCATOR_ACTIVE_ID` / `isDemoPortfolioId` will
+// fail CI here.
+//
+// Citation: `.planning/phases/07-demo-mode-purge/07-RESEARCH.md` §4 is the
+// authoritative call-site table; the allowlist below MUST match that table.
+
+function walk(dir: string, acc: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    const s = statSync(full);
+    if (s.isDirectory()) {
+      // Skip node_modules, .next, and any dotfile directory defensively —
+      // the test walks src/ only, so these should not appear, but guard.
+      if (name === "node_modules" || name.startsWith(".")) continue;
+      walk(full, acc);
+    } else if (s.isFile() && /\.(ts|tsx)$/.test(name)) {
+      acc.push(full);
+    }
+  }
+  return acc;
+}
+
+const PROJECT_ROOT = resolve(__dirname, "../..");
+const SRC_ROOT = resolve(PROJECT_ROOT, "src");
+const MIGRATIONS_ROOT = resolve(PROJECT_ROOT, "supabase/migrations");
+
+// Explicit allowlist — every file permitted to reference demo constants.
+// Citation: RESEARCH.md §4 audit table + CONTEXT.md D-14.
+const DEMO_REFERENCE_ALLOWLIST = [
+  "src/lib/demo.ts",
+  "src/lib/demo.test.ts",
+  "src/__tests__/seed-integrity.test.ts",
+  // admin-only tooling per RESEARCH.md §4 row — allowed even though current
+  // grep shows no direct import. Entry kept so future admin-only references
+  // don't need an allowlist edit.
+  "src/lib/admin/match.ts",
+];
+
+const DEMO_ROUTE_PREFIXES = [
+  "src/app/demo/",
+  "src/app/api/demo/",
+];
+
+const DEMO_PATTERN =
+  /ALLOCATOR_ACTIVE_ID|isDemoPortfolioId|from\s+['"]@\/lib\/demo['"]/;
+
+function isAllowed(relPath: string): boolean {
+  if (DEMO_REFERENCE_ALLOWLIST.includes(relPath)) return true;
+  if (DEMO_ROUTE_PREFIXES.some((p) => relPath.startsWith(p))) return true;
+  return false;
+}
+
+describe("PURGE-01 / PURGE-06: demo constants confined to /demo + test fixtures", () => {
+  it("src/lib/queries.ts has no reference to demo constants", () => {
+    const file = resolve(SRC_ROOT, "lib/queries.ts");
+    const content = readFileSync(file, "utf-8");
+    expect(content).not.toMatch(DEMO_PATTERN);
+  });
+
+  it("no file under src/app/(dashboard) references demo constants", () => {
+    const files = walk(resolve(SRC_ROOT, "app/(dashboard)"));
+    const offenders = files.filter((f) => {
+      const rel = relative(PROJECT_ROOT, f);
+      if (isAllowed(rel)) return false;
+      return DEMO_PATTERN.test(readFileSync(f, "utf-8"));
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it("no file under src/app/api (excluding /api/demo) references demo constants", () => {
+    const files = walk(resolve(SRC_ROOT, "app/api")).filter(
+      (f) => !relative(PROJECT_ROOT, f).startsWith("src/app/api/demo/"),
+    );
+    const offenders = files.filter((f) =>
+      DEMO_PATTERN.test(readFileSync(f, "utf-8")),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("no file under src/lib (excluding demo.ts/demo.test.ts/admin/match.ts) references demo constants", () => {
+    const files = walk(resolve(SRC_ROOT, "lib"));
+    const offenders = files.filter((f) => {
+      const rel = relative(PROJECT_ROOT, f);
+      if (isAllowed(rel)) return false;
+      return DEMO_PATTERN.test(readFileSync(f, "utf-8"));
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it("exact allowlist — set of all referencing files is known", () => {
+    const allSrcFiles = walk(SRC_ROOT);
+    const referencing = allSrcFiles
+      .filter((f) => DEMO_PATTERN.test(readFileSync(f, "utf-8")))
+      .map((f) => relative(PROJECT_ROOT, f))
+      .sort();
+    for (const f of referencing) {
+      expect(
+        isAllowed(f),
+        `unexpected demo reference: ${f}`,
+      ).toBe(true);
+    }
+  });
+});
+
+// ---------- PURGE-05 / VOICES-ACCEPTED f4 migration co-occurrence scan ------
+//
+// Previously the seed-integrity suite asserted "at most one `ON auth.users`
+// substring globally" — that's too weak because a future migration could
+// add a second benign trigger on a different table and accidentally include
+// seed inserts. The co-occurrence check below is stricter: for every
+// `supabase/migrations/*.sql` file, fail if it contains BOTH `ON auth.users`
+// AND `INSERT INTO public.portfolios|allocator_holdings|allocator_equity_snapshots`.
+//
+// Current codebase expectation: exactly one file contains `ON auth.users`
+// (migration 002, the benign `handle_new_user` trigger), and its handler
+// inserts only into `public.profiles`. The positive-control test below
+// locks that in as a regression guard.
+
+describe("PURGE-05 / VOICES-ACCEPTED f4: no migration file co-occurs ON auth.users + seed-INSERT", () => {
+  const SEED_INSERT_PATTERN =
+    /INSERT\s+INTO\s+(public\.)?(portfolios|allocator_holdings|allocator_equity_snapshots)/i;
+  const AUTH_USERS_TRIGGER_PATTERN = /ON\s+auth\.users/i;
+
+  it("no migration has both `ON auth.users` and a seed-table INSERT (co-occurrence)", () => {
+    const migrationFiles = readdirSync(MIGRATIONS_ROOT)
+      .filter((n) => n.endsWith(".sql"))
+      .map((n) => resolve(MIGRATIONS_ROOT, n));
+    const offenders: string[] = [];
+    for (const file of migrationFiles) {
+      const content = readFileSync(file, "utf-8");
+      if (
+        AUTH_USERS_TRIGGER_PATTERN.test(content) &&
+        SEED_INSERT_PATTERN.test(content)
+      ) {
+        offenders.push(relative(PROJECT_ROOT, file));
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("migration 002 has the benign handle_new_user trigger (positive control)", () => {
+    const file = resolve(MIGRATIONS_ROOT, "002_rls_policies.sql");
+    const content = readFileSync(file, "utf-8");
+    // Benign trigger: on_auth_user_created → handle_new_user → INSERT INTO public.profiles
+    expect(content).toMatch(/CREATE\s+TRIGGER\s+on_auth_user_created/);
+    expect(content).toMatch(/handle_new_user/);
+    expect(content).toMatch(/INSERT\s+INTO\s+public\.profiles/);
+    // It should NOT reference portfolios/allocator_holdings/allocator_equity_snapshots:
+    expect(content).not.toMatch(/INSERT\s+INTO\s+public\.portfolios/);
+    expect(content).not.toMatch(/INSERT\s+INTO\s+allocator_holdings/);
+    expect(content).not.toMatch(/INSERT\s+INTO\s+allocator_equity_snapshots/);
   });
 });

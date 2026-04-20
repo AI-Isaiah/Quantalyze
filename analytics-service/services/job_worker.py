@@ -130,6 +130,8 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "compute_intro_snapshot": 2 * 60,  # 2 minutes (pure DB; no exchange I/O)
     "rescore_allocator": 5 * 60,  # Phase 3 / D-12 Option B — full universe scan per allocator
     "poll_allocator_positions": 3 * 60,  # Phase 06 / INGEST-03 — same envelope as poll_positions
+    "reconstruct_allocator_history": 30 * 60,   # Phase 07 / D-01 / RESEARCH.md §1E — 30 min full backfill
+    "refresh_allocator_equity_daily": 3 * 60,   # Phase 07 / D-02 — one-day delta per key (VOICES-ACCEPTED f1)
 }
 
 
@@ -1447,6 +1449,12 @@ async def dispatch(job: dict) -> DispatchResult:
         handler = run_rescore_allocator_job
     elif kind == "poll_allocator_positions":
         handler = run_poll_allocator_positions_job
+    elif kind == "reconstruct_allocator_history":
+        from services.equity_reconstruction import run_reconstruct_allocator_history_job
+        handler = run_reconstruct_allocator_history_job
+    elif kind == "refresh_allocator_equity_daily":
+        from services.equity_reconstruction import run_refresh_allocator_equity_daily_job
+        handler = run_refresh_allocator_equity_daily_job
     else:
         handler = None
 

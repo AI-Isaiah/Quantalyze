@@ -21,23 +21,35 @@ import { join } from "node:path";
 const repoRoot = join(__dirname, "..", "..", "..", "..");
 
 describe("AllocationDashboard outcomes wiring (ISSUE-001 regression)", () => {
-  it("page.tsx destructures `outcomes` from getMyAllocationDashboard()", () => {
+  it("page.tsx passes the full getMyAllocationDashboard payload through to AllocationsTabs", () => {
+    // Phase 07 / 07-04: wiring moved from direct destructure in page.tsx
+    // into a spread through AllocationsTabs → AllocationDashboard. The
+    // ISSUE-001 invariant (outcomes must flow end-to-end) now lives in
+    // AllocationsTabs + AllocationDashboard; the page-level assertion is
+    // that the full payload is spread into AllocationsTabs.
     const pageSrc = readFileSync(
       join(repoRoot, "src", "app", "(dashboard)", "allocations", "page.tsx"),
       "utf8",
     );
-    const destructureLine = /\{\s*[^}]*?\boutcomes\b[^}]*?\}\s*=\s*\n?\s*await\s+getMyAllocationDashboard/.test(
-      pageSrc,
-    );
-    expect(destructureLine).toBe(true);
+    // Assigns result of getMyAllocationDashboard to a single variable
+    // (any identifier) and spreads it into <AllocationsTabs>.
+    expect(pageSrc).toMatch(/=\s*await\s+getMyAllocationDashboard\(/);
+    expect(pageSrc).toMatch(/<AllocationsTabs\s+\{\.\.\.\w+\}\s*\/>/);
   });
 
-  it("page.tsx forwards `outcomes` to <AllocationDashboard />", () => {
-    const pageSrc = readFileSync(
-      join(repoRoot, "src", "app", "(dashboard)", "allocations", "page.tsx"),
+  it("AllocationsTabs forwards the full payload to AllocationDashboard via spread", () => {
+    const tabsSrc = readFileSync(
+      join(
+        repoRoot,
+        "src",
+        "app",
+        "(dashboard)",
+        "allocations",
+        "AllocationsTabs.tsx",
+      ),
       "utf8",
     );
-    expect(pageSrc).toMatch(/<AllocationDashboard[\s\S]*?\boutcomes=\{outcomes\}[\s\S]*?\/>/);
+    expect(tabsSrc).toMatch(/<AllocationDashboard\s+\{\.\.\.props\}/);
   });
 
   it("AllocationDashboard accepts `outcomes` in its Props + destructures it", () => {

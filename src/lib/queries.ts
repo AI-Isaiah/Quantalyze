@@ -5,6 +5,8 @@ import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import { API_KEY_USER_COLUMNS } from "./constants";
+import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
+import type { DailyPoint } from "@/lib/scenario";
 import type {
   Strategy,
   StrategyAnalytics,
@@ -592,6 +594,65 @@ export interface MyAllocationDashboardPayload {
   };
   /** Phase 5 D-15: full outcome history for the allocator, sorted created_at DESC, capped at 200 most-recent (Voice-D5). */
   outcomes: OutcomeRow[];
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 07 / 07-03 extensions (VOICES-ACCEPTED f7 + f9)
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Per-allocator equity time series from `allocator_equity_snapshots`
+   * (Phase 07 plan 01). Ordered ascending by `asof`. Empty array when
+   * the allocator has no snapshots yet (first-connect reconstruction
+   * may still be running). The `history_depth_months` column carries
+   * the per-venue retention cap so the UI can show venue-specific
+   * warm-up copy (f9).
+   */
+  equitySnapshots: Array<{
+    asof: string;
+    value_usd: number;
+    breakdown: Record<string, number> | null;
+    source: "exchange_primary" | "coingecko_fallback" | "mixed";
+    history_depth_months: number | null;
+  }>;
+  /**
+   * Latest-asof-per-symbol collapse of `allocator_holdings` (Phase 06
+   * table). Populated by the Phase 06 poll_allocator_positions cron.
+   */
+  holdingsSummary: Array<{
+    symbol: string;
+    quantity: number;
+    mark_price_usd: number | null;
+    value_usd: number;
+    venue: string;
+    holding_type: "spot" | "derivative";
+  }>;
+  /** Row count in allocator_equity_snapshots for this allocator — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
+  snapshotCount: number;
+  /** True when every active api_key's last_sync_at is older than 24h. Drives the stale KPI render + WarningBanner. */
+  allKeysStale: boolean;
+  /** Most recent `last_sync_at` across all active api_keys (ISO string) or null. */
+  lastSyncAt: string | null;
+  /** True when any active api_key has sync_status='syncing'. */
+  hasSyncing: boolean;
+  /**
+   * Per VOICES-ACCEPTED f7: DailyPoint[] derived from equitySnapshots
+   * via equitySnapshotsToDailyPoints. Consumed by EquityCurve /
+   * DrawdownChart through the parallel-prop path (prefer this over
+   * strategies-derived compute when provided).
+   */
+  equityDailyPoints: DailyPoint[];
+  /**
+   * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
+   * allocator's snapshots, or null when every snapshot's column is
+   * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
+   * specific warm-up copy in KpiStrip (when < 3, show "Only N months
+   * of history available on {venues}").
+   */
+  minHistoryDepthMonths: number | null;
+  /**
+   * Per VOICES-ACCEPTED f9: sorted, deduped display-cased venue
+   * labels from the allocator's active api_keys (e.g., ["Binance",
+   * "OKX"]). Used in the venue-specific warm-up copy.
+   */
+  activeVenues: string[];
 }
 
 /**
@@ -636,23 +697,189 @@ export async function getUserApiKeys(userId: string) {
   }>;
 }
 
+// Per VOICES-ACCEPTED f9 — venue display-case map. Any string not in the
+// map falls back to its original value (defensive against new exchanges).
+const VENUE_DISPLAY: Record<string, string> = {
+  binance: "Binance",
+  okx: "OKX",
+  bybit: "Bybit",
+};
+
+/**
+ * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
+ * both branches (portfolio-exists and !portfolio). Kept internal — the
+ * dashboard function is the only caller.
+ */
+function derivePhase07Fields(
+  apiKeys: Array<{
+    is_active: boolean;
+    exchange: string;
+    sync_status: string | null;
+    last_sync_at: string | null;
+  }>,
+  equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
+  snapshotCount: number,
+  holdingsRows: Array<{
+    symbol: string;
+    quantity: number;
+    mark_price: number | null;
+    value_usd: number;
+    venue: string;
+    holding_type: "spot" | "derivative";
+    asof: string;
+  }>,
+): Pick<
+  MyAllocationDashboardPayload,
+  | "equitySnapshots"
+  | "holdingsSummary"
+  | "snapshotCount"
+  | "allKeysStale"
+  | "lastSyncAt"
+  | "hasSyncing"
+  | "equityDailyPoints"
+  | "minHistoryDepthMonths"
+  | "activeVenues"
+> {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const activeKeys = apiKeys.filter((k) => k.is_active);
+  const allKeysStale =
+    activeKeys.length > 0 &&
+    activeKeys.every((k) => !k.last_sync_at || k.last_sync_at < cutoff);
+  const lastSyncAt = activeKeys.reduce<string | null>((max, k) => {
+    if (!k.last_sync_at) return max;
+    return !max || k.last_sync_at > max ? k.last_sync_at : max;
+  }, null);
+  const hasSyncing = activeKeys.some((k) => k.sync_status === "syncing");
+
+  // f7 adapter: DailyPoint[] for EquityCurve/DrawdownChart parallel-prop.
+  const equityDailyPoints = equitySnapshotsToDailyPoints(
+    equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
+  );
+
+  // f9: min non-null history_depth_months across snapshots. Null when
+  // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
+  const depths = equitySnapshots
+    .map((s) => s.history_depth_months)
+    .filter((d): d is number => d != null);
+  const minHistoryDepthMonths = depths.length > 0 ? Math.min(...depths) : null;
+
+  // f9: sorted deduped display-cased venues from active keys.
+  const activeVenues = Array.from(
+    new Set(
+      activeKeys.map(
+        (k) => VENUE_DISPLAY[k.exchange.toLowerCase()] ?? k.exchange,
+      ),
+    ),
+  ).sort();
+
+  // Collapse holdings to latest-asof-per-symbol via linear scan of the
+  // max-asof comparator. Input order is IRRELEVANT for correctness — the
+  // `.order("asof", { ascending: false })` clause on the PostgREST query
+  // above is a log-inspection hedge (newest rows render first in debug
+  // dumps), not a correctness requirement. Do NOT flip the comparator to
+  // "first-seen wins" thinking ordering is guaranteed — removing `.order()`
+  // would silently regress that assumption.
+  const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
+  for (const r of holdingsRows) {
+    const existing = holdingsMap.get(r.symbol);
+    if (!existing || r.asof > existing.asof) holdingsMap.set(r.symbol, r);
+  }
+  const holdingsSummary = Array.from(holdingsMap.values()).map((r) => ({
+    symbol: r.symbol,
+    quantity: r.quantity,
+    mark_price_usd: r.mark_price,
+    value_usd: r.value_usd,
+    venue: r.venue,
+    holding_type: r.holding_type,
+  }));
+
+  return {
+    equitySnapshots,
+    holdingsSummary,
+    snapshotCount,
+    allKeysStale,
+    lastSyncAt,
+    hasSyncing,
+    equityDailyPoints,
+    minHistoryDepthMonths,
+    activeVenues,
+  };
+}
+
 export const getMyAllocationDashboard = cache(
   async (userId: string): Promise<MyAllocationDashboardPayload> => {
     const supabase = await createClient();
     const admin = createAdminClient();
 
-    // Step 1: the real portfolio anchors everything else.
-    const portfolio = await getRealPortfolio(userId);
+    // Step 1: fan out every userId-keyed fetch in one wave. The Phase 07
+    // inputs (equity snapshots, allocator holdings, api keys) don't depend
+    // on the portfolio row, so we parallelise them with getRealPortfolio
+    // to cut cold-cache waves from 3 to 2. The !portfolio branch still
+    // short-circuits Step 2 cleanly — Phase 07 allocators can have real
+    // equity snapshots + holdings even without a portfolio_strategies row.
+    const [
+      portfolio,
+      phase07EquityRes,
+      phase07HoldingsRes,
+      apiKeys,
+    ] = await Promise.all([
+      getRealPortfolio(userId),
+      supabase
+        .from("allocator_equity_snapshots")
+        .select("asof, value_usd, breakdown, source, history_depth_months")
+        .eq("allocator_id", userId)
+        .order("asof", { ascending: true })
+        // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
+        // payload can't grow unbounded as the table accumulates days.
+        .limit(730),
+      supabase
+        .from("allocator_holdings")
+        .select(
+          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof",
+        )
+        .eq("allocator_id", userId)
+        .order("asof", { ascending: false }),
+      getUserApiKeys(userId),
+    ]);
+
+    const equitySnapshots = (phase07EquityRes.data ??
+      []) as MyAllocationDashboardPayload["equitySnapshots"];
+    // The equity query returns every row in the allocator's window with no
+    // pagination, so `length` is the authoritative count — a separate
+    // head-only count query would be a redundant round-trip.
+    const snapshotCount = equitySnapshots.length;
+    const holdingsRows = (phase07HoldingsRes.data ?? []) as Array<{
+      symbol: string;
+      quantity: number;
+      mark_price: number | null;
+      value_usd: number;
+      venue: string;
+      holding_type: "spot" | "derivative";
+      asof: string;
+    }>;
+
+    const phase07 = derivePhase07Fields(
+      apiKeys,
+      equitySnapshots,
+      snapshotCount,
+      holdingsRows,
+    );
+
     if (!portfolio) {
-      // No real portfolio yet — still fetch api_keys so the page can
-      // prompt the user to connect their first exchange.
+      // No real portfolio yet — still return a full Phase 07 payload so
+      // fresh allocators with api_keys + snapshots see real equity. Legacy
+      // fields collapse to empty/null so the Phase 5/9 widgets render
+      // their empty states; Phase 07 KPI / equity / drawdown widgets
+      // consume the new fields via the parallel-prop path (VOICES-
+      // ACCEPTED f7 + Phase 07 SC3).
       return {
         portfolio: null,
         analytics: null,
         strategies: [],
-        apiKeys: await getUserApiKeys(userId),
+        apiKeys,
         alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
         outcomes: [] as OutcomeRow[],
+        ...phase07,
       };
     }
 
@@ -665,11 +892,15 @@ export const getMyAllocationDashboard = cache(
     // fan-outs run through the user-scoped client because migration 059 gave
     // each table an owner-select policy; RLS then enforces the allocator_id
     // gate as defence-in-depth.
+    // NOTE: `apiKeys` is already fetched above in the Phase 07 parallel
+    // round; we reuse that result here instead of firing a second
+    // getUserApiKeys query. Destructure naming is preserved by
+    // declaring a non-conflicting alias and letting the existing
+    // call sites keep reading `apiKeys`.
     const nowIso = new Date().toISOString();
     const [
       analyticsRes,
       strategiesRes,
-      apiKeys,
       alertsRes,
       sentAsIntroRes,
       existingOutcomesRes,
@@ -711,7 +942,6 @@ export const getMyAllocationDashboard = cache(
         )
         .eq("portfolio_id", portfolio.id)
         .order("current_weight", { ascending: false }),
-      getUserApiKeys(userId),
       supabase
         .from("portfolio_alerts")
         .select("id, severity")
@@ -869,9 +1099,10 @@ export const getMyAllocationDashboard = cache(
       portfolio,
       analytics: (analyticsRes.data ?? null) as PortfolioAnalytics | null,
       strategies,
-      apiKeys: apiKeys,
+      apiKeys,
       alertCount: alertCounts,
       outcomes,
+      ...phase07,
     };
   },
 );

@@ -22,6 +22,30 @@ describe("formatPercent", () => {
   it("returns dash for null", () => {
     expect(formatPercent(null)).toBe("—");
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Phase 07 / 07-03 regression guards per VOICES-ACCEPTED f8.
+  // `src/lib/utils.ts` line 8 already has the `if (value == null) return "—"`
+  // guard; these tests pin the behaviour so a future refactor can't
+  // accidentally start returning "NaN%" or undefined for null / undefined
+  // inputs. The em-dash is the literal U+2014 character (same code point
+  // used by every KPI cell's warm-up + stale render path).
+  // ─────────────────────────────────────────────────────────────────
+  it("regression (f8): formatPercent(null) returns the em-dash U+2014", () => {
+    const result = formatPercent(null);
+    expect(result).toBe("—");
+    expect(result.charCodeAt(0)).toBe(0x2014);
+  });
+  it("regression (f8): formatPercent(undefined) returns the em-dash U+2014", () => {
+    const result = formatPercent(undefined);
+    expect(result).toBe("—");
+    expect(result.charCodeAt(0)).toBe(0x2014);
+  });
+  it("regression (f8): formatPercent(0.12) preserves numeric format contract", () => {
+    // Lock in the canonical output so the stale/warm-up em-dash branch
+    // stays clearly distinguishable from a formatted zero/positive value.
+    expect(formatPercent(0.12)).toBe("+12.00%");
+  });
 });
 
 describe("formatNumber", () => {

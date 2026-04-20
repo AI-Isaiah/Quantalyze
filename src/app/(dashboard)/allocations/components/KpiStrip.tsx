@@ -17,6 +17,30 @@ interface KpiStripProps {
   metrics: ComputedMetrics;
   timeframe: string;
   aum: number | null;
+  /**
+   * Phase 07 / 07-03. When the allocator has < 30 snapshot rows and is
+   * NOT stale, render the warm-up helper sub-line beneath every null KPI
+   * cell. Defaults to 30 so untouched callers see no warm-up render.
+   */
+  snapshotCount?: number;
+  /**
+   * Phase 07 / 07-03. When true, every null KPI renders plain em-dash
+   * (no warm-up helper) — the global stale banner (07-05) surfaces the
+   * stale-sync explanation once at the top of the page.
+   */
+  allKeysStale?: boolean;
+  /**
+   * Per VOICES-ACCEPTED f9. Min(history_depth_months) across the
+   * allocator's snapshots. When `< 3` AND activeVenues is non-empty,
+   * the warm-up copy switches to the venue-specific "Only {N} months of
+   * history available on {venues}" message.
+   */
+  minHistoryDepthMonths?: number | null;
+  /**
+   * Per VOICES-ACCEPTED f9. Display-cased venues (e.g. ["Binance", "OKX"]).
+   * Consumed by the venue-specific warm-up copy.
+   */
+  activeVenues?: string[];
 }
 
 interface KpiItem {
@@ -24,6 +48,34 @@ interface KpiItem {
   value: string;
   raw: number | null | undefined;
   tooltip: string;
+}
+
+/**
+ * Phase 07 / 07-03 — resolve the warm-up helper copy per VOICES-ACCEPTED f9.
+ *
+ * When the allocator's dominant venue has < 3 months of retention (i.e.
+ * OKX via ccxt's 90-day trade-history cap), the default "30 days of synced
+ * data" copy is misleading because the backfill will never reach 30 days.
+ * Switch to a venue-specific explanation. Otherwise render the standard
+ * 30-day countdown copy.
+ */
+function warmupCopy(
+  snapshotCount: number,
+  minHistoryDepthMonths: number | null,
+  activeVenues: string[],
+): string {
+  // The condition is inclusive of 3 months because OKX's trade-history
+  // cap IS 3 months — an allocator sitting AT that boundary needs the
+  // venue-specific explanation, not the generic countdown. Matches the
+  // Test-E/F specs in KpiStrip.warmup.test.tsx.
+  if (
+    minHistoryDepthMonths != null &&
+    minHistoryDepthMonths <= 3 &&
+    activeVenues.length > 0
+  ) {
+    return `Only ${minHistoryDepthMonths} months of history available on ${activeVenues.join(", ")}`;
+  }
+  return `Warming up — need ${30 - snapshotCount} more days of synced data.`;
 }
 
 function kpiColor(raw: number | null | undefined): React.CSSProperties | undefined {
@@ -40,8 +92,26 @@ function healthColor(score: number): string {
   return "#DC2626";
 }
 
-export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) {
+export function KpiStrip({
+  analytics,
+  metrics,
+  timeframe,
+  aum,
+  snapshotCount = 30,
+  allKeysStale = false,
+  minHistoryDepthMonths = null,
+  activeVenues = [],
+}: KpiStripProps) {
   const resolvedAum = aum ?? analytics?.total_aum ?? null;
+
+  // Phase 07 / 07-03 — the warm-up helper line renders for each null KPI
+  // cell when the allocator is still backfilling AND not globally stale.
+  // Stale suppresses the helper so the 07-05 banner can carry the copy
+  // once at the page level instead of per-cell.
+  const warmingUp = snapshotCount < 30 && !allKeysStale;
+  const warmupHelper = warmingUp
+    ? warmupCopy(snapshotCount, minHistoryDepthMonths, activeVenues)
+    : null;
 
   const health = useMemo(
     () => computePortfolioHealthScore(analytics),
@@ -169,6 +239,13 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
           )}
           {group.items.map((item) => {
             const isHealthScore = group.label === "Health" && item.label === "Score";
+            // Phase 07 / 07-03 — the warm-up sub-line renders ONLY on
+            // annualised KPI cells that hit the null-value em-dash path
+            // AND when the allocator is still backfilling. AUM is a dollar
+            // figure (not annualised), so we skip the helper there to
+            // avoid redundant copy.
+            const showWarmupHelper =
+              warmupHelper !== null && item.raw == null && item.label !== "AUM";
             return (
               <Tooltip key={item.label} content={item.tooltip} className="relative inline-flex">
                 <div
@@ -190,6 +267,11 @@ export function KpiStrip({ analytics, metrics, timeframe, aum }: KpiStripProps) 
                   >
                     {item.value}
                   </span>
+                  {showWarmupHelper && (
+                    <p className="text-[13px] mt-1 text-center text-text-muted">
+                      {warmupHelper}
+                    </p>
+                  )}
                 </div>
               </Tooltip>
             );
