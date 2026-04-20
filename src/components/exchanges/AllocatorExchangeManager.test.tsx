@@ -97,6 +97,7 @@ function makeKey(overrides: Partial<Record<string, unknown>> = {}) {
     account_balance_usdt: 12_345,
     created_at: "2026-04-01T00:00:00Z",
     sync_error: null,
+    last_429_at: null as string | null,
     ...overrides,
   };
 }
@@ -428,17 +429,37 @@ describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
     expect(routerRefreshMock).toHaveBeenCalledTimes(2);
   });
 
-  it("no interval fires when no rows are syncing", () => {
-    render(
-      <AllocatorExchangeManager
-        initialKeys={[makeKey({ sync_status: "complete" })]}
-      />,
-    );
-    act(() => {
-      vi.advanceTimersByTime(15_000);
-    });
-    expect(routerRefreshMock).not.toHaveBeenCalled();
-  });
+  // ISSUE-005 regression: the poll used to be gated on hasSyncing, so a
+  // server-side transition (complete → revoked / rate_limited / error /
+  // complete_with_warnings) was invisible until the user reloaded the tab.
+  // These assertions prove the interval ticks for each of those states so
+  // SC3's "≤5s flip" contract holds for the common case (worker silently
+  // invalidates a key while the user is looking at /exchanges).
+  it.each([
+    ["complete"],
+    ["revoked"],
+    ["rate_limited"],
+    ["error"],
+    ["complete_with_warnings"],
+    ["idle"],
+  ])(
+    "ISSUE-005: polling ticks every 5s even when sync_status is %s (non-syncing)",
+    (syncStatus) => {
+      render(
+        <AllocatorExchangeManager
+          initialKeys={[makeKey({ sync_status: syncStatus })]}
+        />,
+      );
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(routerRefreshMock).toHaveBeenCalledTimes(1);
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(routerRefreshMock).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("interval is cleared on unmount", () => {
     const { unmount } = render(
@@ -456,6 +477,97 @@ describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
     });
     // Should still be 1 — no extra ticks after unmount.
     expect(routerRefreshMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ISSUE-006 regression: rate_limited pill used to render "retry in 0s"
+// because the client had no way to compute the cooldown countdown.
+// Migration 068 grants SELECT (last_429_at); constants.ts adds it to
+// API_KEY_USER_COLUMNS_ARR; allocator-cooldowns.ts holds the per-exchange
+// EXCHANGE_COOLDOWN_SECONDS map. These tests exercise the wiring.
+describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+  });
+
+  it("okx + last_429_at 35s ago renders pill 'retry in ~265s' (cooldown 300s)", () => {
+    const last429At = new Date(Date.now() - 35_000).toISOString();
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            id: "key-okx-rate",
+            exchange: "okx",
+            sync_status: "rate_limited",
+            last_429_at: last429At,
+          }),
+        ]}
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill").textContent ?? "";
+    // Tolerate ±3s for render-latency drift.
+    expect(pill).toMatch(
+      /Rate limited \u2014 retry in (262|263|264|265|266|267|268)s/,
+    );
+    // Pre-fix, the pill rendered "retry in 0s" regardless of last_429_at.
+    expect(pill).not.toMatch(/retry in 0s/);
+  });
+
+  it("binance + last_429_at 10s ago renders pill 'retry in ~110s' (cooldown 120s)", () => {
+    const last429At = new Date(Date.now() - 10_000).toISOString();
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            id: "key-binance-rate",
+            exchange: "binance",
+            sync_status: "rate_limited",
+            last_429_at: last429At,
+          }),
+        ]}
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill").textContent ?? "";
+    expect(pill).toMatch(
+      /Rate limited \u2014 retry in (107|108|109|110|111|112|113)s/,
+    );
+  });
+
+  it("rate_limited with no last_429_at falls back to 'retry in 0s' (no data)", () => {
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            id: "key-null-429",
+            exchange: "okx",
+            sync_status: "rate_limited",
+            last_429_at: null,
+          }),
+        ]}
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill").textContent ?? "";
+    expect(pill).toContain("retry in 0s");
+  });
+
+  it("elapsed cooldown (last_429_at >300s ago for okx) clamps to 0s", () => {
+    const last429At = new Date(Date.now() - 400_000).toISOString();
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            id: "key-expired",
+            exchange: "okx",
+            sync_status: "rate_limited",
+            last_429_at: last429At,
+          }),
+        ]}
+      />,
+    );
+    const pill = screen.getByTestId("allocator-sync-pill").textContent ?? "";
+    expect(pill).toContain("retry in 0s");
   });
 });
 

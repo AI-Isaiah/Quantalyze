@@ -36,6 +36,7 @@ import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "@/components/strategy/ApiKeyForm";
 import { createClient } from "@/lib/supabase/client";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { computeRetryAtSeconds } from "@/lib/allocator-cooldowns";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 
 interface ExchangeConnection {
@@ -52,6 +53,11 @@ interface ExchangeConnection {
   // Landmine 3: sync_error surfaces under the pill in the aria-live helper
   // line for `error` / `complete_with_warnings` states.
   sync_error: string | null;
+  // ISSUE-006 / migration 068: last_429_at is stamped by the Python worker
+  // on ccxt 429s. Used to compute the `rate_limited` pill's retry-in-Ns
+  // countdown via EXCHANGE_COOLDOWN_SECONDS (client-side mirror of the
+  // Python EXCHANGE_COOLDOWNS map in job_worker.py).
+  last_429_at: string | null;
   // f8 (client-only — NOT persisted to DB): captured from the sync route's
   // `already_inflight` response. When syncing AND ≥30s out, the pill renders
   // the Queued helper via AllocatorSyncStatus.
@@ -70,9 +76,13 @@ interface ExchangeConnection {
  */
 type InitialKey = Omit<
   ExchangeConnection,
-  "sync_error" | "queued_next_attempt_at" | "helper_override"
+  | "sync_error"
+  | "last_429_at"
+  | "queued_next_attempt_at"
+  | "helper_override"
 > & {
   sync_error?: string | null;
+  last_429_at?: string | null;
 };
 
 interface Props {
@@ -131,6 +141,7 @@ function normalizeInitialKey(
     account_balance_usdt: k.account_balance_usdt,
     created_at: k.created_at,
     sync_error: k.sync_error ?? null,
+    last_429_at: k.last_429_at ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches.
     queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
@@ -162,18 +173,36 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
     });
   }, [initialKeys]);
 
-  // D-11: 5s router.refresh() polling while any row is syncing. The poll
-  // is transparent — the pill IS the live region; no visual "refreshing"
-  // chrome. setInterval is cleared when no rows remain syncing OR on
-  // unmount (cleanup function).
+  // D-11: 5s router.refresh() polling — always-on while the tab is
+  // visible, so server-side transitions into ANY non-terminal state
+  // (`revoked`, `rate_limited`, `error`, `complete_with_warnings`) surface
+  // without a manual reload. Previously gated on `hasSyncing`, which left
+  // the pill stuck on its last-rendered value whenever the row was idle
+  // at render time — breaking SC3's "≤5s flip" contract for the common
+  // case where the worker silently invalidates a key (ISSUE-005).
+  // The `visibilitychange` listener re-runs the poll the moment the tab
+  // comes back into focus so users see fresh state on return.
   useEffect(() => {
-    const hasSyncing = keys.some((k) => k.sync_status === "syncing");
-    if (!hasSyncing) return;
-    const id = setInterval(() => {
+    const tick = () => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
       startTransition(() => router.refresh());
-    }, 5000);
-    return () => clearInterval(id);
-  }, [keys, router, startTransition]);
+    };
+    const id = setInterval(tick, 5000);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", tick);
+    }
+    return () => {
+      clearInterval(id);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", tick);
+      }
+    };
+  }, [router, startTransition]);
 
   async function handleSync(apiKeyId: string) {
     // D-10 optimistic syncing: pill flips immediately so the click feels
@@ -460,6 +489,10 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                     syncError={key.sync_error}
                     lastSyncAt={key.last_sync_at}
                     exchange={key.exchange}
+                    retryAtSeconds={computeRetryAtSeconds(
+                      key.exchange,
+                      key.last_429_at,
+                    )}
                     queuedNextAttemptAt={key.queued_next_attempt_at}
                     helperOverride={key.helper_override}
                   />

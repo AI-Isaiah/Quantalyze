@@ -212,6 +212,12 @@ export interface ApiKey {
   last_sync_at: string | null;
   account_balance_usdt: number | null;
   created_at: string;
+  // Phase 06 (migration 066). Worker-sanitized error message surfaced via
+  // the `error` / `complete_with_warnings` pill helper line.
+  sync_error: string | null;
+  // Phase 06 / ISSUE-006 (migration 068). Stamped by the Python worker on
+  // ccxt 429s; drives the `rate_limited` pill's retry-in-Ns countdown.
+  last_429_at: string | null;
 }
 
 export interface DiscoveryCategory {

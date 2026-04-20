@@ -626,6 +626,11 @@ export async function getUserApiKeys(userId: string) {
     // API_KEY_USER_COLUMNS_ARR (constants.ts). NULL on success or when
     // no sync has run yet.
     sync_error: string | null;
+    // Phase 06 / ISSUE-006 (migration 068) — timestamp of the last ccxt
+    // 429 (stamped by the Python worker). The allocator-facing UI uses
+    // this + EXCHANGE_COOLDOWN_SECONDS to render the `rate_limited` pill's
+    // "retry in Ns" countdown. NULL when the key has never hit a 429.
+    last_429_at: string | null;
     account_balance_usdt: number | null;
     created_at: string;
   }>;

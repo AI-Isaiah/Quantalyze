@@ -97,11 +97,18 @@ export const API_KEY_USER_COLUMNS_ARR = [
   // full-table SELECT via existing grants; admin reads via the
   // admin-select RLS path.
   "sync_error",
+  // Phase 06 (migration 068 / ISSUE-006) — GRANT SELECT (last_429_at)
+  // ON api_keys TO authenticated. Stamped by the Python worker on ccxt
+  // 429s; required so AllocatorExchangeManager can compute the
+  // retry-in-Ns countdown for the `rate_limited` pill. Without this
+  // projection the countdown renders "retry in 0s" regardless of the
+  // real server-side cooldown.
+  "last_429_at",
 ] as const;
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];
