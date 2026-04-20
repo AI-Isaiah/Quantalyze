@@ -176,13 +176,17 @@ export function AllocatorSyncStatus({
       );
       break;
     case "complete":
+      // Wrap both parts in a single span so the inline-flex pill treats them
+      // as one flex item — otherwise the whitespace between "Synced" and
+      // the relative-time span collapses and the pill renders "Synced1m ago"
+      // even though .textContent is still "Synced 1m ago".
       pillLabel = (
-        <>
+        <span>
           Synced{" "}
           <span className="font-metric tabular-nums">
             {formatRelative(lastSyncAt)}
           </span>
-        </>
+        </span>
       );
       break;
     case "complete_with_warnings":
@@ -190,11 +194,13 @@ export function AllocatorSyncStatus({
       break;
     case "rate_limited": {
       const n = Math.max(0, retryAtSeconds ?? 0);
+      // Same single-flex-item wrap as `complete` — otherwise inline-flex
+      // collapses the trailing " " before the {n}s span.
       pillLabel = (
-        <>
+        <span>
           {`Rate limited ${EM_DASH} retry in `}
           <span className="font-metric tabular-nums">{n}s</span>
-        </>
+        </span>
       );
       break;
     }
