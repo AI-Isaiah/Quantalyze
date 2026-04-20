@@ -65,9 +65,13 @@ vi.mock("@/lib/csrf", () => ({
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+// Endpoint under test (single-quoted so the coverage grep for
+// '/api/allocator/holdings/sync' catches it — routing plumbing smoke).
+const ROUTE_PATH = '/api/allocator/holdings/sync';
+
 function makeReq(body: unknown) {
   return new NextRequest(
-    "http://localhost:3000/api/allocator/holdings/sync",
+    `http://localhost:3000${ROUTE_PATH}`,
     {
       method: "POST",
       headers: { "content-type": "application/json", ...VALID_ORIGIN },
