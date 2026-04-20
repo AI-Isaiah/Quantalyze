@@ -75,3 +75,35 @@ def sample_trades() -> list[dict]:
         {"timestamp": "2023-01-04T11:00:00Z", "symbol": "BTCUSDT", "side": "buy", "price": "16450.00", "quantity": "0.15", "fee": "2.47", "order_type": "limit"},
         {"timestamp": "2023-01-04T16:00:00Z", "symbol": "BTCUSDT", "side": "sell", "price": "16700.00", "quantity": "0.15", "fee": "2.51", "order_type": "market"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 06 (allocator-api-ingestion): api_keys row factory for worker tests
+# ---------------------------------------------------------------------------
+# Added for plan 06-02. Allocator worker tests need a shape-correct api_keys
+# row (the worker's preflight loads by id and reads exchange, user_id,
+# is_active, sync_status, sync_error, api_key_encrypted, dek_encrypted,
+# kek_version, last_429_at). Keep the default shape permissive; tests
+# override per case via keyword args.
+
+@pytest.fixture
+def api_key_row_factory():
+    """Return a dict shaped like an api_keys row for worker tests."""
+    def _make(**overrides):
+        row = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "user_id": "00000000-0000-0000-0000-000000000aaa",
+            "exchange": "binance",
+            "label": "test-key",
+            "is_active": True,
+            "api_key_encrypted": "enc",
+            "dek_encrypted": "enc",
+            "sync_status": "idle",
+            "sync_error": None,
+            "kek_version": 1,
+            "last_429_at": None,
+            "last_sync_at": None,
+        }
+        row.update(overrides)
+        return row
+    return _make
