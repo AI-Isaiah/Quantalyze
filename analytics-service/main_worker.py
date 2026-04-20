@@ -104,6 +104,14 @@ async def dispatch_tick(worker_id: str) -> None:
     claim_result = await db_execute(_claim)
     jobs = claim_result.data or []
 
+    # Update healthz timestamp as soon as the claim RPC succeeds — an idle
+    # queue means the worker is healthy, not stale. The previous early-return
+    # path (before this line) made healthz report "stale" whenever there was
+    # nothing to do, defeating the liveness check.
+    import main_worker_healthz
+
+    main_worker_healthz.LAST_TICK_AT = time.time()
+
     if not jobs:
         return
 
@@ -177,11 +185,6 @@ async def dispatch_tick(worker_id: str) -> None:
                     job.get("id"),
                     mark_exc,
                 )
-
-    # Update healthz timestamp
-    import main_worker_healthz
-
-    main_worker_healthz.LAST_TICK_AT = time.time()
 
 
 async def watchdog_tick() -> None:

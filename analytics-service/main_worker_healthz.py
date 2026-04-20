@@ -9,7 +9,8 @@ Uses stdlib only — no aiohttp, no FastAPI. Raw asyncio.start_server +
 manual HTTP response.
 
 Module-level LAST_TICK_AT is written by dispatch_tick in main_worker.py
-after every successful claim batch.
+after every successful claim RPC, regardless of whether the batch was
+empty. An idle queue is still a healthy worker.
 """
 from __future__ import annotations
 
