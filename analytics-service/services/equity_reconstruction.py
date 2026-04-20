@@ -556,10 +556,17 @@ async def persist_equity_snapshots(
     reconstructed_at = datetime.now(timezone.utc).isoformat()
     stamped = []
     for r in rows:
-        # Coingecko-fallback rows may carry None depth (per f9 spec).
+        # WR-05: attach history_depth_months ONLY for rows sourced purely
+        # from exchange OHLCV. Both `coingecko_fallback` (retention doesn't
+        # apply) and `mixed` (some symbols priced from CoinGecko, for which
+        # the per-venue cap isn't the binding constraint) get NULL — the
+        # dashboard's `minHistoryDepthMonths` then reflects the effective
+        # limit from genuinely exchange-retained rows only, and the f9
+        # warm-up copy ("Only N months of history available on {venue}")
+        # isn't misapplied to rows whose limiting factor is CoinGecko.
         row_depth = (
-            None if r.get("source") == "coingecko_fallback"
-            else history_depth_months
+            history_depth_months if r.get("source") == "exchange_primary"
+            else None
         )
         stamped.append({
             **r,

@@ -1042,3 +1042,63 @@ async def test_wr04_fetch_transfers_auth_error_bubbles_to_outer_handler(monkeypa
     assert audit_events, (
         f"expected reconstruct_failed audit event; got {audit_mock.call_args_list!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — WR-05 regression: persist_equity_snapshots tags rows with
+# history_depth_months ONLY when source == "exchange_primary". Mixed and
+# coingecko_fallback rows get NULL so the dashboard's f9 warm-up copy
+# isn't misapplied to rows whose limiting factor is CoinGecko.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wr05_persist_equity_snapshots_depth_by_source(monkeypatch):
+    """WR-05 regression: a `mixed` source row must receive
+    history_depth_months=NULL (per-venue retention does not cleanly
+    apply when some symbols are priced via CoinGecko), not the venue
+    cap. Only `exchange_primary` rows inherit the caller-supplied depth."""
+    from services.equity_reconstruction import persist_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+
+    # Mix of three sources on consecutive days
+    rows = [
+        {
+            "asof": "2026-04-01",
+            "value_usd": 100.0,
+            "breakdown": {"BTC": 100.0},
+            "source": "exchange_primary",
+        },
+        {
+            "asof": "2026-04-02",
+            "value_usd": 150.0,
+            "breakdown": {"BTC": 100.0, "SYMX": 50.0},
+            "source": "mixed",
+        },
+        {
+            "asof": "2026-04-03",
+            "value_usd": 50.0,
+            "breakdown": {"SYMX": 50.0},
+            "source": "coingecko_fallback",
+        },
+    ]
+
+    count = await persist_equity_snapshots(
+        fake_supabase, rows, ALLOCATOR_ID, history_depth_months=24
+    )
+    assert count == 3
+
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    by_asof = {r["asof"]: r for r in stored}
+
+    assert by_asof["2026-04-01"]["history_depth_months"] == 24, (
+        "exchange_primary row must inherit the caller-supplied depth"
+    )
+    assert by_asof["2026-04-02"]["history_depth_months"] is None, (
+        "mixed-source row must receive NULL history_depth_months (WR-05) — "
+        "pre-fix it inherited 24 even though some symbols came from CoinGecko"
+    )
+    assert by_asof["2026-04-03"]["history_depth_months"] is None, (
+        "coingecko_fallback row must receive NULL history_depth_months"
+    )
