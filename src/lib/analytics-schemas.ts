@@ -35,11 +35,18 @@ export const ValidateKeyResponseSchema = z.object({
 }).passthrough();
 
 // --- /api/encrypt-key ---
+// The analytics service uses envelope encryption: every credential (key,
+// secret, passphrase) is bundled into a single JSON blob encrypted by a
+// per-row DEK (api_key_encrypted), and the DEK itself is KEK-encrypted
+// (dek_encrypted). api_secret_encrypted / passphrase_encrypted / nonce
+// stay null by design. Matches analytics-service/services/encryption.py.
 export const EncryptKeyResponseSchema = z.object({
-  encrypted_key: z.string(),
-  encrypted_secret: z.string(),
-  kek_version: z.number().or(z.string()).optional(),
-  encrypted_passphrase: z.string().nullable().optional(),
+  api_key_encrypted: z.string(),
+  api_secret_encrypted: z.string().nullable(),
+  passphrase_encrypted: z.string().nullable(),
+  dek_encrypted: z.string(),
+  nonce: z.string().nullable(),
+  kek_version: z.number().or(z.string()),
 }).passthrough();
 
 // --- /api/fetch-trades ---
