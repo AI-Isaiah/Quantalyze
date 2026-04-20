@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.14.1.0] - 2026-04-20
+
+Post-QA bug-fix pass for Phase 06 (allocator API ingestion). Four defects from
+the /qa report resolved; the fifth (ISSUE-003, missing balance on fresh OKX
+rows) is deferred to Phase 07's demo-mode purge. Also cleaned up a
+pre-existing GDPR coverage gap from migration 066.
+
+### Fixed
+
+- **`Sync now` during an exchange cooldown now shows "Queued" (ISSUE-008).**
+  When another strategy's sync is blocking the same exchange, clicking "Sync
+  now" used to silently report success while the UI stayed blank. Now the
+  pill renders `Queued — exchange cooldown, retry in {N}s` with a real
+  countdown. Root cause: the server-side RPC's duplicate-detection path was
+  dead code (optimistic lookup + ON CONFLICT DO NOTHING never raise a
+  uniqueness error). Migration 067 rewrites the RPC with an explicit
+  pre-check.
+- **Exchange status changes become visible without a page reload (ISSUE-005).**
+  If the worker flipped a key to `revoked`, `rate_limited`, `error`, or
+  `complete_with_warnings` while the allocator was on `/exchanges`, the old
+  5-second poll only ran while a row was actively syncing — so steady-state
+  transitions were invisible until manual refresh. Polling is now always-on
+  while the tab is visible.
+- **Rate-limit countdown shows real seconds (ISSUE-006).** The
+  `rate_limited` pill used to read "retry in 0s" even immediately after a
+  429. The client now reads `api_keys.last_429_at` (migration 068 grants
+  the column) and computes a per-exchange retry counter
+  (`binance: 120s`, `okx: 300s`, `bybit: 600s`), mirroring the Python
+  worker's cooldown map.
+- **OKX renders as "OKX", not "Okx" (ISSUE-007).** Explicit display-name
+  map in `AllocatorSyncStatus` covers acronym venues; unknown venues still
+  title-case gracefully.
+- **Allocator holdings are included in GDPR exports.** `allocator_holdings`
+  (added in migration 066) is now registered in `USER_EXPORT_TABLES`.
+  Unblocks the checked-in GDPR coverage CI hook.
+
 ## [0.14.0.0] - 2026-04-19
 
 Sprint 8 Bridge V2 ships. Four new phases close the Bridge feedback loop end-to-end:
