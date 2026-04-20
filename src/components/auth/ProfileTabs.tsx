@@ -7,12 +7,17 @@ import { ProfileForm } from "./ProfileForm";
 import { DeleteAccountButton } from "./DeleteAccountButton";
 import { OrganizationTab } from "@/components/org/OrganizationTab";
 import { MandateForm } from "@/components/mandate/MandateForm";
+import {
+  ExchangesTabContent,
+  type ExchangesTabContentProps,
+} from "@/components/exchanges/ExchangesTabContent";
 import type { Profile } from "@/lib/types";
 import type { AllocatorPreferences } from "@/lib/preferences";
 
 const ALL_TABS = [
   { key: "personal", label: "Personal Info" },
   { key: "mandate", label: "Mandate", allocatorOnly: true },
+  { key: "exchanges", label: "Exchanges", allocatorOnly: true },
   { key: "organizations", label: "Organizations" },
   { key: "account", label: "Account" },
 ] as const;
@@ -20,11 +25,14 @@ const ALL_TABS = [
 type TabKey = (typeof ALL_TABS)[number]["key"];
 
 const VALID_TAB_KEYS = ALL_TABS.map((t) => t.key) as readonly TabKey[];
+const ALLOCATOR_ONLY_KEYS: readonly TabKey[] = ["mandate", "exchanges"];
 
 function parseTabParam(raw: string | null, isAllocator: boolean): TabKey {
   if (!raw) return "personal";
   if (!(VALID_TAB_KEYS as readonly string[]).includes(raw)) return "personal";
-  if (raw === "mandate" && !isAllocator) return "personal";
+  if ((ALLOCATOR_ONLY_KEYS as readonly string[]).includes(raw) && !isAllocator) {
+    return "personal";
+  }
   return raw as TabKey;
 }
 
@@ -32,9 +40,15 @@ interface Props {
   profile: Profile;
   initialPreferences?: AllocatorPreferences | null;
   isAllocator?: boolean;
+  exchanges?: ExchangesTabContentProps | null;
 }
 
-export function ProfileTabs({ profile, initialPreferences = null, isAllocator = false }: Props) {
+export function ProfileTabs({
+  profile,
+  initialPreferences = null,
+  isAllocator = false,
+  exchanges = null,
+}: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -77,6 +91,12 @@ export function ProfileTabs({ profile, initialPreferences = null, isAllocator = 
       {activeTab === "personal" && <ProfileForm profile={profile} />}
       {activeTab === "mandate" && isAllocator && (
         <MandateForm initial={initialPreferences} />
+      )}
+      {activeTab === "exchanges" && isAllocator && exchanges && (
+        <ExchangesTabContent
+          initialKeys={exchanges.initialKeys}
+          activePortfolio={exchanges.activePortfolio}
+        />
       )}
       {activeTab === "organizations" && <OrganizationTab />}
       {activeTab === "account" && (

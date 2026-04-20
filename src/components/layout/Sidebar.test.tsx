@@ -8,7 +8,7 @@ import { Sidebar } from "./Sidebar";
  * The v0.4.0 My Allocation pivot split allocator and
  * manager/crypto-team workspaces:
  *
- *   Allocator view: My Allocation → Connections → Scenarios → Recommendations.
+ *   Allocator view: My Allocation → Scenarios → Recommendations.
  *     No Strategies (that's the manager surface). No Test Portfolios
  *     (Scenarios replaces the what-if concept). No separate Exchanges
  *     entry (inline in My Allocation).
@@ -31,11 +31,12 @@ describe("Sidebar workspace — allocator view", () => {
     expect(link).toHaveAttribute("href", "/allocations");
   });
 
-  it("renders 'Connections' pointing at /connections", () => {
+  it("does NOT render a 'Connections' entry in the allocator workspace", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    expect(screen.getByText("Connections")).toBeInTheDocument();
-    const link = screen.getByText("Connections").closest("a");
-    expect(link).toHaveAttribute("href", "/connections");
+    // /connections was removed in v0.15.0.0 — the relationship view is
+    // collapsing into the wider allocator surfaces rather than living on
+    // its own route.
+    expect(screen.queryByText("Connections")).toBeNull();
   });
 
   it("renders 'Scenarios' (allocator-only what-if surface)", () => {
@@ -83,22 +84,22 @@ describe("Sidebar workspace — manager / crypto-team view", () => {
 });
 
 describe("Sidebar workspace order — allocator view", () => {
-  it("places 'My Allocation' before 'Connections'", () => {
+  it("places 'My Allocation' before 'Scenarios'", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     const myAlloc = screen.getByText("My Allocation");
-    const connections = screen.getByText("Connections");
+    const scenarios = screen.getByText("Scenarios");
     expect(
-      myAlloc.compareDocumentPosition(connections) &
+      myAlloc.compareDocumentPosition(scenarios) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  it("places 'Connections' before 'Scenarios'", () => {
+  it("places 'Scenarios' before 'Recommendations'", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
-    const connections = screen.getByText("Connections");
     const scenarios = screen.getByText("Scenarios");
+    const recommendations = screen.getByText("Recommendations");
     expect(
-      connections.compareDocumentPosition(scenarios) &
+      scenarios.compareDocumentPosition(recommendations) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });

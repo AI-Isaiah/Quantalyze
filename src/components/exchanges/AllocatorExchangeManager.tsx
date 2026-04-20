@@ -157,9 +157,56 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   const [showForm, setShowForm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formLoading, setFormLoading] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteHoldingsCount, setDeleteHoldingsCount] = useState<number | null>(
+    null,
+  );
+  const [cascadeHoldings, setCascadeHoldings] = useState(false);
   const [, startTransition] = useTransition();
 
   const supabase = createClient();
+
+  async function openDeleteConfirm(keyId: string) {
+    setDeleteError(null);
+    setCascadeHoldings(false);
+    setDeleteHoldingsCount(null);
+    setConfirmDeleteId(keyId);
+    // Fetch holdings count so the modal can prompt before submit. RLS
+    // grants owners SELECT on allocator_holdings (migration 066 STEP 3).
+    const { count, error } = await supabase
+      .from("allocator_holdings")
+      .select("*", { count: "exact", head: true })
+      .eq("api_key_id", keyId);
+    if (error) {
+      setDeleteError(`Could not check holdings: ${error.message}`);
+      setDeleteHoldingsCount(0);
+      return;
+    }
+    setDeleteHoldingsCount(count ?? 0);
+  }
+
+  async function handleDeleteKey(keyId: string) {
+    setDeleteLoading(true);
+    setDeleteError(null);
+    // Migration 069 RPC: atomic cascade-aware delete. Returns the number
+    // of holdings rows actually removed.
+    const { error } = await supabase.rpc("delete_allocator_api_key", {
+      p_api_key_id: keyId,
+      p_cascade_holdings: cascadeHoldings,
+    });
+    setDeleteLoading(false);
+    if (error) {
+      setDeleteError(`Failed to remove key: ${error.message}`);
+      return;
+    }
+    setKeys((prev) => prev.filter((k) => k.id !== keyId));
+    setConfirmDeleteId(null);
+    setDeleteHoldingsCount(null);
+    setCascadeHoldings(false);
+    startTransition(() => router.refresh());
+  }
 
   // Landmine 8: router.refresh() re-renders the server component which
   // passes new initialKeys, but useState(initialKeys) only runs on mount.
@@ -509,6 +556,13 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                   >
                     Sync now
                   </Button>
+                  <Button
+                    variant="secondary"
+                    aria-label={`Remove ${key.exchange} key`}
+                    onClick={() => openDeleteConfirm(key.id)}
+                  >
+                    Remove
+                  </Button>
                 </div>
               );
             })}
@@ -567,6 +621,84 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           />
         </Modal>
       ) : null}
+
+      <Modal
+        open={!!confirmDeleteId}
+        onClose={() => {
+          if (deleteLoading) return;
+          setConfirmDeleteId(null);
+          setDeleteError(null);
+          setDeleteHoldingsCount(null);
+          setCascadeHoldings(false);
+        }}
+        title="Remove exchange key"
+      >
+        <p className="text-sm text-text-secondary">
+          This will permanently remove the encrypted key from Quantalyze and
+          stop future syncs.
+        </p>
+        {deleteHoldingsCount === null ? (
+          <p className="mt-3 text-xs text-text-muted">
+            Checking imported holdings…
+          </p>
+        ) : deleteHoldingsCount === 0 ? (
+          <p className="mt-3 text-xs text-text-muted">
+            No imported holdings are tied to this key.
+          </p>
+        ) : (
+          <label className="mt-3 flex items-start gap-2 text-xs text-text-secondary">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={cascadeHoldings}
+              disabled={deleteLoading}
+              onChange={(e) => setCascadeHoldings(e.target.checked)}
+              aria-describedby="cascade-holdings-help"
+            />
+            <span id="cascade-holdings-help">
+              Also remove {deleteHoldingsCount} imported holdings row
+              {deleteHoldingsCount === 1 ? "" : "s"} for this key. Required
+              to proceed — holdings reference this key and can&apos;t be
+              left orphaned.
+            </span>
+          </label>
+        )}
+        {deleteError ? (
+          <p
+            role="alert"
+            className="mt-3 text-xs text-negative bg-negative/5 border border-negative/20 rounded px-3 py-2"
+          >
+            {deleteError}
+          </p>
+        ) : null}
+        <div className="mt-4 flex justify-end gap-2">
+          <Button
+            variant="secondary"
+            disabled={deleteLoading}
+            onClick={() => {
+              setConfirmDeleteId(null);
+              setDeleteError(null);
+              setDeleteHoldingsCount(null);
+              setCascadeHoldings(false);
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            disabled={
+              deleteLoading ||
+              deleteHoldingsCount === null ||
+              (deleteHoldingsCount > 0 && !cascadeHoldings)
+            }
+            onClick={() =>
+              confirmDeleteId && handleDeleteKey(confirmDeleteId)
+            }
+          >
+            {deleteLoading ? "Removing…" : "Remove key"}
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }
