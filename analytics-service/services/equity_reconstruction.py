@@ -213,15 +213,18 @@ async def _fetch_transfers(
     all_rows: list[dict] = []
     cursor_ms = since_ms
     while cursor_ms < now_ms:
+        # WR-04: only catch ccxt.NotSupported here (feature detection —
+        # the exchange cannot enumerate transfers at all). All other
+        # exceptions (auth revoked mid-backfill, rate limit, network
+        # failure) MUST bubble to the outer handler so they land in
+        # classify_exception + _emit_audit rather than being silently
+        # swallowed — the previous `break` returned a truncated list
+        # that looked identical to "allocator has no transfers", which
+        # caused zero-activity rows with no audit trail.
         try:
             page = await fetcher(None, cursor_ms, 500)
         except ccxt.NotSupported:
             return all_rows
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "%s failed at since_ms=%d: %s", fetcher_name, cursor_ms, exc,
-            )
-            break
         page = page or []
         all_rows.extend(page)
         cursor_ms += window_ms

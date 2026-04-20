@@ -960,3 +960,85 @@ def test_wr03_compute_daily_equity_spot_symbol_unchanged():
     assert "USDT:USDT" not in breakdown
     # Same buy-at-fair-value net-zero invariant holds for the spot symbol.
     assert rows[0]["value_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — WR-04 regression: generic exceptions from fetch_deposits /
+# fetch_withdrawals MUST bubble to the outer handler for classification,
+# not be silently swallowed mid-backfill with a truncated row list.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wr04_fetch_transfers_auth_error_bubbles_to_outer_handler(monkeypatch):
+    """WR-04 regression: a ccxt.AuthenticationError raised by
+    fetch_deposits mid-loop must propagate to the handler's outer
+    try/except where classify_exception + _emit_audit record it as
+    permanent / reconstruct_failed. The pre-fix `except Exception: break`
+    swallowed this, returning partial rows that looked identical to
+    "allocator has no transfers" and never firing an audit event."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=10)
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + day * day_ms, 50000.0) for day in range(11)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    # fetch_deposits raises an AuthenticationError (e.g. read-only key had
+    # its permissions revoked mid-backfill). This MUST bubble.
+    mock_exchange.fetch_deposits = AsyncMock(
+        side_effect=ccxt.AuthenticationError("invalid api key")
+    )
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-wr04",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+
+    # Handler MUST report FAILED (not DONE) and error_kind='permanent'
+    # for auth errors — this only happens if the exception bubbled out
+    # of _fetch_transfers instead of being swallowed.
+    assert result.outcome == DispatchOutcome.FAILED, (
+        f"expected auth error to bubble to outer handler and produce "
+        f"FAILED; got {result!r} — pre-fix `except Exception: break` "
+        f"would swallow the error and return DONE with partial data."
+    )
+    assert result.error_kind == "permanent", (
+        f"expected permanent classification for AuthenticationError; "
+        f"got {result.error_kind!r}"
+    )
+
+    # An audit event MUST have been emitted (reconstruct_failed). Pre-fix,
+    # the silent swallow left zero audit trail for the skipped window.
+    audit_events = [
+        call for call in audit_mock.call_args_list
+        if "reconstruct_failed" in str(call)
+    ]
+    assert audit_events, (
+        f"expected reconstruct_failed audit event; got {audit_mock.call_args_list!r}"
+    )
