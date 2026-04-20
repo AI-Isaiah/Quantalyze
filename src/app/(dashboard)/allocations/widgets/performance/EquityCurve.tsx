@@ -15,8 +15,47 @@ const STRATEGY_COLORS = [
   "#14B8A6", "#EF4444", "#3B82F6", "#84CC16",
 ];
 
-export default function EquityCurve({ data }: WidgetProps) {
+/**
+ * Phase 07 / 07-03 / VOICES-ACCEPTED f7 — parallel-prop widget-local
+ * extension to WidgetProps. When `equityDailyPoints` is PRESENT
+ * (including empty []), the widget renders from that prop and does NOT
+ * compute the strategies-derived composite. When ABSENT (undefined),
+ * the widget falls back to the existing strategies path so Bridge
+ * allocators keep their composite curve post-Phase-09.
+ *
+ * The prop is converted from `value = cumulative wealth multiplier`
+ * (snapshot series) → composite = DailyPoint[] in the same shape the
+ * MultiLineEquityChart already consumes. Snapshot values are USD
+ * totals, so we normalise to a cumulative-wealth curve anchored to the
+ * first point (i.e. value = value_usd[i] / value_usd[0]) so the chart
+ * axis stays percent-of-inception and aligns with the strategies path.
+ */
+interface EquityCurveProps extends WidgetProps {
+  equityDailyPoints?: DailyPoint[];
+}
+
+export default function EquityCurve({ data, equityDailyPoints }: EquityCurveProps) {
   const { composite, strategies } = useMemo(() => {
+    // Parallel-prop: prefer snapshot-derived points when explicitly
+    // provided (including empty []). Only fall back to strategies-
+    // derived compute when the prop is undefined.
+    if (equityDailyPoints !== undefined) {
+      if (equityDailyPoints.length === 0) {
+        return { composite: [] as DailyPoint[], strategies: [] as StrategySeries[] };
+      }
+      // Normalise to cumulative wealth multiplier (value = usd[i]/usd[0])
+      // so the axis is percent-of-inception and aligns with the
+      // strategies-path composite semantics.
+      const base = equityDailyPoints[0].value;
+      const comp: DailyPoint[] = base > 0
+        ? equityDailyPoints.map((p) => ({
+            date: p.date,
+            value: Number((p.value / base).toFixed(6)),
+          }))
+        : equityDailyPoints;
+      return { composite: comp, strategies: [] as StrategySeries[] };
+    }
+
     if (!data?.strategies?.length) {
       return { composite: [] as DailyPoint[], strategies: [] as StrategySeries[] };
     }
@@ -70,7 +109,7 @@ export default function EquityCurve({ data }: WidgetProps) {
     const comp = computeCompositeCurve(builderStrats, weightsById, inception);
 
     return { composite: comp, strategies: stratSeries };
-  }, [data]);
+  }, [data, equityDailyPoints]);
 
   return (
     <MultiLineEquityChart

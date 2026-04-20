@@ -13,8 +13,37 @@ import {
   YAxis,
 } from "recharts";
 
-export default function DrawdownChart({ data }: WidgetProps) {
+/**
+ * Phase 07 / 07-03 / VOICES-ACCEPTED f7 — parallel-prop extension to
+ * WidgetProps. Snapshot-derived DailyPoint[] expresses a cumulative USD
+ * value series (not daily returns); compute drawdown from running-peak
+ * directly. When the prop is ABSENT (undefined), fall back to the existing
+ * compositeReturns / buildCompositeReturns path so Bridge allocators keep
+ * their strategy-composite drawdown curve post-Phase-09.
+ */
+interface DrawdownChartProps extends WidgetProps {
+  equityDailyPoints?: DailyPoint[];
+}
+
+export default function DrawdownChart({ data, equityDailyPoints }: DrawdownChartProps) {
   const drawdownData = useMemo(() => {
+    // Parallel-prop: prefer snapshot-derived points when explicitly
+    // provided (including empty []). Only fall back to strategies-
+    // derived compute when the prop is undefined.
+    if (equityDailyPoints !== undefined) {
+      if (equityDailyPoints.length === 0) return [];
+      // Snapshot values are cumulative USD totals; drawdown is
+      // (current / peak) - 1 directly over the raw series.
+      let peak = equityDailyPoints[0].value;
+      const result: { date: string; value: number }[] = [];
+      for (const d of equityDailyPoints) {
+        if (d.value > peak) peak = d.value;
+        const dd = peak > 0 ? (d.value - peak) / peak : 0;
+        result.push({ date: d.date, value: dd });
+      }
+      return result;
+    }
+
     const composite: DailyPoint[] = data?.compositeReturns ?? buildCompositeReturns(data?.strategies ?? []);
     if (composite.length === 0) return [];
 
@@ -31,7 +60,7 @@ export default function DrawdownChart({ data }: WidgetProps) {
     }
 
     return result;
-  }, [data]);
+  }, [data, equityDailyPoints]);
 
   if (drawdownData.length === 0) {
     return (
