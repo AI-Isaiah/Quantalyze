@@ -27,9 +27,12 @@ import { NextRequest } from "next/server";
  */
 
 const VALID_ORIGIN = { origin: "http://localhost:3000" };
-const TEST_USER_ID = "00000000-0000-0000-0000-aaaaaaaaaaaa";
-const TEST_API_KEY_ID = "11111111-1111-1111-1111-111111111111";
-const TEST_JOB_ID = "22222222-2222-2222-2222-222222222222";
+// Real v4 UUIDs (variant bit 10xx → hex starts 8/9/a/b at position 15).
+// Zod v4's `.uuid()` enforces the variant byte, so sequential fillers like
+// "11111111-...-1111" fail validation.
+const TEST_USER_ID = "d4e5f6a7-b8c9-4a1b-8c2d-3e4f5a6b7c8d";
+const TEST_API_KEY_ID = "a1b2c3d4-e5f6-4789-89ab-cdef01234567";
+const TEST_JOB_ID = "f0e1d2c3-b4a5-4697-8877-aabbccddeeff";
 
 const { mockRpc, mockLogAuditEvent } = vi.hoisted(() => ({
   mockRpc: vi.fn(),
