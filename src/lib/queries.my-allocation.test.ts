@@ -81,6 +81,26 @@ const state = vi.hoisted(() => ({
     allocator_id?: string;
     expires_at: string;
   }>,
+  // Phase 07 / 07-03 — allocator equity snapshots for getMyAllocationDashboard rewire
+  allocatorEquitySnapshots: [] as Array<{
+    allocator_id: string;
+    asof: string;
+    value_usd: number;
+    breakdown: Record<string, number> | null;
+    source: "exchange_primary" | "coingecko_fallback" | "mixed";
+    history_depth_months: number | null;
+  }>,
+  // Phase 07 / 07-03 — allocator holdings (Phase 06 table) read for holdingsSummary
+  allocatorHoldings: [] as Array<{
+    allocator_id: string;
+    symbol: string;
+    quantity: number;
+    mark_price: number | null;
+    value_usd: number;
+    venue: string;
+    holding_type: "spot" | "derivative";
+    asof: string;
+  }>,
 }));
 
 function resetState() {
@@ -92,6 +112,8 @@ function resetState() {
   state.sentAsIntroDecisions = [];
   state.bridgeOutcomes = [];
   state.bridgeDismissals = [];
+  state.allocatorEquitySnapshots = [];
+  state.allocatorHoldings = [];
   chainAudit.entries.length = 0;
 }
 
@@ -104,6 +126,7 @@ type ChainAuditEntry = {
   select: string | null;
   eqs: Array<{ column: string; value: unknown }>;
   limitN: number | null;
+  headCount: boolean;
 };
 const chainAudit = vi.hoisted(() => ({
   entries: [] as ChainAuditEntry[],
@@ -123,9 +146,14 @@ function buildChain(table: string) {
     select: null,
     eqs: [],
     limitN: null,
+    headCount: false,
   };
   chainAudit.entries.push(audit);
   let limitN: number | null = null;
+  // Phase 07 / 07-03 — supabase.select("*", { count: "exact", head: true })
+  // returns only the row count without rows. When this mode is set, the
+  // terminal resolver returns { data: null, error: null, count: N }.
+  let headCountMode = false;
 
   function applyFilters<T extends Record<string, unknown>>(rows: T[]): T[] {
     return rows.filter((row) =>
@@ -171,14 +199,29 @@ function buildChain(table: string) {
           const row = r as { expires_at: string };
           return new Date(row.expires_at) > new Date();
         });
+      case "allocator_equity_snapshots":
+        return applyFilters(
+          state.allocatorEquitySnapshots as Array<Record<string, unknown>>,
+        );
+      case "allocator_holdings":
+        return applyFilters(
+          state.allocatorHoldings as Array<Record<string, unknown>>,
+        );
       default:
         return [];
     }
   }
 
   const chain = {
-    select: (cols?: string) => {
+    select: (
+      cols?: string,
+      options?: { count?: "exact" | "planned" | "estimated"; head?: boolean },
+    ) => {
       audit.select = cols ?? null;
+      if (options?.head === true) {
+        headCountMode = true;
+        audit.headCount = true;
+      }
       return chain;
     },
     eq: (column: string, value: unknown) => {
@@ -198,7 +241,7 @@ function buildChain(table: string) {
     // The rowsFor() implementation handles the actual filtering; this
     // method just returns chain to allow chaining.
     gt: (_column: string, _value: unknown) => chain,
-    order: () => chain,
+    order: (_column?: string, _opts?: { ascending?: boolean }) => chain,
     limit: (n: number) => {
       limitN = n;
       audit.limitN = n;
@@ -218,9 +261,21 @@ function buildChain(table: string) {
       };
     },
     // Terminal await: fall through to a thenable with the full list.
-    then: (resolve: (v: { data: unknown[]; error: null }) => void) => {
+    // When headCountMode is set (via select("*", { count: "exact", head: true })),
+    // resolve to { data: null, error: null, count: N } instead of rows.
+    then: (
+      resolve: (
+        v:
+          | { data: unknown[]; error: null; count?: number }
+          | { data: null; error: null; count: number },
+      ) => void,
+    ) => {
       const rows = rowsFor();
-      resolve({ data: rows, error: null });
+      if (headCountMode) {
+        resolve({ data: null, error: null, count: rows.length });
+      } else {
+        resolve({ data: rows, error: null });
+      }
     },
   };
   return chain;
@@ -702,3 +757,308 @@ describe("getMyAllocationDashboard — outcomes top-level fan-out (Phase 5 D-15)
     ).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 07 / 07-03 — getMyAllocationDashboard Phase 07 payload extensions
+//
+// New fields per VOICES-ACCEPTED f7 + f9:
+//   - equitySnapshots, holdingsSummary, snapshotCount, allKeysStale,
+//     lastSyncAt, hasSyncing, equityDailyPoints, minHistoryDepthMonths,
+//     activeVenues
+//
+// The rewire MUST still populate these fields when the allocator has
+// NO portfolios row — per Phase 07 SC3 (fresh allocator with api_keys +
+// snapshots but no portfolio_strategies row). The !portfolio early-return
+// short-circuit is removed.
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const P7_PORTFOLIO = {
+  id: "real-1",
+  user_id: "user-1",
+  name: "Active Allocation",
+  description: null,
+  created_at: "2024-06-01T00:00:00Z",
+  is_test: false,
+};
+
+describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
+  beforeEach(resetState);
+
+  it("TC p7-01: payload carries all 9 Phase 07 field names", async () => {
+    // Include a portfolio so the function takes the main branch and
+    // exercises every new fetch; the `!portfolio` branch is tested in p7-02.
+    state.portfolios = [P7_PORTFOLIO];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = (await getMyAllocationDashboard("user-1")) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(result).toHaveProperty("equitySnapshots");
+    expect(result).toHaveProperty("holdingsSummary");
+    expect(result).toHaveProperty("snapshotCount");
+    expect(result).toHaveProperty("allKeysStale");
+    expect(result).toHaveProperty("lastSyncAt");
+    expect(result).toHaveProperty("hasSyncing");
+    expect(result).toHaveProperty("equityDailyPoints");
+    expect(result).toHaveProperty("minHistoryDepthMonths");
+    expect(result).toHaveProperty("activeVenues");
+  });
+
+  it("TC p7-02: no portfolio but has api_keys + snapshots → snapshotCount>0, equitySnapshots populated, equityDailyPoints derived", async () => {
+    // SC3: allocator with no portfolio_strategies row still sees real
+    // equity via the snapshot pipeline. Removes the !portfolio early-return.
+    state.portfolios = [];
+    state.apiKeys = [
+      {
+        id: "k1",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance main",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: new Date().toISOString(),
+        account_balance_usdt: 1000,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    state.allocatorEquitySnapshots = [
+      {
+        allocator_id: "user-1",
+        asof: "2026-04-10",
+        value_usd: 10_000,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 24,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-04-11",
+        value_usd: 10_100,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 24,
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.portfolio).toBeNull();
+    expect(result.snapshotCount).toBeGreaterThan(0);
+    expect(result.equitySnapshots.length).toBeGreaterThan(0);
+    expect(result.equityDailyPoints.length).toBeGreaterThan(0);
+  });
+
+  it("TC p7-03: snapshotCount equals mocked row count when < 30", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    // 15 snapshots (warm-up territory)
+    state.allocatorEquitySnapshots = Array.from({ length: 15 }, (_, i) => ({
+      allocator_id: "user-1",
+      asof: `2026-03-${String(i + 1).padStart(2, "0")}`,
+      value_usd: 1000 + i,
+      breakdown: null,
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+    }));
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.snapshotCount).toBe(15);
+  });
+
+  it("TC p7-04: all active api_keys last_sync_at older than 24h → allKeysStale=true, lastSyncAt=max(mocked)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    const nowMs = Date.now();
+    const staleA = new Date(nowMs - 48 * 60 * 60 * 1000).toISOString(); // 48h ago
+    const staleB = new Date(nowMs - 36 * 60 * 60 * 1000).toISOString(); // 36h ago (max of the two)
+    state.apiKeys = [
+      {
+        id: "k1",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: staleA,
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+      {
+        id: "k2",
+        user_id: "user-1",
+        exchange: "okx",
+        label: "OKX",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: staleB,
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.allKeysStale).toBe(true);
+    expect(result.lastSyncAt).toBe(staleB);
+  });
+
+  it("TC p7-05: one fresh active key → allKeysStale=false", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    const nowMs = Date.now();
+    state.apiKeys = [
+      {
+        id: "k1",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: new Date(nowMs - 48 * 60 * 60 * 1000).toISOString(),
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+      {
+        id: "k2",
+        user_id: "user-1",
+        exchange: "okx",
+        label: "OKX",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(), // 2h — fresh
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.allKeysStale).toBe(false);
+  });
+
+  it("TC p7-06: any active key sync_status='syncing' → hasSyncing=true", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = [
+      {
+        id: "k1",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "syncing",
+        last_sync_at: null,
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.hasSyncing).toBe(true);
+  });
+
+  it("TC p7-07 (f7): equitySnapshots of 5 daily rows → equityDailyPoints length 5, values preserved in order", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    const values = [100, 110, 105, 120, 115];
+    state.allocatorEquitySnapshots = values.map((v, i) => ({
+      allocator_id: "user-1",
+      asof: new Date(Date.UTC(2026, 2, i + 1)).toISOString().slice(0, 10),
+      value_usd: v,
+      breakdown: null,
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+    }));
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.equityDailyPoints).toHaveLength(5);
+    expect(result.equityDailyPoints.map((p) => p.value)).toEqual(values);
+  });
+
+  it("TC p7-08 (f9): history_depth_months = [24,24,3] → minHistoryDepthMonths=3", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.allocatorEquitySnapshots = [
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-01",
+        value_usd: 100,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 24,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-02",
+        value_usd: 110,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 24,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-03",
+        value_usd: 105,
+        breakdown: null,
+        source: "exchange_primary",
+        history_depth_months: 3,
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.minHistoryDepthMonths).toBe(3);
+  });
+
+  it("TC p7-09 (f9): all history_depth_months NULL → minHistoryDepthMonths=null", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.allocatorEquitySnapshots = [
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-01",
+        value_usd: 100,
+        breakdown: null,
+        source: "coingecko_fallback",
+        history_depth_months: null,
+      },
+      {
+        allocator_id: "user-1",
+        asof: "2026-03-02",
+        value_usd: 110,
+        breakdown: null,
+        source: "coingecko_fallback",
+        history_depth_months: null,
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.minHistoryDepthMonths).toBeNull();
+  });
+
+  it("TC p7-10 (f9): active api_keys venues [binance, okx] → activeVenues=[Binance, OKX] display-cased + sorted", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    const nowIso = new Date().toISOString();
+    state.apiKeys = [
+      {
+        id: "k1",
+        user_id: "user-1",
+        exchange: "okx",
+        label: "OKX",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: nowIso,
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+      {
+        id: "k2",
+        user_id: "user-1",
+        exchange: "binance",
+        label: "Binance",
+        is_active: true,
+        sync_status: "ok",
+        last_sync_at: nowIso,
+        account_balance_usdt: null,
+        created_at: "2026-04-01T00:00:00Z",
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    expect(result.activeVenues).toEqual(["Binance", "OKX"]);
+  });
+});
+
+// Silence unused-var for DAY_MS helper (kept for future TC authors).
+void DAY_MS;
