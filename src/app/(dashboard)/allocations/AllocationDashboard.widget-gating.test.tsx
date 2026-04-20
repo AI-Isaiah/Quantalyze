@@ -188,6 +188,22 @@ const SNAPSHOT_POINTS: DailyPoint[] = Array.from({ length: 30 }, (_, i) => ({
   value: 1 + i * 0.01,
 }));
 
+// Phase 07 / 07-05 — holdingsSummary must be non-empty in this test
+// fixture so the 07-05 zero-holdings EmptyState early-return does NOT
+// trigger. This test's whole purpose is to assert on the full render
+// path (widget-gating + f7 chart forwarding); the 07-05 branch is
+// exercised separately by EmptyState.test.tsx.
+const MOCK_HOLDINGS = [
+  {
+    symbol: "BTC",
+    quantity: 1.5,
+    mark_price_usd: 60000,
+    value_usd: 90000,
+    venue: "Binance",
+    holding_type: "spot" as const,
+  },
+];
+
 const basePayload = {
   portfolio: null,
   analytics: null,
@@ -195,7 +211,7 @@ const basePayload = {
   alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
   outcomes: [],
   equitySnapshots: [],
-  holdingsSummary: [],
+  holdingsSummary: MOCK_HOLDINGS,
   snapshotCount: 30,
   allKeysStale: false,
   lastSyncAt: null,

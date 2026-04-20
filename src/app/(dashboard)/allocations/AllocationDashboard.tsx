@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
+import Link from "next/link";
 import type { Layout, LayoutItem } from "react-grid-layout";
 import {
   trackUsageEventClient,
@@ -33,6 +34,9 @@ import { UndoToast } from "./components/UndoToast";
 import { AlertBanner } from "./components/AlertBanner";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
+import { Card } from "@/components/ui/Card";
+import { WarningBanner } from "@/components/ui/WarningBanner";
+import { EmptyState } from "./EmptyState";
 
 // ---------------------------------------------------------------------------
 // Types — matches MyAllocationClient props exactly
@@ -193,6 +197,18 @@ interface ToastState {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 07 / 07-05 helpers — stale-data copy arithmetic.
+// ---------------------------------------------------------------------------
+//
+// Local in-browser approximation of "how long ago did we last sync?". The
+// copy is best-effort and does not need server-side time skew correction.
+// Clamped at 0 so clock-skew futures render as "0h" rather than a negative.
+function formatHoursAgo(iso: string): number {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  return Math.max(0, Math.floor(diffMs / (1000 * 60 * 60)));
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -214,6 +230,14 @@ export function AllocationDashboard({
   minHistoryDepthMonths = null,
   activeVenues = [],
   equityDailyPoints,
+  // Phase 07 / 07-05 (PURGE-04 / D-07 / D-08 / D-09 / D-10) — zero /
+  // syncing / stale branch inputs. Defaults keep Phase 5/9 + regression
+  // test call sites source-compatible (empty holdings => zero rendering
+  // would never have landed pre-Phase-07, so default-empty is the right
+  // Phase 5/9 signal for "do not trigger EmptyState").
+  holdingsSummary = [],
+  hasSyncing = false,
+  lastSyncAt = null,
 }: AllocationDashboardProps) {
   // Phase 07 / VOICES-ACCEPTED f2 — one gate for every strategy-composite
   // widget decision below. A Bridge allocator (post-Phase-09) has
@@ -545,12 +569,19 @@ export function AllocationDashboard({
       // pass-through; the compiler doesn't warn).
       const forwardEquityPoints =
         widgetId === "equity-curve" || widgetId === "drawdown-chart";
+      // Phase 07 / 07-05 / D-10: when ALL active keys are stale, the
+      // equity + drawdown chart wrappers get a 40% page-color overlay
+      // with a "Data may be stale" label. Protective posture — the
+      // numeric KPI cells already render `—` (via 07-03 warm-up path
+      // when allKeysStale=true); this overlay is the visual half of the
+      // same gate. Non-chart widgets are untouched.
+      const showStaleOverlay = allKeysStale && forwardEquityPoints;
       // The data-widget-id marker is what the IntersectionObserver in
       // the usage-analytics effect above watches for. Wrapping in a
       // div instead of mutating the widget keeps the marker stable
       // across the React subtree's renders.
       return (
-        <div data-widget-id={widgetId} className="h-full w-full">
+        <div data-widget-id={widgetId} className="relative h-full w-full">
           <Widget
             data={widgetData}
             timeframe={timeframe}
@@ -560,10 +591,20 @@ export function AllocationDashboard({
               ? { equityDailyPoints }
               : {})}
           />
+          {showStaleOverlay && (
+            <div
+              aria-hidden="true"
+              className="absolute inset-0 bg-page/40 flex items-center justify-center pointer-events-none"
+            >
+              <span className="text-sm text-text-secondary font-medium">
+                Data may be stale
+              </span>
+            </div>
+          )}
         </div>
       );
     },
-    [widgetData, timeframe, equityDailyPoints],
+    [widgetData, timeframe, equityDailyPoints, allKeysStale],
   );
 
   // Per VOICES-ACCEPTED f2 — filter out strategy-composite widgets when
@@ -585,6 +626,60 @@ export function AllocationDashboard({
 
   // Active widget IDs for the modal
   const activeWidgetIds = config.tiles.map((t) => t.widgetId);
+
+  // Phase 07 / 07-05 / D-08 — zero-holdings triggers.
+  //
+  // Render-matrix summary (see 07-05-PLAN.md §interfaces):
+  //   holdingsEmpty && !hasSyncing → full EmptyState replacement +
+  //                                  D-09 Notices card (this branch).
+  //   holdingsEmpty &&  hasSyncing → InfoBanner at TOP + D-09 Notices card,
+  //                                  fall through normal render with
+  //                                  07-04 widget-gating filtering the
+  //                                  18 strategy-composite widgets.
+  //   holdings && allKeysStale     → WarningBanner above KPI strip +
+  //                                  chart stale overlay (in renderWidget) +
+  //                                  KpiStrip `—` (from 07-03).
+  //   holdings && fresh            → normal render (07-04 gating applies
+  //                                  when strategies.length === 0).
+  const holdingsEmpty = holdingsSummary.length === 0;
+
+  // D-09 — "What we noticed" prompt card for zero-holdings allocators.
+  // Rendered inside the full-replacement early-return below AND at the
+  // top of the normal render when `holdingsEmpty && hasSyncing`. Copy
+  // verbatim from 07-UI-SPEC.md §Copywriting.
+  const zeroHoldingsNoticesCard = (
+    <section className="mt-6">
+      <Card>
+        <h3 className="text-base font-semibold text-text-primary mb-2">
+          What we noticed
+        </h3>
+        <p className="text-sm text-text-secondary">
+          Connect an exchange to surface insights about your positions.
+        </p>
+        <Link
+          href="/profile?tab=exchanges"
+          className="mt-3 inline-block text-sm text-accent underline-offset-4 hover:underline"
+        >
+          Connect Exchange →
+        </Link>
+      </Card>
+    </section>
+  );
+
+  // D-08: zero holdings + no syncing key → full EmptyState replaces the
+  // KPI strip + charts + holdings table + all widgets. D-09 Notices card
+  // stays visible with the prompt copy below. Short-circuits before the
+  // normal render so the 07-04 widget-gating + renderWidget paths are
+  // skipped entirely — the allocator sees one headline, one sub-line,
+  // one CTA, and one Notices card.
+  if (holdingsEmpty && !hasSyncing) {
+    return (
+      <main className="max-w-[1280px] mx-auto p-6 pb-20">
+        <EmptyState hasSyncing={false} />
+        {zeroHoldingsNoticesCard}
+      </main>
+    );
+  }
 
   return (
     <>
@@ -638,6 +733,41 @@ export function AllocationDashboard({
         </div>
       </header>
 
+      {/* Phase 07 / 07-05 / D-08 — zero holdings + syncing key:
+          InfoBanner at the top of the Performance body, then fall through
+          to the normal render. The 07-04 widget-gating filters out the 18
+          strategy-composite widgets because `strategies.length === 0` in
+          this path; KPI/EquityCurve/DrawdownChart/InsightStrip render
+          `—` naturally via the 07-03 warm-up path (snapshotCount is
+          typically 0–few at this point). */}
+      {holdingsEmpty && hasSyncing && (
+        <div className="mb-6">
+          <EmptyState hasSyncing={true} />
+        </div>
+      )}
+
+      {/* Phase 07 / 07-05 / D-10 + D-11 — stale-data WarningBanner.
+          Renders above the KPI strip when ALL active keys are >24h old.
+          The KpiStrip itself already renders `—` numerics when
+          allKeysStale=true (via 07-03 warm-up path) and the chart
+          widgets get a 40% page-color overlay (via renderWidget). This
+          banner is the third leg of the protective triple — if any one
+          of the three fails, the other two still communicate staleness
+          (threat T-07-30). */}
+      {allKeysStale && lastSyncAt && (
+        <div className="mb-6">
+          <WarningBanner>
+            Data may be stale — last synced {formatHoursAgo(lastSyncAt)}h ago.{" "}
+            <Link
+              href="/profile?tab=exchanges"
+              className="text-accent underline-offset-4 hover:underline"
+            >
+              Sync your keys to refresh →
+            </Link>
+          </WarningBanner>
+        </div>
+      )}
+
       {/* KPI strip — Phase 07 / 07-04 forwards snapshotCount + allKeysStale
           + minHistoryDepthMonths + activeVenues so the 07-03 warm-up + stale
           rendering kicks in correctly for zero-holdings allocators. */}
@@ -674,6 +804,15 @@ export function AllocationDashboard({
         onClose={handleClose}
         renderWidget={renderWidget}
       />
+
+      {/* Phase 07 / 07-05 / D-09 — zero-holdings Notices card in the
+          syncing branch. The full-replacement branch (`holdingsEmpty &&
+          !hasSyncing`) has already returned above; we only reach here
+          when holdings are empty AND a key is currently syncing, in
+          which case we still want the "What we noticed" prompt card
+          under the KPI + charts to tell the allocator why the dashboard
+          looks sparse. */}
+      {holdingsEmpty && hasSyncing && zeroHoldingsNoticesCard}
 
       {/* Add Widget Modal */}
       <AddWidgetModal
