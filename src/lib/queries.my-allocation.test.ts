@@ -1058,6 +1058,85 @@ describe("getMyAllocationDashboard — Phase 07 payload extensions", () => {
     const result = await getMyAllocationDashboard("user-1");
     expect(result.activeVenues).toEqual(["Binance", "OKX"]);
   });
+
+  // Phase 07 / WR-02 regression — holdingsSummary must keep the max-asof
+  // row per symbol REGARDLESS of input order. The PostgREST query sorts
+  // DESC but the reducer's correctness does not depend on that ordering:
+  // a future refactor that drops the .order() clause (or a backend that
+  // returns rows in a different order) must still produce the same result.
+  it("TC p7-11 (WR-02): holdingsSummary picks max-asof per symbol even when input rows are ASC/unordered", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    // Deliberately pre-load holdings in ASCENDING asof order to invert the
+    // query's DESC assumption. The helper under test collapses via linear
+    // scan with `r.asof > existing.asof`, so ordering is irrelevant.
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 0.1,
+        mark_price: 40000,
+        value_usd: 4000,
+        venue: "binance",
+        holding_type: "spot",
+        asof: "2026-04-10", // older
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 0.2,
+        mark_price: 50000,
+        value_usd: 10000,
+        venue: "binance",
+        holding_type: "spot",
+        asof: "2026-04-12", // newest — MUST win
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 0.15,
+        mark_price: 45000,
+        value_usd: 6750,
+        venue: "binance",
+        holding_type: "spot",
+        asof: "2026-04-11", // middle
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "ETH",
+        quantity: 1.0,
+        mark_price: 3000,
+        value_usd: 3000,
+        venue: "binance",
+        holding_type: "spot",
+        asof: "2026-04-11",
+      },
+      {
+        allocator_id: "user-1",
+        symbol: "ETH",
+        quantity: 2.0,
+        mark_price: 3100,
+        value_usd: 6200,
+        venue: "binance",
+        holding_type: "spot",
+        asof: "2026-04-12", // newest ETH — MUST win
+      },
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    const btc = result.holdingsSummary.find((h) => h.symbol === "BTC");
+    const eth = result.holdingsSummary.find((h) => h.symbol === "ETH");
+    expect(btc).toBeDefined();
+    expect(eth).toBeDefined();
+    // Max-asof row wins regardless of input order
+    expect(btc!.quantity).toBe(0.2);
+    expect(btc!.value_usd).toBe(10000);
+    expect(eth!.quantity).toBe(2.0);
+    expect(eth!.value_usd).toBe(6200);
+    // No duplicate symbols in the summary
+    const symbols = result.holdingsSummary.map((h) => h.symbol);
+    expect(new Set(symbols).size).toBe(symbols.length);
+  });
 });
 
 // Silence unused-var for DAY_MS helper (kept for future TC authors).

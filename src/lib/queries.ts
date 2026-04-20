@@ -772,8 +772,13 @@ function derivePhase07Fields(
     ),
   ).sort();
 
-  // Collapse holdings to latest-asof-per-symbol. Rows arrive sorted
-  // by asof DESC, but we defensively keep only the max-asof row.
+  // Collapse holdings to latest-asof-per-symbol via linear scan of the
+  // max-asof comparator. Input order is IRRELEVANT for correctness — the
+  // `.order("asof", { ascending: false })` clause on the PostgREST query
+  // above is a log-inspection hedge (newest rows render first in debug
+  // dumps), not a correctness requirement. Do NOT flip the comparator to
+  // "first-seen wins" thinking ordering is guaranteed — removing `.order()`
+  // would silently regress that assumption.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
   for (const r of holdingsRows) {
     const existing = holdingsMap.get(r.symbol);
