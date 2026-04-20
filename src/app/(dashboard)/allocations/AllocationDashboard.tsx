@@ -87,7 +87,12 @@ interface AlertCount {
 }
 
 interface AllocationDashboardProps {
-  portfolio: Portfolio;
+  // Phase 07 Plan 04 — portfolio may be null when the allocator has
+  // connected an exchange but not yet been assigned a
+  // portfolio_strategies row (zero-holdings warm-up / post-first-connect).
+  // The legacy Phase 5/9 widgets render their own empty states when
+  // portfolio is null.
+  portfolio: Portfolio | null;
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
   apiKeys: ApiKeyRow[];
@@ -96,6 +101,38 @@ interface AllocationDashboardProps {
   positionSnapshots?: PositionSnapshot[];
   /** Phase 5 — bridge outcomes for the OutcomesWidget. */
   outcomes?: OutcomeRow[];
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 07 / 07-04 extensions (VOICES-ACCEPTED f2 + f7 + f9)
+  // Props forwarded from AllocationsTabs → here → KpiStrip / EquityCurve
+  // / DrawdownChart. Declared optional so existing call sites (e.g. the
+  // regression test at AllocationDashboard.regression-001.test.tsx)
+  // remain source-compatible. Task 3 wires the real usage.
+  // ─────────────────────────────────────────────────────────────────────
+  equitySnapshots?: Array<{
+    asof: string;
+    value_usd: number;
+    breakdown: Record<string, number> | null;
+    source: "exchange_primary" | "coingecko_fallback" | "mixed";
+    history_depth_months: number | null;
+  }>;
+  holdingsSummary?: Array<{
+    symbol: string;
+    quantity: number;
+    mark_price_usd: number | null;
+    value_usd: number;
+    venue: string;
+    holding_type: "spot" | "derivative";
+  }>;
+  snapshotCount?: number;
+  allKeysStale?: boolean;
+  lastSyncAt?: string | null;
+  hasSyncing?: boolean;
+  /** Per VOICES-ACCEPTED f7 — forwarded to EquityCurve + DrawdownChart. */
+  equityDailyPoints?: DailyPoint[];
+  /** Per VOICES-ACCEPTED f9 — forwarded to KpiStrip for venue-specific warm-up. */
+  minHistoryDepthMonths?: number | null;
+  /** Per VOICES-ACCEPTED f9 — forwarded to KpiStrip. */
+  activeVenues?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +175,10 @@ export function AllocationDashboard({
   // identifyUsageUser: stitches the client posthog distinct_id to the
   // auth user so client-only events (widget_viewed, bridge_click) join
   // the same person record as the server events.
-  const portfolioOwnerId = portfolio.user_id;
+  // Phase 07 Plan 04 — portfolio may be null for zero-holdings allocators
+  // post-first-connect; skip usage identify when we don't yet have the
+  // owner id.
+  const portfolioOwnerId = portfolio?.user_id ?? null;
   useEffect(() => {
     if (portfolioOwnerId) {
       identifyUsageUser(portfolioOwnerId);
@@ -247,7 +287,7 @@ export function AllocationDashboard({
     return latest;
   }, [strategiesForBuilder]);
 
-  const inceptionDate = portfolio.created_at?.slice(0, 10) ?? "2022-01-01";
+  const inceptionDate = portfolio?.created_at?.slice(0, 10) ?? "2022-01-01";
 
   const timeframeStart = useMemo(
     () => getTimeframeStart(timeframe as TimeframeKey, lastDataDate, inceptionDate),
@@ -322,10 +362,10 @@ export function AllocationDashboard({
   // guard anyway.
   const [nowMs] = useState(() => Date.now());
   const portfolioAgeDays = useMemo(() => {
-    if (!portfolio.created_at) return 0;
+    if (!portfolio?.created_at) return 0;
     const created = new Date(portfolio.created_at).getTime();
     return Math.floor((nowMs - created) / (1000 * 60 * 60 * 24));
-  }, [portfolio.created_at, nowMs]);
+  }, [portfolio?.created_at, nowMs]);
 
   // ── Tile close / undo / add handlers ──────────────────────────────
 
@@ -452,8 +492,10 @@ export function AllocationDashboard({
     <>
       {/* Alert banner renders above the padded main content column intentionally —
           it is full-width and not a dashboard widget, so it sits outside the
-          IntersectionObserver root (dashboardContainerRef). */}
-      <AlertBanner portfolioId={portfolio.id} />
+          IntersectionObserver root (dashboardContainerRef). When portfolio is
+          null (Phase 07 zero-holdings allocator), the banner has nothing to
+          fetch alerts for — skip it. */}
+      {portfolio && <AlertBanner portfolioId={portfolio.id} />}
       <main
         ref={dashboardContainerRef}
         className="max-w-[1280px] mx-auto p-6 pb-20"
@@ -465,7 +507,7 @@ export function AllocationDashboard({
             My Allocation
           </h1>
           <p className="mt-1 text-sm text-text-secondary">
-            <span>{portfolio.name}</span>
+            <span>{portfolio?.name ?? "My Allocation"}</span>
             <span className="mx-2 text-text-muted">&middot;</span>
             <span className="font-metric tabular-nums">{strategies.length}</span>
             <span className="text-text-muted">
@@ -510,7 +552,7 @@ export function AllocationDashboard({
       <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
         <InsightStrip
           analytics={analytics}
-          portfolioId={portfolio.id}
+          portfolioId={portfolio?.id ?? null}
           max={3}
           portfolioStrategies={rebalanceDriftInputs}
           portfolioAgeDays={portfolioAgeDays}

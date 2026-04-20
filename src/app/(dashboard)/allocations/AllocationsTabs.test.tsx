@@ -159,12 +159,14 @@ describe("AllocationsTabs — PURGE-07 / D-04 / f3", () => {
         "Model what-if outcomes by adding or removing strategies and holdings from your live composition. Available in the next update.",
       ),
     ).toBeInTheDocument();
-    // The only buttons under the rendered tree should be the tab buttons
-    // themselves (Performance + Scenario). No other interactive controls
-    // inside the stub body.
-    const buttons = screen.getAllByRole("button");
-    const tabButtonLabels = buttons.map((b) => b.textContent?.trim());
-    expect(tabButtonLabels).toEqual(["Performance", "Scenario"]);
+    // The only interactive controls under the rendered tree should be the
+    // two tab buttons themselves (role="tab" in the tablist above). No
+    // other interactive controls inside the stub body — role="button"
+    // returns nothing, and role="tab" returns exactly Performance + Scenario.
+    expect(screen.queryAllByRole("button")).toEqual([]);
+    const tabs = screen.getAllByRole("tab");
+    const tabLabels = tabs.map((b) => b.textContent?.trim());
+    expect(tabLabels).toEqual(["Performance", "Scenario"]);
   });
 
   it("re-renders correct tab when searchParams change (browser back/forward re-render — f3)", () => {
