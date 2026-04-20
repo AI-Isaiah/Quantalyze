@@ -4,7 +4,11 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { ProfileTabs } from "@/components/auth/ProfileTabs";
 import { SignOutButton } from "@/components/auth/SignOutButton";
 import { getOwnPreferences } from "@/lib/preferences";
+import { getUserApiKeys } from "@/lib/queries";
+import type { ExchangesTabContentProps } from "@/components/exchanges/ExchangesTabContent";
 import { redirect } from "next/navigation";
+
+export const dynamic = "force-dynamic";
 
 export default async function ProfilePage() {
   const supabase = await createClient();
@@ -29,11 +33,28 @@ export default async function ProfilePage() {
 
   if (!profile) redirect("/onboarding");
 
-  // Allocator mandate tab — only fetch for allocator / both roles.
+  // Allocator-only tabs (mandate + exchanges) only fetch for allocator / both.
   const isAllocator = profile.role === "allocator" || profile.role === "both";
   const initialPreferences = isAllocator
     ? await getOwnPreferences(supabase, user.id)
     : null;
+
+  let exchanges: ExchangesTabContentProps | null = null;
+  if (isAllocator) {
+    const initialKeys = await getUserApiKeys(user.id);
+    const { data: activePortfolio } = await admin
+      .from("portfolios")
+      .select("id, name")
+      .eq("user_id", user.id)
+      .ilike("name", "Active Allocation")
+      .maybeSingle();
+    exchanges = {
+      initialKeys,
+      activePortfolio: activePortfolio
+        ? { id: activePortfolio.id as string, name: activePortfolio.name as string }
+        : null,
+    };
+  }
 
   return (
     <>
@@ -46,6 +67,7 @@ export default async function ProfilePage() {
         profile={profile}
         initialPreferences={initialPreferences}
         isAllocator={isAllocator}
+        exchanges={exchanges}
       />
     </>
   );
