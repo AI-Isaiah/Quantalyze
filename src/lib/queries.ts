@@ -620,6 +620,12 @@ export async function getUserApiKeys(userId: string) {
     is_active: boolean;
     sync_status: string | null;
     last_sync_at: string | null;
+    // Phase 06 (migration 066) — worker-sanitized error message surfaced
+    // to the owning allocator. Column-level SELECT granted to the
+    // `authenticated` role in migration 066; projected via
+    // API_KEY_USER_COLUMNS_ARR (constants.ts). NULL on success or when
+    // no sync has run yet.
+    sync_error: string | null;
     account_balance_usdt: number | null;
     created_at: string;
   }>;

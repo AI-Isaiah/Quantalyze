@@ -90,11 +90,18 @@ export const API_KEY_USER_COLUMNS_ARR = [
   "last_sync_at",
   "account_balance_usdt",
   "created_at",
+  // Phase 06 (migration 066) — GRANT SELECT (sync_error) ON api_keys TO
+  // authenticated. Exposes the worker-sanitized error message to the
+  // owning allocator so the exchange-status pill can render a helper
+  // line under "Sync failed" (Landmine 2 resolved). Service-role keeps
+  // full-table SELECT via existing grants; admin reads via the
+  // admin-select RLS path.
+  "sync_error",
 ] as const;
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];

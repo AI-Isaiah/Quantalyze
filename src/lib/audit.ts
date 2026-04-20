@@ -130,7 +130,11 @@ export type AuditAction =
   | "mandate_preference.update"
   | "mandate_preference.admin_update"
   // --- Sprint 8 Phase 4: Feedback loop ------------------------------------
-  | "feedback.overrides_updated";
+  | "feedback.overrides_updated"
+  // --- Phase 06: allocator API ingestion (INGEST-05 / INGEST-06 / INGEST-07) — D-18
+  | "allocator.holdings.sync_requested"
+  | "allocator.holdings.sync_completed"
+  | "allocator.holdings.sync_failed";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
