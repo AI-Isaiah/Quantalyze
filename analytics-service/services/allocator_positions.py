@@ -1,0 +1,276 @@
+"""Allocator-side holdings ingestion (Phase 06, INGEST-03 / INGEST-04 / INGEST-05).
+
+Dual-path CCXT fetch: fetch_balance() for spot + fetch_positions() for derivatives
+(D-01). Idempotent upsert into allocator_holdings via (allocator_id, venue, symbol,
+asof) unique index (INGEST-04).
+
+Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
+
+* Spot-only pricing: we make ONE bulk fetch_tickers() call with the list of
+  non-stablecoin assets. Stablecoins (USDT/USDC/BUSD/DAI/TUSD/USD) skip the
+  ticker entirely with mark_price = 1.0 — lower API cost, no rate-limit bleed
+  onto the strategy-side poll_positions for shared exchanges (RESEARCH §1).
+
+* Derivative rows reuse services.positions.fetch_positions — the same shape
+  the strategy-side worker produces — so the two pipelines stay aligned.
+
+* f3 Path B — Deribit spot is deferred. fetch_balance() on a Deribit
+  derivatives-only account returns {'total': {}} which would silently emit
+  zero spot rows. Instead we raise an explicit DeribitNotSupportedError
+  (subclass of ccxt.NotSupported) BEFORE fetch_balance is called.
+  _map_exception_to_sync_status routes it to sync_status='error' with the
+  message "Deribit spot ingestion not yet supported — derivatives still
+  sync." so the allocator sees the deferral rather than phantom-complete.
+  Tracked in PROJECT.md "Active — Inherited deferrals"; a Phase 06.x minor
+  can flip to Path A once a Deribit test key is provisioned.
+
+* raw_payload cap — JSONB rows in allocator_holdings are capped at ~4KB
+  via json.dumps length check; over-cap payloads are replaced with a
+  truncated preview so the table stays indexable and a runaway CCXT
+  response (huge `info` blob) can't blow up row size.
+
+* Exception → sync_status mapping lives HERE (not in job_worker.py) so the
+  handler's error-UX logic is co-located with the worker concern it serves
+  and can be unit-tested without importing the whole job_worker stack.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import ccxt.async_support as ccxt
+
+from services.db import db_execute
+from services.positions import fetch_positions
+
+
+STABLECOINS: set[str] = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USD"}
+RAW_PAYLOAD_CAP_BYTES: int = 4096  # D-02 / ~4KB JSONB cap
+
+
+class DeribitNotSupportedError(ccxt.NotSupported):
+    """f3 Path B: raised when the allocator worker is asked to fetch spot from Deribit.
+
+    Subclasses ccxt.NotSupported so any catch-all `except ccxt.NotSupported`
+    still works. _map_exception_to_sync_status maps it to 'error' (not
+    'revoked') so the API key is not invalidated — only the current sync
+    surfaces the deferral message; the derivative side continues to work.
+    """
+
+
+def _cap_raw_payload(payload: dict) -> dict:
+    """Truncate a raw_payload JSON dict to fit the ~4KB JSONB cap.
+
+    If the serialized payload exceeds RAW_PAYLOAD_CAP_BYTES, return a
+    replacement dict {'truncated': True, 'preview': str[:3900]} so the
+    row still persists and the operator can see the first ~4KB of the
+    original in the admin UI. default=str handles Decimal/datetime.
+    """
+    encoded = json.dumps(payload, default=str)
+    if len(encoded) <= RAW_PAYLOAD_CAP_BYTES:
+        return payload
+    return {"truncated": True, "preview": encoded[:3900]}
+
+
+def _map_exception_to_sync_status(exc: Exception) -> str:
+    """INGEST-05 / D-07: map a CCXT exception to the api_keys.sync_status value.
+
+    Table:
+      AuthenticationError / PermissionDenied  → 'revoked'
+      RateLimitExceeded                       → 'rate_limited'
+      everything else (Network, ExchangeNotAvailable, DeribitNotSupportedError,
+        generic Exception, ...)               → 'error'
+
+    DeribitNotSupportedError maps to 'error' rather than 'revoked' so the
+    key stays usable for the derivative-side sync (f3 Path B).
+    """
+    if isinstance(exc, (ccxt.AuthenticationError, ccxt.PermissionDenied)):
+        return "revoked"
+    if isinstance(exc, ccxt.RateLimitExceeded):
+        return "rate_limited"
+    return "error"
+
+
+async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict]:
+    """Build spot allocator_holdings rows from fetch_balance() + bulk fetch_tickers().
+
+    f3 Path B: if exchange.id == 'deribit', raise DeribitNotSupportedError
+    BEFORE any network call. The Unified CCXT shape for Deribit
+    derivatives-only accounts returns {'total': {}}, which would silently
+    emit zero spot rows.
+
+    Stablecoin optimization: USDT/USDC/BUSD/DAI/TUSD/USD get mark_price=1.0
+    without a ticker call.
+    """
+    # f3 Path B — Deribit guard (BEFORE fetch_balance is called).
+    if getattr(exchange, "id", None) == "deribit":
+        raise DeribitNotSupportedError(
+            "Deribit spot ingestion not yet supported — derivatives still sync."
+        )
+
+    balance = await exchange.fetch_balance()
+    totals = balance.get("total") or {}
+    non_zero = {
+        asset: float(qty)
+        for asset, qty in totals.items()
+        if qty is not None and float(qty) > 0
+    }
+    if not non_zero:
+        return []
+
+    # Bulk ticker fetch for non-stablecoin assets only.
+    need_tickers = [
+        f"{asset}/USDT" for asset in non_zero
+        if asset.upper() not in STABLECOINS
+    ]
+    tickers: dict[str, dict] = {}
+    if need_tickers:
+        try:
+            tickers = await exchange.fetch_tickers(need_tickers) or {}
+        except Exception:
+            # Per-symbol fallback if bulk fails (some exchanges don't
+            # accept a symbol list). Best effort — if a single ticker
+            # still fails, we mark the price 0 rather than abort spot.
+            tickers = {}
+            for sym in need_tickers:
+                try:
+                    tickers[sym] = await exchange.fetch_ticker(sym)
+                except Exception:
+                    tickers[sym] = {"last": 0.0}
+
+    rows: list[dict] = []
+    for asset, qty in non_zero.items():
+        asset_upper = asset.upper()
+        if asset_upper in STABLECOINS:
+            mark_price = 1.0
+        else:
+            t = tickers.get(f"{asset}/USDT") or {}
+            mark_price = float(t.get("last") or 0.0)
+        rows.append({
+            "venue": exchange_name,
+            "symbol": asset,              # D-16: raw currency code, no suffix
+            "holding_type": "spot",
+            "side": "flat",
+            "quantity": float(qty),
+            "value_usd": float(qty) * mark_price,
+            "entry_price": None,           # D-06: spot has no basis from the worker
+            "mark_price": mark_price,
+            "unrealized_pnl_usd": None,
+            "cost_basis_usd": None,
+            "raw_payload": _cap_raw_payload({
+                "asset": asset,
+                "total": float(qty),
+                "mark_price": mark_price,
+            }),
+        })
+    return rows
+
+
+async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict]:
+    """Build derivative allocator_holdings rows by reusing positions.fetch_positions.
+
+    Remaps the strategy-side snapshot shape to the allocator_holdings
+    column list (D-01 / D-05). Deribit derivative path IS supported —
+    f3 Path B only defers the spot side.
+    """
+    snapshots = await fetch_positions(exchange_name, exchange)
+    rows: list[dict] = []
+    for s in snapshots:
+        qty = float(s.get("size_base") or 0)
+        entry_raw = s.get("entry_price")
+        entry = float(entry_raw) if entry_raw is not None else None
+        if entry == 0:
+            entry = None
+        cost_basis = (entry * abs(qty)) if entry is not None else None
+        rows.append({
+            "venue": exchange_name,
+            "symbol": s["symbol"],          # already stripped by _normalize_ccxt_position (D-16)
+            "holding_type": "derivative",
+            "side": s["side"],
+            "quantity": qty,
+            "value_usd": float(s.get("size_usd") or 0),
+            "entry_price": entry,
+            "mark_price": float(s.get("mark_price") or 0),
+            "unrealized_pnl_usd": float(s.get("unrealized_pnl") or 0),
+            "cost_basis_usd": cost_basis,
+            "raw_payload": _cap_raw_payload(s),
+        })
+    return rows
+
+
+async def fetch_allocator_holdings(
+    exchange_name: str, exchange: Any
+) -> tuple[list[dict], str | None]:
+    """D-01: fetch BOTH spot and derivatives in a single sync.
+
+    Returns ``(rows, warning)`` where ``warning`` is None on full success
+    and a sanitized string when the derivative side failed with a
+    non-auth / non-rate-limit exception but spot succeeded (partial
+    success → the handler writes sync_status='complete_with_warnings').
+
+    On auth / rate-limit failures OR DeribitNotSupportedError the method
+    re-raises so the handler can map to sync_status ('revoked' /
+    'rate_limited' / 'error') per D-07. Deribit is NOT a partial-success
+    path: the whole sync is marked 'error' so the allocator sees the
+    deferral message (f3 Path B).
+    """
+    spot_rows: list[dict] = []
+    deriv_rows: list[dict] = []
+    warning: str | None = None
+
+    # Spot side — any failure (including Deribit Path B) re-raises to
+    # the handler; partial success only applies to the derivative side.
+    spot_rows = await _fetch_spot_rows(exchange_name, exchange)
+
+    try:
+        deriv_rows = await _fetch_derivative_rows(exchange_name, exchange)
+    except (
+        ccxt.AuthenticationError,
+        ccxt.PermissionDenied,
+        ccxt.RateLimitExceeded,
+    ):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Partial success: persist spot, surface the derivative-side error
+        # as sync_status='complete_with_warnings' via the handler.
+        warning = str(exc)[:500]
+
+    return (spot_rows + deriv_rows, warning)
+
+
+async def persist_allocator_holdings(
+    supabase_client: Any,
+    holdings: list[dict],
+    allocator_id: str,
+    api_key_id: str,
+    asof_date: str,
+) -> int:
+    """INGEST-04: idempotent upsert on (allocator_id, venue, symbol, asof).
+
+    Stamps allocator_id / api_key_id / asof onto every row before the
+    upsert so a caller can pass either the raw fetch_allocator_holdings
+    output or a pre-stamped list. Re-running with identical input
+    produces identical rows because the DB unique index + ON CONFLICT
+    DO UPDATE converges.
+    """
+    if not holdings:
+        return 0
+
+    rows = [
+        {
+            **h,
+            "allocator_id": allocator_id,
+            "api_key_id": api_key_id,
+            "asof": asof_date,
+        }
+        for h in holdings
+    ]
+
+    def _upsert():
+        return supabase_client.table("allocator_holdings").upsert(
+            rows,
+            on_conflict="allocator_id,venue,symbol,asof",
+        ).execute()
+
+    await db_execute(_upsert)
+    return len(rows)

@@ -12,6 +12,7 @@ EXCHANGE_CLASSES: dict[str, type] = {
     "binance": ccxt.binance,
     "okx": ccxt.okx,
     "bybit": ccxt.bybit,
+    "deribit": ccxt.deribit,   # Phase 06 — D-17 exchange coverage; derivative-side only per f3 Path B
 }
 
 
