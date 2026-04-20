@@ -212,13 +212,17 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   // passes new initialKeys, but useState(initialKeys) only runs on mount.
   // Merge here so server truth wins on sync_status/last_sync_at/sync_error
   // while preserving client-only queued_next_attempt_at + helper_override
-  // for matching ids (f8 / f4).
-  useEffect(() => {
+  // for matching ids (f8 / f4). Done during render (not an effect) so the
+  // merged state is visible on the same commit — avoids the cascading-render
+  // penalty of setState-in-useEffect (react-hooks/set-state-in-effect).
+  const [prevInitialKeys, setPrevInitialKeys] = useState(initialKeys);
+  if (prevInitialKeys !== initialKeys) {
+    setPrevInitialKeys(initialKeys);
     setKeys((prev) => {
       const byId = new Map(prev.map((k) => [k.id, k]));
       return initialKeys.map((k) => normalizeInitialKey(k, byId.get(k.id)));
     });
-  }, [initialKeys]);
+  }
 
   // D-11: 5s router.refresh() polling — always-on while the tab is
   // visible, so server-side transitions into ANY non-terminal state
