@@ -1,10 +1,14 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AllocationDashboard } from "./AllocationDashboard";
 import { ScenarioStub } from "./ScenarioStub";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+
+// Live-refresh polling inherits the Phase 06 D-11 cadence. Named so cross-page
+// audits of polling behaviour can grep for a single symbol.
+const PERFORMANCE_POLL_INTERVAL_MS = 5_000;
 
 /**
  * Phase 07 Plan 04 / PURGE-07 / D-04 — Tabs shell for /allocations.
@@ -69,19 +73,19 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     }
   }, [searchParams, router, pathname]);
 
-  // 5s polling — only while on Performance + document visible
+  // Live-refresh polling — only while on Performance + document visible
   // (Phase 06 D-11 inherited pattern). Never polls on Scenario.
   useEffect(() => {
     if (activeTab !== "performance") return;
     const id = setInterval(() => {
       if (document.visibilityState === "visible") router.refresh();
-    }, 5000);
+    }, PERFORMANCE_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, [activeTab, router]);
 
-  // Tab click handler — update URL; the URL change triggers a re-render
-  // which re-derives activeTab. No local state for activeTab.
-  const handleTabClick = (key: TabKey) => {
+  // Tab change — update URL; the URL change triggers a re-render which
+  // re-derives activeTab. No local state for activeTab.
+  const changeTab = (key: TabKey) => {
     const params = new URLSearchParams(searchParams.toString());
     if (key === "performance") params.delete("tab");
     else params.set("tab", key);
@@ -89,10 +93,32 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   };
 
+  // WAI-ARIA authoring-practices tab pattern: Arrow keys move focus between
+  // tabs, Home/End jump to first/last. Tab/Shift-Tab leaves the tablist.
+  const tabRefs = useRef<Record<TabKey, HTMLButtonElement | null>>({
+    performance: null,
+    scenario: null,
+  });
+  const handleTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>, key: TabKey) => {
+    const idx = TAB_KEYS.indexOf(key);
+    let next: TabKey | null = null;
+    if (e.key === "ArrowRight") next = TAB_KEYS[(idx + 1) % TAB_KEYS.length];
+    else if (e.key === "ArrowLeft")
+      next = TAB_KEYS[(idx - 1 + TAB_KEYS.length) % TAB_KEYS.length];
+    else if (e.key === "Home") next = TAB_KEYS[0];
+    else if (e.key === "End") next = TAB_KEYS[TAB_KEYS.length - 1];
+    if (next) {
+      e.preventDefault();
+      changeTab(next);
+      tabRefs.current[next]?.focus();
+    }
+  };
+
   return (
     <div>
       <div
         role="tablist"
+        aria-label="Allocation surfaces"
         className="flex gap-1 border-b border-border mb-6"
       >
         {TAB_KEYS.map((key) => {
@@ -101,14 +127,21 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
           return (
             <button
               key={key}
+              ref={(el) => {
+                tabRefs.current[key] = el;
+              }}
               type="button"
               role="tab"
+              id={`tab-${key}`}
               aria-selected={isActive}
-              onClick={() => handleTabClick(key)}
+              aria-controls={`panel-${key}`}
+              tabIndex={isActive ? 0 : -1}
+              onClick={() => changeTab(key)}
+              onKeyDown={(e) => handleTabKeyDown(e, key)}
               className={
                 isActive
-                  ? "px-4 py-2.5 text-sm font-medium border-b-2 -mb-px border-accent text-accent transition-colors"
-                  : "px-4 py-2.5 text-sm font-medium border-b-2 -mb-px border-transparent text-text-muted hover:text-text-primary transition-colors"
+                  ? "px-4 py-2.5 text-sm font-medium border-b-2 -mb-px border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                  : "px-4 py-2.5 text-sm font-medium border-b-2 -mb-px border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
               }
             >
               {label}
@@ -117,16 +150,22 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         })}
       </div>
 
-      {activeTab === "performance" && (
-        // Task 3 widens AllocationDashboard to accept the full Phase 07
-        // payload (including `portfolio: Portfolio | null` and the 9 new
-        // fields) + gates strategy-composite widgets on strategies.length > 0
-        // per VOICES-ACCEPTED f2. Until that lands in the same plan's
-        // next commit, spread the full payload and let AllocationDashboard
-        // destructure what it needs.
-        <AllocationDashboard {...props} />
-      )}
-      {activeTab === "scenario" && <ScenarioStub />}
+      <div
+        role="tabpanel"
+        id="panel-performance"
+        aria-labelledby="tab-performance"
+        hidden={activeTab !== "performance"}
+      >
+        {activeTab === "performance" && <AllocationDashboard {...props} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="panel-scenario"
+        aria-labelledby="tab-scenario"
+        hidden={activeTab !== "scenario"}
+      >
+        {activeTab === "scenario" && <ScenarioStub />}
+      </div>
     </div>
   );
 }

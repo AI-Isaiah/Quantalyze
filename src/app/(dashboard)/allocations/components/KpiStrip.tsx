@@ -268,10 +268,7 @@ export function KpiStrip({
                     {item.value}
                   </span>
                   {showWarmupHelper && (
-                    <p
-                      className="text-[13px] mt-1 text-center"
-                      style={{ color: "#718096" }}
-                    >
+                    <p className="text-[13px] mt-1 text-center text-text-muted">
                       {warmupHelper}
                     </p>
                   )}

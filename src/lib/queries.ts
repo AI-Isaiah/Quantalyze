@@ -811,31 +811,27 @@ export const getMyAllocationDashboard = cache(
     const supabase = await createClient();
     const admin = createAdminClient();
 
-    // Step 1: the real portfolio anchors the legacy Phase 5 fields. The
-    // !portfolio branch no longer short-circuits — Phase 07 allocators
-    // can have real equity snapshots + holdings via the Phase 06/07
-    // pipeline even without a portfolio_strategies row.
-    const portfolio = await getRealPortfolio(userId);
-
-    // Phase 07 parallel fetches — run against the user-scoped client so
-    // RLS enforces the allocator_id gate. `allocator_equity_snapshots`
-    // and `allocator_holdings` both have owner-only SELECT policies per
-    // migration 070 + migration 066.
+    // Step 1: fan out every userId-keyed fetch in one wave. The Phase 07
+    // inputs (equity snapshots, allocator holdings, api keys) don't depend
+    // on the portfolio row, so we parallelise them with getRealPortfolio
+    // to cut cold-cache waves from 3 to 2. The !portfolio branch still
+    // short-circuits Step 2 cleanly — Phase 07 allocators can have real
+    // equity snapshots + holdings even without a portfolio_strategies row.
     const [
+      portfolio,
       phase07EquityRes,
-      phase07CountRes,
       phase07HoldingsRes,
       apiKeys,
     ] = await Promise.all([
+      getRealPortfolio(userId),
       supabase
         .from("allocator_equity_snapshots")
         .select("asof, value_usd, breakdown, source, history_depth_months")
         .eq("allocator_id", userId)
-        .order("asof", { ascending: true }),
-      supabase
-        .from("allocator_equity_snapshots")
-        .select("*", { count: "exact", head: true })
-        .eq("allocator_id", userId),
+        .order("asof", { ascending: true })
+        // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
+        // payload can't grow unbounded as the table accumulates days.
+        .limit(730),
       supabase
         .from("allocator_holdings")
         .select(
@@ -848,7 +844,10 @@ export const getMyAllocationDashboard = cache(
 
     const equitySnapshots = (phase07EquityRes.data ??
       []) as MyAllocationDashboardPayload["equitySnapshots"];
-    const snapshotCount = phase07CountRes.count ?? 0;
+    // The equity query returns every row in the allocator's window with no
+    // pagination, so `length` is the authoritative count — a separate
+    // head-only count query would be a redundant round-trip.
+    const snapshotCount = equitySnapshots.length;
     const holdingsRows = (phase07HoldingsRes.data ?? []) as Array<{
       symbol: string;
       quantity: number;

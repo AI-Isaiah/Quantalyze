@@ -591,6 +591,9 @@ async def test_reconstruct_coingecko_fallback(monkeypatch):
     monkeypatch.setattr("httpx.AsyncClient.__aenter__", _aenter)
     monkeypatch.setattr("httpx.AsyncClient.__aexit__", _aexit)
 
+    # Zero-out the CoinGecko throttle so the test doesn't wait 2s per symbol.
+    monkeypatch.setattr(er, "COINGECKO_MIN_SLEEP_SECS", 0.0)
+
     job = {"id": "job-cg", "kind": "reconstruct_allocator_history", "api_key_id": API_KEY_ID_1}
     result = await run_reconstruct_allocator_history_job(job)
 

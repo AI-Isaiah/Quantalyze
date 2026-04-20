@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from bisect import bisect_right
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -135,6 +136,23 @@ def _cap_breakdown(breakdown: dict) -> dict:
 # ccxt fetch helpers
 # ---------------------------------------------------------------------------
 
+async def _rate_limit_sleep(exchange: Any) -> None:
+    """Back-off between paginated calls to the same exchange.
+
+    CCXT's enableRateLimit flag is not guaranteed on every instance we
+    receive — reach for the advertised per-call rateLimit attribute and
+    sleep for that many ms. Falls through silently on AsyncMock / test
+    doubles that have no rateLimit attribute so pytest stays fast.
+    """
+    ms = getattr(exchange, "rateLimit", None)
+    if not isinstance(ms, (int, float)) or ms <= 0:
+        return
+    try:
+        await asyncio.sleep(float(ms) / 1000.0)
+    except Exception:  # pragma: no cover
+        pass
+
+
 async def _fetch_trades_with_pagination(
     exchange: Any,
     venue: str,
@@ -178,12 +196,9 @@ async def _fetch_trades_with_pagination(
             return all_trades, hit_okx_terminus
         page = page or []
         if not page:
-            if venue.lower() == "okx" and cursor_ms < okx_terminus_ms:
-                logger.info(
-                    "OKX trade history capped at 3 months",
-                    extra={"venue": venue, "since_ms": cursor_ms},
-                )
-                hit_okx_terminus = True
+            # No further trades — terminus logging already happened pre-loop
+            # at the OKX cursor advance (lines above). By this point,
+            # cursor_ms >= okx_terminus_ms for OKX, so no duplicate log.
             break
         all_trades.extend(page)
         if len(page) < limit_per_call:
@@ -193,6 +208,7 @@ async def _fetch_trades_with_pagination(
         if max_ts <= cursor_ms:
             break
         cursor_ms = max_ts + 1
+        await _rate_limit_sleep(exchange)
     return all_trades, hit_okx_terminus
 
 
@@ -231,6 +247,7 @@ async def _fetch_transfers(
         if not page:
             # Advance one window; continue in case the tape is sparse.
             continue
+        await _rate_limit_sleep(exchange)
     return all_rows
 
 
@@ -257,6 +274,7 @@ async def _fetch_ohlcv_daily(
         cursor_ms = max_ts + day_ms
         if len(page) < 1000:
             break
+        await _rate_limit_sleep(exchange)
     return all_rows
 
 
@@ -296,10 +314,10 @@ async def _fetch_coingecko_daily_closes(
             return []
         data = resp.json() or {}
 
-    # Rate-limit sleep (best-effort — async; tests monkeypatch so do not
-    # block pytest with a real 2s sleep).
+    # Rate-limit throttle to stay under CoinGecko's free-tier 30 RPM limit.
+    # Tests monkeypatch COINGECKO_MIN_SLEEP_SECS=0 to keep pytest fast.
     try:
-        await asyncio.sleep(0)
+        await asyncio.sleep(COINGECKO_MIN_SLEEP_SECS)
     except Exception:  # pragma: no cover
         pass
 
@@ -428,6 +446,20 @@ def _compute_daily_equity(
     # Running per-symbol quantities
     quantities: dict[str, float] = {}
 
+    # Pre-sort pricing keys once so the inner hot loop does O(log n) lookups
+    # instead of O(n log n) per (day, symbol) cell. ohlcv rows come back
+    # already ordered ascending from ccxt, but we normalise anyway.
+    ohlcv_keys: dict[str, list[str]] = {}
+    ohlcv_closes: dict[str, list[float]] = {}
+    for sym, series in ohlcv_by_symbol.items():
+        ordered = sorted(series, key=lambda p: p[0])
+        ohlcv_keys[sym] = [iso for iso, _ in ordered]
+        ohlcv_closes[sym] = [c for _, c in ordered]
+
+    cg_keys: dict[str, list[str]] = {
+        sym: sorted(series.keys()) for sym, series in coingecko_by_symbol.items()
+    }
+
     rows: list[dict] = []
     cur = start_date
     used_exchange = False
@@ -482,29 +514,23 @@ def _compute_daily_equity(
             else:
                 px = None
                 src = None
-                series = ohlcv_by_symbol.get(sym)
-                if series:
-                    # Walk back to find the close on-or-before iso
-                    for d_iso, c in reversed(series):
-                        if d_iso <= iso:
-                            px = c
-                            src = "exchange_primary"
-                            break
+                keys = ohlcv_keys.get(sym)
+                if keys:
+                    # O(log n) on-or-before lookup via pre-sorted parallel lists.
+                    idx = bisect_right(keys, iso) - 1
+                    if idx >= 0:
+                        px = ohlcv_closes[sym][idx]
+                        src = "exchange_primary"
                 if px is None:
                     cg_series = coingecko_by_symbol.get(sym)
                     if cg_series and iso in cg_series:
                         px = cg_series[iso]
                         src = "coingecko_fallback"
                     elif cg_series:
-                        # Walk back within the CG series
-                        best: float | None = None
-                        for d_iso in sorted(cg_series.keys()):
-                            if d_iso <= iso:
-                                best = cg_series[d_iso]
-                            else:
-                                break
-                        if best is not None:
-                            px = best
+                        cg_sorted = cg_keys.get(sym, [])
+                        idx = bisect_right(cg_sorted, iso) - 1
+                        if idx >= 0:
+                            px = cg_series[cg_sorted[idx]]
                             src = "coingecko_fallback"
                 if px is None:
                     # Skip symbols with no price — keeps the chart stable
@@ -575,14 +601,21 @@ async def persist_equity_snapshots(
             "history_depth_months": row_depth,
         })
 
-    def _upsert():
-        return supabase.table("allocator_equity_snapshots").upsert(
-            stamped,
-            on_conflict="allocator_id,asof",
-            ignore_duplicates=True,
-        ).execute()
+    # Chunk the upsert so a multi-year backfill (≤730 rows) never bundles
+    # one giant PostgREST payload. 100-row chunks keep each request small
+    # and bound peak memory during the serialize step.
+    BATCH = 100
+    for i in range(0, len(stamped), BATCH):
+        batch = stamped[i : i + BATCH]
 
-    await db_execute(_upsert)
+        def _upsert(batch=batch):
+            return supabase.table("allocator_equity_snapshots").upsert(
+                batch,
+                on_conflict="allocator_id,asof",
+                ignore_duplicates=True,
+            ).execute()
+
+        await db_execute(_upsert)
     return len(stamped)
 
 
@@ -672,34 +705,51 @@ async def _fetch_and_price_window(
 
     ohlcv_by_symbol: dict[str, list[tuple[str, float]]] = {}
     coingecko_by_symbol: dict[str, dict[str, float]] = {}
-    for sym in symbols:
+
+    # Pass 1 — concurrent OHLCV fetches on the primary venue. CCXT's
+    # enableRateLimit throttles per-exchange so parallel calls stay polite.
+    async def _fetch_primary(sym: str) -> tuple[str, list[tuple[str, float]] | None, str | None]:
         if sym in STABLECOINS:
-            continue
+            return sym, None, "skip"
         try:
             raw = await _fetch_ohlcv_daily(exchange, f"{sym}/USDT", start_ms, end_ms)
-            ohlcv_by_symbol[sym] = [
+            return sym, [
                 (
                     datetime.fromtimestamp(int(r[0]) / 1000.0, tz=timezone.utc).date().isoformat(),
                     float(r[4]),
                 )
                 for r in raw
-            ]
+            ], None
         except ccxt.BadSymbol:
-            # Fallback to CoinGecko
-            cached = await _read_cached_prices(supabase, sym, start_date.isoformat(), end_date.isoformat())
-            needed = cached
-            if not cached:
-                closes = await _fetch_coingecko_daily_closes(
-                    sym,
-                    int(datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).timestamp()),
-                    int(datetime(end_date.year, end_date.month, end_date.day, tzinfo=timezone.utc).timestamp()) + 86400,
-                )
-                if closes:
-                    await _cache_coingecko_prices(supabase, sym, closes)
-                    needed = {iso: price for iso, price in closes}
-            coingecko_by_symbol[sym] = needed
+            return sym, None, "bad_symbol"
         except Exception as exc:  # noqa: BLE001
             logger.warning("fetch_ohlcv failed symbol=%s: %s", sym, exc)
+            return sym, None, "error"
+
+    primary_results = await asyncio.gather(*[_fetch_primary(s) for s in symbols])
+
+    for sym, series, err in primary_results:
+        if series is not None:
+            ohlcv_by_symbol[sym] = series
+
+    # Pass 2 — sequential CoinGecko fallback for BadSymbol results. Kept
+    # sequential so the 2s inter-call throttle (COINGECKO_MIN_SLEEP_SECS)
+    # can't be bypassed via parallel fan-out.
+    for sym, _series, err in primary_results:
+        if err != "bad_symbol":
+            continue
+        cached = await _read_cached_prices(supabase, sym, start_date.isoformat(), end_date.isoformat())
+        needed = cached
+        if not cached:
+            closes = await _fetch_coingecko_daily_closes(
+                sym,
+                int(datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).timestamp()),
+                int(datetime(end_date.year, end_date.month, end_date.day, tzinfo=timezone.utc).timestamp()) + 86400,
+            )
+            if closes:
+                await _cache_coingecko_prices(supabase, sym, closes)
+                needed = {iso: price for iso, price in closes}
+        coingecko_by_symbol[sym] = needed
 
     rows = _compute_daily_equity(
         trades, deposits, withdrawals,

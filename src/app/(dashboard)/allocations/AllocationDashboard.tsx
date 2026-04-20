@@ -596,7 +596,10 @@ export function AllocationDashboard({
               aria-hidden="true"
               className="absolute inset-0 bg-page/40 flex items-center justify-center pointer-events-none"
             >
-              <span className="text-sm text-text-secondary font-medium">
+              {/* Pill the text on a solid background so WCAG AA 4.5:1
+                  contrast holds even on busy chart regions where the
+                  40% page tint doesn't fully obscure chart lines. */}
+              <span className="rounded-md bg-surface px-3 py-1 text-sm font-medium text-text-secondary shadow-sm">
                 Data may be stale
               </span>
             </div>
@@ -673,11 +676,13 @@ export function AllocationDashboard({
   // skipped entirely — the allocator sees one headline, one sub-line,
   // one CTA, and one Notices card.
   if (holdingsEmpty && !hasSyncing) {
+    // page.tsx already wraps this subtree in <main>; use <section> here to
+    // avoid two <main> landmarks per document (HTML5 + WCAG landmark nav).
     return (
-      <main className="max-w-[1280px] mx-auto p-6 pb-20">
+      <section className="max-w-[1280px] mx-auto p-6 pb-20">
         <EmptyState hasSyncing={false} />
         {zeroHoldingsNoticesCard}
-      </main>
+      </section>
     );
   }
 
@@ -689,40 +694,38 @@ export function AllocationDashboard({
           null (Phase 07 zero-holdings allocator), the banner has nothing to
           fetch alerts for — skip it. */}
       {portfolio && <AlertBanner portfolioId={portfolio.id} />}
-      <main
+      {/* page.tsx already wraps this subtree in <main>; <section> here avoids
+          two <main> landmarks per document. */}
+      <section
         ref={dashboardContainerRef}
         className="max-w-[1280px] mx-auto p-6 pb-20"
       >
-      {/* Header */}
+      {/* Header — page.tsx owns the <h1>My Allocation</h1> via PageHeader;
+          we render only the metadata sub-line here to avoid duplicate H1s
+          (WCAG single-h1 convention, screen-reader heading nav). */}
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="font-display text-3xl md:text-4xl text-text-primary tracking-tight">
-            My Allocation
-          </h1>
-          <p className="mt-1 text-sm text-text-secondary">
-            <span>{portfolio?.name ?? "My Allocation"}</span>
-            <span className="mx-2 text-text-muted">&middot;</span>
-            <span className="font-metric tabular-nums">{strategies.length}</span>
-            <span className="text-text-muted">
-              {" "}
-              {strategies.length === 1 ? "investment" : "investments"}
-            </span>
-            {aum != null && (
-              <>
-                <span className="mx-2 text-text-muted">&middot;</span>
-                <span className="font-metric tabular-nums">
-                  {formatCurrency(aum)}
-                </span>
-              </>
-            )}
-          </p>
-        </div>
+        <p className="text-sm text-text-secondary">
+          <span>{portfolio?.name ?? "My Allocation"}</span>
+          <span className="mx-2 text-text-muted">&middot;</span>
+          <span className="font-metric tabular-nums">{strategies.length}</span>
+          <span className="text-text-muted">
+            {" "}
+            {strategies.length === 1 ? "investment" : "investments"}
+          </span>
+          {aum != null && (
+            <>
+              <span className="mx-2 text-text-muted">&middot;</span>
+              <span className="font-metric tabular-nums">
+                {formatCurrency(aum)}
+              </span>
+            </>
+          )}
+        </p>
         <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={() => setShowModal(true)}
-            className="whitespace-nowrap rounded-md border border-[#E2E8F0] bg-white px-3 py-1.5 text-sm font-medium transition-colors hover:bg-[#F8F9FA] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
-            style={{ color: "#1B6B5A" }}
+            className="whitespace-nowrap rounded-md border border-border bg-white px-3 py-1.5 text-sm font-medium text-accent transition-colors hover:bg-page focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           >
             + Add Widget
           </button>
@@ -831,7 +834,7 @@ export function AllocationDashboard({
           onDismiss={handleDismiss}
         />
       )}
-    </main>
+    </section>
     </>
   );
 }
