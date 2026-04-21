@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.db import get_supabase
+from services.equity_reconstruction import reconstruct_symbol_returns
 from services.match_engine import (
     ENGINE_VERSION,
     TOP_N_CANDIDATES,
@@ -35,12 +36,11 @@ _scoring_semaphore = asyncio.Semaphore(3)
 # Skip recompute if the last batch is newer than this threshold (unless forced)
 RECOMPUTE_MIN_AGE_HOURS = 12
 
-# Phase 09 / D-06 + finding f5. Composite-score threshold for flagging holdings.
-# A holding is flagged iff its top candidate composite (0..100 scale, match_engine.py:787
-# final_score) meets or exceeds this value. 0.50 on the normalized [0,1] scale = 50 here.
-# Parity with the TypeScript-side FLAG_COMPOSITE_THRESHOLD is asserted in
-# src/app/(dashboard)/allocations/lib/holding-outcome-adapter.test.ts (finding f5).
-FLAG_COMPOSITE_THRESHOLD: int = 50
+# Phase 09 / D-06 + RESEARCH A3 + finding f5. Composite-score threshold for flagging
+# holdings. Scale is 0..100 per match_engine.py:787 final_score; D-06's "composite >= 0.50"
+# on the normalized [0,1] scale corresponds to score >= 50 here. TypeScript-side parity
+# asserted in src/app/(dashboard)/allocations/lib/holding-outcome-adapter.test.ts.
+FLAG_COMPOSITE_THRESHOLD = 50
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +176,119 @@ def _load_candidate_universe() -> dict[str, Any]:
     }
 
 
+def _load_holding_portfolio_context(allocator_id: str) -> dict[str, Any]:
+    """Phase 09 / D-01 + D-16. Load allocator_holdings and reconstruct per-symbol
+    returns from allocator_equity_snapshots.breakdown.
+
+    Mirrors the TypeScript queries.ts holdingsMap collapse (latest-asof-per-
+    (venue, symbol, holding_type) wins). Applies the Phase 07 D-03 warm-up gate:
+    holdings whose per-symbol series has fewer than 30 daily returns are excluded
+    from portfolio math entirely (not flagged, not compared).
+
+    This helper is SYNC (plain def) — called from _load_allocator_context which is
+    itself sync and invoked via asyncio.to_thread. Per finding f1: MUST NOT be
+    converted to async def.
+
+    Returns dict with:
+      portfolio_strategies: list[dict]  (pseudo-strategy dicts, strategy_id = "holding:V:S:T")
+      portfolio_weights:    dict[str, float]  (value_usd / total_eligible_value, sums to 1.0)
+      portfolio_returns:    dict[str, pd.Series]  (one Series per eligible holding)
+      portfolio_aum:        float  (sum of eligible holding value_usd)
+      holdings_rows_eligible: list[dict]  (raw holding rows that passed warm-up gate, for
+                                           compute_holding_flags consumption in Task 3)
+    """
+    supabase = get_supabase()
+
+    # --- Step 1: fetch all holdings for this allocator, most-recent-first ---
+    holdings_result = (
+        supabase.table("allocator_holdings")
+        .select("venue, symbol, holding_type, value_usd, asof")
+        .eq("allocator_id", allocator_id)
+        .order("asof", desc=True)
+        .execute()
+    )
+    holdings_rows = holdings_result.data or []
+
+    # --- Step 2: collapse to latest-asof-per-(venue, symbol, holding_type) ---
+    # First row wins because we ordered DESC — mirrors queries.ts:791-795 holdingsMap
+    holdings_map: dict[tuple[str, str, str], dict] = {}
+    for row in holdings_rows:
+        key = (row["venue"], row["symbol"], row["holding_type"])
+        if key not in holdings_map:
+            holdings_map[key] = row
+    collapsed = list(holdings_map.values())
+
+    if not collapsed:
+        return {
+            "portfolio_strategies": [],
+            "portfolio_weights": {},
+            "portfolio_returns": {},
+            "portfolio_aum": 0.0,
+            "holdings_rows_eligible": [],
+        }
+
+    # --- Step 3: fetch equity snapshots ordered ASC (needed for pct_change) ---
+    snapshots_result = (
+        supabase.table("allocator_equity_snapshots")
+        .select("asof, breakdown")
+        .eq("allocator_id", allocator_id)
+        .order("asof", desc=False)
+        .execute()
+    )
+    snapshots = snapshots_result.data or []
+
+    # --- Step 4: reconstruct per-symbol returns + apply 30-day warm-up gate ---
+    portfolio_strategies: list[dict[str, Any]] = []
+    portfolio_returns: dict[str, pd.Series] = {}
+    holdings_rows_eligible: list[dict] = []
+    raw_values: dict[str, float] = {}  # pseudo_id -> value_usd (for weight computation)
+
+    for row in collapsed:
+        venue = row["venue"]
+        symbol = row["symbol"]
+        holding_type = row["holding_type"]
+        pseudo_id = f"holding:{venue}:{symbol}:{holding_type}"
+        value_usd = float(row.get("value_usd") or 0.0)
+
+        series = reconstruct_symbol_returns(snapshots, symbol)
+        if series is None or len(series) < 30:
+            # Warm-up gate: insufficient history — exclude entirely (Phase 07 D-03 analog)
+            continue
+
+        portfolio_strategies.append({"strategy_id": pseudo_id})
+        portfolio_returns[pseudo_id] = series
+        holdings_rows_eligible.append(row)
+        raw_values[pseudo_id] = value_usd
+
+    # --- Step 5: compute weights (value_usd / total_eligible_value) ---
+    total_eligible_value = sum(raw_values.values())
+    portfolio_weights: dict[str, float] = {}
+    if total_eligible_value > 0:
+        for pid, val in raw_values.items():
+            portfolio_weights[pid] = val / total_eligible_value
+    else:
+        # All values zero — equal weight as fallback
+        for pid in raw_values:
+            portfolio_weights[pid] = 1.0 / len(raw_values) if raw_values else 0.0
+
+    return {
+        "portfolio_strategies": portfolio_strategies,
+        "portfolio_weights": portfolio_weights,
+        "portfolio_returns": portfolio_returns,
+        "portfolio_aum": total_eligible_value,
+        "holdings_rows_eligible": holdings_rows_eligible,
+    }
+
+
 def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
-    """Load per-allocator data: preferences, portfolio, thumbs-down history."""
+    """Load per-allocator data: preferences, portfolio, thumbs-down history.
+
+    Phase 09 / D-16: merges both portfolio_strategies (legacy) and
+    allocator_holdings (real holdings as pseudo-strategies) into the combined
+    context dicts. Weights are renormalized across the combined set so they sum
+    to 1.0. This function remains a synchronous `def` — it is called via
+    asyncio.to_thread at line ~268 (finding f1 mandate: MUST NOT be async def).
+    """
     supabase = get_supabase()
 
     # Preferences
@@ -195,7 +306,9 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     portfolio_strategies: list[dict[str, Any]] = []
     portfolio_weights: dict[str, float] = {}
     portfolio_returns: dict[str, pd.Series] = {}
-    portfolio_aum: float = 0.0
+    strategy_aum: float = 0.0
+    # Track raw value per strategy id for combined renormalization
+    strategy_raw_values: dict[str, float] = {}
 
     if portfolio_ids:
         ps_result = (
@@ -233,7 +346,47 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                         portfolio_returns[sid] = returns
                     allocated = row.get("allocated_amount")
                     if allocated:
-                        portfolio_aum += float(allocated)
+                        alloc_val = float(allocated)
+                        strategy_aum += alloc_val
+                        strategy_raw_values[sid] = alloc_val
+
+    # Phase 09 / D-01 + D-16: load holdings-sourced pseudo-strategies
+    holdings_ctx = _load_holding_portfolio_context(allocator_id)
+    holding_strategies = holdings_ctx["portfolio_strategies"]
+    holding_returns = holdings_ctx["portfolio_returns"]
+    holding_aum = holdings_ctx["portfolio_aum"]
+    holdings_rows_eligible = holdings_ctx["holdings_rows_eligible"]
+
+    # Merge strategies + holdings into combined dicts
+    portfolio_strategies.extend(holding_strategies)
+    portfolio_returns.update(holding_returns)
+
+    # Combined AUM
+    combined_aum = strategy_aum + holding_aum
+
+    # Renormalize weights across the combined set so they sum to 1.0 (D-16).
+    # Strategy side: use allocated_amount as the value basis.
+    # Holdings side: use value_usd (already in holdings_ctx["portfolio_weights"] as fractions
+    #   of the holdings total, but we need absolute values for combined renorm).
+    # Reconstruct absolute values for holding side from their individual value_usd.
+    holding_abs_values: dict[str, float] = {}
+    for row in holdings_rows_eligible:
+        pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
+        holding_abs_values[pseudo_id] = float(row.get("value_usd") or 0.0)
+
+    if combined_aum > 0:
+        # Strategies side
+        for sid, val in strategy_raw_values.items():
+            portfolio_weights[sid] = val / combined_aum
+        # Holdings side
+        for pid, val in holding_abs_values.items():
+            portfolio_weights[pid] = val / combined_aum
+    elif holding_strategies or portfolio_strategies:
+        # Fall back: equal weights when no AUM data available
+        all_ids = [ps["strategy_id"] for ps in portfolio_strategies]
+        eq_w = 1.0 / len(all_ids) if all_ids else 0.0
+        for pid in all_ids:
+            portfolio_weights[pid] = eq_w
 
     # Thumbs-down history
     td_result = (
@@ -250,9 +403,117 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         "portfolio_strategies": portfolio_strategies,
         "portfolio_weights": portfolio_weights,
         "portfolio_returns": portfolio_returns,
-        "portfolio_aum": portfolio_aum if portfolio_aum > 0 else None,
+        "portfolio_aum": combined_aum if combined_aum > 0 else None,
         "thumbs_down_ids": thumbs_down_ids,
+        # Internal-use: passed to compute_holding_flags in _score_one_allocator (Task 3)
+        "_holdings_rows_eligible": holdings_rows_eligible,
     }
+
+
+def compute_holding_flags(
+    *,
+    holdings_rows_eligible: list[dict],
+    portfolio_returns: dict[str, pd.Series],
+    portfolio_weights: dict[str, float],
+    portfolio_aum: float | None,
+    allocator_preferences: dict,
+    scored_candidates_by_slot: dict[str, list],
+) -> list[dict]:
+    """Phase 09 / finding f5. Per-holding flag rows persisted into match_batches.holding_flags.
+
+    Returns list[dict] — one entry per eligible holding (those present in portfolio_returns).
+    Applies D-04 (breach + candidate-exists gate) + D-05 (max_weight + correlation_ceiling)
+    + D-06 (FLAG_COMPOSITE_THRESHOLD=50 gate on top candidate composite score).
+
+    Entry shape:
+        {
+            "holding_ref":              "holding:{venue}:{symbol}:{holding_type}",
+            "value_usd":                float,
+            "weight":                   float,       # value_usd / portfolio_aum
+            "breach_reasons":           list[str],   # "max_weight" | "correlation_ceiling"
+            "top_candidate_strategy_id": str | None,
+            "top_candidate_composite":  float | None,
+            "flagged":                  bool,        # True iff breach + candidate_composite >= 50
+        }
+
+    This is a synchronous plain `def` per finding f1.
+    """
+    from services.match_engine import _compute_corr_with_portfolio
+
+    max_weight_pref = allocator_preferences.get("max_weight")
+    corr_ceiling = allocator_preferences.get("correlation_ceiling")
+    aum = float(portfolio_aum) if portfolio_aum and float(portfolio_aum) > 0 else None
+
+    flags: list[dict] = []
+
+    for row in holdings_rows_eligible:
+        pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
+
+        # Defense-in-depth: skip any holding whose series isn't loaded
+        # (warm-up already filtered upstream in _load_holding_portfolio_context)
+        if pseudo_id not in portfolio_returns:
+            continue
+
+        value = float(row.get("value_usd") or 0.0)
+        weight = value / aum if aum else 0.0
+        breaches: list[str] = []
+
+        # D-05 max_weight breach
+        if max_weight_pref is not None and aum is not None and weight > float(max_weight_pref):
+            breaches.append("max_weight")
+
+        # D-05 correlation_ceiling breach via _compute_corr_with_portfolio
+        if corr_ceiling is not None:
+            # Build weighted rest-of-portfolio returns (all holdings except this one)
+            rest_ids = [k for k in portfolio_returns if k != pseudo_id]
+            if rest_ids:
+                rest_weights = {k: portfolio_weights.get(k, 0.0) for k in rest_ids}
+                total_rest_w = sum(rest_weights.values())
+                if total_rest_w > 0:
+                    # Compute weighted portfolio returns for the rest
+                    rest_series_list = []
+                    for k in rest_ids:
+                        s = portfolio_returns[k]
+                        rest_series_list.append(s.rename(k))
+
+                    rest_df = pd.concat(rest_series_list, axis=1).dropna()
+                    if not rest_df.empty:
+                        w_arr = [rest_weights.get(col, 0.0) / total_rest_w for col in rest_df.columns]
+                        rest_port = (rest_df * w_arr).sum(axis=1)
+                        corr = _compute_corr_with_portfolio(
+                            rest_port,
+                            portfolio_returns[pseudo_id],
+                        )
+                        if corr is not None and corr > float(corr_ceiling):
+                            breaches.append("correlation_ceiling")
+
+        # D-06 candidate-exists gate: pick top verified strategy candidate above threshold
+        top_id: str | None = None
+        top_composite: float | None = None
+        slot_candidates = scored_candidates_by_slot.get(pseudo_id) or []
+        # Sort by final_score descending; only real strategy UUIDs (not holding: pseudo-ids)
+        for cand in sorted(slot_candidates, key=lambda c: float(getattr(c, "final_score", 0.0)), reverse=True):
+            cand_id = getattr(cand, "strategy_id", None)
+            if cand_id and not str(cand_id).startswith("holding:"):
+                score_val = float(getattr(cand, "final_score", 0.0))
+                if score_val >= FLAG_COMPOSITE_THRESHOLD:
+                    top_id = str(cand_id)
+                    top_composite = score_val
+                break  # Only need the top candidate — exit after first real UUID
+
+        flagged = bool(breaches) and top_id is not None and top_composite is not None and top_composite >= FLAG_COMPOSITE_THRESHOLD
+
+        flags.append({
+            "holding_ref": pseudo_id,
+            "value_usd": value,
+            "weight": weight,
+            "breach_reasons": breaches,
+            "top_candidate_strategy_id": top_id,
+            "top_candidate_composite": top_composite,
+            "flagged": flagged,
+        })
+
+    return flags
 
 
 async def _score_one_allocator(
@@ -297,6 +558,41 @@ async def _score_one_allocator(
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
+        # Phase 09 / finding f5: compute per-holding flags list for SSR consumption
+        # (Plan 09-03 reads match_batches.holding_flags directly instead of deriving
+        # from match_candidates — avoids the ungrounded derivation Voice A flagged).
+        # scored_candidates_by_slot: pass the full ranked list to every holding slot;
+        # compute_holding_flags's top-real-UUID + FLAG_COMPOSITE_THRESHOLD filter
+        # gives deterministic per-holding top-candidate selection.
+        holdings_eligible = ctx.get("_holdings_rows_eligible") or []
+        scored_by_slot: dict[str, list] = {}
+        if holdings_eligible:
+            # Build a lightweight proxy list for the scored candidates
+            # (result["candidates"] are dicts with "strategy_id" and "score" keys)
+            class _ScoredProxy:
+                """Thin proxy so compute_holding_flags can use getattr(c, "strategy_id")."""
+                __slots__ = ("strategy_id", "final_score")
+                def __init__(self, strategy_id: str, final_score: float) -> None:
+                    self.strategy_id = strategy_id
+                    self.final_score = final_score
+
+            proxies = [
+                _ScoredProxy(c["strategy_id"], float(c.get("score", 0.0)))
+                for c in result["candidates"]
+            ]
+            for row in holdings_eligible:
+                slot_key = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
+                scored_by_slot[slot_key] = proxies  # same ranked list for every slot
+
+        holding_flags_list = compute_holding_flags(
+            holdings_rows_eligible=holdings_eligible,
+            portfolio_returns=ctx["portfolio_returns"],
+            portfolio_weights=ctx["portfolio_weights"],
+            portfolio_aum=ctx["portfolio_aum"],
+            allocator_preferences=ctx["preferences"] or {},
+            scored_candidates_by_slot=scored_by_slot,
+        )
+
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()
 
@@ -314,6 +610,8 @@ async def _score_one_allocator(
             "effective_thresholds": result["effective_thresholds"],
             "source_strategy_count": result["source_strategy_count"],
             "latency_ms": latency_ms,
+            # Phase 09 / finding f5: JSONB list read by Plan 09-03 SSR layer
+            "holding_flags": holding_flags_list,
         }
         batch_insert = await asyncio.to_thread(
             lambda: supabase.table("match_batches").insert(batch_row).execute()
