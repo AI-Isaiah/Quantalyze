@@ -35,6 +35,13 @@ _scoring_semaphore = asyncio.Semaphore(3)
 # Skip recompute if the last batch is newer than this threshold (unless forced)
 RECOMPUTE_MIN_AGE_HOURS = 12
 
+# Phase 09 / D-06 + finding f5. Composite-score threshold for flagging holdings.
+# A holding is flagged iff its top candidate composite (0..100 scale, match_engine.py:787
+# final_score) meets or exceeds this value. 0.50 on the normalized [0,1] scale = 50 here.
+# Parity with the TypeScript-side FLAG_COMPOSITE_THRESHOLD is asserted in
+# src/app/(dashboard)/allocations/lib/holding-outcome-adapter.test.ts (finding f5).
+FLAG_COMPOSITE_THRESHOLD: int = 50
+
 
 # ---------------------------------------------------------------------------
 # Request models
