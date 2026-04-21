@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 import type { PortfolioAnalytics } from "@/lib/types";
 import {
@@ -37,6 +38,13 @@ export interface InsightStripProps {
    */
   portfolioAgeDays?: number;
   className?: string;
+  /**
+   * Phase 09 / D-07 + finding f5. When > 0, prepends a dedicated line
+   * "Bridge flagged N holding(s) — Review in Scenario →" that links to
+   * /allocations?tab=scenario. Hidden entirely when 0 or undefined.
+   * No empty-state copy — presence is the signal.
+   */
+  flaggedCount?: number;
 }
 
 type Severity = "high" | "medium" | "low";
@@ -69,6 +77,7 @@ export function InsightStrip({
   portfolioStrategies,
   portfolioAgeDays,
   className,
+  flaggedCount,
 }: InsightStripProps) {
   const insights = computeAllInsights(
     analytics,
@@ -84,12 +93,23 @@ export function InsightStrip({
       <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
         What we noticed
       </p>
-      {insights.length === 0 ? (
+      {insights.length === 0 && !flaggedCount ? (
         <p className="text-sm text-text-secondary">
           No unusual activity in the trailing window.
         </p>
       ) : (
         <ul role="list" className="space-y-2">
+          {flaggedCount !== undefined && flaggedCount > 0 && (
+            <li className="flex items-start gap-3 text-sm text-text-secondary">
+              <span
+                aria-hidden="true"
+                className="mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full bg-text-muted"
+              />
+              <Link href="/allocations?tab=scenario" className="hover:underline">
+                {`Bridge flagged ${flaggedCount} holding(s) — Review in Scenario →`}
+              </Link>
+            </li>
+          )}
           {insights.map((insight) => (
             <li
               key={`${insight.key}${insight.strategy_id ? `:${insight.strategy_id}` : ""}`}
