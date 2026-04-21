@@ -66,6 +66,18 @@ vi.mock("@/lib/supabase/server", () => ({
           }),
         };
       }
+      return {};
+    }),
+  }),
+}));
+
+// ---------------------------------------------------------------------------
+// Mock admin client — match_decisions INSERT requires service-role under RLS
+// ---------------------------------------------------------------------------
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: vi.fn((table: string) => {
       if (table === "match_decisions") {
         return {
           insert: (row: unknown) => ({

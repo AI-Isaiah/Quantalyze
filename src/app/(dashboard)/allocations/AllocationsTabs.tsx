@@ -166,7 +166,12 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         aria-labelledby="tab-scenario"
         hidden={activeTab !== "scenario"}
       >
-        {activeTab === "scenario" && <ScenarioStub />}
+        {activeTab === "scenario" && (
+          <ScenarioStub
+            flaggedHoldings={props.flaggedHoldings}
+            matchDecisionsByHoldingRef={props.matchDecisionsByHoldingRef}
+          />
+        )}
       </div>
     </div>
   );

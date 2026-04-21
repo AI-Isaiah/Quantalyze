@@ -15,6 +15,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { logAuditEvent } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
@@ -103,7 +104,12 @@ export const POST = withAuth(
 
     // Insert match_decisions row (XOR satisfied: original_strategy_id=NULL, original_holding_ref set)
     // Per migration 011:138 CHECK constraint, decision='sent_as_intro' is the correct value.
-    const { data: inserted, error: insertErr } = await supabase
+    // Uses admin client because migration 011 only grants service-role INSERT on
+    // match_decisions — authed allocators cannot insert even their own rows. The
+    // ownership + strategy gates above use the authed client so RLS still enforces
+    // the trust boundary before the elevated insert runs.
+    const admin = createAdminClient();
+    const { data: inserted, error: insertErr } = await admin
       .from("match_decisions")
       .insert({
         allocator_id: user.id,
