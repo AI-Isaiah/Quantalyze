@@ -341,6 +341,20 @@ describe("HoldingsTable — note icon column + expandable sub-row (08-04 / MANAG
   });
 
   it("T18+T19: sub-row textarea blur fires PATCH with scope_kind=holding + buildHoldingScopeRef scope_ref", async () => {
+    // Phase 08 Plan 05: HoldingNoteRow now fires a mount GET before any PATCH.
+    // Override the default 200 (from beforeEach) so the mount GET returns 404
+    // (empty state → textarea renders), then the blur PATCH returns 200.
+    fetchSpy.mockReset();
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({}), { status: 404, headers: { "Content-Type": "application/json" } }),
+    ); // mount GET → empty edit mode
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ updated_at: "2026-04-21T00:00:00Z" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ); // blur PATCH → success
+
     const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
     render(
       <HoldingsTable
@@ -353,8 +367,11 @@ describe("HoldingsTable — note icon column + expandable sub-row (08-04 / MANAG
     await act(async () => {
       fireEvent.click(icon);
     });
-    const region = screen.getByRole("region", {
-      name: "Note for BTC spot",
+    // Wait for the loading gate to resolve to the textarea.
+    const region = await waitFor(() => {
+      const r = screen.getByRole("region", { name: "Note for BTC spot" });
+      expect(within(r).getByRole("textbox")).toBeInTheDocument();
+      return r;
     });
     const ta = within(region).getByRole("textbox") as HTMLTextAreaElement;
     await act(async () => {
@@ -364,9 +381,10 @@ describe("HoldingsTable — note icon column + expandable sub-row (08-04 / MANAG
       fireEvent.blur(ta);
     });
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      // calls[0] = mount GET, calls[1] = blur PATCH
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
-    const [url, init] = fetchSpy.mock.calls[0];
+    const [url, init] = fetchSpy.mock.calls[1];
     expect(url).toBe("/api/notes");
     expect((init as RequestInit).method).toBe("PATCH");
     const body = JSON.parse((init as RequestInit).body as string);

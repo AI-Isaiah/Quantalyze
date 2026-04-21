@@ -20,7 +20,7 @@
  * persist — same shape as NotesWidget.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { NoteRender } from "./NoteRender";
 import { useNoteAutoSave } from "./useNoteAutoSave";
 import { NoteSaveStatus } from "./NoteSaveStatus";
@@ -133,18 +133,88 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
     symbol: props.symbol,
     holding_type: props.holding_type,
   });
+
+  // Phase 08 Plan 05 — lazy GET on mount, mirroring
+  // BridgeOutcomeNoteSection's pattern. Closes VERIFICATION gaps[0]
+  // (IN-04 / MANAGE-05 holding-scope read-back).
+  //
+  // HoldingsTable does not server-side-prefetch holding-scope notes
+  // (that would widen getMyAllocationDashboard — deferred to Phase 11+
+  // per D-24). Instead the row fetches its own note when the sub-row
+  // mounts. Only one sub-row is open at a time so the cost is a single
+  // round-trip per open, which is acceptable for the low-frequency
+  // note-open UX.
+  const [content, setContent] = useState("");
+  const [draft, setDraft] = useState("");
+  const [initialLoaded, setInitialLoaded] = useState(false);
+  const [initialSavedAt, setInitialSavedAt] = useState<Date | null>(
+    props.initialLastSavedAt,
+  );
+  // Default to edit mode ONLY when the network path confirms empty.
+  // Before the fetch resolves, the loading gate below renders — we
+  // do not flip editing until we know what the server has.
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/notes?scope_kind=holding&scope_ref=${encodeURIComponent(scope_ref)}`,
+          { credentials: "same-origin" },
+        );
+        if (!cancelled && res.ok) {
+          const json = await res.json();
+          const c = (json.content as string | undefined) ?? "";
+          setContent(c);
+          setDraft(c);
+          setInitialSavedAt(
+            json.updated_at ? new Date(json.updated_at as string) : null,
+          );
+          // Existing content → read mode with Edit affordance.
+          // Empty string → edit mode so placeholder guides first-time users.
+          setEditing(!c);
+        } else if (!cancelled && res.status === 404) {
+          // No note persisted for this scope — empty edit mode.
+          setEditing(true);
+        }
+      } catch {
+        // Network error — default to empty edit mode so the user
+        // isn't blocked from writing. save-state will surface errors.
+        if (!cancelled) setEditing(true);
+      } finally {
+        if (!cancelled) setInitialLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [scope_ref]);
+
   const { saveState, lastSavedAt, save } = useNoteAutoSave(
     "holding",
     scope_ref,
-    props.initialLastSavedAt,
+    initialSavedAt,
   );
-  // Mirror the NotesWidget read/edit toggle: default into edit mode only
-  // when there is no existing content (empty state placeholder guides the
-  // first-time user). Existing content opens in read mode with an Edit
-  // affordance, matching UI-SPEC §4 state machine.
-  const [editing, setEditing] = useState(!props.initialContent);
-  const [draft, setDraft] = useState(props.initialContent);
-  const [content, setContent] = useState(props.initialContent);
+
+  // Loading gate: render a skeleton inside the same <tr><td> shell so that
+  // the HTML5 table content model is satisfied (<tbody> only permits <tr>
+  // children — a bare <p> would be invalid markup and cause DOM warnings).
+  if (!initialLoaded) {
+    return (
+      <tr
+        id={`note-row-${props.rowId}`}
+        role="region"
+        aria-label={`Note for ${props.symbol} ${props.holding_type}`}
+      >
+        <td colSpan={props.colSpan} className="p-0">
+          <div className="px-4 py-3 bg-surface border-t border-border">
+            <p className="text-sm text-text-muted">Loading…</p>
+          </div>
+        </td>
+      </tr>
+    );
+  }
 
   const onBlurTextarea = () => {
     const payload = draft;
