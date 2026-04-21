@@ -961,11 +961,10 @@ def test_mandate_fit_key_present_both_modes():
 
 
 # --- 18/20 ----------------------------------------------------------------
-def test_engine_version_bumped():
-    """SCORING-01: ENGINE_VERSION and WEIGHTS_VERSION both equal 'v2.0.0' in
-    lockstep. Intentional red during Wave 0 (module still at v1.0.0)."""
-    assert ENGINE_VERSION == "v2.0.0", \
-        f"Expected ENGINE_VERSION='v2.0.0', got {ENGINE_VERSION!r}"
+def test_weights_version_pinned_v2():
+    """SCORING-01: WEIGHTS_VERSION pinned to 'v2.0.0' — weight composition is
+    unchanged across Phase 09's input-layer rewire (D-17). ENGINE_VERSION is
+    asserted separately in the Phase 09 D-17 section below."""
     assert WEIGHTS_VERSION == "v2.0.0", \
         f"Expected WEIGHTS_VERSION='v2.0.0', got {WEIGHTS_VERSION!r}"
 
