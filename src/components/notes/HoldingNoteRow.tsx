@@ -164,13 +164,18 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
           { credentials: "same-origin" },
         );
         if (!cancelled && res.ok) {
-          const json = await res.json();
-          const c = (json.content as string | undefined) ?? "";
+          const json: unknown = await res.json();
+          const parsed =
+            json && typeof json === "object"
+              ? (json as Record<string, unknown>)
+              : {};
+          const c =
+            typeof parsed.content === "string" ? parsed.content : "";
+          const ts =
+            typeof parsed.updated_at === "string" ? parsed.updated_at : null;
           setContent(c);
           setDraft(c);
-          setInitialSavedAt(
-            json.updated_at ? new Date(json.updated_at as string) : null,
-          );
+          setInitialSavedAt(ts ? new Date(ts) : null);
           // Existing content → read mode with Edit affordance.
           // Empty string → edit mode so placeholder guides first-time users.
           setEditing(!c);
