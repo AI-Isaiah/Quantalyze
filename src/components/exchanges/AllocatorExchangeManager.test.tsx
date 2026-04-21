@@ -43,15 +43,19 @@ vi.mock("next/navigation", () => ({
 
 // Supabase client mock. Tests override `insertMock` to simulate success vs.
 // error on the `api_keys` table insert. `.select(...).single()` returns the
-// inserted row by default.
+// inserted row by default. `rpcMock` + `holdingsCountMock` support the
+// Phase 08 Disconnect flow (allocator_holdings count probe + RPC call).
 const insertMock = vi.fn();
 const getUserMock = vi.fn();
+const rpcMock = vi.fn();
+const holdingsCountMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
     auth: {
       getUser: () => getUserMock(),
     },
+    rpc: (name: string, args: unknown) => rpcMock(name, args),
     from: (_table: string) => ({
       insert: (row: unknown) => {
         const result = insertMock(row);
@@ -64,6 +68,15 @@ vi.mock("@/lib/supabase/client", () => ({
           }),
         };
       },
+      // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
+      // openDeleteConfirm. Shape matches the call:
+      //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)
+      select: (_cols: string, _opts?: unknown) => ({
+        eq: (_col: string, _val: string) =>
+          Promise.resolve(
+            holdingsCountMock() ?? { count: 0, error: null },
+          ),
+      }),
     }),
   }),
 }));
@@ -568,6 +581,232 @@ describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)"
     );
     const pill = screen.getByTestId("allocator-sync-pill").textContent ?? "";
     expect(pill).toContain("retry in 0s");
+  });
+});
+
+// Phase 08 Plan 02 Task 1 — Disconnect rename + cascade-optional modal
+// (MANAGE-01 / MANAGE-03). Verifies:
+//   - Row button labelled "Disconnect" (not "Remove")
+//   - Modal title "Disconnect {Venue}?" with venue capitalised
+//   - Locked explainer copy ("stop syncing this key", "historical holdings stay available")
+//   - Checkbox DEFAULT UNCHECKED when deleteHoldingsCount > 0
+//   - Disconnect button ENABLED regardless of checkbox state once count loads
+//   - Cascade sub-copy flips verbatim between checked / unchecked variants
+//   - RPC called with p_cascade_holdings matching checkbox state (true/false)
+//   - Loading label "Disconnecting…" while deleteLoading=true
+//   - Zero-holdings branch renders "No historical holdings are tied to this key." + no checkbox
+describe("AllocatorExchangeManager — Disconnect rename + cascade-optional modal (Phase 08 MANAGE-01/03)", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+  });
+
+  function renderWithHoldings(count: number) {
+    holdingsCountMock.mockReturnValue({ count, error: null });
+    return render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+  }
+
+  it("row button label reads 'Disconnect' (not 'Remove') with Disconnect aria-label", async () => {
+    renderWithHoldings(0);
+    expect(
+      screen.getByRole("button", { name: /Disconnect binance key/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Remove binance key/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opening the modal shows title 'Disconnect Binance?' and the locked explainer copy", async () => {
+    renderWithHoldings(0);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Disconnect Binance\?/)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(
+        /We'll stop syncing this key\. Your historical holdings stay available for audit and are reflected in past performance\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("with 0 holdings: renders 'No historical holdings are tied to this key.' and hides the checkbox", async () => {
+    renderWithHoldings(0);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByText("No historical holdings are tied to this key."),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("with 5 holdings + default UNCHECKED: Disconnect button ENABLED; sub-copy reads the unchecked variant", async () => {
+    renderWithHoldings(5);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    // Wait for holdings count to load and checkbox to render.
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    });
+    const checkbox = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    // Disconnect button — the danger button inside the modal. Match by
+    // exact name so the row's "Disconnect binance key" aria-label doesn't
+    // match this assertion.
+    const disconnectBtn = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "Disconnect")!;
+    expect(disconnectBtn).not.toBeDisabled();
+    // Unchecked sub-copy variant.
+    expect(
+      screen.getByText(
+        /Unchecked: holdings are kept for audit continuity and reflected in past performance\./,
+      ),
+    ).toBeInTheDocument();
+    // Label has plural form for N=5.
+    expect(
+      screen.getByText(/Also delete 5 historical holdings from this key/),
+    ).toBeInTheDocument();
+  });
+
+  it("with 1 holding: label uses singular form", async () => {
+    renderWithHoldings(1);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/Also delete 1 historical holding from this key/),
+    ).toBeInTheDocument();
+  });
+
+  it("checking the box flips sub-copy to the checked variant; button stays ENABLED", async () => {
+    renderWithHoldings(3);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    });
+    const checkbox = screen.getByRole("checkbox");
+    await act(async () => {
+      fireEvent.click(checkbox);
+    });
+    expect(
+      screen.getByText(
+        /Checked: holdings are permanently deleted and excluded from all historical metrics\./,
+      ),
+    ).toBeInTheDocument();
+    const disconnectBtn = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "Disconnect")!;
+    expect(disconnectBtn).not.toBeDisabled();
+  });
+
+  it("confirming unchecked calls delete_allocator_api_key with p_cascade_holdings: false", async () => {
+    rpcMock.mockResolvedValue({ data: 0, error: null });
+    renderWithHoldings(2);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    });
+    // Leave checkbox unchecked; click the Disconnect confirm button.
+    const disconnectBtn = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "Disconnect")!;
+    await act(async () => {
+      fireEvent.click(disconnectBtn);
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: false,
+    });
+  });
+
+  it("confirming checked calls delete_allocator_api_key with p_cascade_holdings: true", async () => {
+    rpcMock.mockResolvedValue({ data: 2, error: null });
+    renderWithHoldings(2);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("checkbox"));
+    });
+    const disconnectBtn = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "Disconnect")!;
+    await act(async () => {
+      fireEvent.click(disconnectBtn);
+    });
+    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+      p_cascade_holdings: true,
+    });
+  });
+
+  it("button label flips to 'Disconnecting…' while RPC is in flight", async () => {
+    let resolveRpc!: (v: unknown) => void;
+    rpcMock.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveRpc = r;
+      }),
+    );
+    renderWithHoldings(0);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Disconnect binance key/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByText("No historical holdings are tied to this key."),
+      ).toBeInTheDocument();
+    });
+    const disconnectBtn = screen
+      .getAllByRole("button")
+      .find((b) => b.textContent === "Disconnect")!;
+    await act(async () => {
+      fireEvent.click(disconnectBtn);
+    });
+    // While the RPC is pending, the button label MUST read "Disconnecting…"
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button").some((b) => b.textContent === "Disconnecting\u2026"),
+      ).toBe(true);
+    });
+    // Cleanup — resolve the pending RPC so React doesn't warn.
+    await act(async () => {
+      resolveRpc({ data: 0, error: null });
+    });
   });
 });
 
