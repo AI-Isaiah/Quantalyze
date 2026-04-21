@@ -385,16 +385,24 @@ describe("OutcomesWidget — Timeline (inline TimelineTable + TimelineRow)", () 
 
 describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
   it("clicking caret fires fetch('/api/bridge/outcome/{id}/curves') exactly once", async () => {
+    // Phase 08 Plan 04 Task 2 — BridgeOutcomeNoteSection also lazy-fetches
+    // /api/notes on mount, so the assertion filters to curves-only calls.
     renderWidget([makeOutcome({ id: "o-expand-1" })]);
     const caret = screen.getByRole("button", {
       name: /Expand outcome detail/,
     });
     fireEvent.click(caret);
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const curvesCalls = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes("/curves"),
+      );
+      expect(curvesCalls).toHaveLength(1);
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/bridge/outcome/o-expand-1/curves",
+    const curvesCalls = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes("/curves"),
+    );
+    expect(curvesCalls[0][0]).toBe("/api/bridge/outcome/o-expand-1/curves");
+    expect(curvesCalls[0][1]).toEqual(
       expect.objectContaining({ credentials: "same-origin" }),
     );
   });
@@ -405,13 +413,17 @@ describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
       name: /Expand outcome detail/,
     });
     fireEvent.click(caret);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const curvesCount = () =>
+      fetchMock.mock.calls.filter((c) => String(c[0]).includes("/curves"))
+        .length;
+    await waitFor(() => expect(curvesCount()).toBe(1));
     // Collapse
     fireEvent.click(caret);
     // Re-expand
     fireEvent.click(caret);
-    // Cache hit — fetch count unchanged
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    // Cache hit — curves fetch count unchanged (note-section re-fetches
+    // on each mount but that's a separate URL).
+    await waitFor(() => expect(curvesCount()).toBe(1));
   });
 
   it("pending-window column shows 'Pending' pill + animate-pulse placeholder rectangle", async () => {
@@ -488,8 +500,8 @@ describe("OutcomesWidget — 'Your note' section (08-04 / MANAGE-05)", () => {
     });
   });
 
-  it("T22: initial mount of the note section fetches /api/notes?scope_kind=bridge_outcome&scope_ref=<id>; 404 → empty placeholder", async () => {
-    renderWidget([makeOutcome({ id: "o-note-2" })]);
+  it("T22: initial mount of the note section fetches /api/notes?scope_kind=bridge_outcome&scope_ref=<id>; 404 → empty-state textarea placeholder", async () => {
+    const { container } = renderWidget([makeOutcome({ id: "o-note-2" })]);
     const caret = screen.getByRole("button", {
       name: /Expand outcome detail/,
     });
@@ -506,12 +518,14 @@ describe("OutcomesWidget — 'Your note' section (08-04 / MANAGE-05)", () => {
         "/api/notes?scope_kind=bridge_outcome&scope_ref=o-note-2",
       );
     });
+    // 404 → default into edit mode with the UI-SPEC §4c empty placeholder on
+    // the textarea.
     await waitFor(() => {
-      expect(
-        screen.getByText(
-          "No note for this outcome. Start typing to add one.",
-        ),
-      ).toBeInTheDocument();
+      const ta = container.querySelector("textarea");
+      expect(ta).not.toBeNull();
+      expect(ta?.getAttribute("placeholder")).toBe(
+        "No note for this outcome. Start typing to add one.",
+      );
     });
   });
 

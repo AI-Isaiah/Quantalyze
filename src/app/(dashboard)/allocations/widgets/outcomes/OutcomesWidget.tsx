@@ -14,6 +14,9 @@ import {
   type OutcomeStatusPill,
 } from "@/lib/bridge-outcome-label";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+// Phase 08 Plan 04 Task 2 — "Your note" section inside ExpandedPanel
+// (MANAGE-05 bridge_outcome scope).
+import { BridgeOutcomeNoteSection } from "@/components/notes/BridgeOutcomeNoteSection";
 
 /**
  * Phase 5 Outcomes Dashboard widget — SINGLE-FILE per Voice-D1 (2026-04-19).
@@ -317,67 +320,79 @@ function ExpandedPanel({
 
   return (
     <div
-      className="grid grid-cols-3 gap-4 border-b border-[#E2E8F0] px-3 py-4"
+      className="border-b border-[#E2E8F0] px-3 py-4"
       style={{ backgroundColor: "#F8F9FA" }}
     >
-      {columns.map((col) => {
-        const d = formatDelta(col.delta);
-        const isPending = col.delta === null;
-        const isLoading = !curve && !error;
+      <div className="grid grid-cols-3 gap-4">
+        {columns.map((col) => {
+          const d = formatDelta(col.delta);
+          const isPending = col.delta === null;
+          const isLoading = !curve && !error;
 
-        return (
-          <div key={col.label} className="flex flex-col gap-2">
-            <span
-              className="text-[11px] font-semibold uppercase tracking-wider"
-              style={{ color: "#718096" }}
-            >
-              {col.label}
-            </span>
-            {isPending ? (
+          return (
+            <div key={col.label} className="flex flex-col gap-2">
               <span
-                className="inline-block rounded px-2 py-0.5 text-[11px] font-medium self-start"
-                style={{
-                  color: "#718096",
-                  backgroundColor: "rgba(148,163,184,0.10)",
-                }}
+                className="text-[11px] font-semibold uppercase tracking-wider"
+                style={{ color: "#718096" }}
               >
-                Pending
+                {col.label}
               </span>
-            ) : (
-              <span
-                className="font-mono text-[13px] tabular-nums font-semibold"
-                style={{ color: toneColor(d.tone) }}
+              {isPending ? (
+                <span
+                  className="inline-block rounded px-2 py-0.5 text-[11px] font-medium self-start"
+                  style={{
+                    color: "#718096",
+                    backgroundColor: "rgba(148,163,184,0.10)",
+                  }}
+                >
+                  Pending
+                </span>
+              ) : (
+                <span
+                  className="font-mono text-[13px] tabular-nums font-semibold"
+                  style={{ color: toneColor(d.tone) }}
+                >
+                  {d.text}
+                </span>
+              )}
+              {isPending || isLoading || error ? (
+                <div className="h-[48px] rounded bg-[#E2E8F0] animate-pulse" />
+              ) : (
+                <Sparkline points={col.points} />
+              )}
+              <div
+                className="flex flex-col gap-1 text-[11px]"
+                style={{ color: "#718096" }}
               >
-                {d.text}
-              </span>
-            )}
-            {isPending || isLoading || error ? (
-              <div className="h-[48px] rounded bg-[#E2E8F0] animate-pulse" />
-            ) : (
-              <Sparkline points={col.points} />
-            )}
-            <div
-              className="flex flex-col gap-1 text-[11px]"
-              style={{ color: "#718096" }}
-            >
-              <span>
-                <span
-                  className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
-                  style={{ backgroundColor: "#94A3B8" }}
-                />
-                Original
-              </span>
-              <span>
-                <span
-                  className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
-                  style={{ backgroundColor: "#1B6B5A" }}
-                />
-                Replacement
-              </span>
+                <span>
+                  <span
+                    className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
+                    style={{ backgroundColor: "#94A3B8" }}
+                  />
+                  Original
+                </span>
+                <span>
+                  <span
+                    className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
+                    style={{ backgroundColor: "#1B6B5A" }}
+                  />
+                  Replacement
+                </span>
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+
+      {/* Phase 08 Plan 04 Task 2 — "Your note" section below the 3-column
+          delta grid (UI-SPEC §4c). Uses the shared Plan 03 primitives via
+          BridgeOutcomeNoteSection. scope_kind=bridge_outcome;
+          scope_ref=outcome.id (UUID). */}
+      <hr className="my-3 border-[#E2E8F0]" />
+      <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "#718096" }}>
+        Your note
+      </p>
+      <BridgeOutcomeNoteSection outcomeId={outcome.id} />
     </div>
   );
 }
