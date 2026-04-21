@@ -49,7 +49,6 @@ vi.mock("next/navigation", () => ({
 describe("ScenarioFlaggedHoldingsList", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    // @ts-expect-error — global fetch mock
     global.fetch = vi.fn();
   });
 
@@ -95,7 +94,6 @@ describe("ScenarioFlaggedHoldingsList", () => {
   });
 
   it("finding f2 click-path: no decision yet → click 'Allocated' POSTs to /api/match/decisions/holding BEFORE AllocatedForm mounts; on 2xx form mounts", async () => {
-    // @ts-expect-error
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 201,
@@ -128,7 +126,6 @@ describe("ScenarioFlaggedHoldingsList", () => {
   });
 
   it("finding f2 click-path: on 4xx response → error shown; form does NOT mount", async () => {
-    // @ts-expect-error
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 403,
@@ -150,7 +147,6 @@ describe("ScenarioFlaggedHoldingsList", () => {
   });
 
   it("skips POST when matchDecisionsByHoldingRef[ref] already present — mounts AllocatedForm directly", async () => {
-    // @ts-expect-error
     global.fetch = vi.fn();
     render(
       <ScenarioFlaggedHoldingsList
