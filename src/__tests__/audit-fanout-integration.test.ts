@@ -10,32 +10,19 @@ import { NextRequest } from "next/server";
  * expected action + entity_type on the happy path for the high-signal
  * routes.
  *
- * Routes covered (per the plan's 8-10 high-signal cap):
- *   - /api/portfolio-alerts PATCH    → alert.acknowledge
- *   - /api/notes PATCH               → portfolio_note.update
- *   - /api/preferences PUT           → notification_preferences.update
- *   - /api/attestation POST          → attestation.accept
- *   - /api/portfolio-strategies/alias PATCH → allocation.update
- *   - /api/admin/match/kill-switch POST     → admin.kill_switch
- *   - /api/admin/allocator-approve POST     → allocator.approve
- *   - /api/admin/strategy-review POST       → strategy.approve
+ * Phase 08 Plan 01 update: the legacy `portfolio_note.update` block was
+ * replaced with four parallel `user_note.{scope}.update` blocks covering
+ * the new multi-scope /api/notes PATCH contract. Per Research Finding #8,
+ * entity_id is a scope-appropriate UUID (NOT a synthetic composite string)
+ * because `audit_log.entity_id` is UUID-typed:
+ *   - portfolio       → portfolios.id (scope_ref as UUID)
+ *   - holding         → caller's profiles.id (no single row aggregates the note)
+ *   - bridge_outcome  → bridge_outcomes.id (scope_ref as UUID)
+ *   - strategy        → strategies.id (scope_ref as UUID)
  *
- * /review follow-up (T4-I2): extended coverage for two novel patterns:
- *   - /api/admin/partner-import POST → admin.partner_import
- *     Novel: emits a single rollup event with a *synthesized* UUID
- *     entity_id (deterministic sha256 slice of partner_tag + timestamp)
- *     instead of anchoring on a DB row id.
- *   - /api/alerts/ack POST (email path) → alert.acknowledge
- *     Novel: uses `logAuditEventAsUser` (service-role RPC variant) so
- *     the acting-user id is resolved from portfolios.user_id, not from
- *     a browser JWT. Different attribution path than the in-app branch.
- *
- * Each test asserts:
- *   1. The RPC call fired with the expected p_action.
- *   2. The entity_id matches the expected source (row id / portfolio
- *      id / target user id / synthesized UUID).
- *   3. The happy-path response is 200/204 (not a 500 from an audit
- *      throw — the fire-and-forget contract must not break the flow).
+ * Each note-scope block asserts: entity_type="user_note"; metadata includes
+ * scope_kind + scope_ref + content_length; metadata.content is undefined
+ * (D-20 privacy invariant).
  */
 
 // audit.ts imports "server-only" which throws under vitest+jsdom.
@@ -238,9 +225,17 @@ describe("POST /api/portfolio-alerts PATCH — alert.acknowledge emission", () =
   });
 });
 
-// ─── notes PATCH (portfolio_note.update) ─────────────────────────────
-describe("PATCH /api/notes — portfolio_note.update emission", () => {
-  it("emits portfolio_note.update on save", async () => {
+// ─── notes PATCH — 4 scope_kind emission blocks (Phase 08) ───────────
+//
+// Replaces the legacy `portfolio_note.update` block. Per Research Finding #8,
+// entity_id resolves to a scope-appropriate UUID:
+//   portfolio      → portfolios.id (= scope_ref)
+//   holding        → caller's profiles.id (= STATE.authUser.id)
+//   bridge_outcome → bridge_outcomes.id (= scope_ref)
+//   strategy       → strategies.id (= scope_ref)
+
+describe("PATCH /api/notes — user_note.portfolio.update emission", () => {
+  it("emits user_note.portfolio.update with entity_id = portfolios.id", async () => {
     const PORTFOLIO_ID = "cccc3333-cccc-4ccc-8ccc-cccccccccccc";
 
     vi.resetModules();
@@ -252,6 +247,10 @@ describe("PATCH /api/notes — portfolio_note.update emission", () => {
               select: () => ({
                 eq: () => ({
                   eq: () => ({
+                    maybeSingle: async () => ({
+                      data: { id: PORTFOLIO_ID },
+                      error: null,
+                    }),
                     single: async () => ({
                       data: { id: PORTFOLIO_ID },
                       error: null,
@@ -282,18 +281,232 @@ describe("PATCH /api/notes — portfolio_note.update emission", () => {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        content: "my note",
-        portfolio_id: PORTFOLIO_ID,
+        scope_kind: "portfolio",
+        scope_ref: PORTFOLIO_ID,
+        content: "portfolio note",
       }),
     });
     const res = await PATCH(req);
     expect(res.status).toBe(200);
 
     await drain();
-    const audit = findAudit("portfolio_note.update");
+    const audit = findAudit("user_note.portfolio.update");
     expect(audit).toBeDefined();
-    expect(audit!.args.p_entity_type).toBe("portfolio_note");
+    expect(audit!.args.p_entity_type).toBe("user_note");
     expect(audit!.args.p_entity_id).toBe(PORTFOLIO_ID);
+    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    expect(meta.scope_kind).toBe("portfolio");
+    expect(meta.scope_ref).toBe(PORTFOLIO_ID);
+    expect(meta.content_length).toBe("portfolio note".length);
+    expect(meta.content).toBeUndefined();
+  });
+});
+
+describe("PATCH /api/notes — user_note.holding.update emission", () => {
+  it("emits user_note.holding.update with entity_id = caller's profiles.id", async () => {
+    const SCOPE_REF = "binance:BTC:spot";
+
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () =>
+        makeClient((table: string) => {
+          if (table === "allocator_holdings") {
+            return {
+              select: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    eq: () => ({
+                      eq: () => ({
+                        limit: () => ({
+                          maybeSingle: async () => ({
+                            data: { id: "h-1" },
+                            error: null,
+                          }),
+                        }),
+                      }),
+                    }),
+                  }),
+                }),
+              }),
+            };
+          }
+          if (table === "user_notes") {
+            return {
+              upsert: () => ({
+                select: () => ({
+                  single: async () => ({
+                    data: { updated_at: new Date().toISOString() },
+                    error: null,
+                  }),
+                }),
+              }),
+            };
+          }
+          throw new Error(`unexpected from(${table})`);
+        }),
+    }));
+
+    const { PATCH } = await import("@/app/api/notes/route");
+    const req = new NextRequest("http://localhost:3000/api/notes", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope_kind: "holding",
+        scope_ref: SCOPE_REF,
+        content: "holding note",
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(200);
+
+    await drain();
+    const audit = findAudit("user_note.holding.update");
+    expect(audit).toBeDefined();
+    expect(audit!.args.p_entity_type).toBe("user_note");
+    // Finding #8: holding has no single aggregate row → caller's user_id.
+    expect(audit!.args.p_entity_id).toBe(STATE.authUser.id);
+    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    expect(meta.scope_kind).toBe("holding");
+    expect(meta.scope_ref).toBe(SCOPE_REF);
+    expect(meta.content_length).toBe("holding note".length);
+    expect(meta.content).toBeUndefined();
+  });
+});
+
+describe("PATCH /api/notes — user_note.bridge_outcome.update emission", () => {
+  it("emits user_note.bridge_outcome.update with entity_id = bridge_outcomes.id", async () => {
+    const OUTCOME_ID = "dddd4444-dddd-4ddd-8ddd-dddddddddddd";
+
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () =>
+        makeClient((table: string) => {
+          if (table === "bridge_outcomes") {
+            return {
+              select: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    maybeSingle: async () => ({
+                      data: { id: OUTCOME_ID },
+                      error: null,
+                    }),
+                  }),
+                }),
+              }),
+            };
+          }
+          if (table === "user_notes") {
+            return {
+              upsert: () => ({
+                select: () => ({
+                  single: async () => ({
+                    data: { updated_at: new Date().toISOString() },
+                    error: null,
+                  }),
+                }),
+              }),
+            };
+          }
+          throw new Error(`unexpected from(${table})`);
+        }),
+    }));
+
+    const { PATCH } = await import("@/app/api/notes/route");
+    const req = new NextRequest("http://localhost:3000/api/notes", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope_kind: "bridge_outcome",
+        scope_ref: OUTCOME_ID,
+        content: "bridge note",
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(200);
+
+    await drain();
+    const audit = findAudit("user_note.bridge_outcome.update");
+    expect(audit).toBeDefined();
+    expect(audit!.args.p_entity_type).toBe("user_note");
+    expect(audit!.args.p_entity_id).toBe(OUTCOME_ID);
+    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    expect(meta.scope_kind).toBe("bridge_outcome");
+    expect(meta.scope_ref).toBe(OUTCOME_ID);
+    expect(meta.content).toBeUndefined();
+  });
+});
+
+describe("PATCH /api/notes — user_note.strategy.update emission", () => {
+  it("emits user_note.strategy.update with entity_id = strategies.id", async () => {
+    const STRATEGY_ID = "eeee5555-eeee-4eee-8eee-eeeeeeeeeeee";
+
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () =>
+        makeClient((table: string) => {
+          if (table === "strategies") {
+            // Track every .eq() so the published-only filter is asserted.
+            return {
+              select: () => {
+                const api: {
+                  eq: (col: string, val: unknown) => typeof api;
+                  maybeSingle: () => Promise<{
+                    data: unknown;
+                    error: unknown;
+                  }>;
+                } = {
+                  eq(_col, _val) {
+                    return api;
+                  },
+                  async maybeSingle() {
+                    return {
+                      data: { id: STRATEGY_ID },
+                      error: null,
+                    };
+                  },
+                };
+                return api;
+              },
+            };
+          }
+          if (table === "user_notes") {
+            return {
+              upsert: () => ({
+                select: () => ({
+                  single: async () => ({
+                    data: { updated_at: new Date().toISOString() },
+                    error: null,
+                  }),
+                }),
+              }),
+            };
+          }
+          throw new Error(`unexpected from(${table})`);
+        }),
+    }));
+
+    const { PATCH } = await import("@/app/api/notes/route");
+    const req = new NextRequest("http://localhost:3000/api/notes", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope_kind: "strategy",
+        scope_ref: STRATEGY_ID,
+        content: "strategy note",
+      }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(200);
+
+    await drain();
+    const audit = findAudit("user_note.strategy.update");
+    expect(audit).toBeDefined();
+    expect(audit!.args.p_entity_type).toBe("user_note");
+    expect(audit!.args.p_entity_id).toBe(STRATEGY_ID);
+    const meta = audit!.args.p_metadata as Record<string, unknown>;
+    expect(meta.scope_kind).toBe("strategy");
+    expect(meta.scope_ref).toBe(STRATEGY_ID);
+    expect(meta.content).toBeUndefined();
   });
 });
 
