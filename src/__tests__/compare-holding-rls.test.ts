@@ -152,7 +152,7 @@ describe("/compare holding RLS access gate (live-DB)", () => {
     // Authenticate both users
     clientA = await createAuthedClient(emailA, passwordA);
     clientB = await createAuthedClient(emailB, passwordB);
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (!HAS_LIVE_DB) return;
