@@ -41,9 +41,13 @@ max_drawdown = _max_drawdown
 
 
 # Versioning for the engine + weight set. Bump on any change to the scoring math
-# so historical batches are reproducible / debuggable. Phase 3 bumps both to
-# v2.0.0 in lockstep — SCORING-01.
-ENGINE_VERSION = "v2.0.0"
+# so historical batches are reproducible / debuggable. Phase 3 bumped both to
+# v2.0.0 in lockstep — SCORING-01. Phase 09 (D-17) bumps ENGINE_VERSION to
+# v2.1.0 because the INPUT LAYER changed (holdings-sourced pseudo-strategies
+# now feed score_candidates) — _should_skip_allocator trigger #2 auto-invalidates
+# cached v2.0.0 batches on first post-ship cron run. WEIGHTS_VERSION stays
+# v2.0.0 (weight composition identical; only input layer changed).
+ENGINE_VERSION = "v2.1.0"
 WEIGHTS_VERSION = "v2.0.0"
 
 # Top-N candidates returned per batch
