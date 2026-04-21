@@ -18,6 +18,11 @@ import React from "react";
 // Module-level mocks — must be hoisted
 // ---------------------------------------------------------------------------
 
+// server-only package throws in jsdom test environment — mock to no-op.
+// Needed because EMPTY_ANALYTICS from @/lib/queries transitively imports
+// @/lib/supabase/admin which has `import "server-only"`.
+vi.mock("server-only", () => ({}));
+
 // Mock next/navigation so redirect() is a no-op in tests
 vi.mock("next/navigation", () => ({
   redirect: vi.fn(),
@@ -57,6 +62,35 @@ let mockSnapshotData: MockSnapshot[] = [];
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => {
+    // Helper: builds a thenable Supabase-style query builder that resolves to { data, error }
+    function makeQueryBuilder(resolveData: () => unknown[]): Record<string, unknown> {
+      const resolve = () =>
+        Promise.resolve({ data: resolveData(), error: null });
+      const builder: Record<string, unknown> = {
+        select: vi.fn().mockReturnThis(),
+        in: vi.fn().mockReturnThis(),
+        eq: vi.fn().mockReturnThis(),
+        order: vi.fn().mockReturnThis(),
+        // limit() is called as the terminal step for snapshot queries
+        limit: vi.fn(async () => ({ data: resolveData(), error: null })),
+        // Make the builder itself awaitable (Supabase pattern: await builder resolves { data, error })
+        then: (
+          onfulfilled?: ((v: unknown) => unknown) | null,
+          onrejected?: ((e: unknown) => unknown) | null,
+        ) => resolve().then(onfulfilled, onrejected),
+        catch: (onrejected?: ((e: unknown) => unknown) | null) =>
+          resolve().catch(onrejected),
+        finally: (onfinally?: (() => void) | null) =>
+          resolve().finally(onfinally),
+      };
+      // self-referential mockReturnThis needs the object already built
+      (builder.select as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      (builder.in as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      (builder.eq as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      (builder.order as ReturnType<typeof vi.fn>).mockReturnValue(builder);
+      return builder;
+    }
+
     return {
       auth: {
         getUser: vi.fn(async () => ({
@@ -65,33 +99,12 @@ vi.mock("@/lib/supabase/server", () => ({
       },
       from: vi.fn((table: string) => {
         if (table === "strategies") {
-          return {
-            select: vi.fn().mockReturnThis(),
-            in: vi.fn().mockReturnThis(),
-            eq: vi.fn().mockReturnThis(),
-            then: undefined,
-            // Thenable so await works
-            execute: vi.fn(async () => ({ data: mockStrategyData, error: null })),
-            // Make it work with direct destructuring: const { data } = await supabase.from(...)...
-            // We need this to resolve as a promise with { data, error }
-            [Symbol.asyncIterator]: undefined,
-          };
+          return makeQueryBuilder(() => mockStrategyData);
         }
         if (table === "allocator_equity_snapshots") {
-          return {
-            select: vi.fn().mockReturnThis(),
-            eq: vi.fn().mockReturnThis(),
-            order: vi.fn().mockReturnThis(),
-            limit: vi.fn(async () => ({ data: mockSnapshotData, error: null })),
-          };
+          return makeQueryBuilder(() => mockSnapshotData);
         }
-        return {
-          select: vi.fn().mockReturnThis(),
-          in: vi.fn().mockReturnThis(),
-          eq: vi.fn().mockReturnThis(),
-          order: vi.fn().mockReturnThis(),
-          limit: vi.fn(async () => ({ data: [], error: null })),
-        };
+        return makeQueryBuilder(() => []);
       }),
     };
   }),
