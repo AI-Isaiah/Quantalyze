@@ -7,6 +7,10 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Button } from "@/components/ui/Button";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
+// Phase 08 Plan 04 Task 3 — user-gated private note card on the factsheet
+// between the sparkline card and CTA card (UI-SPEC §4d, MANAGE-05).
+import { createClient } from "@/lib/supabase/server";
+import { StrategyNoteCard } from "@/components/notes/StrategyNoteCard";
 
 /* ---------- OG metadata ---------- */
 
@@ -80,6 +84,34 @@ export default async function PublicStrategyPage({
 
   const { strategy, analytics } = result;
 
+  // Phase 08 Plan 04 Task 3 / MANAGE-05 — user-gated server-side fetch
+  // of the current viewer's private note for this strategy. Unauthenticated
+  // visitors skip rendering the StrategyNoteCard entirely (strategy pages
+  // are publicly viewable; notes are authenticated-only).
+  //
+  // Ownership predicate per Research Finding #3: strategies.status =
+  // 'published'. Any authenticated allocator can annotate any published
+  // strategy; RLS on user_notes enforces per-user privacy of the content.
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  let initialNoteContent = "";
+  let initialNoteSavedAt: Date | null = null;
+  if (user) {
+    const { data: noteRow } = await supabase
+      .from("user_notes")
+      .select("content, updated_at")
+      .eq("user_id", user.id)
+      .eq("scope_kind", "strategy")
+      .eq("scope_ref", strategy.id)
+      .maybeSingle();
+    initialNoteContent = (noteRow?.content as string | undefined) ?? "";
+    initialNoteSavedAt = noteRow?.updated_at
+      ? new Date(noteRow.updated_at as string)
+      : null;
+  }
+
   return (
     <div className="min-h-screen bg-page">
       <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
@@ -151,6 +183,17 @@ export default async function PublicStrategyPage({
           <div className="rounded-lg border border-border bg-card p-8 text-center mb-8">
             <p className="text-text-muted">Analytics are being computed. Check back soon.</p>
           </div>
+        )}
+
+        {/* Phase 08 Plan 04 Task 3 / MANAGE-05 — private strategy note.
+            User-gated: only authenticated viewers see the card (strategy
+            pages are publicly viewable; notes are per-allocator private). */}
+        {user && (
+          <StrategyNoteCard
+            strategyId={strategy.id}
+            initialContent={initialNoteContent}
+            initialLastSavedAt={initialNoteSavedAt}
+          />
         )}
 
         {/* CTA */}
