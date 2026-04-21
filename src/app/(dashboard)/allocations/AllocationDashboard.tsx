@@ -32,11 +32,34 @@ import { DashboardGrid } from "./components/DashboardGrid";
 import { AddWidgetModal } from "./components/AddWidgetModal";
 import { UndoToast } from "./components/UndoToast";
 import { AlertBanner } from "./components/AlertBanner";
+import { HoldingsTable, type HoldingRow } from "./components/HoldingsTable";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import { Card } from "@/components/ui/Card";
 import { WarningBanner } from "@/components/ui/WarningBanner";
 import { EmptyState } from "./EmptyState";
+
+// Phase 08 Plan 02 / MANAGE-02 / D-05 — localStorage-backed boolean
+// toggle controlling whether revoked-key holdings appear in the Phase
+// 08 HoldingsTable. Default ON per D-05 / UI-SPEC §2. Toggle affects
+// TABLE RENDER ONLY; KPI / equity curve / drawdown widgets always
+// receive the FULL unfiltered holdings list (D-04 invariant — see T12
+// in AllocationDashboard.revoked-holdings.test.tsx).
+const REVOKED_STORAGE_KEY = "allocations.showRevokedHoldings";
+
+function loadShowRevoked(): boolean {
+  if (typeof window === "undefined") return true; // SSR default
+  try {
+    const raw = window.localStorage.getItem(REVOKED_STORAGE_KEY);
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    // Missing key OR any non-canonical value → default ON.
+    return true;
+  } catch {
+    // Safari private-mode / storage disabled — default ON.
+    return true;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types — matches MyAllocationClient props exactly
@@ -252,6 +275,20 @@ export function AllocationDashboard({
   const { config, addTile, removeTile, updateLayout, restoreTile } =
     useDashboardConfig();
   const [timeframe, setTimeframe] = useTimeframe("YTD");
+
+  // Phase 08 Plan 02 / MANAGE-02 — revoked-holdings table filter state,
+  // hydrated from localStorage (default ON per D-05). The flag is NOT
+  // propagated to KPI / equity / drawdown widgets — those always read
+  // the full holdings list per the historical-inclusion invariant
+  // (D-04). See T12 in AllocationDashboard.revoked-holdings.test.tsx.
+  const [showRevoked, setShowRevoked] = useState<boolean>(loadShowRevoked);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(REVOKED_STORAGE_KEY, String(showRevoked));
+    } catch {
+      // Silent — private-mode / quota-exceeded are non-fatal.
+    }
+  }, [showRevoked]);
 
   const [showModal, setShowModal] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -634,6 +671,42 @@ export function AllocationDashboard({
   // Active widget IDs for the modal
   const activeWidgetIds = config.tiles.map((t) => t.widgetId);
 
+  // Phase 08 Plan 02 / MANAGE-02 — join holdingsSummary with apiKeys to
+  // resolve source_key_sync_status for each row (the join is done here
+  // rather than in the query layer to avoid a nested PostgREST select
+  // and to reuse the apiKeys array that every other widget already
+  // consumes via `widgetData`). Falls back to 'unknown' when a row's
+  // api_key_id doesn't match any row in apiKeys (defensive — the
+  // RESTRICT FK on allocator_holdings.api_key_id should prevent this).
+  const enrichedHoldings = useMemo<HoldingRow[]>(() => {
+    const keyStatus = new Map<string, string>();
+    for (const k of apiKeys) {
+      keyStatus.set(k.id, k.sync_status ?? "unknown");
+    }
+    return holdingsSummary.map((h, idx) => ({
+      // holdingsSummary rows are collapsed by symbol so a synthetic id
+      // built from venue+symbol+holding_type is stable and unique for
+      // React keying.
+      id: `${h.venue}-${h.symbol}-${h.holding_type}-${idx}`,
+      venue: h.venue,
+      symbol: h.symbol,
+      holding_type: h.holding_type,
+      quantity: h.quantity,
+      value_usd: h.value_usd,
+      // Entry price + unrealized P&L are not yet surfaced by the Phase
+      // 07 projection (holdingsSummary collapses to value_usd only).
+      // Pass null so HoldingsTable renders the em-dash placeholder per
+      // formatUsd/formatPnl. Plan 04 or a later phase can widen the
+      // projection if the UI grows those columns.
+      entry_price: null,
+      unrealized_pnl_usd: null,
+      api_key_id: h.api_key_id ?? "",
+      source_key_sync_status: h.api_key_id
+        ? keyStatus.get(h.api_key_id) ?? "unknown"
+        : "unknown",
+    }));
+  }, [holdingsSummary, apiKeys]);
+
   // Phase 07 / 07-05 / D-08 — zero-holdings triggers.
   //
   // Render-matrix summary (see 07-05-PLAN.md §interfaces):
@@ -810,6 +883,19 @@ export function AllocationDashboard({
         onLayoutChange={handleLayoutChange}
         onClose={handleClose}
         renderWidget={renderWidget}
+      />
+
+      {/* Phase 08 Plan 02 / MANAGE-02 — Holdings table with revoked-key
+          strikethrough + amber chip + allocator-scoped toggle. Receives
+          the FULL `enrichedHoldings` list (component filters internally
+          based on `showRevoked`). KPIs / equity / drawdown widgets above
+          keep receiving the unfiltered `holdingsSummary` via
+          `widgetData` so historical KPIs still include revoked rows
+          per D-04. */}
+      <HoldingsTable
+        holdings={enrichedHoldings}
+        showRevoked={showRevoked}
+        onShowRevokedChange={setShowRevoked}
       />
 
       {/* Phase 07 / 07-05 / D-09 — zero-holdings Notices card in the

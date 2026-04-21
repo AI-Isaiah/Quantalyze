@@ -99,10 +99,11 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     expect(screen.queryByText("Key revoked")).not.toBeInTheDocument();
-    // The revoked-row's symbol (ETH) MUST NOT be rendered.
-    expect(screen.queryByText("ETH")).not.toBeInTheDocument();
-    expect(screen.getByText("BTC")).toBeInTheDocument();
-    expect(screen.getByText("SOL")).toBeInTheDocument();
+    // Symbols are concatenated with venue inside a single span (e.g.
+    // "Binance · ETH"). Substring-match via regex.
+    expect(screen.queryByText(/ETH/)).not.toBeInTheDocument();
+    expect(screen.getByText(/BTC/)).toBeInTheDocument();
+    expect(screen.getByText(/SOL/)).toBeInTheDocument();
   });
 
   it("T4: showRevoked=false + 1 hidden → footer reads '1 holding hidden from revoked keys · Show all'; clicking Show all fires onShowRevokedChange(true)", () => {
@@ -169,7 +170,7 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
     ).toBeInTheDocument();
   });
 
-  it("T7: amber chip carries the --color-warning token #D97706 via inline style", () => {
+  it("T7: amber chip carries the --color-warning token #D97706 via inline style (serialised to rgb by jsdom)", () => {
     const holdings = [
       makeHolding({
         id: "h2",
@@ -185,11 +186,10 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     const chip = screen.getByText("Key revoked");
-    // Matches UI-SPEC §2 amber palette inline styling.
+    // jsdom serialises inline-style hex values to rgb() form at DOM read
+    // time. #D97706 → rgb(217, 119, 6) and #FEF3C7 → rgb(254, 243, 199).
     const style = chip.getAttribute("style") ?? "";
-    // Style attribute values are lowercased by jsdom during serialisation,
-    // so match #d97706 case-insensitively.
-    expect(style.toLowerCase()).toContain("#d97706");
-    expect(style.toLowerCase()).toContain("#fef3c7");
+    expect(style).toContain("rgb(217, 119, 6)");
+    expect(style).toContain("rgb(254, 243, 199)");
   });
 });

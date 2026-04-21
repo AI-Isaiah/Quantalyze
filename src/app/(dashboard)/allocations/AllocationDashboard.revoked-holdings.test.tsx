@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { AllocationDashboard } from "./AllocationDashboard";
 
 // jsdom's localStorage is flaky under vitest 4.x (`setItem is not a
@@ -214,8 +214,11 @@ describe("AllocationDashboard — revoked-holdings toggle (Phase 08 MANAGE-02)",
       onShowRevokedChange: (v: boolean) => void;
     };
     // Drive the state change directly (skip the UI click — the component
-    // itself is stubbed out; AllocationDashboard owns the state).
-    firstProps.onShowRevokedChange(false);
+    // itself is stubbed out; AllocationDashboard owns the state). Wrap in
+    // act() so the persist useEffect flushes before we read localStorage.
+    act(() => {
+      firstProps.onShowRevokedChange(false);
+    });
     expect(localStorage.getItem(STORAGE_KEY)).toBe("false");
   });
 
