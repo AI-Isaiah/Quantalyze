@@ -41,8 +41,12 @@ export function parseHoldingCompareId(id: string): ParsedHoldingCompareId | null
   if (parts.length !== 3) return null;
   const [venue, symbol, holding_type] = parts;
   if (!venue || !symbol || !holding_type) return null;
-  // Finding f6: enforce Phase 08 D-08 scope_ref charset invariant
-  if (!SAFE_PART.test(venue) || !SAFE_PART.test(symbol) || !SAFE_PART.test(holding_type)) return null;
+  // Finding f6: enforce Phase 08 D-08 scope_ref charset invariant.
+  // Each segment (venue, symbol, holding_type) must match /^[A-Za-z0-9_-]+$/
+  // — same character set as Phase 08 notes + audit entity_id scope_refs.
+  if (!SAFE_PART.test(venue)) return null;
+  if (!SAFE_PART.test(symbol)) return null;
+  if (!SAFE_PART.test(holding_type)) return null;
   return { venue, symbol, holding_type };
 }
 
