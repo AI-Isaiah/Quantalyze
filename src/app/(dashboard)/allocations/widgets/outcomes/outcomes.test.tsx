@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import OutcomesWidget from "./OutcomesWidget";
 
 // ---------------------------------------------------------------------------
@@ -432,6 +432,203 @@ describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
       const pendingPills = screen.getAllByText("Pending");
       expect(pendingPills.length).toBeGreaterThanOrEqual(3);
     });
+  });
+});
+
+// ===========================================================================
+// Phase 08 Plan 04 Task 2 — "Your note" section inside ExpandedPanel
+// (MANAGE-05 bridge_outcome scope). UI-SPEC §4c.
+// ===========================================================================
+
+describe("OutcomesWidget — 'Your note' section (08-04 / MANAGE-05)", () => {
+  beforeEach(() => {
+    // Override the default curves mock with a multi-URL router so the
+    // ExpandedPanel curves fetch AND the lazy note GET both resolve
+    // predictably. Order of fetches is: (1) curves (2) note GET
+    // (3+) note PATCH on blur.
+    fetchMock = vi.fn().mockImplementation((input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/bridge/outcome/") && url.includes("/curves")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            original: [{ date: "2026-03-01", nav: 100 }],
+            replacement: [{ date: "2026-03-01", nav: 100 }],
+            allocated_at: "2026-03-01",
+          }),
+        });
+      }
+      if (url.includes("/api/notes")) {
+        // Default: 404 (no note yet). Individual tests override via
+        // fetchMock.mockImplementationOnce to return 200 or to assert
+        // the PATCH body.
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: async () => ({ error: "Not found" }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL in test: ${url}`));
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  it("T21: expanded row renders a 'Your note' section header below the delta grid", async () => {
+    renderWidget([makeOutcome({ id: "o-note-1" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+    await act(async () => {
+      fireEvent.click(caret);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Your note")).toBeInTheDocument();
+    });
+  });
+
+  it("T22: initial mount of the note section fetches /api/notes?scope_kind=bridge_outcome&scope_ref=<id>; 404 → empty placeholder", async () => {
+    renderWidget([makeOutcome({ id: "o-note-2" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+    await act(async () => {
+      fireEvent.click(caret);
+    });
+    await waitFor(() => {
+      const noteGet = fetchMock.mock.calls.find((call) => {
+        const u = String(call[0]);
+        return u.startsWith("/api/notes?") && u.includes("bridge_outcome");
+      });
+      expect(noteGet).toBeTruthy();
+      expect(String(noteGet![0])).toBe(
+        "/api/notes?scope_kind=bridge_outcome&scope_ref=o-note-2",
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "No note for this outcome. Start typing to add one.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("T23: GET returning content → NoteRender markdown + Edit affordance", async () => {
+    fetchMock = vi.fn().mockImplementation((input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/curves")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            original: [{ date: "2026-03-01", nav: 100 }],
+            replacement: [{ date: "2026-03-01", nav: 100 }],
+            allocated_at: "2026-03-01",
+          }),
+        });
+      }
+      if (url.startsWith("/api/notes")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            content: "**hold through pullback**",
+            updated_at: "2026-04-21T00:00:00Z",
+          }),
+        });
+      }
+      return Promise.reject(new Error(`Unexpected URL: ${url}`));
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = fetchMock as unknown as typeof fetch;
+
+    const { container } = renderWidget([makeOutcome({ id: "o-note-3" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+    await act(async () => {
+      fireEvent.click(caret);
+    });
+    await waitFor(() => {
+      expect(
+        container.querySelector("strong")?.textContent,
+      ).toBe("hold through pullback");
+    });
+    expect(screen.getByText("Edit")).toBeInTheDocument();
+  });
+
+  it("T24: blur on the textarea fires PATCH with {scope_kind:'bridge_outcome', scope_ref:<id>, content:<typed>}", async () => {
+    const { container } = renderWidget([makeOutcome({ id: "o-note-4" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+    await act(async () => {
+      fireEvent.click(caret);
+    });
+    // Wait for the initial 404 GET to resolve so the textarea mounts
+    // (empty-state default opens into edit mode).
+    let ta: HTMLTextAreaElement | null = null;
+    await waitFor(() => {
+      ta = container.querySelector("textarea");
+      expect(ta).not.toBeNull();
+    });
+    await act(async () => {
+      fireEvent.change(ta as unknown as HTMLTextAreaElement, {
+        target: { value: "Keep holding. Conviction intact." },
+      });
+    });
+    await act(async () => {
+      fireEvent.blur(ta as unknown as HTMLTextAreaElement);
+    });
+    await waitFor(() => {
+      const patchCall = fetchMock.mock.calls.find((call) => {
+        const init = call[1] as RequestInit | undefined;
+        return init?.method === "PATCH";
+      });
+      expect(patchCall).toBeTruthy();
+      const [url, init] = patchCall!;
+      expect(url).toBe("/api/notes");
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body).toEqual({
+        scope_kind: "bridge_outcome",
+        scope_ref: "o-note-4",
+        content: "Keep holding. Conviction intact.",
+      });
+    });
+  });
+
+  it("T25: NoteSaveStatus is present in the expanded note section", async () => {
+    renderWidget([makeOutcome({ id: "o-note-5" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+    await act(async () => {
+      fireEvent.click(caret);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("note-save-status")).toBeInTheDocument();
+    });
+  });
+
+  it("T26: section has an hr separator above it + uppercase tracking-wider header", async () => {
+    const { container } = renderWidget([makeOutcome({ id: "o-note-6" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+    await act(async () => {
+      fireEvent.click(caret);
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Your note")).toBeInTheDocument();
+    });
+    // Separator is an <hr> inside the ExpandedPanel
+    expect(container.querySelector("hr")).not.toBeNull();
+    // Header className carries the uppercase tracking-wider treatment
+    const header = screen.getByText("Your note");
+    expect(header.className).toContain("uppercase");
+    expect(header.className).toContain("tracking-wider");
   });
 });
 
