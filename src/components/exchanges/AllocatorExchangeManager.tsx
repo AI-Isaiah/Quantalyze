@@ -198,7 +198,7 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
     });
     setDeleteLoading(false);
     if (error) {
-      setDeleteError(`Failed to remove key: ${error.message}`);
+      setDeleteError(`Failed to disconnect: ${error.message}`);
       return;
     }
     setKeys((prev) => prev.filter((k) => k.id !== keyId));
@@ -562,10 +562,10 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
                   </Button>
                   <Button
                     variant="secondary"
-                    aria-label={`Remove ${key.exchange} key`}
+                    aria-label={`Disconnect ${key.exchange} key`}
                     onClick={() => openDeleteConfirm(key.id)}
                   >
-                    Remove
+                    Disconnect
                   </Button>
                 </div>
               );
@@ -626,83 +626,103 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
         </Modal>
       ) : null}
 
-      <Modal
-        open={!!confirmDeleteId}
-        onClose={() => {
-          if (deleteLoading) return;
-          setConfirmDeleteId(null);
-          setDeleteError(null);
-          setDeleteHoldingsCount(null);
-          setCascadeHoldings(false);
-        }}
-        title="Remove exchange key"
-      >
-        <p className="text-sm text-text-secondary">
-          This will permanently remove the encrypted key from Quantalyze and
-          stop future syncs.
-        </p>
-        {deleteHoldingsCount === null ? (
-          <p className="mt-3 text-xs text-text-muted">
-            Checking imported holdings…
-          </p>
-        ) : deleteHoldingsCount === 0 ? (
-          <p className="mt-3 text-xs text-text-muted">
-            No imported holdings are tied to this key.
-          </p>
-        ) : (
-          <label className="mt-3 flex items-start gap-2 text-xs text-text-secondary">
-            <input
-              type="checkbox"
-              className="mt-0.5"
-              checked={cascadeHoldings}
-              disabled={deleteLoading}
-              onChange={(e) => setCascadeHoldings(e.target.checked)}
-              aria-describedby="cascade-holdings-help"
-            />
-            <span id="cascade-holdings-help">
-              Also remove {deleteHoldingsCount} imported holdings row
-              {deleteHoldingsCount === 1 ? "" : "s"} for this key. Required
-              to proceed — holdings reference this key and can&apos;t be
-              left orphaned.
-            </span>
-          </label>
-        )}
-        {deleteError ? (
-          <p
-            role="alert"
-            className="mt-3 text-xs text-negative bg-negative/5 border border-negative/20 rounded px-3 py-2"
-          >
-            {deleteError}
-          </p>
-        ) : null}
-        <div className="mt-4 flex justify-end gap-2">
-          <Button
-            variant="secondary"
-            disabled={deleteLoading}
-            onClick={() => {
+      {(() => {
+        // Derive venue label from the row being confirmed. Reuses key.exchange
+        // (already the identifier used in EXCHANGE_TAGS + aria-labels) and
+        // capitalises via a simple first-letter-upper transform. No new
+        // mapping table — the row already carries the canonical string.
+        const confirmRow = confirmDeleteId
+          ? keys.find((k) => k.id === confirmDeleteId)
+          : null;
+        const venueLabel = confirmRow
+          ? confirmRow.exchange.charAt(0).toUpperCase() +
+            confirmRow.exchange.slice(1)
+          : "";
+        return (
+          <Modal
+            open={!!confirmDeleteId}
+            onClose={() => {
+              if (deleteLoading) return;
               setConfirmDeleteId(null);
               setDeleteError(null);
               setDeleteHoldingsCount(null);
               setCascadeHoldings(false);
             }}
+            title={`Disconnect ${venueLabel}?`}
           >
-            Cancel
-          </Button>
-          <Button
-            variant="danger"
-            disabled={
-              deleteLoading ||
-              deleteHoldingsCount === null ||
-              (deleteHoldingsCount > 0 && !cascadeHoldings)
-            }
-            onClick={() =>
-              confirmDeleteId && handleDeleteKey(confirmDeleteId)
-            }
-          >
-            {deleteLoading ? "Removing…" : "Remove key"}
-          </Button>
-        </div>
-      </Modal>
+            <p className="text-sm text-text-secondary">
+              We&apos;ll stop syncing this key. Your historical holdings stay
+              available for audit and are reflected in past performance.
+            </p>
+
+            {deleteHoldingsCount === null ? (
+              <p className="mt-3 text-xs text-text-muted">Checking holdings…</p>
+            ) : deleteHoldingsCount === 0 ? (
+              <p className="mt-3 text-xs text-text-muted">
+                No historical holdings are tied to this key.
+              </p>
+            ) : (
+              <div className="mt-3">
+                <label className="flex items-start gap-2 text-xs text-text-secondary">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={cascadeHoldings}
+                    disabled={deleteLoading}
+                    onChange={(e) => setCascadeHoldings(e.target.checked)}
+                    aria-describedby="cascade-holdings-help"
+                  />
+                  <span>
+                    Also delete {deleteHoldingsCount} historical holding
+                    {deleteHoldingsCount === 1 ? "" : "s"} from this key
+                  </span>
+                </label>
+                <p
+                  id="cascade-holdings-help"
+                  className="ml-6 mt-1 text-[11px] text-text-muted"
+                >
+                  {cascadeHoldings
+                    ? "Checked: holdings are permanently deleted and excluded from all historical metrics."
+                    : "Unchecked: holdings are kept for audit continuity and reflected in past performance."}
+                </p>
+              </div>
+            )}
+
+            {deleteError ? (
+              <p
+                role="alert"
+                className="mt-3 text-xs text-negative bg-negative/5 border border-negative/20 rounded px-3 py-2"
+              >
+                {deleteError}
+              </p>
+            ) : null}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                disabled={deleteLoading}
+                onClick={() => {
+                  setConfirmDeleteId(null);
+                  setDeleteError(null);
+                  setDeleteHoldingsCount(null);
+                  setCascadeHoldings(false);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                disabled={deleteLoading || deleteHoldingsCount === null}
+                onClick={() =>
+                  confirmDeleteId && handleDeleteKey(confirmDeleteId)
+                }
+              >
+                {deleteLoading ? "Disconnecting…" : "Disconnect"}
+              </Button>
+            </div>
+          </Modal>
+        );
+      })()}
     </div>
   );
 }

@@ -667,9 +667,18 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     // Disconnect button — the danger button inside the modal. Match by
     // exact name so the row's "Disconnect binance key" aria-label doesn't
     // match this assertion.
+    // Prefer the modal's confirm button. There are two buttons whose
+    // textContent === "Disconnect" (the row button that opened the modal,
+    // and the modal's danger confirm). The modal's button is rendered
+    // LAST in the DOM and carries the danger variant class `bg-negative`.
     const disconnectBtn = screen
       .getAllByRole("button")
-      .find((b) => b.textContent === "Disconnect")!;
+      .filter(
+        (b) =>
+          b.textContent === "Disconnect" &&
+          b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
     expect(disconnectBtn).not.toBeDisabled();
     // Unchecked sub-copy variant.
     expect(
@@ -717,9 +726,18 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
         /Checked: holdings are permanently deleted and excluded from all historical metrics\./,
       ),
     ).toBeInTheDocument();
+    // Prefer the modal's confirm button. There are two buttons whose
+    // textContent === "Disconnect" (the row button that opened the modal,
+    // and the modal's danger confirm). The modal's button is rendered
+    // LAST in the DOM and carries the danger variant class `bg-negative`.
     const disconnectBtn = screen
       .getAllByRole("button")
-      .find((b) => b.textContent === "Disconnect")!;
+      .filter(
+        (b) =>
+          b.textContent === "Disconnect" &&
+          b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
     expect(disconnectBtn).not.toBeDisabled();
   });
 
@@ -735,9 +753,18 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
       expect(screen.getByRole("checkbox")).toBeInTheDocument();
     });
     // Leave checkbox unchecked; click the Disconnect confirm button.
+    // Prefer the modal's confirm button. There are two buttons whose
+    // textContent === "Disconnect" (the row button that opened the modal,
+    // and the modal's danger confirm). The modal's button is rendered
+    // LAST in the DOM and carries the danger variant class `bg-negative`.
     const disconnectBtn = screen
       .getAllByRole("button")
-      .find((b) => b.textContent === "Disconnect")!;
+      .filter(
+        (b) =>
+          b.textContent === "Disconnect" &&
+          b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
     await act(async () => {
       fireEvent.click(disconnectBtn);
     });
@@ -761,9 +788,18 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     await act(async () => {
       fireEvent.click(screen.getByRole("checkbox"));
     });
+    // Prefer the modal's confirm button. There are two buttons whose
+    // textContent === "Disconnect" (the row button that opened the modal,
+    // and the modal's danger confirm). The modal's button is rendered
+    // LAST in the DOM and carries the danger variant class `bg-negative`.
     const disconnectBtn = screen
       .getAllByRole("button")
-      .find((b) => b.textContent === "Disconnect")!;
+      .filter(
+        (b) =>
+          b.textContent === "Disconnect" &&
+          b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
     await act(async () => {
       fireEvent.click(disconnectBtn);
     });
@@ -791,9 +827,18 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
         screen.getByText("No historical holdings are tied to this key."),
       ).toBeInTheDocument();
     });
+    // Prefer the modal's confirm button. There are two buttons whose
+    // textContent === "Disconnect" (the row button that opened the modal,
+    // and the modal's danger confirm). The modal's button is rendered
+    // LAST in the DOM and carries the danger variant class `bg-negative`.
     const disconnectBtn = screen
       .getAllByRole("button")
-      .find((b) => b.textContent === "Disconnect")!;
+      .filter(
+        (b) =>
+          b.textContent === "Disconnect" &&
+          b.className.includes("bg-negative"),
+      )
+      .at(-1)!;
     await act(async () => {
       fireEvent.click(disconnectBtn);
     });
