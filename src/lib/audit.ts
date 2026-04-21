@@ -103,7 +103,11 @@ export type AuditAction =
   | "allocator.approve"
   | "notification_preferences.update"
   | "attestation.accept"
-  | "portfolio_note.update"
+  // --- Phase 08: multi-scope notes (user_note.*) — replaces portfolio_note.update
+  | "user_note.portfolio.update"
+  | "user_note.holding.update"
+  | "user_note.bridge_outcome.update"
+  | "user_note.strategy.update"
   | "admin.kill_switch"
   | "match.decision_record"
   | "match.decision_delete"
@@ -159,7 +163,8 @@ export type AuditEntityType =
   | "match_decision"
   | "strategy"
   | "partner_import"
-  | "portfolio_note"
+  // --- Phase 08: multi-scope notes — replaces the legacy portfolio_note entity
+  | "user_note"
   | "investor_attestation"
   | "trades_upload"
   // --- /review follow-up (T4-C1 + T4-M6) ------------------------------

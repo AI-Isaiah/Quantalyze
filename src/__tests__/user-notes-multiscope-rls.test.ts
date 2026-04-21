@@ -233,14 +233,14 @@ describe("Migration 071 — user_notes multi-scope RLS", () => {
         // --- Test 3: A UPDATEs own row (content) ---------------------------
         const { error: updOwnErr } = await clientA
           .from("user_notes")
-          .update({ content: "A-portfolio-updated" })
+          .update({ content: "A-portfolio-updated" } as never)
           .eq("id", aPortfolioNote);
         expect(updOwnErr).toBeNull();
 
         // --- Test 4: A UPDATE targeting B's row affects 0 rows -------------
         const { data: updCrossData, error: updCrossErr } = await clientA
           .from("user_notes")
-          .update({ content: "TAMPERED" })
+          .update({ content: "TAMPERED" } as never)
           .eq("id", bPortfolioNote)
           .select("id");
         expect(updCrossErr).toBeNull();
@@ -297,13 +297,13 @@ describe("Migration 071 — user_notes multi-scope RLS", () => {
         const [{ error: up1Err }, { error: up2Err }] = await Promise.all([
           clientA
             .from("user_notes")
-            .upsert(upsertPayload, {
+            .upsert(upsertPayload as never, {
               onConflict: "user_id,scope_kind,scope_ref",
             }),
           clientA
             .from("user_notes")
             .upsert(
-              { ...upsertPayload, content: "rapid-2" },
+              { ...upsertPayload, content: "rapid-2" } as never,
               { onConflict: "user_id,scope_kind,scope_ref" },
             ),
         ]);

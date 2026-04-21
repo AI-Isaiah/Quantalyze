@@ -72,7 +72,11 @@ export type AuditAction =
   | "allocator.approve"
   | "notification_preferences.update"
   | "attestation.accept"
-  | "portfolio_note.update"
+  // Phase 08: multi-scope notes (user_note.*) — replaces portfolio_note.update
+  | "user_note.portfolio.update"
+  | "user_note.holding.update"
+  | "user_note.bridge_outcome.update"
+  | "user_note.strategy.update"
   | "admin.kill_switch"
   | "match.decision_record"
   | "match.decision_delete"
@@ -131,7 +135,10 @@ action doesn't belong in audit_log — it belongs in product analytics
 | `allocator.approve` | `user` | target user's `profiles.id` | new_status |
 | `notification_preferences.update` | `user` | target user's `allocator_preferences.user_id` (matches profiles.id; composite-keyed table uses user_id as anchor) | fields, self_edit, edited_by? |
 | `attestation.accept` | `investor_attestation` | caller's own `profiles.id` (investor_attestations keys on user_id) | version, has_ip |
-| `portfolio_note.update` | `portfolio_note` | `portfolios.id` (user_notes composite PK on (user_id, portfolio_id)) | content_length |
+| `user_note.portfolio.update` | `user_note` | `portfolios.id` (scope_ref as UUID) | scope_kind, scope_ref, content_length |
+| `user_note.holding.update` | `user_note` | caller's `profiles.id` (no single row aggregates a holding scope — see Research Finding #8) | scope_kind, scope_ref, content_length |
+| `user_note.bridge_outcome.update` | `user_note` | `bridge_outcomes.id` (scope_ref as UUID) | scope_kind, scope_ref, content_length |
+| `user_note.strategy.update` | `user_note` | `strategies.id` (scope_ref as UUID) | scope_kind, scope_ref, content_length |
 | `admin.kill_switch` | `system_flag` | acting admin's `profiles.id` (system_flags keyed on text `key`, no UUID available) | flag, new_value |
 | `match.decision_record` | `match_decision` | `match_decisions.id` | allocator_id, strategy_id, decision |
 | `match.decision_delete` | `match_decision` | `match_decisions.id` of the removed row | allocator_id, strategy_id, decision |
@@ -209,6 +216,40 @@ lifecycle:
 Worker-side emission goes through `log_audit_event_service` because
 the Python path has no `auth.uid()` context; the caller-supplied
 `user_id` is the allocator that owns the key (`api_keys.user_id`).
+
+Phase 08 (connection management + multi-scope notes, migration 071)
+renamed `portfolio_note.update` → `user_note.portfolio.update` and
+added three new scope-specific variants (`user_note.holding.update`,
+`user_note.bridge_outcome.update`, `user_note.strategy.update`). The
+`AuditEntityType` entry `portfolio_note` was renamed to `user_note` in
+the same enum. The rename is atomic — no back-compat alias, no
+deprecated old name accepted in parallel — because the only emitter
+(`/api/notes` PATCH) is rewritten in the same commit as the migration,
+the audit enum, this ADR, and the scope-ref/ownership helpers (per
+D-23 / the S1 atomic-commit mandate). The five in-repo call sites
+(`src/lib/audit.ts`, `src/app/api/notes/route.ts`, this ADR, the
+audit-fanout integration test, and the critical-regressions grep
+guard) all update in lockstep; no external consumer references the
+old string. The historical `audit_log` rows with
+`action='portfolio_note.update'` remain immutable per §6 append-only
+— any future dashboard surfacing the time series must UNION the old
+name with the new four for the transition window.
+
+`entity_id` is a scope-appropriate UUID, not a synthetic composite
+string. `audit_log.entity_id` is UUID-typed, and Research Finding #8
+locks the per-scope resolution:
+
+- `user_note.portfolio.update`       → `portfolios.id`   (= scope_ref as UUID)
+- `user_note.holding.update`         → caller's `profiles.id` (no single row aggregates a holding-scope note — the note spans every daily `allocator_holdings.asof` row for the {venue, symbol, holding_type} tuple; matches the `attestation.accept` pattern of using the caller's own id when no single row applies)
+- `user_note.bridge_outcome.update`  → `bridge_outcomes.id` (= scope_ref as UUID)
+- `user_note.strategy.update`        → `strategies.id`   (= scope_ref as UUID)
+
+Grep-ability is preserved: `audit_log WHERE action LIKE 'user_note.%'`
+returns every note event, and `metadata->>'scope_kind'` disambiguates
+further. Content is NEVER echoed into metadata (D-14/D-20 privacy
+invariant); metadata carries `{scope_kind, scope_ref, content_length}`
+only. The audit-fanout integration test asserts `metadata.content`
+is `undefined` across all four kinds.
 
 ### 5. user_id is derived from `auth.uid()` in the RPC
 `log_audit_event` is SECURITY DEFINER (migration 049). Inside the

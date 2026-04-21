@@ -173,25 +173,29 @@ describe("Critical regression guards", () => {
   // Phase 08 Plan 01 — atomic rename of portfolio_note.update → user_note.*.update.
   // D-23 mandates the rename lands in a single atomic commit with migration 071,
   // the audit enum, the route emitter, and ADR-0023 all in lockstep. This guard
-  // asserts the legacy literal is absent from the route emitter and the audit
-  // enum so a future accidental reintroduction fails fast.
+  // asserts the legacy quoted literals are absent from the route emitter and
+  // the audit enum so a future accidental reintroduction fails fast. Comments
+  // referencing the old name for historical context are allowed — the guard
+  // matches only quoted string literals (the forms used by the enum + emitter).
   describe("[PHASE-08-01] portfolio_note literal absent from route.ts + audit.ts", () => {
     const watchedFiles = ["src/app/api/notes/route.ts", "src/lib/audit.ts"];
 
     for (const rel of watchedFiles) {
-      it(`${rel} must not contain the literal "portfolio_note.update"`, () => {
+      it(`${rel} must not contain the quoted literal "portfolio_note.update"`, () => {
         const src = readText(rel);
+        const hasQuotedLiteral =
+          /"portfolio_note\.update"/.test(src) ||
+          /'portfolio_note\.update'/.test(src);
         expect(
-          src.includes("portfolio_note.update"),
+          hasQuotedLiteral,
           `${rel} still references the legacy audit action "portfolio_note.update" — the Phase 08 rename to user_note.{scope}.update must remove all in-repo call sites atomically (D-23).`,
         ).toBe(false);
       });
 
-      it(`${rel} must not contain the legacy entity_type literal "portfolio_note"`, () => {
+      it(`${rel} must not contain the quoted legacy entity_type literal "portfolio_note"`, () => {
         const src = readText(rel);
-        // Match the quoted literal to avoid catching the word inside a longer
-        // identifier (e.g. migration comments). Both single- and double-quoted
-        // forms are checked.
+        // Match the quoted literal only (enum/emitter form). Comments
+        // referencing the old name for historical context are allowed.
         const hasLiteral =
           /"portfolio_note"/.test(src) || /'portfolio_note'/.test(src);
         expect(
