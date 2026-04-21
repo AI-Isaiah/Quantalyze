@@ -353,7 +353,6 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     # Phase 09 / D-01 + D-16: load holdings-sourced pseudo-strategies
     holdings_ctx = _load_holding_portfolio_context(allocator_id)
     holding_strategies = holdings_ctx["portfolio_strategies"]
-    holding_weights_raw = holdings_ctx["portfolio_returns"]  # keyed by pseudo_id
     holding_returns = holdings_ctx["portfolio_returns"]
     holding_aum = holdings_ctx["portfolio_aum"]
     holdings_rows_eligible = holdings_ctx["holdings_rows_eligible"]
@@ -411,6 +410,112 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     }
 
 
+def compute_holding_flags(
+    *,
+    holdings_rows_eligible: list[dict],
+    portfolio_returns: dict[str, pd.Series],
+    portfolio_weights: dict[str, float],
+    portfolio_aum: float | None,
+    allocator_preferences: dict,
+    scored_candidates_by_slot: dict[str, list],
+) -> list[dict]:
+    """Phase 09 / finding f5. Per-holding flag rows persisted into match_batches.holding_flags.
+
+    Returns list[dict] — one entry per eligible holding (those present in portfolio_returns).
+    Applies D-04 (breach + candidate-exists gate) + D-05 (max_weight + correlation_ceiling)
+    + D-06 (FLAG_COMPOSITE_THRESHOLD=50 gate on top candidate composite score).
+
+    Entry shape:
+        {
+            "holding_ref":              "holding:{venue}:{symbol}:{holding_type}",
+            "value_usd":                float,
+            "weight":                   float,       # value_usd / portfolio_aum
+            "breach_reasons":           list[str],   # "max_weight" | "correlation_ceiling"
+            "top_candidate_strategy_id": str | None,
+            "top_candidate_composite":  float | None,
+            "flagged":                  bool,        # True iff breach + candidate_composite >= 50
+        }
+
+    This is a synchronous plain `def` per finding f1.
+    """
+    from services.match_engine import _compute_corr_with_portfolio
+
+    max_weight_pref = allocator_preferences.get("max_weight")
+    corr_ceiling = allocator_preferences.get("correlation_ceiling")
+    aum = float(portfolio_aum) if portfolio_aum and float(portfolio_aum) > 0 else None
+
+    flags: list[dict] = []
+
+    for row in holdings_rows_eligible:
+        pseudo_id = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
+
+        # Defense-in-depth: skip any holding whose series isn't loaded
+        # (warm-up already filtered upstream in _load_holding_portfolio_context)
+        if pseudo_id not in portfolio_returns:
+            continue
+
+        value = float(row.get("value_usd") or 0.0)
+        weight = value / aum if aum else 0.0
+        breaches: list[str] = []
+
+        # D-05 max_weight breach
+        if max_weight_pref is not None and aum is not None and weight > float(max_weight_pref):
+            breaches.append("max_weight")
+
+        # D-05 correlation_ceiling breach via _compute_corr_with_portfolio
+        if corr_ceiling is not None:
+            # Build weighted rest-of-portfolio returns (all holdings except this one)
+            rest_ids = [k for k in portfolio_returns if k != pseudo_id]
+            if rest_ids:
+                rest_weights = {k: portfolio_weights.get(k, 0.0) for k in rest_ids}
+                total_rest_w = sum(rest_weights.values())
+                if total_rest_w > 0:
+                    # Compute weighted portfolio returns for the rest
+                    rest_series_list = []
+                    for k in rest_ids:
+                        s = portfolio_returns[k]
+                        rest_series_list.append(s.rename(k))
+
+                    rest_df = pd.concat(rest_series_list, axis=1).dropna()
+                    if not rest_df.empty:
+                        w_arr = [rest_weights.get(col, 0.0) / total_rest_w for col in rest_df.columns]
+                        rest_port = (rest_df * w_arr).sum(axis=1)
+                        corr = _compute_corr_with_portfolio(
+                            rest_port,
+                            portfolio_returns[pseudo_id],
+                        )
+                        if corr is not None and corr > float(corr_ceiling):
+                            breaches.append("correlation_ceiling")
+
+        # D-06 candidate-exists gate: pick top verified strategy candidate above threshold
+        top_id: str | None = None
+        top_composite: float | None = None
+        slot_candidates = scored_candidates_by_slot.get(pseudo_id) or []
+        # Sort by final_score descending; only real strategy UUIDs (not holding: pseudo-ids)
+        for cand in sorted(slot_candidates, key=lambda c: float(getattr(c, "final_score", 0.0)), reverse=True):
+            cand_id = getattr(cand, "strategy_id", None)
+            if cand_id and not str(cand_id).startswith("holding:"):
+                score_val = float(getattr(cand, "final_score", 0.0))
+                if score_val >= FLAG_COMPOSITE_THRESHOLD:
+                    top_id = str(cand_id)
+                    top_composite = score_val
+                break  # Only need the top candidate — exit after first real UUID
+
+        flagged = bool(breaches) and top_id is not None and top_composite is not None and top_composite >= FLAG_COMPOSITE_THRESHOLD
+
+        flags.append({
+            "holding_ref": pseudo_id,
+            "value_usd": value,
+            "weight": weight,
+            "breach_reasons": breaches,
+            "top_candidate_strategy_id": top_id,
+            "top_candidate_composite": top_composite,
+            "flagged": flagged,
+        })
+
+    return flags
+
+
 async def _score_one_allocator(
     allocator_id: str,
     universe: dict[str, Any],
@@ -453,6 +558,41 @@ async def _score_one_allocator(
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
+        # Phase 09 / finding f5: compute per-holding flags list for SSR consumption
+        # (Plan 09-03 reads match_batches.holding_flags directly instead of deriving
+        # from match_candidates — avoids the ungrounded derivation Voice A flagged).
+        # scored_candidates_by_slot: pass the full ranked list to every holding slot;
+        # compute_holding_flags's top-real-UUID + FLAG_COMPOSITE_THRESHOLD filter
+        # gives deterministic per-holding top-candidate selection.
+        holdings_eligible = ctx.get("_holdings_rows_eligible") or []
+        scored_by_slot: dict[str, list] = {}
+        if holdings_eligible:
+            # Build a lightweight proxy list for the scored candidates
+            # (result["candidates"] are dicts with "strategy_id" and "score" keys)
+            class _ScoredProxy:
+                """Thin proxy so compute_holding_flags can use getattr(c, "strategy_id")."""
+                __slots__ = ("strategy_id", "final_score")
+                def __init__(self, strategy_id: str, final_score: float) -> None:
+                    self.strategy_id = strategy_id
+                    self.final_score = final_score
+
+            proxies = [
+                _ScoredProxy(c["strategy_id"], float(c.get("score", 0.0)))
+                for c in result["candidates"]
+            ]
+            for row in holdings_eligible:
+                slot_key = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
+                scored_by_slot[slot_key] = proxies  # same ranked list for every slot
+
+        holding_flags_list = compute_holding_flags(
+            holdings_rows_eligible=holdings_eligible,
+            portfolio_returns=ctx["portfolio_returns"],
+            portfolio_weights=ctx["portfolio_weights"],
+            portfolio_aum=ctx["portfolio_aum"],
+            allocator_preferences=ctx["preferences"] or {},
+            scored_candidates_by_slot=scored_by_slot,
+        )
+
         # Persist: one match_batches row, N match_candidates rows.
         supabase = get_supabase()
 
@@ -470,6 +610,8 @@ async def _score_one_allocator(
             "effective_thresholds": result["effective_thresholds"],
             "source_strategy_count": result["source_strategy_count"],
             "latency_ms": latency_ms,
+            # Phase 09 / finding f5: JSONB list read by Plan 09-03 SSR layer
+            "holding_flags": holding_flags_list,
         }
         batch_insert = await asyncio.to_thread(
             lambda: supabase.table("match_batches").insert(batch_row).execute()

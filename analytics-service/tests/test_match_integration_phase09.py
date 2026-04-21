@@ -12,9 +12,8 @@ asyncio.to_thread from _score_one_allocator. Tests call it without await.
 """
 from __future__ import annotations
 
-import pandas as pd
 import pytest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 # NOTE per finding f1: _load_allocator_context is sync `def` at routers/match.py:172.
 # Tests MUST be plain `def` (NOT `async def`) and call without `await`. Adding
@@ -230,8 +229,6 @@ def test_warmup_gate_under_30d(monkeypatch):
     btc_snaps = _make_snapshot_series(20, "BTC", start_value=50000.0)
     eth_snaps = _make_snapshot_series(41, "ETH", start_value=30000.0)
     # Merge into a unified snapshot list covering the same asof range
-    from datetime import date, timedelta
-    base = date(2026, 1, 1)
     combined: dict[str, dict] = {}
     for s in btc_snaps:
         combined.setdefault(s["asof"], {"asof": s["asof"], "breakdown": {}})

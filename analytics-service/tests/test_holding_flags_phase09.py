@@ -11,7 +11,6 @@ All tests are plain `def` (NOT async def) per finding f1.
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 from unittest.mock import MagicMock
 
 from routers.match import compute_holding_flags, FLAG_COMPOSITE_THRESHOLD
@@ -82,23 +81,34 @@ def test_holding_flags_max_weight():
 
 
 def test_holding_flags_correlation_ceiling():
-    """finding f5: perfectly-correlated holdings trigger correlation_ceiling breach.
+    """finding f5: highly-correlated holdings trigger correlation_ceiling breach.
 
-    Three symbols with identical returns series — each has correlation ≈ 1.0
-    with the rest-of-portfolio, exceeding the 0.8 ceiling.
+    Three symbols share the same base returns signal with tiny additive offsets
+    (avoids NaN from zero-stddev with identical constant series), producing
+    correlation > 0.99 which exceeds the 0.8 ceiling.
     """
-    idx = pd.date_range("2026-01-01", periods=40, freq="D").strftime("%Y-%m-%d").tolist()
-    identical = pd.Series([0.01] * 40, index=idx)
+    import numpy as np
 
+    rng = np.random.default_rng(42)
+    n = 40
+    # Shared trend signal: normally distributed returns
+    base = rng.standard_normal(n) * 0.02
+    # Each symbol = base + tiny noise (corr ≈ 0.99 with the weighted portfolio)
+    noise_scale = 0.0001
+    btc_vals = base + rng.standard_normal(n) * noise_scale
+    eth_vals = base + rng.standard_normal(n) * noise_scale
+    sol_vals = base + rng.standard_normal(n) * noise_scale
+
+    idx = pd.date_range("2026-01-01", periods=n, freq="D").strftime("%Y-%m-%d").tolist()
     holdings = [
         _mk_holding(symbol="BTC", value_usd=500.0),
         _mk_holding(symbol="ETH", value_usd=300.0),
         _mk_holding(symbol="SOL", value_usd=200.0),
     ]
     portfolio_returns = {
-        "holding:binance:BTC:spot": identical,
-        "holding:binance:ETH:spot": identical,
-        "holding:binance:SOL:spot": identical,
+        "holding:binance:BTC:spot": pd.Series(btc_vals.tolist(), index=idx),
+        "holding:binance:ETH:spot": pd.Series(eth_vals.tolist(), index=idx),
+        "holding:binance:SOL:spot": pd.Series(sol_vals.tolist(), index=idx),
     }
     portfolio_weights = {
         "holding:binance:BTC:spot": 0.5,

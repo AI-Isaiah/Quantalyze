@@ -6,7 +6,6 @@ analytics-service/services/equity_reconstruction.py for LIVE-01.
 All tests are plain `def` (not async) per finding f1.
 """
 
-import pandas as pd
 import pytest
 from services.equity_reconstruction import reconstruct_symbol_returns
 
