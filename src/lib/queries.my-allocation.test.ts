@@ -132,7 +132,11 @@ const chainAudit = vi.hoisted(() => ({
   entries: [] as ChainAuditEntry[],
 }));
 
-type Filter = { column: string; value: unknown; op: "eq" | "in" | "is" };
+type Filter = {
+  column: string;
+  value: unknown;
+  op: "eq" | "in" | "is" | "not-is";
+};
 
 /**
  * Minimal builder that supports the methods these helpers actually use:
@@ -161,6 +165,7 @@ function buildChain(table: string) {
         const v = row[f.column];
         if (f.op === "eq") return v === f.value;
         if (f.op === "is") return v === f.value;
+        if (f.op === "not-is") return (v ?? null) !== f.value;
         if (f.op === "in")
           return Array.isArray(f.value) && (f.value as unknown[]).includes(v);
         return true;
@@ -235,6 +240,15 @@ function buildChain(table: string) {
     },
     is: (column: string, value: unknown) => {
       filters.push({ column, value, op: "is" });
+      return chain;
+    },
+    // Phase 09 / 09-03 — admin.from("match_decisions")...eq(...).not("original_holding_ref", "is", null)
+    // Only the "<col> IS NOT NULL" form is exercised by getMyAllocationDashboard;
+    // broader PostgREST .not() semantics intentionally unsupported.
+    not: (column: string, op: string, value: unknown) => {
+      if (op === "is") {
+        filters.push({ column, value, op: "not-is" });
+      }
       return chain;
     },
     // .gt() is used by bridge_outcome_dismissals to filter active rows.
