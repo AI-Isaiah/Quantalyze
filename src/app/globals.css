@@ -209,3 +209,21 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .mandate-saved-flash { animation: none; opacity: 1; }
 }
+
+/* Phase 08 — NoteRender institutional prose rules. */
+/* Minimal typography reset for rendered markdown in notes. Does NOT use
+   @tailwindcss/typography (no new dependency) — a hand-rolled block keyed off
+   the .prose-note wrapper in src/components/notes/NoteRender.tsx. All values
+   source design tokens from :root above. */
+.prose-note p { margin-bottom: 0.5rem; }
+.prose-note h1, .prose-note h2, .prose-note h3 { font-weight: 600; margin-bottom: 0.25rem; margin-top: 0.75rem; }
+.prose-note ul, .prose-note ol { padding-left: 1.25rem; margin-bottom: 0.5rem; }
+.prose-note li { margin-bottom: 0.125rem; }
+.prose-note code { font-family: var(--font-mono); font-size: 12px; background: var(--color-border); padding: 0.125rem 0.25rem; border-radius: 3px; }
+.prose-note pre { background: var(--color-border); border-radius: 4px; padding: 0.75rem; overflow-x: auto; margin-bottom: 0.5rem; }
+.prose-note blockquote { border-left: 2px solid var(--color-border); padding-left: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.5rem; }
+.prose-note table { border-collapse: collapse; width: 100%; margin-bottom: 0.5rem; font-size: 13px; }
+.prose-note th, .prose-note td { border: 1px solid var(--color-border); padding: 0.25rem 0.5rem; text-align: left; }
+.prose-note th { font-weight: 600; background: var(--color-page); }
+.prose-note del { text-decoration: line-through; color: var(--color-text-muted); }
+.prose-note hr { border: none; border-top: 1px solid var(--color-border); margin: 0.75rem 0; }
