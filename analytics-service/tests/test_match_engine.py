@@ -1053,3 +1053,26 @@ def test_v1_to_v2_golden_snapshot():
     assert actual == expected, (
         "Golden snapshot drift — regen via REGENERATE_GOLDEN=1 if math change is intentional"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 09 / D-17: ENGINE_VERSION bump assertion
+# ---------------------------------------------------------------------------
+
+
+def test_engine_version_phase09_bump():
+    """Phase 09 D-17: ENGINE_VERSION must be v2.1.0 after the input-layer rewire.
+
+    _should_skip_allocator trigger #2 auto-invalidates cached v2.0.0 batches
+    on first post-ship cron run via engine_version != ENGINE_VERSION check.
+    WEIGHTS_VERSION stays v2.0.0 (weight composition identical; only input layer changed).
+    """
+    assert ENGINE_VERSION == "v2.1.0", (
+        f"Phase 09 D-17: expected ENGINE_VERSION='v2.1.0', got '{ENGINE_VERSION}'. "
+        "Bump ENGINE_VERSION in services/match_engine.py."
+    )
+    # WEIGHTS_VERSION unchanged per D-17 (weight composition identical; only input layer changed)
+    assert WEIGHTS_VERSION == "v2.0.0", (
+        f"WEIGHTS_VERSION should remain 'v2.0.0', got '{WEIGHTS_VERSION}'. "
+        "D-17 specifies WEIGHTS_VERSION is NOT bumped."
+    )
