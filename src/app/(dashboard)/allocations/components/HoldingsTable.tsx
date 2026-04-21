@@ -29,7 +29,12 @@
  * back ON via `onShowRevokedChange(true)`.
  */
 
-import type { CSSProperties } from "react";
+import { Fragment, useState, type CSSProperties } from "react";
+import {
+  HoldingNoteIconButton,
+  HoldingNoteRow,
+} from "@/components/notes/HoldingNoteRow";
+import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 
 export interface HoldingRow {
   id: string;
@@ -49,6 +54,20 @@ export interface HoldingsTableProps {
   holdings: HoldingRow[];
   showRevoked: boolean;
   onShowRevokedChange: (next: boolean) => void;
+  /**
+   * Phase 08 Plan 04 — optional map of `buildHoldingScopeRef(...)` → existing
+   * user_note row for the current user. When a row's scope_ref lives in this
+   * map, the trailing note icon renders in the "has note" state and the
+   * sub-row seeds its editor with the content. When absent (default — Plan
+   * 04 ships with no server-side prefetch hook yet), the icon renders in
+   * the empty state. Server-side population inside getMyAllocationDashboard
+   * is a follow-up optimisation; for now Phase 08 keeps the holdings layer
+   * indicator-only when the query layer supplies the map.
+   */
+  notesByHoldingScopeRef?: Record<
+    string,
+    { content: string; updated_at: string } | undefined
+  >;
 }
 
 // UI-SPEC §2 amber chip palette — amber-50 bg, amber-200 border,
@@ -101,6 +120,7 @@ export function HoldingsTable({
   holdings,
   showRevoked,
   onShowRevokedChange,
+  notesByHoldingScopeRef = {},
 }: HoldingsTableProps) {
   const visibleHoldings = showRevoked
     ? holdings
@@ -109,6 +129,16 @@ export function HoldingsTable({
   const hiddenCount = showRevoked
     ? 0
     : holdings.filter((h) => h.source_key_sync_status === "revoked").length;
+
+  // One-open-at-a-time sub-row (OutcomesWidget convention). Clicking a
+  // different row's note icon closes the previously-open sub-row.
+  const [expandedNoteRowId, setExpandedNoteRowId] = useState<string | null>(
+    null,
+  );
+
+  // 7 visible columns: Venue/Symbol, Type, Quantity, Entry price,
+  // Value (USD), Unrealized P&L, plus the new trailing note column.
+  const TOTAL_COLUMNS = 7;
 
   return (
     <section className="mt-6 rounded-lg border border-border bg-surface">
@@ -139,8 +169,10 @@ export function HoldingsTable({
               <th className="px-4 py-2 font-semibold text-right">Entry price</th>
               <th className="px-4 py-2 font-semibold text-right">Value (USD)</th>
               <th className="px-4 py-2 font-semibold text-right">Unrealized P&amp;L</th>
-              {/* Trailing placeholder column reserved for Plan 04 note icon. */}
-              <th className="px-2 py-2" aria-hidden="true" />
+              {/* Phase 08 Plan 04 — trailing note-icon column. aria-label
+                  (not aria-hidden) so screenreaders announce the column
+                  purpose while keeping the header visually unlabeled. */}
+              <th className="w-10 px-2 py-2" aria-label="Notes" />
             </tr>
           </thead>
           <tbody>
@@ -149,38 +181,75 @@ export function HoldingsTable({
               const numericCell = isRevoked
                 ? "px-4 py-2 font-metric tabular-nums text-right line-through text-text-muted"
                 : "px-4 py-2 font-metric tabular-nums text-right text-text-primary";
+              const scopeRef = buildHoldingScopeRef({
+                venue: h.venue,
+                symbol: h.symbol,
+                holding_type: h.holding_type,
+              });
+              const noteEntry = notesByHoldingScopeRef[scopeRef];
+              const isExpanded = expandedNoteRowId === h.id;
               return (
-                <tr
-                  key={h.id}
-                  className="border-b border-border last:border-b-0 hover:bg-page/50 transition-colors"
-                  style={{ minHeight: 44 }}
-                >
-                  <td className="px-4 py-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-text-primary font-medium">
-                        {venueLabel(h.venue)} · {h.symbol}
-                      </span>
-                      {isRevoked ? (
-                        <span
-                          className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
-                          style={AMBER_CHIP_STYLE}
-                        >
-                          Key revoked
+                <Fragment key={h.id}>
+                  <tr
+                    className="border-b border-border last:border-b-0 hover:bg-page/50 transition-colors"
+                    style={{ minHeight: 44 }}
+                  >
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-text-primary font-medium">
+                          {venueLabel(h.venue)} · {h.symbol}
                         </span>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2 text-xs text-text-secondary">
-                    {h.holding_type === "spot" ? "Spot" : "Derivative"}
-                  </td>
-                  <td className={numericCell}>{formatQuantity(h.quantity)}</td>
-                  <td className={numericCell}>{formatUsd(h.entry_price)}</td>
-                  <td className={numericCell}>{formatUsd(h.value_usd)}</td>
-                  <td className={numericCell}>
-                    {formatPnl(h.unrealized_pnl_usd)}
-                  </td>
-                  <td className="px-2 py-2" aria-hidden="true" />
-                </tr>
+                        {isRevoked ? (
+                          <span
+                            className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider"
+                            style={AMBER_CHIP_STYLE}
+                          >
+                            Key revoked
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2 text-xs text-text-secondary">
+                      {h.holding_type === "spot" ? "Spot" : "Derivative"}
+                    </td>
+                    <td className={numericCell}>{formatQuantity(h.quantity)}</td>
+                    <td className={numericCell}>{formatUsd(h.entry_price)}</td>
+                    <td className={numericCell}>{formatUsd(h.value_usd)}</td>
+                    <td className={numericCell}>
+                      {formatPnl(h.unrealized_pnl_usd)}
+                    </td>
+                    <td className="px-2 py-2">
+                      <HoldingNoteIconButton
+                        hasNote={!!noteEntry}
+                        revoked={isRevoked}
+                        isExpanded={isExpanded}
+                        onClick={() =>
+                          setExpandedNoteRowId((prev) =>
+                            prev === h.id ? null : h.id,
+                          )
+                        }
+                        symbol={h.symbol}
+                        holdingType={h.holding_type}
+                        rowId={h.id}
+                      />
+                    </td>
+                  </tr>
+                  {isExpanded ? (
+                    <HoldingNoteRow
+                      rowId={h.id}
+                      colSpan={TOTAL_COLUMNS}
+                      venue={h.venue}
+                      symbol={h.symbol}
+                      holding_type={h.holding_type}
+                      initialContent={noteEntry?.content ?? ""}
+                      initialLastSavedAt={
+                        noteEntry?.updated_at
+                          ? new Date(noteEntry.updated_at)
+                          : null
+                      }
+                    />
+                  ) : null}
+                </Fragment>
               );
             })}
           </tbody>
