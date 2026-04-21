@@ -103,14 +103,23 @@ export default async function ComparePage({
     ? `Comparing ${items.length} ${items.length === 1 ? "Strategy" : "Strategies"}`
     : `Comparing ${items.length} ${items.length === 1 ? "item" : "items"}`;
 
+  // CompareEquityOverlay and CompareCorrelationMatrix operate on
+  // `item.strategy` — they predate the Phase 09 discriminated union and
+  // have no returns-series equivalent for holdings. Pass the strategy slice
+  // only; the holding rows render via CompareTable's kind-branch.
+  const strategyOnlyItems = items.filter(
+    (it): it is Extract<typeof items[number], { kind: "strategy" }> =>
+      it.kind === "strategy",
+  );
+
   return (
     <>
       <Breadcrumb items={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]} />
       <PageHeader title={title} />
       <div className="space-y-8">
         <CompareTable items={items} />
-        <CompareEquityOverlay items={items as never} />
-        <CompareCorrelationMatrix items={items as never} />
+        <CompareEquityOverlay items={strategyOnlyItems} />
+        <CompareCorrelationMatrix items={strategyOnlyItems} />
       </div>
     </>
   );
