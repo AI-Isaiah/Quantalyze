@@ -138,7 +138,7 @@ describe("POST /api/match/decisions/holding — zod validation", () => {
     const res = await POST(
       mkReq({
         holding_ref: "not-a-holding-ref",
-        top_candidate_strategy_id: "11111111-2222-3333-4444-555555555555",
+        top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
       }),
     );
     expect(res.status).toBe(400);
@@ -155,7 +155,7 @@ describe("POST /api/match/decisions/holding — ownership gate (T-09-03.b)", () 
     const res = await POST(
       mkReq({
         holding_ref: "holding:binance:BTC:spot",
-        top_candidate_strategy_id: "11111111-2222-3333-4444-555555555555",
+        top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
       }),
     );
     expect(res.status).toBe(403);
@@ -175,7 +175,7 @@ describe("POST /api/match/decisions/holding — happy path", () => {
       error: null,
     });
     mockStrategySelectSingle.mockResolvedValueOnce({
-      data: { id: "11111111-2222-3333-4444-555555555555" },
+      data: { id: "11111111-2222-4333-8444-555555555555" },
       error: null,
     });
     mockDecisionInsertSingle.mockResolvedValueOnce({
@@ -186,7 +186,7 @@ describe("POST /api/match/decisions/holding — happy path", () => {
     const res = await POST(
       mkReq({
         holding_ref: "holding:binance:BTC:spot",
-        top_candidate_strategy_id: "11111111-2222-3333-4444-555555555555",
+        top_candidate_strategy_id: "11111111-2222-4333-8444-555555555555",
       }),
     );
 
@@ -198,7 +198,7 @@ describe("POST /api/match/decisions/holding — happy path", () => {
     expect(mockDecisionInsertSingle).toHaveBeenCalledWith(
       expect.objectContaining({
         allocator_id: "alloc-1",
-        strategy_id: "11111111-2222-3333-4444-555555555555",
+        strategy_id: "11111111-2222-4333-8444-555555555555",
         original_strategy_id: null,
         original_holding_ref: "holding:binance:BTC:spot",
         decision: "sent_as_intro",
