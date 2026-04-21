@@ -7,6 +7,7 @@ import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import { API_KEY_USER_COLUMNS } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import type { DailyPoint } from "@/lib/scenario";
+import type { FlaggedHolding } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
 import type {
   Strategy,
   StrategyAnalytics,
@@ -661,6 +662,28 @@ export interface MyAllocationDashboardPayload {
    * "OKX"]). Used in the venue-specific warm-up copy.
    */
   activeVenues: string[];
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 09 / D-07 + D-08 + D-11 + finding f5
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Flagged holdings READ from match_batches.holding_flags JSONB (written by
+   * Plan 09-02's compute_holding_flags). Phase 09-03 does NOT derive flags
+   * from match_candidates + allocator_preferences — that derivation was
+   * explicitly flagged as ungrounded by Voice A and replaced by this
+   * direct-read path per finding f5.
+   *
+   * Each entry has top_candidate_strategy_id resolved to its strategy name
+   * via a strategies table join. Empty array when no batch exists or no
+   * holdings are flagged.
+   */
+  flaggedHoldings: FlaggedHolding[];
+  /**
+   * Phase 09 / D-11. Keyed by scope_ref "holding:{venue}:{symbol}:{holding_type}".
+   * null = no decision yet; { id } = decision exists (drives deriveEligibleForOutcome).
+   * Read via admin client with explicit .eq("allocator_id", userId) ownership gate
+   * (match_decisions lacks owner-self-SELECT RLS — queries.ts:968-976 precedent).
+   */
+  matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
 }
 
 /**
@@ -832,6 +855,15 @@ export const getMyAllocationDashboard = cache(
       phase07EquityRes,
       phase07HoldingsRes,
       apiKeys,
+      // Phase 09 / finding f5 — latest match_batches row for this allocator.
+      // holding_flags JSONB is written by Plan 09-02's compute_holding_flags.
+      // We do NOT derive flags from match_candidates + allocator_preferences
+      // (Voice A flagged that as ungrounded; replaced by direct-read here).
+      phase09MatchBatchRes,
+      // Phase 09 / D-11 — match_decisions with original_holding_ref set.
+      // Admin client required: match_decisions has no allocator-self-SELECT RLS.
+      // Explicit .eq("allocator_id", userId) is the ownership gate (Pattern D).
+      phase09MatchDecisionsRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -853,6 +885,17 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .order("asof", { ascending: false }),
       getUserApiKeys(userId),
+      supabase
+        .from("match_batches")
+        .select("id, holding_flags")
+        .eq("allocator_id", userId)
+        .order("computed_at", { ascending: false })
+        .limit(1),
+      admin
+        .from("match_decisions")
+        .select("id, original_holding_ref")
+        .eq("allocator_id", userId)
+        .not("original_holding_ref", "is", null),
     ]);
 
     const equitySnapshots = (phase07EquityRes.data ??
@@ -879,6 +922,73 @@ export const getMyAllocationDashboard = cache(
       holdingsRows,
     );
 
+    // Phase 09 / D-07 + D-08 + D-11 + finding f5
+    // Derive flaggedHoldings by READING match_batches.holding_flags JSONB.
+    // DO NOT derive from match_candidates + allocator_preferences (Voice A rejected that as ungrounded).
+    const latestBatch = (phase09MatchBatchRes.data ?? [])[0] as
+      | { id: string; holding_flags: unknown }
+      | undefined;
+    const rawFlags = (latestBatch?.holding_flags ?? []) as Array<{
+      holding_ref: string;
+      value_usd: number;
+      weight: number;
+      breach_reasons: Array<"max_weight" | "correlation_ceiling">;
+      top_candidate_strategy_id: string | null;
+      top_candidate_composite: number | null;
+      flagged: boolean;
+    }>;
+
+    const flaggedRowsOnly = rawFlags.filter(
+      (f) => f.flagged && f.top_candidate_strategy_id,
+    );
+
+    // Resolve candidate strategy names from the strategies table.
+    const candidateIds = Array.from(
+      new Set(flaggedRowsOnly.map((f) => f.top_candidate_strategy_id!)),
+    );
+    const { data: candidateStrategies } =
+      candidateIds.length > 0
+        ? await supabase
+            .from("strategies")
+            .select("id, name")
+            .in("id", candidateIds)
+        : { data: [] as Array<{ id: string; name: string }> };
+    const nameById = new Map(
+      (candidateStrategies ?? []).map((s) => [s.id, s.name]),
+    );
+
+    const flaggedHoldings: FlaggedHolding[] = flaggedRowsOnly
+      .map((f): FlaggedHolding | null => {
+        // Parse holding_ref: "holding:{venue}:{symbol}:{holding_type}"
+        const parts = f.holding_ref.split(":");
+        if (parts.length !== 4 || parts[0] !== "holding") return null;
+        const [, venue, symbol, holding_type] = parts;
+        if (holding_type !== "spot" && holding_type !== "derivative") return null;
+        const name = nameById.get(f.top_candidate_strategy_id!);
+        if (!name) return null;
+        return {
+          venue,
+          symbol,
+          holding_type,
+          value_usd: f.value_usd,
+          top_candidate_strategy_id: f.top_candidate_strategy_id!,
+          top_candidate_name: name,
+          top_candidate_composite: f.top_candidate_composite!,
+          breach_reasons: f.breach_reasons,
+        };
+      })
+      .filter((x): x is FlaggedHolding => x !== null);
+
+    // Build matchDecisionsByHoldingRef keyed by scope_ref.
+    const matchDecisionsByHoldingRef: Record<string, { id: string } | null> =
+      {};
+    for (const d of phase09MatchDecisionsRes.data ?? []) {
+      const row = d as { id: string; original_holding_ref: string | null };
+      if (row.original_holding_ref) {
+        matchDecisionsByHoldingRef[row.original_holding_ref] = { id: row.id };
+      }
+    }
+
     if (!portfolio) {
       // No real portfolio yet — still return a full Phase 07 payload so
       // fresh allocators with api_keys + snapshots see real equity. Legacy
@@ -893,6 +1003,8 @@ export const getMyAllocationDashboard = cache(
         apiKeys,
         alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
         outcomes: [] as OutcomeRow[],
+        flaggedHoldings,
+        matchDecisionsByHoldingRef,
         ...phase07,
       };
     }
@@ -1116,6 +1228,8 @@ export const getMyAllocationDashboard = cache(
       apiKeys,
       alertCount: alertCounts,
       outcomes,
+      flaggedHoldings,
+      matchDecisionsByHoldingRef,
       ...phase07,
     };
   },

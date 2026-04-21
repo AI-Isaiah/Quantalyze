@@ -10,6 +10,7 @@ import {
 import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } from "@/lib/types";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 import type { OutcomeRow } from "@/lib/queries";
+import type { FlaggedHolding } from "./lib/holding-outcome-adapter";
 import type { TileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
@@ -164,6 +165,13 @@ interface AllocationDashboardProps {
   minHistoryDepthMonths?: number | null;
   /** Per VOICES-ACCEPTED f9 — forwarded to KpiStrip. */
   activeVenues?: string[];
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 09 / D-07 + D-08 + D-11 + finding f5
+  // ─────────────────────────────────────────────────────────────────────
+  /** Phase 09 — flagged holdings from match_batches.holding_flags (finding f5). */
+  flaggedHoldings?: FlaggedHolding[];
+  /** Phase 09 — match decisions keyed by holding scope_ref (D-11). */
+  matchDecisionsByHoldingRef?: Record<string, { id: string } | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +273,11 @@ export function AllocationDashboard({
   holdingsSummary = [],
   hasSyncing = false,
   lastSyncAt = null,
+  // Phase 09 / D-07 + D-08 + D-11 + finding f5 — flagged holdings + decisions.
+  // Default empty so existing call sites (regression tests, Phase 5/9 paths) stay
+  // source-compatible without any changes.
+  flaggedHoldings = [],
+  matchDecisionsByHoldingRef = {},
 }: AllocationDashboardProps) {
   // Phase 07 / VOICES-ACCEPTED f2 — one gate for every strategy-composite
   // widget decision below. A Bridge allocator (post-Phase-09) has
@@ -580,8 +593,11 @@ export function AllocationDashboard({
       weightSnapshots,
       positionSnapshots,
       outcomes,
+      // Phase 09 / D-08 + D-11 — thread into AllocationsTabs for Scenario tab
+      flaggedHoldings,
+      matchDecisionsByHoldingRef,
     }),
-    [portfolio, analytics, strategies, apiKeys, alertCount, metrics, compositeReturns, weightSnapshots, positionSnapshots, outcomes],
+    [portfolio, analytics, strategies, apiKeys, alertCount, metrics, compositeReturns, weightSnapshots, positionSnapshots, outcomes, flaggedHoldings, matchDecisionsByHoldingRef],
   );
 
   // ── Widget renderer ─────────────────────────────────────────────
@@ -862,7 +878,10 @@ export function AllocationDashboard({
         activeVenues={activeVenues}
       />
 
-      {/* Insight strip — fixed above the widget grid */}
+      {/* Insight strip — fixed above the widget grid.
+          Phase 09 / D-07: flaggedCount threads into InsightStrip so the
+          "Bridge flagged N holding(s) — Review in Scenario →" line renders
+          when flaggedHoldings.length > 0. Hidden when 0 or undefined. */}
       <div className="mb-6 rounded-lg border border-[#E2E8F0] bg-white px-5 py-4">
         <InsightStrip
           analytics={analytics}
@@ -870,6 +889,7 @@ export function AllocationDashboard({
           max={3}
           portfolioStrategies={rebalanceDriftInputs}
           portfolioAgeDays={portfolioAgeDays}
+          flaggedCount={flaggedHoldings.length}
         />
       </div>
 

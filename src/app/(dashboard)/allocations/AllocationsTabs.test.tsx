@@ -75,6 +75,9 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   equityDailyPoints: [],
   minHistoryDepthMonths: null,
   activeVenues: [],
+  // Phase 09 / D-08 + D-11 + finding f5
+  flaggedHoldings: [],
+  matchDecisionsByHoldingRef: {},
 };
 
 function setSearchParams(query: string): void {
