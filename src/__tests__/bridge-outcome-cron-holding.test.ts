@@ -38,8 +38,11 @@ import {
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Stable synthetic UUIDs — test-only, deterministic for easier cleanup
-const STRATEGY_HOLDING_TEST = "00000000-0000-0000-0000-000000000730";
-const STRATEGY_LEGACY_NULL  = "00000000-0000-0000-0000-000000000731";
+const STRATEGY_HOLDING_TEST  = "00000000-0000-0000-0000-000000000730";
+const STRATEGY_LEGACY_NULL   = "00000000-0000-0000-0000-000000000731";
+// Separate strategy for Test 4 so it doesn't collide with Test 3's bridge_outcomes
+// UNIQUE slot (allocator, strategy, COALESCE(original_holding_ref,'')='')).
+const STRATEGY_LEGACY_NULL_2 = "00000000-0000-0000-0000-000000000732";
 
 // Anchor date for all test fixtures
 const ANCHOR_DATE = "2026-01-01";
@@ -147,6 +150,11 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           user_id: allocatorId,
           name: "Phase9 Cron Legacy Null Test (synthetic)",
         },
+        {
+          id: STRATEGY_LEGACY_NULL_2,
+          user_id: allocatorId,
+          name: "Phase9 Cron Legacy Null Test 2 (synthetic)",
+        },
       ],
       { onConflict: "id" },
     );
@@ -156,9 +164,9 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       );
     }
 
-    // Seed strategy_analytics for both strategies
+    // Seed strategy_analytics for all strategies
     // STRATEGY_HOLDING_TEST: empty series (holding branch uses breakdown, not returns_series)
-    // STRATEGY_LEGACY_NULL: linear curve (legacy NULL match_decision_id path uses strategy branch)
+    // STRATEGY_LEGACY_NULL / STRATEGY_LEGACY_NULL_2: linear curve (strategy branch)
     await admin.from("strategy_analytics").upsert(
       [
         {
@@ -167,6 +175,10 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
         },
         {
           strategy_id: STRATEGY_LEGACY_NULL,
+          returns_series: buildLinearEquityCurve(180),
+        },
+        {
+          strategy_id: STRATEGY_LEGACY_NULL_2,
           returns_series: buildLinearEquityCurve(180),
         },
       ],
@@ -197,11 +209,11 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
     await admin
       .from("strategy_analytics")
       .delete()
-      .in("strategy_id", [STRATEGY_HOLDING_TEST, STRATEGY_LEGACY_NULL]);
+      .in("strategy_id", [STRATEGY_HOLDING_TEST, STRATEGY_LEGACY_NULL, STRATEGY_LEGACY_NULL_2]);
     await admin
       .from("strategies")
       .delete()
-      .in("id", [STRATEGY_HOLDING_TEST, STRATEGY_LEGACY_NULL]);
+      .in("id", [STRATEGY_HOLDING_TEST, STRATEGY_LEGACY_NULL, STRATEGY_LEGACY_NULL_2]);
     await admin.auth.admin.deleteUser(allocatorId);
   });
 
@@ -287,9 +299,11 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "holding-sourced outcome with missing value_at(allocated_at + N) leaves that delta as NULL",
     async () => {
-      // Use a date far enough in the future that anchor+30 / anchor+90 / anchor+180
-      // snapshots don't exist — only the anchor day snapshot is seeded
-      const futureAnchor = addDays(ANCHOR_DATE, 365);
+      // Use a recent past date (ANCHOR_DATE + 10 = 2026-01-11) within the
+      // bridge_outcomes_allocated_at_check window (CURRENT_DATE - 365..CURRENT_DATE).
+      // The breakdown snapshots at this date+30/+90/+180 are NOT seeded, so
+      // extract_symbol_value_at will return NULL for those windows → deltas stay NULL.
+      const recentAnchor = addDays(ANCHOR_DATE, 10);
 
       // Seed only the anchor snapshot (no +30/+90/+180 rows)
       const { error: snapErr } = await admin
@@ -298,7 +312,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           [
             {
               allocator_id: allocatorId,
-              asof: futureAnchor,
+              asof: recentAnchor,
               value_usd: 200,
               breakdown: { ETH: 200 },
               source: "exchange_primary",
@@ -308,7 +322,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
         );
       expect(snapErr).toBeNull();
 
-      // Holding-sourced match_decision for ETH
+      // Holding-sourced match_decision for ETH (different holding_ref from Test 1's BTC)
       const { data: md2, error: mdErr2 } = await admin
         .from("match_decisions")
         .insert({
@@ -332,7 +346,7 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
           match_decision_id: md2!.id,
           kind: "allocated",
           percent_allocated: 5,
-          allocated_at: futureAnchor,
+          allocated_at: recentAnchor,
           needs_recompute: false,
           delta_30d: null,
         })
@@ -428,11 +442,13 @@ describe("bridge-outcome-cron-holding (live-DB)", () => {
       //
       // Fixture: bridge_outcomes row with match_decision_id=NULL, kind='allocated',
       // strategy_id pointing to a strategy with a real returns_series.
+      // Uses STRATEGY_LEGACY_NULL_2 (not STRATEGY_LEGACY_NULL) to avoid colliding
+      // with Test 3's bridge_outcomes UNIQUE slot (allocator, strategy, COALESCE(holding_ref,'')='').
       const { data: boLegacy, error: boLegacyErr } = await admin
         .from("bridge_outcomes")
         .insert({
           allocator_id: allocatorId,
-          strategy_id: STRATEGY_LEGACY_NULL,
+          strategy_id: STRATEGY_LEGACY_NULL_2,
           match_decision_id: null, // explicit NULL — simulates ON DELETE SET NULL or pre-link row
           kind: "allocated",
           percent_allocated: 25,

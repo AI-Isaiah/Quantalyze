@@ -136,6 +136,10 @@ describe("bridge-outcome-cron (live-DB)", () => {
         strategy_id: stratId,
         decision: "sent_as_intro",
         decided_by: allocatorId,
+        // Migration 072 XOR CHECK requires exactly one of original_strategy_id
+        // or original_holding_ref to be set. Strategy-sourced rows use original_strategy_id.
+        original_strategy_id: stratId,
+        original_holding_ref: null,
       });
       if (mdIns.error && mdIns.error.code !== "23505") {
         throw new Error(
