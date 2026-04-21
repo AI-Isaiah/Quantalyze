@@ -342,29 +342,16 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
       expect(boErr1).toBeNull();
       if (bo1?.id) createdBridgeOutcomeIds.push(bo1.id as string);
 
-      // Second insert with the same (allocator, strategy, holding_ref) via another
-      // match_decision that also points to holding:okx:SOL:spot
-      const { data: md2, error: errMd2 } = await admin
-        .from("match_decisions")
-        .insert({
-          allocator_id: allocatorId,
-          strategy_id: STRATEGY_XOR_A,
-          decision: "thumbs_down",
-          decided_by: allocatorId,
-          original_strategy_id: null,
-          original_holding_ref: "holding:okx:SOL:spot",
-        })
-        .select("id")
-        .single();
-      expect(errMd2).toBeNull();
-      if (md2?.id) createdMatchDecisionIds.push(md2.id as string);
-
-      // This second bridge_outcomes insert should fail: same (allocator, strategy,
-      // COALESCE(original_holding_ref, '')) triple → 23505
+      // Second bridge_outcomes insert re-using the SAME match_decision (md1)
+      // → trigger denormalizes same holding_ref → same (allocator, strategy,
+      //   COALESCE(original_holding_ref, '')) triple → 23505
+      // NOTE: Migration 074 also correctly prevents two match_decisions with the
+      // same (allocator, strategy, holding_ref, decision) from being created —
+      // so we demonstrate the bridge_outcomes dedup using the existing md1.
       const { error: boErr2 } = await admin.from("bridge_outcomes").insert({
         allocator_id: allocatorId,
         strategy_id: STRATEGY_XOR_A,
-        match_decision_id: md2!.id,
+        match_decision_id: md1!.id,
         kind: "allocated",
         percent_allocated: 20,
         allocated_at: today,
