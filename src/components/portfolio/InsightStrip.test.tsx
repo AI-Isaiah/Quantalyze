@@ -1,7 +1,14 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InsightStrip } from "./InsightStrip";
 import type { PortfolioAnalytics } from "@/lib/types";
+
+// next/link renders as a plain <a> in tests; mock to avoid router context errors
+vi.mock("next/link", () => ({
+  default: ({ href, children, className }: { href: string; children: React.ReactNode; className?: string }) => (
+    <a href={href} className={className}>{children}</a>
+  ),
+}));
 
 function buildAnalytics(
   partial: Partial<PortfolioAnalytics> = {},
@@ -120,5 +127,52 @@ describe("<InsightStrip>", () => {
     );
     // High severity drawdown insight should carry the sr-only label.
     expect(screen.getByText("High severity:")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 09 — flaggedCount line (LIVE-02, D-07)
+// ---------------------------------------------------------------------------
+
+// Minimal analytics with no firing rules → empty insight list
+const MOCK_ANALYTICS = buildAnalytics();
+
+// Analytics with one firing rule (drawdown) → non-empty insight list
+const MOCK_ANALYTICS_WITH_INSIGHTS = buildAnalytics({
+  portfolio_max_drawdown: -0.25,
+  attribution_breakdown: [
+    { strategy_id: "a", strategy_name: "Alpha", contribution: 0.05, allocation_effect: 0 },
+    { strategy_id: "b", strategy_name: "Beta", contribution: 0.03, allocation_effect: 0 },
+  ],
+});
+
+describe("InsightStrip — Phase 09 flaggedCount line (LIVE-02, D-07)", () => {
+  it("renders 'Bridge flagged N holding(s) — Review in Scenario →' when flaggedCount > 0", () => {
+    render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={3} />);
+    expect(screen.getByText(/Bridge flagged 3 holding\(s\) — Review in Scenario →/)).toBeInTheDocument();
+  });
+
+  it("links to /allocations?tab=scenario", () => {
+    render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={2} />);
+    const link = screen.getByRole("link", { name: /Bridge flagged/ });
+    expect(link).toHaveAttribute("href", "/allocations?tab=scenario");
+  });
+
+  it("hides line when flaggedCount === 0", () => {
+    render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" flaggedCount={0} />);
+    expect(screen.queryByText(/Bridge flagged/)).not.toBeInTheDocument();
+  });
+
+  it("hides line when flaggedCount undefined (backward-compatible)", () => {
+    render(<InsightStrip analytics={MOCK_ANALYTICS} portfolioId="p-1" />);
+    expect(screen.queryByText(/Bridge flagged/)).not.toBeInTheDocument();
+  });
+
+  it("line appears ABOVE regular insights (prepended)", () => {
+    render(<InsightStrip analytics={MOCK_ANALYTICS_WITH_INSIGHTS} portfolioId="p-1" flaggedCount={1} />);
+    const flagged = screen.getByText(/Bridge flagged 1 holding\(s\)/);
+    const firstInsight = screen.getByText(/below peak/);
+    // compareDocumentPosition: DOCUMENT_POSITION_FOLLOWING = 4 means firstInsight comes after flagged
+    expect(flagged.compareDocumentPosition(firstInsight) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
