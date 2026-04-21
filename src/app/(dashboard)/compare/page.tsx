@@ -7,6 +7,11 @@ import { CompareTable } from "@/components/strategy/CompareTable";
 import { CompareEquityOverlay } from "@/components/strategy/CompareEquityOverlay";
 import { CompareCorrelationMatrix } from "@/components/strategy/CompareCorrelationMatrix";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import {
+  parseHoldingCompareId,
+  fetchHoldingCompareItem,
+  type HoldingCompareItem,
+} from "./lib/holding-compare-adapter";
 
 export default async function ComparePage({
   searchParams,
@@ -32,25 +37,80 @@ export default async function ComparePage({
     );
   }
 
-  const { data: strategies } = await supabase
-    .from("strategies")
-    .select("*, strategy_analytics (*)")
-    .in("id", ids)
-    .eq("status", "published");
+  // Phase 09 / Pitfall 8: partition ids BEFORE the strategies fetch.
+  // holding: prefixed ids go through the holding path; UUIDs go through strategies.
+  const holdingIds = ids.filter((id) => parseHoldingCompareId(id) !== null);
+  const strategyIds = ids.filter((id) => parseHoldingCompareId(id) === null);
 
-  const items = (strategies ?? []).map((s) => ({
-    strategy: s as Strategy,
-    analytics: ((Array.isArray(s.strategy_analytics) ? s.strategy_analytics[0] : s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id }) as StrategyAnalytics,
-  }));
+  const [strategiesRes, holdingItemsRes] = await Promise.all([
+    strategyIds.length > 0
+      ? supabase
+          .from("strategies")
+          .select("*, strategy_analytics (*)")
+          .in("id", strategyIds)
+          .eq("status", "published")
+      : Promise.resolve({ data: [], error: null }),
+    Promise.all(
+      holdingIds.map((hid) =>
+        fetchHoldingCompareItem({
+          allocator_id: user.id,
+          holding_ref: hid,
+          supabase,
+        }),
+      ),
+    ),
+  ]);
+
+  const strategyItems = ((strategiesRes as { data: unknown[] | null }).data ?? []).map((s) => {
+    const strat = s as Strategy & { strategy_analytics: unknown };
+    return {
+      kind: "strategy" as const,
+      strategy: strat as Strategy,
+      analytics: ((Array.isArray(strat.strategy_analytics) ? strat.strategy_analytics[0] : strat.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strat.id }) as StrategyAnalytics,
+    };
+  });
+
+  const holdingItems = holdingItemsRes.filter(
+    (x): x is HoldingCompareItem => x !== null,
+  );
+
+  // Merged items[] with discriminator; preserve input ordering from ids param
+  const items = ids
+    .map((id) => {
+      if (parseHoldingCompareId(id) !== null) {
+        return holdingItems.find((h) => h.holding_ref === id) ?? null;
+      }
+      return strategyItems.find((s) => s.strategy.id === id) ?? null;
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
+  // D-15: if all ids were invalid / unowned / not found → generic not-available
+  if (items.length === 0) {
+    return (
+      <>
+        <Breadcrumb items={[{ label: "Compare" }]} />
+        <PageHeader title="Compare" />
+        <p className="text-sm text-text-muted text-center py-16">
+          This comparison isn&apos;t available.
+        </p>
+      </>
+    );
+  }
+
+  // Title: mixed mode says "items", pure-strategy says "Strategies"
+  const allStrategies = items.every((item) => item.kind === "strategy");
+  const title = allStrategies
+    ? `Comparing ${items.length} ${items.length === 1 ? "Strategy" : "Strategies"}`
+    : `Comparing ${items.length} ${items.length === 1 ? "item" : "items"}`;
 
   return (
     <>
       <Breadcrumb items={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]} />
-      <PageHeader title={`Comparing ${items.length} Strategies`} />
+      <PageHeader title={title} />
       <div className="space-y-8">
         <CompareTable items={items} />
-        <CompareEquityOverlay items={items} />
-        <CompareCorrelationMatrix items={items} />
+        <CompareEquityOverlay items={items as never} />
+        <CompareCorrelationMatrix items={items as never} />
       </div>
     </>
   );

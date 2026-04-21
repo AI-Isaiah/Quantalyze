@@ -3,11 +3,18 @@
 import { formatPercent, formatNumber, cn } from "@/lib/utils";
 import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import type { HoldingCompareItem } from "@/app/(dashboard)/compare/lib/holding-compare-adapter";
+import { HoldingFactsheet } from "./HoldingFactsheet";
 
-interface CompareItem {
+interface StrategyItem {
+  kind: "strategy";
   strategy: Strategy;
   analytics: StrategyAnalytics;
 }
+
+// Phase 09 / finding g4: discriminated union so CompareTable can render
+// both strategy columns and holding-side factsheet panels.
+type CompareItem = StrategyItem | HoldingCompareItem;
 
 interface MetricRow {
   label: string;
@@ -41,7 +48,7 @@ function formatValue(value: number | null, format: MetricRow["format"]): string 
   return formatNumber(value);
 }
 
-function findWinner(items: CompareItem[], key: string, higherIsBetter: boolean): number | null {
+function findWinner(items: StrategyItem[], key: string, higherIsBetter: boolean): number | null {
   let bestIdx: number | null = null;
   let bestVal: number | null = null;
   items.forEach((item, i) => {
@@ -60,53 +67,68 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
     return <p className="text-sm text-text-muted text-center py-8">Select strategies to compare.</p>;
   }
 
+  // Phase 09 / finding g4: separate holding items (full-width factsheet card) from
+  // strategy items (tabular comparison columns).
+  const holdingItems = items.filter((item): item is HoldingCompareItem => item.kind === "holding");
+  const strategyItems = items.filter((item): item is StrategyItem => item.kind === "strategy");
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-border">
-            <th className="text-left px-4 py-3 text-xs font-semibold text-text-muted w-40">Metric</th>
-            {items.map((item) => (
-              <th key={item.strategy.id} className="text-right px-4 py-3 text-xs font-semibold text-text-primary">
-                {item.strategy.name}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {METRICS.map((metric) => {
-            const winnerIdx = findWinner(items, metric.key, metric.higherIsBetter);
-            return (
-              <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
-                <td className="px-4 py-2.5 text-xs text-text-muted">{metric.label}</td>
-                {items.map((item, i) => {
-                  const val = getValue(item.analytics, metric.key);
-                  const isWinner = winnerIdx === i && items.length > 1;
-                  const qual = metric.qualKey ? getMetricLabel(metric.qualKey, val) : null;
-                  return (
-                    <td key={item.strategy.id} className="text-right px-4 py-2.5">
-                      <div className="flex items-center justify-end gap-2">
-                        {qual && (
-                          <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", LABEL_COLORS[qual.color])}>
-                            {qual.label}
-                          </span>
-                        )}
-                        <span className={cn(
-                          "text-xs font-metric",
-                          isWinner ? "text-accent font-bold" : "text-text-secondary",
-                        )}>
-                          {formatValue(val, metric.format)}
-                          {isWinner && " ✓"}
-                        </span>
-                      </div>
-                    </td>
-                  );
-                })}
+    <div className="space-y-6">
+      {/* Holding-side factsheet panels — rendered first, full-width, per finding g4 */}
+      {holdingItems.map((item) => (
+        <HoldingFactsheet key={item.holding_ref} item={item} />
+      ))}
+
+      {/* Strategy comparison table — preserved verbatim from pre-Phase-09 */}
+      {strategyItems.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border">
+                <th className="text-left px-4 py-3 text-xs font-semibold text-text-muted w-40">Metric</th>
+                {strategyItems.map((item) => (
+                  <th key={item.strategy.id} className="text-right px-4 py-3 text-xs font-semibold text-text-primary">
+                    {item.strategy.name}
+                  </th>
+                ))}
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            </thead>
+            <tbody>
+              {METRICS.map((metric) => {
+                const winnerIdx = findWinner(strategyItems, metric.key, metric.higherIsBetter);
+                return (
+                  <tr key={metric.key} className="border-b border-border/50 hover:bg-page/50">
+                    <td className="px-4 py-2.5 text-xs text-text-muted">{metric.label}</td>
+                    {strategyItems.map((item, i) => {
+                      const val = getValue(item.analytics, metric.key);
+                      const isWinner = winnerIdx === i && strategyItems.length > 1;
+                      const qual = metric.qualKey ? getMetricLabel(metric.qualKey, val) : null;
+                      return (
+                        <td key={item.strategy.id} className="text-right px-4 py-2.5">
+                          <div className="flex items-center justify-end gap-2">
+                            {qual && (
+                              <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", LABEL_COLORS[qual.color])}>
+                                {qual.label}
+                              </span>
+                            )}
+                            <span className={cn(
+                              "text-xs font-metric",
+                              isWinner ? "text-accent font-bold" : "text-text-secondary",
+                            )}>
+                              {formatValue(val, metric.format)}
+                              {isWinner && " ✓"}
+                            </span>
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
