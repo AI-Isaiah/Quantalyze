@@ -126,6 +126,10 @@ interface AllocationDashboardProps {
     value_usd: number;
     venue: string;
     holding_type: "spot" | "derivative";
+    // Phase 08 Plan 02 — optional because existing call sites
+    // (widget-gating test, regression-001 test) predate the projection
+    // change; runtime queries always include it per queries.ts.
+    api_key_id?: string;
   }>;
   snapshotCount?: number;
   allKeysStale?: boolean;

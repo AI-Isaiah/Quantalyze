@@ -615,6 +615,13 @@ export interface MyAllocationDashboardPayload {
   /**
    * Latest-asof-per-symbol collapse of `allocator_holdings` (Phase 06
    * table). Populated by the Phase 06 poll_allocator_positions cron.
+   *
+   * Phase 08 Plan 02: `api_key_id` is projected so HoldingsTable can
+   * cross-reference the source key's current sync_status (for the
+   * revoked-key strikethrough + amber chip treatment per MANAGE-02).
+   * The join is done client-side against the `apiKeys` array that's
+   * already on the dashboard payload — cheaper than widening this
+   * projection with a nested `api_keys(sync_status)` Supabase join.
    */
   holdingsSummary: Array<{
     symbol: string;
@@ -623,6 +630,7 @@ export interface MyAllocationDashboardPayload {
     value_usd: number;
     venue: string;
     holding_type: "spot" | "derivative";
+    api_key_id: string;
   }>;
   /** Row count in allocator_equity_snapshots for this allocator — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -727,6 +735,7 @@ function derivePhase07Fields(
     venue: string;
     holding_type: "spot" | "derivative";
     asof: string;
+    api_key_id: string;
   }>,
 ): Pick<
   MyAllocationDashboardPayload,
@@ -791,6 +800,7 @@ function derivePhase07Fields(
     value_usd: r.value_usd,
     venue: r.venue,
     holding_type: r.holding_type,
+    api_key_id: r.api_key_id,
   }));
 
   return {
@@ -835,7 +845,10 @@ export const getMyAllocationDashboard = cache(
       supabase
         .from("allocator_holdings")
         .select(
-          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof",
+          // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
+          // resolve source_key_sync_status via the shared `apiKeys` array
+          // (avoids a nested PostgREST join).
+          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id",
         )
         .eq("allocator_id", userId)
         .order("asof", { ascending: false }),
@@ -856,6 +869,7 @@ export const getMyAllocationDashboard = cache(
       venue: string;
       holding_type: "spot" | "derivative";
       asof: string;
+      api_key_id: string;
     }>;
 
     const phase07 = derivePhase07Fields(
