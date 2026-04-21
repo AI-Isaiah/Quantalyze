@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CustomKpiStrip } from "./CustomKpiStrip";
 import { NotesWidget } from "./NotesWidget";
 import { QuickActions } from "./QuickActions";
@@ -40,21 +40,166 @@ describe("CustomKpiStrip", () => {
 });
 
 // ---------------------------------------------------------------------------
-// NotesWidget
+// NotesWidget — Phase 08 Plan 03 upgrade
 // ---------------------------------------------------------------------------
 
-describe("NotesWidget", () => {
-  it("renders textarea with placeholder", () => {
-    render(<NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />);
-    const textarea = screen.getByPlaceholderText("Loading...");
-    expect(textarea).toBeInTheDocument();
+function makeResponse(status: number, body: unknown = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("NotesWidget (Phase 08 Plan 03 upgrade)", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy as unknown as typeof fetch);
   });
 
-  it("renders without crash", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("fetches with new scope_kind=portfolio&scope_ref=… shape", async () => {
+    fetchSpy.mockResolvedValueOnce(makeResponse(404, { error: "not found" }));
+    render(<NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const url = fetchSpy.mock.calls[0][0] as string;
+    expect(url).toBe("/api/notes?scope_kind=portfolio&scope_ref=p1");
+  });
+
+  it("renders markdown in read mode after initial GET (no textarea yet)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      makeResponse(200, {
+        content: "**hi**",
+        updated_at: "2026-04-21T00:00:00Z",
+      }),
+    );
     const { container } = render(
       <NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />,
     );
-    expect(container.querySelector("textarea")).toBeTruthy();
+
+    await waitFor(() => {
+      expect(container.querySelector("strong")?.textContent).toBe("hi");
+    });
+    // Read mode — textarea NOT mounted yet.
+    expect(container.querySelector("textarea")).toBeNull();
+    // Edit affordance visible.
+    expect(screen.getByText("Edit")).toBeInTheDocument();
+  });
+
+  it("clicking Edit reveals the textarea seeded with the current content", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      makeResponse(200, {
+        content: "**hi**",
+        updated_at: "2026-04-21T00:00:00Z",
+      }),
+    );
+    const { container } = render(
+      <NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Edit")).toBeInTheDocument();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Edit"));
+    });
+    const ta = container.querySelector("textarea");
+    expect(ta).not.toBeNull();
+    expect((ta as HTMLTextAreaElement).value).toBe("**hi**");
+  });
+
+  it("saves on textarea blur with new PATCH body shape (not on keystroke)", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        makeResponse(200, { content: "", updated_at: null }),
+      )
+      .mockResolvedValueOnce(
+        makeResponse(200, { updated_at: "2026-04-21T00:00:00Z" }),
+      );
+
+    const { container } = render(
+      <NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+    );
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Enter edit mode
+    await act(async () => {
+      fireEvent.click(screen.getByText("Edit"));
+    });
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+
+    // Type — should NOT fire a PATCH per keystroke.
+    await act(async () => {
+      fireEvent.change(ta, { target: { value: "Hello" } });
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // still just the initial GET
+
+    // Blur — exactly one PATCH fires with the new body shape.
+    await act(async () => {
+      fireEvent.blur(ta);
+    });
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+    const [patchUrl, patchInit] = fetchSpy.mock.calls[1];
+    expect(patchUrl).toBe("/api/notes");
+    expect((patchInit as RequestInit).method).toBe("PATCH");
+    const body = JSON.parse((patchInit as RequestInit).body as string);
+    expect(body).toEqual({
+      scope_kind: "portfolio",
+      scope_ref: "p1",
+      content: "Hello",
+    });
+  });
+
+  it("after successful save, NoteSaveStatus is present (shared primitive)", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(
+        makeResponse(200, { content: "", updated_at: null }),
+      )
+      .mockResolvedValueOnce(
+        makeResponse(200, { updated_at: "2026-04-21T00:00:00Z" }),
+      );
+
+    const { container } = render(
+      <NotesWidget data={{ portfolio: { id: "p1" } }} {...baseProps} />,
+    );
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // NoteSaveStatus wrapper present from mount.
+    expect(screen.getByTestId("note-save-status")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Edit"));
+    });
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(ta, { target: { value: "x" } });
+    });
+    await act(async () => {
+      fireEvent.blur(ta);
+    });
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("note-save-status").textContent).toContain(
+        "Note saved",
+      );
+    });
   });
 });
 
