@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { HoldingsTable } from "./HoldingsTable";
 
 /**
@@ -191,5 +191,210 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
     const style = chip.getAttribute("style") ?? "";
     expect(style).toContain("rgb(217, 119, 6)");
     expect(style).toContain("rgb(254, 243, 199)");
+  });
+});
+
+// ===========================================================================
+// Phase 08 Plan 04 Task 1 — HoldingsTable × HoldingNoteRow integration
+// (MANAGE-05 holding scope). Covers UI-SPEC §3 trailing note icon + §4b
+// inline expandable sub-row + one-open-at-a-time expand/collapse.
+// ===========================================================================
+
+describe("HoldingsTable — note icon column + expandable sub-row (08-04 / MANAGE-05)", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ updated_at: "2026-04-21T00:00:00Z" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy as unknown as typeof fetch);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("T13: renders one HoldingNoteIconButton per holdings row", () => {
+    const holdings = [
+      makeHolding({ id: "h1", symbol: "BTC" }),
+      makeHolding({ id: "h2", symbol: "ETH", api_key_id: "key-2" }),
+      makeHolding({ id: "h3", symbol: "SOL", api_key_id: "key-3" }),
+    ];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    // Three add-note buttons (no entries in notesByHoldingScopeRef → empty state)
+    const addButtons = screen.getAllByRole("button", {
+      name: /^Add note for /,
+    });
+    expect(addButtons).toHaveLength(3);
+  });
+
+  it("T14: aria-label flips from 'Add note for ...' to 'Edit note for ...' when the row has an entry in notesByHoldingScopeRef", () => {
+    const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+        notesByHoldingScopeRef={{
+          "binance:BTC:spot": {
+            content: "my thesis",
+            updated_at: "2026-04-21T00:00:00Z",
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Edit note for BTC spot" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add note for BTC spot" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("T15: revoked row's note icon renders with the amber color class", () => {
+    const holdings = [
+      makeHolding({
+        id: "h2",
+        symbol: "ETH",
+        source_key_sync_status: "revoked",
+      }),
+    ];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const icon = screen.getByRole("button", {
+      name: "Add note for ETH spot",
+    });
+    expect(icon.className).toContain("#D97706");
+  });
+
+  it("T16: clicking the icon toggles the inline expandable sub-row open/closed", async () => {
+    const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const icon = screen.getByRole("button", { name: "Add note for BTC spot" });
+    expect(screen.queryByRole("region", { name: /Note for BTC spot/ })).toBeNull();
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    expect(
+      screen.getByRole("region", { name: "Note for BTC spot" }),
+    ).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    expect(
+      screen.queryByRole("region", { name: /Note for BTC spot/ }),
+    ).toBeNull();
+  });
+
+  it("T17: one-open-at-a-time — clicking icon on row B while row A is open closes row A's sub-row", async () => {
+    const holdings = [
+      makeHolding({ id: "h1", symbol: "BTC" }),
+      makeHolding({ id: "h2", symbol: "ETH", api_key_id: "key-2" }),
+    ];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const iconA = screen.getByRole("button", { name: "Add note for BTC spot" });
+    const iconB = screen.getByRole("button", { name: "Add note for ETH spot" });
+
+    await act(async () => {
+      fireEvent.click(iconA);
+    });
+    expect(
+      screen.getByRole("region", { name: "Note for BTC spot" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(iconB);
+    });
+    expect(
+      screen.queryByRole("region", { name: /Note for BTC spot/ }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("region", { name: "Note for ETH spot" }),
+    ).toBeInTheDocument();
+  });
+
+  it("T18+T19: sub-row textarea blur fires PATCH with scope_kind=holding + buildHoldingScopeRef scope_ref", async () => {
+    const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const icon = screen.getByRole("button", { name: "Add note for BTC spot" });
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    const region = screen.getByRole("region", {
+      name: "Note for BTC spot",
+    });
+    const ta = within(region).getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(ta, { target: { value: "core crypto thesis" } });
+    });
+    await act(async () => {
+      fireEvent.blur(ta);
+    });
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("/api/notes");
+    expect((init as RequestInit).method).toBe("PATCH");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({
+      scope_kind: "holding",
+      scope_ref: "binance:BTC:spot",
+      content: "core crypto thesis",
+    });
+  });
+
+  it("T20: aria-expanded on the note icon mirrors the row's expansion state", async () => {
+    const holdings = [makeHolding({ id: "h1", symbol: "BTC" })];
+    render(
+      <HoldingsTable
+        holdings={holdings}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+    const icon = screen.getByRole("button", { name: "Add note for BTC spot" });
+    expect(icon.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    expect(icon.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => {
+      fireEvent.click(icon);
+    });
+    expect(icon.getAttribute("aria-expanded")).toBe("false");
   });
 });
