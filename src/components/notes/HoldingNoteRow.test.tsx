@@ -429,4 +429,53 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
       resolveFetch(makeResponse(404));
     });
   });
+
+  // ----------------------------------------------------------------
+  // Phase 08 Plan 05 REVIEW-FIX — WR-02 regression coverage: non-200 /
+  // non-404 status codes (500, 401, 403, 429, ...) must NOT leave the
+  // user stuck on a silent empty read-mode view. Collapsing into the
+  // same recovery sink as 404 means every error surface defaults to
+  // edit mode so the user can still type (save-state surfaces the
+  // actual error on first blur).
+  // ----------------------------------------------------------------
+
+  it("500 response resolves loading gate to empty edit-mode textarea (WR-02)", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockResolvedValueOnce(makeResponse(500));
+    const { container } = renderRowInTable(
+      <HoldingNoteRow
+        rowId="h-500"
+        colSpan={7}
+        venue="binance"
+        symbol="BTC"
+        holding_type="spot"
+        initialContent=""
+        initialLastSavedAt={null}
+      />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector("textarea")).not.toBeNull();
+    });
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
+
+  it("401 response resolves loading gate to empty edit-mode textarea (WR-02)", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockResolvedValueOnce(makeResponse(401));
+    const { container } = renderRowInTable(
+      <HoldingNoteRow
+        rowId="h-401"
+        colSpan={7}
+        venue="binance"
+        symbol="BTC"
+        holding_type="spot"
+        initialContent=""
+        initialLastSavedAt={null}
+      />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector("textarea")).not.toBeNull();
+    });
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
 });

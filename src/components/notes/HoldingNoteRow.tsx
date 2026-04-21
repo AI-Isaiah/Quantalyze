@@ -179,8 +179,10 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
           // Existing content → read mode with Edit affordance.
           // Empty string → edit mode so placeholder guides first-time users.
           setEditing(!c);
-        } else if (!cancelled && res.status === 404) {
-          // No note persisted for this scope — empty edit mode.
+        } else if (!cancelled) {
+          // 404 or any other non-OK status (401/403/500/etc.) → default to
+          // empty edit mode so the user isn't blocked from writing.
+          // save-state will surface errors on first blur.
           setEditing(true);
         }
       } catch {
