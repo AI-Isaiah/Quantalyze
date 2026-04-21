@@ -427,3 +427,43 @@ emission site — `alert.acknowledge` was already emitted from
   `docs/architecture/adr-0010-observability.md`.
 - ADR-0014 secret handling (context for why `api_key.decrypt` exists):
   `docs/architecture/adr-0014-secret-handling.md`.
+
+## Phase 09 — Bridge Live Against Real Holdings
+
+Migration 072 adds `match_decisions.original_holding_ref TEXT NULL` as a sibling key to
+`original_strategy_id`, enforced XOR (exactly one non-null per row) via
+`match_decisions_original_xor` CHECK. For holdings-sourced Bridge decisions the scope_ref
+format is `holding:{venue}:{symbol}:{holding_type}` (matches Phase 08 D-08 note scope_ref
+verbatim). SQLSTATE 23514 is raised on any INSERT or UPDATE that sets both columns or
+neither column.
+
+Migration 072 also widens `bridge_outcomes_unique_per_strategy` →
+`bridge_outcomes_unique_per_strategy_holding` to permit two different holdings to record
+outcomes against the same top-candidate strategy. A denormalized
+`bridge_outcomes.original_holding_ref TEXT` column + `bridge_outcomes_sync_holding_ref_trigger`
+mirror the value from `match_decisions` at INSERT/UPDATE time. Postgres requires IMMUTABLE
+index expressions — sub-selects are not permitted — so the denormalized-column + trigger
+fallback from finding f4 is the approved approach for Postgres 17. Same (allocator, strategy,
+holding_ref) triple is still rejected with SQLSTATE 23505.
+
+Migration 072 adds `match_batches.holding_flags JSONB NOT NULL DEFAULT '[]'::jsonb` as the
+persistence seam between the analytics-service engine (writes per-holding flag rows during
+`score_candidates` in Plan 09-02) and the Next.js SSR dashboard (reads via
+`getMyAllocationDashboard` in Plan 09-03). Each array entry carries: `holding_ref`,
+`value_usd`, `weight`, `breach_reasons[]`, `top_candidate_strategy_id`,
+`top_candidate_composite`, `flagged`.
+
+Migration 073 extends `compute_bridge_outcome_deltas()` with a holding-ref branch that reads
+per-symbol USD value from `allocator_equity_snapshots.breakdown` when
+`original_holding_ref IS NOT NULL`. New helper functions `extract_symbol_value_at` and
+`parse_holding_ref` support this branch. Migration 073 also converts the strategy branch from
+INNER JOIN to LEFT JOIN + OR filter so legacy `bridge_outcomes` rows where
+`match_decision_id IS NULL` (set NULL via ON DELETE SET NULL cascade) continue to be processed
+by the cron (finding f3 regression preserved).
+
+**No new audit event kind is registered.** The action being audited ("Bridge outcome
+recorded") is identical regardless of source; only the entity pointer varies, carried through
+existing `metadata.match_decision_id`. The existing `match.decision_record` kind
+(`src/lib/audit.ts`) carries both strategy-sourced and holding-sourced decisions unchanged.
+
+Reference: `.planning/phases/09-bridge-live-against-real-holdings/09-CONTEXT.md` §D-14.
