@@ -885,7 +885,7 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .order("asof", { ascending: false }),
       getUserApiKeys(userId),
-      supabase
+      admin
         .from("match_batches")
         .select("id, holding_flags")
         .eq("allocator_id", userId)
