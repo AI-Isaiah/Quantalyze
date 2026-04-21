@@ -5,6 +5,11 @@
  * Covers UI-SPEC §3 (three-state note icon + aria plumbing) and
  * UI-SPEC §4b (inline expandable sub-row DOM + read/edit toggle + blur-save
  * using the shared Plan 03 primitives).
+ *
+ * Phase 08 Plan 05 Task 1 — RED regression tests for holding-note read-back.
+ * Adds 4 failing tests that will pass once HoldingNoteRow lazily fetches its
+ * note on mount (Task 2 GREEN). Also updates existing tests to thread through
+ * the loading gate via waitFor.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -169,6 +174,7 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
 
   beforeEach(() => {
     fetchSpy = vi.fn();
+    fetchSpy.mockResolvedValue(makeResponse(404));
     vi.stubGlobal("fetch", fetchSpy as unknown as typeof fetch);
   });
 
@@ -185,7 +191,7 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
     );
   }
 
-  it("renders a tr with id=note-row-{rowId} and role=region", () => {
+  it("renders a tr with id=note-row-{rowId} and role=region", async () => {
     renderRowInTable(
       <HoldingNoteRow
         rowId="h-42"
@@ -197,6 +203,10 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
         initialLastSavedAt={null}
       />,
     );
+    // Wait for loading gate to resolve before querying the region
+    await waitFor(() => {
+      expect(screen.queryByText("Loading…")).toBeNull();
+    });
     const region = screen.getByRole("region", {
       name: "Note for BTC spot",
     });
@@ -204,7 +214,7 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
     expect(region.getAttribute("id")).toBe("note-row-h-42");
   });
 
-  it("with empty initialContent → textarea mounts in edit mode with the §4b placeholder", () => {
+  it("with empty initialContent → textarea mounts in edit mode with the §4b placeholder", async () => {
     const { container } = renderRowInTable(
       <HoldingNoteRow
         rowId="h-1"
@@ -216,14 +226,20 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
         initialLastSavedAt={null}
       />,
     );
-    const ta = container.querySelector("textarea") as HTMLTextAreaElement | null;
-    expect(ta).not.toBeNull();
-    expect(ta?.getAttribute("placeholder")).toBe(
+    await waitFor(() => {
+      expect(container.querySelector("textarea")).not.toBeNull();
+    });
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(ta.getAttribute("placeholder")).toBe(
       "No note yet. Start typing to add one.",
     );
   });
 
-  it("with non-empty initialContent → NoteRender markdown in read mode; Edit button visible", () => {
+  it("with non-empty initialContent (served via GET) → NoteRender markdown in read mode; Edit button visible", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockResolvedValueOnce(
+      makeResponse(200, { content: "**hello**", updated_at: "2026-04-21T00:00:00Z" }),
+    );
     const { container } = renderRowInTable(
       <HoldingNoteRow
         rowId="h-2"
@@ -231,19 +247,23 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
         venue="binance"
         symbol="BTC"
         holding_type="spot"
-        initialContent={"**hello**"}
+        initialContent=""
         initialLastSavedAt={null}
       />,
     );
+    await waitFor(() => {
+      expect(container.querySelector("strong")?.textContent).toBe("hello");
+    });
     expect(container.querySelector("textarea")).toBeNull();
-    expect(container.querySelector("strong")?.textContent).toBe("hello");
     expect(screen.getByText("Edit")).toBeInTheDocument();
   });
 
   it("blur on the textarea fires PATCH with scope_kind=holding + buildHoldingScopeRef scope_ref + typed content", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockResolvedValueOnce(makeResponse(404)); // mount GET
     fetchSpy.mockResolvedValueOnce(
       makeResponse(200, { updated_at: "2026-04-21T00:00:00Z" }),
-    );
+    ); // blur PATCH
     const { container } = renderRowInTable(
       <HoldingNoteRow
         rowId="h-3"
@@ -255,8 +275,10 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
         initialLastSavedAt={null}
       />,
     );
+    await waitFor(() => {
+      expect(container.querySelector("textarea")).not.toBeNull();
+    });
     const ta = container.querySelector("textarea") as HTMLTextAreaElement;
-    expect(ta).not.toBeNull();
 
     await act(async () => {
       fireEvent.change(ta, { target: { value: "BTC thesis — core hold" } });
@@ -265,9 +287,10 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
       fireEvent.blur(ta);
     });
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      // First call = mount GET; second call = blur PATCH
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
-    const [url, init] = fetchSpy.mock.calls[0];
+    const [url, init] = fetchSpy.mock.calls[1];
     expect(url).toBe("/api/notes");
     expect((init as RequestInit).method).toBe("PATCH");
     const body = JSON.parse((init as RequestInit).body as string);
@@ -278,7 +301,7 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
     });
   });
 
-  it("NoteSaveStatus wrapper is present below the editor", () => {
+  it("NoteSaveStatus wrapper is present below the editor", async () => {
     renderRowInTable(
       <HoldingNoteRow
         rowId="h-4"
@@ -290,6 +313,120 @@ describe("HoldingNoteRow (UI-SPEC §4b — inline expandable sub-row)", () => {
         initialLastSavedAt={null}
       />,
     );
-    expect(screen.getByTestId("note-save-status")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("note-save-status")).toBeInTheDocument();
+    });
+  });
+
+  // ----------------------------------------------------------------
+  // Phase 08 Plan 05 — RED regression tests for holding-note read-back
+  // (IN-04 gap closure). These tests fail against the current
+  // HoldingNoteRow that does not fetch on mount. They pass once Task 2
+  // adds the lazy GET useEffect mirroring BridgeOutcomeNoteSection.
+  // ----------------------------------------------------------------
+
+  it("RED: fires lazy GET on mount with URL-encoded holding scope_ref", async () => {
+    renderRowInTable(
+      <HoldingNoteRow
+        rowId="h-lazy-get"
+        colSpan={7}
+        venue="binance"
+        symbol="BTC"
+        holding_type="spot"
+        initialContent=""
+        initialLastSavedAt={null}
+      />,
+    );
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe(
+      "/api/notes?scope_kind=holding&scope_ref=binance%3ABTC%3Aspot",
+    );
+    expect((init as RequestInit).credentials).toBe("same-origin");
+  });
+
+  it("RED: 200 response seeds read-mode NoteRender with persisted content (IN-04 closure)", async () => {
+    fetchSpy.mockReset();
+    fetchSpy.mockResolvedValueOnce(
+      makeResponse(200, {
+        content: "saved thesis",
+        updated_at: "2026-04-21T10:00:00Z",
+      }),
+    );
+    const { container } = renderRowInTable(
+      <HoldingNoteRow
+        rowId="h-readback"
+        colSpan={7}
+        venue="binance"
+        symbol="BTC"
+        holding_type="spot"
+        initialContent=""
+        initialLastSavedAt={null}
+      />,
+    );
+    // Wait for NoteRender to replace the loading gate.
+    await waitFor(() => {
+      expect(screen.getByText("saved thesis")).toBeInTheDocument();
+    });
+    // Read mode, not edit mode.
+    expect(container.querySelector("textarea")).toBeNull();
+    expect(screen.getByText("Edit")).toBeInTheDocument();
+  });
+
+  it("RED: 404 response resolves loading gate to empty edit-mode textarea", async () => {
+    // Default beforeEach already mocks 404.
+    const { container } = renderRowInTable(
+      <HoldingNoteRow
+        rowId="h-404"
+        colSpan={7}
+        venue="binance"
+        symbol="BTC"
+        holding_type="spot"
+        initialContent=""
+        initialLastSavedAt={null}
+      />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector("textarea")).not.toBeNull();
+    });
+    const ta = container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(ta.getAttribute("placeholder")).toBe(
+      "No note yet. Start typing to add one.",
+    );
+    // Loading text gone.
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
+
+  it("RED: renders 'Loading…' gate before the mount fetch resolves", async () => {
+    // Construct a deferred promise so the fetch never resolves during
+    // this assertion window.
+    let resolveFetch: (r: Response) => void = () => {};
+    fetchSpy.mockReset();
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise<Response>((r) => {
+          resolveFetch = r;
+        }),
+    );
+    const { container } = renderRowInTable(
+      <HoldingNoteRow
+        rowId="h-loading"
+        colSpan={7}
+        venue="binance"
+        symbol="BTC"
+        holding_type="spot"
+        initialContent=""
+        initialLastSavedAt={null}
+      />,
+    );
+    // Before resolve: loading text visible, no textarea, no NoteRender.
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(container.querySelector("textarea")).toBeNull();
+    // Resolve so the test doesn't leak a pending promise.
+    await act(async () => {
+      resolveFetch(makeResponse(404));
+    });
   });
 });
