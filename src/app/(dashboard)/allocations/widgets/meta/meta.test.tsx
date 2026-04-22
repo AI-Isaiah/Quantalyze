@@ -130,6 +130,9 @@ describe("NotesWidget (Phase 08 Plan 03 upgrade)", () => {
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
+    await waitFor(() => {
+      expect(screen.getByText("Edit")).toBeInTheDocument();
+    });
 
     // Enter edit mode
     await act(async () => {
@@ -181,6 +184,9 @@ describe("NotesWidget (Phase 08 Plan 03 upgrade)", () => {
     // NoteSaveStatus wrapper present from mount.
     expect(screen.getByTestId("note-save-status")).toBeInTheDocument();
 
+    await waitFor(() => {
+      expect(screen.getByText("Edit")).toBeInTheDocument();
+    });
     await act(async () => {
       fireEvent.click(screen.getByText("Edit"));
     });
