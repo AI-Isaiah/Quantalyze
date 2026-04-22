@@ -54,6 +54,18 @@ BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommen
 COINGECKO_BASE: str = "https://api.coingecko.com/api/v3"
 COINGECKO_MIN_SLEEP_SECS: float = 2.0       # stay below 30 RPM free tier
 
+# OKX's /api/v5/trade/fills-history endpoint is partitioned by instType
+# (SPOT, MARGIN, SWAP, FUTURES, OPTION). A vanilla fetch_my_trades(None)
+# call only returns one type at a time — defaulting to SPOT — and silently
+# drops every fill on the other four. Accounts that primarily trade
+# perpetual swaps (the common case for crypto allocators) appeared to have
+# zero history under the old single-pass call, which collapsed equity
+# reconstruction to days_written=0. Fan-out across all five types is the
+# only way to assemble the full trade book for an OKX account.
+OKX_INSTRUMENT_TYPES: tuple[str, ...] = (
+    "SPOT", "MARGIN", "SWAP", "FUTURES", "OPTION",
+)
+
 # Per VOICES-ACCEPTED f9: per-venue retained-history caps (months) written
 # into snapshot rows. Drives venue-specific KpiStrip warm-up copy in 07-03.
 VENUE_HISTORY_DEPTH_MONTHS: dict[str, int] = {
@@ -163,54 +175,90 @@ async def _fetch_trades_with_pagination(
 ) -> tuple[list[dict], bool]:
     """Paginate fetch_my_trades via since. Returns (trades, hit_okx_terminus).
 
-    On OKX: if an empty page is returned and `since` is older than the
-    90-day terminus, set hit_okx_terminus=True and break cleanly. Logs
-    the sentinel string used by the TDD Red gate test:
+    For OKX, fans out across every instrument type (SPOT/MARGIN/SWAP/
+    FUTURES/OPTION). OKX's /api/v5/trade/fills-history endpoint requires
+    a single instType per call — fetch_my_trades(None) only returns the
+    default (SPOT), so derivative-only or swap-heavy accounts otherwise
+    appear to have zero history. See OKX_INSTRUMENT_TYPES comment for
+    the full reasoning. For other venues, a single pass without instType
+    is correct (Binance/Bybit return the full book per call).
+
+    On OKX: if `since` is older than the 90-day terminus, set
+    hit_okx_terminus=True and clamp the effective since. Logs the
+    sentinel string used by the TDD Red gate test:
       "OKX trade history capped at 3 months"
     (RESEARCH.md Pitfall 1 / VOICES-ACCEPTED f9.)
     """
-    all_trades: list[dict] = []
-    hit_okx_terminus = False
-    cursor_ms = since_ms
-    okx_terminus_ms = now_ms - OKX_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000
+    if venue.lower() != "okx":
+        trades = await _fetch_trades_paginated_one_pass(
+            exchange, since_ms, limit_per_call, params=None,
+        )
+        return trades, False
 
-    # OKX exposes only ~3 months of trade history (RESEARCH.md §1B, A3).
-    # When our caller requests a window that starts before the terminus we
-    # log the sentinel string used by the TDD Red gate test and stamp
-    # hit_okx_terminus=True so the handler can force history_depth_months=3
-    # on the resulting rows (VOICES-ACCEPTED f9).
-    if venue.lower() == "okx" and cursor_ms < okx_terminus_ms:
+    okx_terminus_ms = now_ms - OKX_TRADE_TERMINUS_DAYS * 24 * 60 * 60 * 1000
+    hit_okx_terminus = since_ms < okx_terminus_ms
+    if hit_okx_terminus:
         logger.info(
             "OKX trade history capped at 3 months",
-            extra={"venue": venue, "since_ms": cursor_ms},
+            extra={"venue": venue, "since_ms": since_ms},
         )
-        hit_okx_terminus = True
-        cursor_ms = okx_terminus_ms
+    effective_since_ms = max(since_ms, okx_terminus_ms)
 
-    # Guard against pathological loops: if the exchange keeps returning rows
-    # with the same max timestamp we advance by 1ms; 500 iterations is a
-    # 250k trade ceiling — plenty for any real allocator.
+    # Per-instType fan-out. We pass `params={"type": X}` rather than
+    # `params={"instType": X}` because ccxt overwrites request['instType']
+    # in okx.fetch_my_trades (line 4706 of ccxt/okx.py) using the value
+    # resolved by handle_market_type_and_params, which reads `params.type`
+    # → exchangeType map → final 'SPOT'/'SWAP'/etc. Pre-fix, no `type`
+    # was passed, so the call defaulted to SPOT and dropped every other
+    # instrument's fills.
+    all_trades: list[dict] = []
+    for inst_type in OKX_INSTRUMENT_TYPES:
+        type_trades = await _fetch_trades_paginated_one_pass(
+            exchange,
+            effective_since_ms,
+            limit_per_call,
+            params={"type": inst_type.lower()},
+        )
+        all_trades.extend(type_trades)
+    return all_trades, hit_okx_terminus
+
+
+async def _fetch_trades_paginated_one_pass(
+    exchange: Any,
+    since_ms: int,
+    limit_per_call: int,
+    params: dict | None,
+) -> list[dict]:
+    """Inner pagination loop — one cursor walk against fetch_my_trades with
+    a fixed params payload. Caller picks `params` (None for non-OKX, an
+    instType selector for OKX). Returns the flat list of trade dicts.
+    """
+    all_trades: list[dict] = []
+    cursor_ms = since_ms
+
+    # 500 iterations × 500 trades/page = 250k trade ceiling per pass —
+    # plenty for any real allocator's 90-day or 2-year window.
     for _ in range(500):
         try:
-            page = await exchange.fetch_my_trades(None, cursor_ms, limit_per_call)
+            page = await exchange.fetch_my_trades(
+                None, cursor_ms, limit_per_call, params or {},
+            )
         except ccxt.NotSupported:
-            return all_trades, hit_okx_terminus
+            return all_trades
         page = page or []
         if not page:
-            # No further trades — terminus logging already happened pre-loop
-            # at the OKX cursor advance (lines above). By this point,
-            # cursor_ms >= okx_terminus_ms for OKX, so no duplicate log.
             break
         all_trades.extend(page)
         if len(page) < limit_per_call:
             break
-        # Advance cursor past the latest timestamp in the page
-        max_ts = max((int(t.get("timestamp") or 0) for t in page), default=cursor_ms)
+        max_ts = max(
+            (int(t.get("timestamp") or 0) for t in page), default=cursor_ms,
+        )
         if max_ts <= cursor_ms:
             break
         cursor_ms = max_ts + 1
         await _rate_limit_sleep(exchange)
-    return all_trades, hit_okx_terminus
+    return all_trades
 
 
 async def _fetch_transfers(

@@ -462,9 +462,20 @@ async def test_reconstruct_okx_3month_terminus(monkeypatch, caplog):
 
     mock_exchange = AsyncMock()
     mock_exchange.id = "okx"
-    # First call returns real trades; subsequent calls simulate OKX's empty
-    # page once since < 90d ago.
-    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    # OKX now fans out across 5 instType passes (SPOT/MARGIN/SWAP/FUTURES/
+    # OPTION). Trades land on the first pass; the remaining 4 are empty,
+    # which matches a real account where activity is concentrated on one
+    # instrument type. The second sentinel `[]` from the original pattern
+    # is for the cursor-advance step within the SPOT pass.
+    _trade_pages = iter([trades, []])
+
+    async def _ft(_symbol, _since, _limit, _params=None):
+        try:
+            return next(_trade_pages)
+        except StopIteration:
+            return []
+
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=_ft)
     mock_exchange.fetch_deposits = AsyncMock(return_value=[])
     mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
     mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
@@ -730,7 +741,18 @@ async def test_history_depth_months_per_venue(monkeypatch, venue, expected_depth
 
     mock_exchange = AsyncMock()
     mock_exchange.id = venue
-    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    # Trades on the first call; empty thereafter. Works for both the legacy
+    # 2-call pattern (binance/bybit: trades + cursor-advance empty) and the
+    # OKX 5-instType fan-out (trades on first instType, empty on the rest).
+    _trade_pages = iter([trades, []])
+
+    async def _ft(_symbol, _since, _limit, _params=None):
+        try:
+            return next(_trade_pages)
+        except StopIteration:
+            return []
+
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=_ft)
     mock_exchange.fetch_deposits = AsyncMock(return_value=[])
     mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
     mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
@@ -1443,3 +1465,199 @@ async def test_m076_reconstruct_short_circuits_when_same_api_key_already_done(mo
         f"expected audit event with reason=already_reconstructed_for_api_key; "
         f"got {audit_mock.call_args_list!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Migration 077 regression — OKX instType fan-out.
+# Pre-fix: _fetch_trades_with_pagination called fetch_my_trades(None) which
+# defaults to instType=SPOT. SWAP-only / derivative-heavy accounts (the
+# common OKX allocator profile) returned 0 trades and the equity curve
+# collapsed to days_written=0 even though the account was actively trading.
+# Post-fix: handler iterates over all 5 OKX instrument types per ccxt's
+# /api/v5/trade/fills-history requirement.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_m077_okx_fan_out_captures_swap_trades(monkeypatch):
+    """SWAP-only OKX account: spot fetch returns nothing, but the SWAP
+    fetch returns real trades. The handler must aggregate across instType
+    passes and produce non-zero equity rows.
+
+    Pre-fix this test FAILED because the old single-pass call only ever
+    asked OKX for SPOT trades, missed every SWAP fill, and reported
+    days_written=0 — the exact state observed on prod for the demo
+    allocator's OKX keys."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    # 30 days of SWAP activity well inside the OKX 90-day window
+    start_date = end_date - timedelta(days=30)
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+
+    # The user's account opened a long ETH/USDT perpetual on day 0
+    swap_trades = [
+        {
+            "timestamp": ts,
+            "symbol": "ETH/USDT:USDT",
+            "side": "buy",
+            "price": 2300.0,
+            "amount": 10.0,
+            "cost": 23000.0,
+            "fee": {"cost": 0.0, "currency": "USDT"},
+        },
+    ]
+    ohlcv = [_make_ohlcv_row(ts + day * day_ms, 2300.0 + day * 5.0) for day in range(31)]
+
+    # Per-instType return-value table. Spot/margin/futures/option are empty;
+    # only the SWAP pass returns real trades. Empties on the second call of
+    # each pass (cursor advance).
+    returns_by_type: dict[str, list[list[dict]]] = {
+        "spot":    [[], []],
+        "margin":  [[], []],
+        "swap":    [swap_trades, []],
+        "futures": [[], []],
+        "option":  [[], []],
+    }
+    call_log: list[str] = []
+
+    async def _ft(_symbol, _since, _limit, params=None):
+        params = params or {}
+        inst = (params.get("type") or params.get("instType") or "spot").lower()
+        call_log.append(inst)
+        pages = returns_by_type.get(inst, [[]])
+        return pages.pop(0) if pages else []
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=_ft)
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-m077-fan-out",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Handler must have asked OKX for ALL five instrument types — not just
+    # the default SPOT. The bug pre-fix was that only "spot" appeared.
+    assert "spot" in call_log, f"expected SPOT pass; got {call_log!r}"
+    assert "swap" in call_log, (
+        f"expected SWAP pass; pre-fix this was never called and SWAP-only "
+        f"accounts produced empty equity charts. call_log={call_log!r}"
+    )
+    for required in ("margin", "futures", "option"):
+        assert required in call_log, (
+            f"expected {required.upper()} pass for completeness; got {call_log!r}"
+        )
+
+    # The SWAP trades MUST have produced non-zero equity rows. Pre-fix
+    # this returned 0 because the single SPOT pass found nothing.
+    rows = fake_supabase.rows_for("allocator_equity_snapshots")
+    assert len(rows) >= 1, (
+        f"expected SWAP trades to produce equity rows after fan-out; got 0. "
+        f"This is the prod symptom: SWAP account → days_written=0."
+    )
+    # A later day must reflect ETH price appreciation. The trade-day row
+    # legitimately nets to zero (buy at fair value: +$23k ETH, -$23k USDT),
+    # but by day 30 the OHLCV price moved from $2300 → $2450 ($5/day for
+    # 30 days), so 10 ETH × $150 PnL = +$1500 equity gain.
+    by_asof = {r["asof"]: r for r in rows}
+    last_day = end_date.date().isoformat()
+    assert last_day in by_asof, (
+        f"expected snapshot for {last_day}; got {sorted(by_asof.keys())!r}"
+    )
+    assert by_asof[last_day]["value_usd"] != 0.0, (
+        f"end-of-window equity must reflect ETH appreciation (+$1500 PnL); "
+        f"got {by_asof[last_day]!r} — pre-fix value would be 0 because the "
+        f"SWAP trade was never captured."
+    )
+
+
+@pytest.mark.asyncio
+async def test_m077_non_okx_venue_unchanged_single_pass(monkeypatch):
+    """Binance / Bybit must NOT fan out — their fetch_my_trades returns
+    the full book per call. Adding 5 instType passes for non-OKX venues
+    would 5x the API call count and risk rate-limit hits for no benefit."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=10)
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + day * day_ms, 50000.0) for day in range(11)]
+
+    call_log: list[dict | None] = []
+
+    async def _ft(_symbol, _since, _limit, params=None):
+        call_log.append(params)
+        # First call returns trades; second (cursor advance) returns empty.
+        return trades if len(call_log) == 1 else []
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=_ft)
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-m077-non-okx",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Binance: at most one cursor walk (trades + empty page = 2 calls).
+    # Adding instType fan-out here would multiply call count by 5.
+    assert mock_exchange.fetch_my_trades.await_count <= 2, (
+        f"non-OKX venues must use a single pass — got "
+        f"{mock_exchange.fetch_my_trades.await_count} calls; "
+        f"OKX fan-out should not apply to binance/bybit. call_log={call_log!r}"
+    )
+    # And the params payload must NOT include an instType selector — those
+    # are OKX-specific and could break Binance's fetch_my_trades signature.
+    for params in call_log:
+        if not params:
+            continue
+        assert "type" not in params and "instType" not in params, (
+            f"non-OKX call leaked OKX-specific instType param: {params!r}"
+        )

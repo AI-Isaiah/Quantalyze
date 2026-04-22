@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.2.0] - 2026-04-22
+
+OKX equity reconstruction now sees derivative trades. A swap-heavy or
+derivative-only OKX account previously produced a flat equity curve
+with `days_written=0` even when actively trading — the chart looked
+broken to the user. Now the full trade book is captured across all
+five OKX instrument types.
+
+### Fixed
+
+- **OKX `fetch_my_trades` instType fan-out.** OKX's
+  `/api/v5/trade/fills-history` endpoint requires an `instType`
+  parameter and only returns fills for that one type per call. ccxt
+  defaults to `SPOT`, so a vanilla `fetch_my_trades(None, since)`
+  silently dropped every `SWAP` / `FUTURES` / `OPTION` / `MARGIN` fill
+  on accounts that primarily trade derivatives. The reconstructor now
+  iterates over all five instrument types per OKX cursor walk and
+  aggregates the result. Other venues (Binance, Bybit) keep the
+  single-pass behavior since their trade endpoints return the full
+  book per call. Adds 4 extra OKX API calls per reconstruct (still
+  well within OKX's 10 req/2s quota for `/api/v5/trade/fills-history`).
+  `analytics-service/services/equity_reconstruction.py` plus two new
+  regression tests (`test_m077_okx_fan_out_captures_swap_trades` and
+  `test_m077_non_okx_venue_unchanged_single_pass`).
+
+### Added
+
+- **GitHub Action: auto-deploy analytics worker to Railway.** Railway's
+  GitHub auto-deploy was not connected for the `quantalyze-analytics`
+  service, so the v0.15.1.0 ship sat un-deployed until manual
+  intervention. New workflow at `.github/workflows/deploy-analytics.yml`
+  triggers on push to main when `analytics-service/**` changes (and
+  via `workflow_dispatch` for force-redeploy). Requires a one-time
+  `RAILWAY_TOKEN` secret in repo settings.
+
 ## [0.15.1.0] - 2026-04-22
 
 Equity history backfill fix. Adding a second exchange (or rebackfilling a key
