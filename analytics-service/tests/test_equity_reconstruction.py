@@ -72,10 +72,11 @@ class _FakeTable:
         self._store = store  # { (table, pk_tuple): row_dict }
         # Filter state for chained .select(...).eq(...).execute()
         self._select_filters: list[tuple[str, Any]] = []
+        self._select_neq_filters: list[tuple[str, Any]] = []
         self._select_ranges: list[tuple[str, str, str]] = []  # (col, op, val)
         self._select_count_mode: str | None = None
         # Pending write
-        self._pending_op: str | None = None  # 'upsert' | 'update' | 'insert'
+        self._pending_op: str | None = None  # 'upsert' | 'update' | 'insert' | 'delete'
         self._pending_rows: list[dict] = []
         self._pending_on_conflict: str | None = None
         self._pending_ignore_duplicates: bool = False
@@ -99,6 +100,10 @@ class _FakeTable:
         self._pending_update_payload = payload
         return self
 
+    def delete(self):
+        self._pending_op = "delete"
+        return self
+
     # --- select ops ---
     def select(self, *_args, count: str | None = None, head: bool = False, **_kwargs):
         self._pending_op = "select"
@@ -107,6 +112,10 @@ class _FakeTable:
 
     def eq(self, col: str, val):
         self._select_filters.append((col, val))
+        return self
+
+    def neq(self, col: str, val):
+        self._select_neq_filters.append((col, val))
         return self
 
     def gte(self, col: str, val):
@@ -171,12 +180,29 @@ class _FakeTable:
                     matched.append(row)
             return _FakeUpdateResult(matched)
 
+        if self._pending_op == "delete":
+            deleted: list[dict] = []
+            for key in list(self._store.keys()):
+                tbl, _pk = key
+                if tbl != self._name:
+                    continue
+                row = self._store[key]
+                if not all(row.get(c) == v for c, v in self._select_filters):
+                    continue
+                if any(row.get(c) == v for c, v in self._select_neq_filters):
+                    continue
+                deleted.append(dict(row))
+                del self._store[key]
+            return _FakeUpdateResult(deleted)
+
         if self._pending_op == "select":
             matched = []
             for (tbl, _pk), row in self._store.items():
                 if tbl != self._name:
                     continue
                 if not all(row.get(c) == v for c, v in self._select_filters):
+                    continue
+                if any(row.get(c) == v for c, v in self._select_neq_filters):
                     continue
                 # range filters
                 ok = True
@@ -421,8 +447,22 @@ async def test_reconstruct_idempotent(monkeypatch):
         (r["allocator_id"], r["asof"]): r.get("reconstructed_at") for r in rows_first
     }
 
-    # Second run — handler should early-return since snapshots already exist
-    # OR re-upsert with ON CONFLICT DO NOTHING. Either way, row count identical.
+    # Simulate the real worker: after a successful run, compute_jobs has a
+    # status='done' row for this api_key. The per-api_key gate (migration
+    # 076) then short-circuits any subsequent reconstruct for the same
+    # key, which is the production idempotency guarantee — not the
+    # DO NOTHING at the persist layer. Without this seed, the second run
+    # would legitimately purge + re-upsert (sole-key fresh-source
+    # behavior from the 2026-04-22 /investigate fix).
+    fake_supabase.store[("compute_jobs", ("done-first-run",))] = {
+        "id": "done-first-run",
+        "api_key_id": API_KEY_ID_1,
+        "kind": "reconstruct_allocator_history",
+        "status": "done",
+    }
+
+    # Second run — handler early-returns via the per-api_key gate; the
+    # rows written by the first run remain untouched.
     await run_reconstruct_allocator_history_job(job)
     rows_second = fake_supabase.rows_for("allocator_equity_snapshots")
 
@@ -1906,3 +1946,253 @@ def test_m078_spot_trade_path_unchanged():
             assert ":PERP" not in k, (
                 f"spot trade leaked a perp mark into breakdown: {row!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Stale-snapshot replacement regression (2026-04-22 /investigate report).
+#
+# Bug: persist_equity_snapshots uses ON CONFLICT (allocator_id, asof)
+# DO NOTHING. When a user uploads a new read-only key (either replacing a
+# deleted key or after a pre-v0.15.3.0 reconstruction left buggy rows in
+# place), the fresh reconstruct runs end-to-end but writes ZERO rows —
+# every (allocator_id, asof) already exists. The dashboard keeps serving
+# the stale (often mathematically incorrect, e.g. perpetual-as-spot
+# V-shape) data with no user-actionable recovery path. Migration 077
+# only cascades snapshots on HARD DELETE with cascade=true AND last-key,
+# which leaves the "I just uploaded a new key" door wide open.
+#
+# Fix invariant: when the allocator has NO other api_keys (this key is
+# the sole authoritative source), any pre-existing snapshots are orphans
+# or stale and must be wiped before the fresh reconstruct upserts its
+# rows. When the allocator has other keys, DO NOTHING semantics are
+# preserved to protect multi-key aggregation (threat T-07-V5b).
+#
+# Also fixes: persist_equity_snapshots returned len(stamped) even when
+# every row was a DO-NOTHING no-op — audit logs reported days_written=730
+# while the dashboard showed zero change. Must return the actual number
+# of rows Postgres wrote (upsert .data length).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch):
+    """The user's case: stale snapshots exist (from a deleted key's old
+    reconstruct, or from a pre-v0.15.3.0 buggy run); user uploads a new
+    read-only key; allocator has NO OTHER api_keys. A fresh reconstruct
+    MUST replace the stale rows with the new computed values."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+
+    # Seed 10 days of STALE snapshots for the allocator. Simulates the
+    # pre-v0.15.3.0 state: obviously-wrong perp-as-spot V-shape numbers.
+    # Key insight: these rows predate the new api_key. The old key that
+    # wrote them has been deleted (compute_jobs rows cascaded away), so
+    # api_keys has NO row for this allocator other than the new one.
+    for day_offset in range(10):
+        asof = (start_date + timedelta(days=day_offset)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": -999_999.0,  # STALE / WRONG sentinel
+            "breakdown": {"STALE": -999_999.0},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+            "reconstructed_at": "2026-03-01T00:00:00+00:00",
+        }
+
+    # The allocator has ONLY this new api_key — no siblings, so fresh
+    # reconstruct must take over. The fake preflight already sets up
+    # key_row with id=API_KEY_ID_1; we also seed an api_keys row to make
+    # the sibling-count query answer 0 cleanly.
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1,
+        "user_id": ALLOCATOR_ID,
+        "exchange": "binance",
+    }
+
+    # Mock exchange returns a single clean BTC trade + 10 days of OHLCV.
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-sole-key-replace",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # The stale rows MUST be gone — their value_usd=-999_999 sentinel
+    # cannot appear in the final snapshot set.
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    stale_survivors = [r for r in stored if r.get("value_usd") == -999_999.0]
+    assert not stale_survivors, (
+        "PRE-FIX BUG: stale snapshots survived the new-key reconstruct. "
+        "The UPSERT's ignore_duplicates=True silently dropped every "
+        "fresh row because (allocator_id, asof) already collided with "
+        f"the stale rows. Stale survivors: {stale_survivors!r}"
+    )
+
+    # The fresh reconstruct should have produced BTC-priced rows for
+    # days where the trade was in scope (5x 50000 = 50000 equity per day).
+    assert stored, (
+        "expected at least one fresh snapshot row after reconstruct; "
+        "got an empty table."
+    )
+    btc_rows = [r for r in stored if "BTC" in (r.get("breakdown") or {})]
+    assert btc_rows, (
+        "expected fresh reconstruct to write BTC-priced rows; "
+        f"got {stored!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
+    """Multi-key safety: when the allocator has ANOTHER api_key (even
+    disconnected), the fresh reconstruct MUST NOT wipe existing rows.
+    DO NOTHING semantics protect multi-key aggregation (T-07-V5b).
+    This guards the fix against over-correction."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+
+    # Seed rows from a prior key's reconstruct.
+    for day_offset in range(10):
+        asof = (start_date + timedelta(days=day_offset)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": 12345.0,  # legit first-key value
+            "breakdown": {"ETH": 12345.0},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+    # Allocator has BOTH api_keys — the new one (API_KEY_ID_1) and the
+    # prior one (API_KEY_ID_2). The prior key's existence is the signal
+    # that stale rows are legitimately aggregated, not orphaned.
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+    }
+    fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
+        "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-multi-key-preserve",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Prior-key rows must ALL survive — 12345.0 sentinel still present.
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    prior_survivors = [r for r in stored if r.get("value_usd") == 12345.0]
+    assert len(prior_survivors) == 10, (
+        "Multi-key safety regression: prior key's rows were clobbered. "
+        "Expected all 10 seeded rows to survive (DO NOTHING preserves "
+        "first-writer-wins aggregation per T-07-V5b), "
+        f"got {len(prior_survivors)} survivors: {stored!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_equity_snapshots_returns_actual_written_count(monkeypatch):
+    """persist_equity_snapshots must return the number of rows Postgres
+    actually wrote, not len(input). Pre-fix it returned len(stamped)
+    unconditionally, so audit logs reported days_written=N while every
+    row was a DO-NOTHING no-op — the user sees reconstruct_complete in
+    the audit trail but the dashboard stays stale."""
+    from services.equity_reconstruction import persist_equity_snapshots
+
+    fake_supabase = FakeSupabaseClient()
+
+    # Pre-seed 5 rows with the SAME (allocator_id, asof) keys we're about
+    # to upsert. Every upsert must collide → DO NOTHING → 0 writes.
+    for day in range(1, 6):
+        asof = f"2026-04-{day:02d}"
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": 1.0,
+            "breakdown": {"BTC": 1.0},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+        }
+
+    rows = [
+        {
+            "asof": f"2026-04-{day:02d}",
+            "value_usd": 9999.0,  # different value — would overwrite if not ignore
+            "breakdown": {"BTC": 9999.0},
+            "source": "exchange_primary",
+        }
+        for day in range(1, 6)
+    ]
+
+    count = await persist_equity_snapshots(
+        fake_supabase, rows, ALLOCATOR_ID, history_depth_months=24
+    )
+
+    assert count == 0, (
+        "PRE-FIX BUG: persist_equity_snapshots returned len(stamped) even "
+        "though every row was a DO-NOTHING no-op. The audit log then "
+        "reported days_written=5 while the dashboard showed zero change. "
+        f"Got count={count}; must reflect actual Postgres writes."
+    )
