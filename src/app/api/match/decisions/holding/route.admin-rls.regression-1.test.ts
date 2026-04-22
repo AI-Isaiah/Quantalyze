@@ -107,7 +107,6 @@ vi.mock("@/lib/audit", () => ({
   logAuditEvent: vi.fn(),
 }));
 
-// eslint-disable-next-line import/first
 import { POST } from "./route";
 
 function mkReq(body: unknown) {

@@ -74,7 +74,7 @@ function BannerSubRowContent({
   const router = useRouter();
   const ref = buildHoldingRef(h);
   const effectiveDecisions = { ...matchDecisionsByHoldingRef, ...localDecisionsByRef };
-  const { eligible, existingOutcome } = deriveEligibleForOutcome(
+  const { existingOutcome } = deriveEligibleForOutcome(
     h,
     effectiveDecisions,
     existingOutcomesByHoldingRef,

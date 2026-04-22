@@ -30,7 +30,6 @@ describe("/api/match/decisions/holding ownership gate (live-DB / T-09-03.b)", ()
   let allocAId: string;
   let allocBId: string;
   let allocBToken: string;
-  let allocAToken: string;
   let cleanupHoldingId: string | undefined;
   let cleanupDecisionId: string | undefined;
 
@@ -53,13 +52,6 @@ describe("/api/match/decisions/holding ownership gate (live-DB / T-09-03.b)", ()
     const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const supaAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
     const { createClient } = await import("@supabase/supabase-js");
-
-    const clientA = createClient(supaUrl, supaAnonKey);
-    const signInA = await clientA.auth.signInWithPassword({
-      email: `test-alloc-a-${tsA}@example-rls.test`,
-      password: `LiveDbTest${tsA}!`,
-    });
-    allocAToken = signInA.data.session?.access_token ?? "";
 
     const clientB = createClient(supaUrl, supaAnonKey);
     const signInB = await clientB.auth.signInWithPassword({

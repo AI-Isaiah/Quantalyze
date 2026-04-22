@@ -386,8 +386,6 @@ describe("match_decisions XOR CHECK + bridge_outcomes widened UNIQUE (live-DB)",
         .single();
       if (mdS1?.id) createdMatchDecisionIds.push(mdS1.id as string);
 
-      const today = new Date().toISOString().slice(0, 10);
-
       // First strategy-sourced bridge_outcomes row → triggers populate NULL
       // → COALESCE(NULL, '') = '' → unique slot (allocator, strategy, '')
       const { data: boS1, error: boErrS1 } = await admin

@@ -106,7 +106,6 @@ describe("migration 064 — match_decisions.original_strategy_id schema smoke", 
       const rows = data as any[];
       expect(Array.isArray(rows) && rows.length).toBeGreaterThan(0);
       const deleteRule =
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rows[0]?.referential_constraints?.delete_rule ??
         rows[0]?.delete_rule;
       expect(deleteRule).toBe("RESTRICT");
