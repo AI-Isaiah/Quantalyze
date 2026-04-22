@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.3.3] - 2026-04-22
+
+### Fixed
+
+- **Uploading a new read-only key now actually refreshes the equity curve.**
+  Previously, a fresh reconstruct on a new key computed the correct 730-day
+  replay but wrote zero rows because every `(allocator_id, asof)` collided
+  with stale snapshots from a deleted-or-buggy prior key. The dashboard kept
+  serving the wrong numbers indefinitely (often the pre-v0.15.3.0 perp-as-spot
+  V-shape) with no user-visible recovery path. The reconstruction worker now
+  detects when a key is the allocator's sole authoritative source (no other
+  `api_keys` rows exist) and wipes the stale series before upserting. Users
+  with multiple keys are unaffected — DO NOTHING semantics and multi-key
+  aggregation stay intact. Audit events gain `stale_snapshots_purged` so
+  the cleanup is visible in the trail.
+- **Audit log's `days_written` count stopped lying.** `persist_equity_snapshots`
+  used to return `len(stamped)` regardless of how many rows Postgres actually
+  wrote, so the audit trail reported `days_written=730` during full
+  DO-NOTHING no-ops. It now returns the real count from the upsert response.
+
 ## [0.15.3.2] - 2026-04-22
 
 ### Fixed
