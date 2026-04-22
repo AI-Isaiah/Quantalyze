@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.3.0] - 2026-04-22
+
+The equity curve no longer collapses to -200%+ phantom drawdowns for
+perpetual-heavy accounts. Opening a short was silently inflating the
+reconstruction's synthetic USDT balance and crediting a negative ETH
+inventory that, when marked to market each day, showed the account
+underwater by hundreds of percent before snapping back to 100% once
+every position closed. The V-shape was a math bug, not a real drawdown.
+
+### Fixed
+
+- **Perpetual trades now replay with proper position tracking and
+  mark-to-market.** `_compute_daily_equity` used to treat every trade
+  as a spot swap: a 21-ETH perp short open credited +$48k USDT and
+  -21 ETH into the quantities dict, same as if the user had literally
+  sold 21 ETH. Closed round trips cancelled out at the endpoints, but
+  mid-window the synthetic short inventory multiplied by the day's ETH
+  close price drove reconstructed equity deeply negative. For active
+  perp allocators with overlapping positions the curve routinely
+  traced a V from 100% down to -224% and back. Now perp symbols
+  (ccxt `:settle` suffix) maintain a signed position size with a
+  weighted average entry price: opens/increases update the avg entry,
+  reduces/closes realise PnL into the quote currency, and flips
+  decompose into full-close-plus-new-open at the trade price. Each
+  day, open positions mark-to-market against the base symbol's daily
+  close and the unrealised PnL rolls into `value_usd` under a distinct
+  `{BASE}:{QUOTE}:PERP` breakdown key. Spot trades keep the classical
+  base/quote swap behaviour, guarded by the `:` detector. This bug
+  was latent for Binance and Bybit perp users from day one and became
+  visible for OKX users after v0.15.2.0 (which was what brought OKX
+  perp fills into the trade list at all).
+  `analytics-service/services/equity_reconstruction.py` plus four new
+  regression tests pinning down (1) a short held across days marks to
+  $7,900 instead of -$40k on a $10k account, (2) realised PnL lands
+  in USDT on close, (3) position flips decompose correctly, (4) spot
+  path is untouched. `WR-03` test updated to assert the round-trip
+  invariant under the new model. 535 analytics tests pass.
+
 ## [0.15.2.0] - 2026-04-22
 
 OKX equity reconstruction now sees derivative trades. A swap-heavy or

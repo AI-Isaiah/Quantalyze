@@ -477,6 +477,26 @@ def _compute_daily_equity(
     'exchange_primary' if all symbols priced from exchange OHLCV;
     'coingecko_fallback' if ALL pricing came from CoinGecko;
     'mixed' if partial.
+
+    Perpetual vs spot replay (M078):
+        Spot trades mutate base/quote quantities the classical way — buying
+        1 BTC with $50k USDT reduces cash by $50k and credits 1 BTC. That
+        model is a disaster for linear perpetuals: opening a 2x ETH long
+        does NOT drain cash by the full notional, nor does it credit real
+        ETH to the wallet — it posts margin and issues a contract. Replay
+        that opens as "spot buy at full notional" credits a phantom base
+        balance that, when marked against a later day's close price,
+        compounded across overlapping positions in an active perp
+        allocator, dragged the equity curve to -224% at mid-window before
+        every close zeroed it back to 100%.
+
+        The fix tracks perp positions separately: signed size and weighted
+        avg_entry per ccxt symbol (e.g. 'ETH/USDT:USDT'). Opens/increases
+        update avg_entry. Reduces/closes realise PnL into the quote
+        currency. Flips decompose into a full close plus a new open at
+        trade price. At end of each day, OPEN perp positions mark-to-
+        market using the base symbol's daily close, and the unrealised
+        PnL feeds directly into that day's total_usd.
     """
     # Build event timeline keyed by date
     events_by_date: dict[str, list[dict]] = {}
@@ -506,8 +526,18 @@ def _compute_daily_equity(
             continue
         events_by_date.setdefault(iso, []).append({"kind": "withdrawal", **w})
 
-    # Running per-symbol quantities
+    # Preserve chronological ordering within a single date. Opens must land
+    # before closes so position state is correct when a round trip spans a
+    # handful of minutes inside the same day.
+    for iso_key in events_by_date:
+        events_by_date[iso_key].sort(key=lambda e: int(e.get("timestamp") or 0))
+
+    # Running per-symbol quantities (spot side + realised perp PnL in quote)
     quantities: dict[str, float] = {}
+    # Perp positions keyed by full ccxt symbol ('ETH/USDT:USDT'). Size is
+    # signed: +ve = long, -ve = short. avg_entry is the weighted avg fill
+    # price of the currently-open lot; resets to 0 when size goes to 0.
+    perp_positions: dict[str, dict[str, float]] = {}
 
     # Pre-sort pricing keys once so the inner hot loop does O(log n) lookups
     # instead of O(n log n) per (day, symbol) cell. ohlcv rows come back
@@ -523,6 +553,24 @@ def _compute_daily_equity(
         sym: sorted(series.keys()) for sym, series in coingecko_by_symbol.items()
     }
 
+    def _price_on(sym: str, iso_date: str) -> tuple[float | None, str | None]:
+        """Return (price, source) for `sym` on `iso_date` using on-or-before
+        lookup. Source is 'exchange_primary' / 'coingecko_fallback' / None."""
+        keys = ohlcv_keys.get(sym)
+        if keys:
+            idx = bisect_right(keys, iso_date) - 1
+            if idx >= 0:
+                return ohlcv_closes[sym][idx], "exchange_primary"
+        cg_series = coingecko_by_symbol.get(sym)
+        if cg_series:
+            if iso_date in cg_series:
+                return cg_series[iso_date], "coingecko_fallback"
+            cg_sorted = cg_keys.get(sym, [])
+            idx = bisect_right(cg_sorted, iso_date) - 1
+            if idx >= 0:
+                return cg_series[cg_sorted[idx]], "coingecko_fallback"
+        return None, None
+
     rows: list[dict] = []
     cur = start_date
     while cur <= end_date:
@@ -536,11 +584,13 @@ def _compute_daily_equity(
         for ev in events_by_date.get(iso, []):
             kind = ev.get("kind")
             if kind == "trade":
-                sym = (ev.get("symbol") or "").split("/")[0].upper()
+                raw_symbol = ev.get("symbol") or ""
+                sym = raw_symbol.split("/")[0].upper()
                 side = (ev.get("side") or "").lower()
                 amt = float(ev.get("amount") or 0.0)
+                price = float(ev.get("price") or 0.0)
                 cost = float(ev.get("cost") or 0.0)
-                if not sym:
+                if not sym or amt <= 0:
                     continue
                 # WR-03: CCXT normalises linear perpetuals as "BTC/USDT:USDT"
                 # and inverse contracts as "BTC/USD:BTC". A naive split("/")[-1]
@@ -548,17 +598,66 @@ def _compute_daily_equity(
                 # the quantities dict, producing unpriced base balances that
                 # never offset the buy side. Strip the `:settle` suffix so
                 # the quote side lands on the canonical currency code.
-                raw_symbol = ev.get("symbol") or ""
                 if "/" in raw_symbol:
                     quote = raw_symbol.split("/")[-1].split(":")[0].upper()
                 else:
                     quote = "USDT"
-                if side == "buy":
-                    quantities[sym] = quantities.get(sym, 0.0) + amt
-                    quantities[quote] = quantities.get(quote, 0.0) - cost
-                elif side == "sell":
-                    quantities[sym] = quantities.get(sym, 0.0) - amt
-                    quantities[quote] = quantities.get(quote, 0.0) + cost
+                # `:` in the ccxt symbol marks a derivative (linear or
+                # inverse). Spot never has it.
+                is_perp = ":" in raw_symbol
+                if is_perp:
+                    # Derive price from cost if the ccxt parser didn't fill
+                    # it (older Bybit spot fixtures set only execValue/qty).
+                    if price <= 0 and cost > 0:
+                        price = cost / amt
+                    if price <= 0:
+                        continue
+                    signed = amt if side == "buy" else -amt
+                    pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
+                    cur_size = pos["size"]
+                    cur_avg = pos["avg_entry"]
+                    if cur_size == 0.0 or (cur_size > 0) == (signed > 0):
+                        # Open new or increase same-direction. Avg entry is
+                        # weighted by contract size, not by notional value —
+                        # that keeps avg_entry a true price independent of
+                        # how leverage is recorded on the venue.
+                        new_size = cur_size + signed
+                        if new_size != 0.0:
+                            pos["avg_entry"] = (
+                                cur_size * cur_avg + signed * price
+                            ) / new_size
+                        else:
+                            pos["avg_entry"] = 0.0
+                        pos["size"] = new_size
+                    else:
+                        # Opposite-direction: reduce, full close, or flip.
+                        close_size = min(abs(cur_size), abs(signed))
+                        direction = 1.0 if cur_size > 0 else -1.0
+                        realized = direction * close_size * (price - cur_avg)
+                        quantities[quote] = quantities.get(quote, 0.0) + realized
+                        if abs(signed) >= abs(cur_size):
+                            remainder = abs(signed) - abs(cur_size)
+                            if remainder > 0.0:
+                                # Flip: old side fully closed, new side
+                                # opens at trade price for the remainder.
+                                pos["size"] = (1.0 if signed > 0 else -1.0) * remainder
+                                pos["avg_entry"] = price
+                            else:
+                                pos["size"] = 0.0
+                                pos["avg_entry"] = 0.0
+                        else:
+                            # Partial close: avg_entry is unchanged on the
+                            # remaining lot (the fills that are still open
+                            # were always filled at `cur_avg`).
+                            pos["size"] = cur_size + signed
+                    perp_positions[raw_symbol] = pos
+                else:
+                    if side == "buy":
+                        quantities[sym] = quantities.get(sym, 0.0) + amt
+                        quantities[quote] = quantities.get(quote, 0.0) - cost
+                    elif side == "sell":
+                        quantities[sym] = quantities.get(sym, 0.0) - amt
+                        quantities[quote] = quantities.get(quote, 0.0) + cost
             elif kind == "deposit":
                 sym = (ev.get("currency") or ev.get("code") or "").upper()
                 amt = float(ev.get("amount") or 0.0)
@@ -579,32 +678,41 @@ def _compute_daily_equity(
                 px = 1.0
                 src = "exchange_primary"
             else:
-                px = None
-                src = None
-                keys = ohlcv_keys.get(sym)
-                if keys:
-                    # O(log n) on-or-before lookup via pre-sorted parallel lists.
-                    idx = bisect_right(keys, iso) - 1
-                    if idx >= 0:
-                        px = ohlcv_closes[sym][idx]
-                        src = "exchange_primary"
-                if px is None:
-                    cg_series = coingecko_by_symbol.get(sym)
-                    if cg_series and iso in cg_series:
-                        px = cg_series[iso]
-                        src = "coingecko_fallback"
-                    elif cg_series:
-                        cg_sorted = cg_keys.get(sym, [])
-                        idx = bisect_right(cg_sorted, iso) - 1
-                        if idx >= 0:
-                            px = cg_series[cg_sorted[idx]]
-                            src = "coingecko_fallback"
+                px, src = _price_on(sym, iso)
                 if px is None:
                     # Skip symbols with no price — keeps the chart stable
                     continue
             usd = qty * px
             breakdown[sym] = round(usd, 2)
             total += usd
+            if src == "exchange_primary":
+                used_exchange = True
+            elif src == "coingecko_fallback":
+                used_coingecko = True
+
+        # Mark open perp positions to the day's close. Unrealised PnL rolls
+        # into total_usd and is attributed in the breakdown under a
+        # distinct key (`{BASE}:{QUOTE}:PERP`) so it doesn't collide with a
+        # spot holding of the same base currency.
+        for perp_sym, pos in perp_positions.items():
+            size = pos.get("size") or 0.0
+            avg_entry = pos.get("avg_entry") or 0.0
+            if size == 0.0 or avg_entry == 0.0:
+                continue
+            base = perp_sym.split("/")[0].upper()
+            quote_sym = (
+                perp_sym.split("/")[-1].split(":")[0].upper()
+                if "/" in perp_sym else "USDT"
+            )
+            px, src = _price_on(base, iso)
+            if px is None:
+                continue
+            unrealized = size * (px - avg_entry)
+            if unrealized == 0.0:
+                continue
+            key = f"{base}:{quote_sym}:PERP"
+            breakdown[key] = round(breakdown.get(key, 0.0) + unrealized, 2)
+            total += unrealized
             if src == "exchange_primary":
                 used_exchange = True
             elif src == "coingecko_fallback":

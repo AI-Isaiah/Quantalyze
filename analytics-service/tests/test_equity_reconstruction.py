@@ -889,65 +889,65 @@ async def test_refresh_daily_aggregates_across_keys(monkeypatch):
 
 def test_wr03_compute_daily_equity_strips_settle_suffix_from_perp_symbol():
     """WR-03 regression: CCXT normalises a Binance/Bybit linear perpetual
-    as symbol 'BTC/USDT:USDT'. The previous implementation did
+    as symbol 'BTC/USDT:USDT'. An early implementation did
     `split('/')[-1]` which returned 'USDT:USDT' — the buy-side cost flowed
     into a phantom 'USDT:USDT' key in `quantities` while the base 'BTC'
-    side was credited normally, producing spurious base-only balances on
-    the reconstructed equity row.
+    side was credited normally, producing spurious base-only balances.
 
-    Post-fix: `split('/')[-1].split(':')[0]` yields the canonical 'USDT',
-    so the buy debit lands on the real USDT balance and offsets the base
-    credit as expected."""
+    Since M078 perp-aware replay, opening a long at fair value doesn't
+    mutate spot balances at all (a perp is a contract, not a swap), but
+    the `:settle` suffix stripping still matters for realised-PnL routing
+    on closes. This test pins down the combined invariant: after a
+    round-trip (open + close at same price), the USDT quote lands on the
+    canonical 'USDT' key (no phantom ':USDT' or 'USDT:USDT' entry)."""
     from services.equity_reconstruction import _compute_daily_equity
 
-    asof = date(2026, 4, 15)
-    ts_ms = int(
-        datetime(asof.year, asof.month, asof.day, tzinfo=timezone.utc).timestamp() * 1000
-    )
+    d0 = date(2026, 4, 15)
+    d1 = date(2026, 4, 16)
 
-    # CCXT-style linear perp (Binance/Bybit) — symbol has a `:settle` suffix.
+    def _ts(d: date) -> int:
+        return int(
+            datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000
+        )
+
+    deposits = [
+        {"timestamp": _ts(d0), "currency": "USDT", "amount": 50_000.0}
+    ]
     trades = [
         {
-            "timestamp": ts_ms,
-            "symbol": "BTC/USDT:USDT",
-            "side": "buy",
-            "amount": 1.0,
-            "cost": 50_000.0,
-        }
+            "timestamp": _ts(d0), "symbol": "BTC/USDT:USDT", "side": "buy",
+            "amount": 1.0, "price": 50_000.0, "cost": 50_000.0,
+        },
+        {
+            "timestamp": _ts(d1), "symbol": "BTC/USDT:USDT", "side": "sell",
+            "amount": 1.0, "price": 50_000.0, "cost": 50_000.0,
+        },
     ]
-    # Priced via exchange OHLCV for BTC at $50k.
     ohlcv_by_symbol = {
-        "BTC": [(asof.isoformat(), 50_000.0)],
+        "BTC": [(d0.isoformat(), 50_000.0), (d1.isoformat(), 50_000.0)],
     }
 
     rows = _compute_daily_equity(
         trades=trades,
-        deposits=[],
+        deposits=deposits,
         withdrawals=[],
         ohlcv_by_symbol=ohlcv_by_symbol,
         coingecko_by_symbol={},
-        start_date=asof,
-        end_date=asof,
+        start_date=d0,
+        end_date=d1,
     )
-
-    assert len(rows) == 1, f"expected exactly one row for {asof}; got {rows!r}"
-    breakdown = rows[0]["breakdown"]
-    # Phantom key must NOT exist post-fix
-    assert "USDT:USDT" not in breakdown, (
-        f"expected :settle suffix to be stripped from quote side; "
-        f"breakdown leaked phantom key: {breakdown!r}"
-    )
-    # USDT is a stablecoin priced at 1.0; after a buy of 1 BTC at $50k the
-    # USDT quantity goes to -50_000 and is EXCLUDED from the breakdown only
-    # if qty==0 (see the `if qty == 0: continue` guard). It's non-zero, so
-    # it SHOULD be represented — verifying the quote side landed on USDT
-    # (not 'USDT:USDT') via a value_usd that reflects the offset.
-    # BTC side: +1 @ $50k = +$50,000; USDT side: -$50,000 @ $1 = -$50,000.
-    # Net value_usd == 0.
-    assert rows[0]["value_usd"] == 0.0, (
-        f"expected buy of 1 BTC at $50k to net to $0 equity "
-        f"(base credit offset by quote debit); got {rows[0]!r}"
-    )
+    assert len(rows) == 2, f"expected 2 rows; got {rows!r}"
+    for row in rows:
+        breakdown = row["breakdown"]
+        assert "USDT:USDT" not in breakdown, (
+            f"phantom quote key leaked: {breakdown!r}"
+        )
+        for k in breakdown:
+            assert not k.endswith(":USDT"), (
+                f"suspicious unqualified :USDT key: {k!r} in {breakdown!r}"
+            )
+    # Round-trip at fair value → final equity equals deposited cash.
+    assert rows[-1]["value_usd"] == pytest.approx(50_000.0, abs=0.01)
 
 
 def test_wr03_compute_daily_equity_spot_symbol_unchanged():
@@ -1661,3 +1661,248 @@ async def test_m077_non_okx_venue_unchanged_single_pass(monkeypatch):
         assert "type" not in params and "instType" not in params, (
             f"non-OKX call leaked OKX-specific instType param: {params!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# M078 regression — perpetuals replay (position tracking, mark-to-market).
+# Before this fix, every trade was replayed as if it were a spot swap: a
+# 21-ETH perp SHORT open credited +48,693 USDT and debited -21.957 ETH, so
+# the replay during the open window marked to a synthetic short against
+# current ETH close price. For accounts running many overlapping shorts,
+# that produced the infamous V-shape: 100% → -224% → 100% once every
+# position closed. These tests pin down that:
+#   1) opening a perp doesn't cash-settle the notional,
+#   2) an open position marks to market sensibly each day,
+#   3) closing realises PnL into USDT,
+#   4) flipping a position decomposes correctly,
+#   5) spot trades are unaffected.
+# ---------------------------------------------------------------------------
+
+
+def _mk_perp_trade(
+    *, iso: str, side: str, amount: float, price: float,
+    symbol: str = "ETH/USDT:USDT",
+) -> dict:
+    ts_ms = int(
+        datetime.fromisoformat(iso).replace(tzinfo=timezone.utc).timestamp() * 1000
+    )
+    return {
+        "timestamp": ts_ms,
+        "symbol": symbol,
+        "side": side,
+        "amount": amount,
+        "price": price,
+        "cost": amount * price,
+    }
+
+
+def test_m078_perp_short_mark_to_market_no_phantom_drawdown():
+    """Short 21 ETH @ 2200 on day 0. Hold through day 1 (ETH close = 2300,
+    price moved 100 against the short). Close on day 2 @ 2250. The replay
+    must NOT show a -224% phantom: mid-window equity = starting deposit
+    minus unrealised PnL (21 × 100 = 2100), not starting - full notional.
+    """
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 1)
+    d1 = date(2026, 4, 2)
+    d2 = date(2026, 4, 3)
+
+    deposits = [{
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "currency": "USDT",
+        "amount": 10_000.0,
+    }]
+    trades = [
+        _mk_perp_trade(iso=d0.isoformat(), side="sell", amount=21.0, price=2200.0),
+        _mk_perp_trade(iso=d2.isoformat(), side="buy",  amount=21.0, price=2250.0),
+    ]
+    ohlcv_by_symbol = {
+        "ETH": [
+            (d0.isoformat(), 2200.0),
+            (d1.isoformat(), 2300.0),
+            (d2.isoformat(), 2250.0),
+        ],
+    }
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d2,
+    )
+
+    by_date = {r["asof"]: r for r in rows}
+
+    # Day 0: opened short at fair value — unrealised PnL ≈ 0, cash intact.
+    assert by_date[d0.isoformat()]["value_usd"] == pytest.approx(10_000.0, abs=0.01), (
+        f"day 0 open should not move cash (only margin locked); got "
+        f"{by_date[d0.isoformat()]!r}"
+    )
+    # Day 1: short held through a $100 rise. Unrealised PnL = -21 × 100 = -2100.
+    # Expected equity = 10_000 - 2100 = 7900 (NOT deeply negative).
+    assert by_date[d1.isoformat()]["value_usd"] == pytest.approx(7_900.0, abs=0.01), (
+        f"day 1 should mark to market: 10k - 21 * (2300-2200) = 7900; got "
+        f"{by_date[d1.isoformat()]!r}"
+    )
+    # Day 2: short closed at 2250. Realised PnL = 21 × (2200 - 2250) = -1050.
+    # No open perp position remains, so unrealised = 0.
+    assert by_date[d2.isoformat()]["value_usd"] == pytest.approx(8_950.0, abs=0.01), (
+        f"day 2 close should realise 21 * (2200-2250) = -1050; got "
+        f"{by_date[d2.isoformat()]!r}"
+    )
+    # Hard floor: NO day may swing anywhere near the pre-fix phantom (-40k
+    # on a $10k account). This is the bug-signature guard.
+    for iso_key, row in by_date.items():
+        assert row["value_usd"] > 0, (
+            f"equity went non-positive on {iso_key}: {row!r}"
+        )
+
+
+def test_m078_perp_long_realises_pnl_to_usdt_on_close():
+    """Long 10 ETH @ 2000 on d0, close @ 2100 on d1. Realised PnL = 10 ×
+    100 = +1000 USDT. End-of-window equity = 10,000 + 1000 = 11,000."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 10)
+    d1 = date(2026, 4, 11)
+    deposits = [{
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "currency": "USDT",
+        "amount": 10_000.0,
+    }]
+    trades = [
+        _mk_perp_trade(iso=d0.isoformat(), side="buy",  amount=10.0, price=2000.0),
+        _mk_perp_trade(iso=d1.isoformat(), side="sell", amount=10.0, price=2100.0),
+    ]
+    ohlcv_by_symbol = {
+        "ETH": [(d0.isoformat(), 2000.0), (d1.isoformat(), 2100.0)],
+    }
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d1,
+    )
+    by_date = {r["asof"]: r for r in rows}
+    assert by_date[d1.isoformat()]["value_usd"] == pytest.approx(11_000.0, abs=0.01)
+    # Realised PnL must land in USDT breakdown, not in a phantom ETH entry.
+    brk = by_date[d1.isoformat()]["breakdown"]
+    assert "ETH:USDT:PERP" not in brk, (
+        f"closed position must not leave a perp mark entry: {brk!r}"
+    )
+    assert brk.get("USDT") == pytest.approx(11_000.0, abs=0.01), brk
+
+
+def test_m078_perp_flip_long_to_short_in_one_trade():
+    """Long 5 ETH @ 2000, then a single 10-ETH sell @ 2100 closes the long
+    (realising +500) and opens a new 5-ETH short @ 2100. A subsequent day
+    with ETH close 2050 should show unrealised on the short of +250."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 15)
+    d1 = date(2026, 4, 16)
+    d2 = date(2026, 4, 17)
+    deposits = [{
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "currency": "USDT",
+        "amount": 10_000.0,
+    }]
+    trades = [
+        _mk_perp_trade(iso=d0.isoformat(), side="buy",  amount=5.0,  price=2000.0),
+        _mk_perp_trade(iso=d1.isoformat(), side="sell", amount=10.0, price=2100.0),
+    ]
+    ohlcv_by_symbol = {
+        "ETH": [
+            (d0.isoformat(), 2000.0),
+            (d1.isoformat(), 2100.0),
+            (d2.isoformat(), 2050.0),
+        ],
+    }
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d2,
+    )
+    by_date = {r["asof"]: r for r in rows}
+
+    # After flip on d1: realised +500, new short 5 @ 2100. d1 marks @ 2100
+    # → unrealised 0. Total = 10,000 + 500 + 0 = 10,500.
+    assert by_date[d1.isoformat()]["value_usd"] == pytest.approx(10_500.0, abs=0.01), (
+        f"flip must realise the closed lot and mark the new lot at entry; "
+        f"got {by_date[d1.isoformat()]!r}"
+    )
+    # d2: short 5 @ 2100 marked at 2050 → unrealised = -5 × (2050 - 2100) = +250.
+    assert by_date[d2.isoformat()]["value_usd"] == pytest.approx(10_750.0, abs=0.01), (
+        f"d2 should carry realised 500 + unrealised 250 on the remaining "
+        f"short; got {by_date[d2.isoformat()]!r}"
+    )
+
+
+def test_m078_spot_trade_path_unchanged():
+    """Regression guard: spot symbols (no `:settle` suffix) must continue
+    to replay base/quote swaps the classical way. Buying 1 BTC with 50k
+    USDT at $50k price nets to $0 equity delta; selling it back at 55k
+    yields +5k."""
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 20)
+    d1 = date(2026, 4, 21)
+    deposits = [{
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "currency": "USDT",
+        "amount": 50_000.0,
+    }]
+    ts0 = int(datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000)
+    ts1 = int(datetime(d1.year, d1.month, d1.day, tzinfo=timezone.utc).timestamp() * 1000)
+    trades = [
+        {
+            "timestamp": ts0, "symbol": "BTC/USDT", "side": "buy",
+            "amount": 1.0, "price": 50_000.0, "cost": 50_000.0,
+        },
+        {
+            "timestamp": ts1, "symbol": "BTC/USDT", "side": "sell",
+            "amount": 1.0, "price": 55_000.0, "cost": 55_000.0,
+        },
+    ]
+    ohlcv_by_symbol = {
+        "BTC": [(d0.isoformat(), 50_000.0), (d1.isoformat(), 55_000.0)],
+    }
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d1,
+    )
+    by_date = {r["asof"]: r for r in rows}
+    # d0: bought 1 BTC at fair value → net equity still 50k.
+    assert by_date[d0.isoformat()]["value_usd"] == pytest.approx(50_000.0, abs=0.01)
+    # d1: sold at 55k → cash = 0 + 55k = 55k. No perp mark entries.
+    assert by_date[d1.isoformat()]["value_usd"] == pytest.approx(55_000.0, abs=0.01)
+    for row in rows:
+        for k in row["breakdown"]:
+            assert ":PERP" not in k, (
+                f"spot trade leaked a perp mark into breakdown: {row!r}"
+            )
