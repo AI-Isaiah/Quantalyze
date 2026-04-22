@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.3.1] - 2026-04-22
+
+### Removed
+
+- **`.github/workflows/deploy-analytics.yml` — Railway now deploys via its
+  native GitHub integration.** The custom workflow was fighting Railway's
+  own watcher: every push to `analytics-service/**` would fire both paths,
+  the native deploy would succeed, and ours would red-X the Actions tab
+  because the token pattern the workflow expected (Account token) is not
+  what `railway up --service <name> --ci` needs in a non-linked CI
+  directory (Project token). With the GUI integration in place, one
+  deploy pipeline is enough. `RAILWAY_TOKEN` GitHub secret also removed.
+
 ## [0.15.3.0] - 2026-04-22
 
 The equity curve no longer collapses to -200%+ phantom drawdowns for
