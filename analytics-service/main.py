@@ -14,6 +14,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Root logging config. FastAPI / uvicorn don't configure the root logger,
+# so any `logging.getLogger(...).info(...)` from our code silently drops
+# on stdout. Explicit basicConfig here guarantees worker-loop events
+# ("Worker starting as ...", "Claimed N jobs", "Job X done") land in
+# Railway's deploy log stream alongside uvicorn's access log. LOG_LEVEL
+# env var lets ops bump to DEBUG without a code change.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+
 # Sentry error tracking (optional, production only)
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
