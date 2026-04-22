@@ -642,28 +642,46 @@ async def persist_equity_snapshots(
 # Read helpers
 # ---------------------------------------------------------------------------
 
-async def _existing_snapshot_count(supabase: Any, allocator_id: str) -> int:
+async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
+    """Per-api_key idempotency check (replaces 070's allocator-scoped gate).
+
+    Returns True when this api_key has previously produced a completed
+    reconstruct_allocator_history job. Migration 076 — without this scope
+    fix, an allocator's first reconstruct rows blocked every subsequent
+    api_key (additional exchanges, re-keyed connections) from ever
+    backfilling, because allocator_equity_snapshots intentionally
+    aggregates across keys at UPSERT time and cannot answer the
+    per-key question.
+
+    The check is `status = 'done'` only — the partial unique index
+    `compute_jobs_one_inflight_reconstruct_per_api_key` already prevents
+    a second concurrent in-flight job for the same key, and the current
+    job's own row is `running`/`pending`, never `done`, so excluding it
+    is automatic.
+    """
     def _sel():
-        # head=True tells PostgREST to return only the count header and no
-        # row bodies — for an idempotency check that cares only whether
-        # count > 0, we don't need to ship N rows across the wire.
         return (
-            supabase.table("allocator_equity_snapshots")
-            .select("asof", count="exact", head=True)
-            .eq("allocator_id", allocator_id)
+            supabase.table("compute_jobs")
+            .select("id", count="exact", head=True)
+            .eq("api_key_id", api_key_id)
+            .eq("kind", "reconstruct_allocator_history")
+            .eq("status", "done")
             .execute()
         )
 
     try:
         res = await db_execute(_sel)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("allocator_equity_snapshots count failed: %s", exc)
-        return 0
+        logger.warning(
+            "compute_jobs done-reconstruct lookup failed for api_key=%s: %s",
+            api_key_id, exc,
+        )
+        return False
     count = getattr(res, "count", None)
     if count is not None:
-        return int(count)
+        return int(count) > 0
     data = getattr(res, "data", None) or []
-    return len(data)
+    return len(data) > 0
 
 
 async def _fetch_today_holdings(
@@ -829,14 +847,18 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
             error_kind="permanent",
         )
 
-    # Threat T-07-V5 idempotency: if snapshots already exist for this
-    # allocator, short-circuit as DONE.
-    existing = await _existing_snapshot_count(ctx.supabase, allocator_id)
-    if existing > 0:
+    # Per-api_key idempotency (Migration 076): short-circuit as DONE
+    # only when THIS key has previously completed a reconstruct.
+    # Allocator-scoped snapshot count was the wrong gate — it locked
+    # out every subsequent api_key (additional exchanges or re-key)
+    # from ever backfilling, because allocator_equity_snapshots
+    # intentionally aggregates across keys via UPSERT on (allocator_id,
+    # asof). The compute_jobs table is the per-key source of truth.
+    if await _api_key_already_reconstructed(ctx.supabase, api_key_id):
         _emit_audit(
             allocator_id, api_key_id,
             "allocator.equity.reconstruct_complete",
-            {"reason": "already_reconstructed", "existing_rows": existing},
+            {"reason": "already_reconstructed_for_api_key"},
         )
         try:
             await ctx.exchange.close()

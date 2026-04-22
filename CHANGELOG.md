@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.1.0] - 2026-04-22
+
+Equity history backfill fix. Adding a second exchange (or rebackfilling a key
+after seed data) now actually pulls real historical equity instead of silently
+short-circuiting. Pre-fix, any existing snapshot row for an allocator (test
+seed, prior key's reconstruction, or even today's daily-refresh row) caused
+every future `reconstruct_allocator_history` job to skip without fetching, so
+new connections produced empty equity charts.
+
+### Fixed
+
+- **Per-api_key reconstruction gate.** The `request_allocator_holdings_sync`
+  RPC and the `reconstruct_allocator_history` worker handler both used
+  allocator-scoped snapshot counts as their idempotency check (`if existing
+  rows > 0: skip`). Because `allocator_equity_snapshots` aggregates across
+  keys at UPSERT time, that check could never answer "has THIS api_key been
+  backfilled" — it only ever answered "has the allocator ever had any row at
+  all". Adding a second exchange therefore inherited the first key's snapshot
+  presence and got zero historical backfill. Replaced both gates with a
+  per-`api_key_id` lookup against `compute_jobs` (status = `done`,
+  kind = `reconstruct_allocator_history`) so each key gets exactly one
+  reconstruction attempt regardless of allocator-level snapshot history.
+  Migration `076_reconstruct_per_api_key_gate.sql` + handler patch in
+  `analytics-service/services/equity_reconstruction.py`.
+
 ## [0.15.0.0] - 2026-04-20
 
 Phase 07 — Demo-Mode Purge. The `/allocations` dashboard now derives every

@@ -1287,3 +1287,159 @@ async def test_wr_adv_03_persist_equity_snapshots_is_atomic(monkeypatch):
         f"existing>0 idempotency contract: a mid-run failure leaves rows>0 "
         f"with history truncated, and retries short-circuit permanently."
     )
+
+
+# ---------------------------------------------------------------------------
+# Migration 076 regression tests — per-api_key reconstruction gate.
+#   M076-01: a 2nd api_key for the same allocator MUST backfill even when
+#            the allocator already has snapshots from another key.
+#   M076-02: when the SAME api_key already has a `done` reconstruct job in
+#            compute_jobs, the handler short-circuits (gate still gates).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_m076_reconstruct_runs_for_new_api_key_when_allocator_has_other_key_snapshots(monkeypatch):
+    """Migration 076 regression: pre-fix, the allocator-scoped snapshot
+    count blocked every additional exchange the user added. With the
+    per-api_key gate, KEY_2 must still backfill even though the allocator
+    already has 30 days of snapshots from KEY_1."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    # Seed the allocator with 30 prior snapshots — these came from a
+    # previous reconstruct against API_KEY_ID_1. Pre-fix: the handler
+    # would short-circuit because COUNT(*) > 0 for this allocator.
+    for day in range(1, 31):
+        asof = f"2026-03-{day:02d}"
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": 100.0 + day,
+            "breakdown": {"BTC": 100.0 + day},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+    # NOTE: no compute_jobs row inserted for API_KEY_ID_2 — gate must
+    # therefore allow the reconstruct to proceed.
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + day * day_ms, 50000.0) for day in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-m076-1",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_2,  # NEW key, allocator already has rows from KEY_1
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Pre-fix: only the 30 seed rows remained, NO new fetches happened, and
+    # the audit recorded reason=already_reconstructed (or
+    # already_reconstructed_for_api_key with the new gate but still no
+    # fetches). Post-fix: the handler called fetch_my_trades and persisted
+    # additional snapshots.
+    assert mock_exchange.fetch_my_trades.await_count > 0, (
+        "Migration 076 regression: handler must fetch trades for a NEW api_key "
+        "even if the allocator has prior snapshots from another key. "
+        "Pre-fix the allocator-scoped snapshot count short-circuited."
+    )
+
+    # Audit should record reconstruct_STARTED + reconstruct_COMPLETE,
+    # NOT a bare reconstruct_complete with reason=already_reconstructed_for_api_key.
+    started_events = [
+        c for c in audit_mock.call_args_list if "reconstruct_started" in str(c)
+    ]
+    assert started_events, (
+        f"expected reconstruct_started audit event for new api_key; "
+        f"got {audit_mock.call_args_list!r}"
+    )
+    short_circuit_events = [
+        c for c in audit_mock.call_args_list
+        if "already_reconstructed" in str(c)
+    ]
+    assert not short_circuit_events, (
+        f"unexpected short-circuit audit for a new api_key: {short_circuit_events!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_m076_reconstruct_short_circuits_when_same_api_key_already_done(monkeypatch):
+    """Migration 076 regression: the per-api_key gate must still gate.
+    When a `done` reconstruct_allocator_history compute_jobs row exists
+    for the SAME api_key, the handler must short-circuit without
+    touching the exchange — protects against duplicate retries."""
+    fake_supabase = FakeSupabaseClient()
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    # Pre-existing DONE reconstruct job for API_KEY_ID_1.
+    fake_supabase.store[("compute_jobs", ("done-job-1",))] = {
+        "id": "done-job-1",
+        "api_key_id": API_KEY_ID_1,
+        "kind": "reconstruct_allocator_history",
+        "status": "done",
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=[])
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    job = {
+        "id": "job-m076-2",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,  # already done
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # No exchange calls — gate must short-circuit BEFORE any I/O.
+    assert mock_exchange.fetch_my_trades.await_count == 0, (
+        "per-api_key gate failed to short-circuit: handler still hit "
+        "fetch_my_trades despite an existing done job for this key."
+    )
+
+    # Audit records the new short-circuit reason.
+    short_circuit_events = [
+        c for c in audit_mock.call_args_list
+        if "already_reconstructed_for_api_key" in str(c)
+    ]
+    assert short_circuit_events, (
+        f"expected audit event with reason=already_reconstructed_for_api_key; "
+        f"got {audit_mock.call_args_list!r}"
+    )
