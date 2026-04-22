@@ -58,6 +58,11 @@ interface ExchangeConnection {
   // countdown via EXCHANGE_COOLDOWN_SECONDS (client-side mirror of the
   // Python EXCHANGE_COOLDOWNS map in job_worker.py).
   last_429_at: string | null;
+  // Migration 075: soft-disconnect timestamp. NULL = connected (renders in
+  // the main list with Sync now + Disconnect). Non-null = disconnected
+  // (renders in the "Disconnected keys" section with a Reconnect button;
+  // workers skip the key on the next cron tick).
+  disconnected_at: string | null;
   // f8 (client-only — NOT persisted to DB): captured from the sync route's
   // `already_inflight` response. When syncing AND ≥30s out, the pill renders
   // the Queued helper via AllocatorSyncStatus.
@@ -78,11 +83,13 @@ type InitialKey = Omit<
   ExchangeConnection,
   | "sync_error"
   | "last_429_at"
+  | "disconnected_at"
   | "queued_next_attempt_at"
   | "helper_override"
 > & {
   sync_error?: string | null;
   last_429_at?: string | null;
+  disconnected_at?: string | null;
 };
 
 interface Props {
@@ -142,6 +149,7 @@ function normalizeInitialKey(
     created_at: k.created_at,
     sync_error: k.sync_error ?? null,
     last_429_at: k.last_429_at ?? null,
+    disconnected_at: k.disconnected_at ?? null,
     // Landmine 8 + f8/f4 preservation: client-only fields carry over across
     // router.refresh() server-state cycles when the row id matches.
     queued_next_attempt_at: prev?.queued_next_attempt_at ?? null,
@@ -190,21 +198,123 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   async function handleDeleteKey(keyId: string) {
     setDeleteLoading(true);
     setDeleteError(null);
-    // Migration 069 RPC: atomic cascade-aware delete. Returns the number
-    // of holdings rows actually removed.
-    const { error } = await supabase.rpc("delete_allocator_api_key", {
-      p_api_key_id: keyId,
-      p_cascade_holdings: cascadeHoldings,
-    });
-    setDeleteLoading(false);
-    if (error) {
-      setDeleteError(`Failed to disconnect: ${error.message}`);
-      return;
+
+    // Split by user intent: "delete N holdings" checkbox gates hard-delete.
+    // Unchecked → migration 075 soft-disconnect (key + holdings preserved,
+    // worker crons skip, UI renders Reconnect).
+    // Checked → migration 069 cascade-delete (key + holdings wiped).
+    if (cascadeHoldings) {
+      const { error } = await supabase.rpc("delete_allocator_api_key", {
+        p_api_key_id: keyId,
+        p_cascade_holdings: true,
+      });
+      setDeleteLoading(false);
+      if (error) {
+        setDeleteError("Could not disconnect this key. Please try again.");
+        return;
+      }
+      setKeys((prev) => prev.filter((k) => k.id !== keyId));
+    } else {
+      const { error } = await supabase.rpc("disconnect_allocator_api_key", {
+        p_api_key_id: keyId,
+      });
+      setDeleteLoading(false);
+      if (error) {
+        setDeleteError("Could not disconnect this key. Please try again.");
+        return;
+      }
+      // Stamp locally so the row re-renders in the Disconnected section
+      // without waiting for router.refresh() to round-trip. Server truth
+      // wins on the next merge via prevInitialKeys.
+      const nowIso = new Date().toISOString();
+      setKeys((prev) =>
+        prev.map((k) =>
+          k.id === keyId ? { ...k, disconnected_at: nowIso } : k,
+        ),
+      );
     }
-    setKeys((prev) => prev.filter((k) => k.id !== keyId));
+
     setConfirmDeleteId(null);
     setDeleteHoldingsCount(null);
     setCascadeHoldings(false);
+    startTransition(() => router.refresh());
+  }
+
+  async function handleReconnect(keyId: string) {
+    // Optimistic: clear disconnected_at + flip to syncing so the pill
+    // renders immediately. Server reset of sync_error + sync_status='idle'
+    // lands via the reconnect RPC; the subsequent sync POST (mirrors
+    // handleAddKey) flips sync_status to 'syncing' on the server.
+    setKeys((prev) =>
+      prev.map((k) =>
+        k.id === keyId
+          ? {
+              ...k,
+              disconnected_at: null,
+              sync_status: "syncing",
+              sync_error: null,
+              helper_override: null,
+            }
+          : k,
+      ),
+    );
+
+    const { error: rpcErr } = await supabase.rpc(
+      "reconnect_allocator_api_key",
+      { p_api_key_id: keyId },
+    );
+    if (rpcErr) {
+      // Revert on failure.
+      setKeys((prev) =>
+        prev.map((k) =>
+          k.id === keyId
+            ? {
+                ...k,
+                disconnected_at: new Date().toISOString(),
+                sync_status: "idle",
+                helper_override: "Reconnect failed — try again",
+              }
+            : k,
+        ),
+      );
+      return;
+    }
+
+    // Kick off an immediate sync so the user doesn't wait for tomorrow's
+    // cron tick. Mirrors handleAddKey f4: 4xx/5xx surface via helper line.
+    try {
+      const syncRes = await fetch("/api/allocator/holdings/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key_id: keyId }),
+      });
+      if (!syncRes.ok) {
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.id === keyId
+              ? {
+                  ...k,
+                  sync_status: "idle",
+                  helper_override: SYNC_FAILED_HELPER,
+                }
+              : k,
+          ),
+        );
+      }
+    } catch {
+      setKeys((prev) =>
+        prev.map((k) =>
+          k.id === keyId
+            ? {
+                ...k,
+                sync_status: "idle",
+                helper_override: SYNC_FAILED_HELPER,
+              }
+            : k,
+        ),
+      );
+    }
+
     startTransition(() => router.refresh());
   }
 
@@ -469,6 +579,12 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
     }
   }
 
+  // Migration 075: split active vs disconnected. Active rows render with
+  // Sync + Disconnect; disconnected rows render under a separate section
+  // with Reconnect. Derived each render — keys list is small (rarely >10).
+  const activeKeys = keys.filter((k) => k.disconnected_at === null);
+  const disconnectedKeys = keys.filter((k) => k.disconnected_at !== null);
+
   return (
     <div className="mt-6 space-y-4">
       <Card>
@@ -478,15 +594,15 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
               Exchange connections
             </h2>
             <p className="text-xs text-text-muted mt-0.5">
-              {keys.length === 0
+              {activeKeys.length === 0
                 ? "No exchanges connected yet."
-                : `${keys.length} connected · Active Allocation auto-synced`}
+                : `${activeKeys.length} connected · Active Allocation auto-synced`}
             </p>
           </div>
           <Button onClick={() => setShowForm(true)}>+ Connect exchange</Button>
         </div>
 
-        {keys.length === 0 ? (
+        {activeKeys.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border bg-bg-secondary p-8 text-center">
             <p className="text-sm text-text-secondary">
               Upload a read-only API key from Binance, OKX, Bybit, or
@@ -500,7 +616,7 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           </div>
         ) : (
           <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
-            {keys.map((key) => {
+            {activeKeys.map((key) => {
               const tag = EXCHANGE_TAGS[key.exchange] ?? {
                 label: key.exchange.slice(0, 3).toUpperCase(),
                 bg: "#F1F5F9",
@@ -573,6 +689,68 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
           </div>
         )}
       </Card>
+
+      {disconnectedKeys.length > 0 ? (
+        <Card>
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-text-primary">
+              Disconnected
+            </h3>
+            <p className="text-xs text-text-muted mt-0.5">
+              {disconnectedKeys.length} key
+              {disconnectedKeys.length === 1 ? "" : "s"} stopped syncing.
+              Historical holdings stay reflected in past performance.
+            </p>
+          </div>
+          <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
+            {disconnectedKeys.map((key) => {
+              const tag = EXCHANGE_TAGS[key.exchange] ?? {
+                label: key.exchange.slice(0, 3).toUpperCase(),
+                bg: "#F1F5F9",
+                fg: "#475569",
+              };
+              return (
+                <div
+                  key={key.id}
+                  className="flex items-center gap-4 bg-surface px-4 py-3 opacity-75"
+                >
+                  <div
+                    className="flex h-10 w-10 items-center justify-center rounded-md font-metric text-xs font-bold tabular-nums"
+                    style={{ backgroundColor: tag.bg, color: tag.fg }}
+                    aria-label={key.exchange}
+                  >
+                    {tag.label}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-text-primary truncate">
+                      {key.label}
+                    </p>
+                    <p className="text-[10px] text-text-muted uppercase tracking-wider mt-0.5">
+                      {key.exchange} · Disconnected{" "}
+                      {formatRelative(key.disconnected_at)}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">
+                      Last sync
+                    </p>
+                    <p className="text-xs text-text-secondary font-metric mt-0.5">
+                      {formatRelative(key.last_sync_at)}
+                    </p>
+                  </div>
+                  <Button
+                    variant="primary"
+                    aria-label={`Reconnect ${key.exchange} key`}
+                    onClick={() => handleReconnect(key.id)}
+                  >
+                    Reconnect
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      ) : null}
 
       <Card>
         <div>

@@ -741,8 +741,8 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     expect(disconnectBtn).not.toBeDisabled();
   });
 
-  it("confirming unchecked calls delete_allocator_api_key with p_cascade_holdings: false", async () => {
-    rpcMock.mockResolvedValue({ data: 0, error: null });
+  it("confirming unchecked calls disconnect_allocator_api_key (migration 075 soft-disconnect)", async () => {
+    rpcMock.mockResolvedValue({ data: true, error: null });
     renderWithHoldings(2);
     await act(async () => {
       fireEvent.click(
@@ -768,9 +768,10 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     await act(async () => {
       fireEvent.click(disconnectBtn);
     });
-    expect(rpcMock).toHaveBeenCalledWith("delete_allocator_api_key", {
+    // Post-075: unchecked → soft-disconnect RPC (no p_cascade_holdings
+    // param). Holdings keep their FK reference; worker crons skip the key.
+    expect(rpcMock).toHaveBeenCalledWith("disconnect_allocator_api_key", {
       p_api_key_id: "key-binance-1",
-      p_cascade_holdings: false,
     });
   });
 
@@ -852,6 +853,125 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
     await act(async () => {
       resolveRpc({ data: 0, error: null });
     });
+  });
+});
+
+// ===========================================================================
+// Migration 075 — soft-disconnect + Reconnect section
+// ===========================================================================
+// Post-075 the Disconnect modal splits by intent:
+//   - cascadeHoldings=false → disconnect_allocator_api_key (soft)
+//   - cascadeHoldings=true  → delete_allocator_api_key (hard)
+// A key with a non-null disconnected_at renders in the Disconnected section
+// with a Reconnect button instead of Sync now / Disconnect. Reconnect
+// triggers reconnect_allocator_api_key RPC + an immediate /api/allocator/
+// holdings/sync POST (mirrors handleAddKey f4 error handling).
+
+describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect", () => {
+  let fetchMockReconnect: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    rpcMock.mockReset();
+    holdingsCountMock.mockReset();
+    fetchMockReconnect = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, job_id: "j1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    globalThis.fetch = fetchMockReconnect as unknown as typeof fetch;
+  });
+
+  it("disconnected key renders in the Disconnected section with a Reconnect button (no Sync / Disconnect)", () => {
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: /Disconnected/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Reconnect binance key/i }),
+    ).toBeInTheDocument();
+    // The row does NOT render the Sync now / Disconnect buttons.
+    expect(
+      screen.queryByRole("button", { name: /Sync binance now/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Disconnect binance key/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clicking Reconnect calls reconnect_allocator_api_key RPC and then POSTs to /api/allocator/holdings/sync", async () => {
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    expect(rpcMock).toHaveBeenCalledWith("reconnect_allocator_api_key", {
+      p_api_key_id: "key-binance-1",
+    });
+    await waitFor(() => {
+      expect(fetchMockReconnect).toHaveBeenCalledWith(
+        "/api/allocator/holdings/sync",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ api_key_id: "key-binance-1" }),
+        }),
+      );
+    });
+  });
+
+  it("successful reconnect moves the row back into the active Exchange connections list", async () => {
+    rpcMock.mockResolvedValue({ data: true, error: null });
+    render(
+      <AllocatorExchangeManager
+        initialKeys={[
+          makeKey({
+            disconnected_at: "2026-04-22T09:00:00Z",
+            sync_status: "idle",
+          }),
+        ]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reconnect binance key/i }),
+      );
+    });
+    // Post-reconnect: Sync now returns, Reconnect is gone, Disconnected
+    // section disappears.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Sync binance now/i }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: /Reconnect binance key/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /Disconnected/i }),
+    ).not.toBeInTheDocument();
   });
 });
 

@@ -723,6 +723,10 @@ export async function getUserApiKeys(userId: string) {
     // this + EXCHANGE_COOLDOWN_SECONDS to render the `rate_limited` pill's
     // "retry in Ns" countdown. NULL when the key has never hit a 429.
     last_429_at: string | null;
+    // Migration 075 — NULL when the key is connected. When non-null, the
+    // key is soft-disconnected: workers skip it, UI renders the
+    // Disconnected section with a Reconnect button.
+    disconnected_at: string | null;
     account_balance_usdt: number | null;
     created_at: string;
   }>;

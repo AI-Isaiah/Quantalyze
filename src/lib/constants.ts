@@ -104,11 +104,16 @@ export const API_KEY_USER_COLUMNS_ARR = [
   // projection the countdown renders "retry in 0s" regardless of the
   // real server-side cooldown.
   "last_429_at",
+  // Migration 075 — GRANT SELECT (disconnected_at) ON api_keys TO
+  // authenticated. NULL = connected; timestamp = soft-disconnected.
+  // AllocatorExchangeManager uses it to split keys into active vs
+  // disconnected sections and render the Reconnect affordance.
+  "disconnected_at",
 ] as const;
 
 /** PostgREST projection string derived from the allowlist tuple. */
 export const API_KEY_USER_COLUMNS = API_KEY_USER_COLUMNS_ARR.join(", ") as
-  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at";
+  "id, user_id, exchange, label, is_active, sync_status, last_sync_at, account_balance_usdt, created_at, sync_error, last_429_at, disconnected_at";
 
 /** Single api_keys column name as a narrow string literal union type. */
 export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];
