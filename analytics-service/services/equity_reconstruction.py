@@ -790,8 +790,86 @@ async def persist_equity_snapshots(
             ignore_duplicates=True,
         ).execute()
 
-    await db_execute(_upsert)
-    return len(stamped)
+    # /investigate 2026-04-22: return the count Postgres ACTUALLY wrote,
+    # not len(stamped). With ignore_duplicates=True, a collision on every
+    # (allocator_id, asof) produces a no-op — pre-fix this returned 730
+    # while 0 rows were written, so audit logs reported `days_written=730`
+    # while the dashboard showed zero change. Callers now see the real
+    # count and can surface "reconstruct_complete but no rows written"
+    # as a user-actionable signal.
+    res = await db_execute(_upsert)
+    return len(getattr(res, "data", None) or [])
+
+
+async def _allocator_has_other_api_keys(
+    supabase: Any, allocator_id: str, api_key_id: str,
+) -> bool:
+    """Does this allocator own any api_keys OTHER than `api_key_id`?
+
+    The reconstruction-upsert path uses ON CONFLICT DO NOTHING to protect
+    multi-key aggregation (threat T-07-V5b) — the first key to land for a
+    given (allocator, asof) wins; subsequent keys are benign no-ops. That
+    invariant is load-bearing when multiple keys contribute, but it traps
+    single-key users whose snapshots are stale (e.g. pre-v0.15.3.0 buggy
+    perp replay, or orphans from a deleted key). When this key is the
+    allocator's sole authoritative source, the fresh reconstruct should
+    own the series outright.
+
+    api_keys has FK cascade to compute_jobs (migration 066 STEP 2) — if a
+    prior key was hard-deleted, its api_keys row is gone. So checking
+    api_keys presence is a sufficient proxy for "are there OTHER keys
+    whose data we must not clobber".
+
+    Returns True when at least one sibling exists. Defaults to True on
+    query failure (fail-safe: preserve DO NOTHING rather than risk
+    wiping legitimate multi-key data on a transient read error).
+    """
+    def _sel():
+        return (
+            supabase.table("api_keys")
+            .select("id", count="exact", head=True)
+            .eq("user_id", allocator_id)
+            .neq("id", api_key_id)
+            .execute()
+        )
+
+    try:
+        res = await db_execute(_sel)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "api_keys sibling lookup failed for allocator=%s (key=%s): %s — "
+            "defaulting to multi-key safe (no snapshot wipe)",
+            allocator_id, api_key_id, exc,
+        )
+        return True
+    count = getattr(res, "count", None)
+    if count is not None:
+        return int(count) > 0
+    data = getattr(res, "data", None) or []
+    return len(data) > 0
+
+
+async def _purge_allocator_equity_snapshots(
+    supabase: Any, allocator_id: str,
+) -> int:
+    """Delete every allocator_equity_snapshots row for this allocator.
+
+    Called only from the sole-key reconstruction path (see caller). Returns
+    the number of rows deleted for audit-log surfacing. Failures bubble so
+    the handler's outer except-block classifies + records them rather than
+    silently proceeding with a polluted upsert.
+    """
+    def _del():
+        return (
+            supabase.table("allocator_equity_snapshots")
+            .delete()
+            .eq("allocator_id", allocator_id)
+            .execute()
+        )
+
+    res = await db_execute(_del)
+    data = getattr(res, "data", None) or []
+    return len(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1075,6 +1153,21 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
     if hit_terminus:
         depth_months = 3
 
+    # /investigate 2026-04-22: sole-key stale-snapshot replacement.
+    # When this api_key is the allocator's only key, any existing snapshots
+    # are either orphans from a previously deleted key OR stale rows from
+    # a pre-fix engine version (e.g. v0.15.3.0 perpetual MTM). The
+    # first-writer-wins UPSERT silently drops our fresh rows in that case,
+    # so the dashboard serves the wrong curve indefinitely with no
+    # user-actionable recovery path (migration 077 only covers the
+    # hard-delete+cascade last-key path, leaving the "add new key" door
+    # wide open). Purge-then-upsert breaks the deadlock cleanly without
+    # regressing the T-07-V5b multi-key aggregation invariant — any
+    # allocator with sibling keys keeps DO NOTHING semantics below.
+    purged = 0
+    if not await _allocator_has_other_api_keys(ctx.supabase, allocator_id, api_key_id):
+        purged = await _purge_allocator_equity_snapshots(ctx.supabase, allocator_id)
+
     count = await persist_equity_snapshots(ctx.supabase, rows, allocator_id, depth_months)
 
     _emit_audit(
@@ -1082,6 +1175,7 @@ async def run_reconstruct_allocator_history_job(job: dict) -> DispatchResult:
         "allocator.equity.reconstruct_complete",
         {
             "days_written": count,
+            "stale_snapshots_purged": purged,
             "history_depth_months": depth_months,
             "okx_terminus_hit": hit_terminus,
             "venue": venue,
