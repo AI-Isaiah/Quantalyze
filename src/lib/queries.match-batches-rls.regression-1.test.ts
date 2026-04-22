@@ -37,7 +37,7 @@ type Chain = {
 
 function makeChain(rows: Record<string, unknown[]>): (table: string) => Chain {
   return (table: string) => {
-    let filters: Array<{ column: string; value: unknown; op: "eq" | "in" | "is" | "not-is" }> = [];
+    const filters: Array<{ column: string; value: unknown; op: "eq" | "in" | "is" | "not-is" }> = [];
 
     function applyFilters(all: unknown[]): unknown[] {
       return all.filter((row) =>
