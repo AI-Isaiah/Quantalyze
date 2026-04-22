@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.3.2] - 2026-04-22
+
+### Fixed
+
+- **"Delete key + data" now actually clears the equity curve.** The
+  hard-delete path (`delete_allocator_api_key` with `p_cascade_holdings=true`)
+  wiped holdings and the key itself but left `allocator_equity_snapshots`
+  behind. On a last-key delete + fresh reconnect, the reconstruct job's
+  first-writer-wins upsert collided with the stale rows and wrote zero
+  new snapshots, so the dashboard kept serving pre-fix numbers forever.
+  Migration 077 extends the RPC to also clear equity snapshots when the
+  cascade delete drops the user to zero remaining keys — a "clean slate"
+  delete now actually produces a clean slate. Multi-key users deleting
+  one of N keys are unaffected: their aggregated series stays intact.
+
 ## [0.15.3.1] - 2026-04-22
 
 ### Removed
