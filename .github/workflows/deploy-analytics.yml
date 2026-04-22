@@ -1,0 +1,64 @@
+name: Deploy Analytics Worker (Railway)
+
+# Auto-deploys the Python analytics worker (analytics-service/) to Railway
+# whenever its source changes on main. Railway's GitHub auto-deploy is not
+# wired up for this service — without this workflow, every fix to the worker
+# requires a manual `railway up` from analytics-service/. The workflow_dispatch
+# trigger lets you force a redeploy from the Actions tab if a deploy was
+# missed (e.g., commit landed via a path-filter-skipping merge).
+#
+# Required secret: RAILWAY_TOKEN
+#   Create at: https://railway.com/account/tokens
+#   Add to GitHub: Settings → Secrets and variables → Actions →
+#                  New repository secret → name = RAILWAY_TOKEN
+#
+# Security note: this workflow does NOT consume any github.event.* payload
+# data (commit messages, PR titles, etc.), so it's not exposed to the
+# command-injection class of attacks documented at
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'analytics-service/**'
+      - '.github/workflows/deploy-analytics.yml'
+  workflow_dispatch:
+
+concurrency:
+  # Only one deploy in flight per branch. Newer push cancels the older one
+  # so we don't end up racing two builds toward the same service.
+  group: deploy-analytics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify RAILWAY_TOKEN is configured
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_TOKEN secret is not set."
+            echo "Create one at https://railway.com/account/tokens, then add it to"
+            echo "GitHub Settings -> Secrets and variables -> Actions -> RAILWAY_TOKEN"
+            exit 1
+          fi
+
+      - name: Install Railway CLI
+        run: |
+          curl -fsSL https://railway.com/install.sh | sh
+          echo "$HOME/.railway/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy analytics-service to Railway
+        working-directory: analytics-service
+        run: |
+          # `railway up --service` deploys the current directory to a named
+          # service in the project linked to RAILWAY_TOKEN. --ci streams
+          # build logs synchronously and exits non-zero on failure so the
+          # workflow surfaces deploy errors instead of fire-and-forgetting.
+          railway up --service quantalyze-analytics --ci
