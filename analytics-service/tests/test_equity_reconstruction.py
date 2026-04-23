@@ -73,6 +73,7 @@ class _FakeTable:
         # Filter state for chained .select(...).eq(...).execute()
         self._select_filters: list[tuple[str, Any]] = []
         self._select_neq_filters: list[tuple[str, Any]] = []
+        self._select_is_null_cols: list[str] = []
         self._select_ranges: list[tuple[str, str, str]] = []  # (col, op, val)
         self._select_count_mode: str | None = None
         # Pending write
@@ -116,6 +117,15 @@ class _FakeTable:
 
     def neq(self, col: str, val):
         self._select_neq_filters.append((col, val))
+        return self
+
+    def is_(self, col: str, val):
+        # Supabase-py: `.is_(col, "null")` or `.is_(col, None)` -> col IS NULL.
+        # Any other value is treated as IS <literal>; for our tests NULL is all we need.
+        if val in (None, "null", "NULL"):
+            self._select_is_null_cols.append(col)
+        else:
+            self._select_filters.append((col, val))
         return self
 
     def gte(self, col: str, val):
@@ -191,6 +201,8 @@ class _FakeTable:
                     continue
                 if any(row.get(c) == v for c, v in self._select_neq_filters):
                     continue
+                if any(row.get(c) is not None for c in self._select_is_null_cols):
+                    continue
                 deleted.append(dict(row))
                 del self._store[key]
             return _FakeUpdateResult(deleted)
@@ -203,6 +215,8 @@ class _FakeTable:
                 if not all(row.get(c) == v for c, v in self._select_filters):
                     continue
                 if any(row.get(c) == v for c, v in self._select_neq_filters):
+                    continue
+                if any(row.get(c) is not None for c in self._select_is_null_cols):
                     continue
                 # range filters
                 ok = True
@@ -2074,10 +2088,13 @@ async def test_stale_snapshots_replaced_on_new_key_when_no_siblings(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
-    """Multi-key safety: when the allocator has ANOTHER api_key (even
-    disconnected), the fresh reconstruct MUST NOT wipe existing rows.
-    DO NOTHING semantics protect multi-key aggregation (T-07-V5b).
-    This guards the fix against over-correction."""
+    """Multi-key safety: when the allocator has ANOTHER CONNECTED api_key,
+    the fresh reconstruct MUST NOT wipe existing rows. DO NOTHING semantics
+    protect multi-key aggregation (T-07-V5b). This guards the fix against
+    over-correction. (Disconnected siblings are covered by the separate
+    test_stale_snapshots_replaced_when_sibling_is_disconnected test —
+    per migration 075 a disconnected key cannot produce new data and must
+    not block the sole-source purge.)"""
     fake_supabase = FakeSupabaseClient()
     _install_fake_audit(monkeypatch)
 
@@ -2150,6 +2167,102 @@ async def test_stale_snapshots_preserved_when_other_key_exists(monkeypatch):
         "first-writer-wins aggregation per T-07-V5b), "
         f"got {len(prior_survivors)} survivors: {stored!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_snapshots_replaced_when_sibling_is_disconnected(monkeypatch):
+    """/investigate 2026-04-24: disconnected sibling must not block purge.
+
+    Reproduces the v0.15.3.3 follow-up bug: user soft-disconnected their
+    previous exchange key (migration 075: api_keys.disconnected_at set),
+    then added a new read-only key and hit Sync now. The stale V-shaped
+    curve persisted because _allocator_has_other_api_keys counted the
+    disconnected row as a sibling, the sole-source purge was skipped,
+    and DO NOTHING protected the stale rows.
+
+    Expected: disconnected sibling is NOT a live contributor (worker
+    dispatch skips it per migration 075 STEP 4). The purge MUST fire
+    and the fresh reconstruct must own the series.
+
+    FAILS without the `.is_("disconnected_at", "null")` filter on the
+    sibling-count query."""
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    end_date = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    start_date = end_date - timedelta(days=9)
+
+    # Seed stale rows from the (now-disconnected) prior key's era.
+    # Sentinel value -999_999 makes it trivial to detect the wipe.
+    for day_offset in range(10):
+        asof = (start_date + timedelta(days=day_offset)).date().isoformat()
+        fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, asof))] = {
+            "allocator_id": ALLOCATOR_ID,
+            "asof": asof,
+            "value_usd": -999_999.0,  # stale sentinel — must be replaced
+            "breakdown": {"STALE": -999_999.0},
+            "source": "exchange_primary",
+            "history_depth_months": 24,
+            "reconstructed_at": "2026-04-01T00:00:00+00:00",
+        }
+
+    # New (active) key the user just uploaded + disconnected prior key.
+    fake_supabase.store[("api_keys", (API_KEY_ID_1,))] = {
+        "id": API_KEY_ID_1, "user_id": ALLOCATOR_ID, "exchange": "binance",
+        "disconnected_at": None,
+    }
+    fake_supabase.store[("api_keys", (API_KEY_ID_2,))] = {
+        "id": API_KEY_ID_2, "user_id": ALLOCATOR_ID, "exchange": "okx",
+        "disconnected_at": "2026-04-20T12:00:00+00:00",  # soft-disconnected
+    }
+
+    ts = int(start_date.timestamp() * 1000)
+    day_ms = 24 * 60 * 60 * 1000
+    trades = [_make_trade(ts, "BTC/USDT", "buy", 50_000.0, 1.0)]
+    ohlcv = [_make_ohlcv_row(ts + d * day_ms, 50_000.0) for d in range(10)]
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_my_trades = AsyncMock(side_effect=[trades, []])
+    mock_exchange.fetch_deposits = AsyncMock(return_value=[])
+    mock_exchange.fetch_withdrawals = AsyncMock(return_value=[])
+    mock_exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    mock_exchange.close = AsyncMock()
+
+    _install_fake_preflight(monkeypatch, "binance", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end_date if tz else end_date.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    job = {
+        "id": "job-disconnected-sibling",
+        "kind": "reconstruct_allocator_history",
+        "api_key_id": API_KEY_ID_1,
+    }
+    result = await run_reconstruct_allocator_history_job(job)
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    # Stale sentinel rows MUST be purged — disconnected sibling is not a
+    # live contributor, so sole-source semantics apply.
+    stored = fake_supabase.rows_for("allocator_equity_snapshots")
+    stale_survivors = [r for r in stored if r.get("value_usd") == -999_999.0]
+    assert not stale_survivors, (
+        "Disconnected-sibling regression: stale snapshots survived because "
+        "the sole-source purge was skipped. A disconnected key (migration 075) "
+        "cannot produce new data (worker dispatch filters disconnected_at IS "
+        "NULL) and must not block the fresh reconstruct. "
+        f"Got {len(stale_survivors)} stale sentinel rows still in store: {stored!r}"
+    )
+    # And the fresh reconstruct's rows must now be present.
+    assert stored, "Fresh reconstruct wrote zero rows — upstream regression"
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.3.4] - 2026-04-24
+
+### Fixed
+
+- **Disconnected exchange keys no longer block the equity-curve fix.** The
+  v0.15.3.3 sole-source check counted soft-disconnected keys (migration 075:
+  `disconnected_at IS NOT NULL`) as siblings, so any user who had *ever*
+  disconnected a previous exchange before uploading a fresh read-only key
+  kept seeing the stale V-shaped curve. The fix re-entered the "I have a
+  sibling" branch, DO NOTHING kept the stale rows, and the dashboard stayed
+  wrong indefinitely. The sibling query now mirrors the worker's dispatch
+  filter (`disconnected_at IS NULL`) — disconnected keys can't produce new
+  snapshots, so they can't legitimately block the purge. New regression test
+  `test_stale_snapshots_replaced_when_sibling_is_disconnected` seeds a
+  disconnected sibling + stale sentinel rows; fails without the filter,
+  passes with it.
+
 ## [0.15.3.3] - 2026-04-22
 
 ### Fixed

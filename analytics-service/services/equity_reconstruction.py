@@ -804,7 +804,7 @@ async def persist_equity_snapshots(
 async def _allocator_has_other_api_keys(
     supabase: Any, allocator_id: str, api_key_id: str,
 ) -> bool:
-    """Does this allocator own any api_keys OTHER than `api_key_id`?
+    """Does this allocator own any CONNECTED api_keys OTHER than `api_key_id`?
 
     The reconstruction-upsert path uses ON CONFLICT DO NOTHING to protect
     multi-key aggregation (threat T-07-V5b) — the first key to land for a
@@ -815,14 +815,24 @@ async def _allocator_has_other_api_keys(
     allocator's sole authoritative source, the fresh reconstruct should
     own the series outright.
 
+    Soft-disconnected keys (migration 075: disconnected_at IS NOT NULL)
+    MUST be excluded from the sibling count. Their rows persist in
+    api_keys for audit continuity, but the worker stopped syncing them
+    the moment they were disconnected, so they cannot produce new
+    snapshots. Counting them as siblings re-opens the "I uploaded a
+    fresh key but my stale V-shaped curve persists" trap that v0.15.3.3
+    was meant to close. Mirrors the worker-dispatch filter in migrations
+    075 (enqueue_poll_allocator_positions_for_all_keys, line 193-196;
+    enqueue_refresh_allocator_equity_for_all, line 244-248).
+
     api_keys has FK cascade to compute_jobs (migration 066 STEP 2) — if a
     prior key was hard-deleted, its api_keys row is gone. So checking
-    api_keys presence is a sufficient proxy for "are there OTHER keys
-    whose data we must not clobber".
+    connected api_keys presence is a sufficient proxy for "are there
+    OTHER keys whose data we must not clobber".
 
-    Returns True when at least one sibling exists. Defaults to True on
-    query failure (fail-safe: preserve DO NOTHING rather than risk
-    wiping legitimate multi-key data on a transient read error).
+    Returns True when at least one connected sibling exists. Defaults to
+    True on query failure (fail-safe: preserve DO NOTHING rather than
+    risk wiping legitimate multi-key data on a transient read error).
     """
     def _sel():
         return (
@@ -830,6 +840,7 @@ async def _allocator_has_other_api_keys(
             .select("id", count="exact", head=True)
             .eq("user_id", allocator_id)
             .neq("id", api_key_id)
+            .is_("disconnected_at", "null")
             .execute()
         )
 
