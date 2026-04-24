@@ -94,6 +94,88 @@ COINGECKO_ID_OVERRIDES: dict[str, str] = {
     "ATOM": "cosmos",
 }
 
+# /investigate 2026-04-24 (v0.15.4.2) — defensive contract-size table for
+# OKX linear perpetuals. The v0.15.4.0 fix relied on ccxt's safe_trade
+# populating `cost = amount × price × contractSize`. In practice that
+# contract-aware multiplication happens ONLY when ccxt's okx.parse_trade
+# sets cost=None (it does) AND the market object resolved inside
+# safe_market carries a non-None contractSize. The latter depends on
+# which ccxt version, which markets were pre-loaded, and which instType
+# branch the fills-history endpoint returned — none of which we can
+# assert at the replay layer. When contractSize is missing from the
+# resolved market, safe_trade falls through with `cost = amount × price`
+# (no multiplier) and `amt_base = cost / price = amount` — contracts,
+# not base units. The 10x-100x position-size inflation returns under
+# a fresh disguise.
+#
+# The defensive fix: resolve base units from an explicit per-symbol
+# ctVal table when we recognise the perp. This is independent of ccxt's
+# cost field and survives every flavour of the safe_trade path. When
+# both `cost/price` and the explicit table agree (within 5%), we keep
+# using cost/price so fixtures with contractSize=1 stay unaffected.
+# When they diverge, we trust the table.
+#
+# ctVal values cross-checked against OKX's public `/api/v5/public/
+# instruments?instType=SWAP` on 2026-04-24.
+OKX_PERP_CONTRACT_SIZE: dict[str, float] = {
+    "BTC/USDT:USDT": 0.01,
+    "ETH/USDT:USDT": 0.1,
+    "SOL/USDT:USDT": 1.0,
+    "BNB/USDT:USDT": 0.01,
+    "XRP/USDT:USDT": 100.0,
+    "ADA/USDT:USDT": 100.0,
+    "DOGE/USDT:USDT": 1000.0,
+    "LINK/USDT:USDT": 1.0,
+    "DOT/USDT:USDT": 1.0,
+    "MATIC/USDT:USDT": 10.0,
+    "AVAX/USDT:USDT": 1.0,
+    "LTC/USDT:USDT": 1.0,
+    "ATOM/USDT:USDT": 1.0,
+    "SUI/USDT:USDT": 1.0,
+}
+
+
+def _resolve_perp_amt_base(
+    raw_symbol: str, amount: float, price: float, cost: float,
+    inst_type: str | None = None,
+) -> float:
+    """Recover base-unit trade size for a linear perp.
+
+    Prefers `cost / price` when cost is trustworthy (i.e. ccxt's
+    safe_trade did apply contractSize). Falls back to the explicit
+    OKX_PERP_CONTRACT_SIZE table whenever the two disagree by more
+    than 5% — that's the signal safe_trade didn't have a market with
+    contractSize available and returned `cost = amount × price`, which
+    would silently leak contract counts into the replay state.
+
+    The defensive override only fires when the trade carries the real
+    OKX `info.instType = "SWAP"` stamp. Synthetic test fixtures that
+    treat amount as base units (implicit contractSize = 1) never carry
+    that stamp, so they keep the legacy behaviour and aren't bitten by
+    the symbol collision with the ctVal table.
+
+    Backward-compatible for fixtures that pass cost = amount × price
+    (contractSize = 1 implicit): cost/price == amount, inst_type is
+    None, we return amount.
+    """
+    if price <= 0:
+        return amount  # caller already skips this path
+    amt_from_cost = (cost / price) if cost > 0 else amount
+    # Only apply the defensive override for REAL OKX SWAP fills. Synthetic
+    # fixtures without info.instType stay on the legacy cost/price path.
+    if not inst_type or str(inst_type).upper() != "SWAP":
+        return amt_from_cost
+    ctval = OKX_PERP_CONTRACT_SIZE.get(raw_symbol)
+    if ctval is None:
+        return amt_from_cost
+    amt_explicit = amount * ctval
+    if amt_explicit <= 0:
+        return amt_from_cost
+    relative_err = abs(amt_from_cost - amt_explicit) / amt_explicit
+    if relative_err > 0.05:
+        return amt_explicit
+    return amt_from_cost
+
 
 # ---------------------------------------------------------------------------
 # Exception classification (copy of allocator_positions.py pattern)
@@ -612,26 +694,23 @@ def _compute_daily_equity(
                         price = cost / amt
                     if price <= 0:
                         continue
-                    # /investigate 2026-04-24: OKX contract-size normalisation.
-                    # CCXT's safe_trade (base/exchange.py:4412) returns
-                    # amount = raw fillSz, which for OKX perpetuals is in
-                    # CONTRACTS (ctVal=0.01 ETH for ETH-USDT-SWAP, 0.001 BTC
-                    # for BTC-USDT-SWAP, etc.). safe_trade DOES recompute
-                    # `cost` correctly as amount × price × contractSize,
-                    # so cost/price recovers base units independent of
-                    # contractSize. Without this, a 21.464 ETH short on
-                    # OKX lands as size=2146.4 and every $1 ETH move marks
-                    # the position 100x too hard — the V-shaped curve
-                    # reported 2026-04-22 (value_usd=-$152,771 on a fully-
-                    # collateralised account). For fixtures using the
-                    # synthetic "amount as base units" convention (the
-                    # test helper _mk_perp_trade, where cost=amount×price
-                    # and contractSize is implicitly 1), cost/price equals
-                    # amount — so this is backward-compatible.
-                    if cost > 0:
-                        amt_base = cost / price
-                    else:
-                        amt_base = amt
+                    # /investigate 2026-04-24 (v0.15.4.2): defensive contract-
+                    # size resolution. Previous v0.15.4.0 attempt relied on
+                    # ccxt's safe_trade populating cost = amount × price ×
+                    # contractSize, but that only fires when the market
+                    # resolved inside safe_market carries a non-None
+                    # contractSize. When it doesn't — a ccxt version quirk,
+                    # a missing markets prefetch, a SWAP instType fill
+                    # resolved against a SPOT market record — cost silently
+                    # collapses to amount × price and we leak contract
+                    # counts into the replay. Defensive: prefer cost/price
+                    # when it agrees with an explicit OKX ctVal table, else
+                    # fall back to amount × ctVal. See _resolve_perp_amt_base
+                    # for the exact rule + fixture-compat carve-out.
+                    inst_type = (ev.get("info") or {}).get("instType")
+                    amt_base = _resolve_perp_amt_base(
+                        raw_symbol, amt, price, cost, inst_type=inst_type,
+                    )
                     signed = amt_base if side == "buy" else -amt_base
                     pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
                     cur_size = pos["size"]
@@ -1077,7 +1156,106 @@ async def _fetch_and_price_window(
         ohlcv_by_symbol, coingecko_by_symbol,
         start_date, end_date,
     )
+
+    # /investigate 2026-04-24 (v0.15.4.2): anchor the reconstructed series
+    # to today's actual exchange equity. Pure trade-replay from genesis
+    # starts with quantities={} (zero cash), so accounts whose USDT
+    # margin pre-dates the OKX 90-day trade window show equity curves
+    # that start near zero and drift into deep negative territory when
+    # open perps mark against zero cash. A fully-collateralised $195k
+    # OKX account came out of reconstruction at -$18k (equity pct
+    # -1510% in the dashboard) even after the v0.15.4.0 contract-size
+    # fix. The window boundary eats the initial balance.
+    #
+    # Fix: fetch today's true total equity from the exchange, compute
+    # the offset needed so the final row matches reality, and apply
+    # that offset uniformly. Historical *relative* day-to-day changes
+    # are preserved; absolute levels are anchored to the exchange's
+    # own number. Breakdown gets a "STARTING_BALANCE" entry so the
+    # components still sum to value_usd.
+    anchor = await _fetch_current_equity(exchange, venue)
+    if rows and anchor is not None:
+        last_value = float(rows[-1].get("value_usd") or 0.0)
+        offset = anchor - last_value
+        if abs(offset) > 0.005:
+            for r in rows:
+                r["value_usd"] = round(float(r["value_usd"] or 0.0) + offset, 2)
+                bd = dict(r.get("breakdown") or {})
+                bd["STARTING_BALANCE"] = round(
+                    float(bd.get("STARTING_BALANCE", 0.0)) + offset, 2,
+                )
+                r["breakdown"] = _cap_breakdown(bd)
+
     return rows, hit_terminus
+
+
+async def _fetch_current_equity(exchange: Any, venue: str) -> float | None:
+    """Return today's total account equity in USD, or None if we can't
+    determine it. Sums spot USDT equivalents + perp unrealised PnL.
+
+    Keeps the semantics of the daily refresh job (v0.15.4.0 fix 2): spot
+    rows contribute their marked value, derivative rows contribute
+    unrealized PnL only — on unified-margin venues the USDT collateral
+    backing perps already sits in the spot row and summing notional on
+    top double-counts.
+
+    Wrapped in a blanket try/except: the anchor is advisory, not load-
+    bearing. Any exchange error — including mocked exchanges in tests
+    that don't stub fetch_balance/fetch_positions — returns None so the
+    reconstruction still ships an unanchored series rather than failing
+    the whole job.
+    """
+    try:
+        balance = await exchange.fetch_balance()
+        if not isinstance(balance, dict):
+            return None
+        totals = balance.get("total") or {}
+        if not isinstance(totals, dict):
+            return None
+        total = 0.0
+        for asset, qty in totals.items():
+            if qty is None:
+                continue
+            try:
+                q = float(qty)
+            except (TypeError, ValueError):
+                continue
+            if q <= 0:
+                continue
+            asset_upper = str(asset).upper()
+            if asset_upper in STABLECOINS:
+                total += q
+                continue
+            # Price non-stablecoin spot via a single ticker call. Best-
+            # effort — a missing ticker is treated as zero rather than
+            # aborting the anchor.
+            try:
+                t = await exchange.fetch_ticker(f"{asset_upper}/USDT")
+                px = float((t or {}).get("last") or 0.0) if isinstance(t, dict) else 0.0
+            except Exception:  # noqa: BLE001
+                px = 0.0
+            total += q * px
+
+        try:
+            positions = await exchange.fetch_positions()
+        except Exception:  # noqa: BLE001
+            positions = []
+        if not isinstance(positions, list):
+            positions = []
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            upnl = p.get("unrealizedPnl")
+            if upnl is None:
+                continue
+            try:
+                total += float(upnl)
+            except (TypeError, ValueError):
+                continue
+        return total
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("anchor: _fetch_current_equity failed venue=%s: %s", venue, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

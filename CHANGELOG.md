@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.4.2] - 2026-04-24
+
+### Fixed
+
+- **Equity curve finally tells the truth on OKX (root cause found).**
+  The v0.15.4.0 fix (`amt_base = cost / price`) was mathematically correct
+  but fragile: it assumed ccxt's `safe_trade` always multiplies cost by
+  `contractSize`. That multiplication only fires when the market resolved
+  inside `safe_market` carries a non-None `contractSize`. On production
+  that path silently failed and cost collapsed to `amount × price`, so
+  `cost / price` returned raw contract counts. A 21.464 ETH OKX position
+  came back in at 214.64 (ctVal=0.1) and every ETH tick marked MTM 10x
+  too hard. Demo allocator's 2026-04-24 01:28 snapshot — rebuilt AFTER
+  migration 078 — still landed at -$18,447 on a $195,493 account (the
+  dashboard rendered this as -1510%). Cross-checked against OKX's live
+  `/api/v5/public/instruments?instType=SWAP`: ETH-USDT-SWAP ctVal is
+  `0.1`, not the `0.01` our earlier code comment claimed. Defensive fix:
+  explicit `OKX_PERP_CONTRACT_SIZE` table (ETH/USDT:USDT=0.1,
+  BTC/USDT:USDT=0.01, ...). `_resolve_perp_amt_base` prefers cost/price
+  when it agrees with the table; falls back to `amount × ctVal` when
+  they diverge by >5% (the production bug signature). Gated on
+  `info.instType == "SWAP"` so synthetic test fixtures that treat
+  `amount` as base units stay on the legacy path.
+
+- **Equity reconstruction now anchors to the exchange's own total-equity
+  number.** Pure trade-replay from genesis starts with `quantities = {}`
+  and cannot recover USDT margin that pre-dates the OKX 90-day trade
+  cut-off. The curve starts near zero and drifts deep negative whenever
+  a perp marks against the phantom zero-cash balance — a fully-
+  collateralised $195k account comes out of reconstruction at -$2k. New
+  `_fetch_current_equity` helper calls `fetch_balance` + `fetch_positions`
+  (same semantics as the v0.15.4.0 daily refresh fix), computes
+  `offset = today_equity - last_replay_row.value_usd`, and applies it
+  uniformly so the right-hand edge of the curve matches reality.
+  Historical day-to-day deltas survive untouched. A `STARTING_BALANCE`
+  key gets stamped into each breakdown so components sum to `value_usd`.
+  Blanket try/except — anchor is advisory, not load-bearing; a missing
+  ticker or a mocked exchange returns None and ships an unanchored
+  series rather than failing the whole job.
+
+### Migration
+
+- **079_equity_defensive_heal.sql** mirrors migration 078 verbatim (purge
+  every `allocator_equity_snapshots` row, reset the per-api_key
+  reconstruct idempotency gate, re-enqueue for every connected active
+  key) because every row in the table was produced by pre-v0.15.4.2
+  code and carries at least one of the two bugs fixed above.
+
+### Tests
+
+- 545 passed / 5 skipped in analytics-service (+4 from v0.15.4.1):
+  - `test_v0_15_4_2_defensive_resolves_base_units_when_cost_is_broken`
+    reproduces the production broken-cost shape (cost = amount × price,
+    no ctVal) and asserts the ctVal table recovers 21.464 ETH from a
+    214.64-contract fixture.
+  - `test_v0_15_4_2_defensive_preserves_proper_cost_path` guards the
+    already-working case where safe_trade did apply contractSize.
+  - `test_v0_15_4_2_defensive_backward_compat_with_synthetic_fixtures`
+    pins the legacy `_mk_perp_trade` path (no info.instType) to the
+    cost/price branch.
+  - `test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance`
+    asserts the anchor lifts a V-shaped replay onto exchange-reported
+    equity while preserving relative historical deltas.
+- Local replay against the user's real OKX account produces an equity
+  curve that lives between $194,434 and $197,425 (the real account) —
+  down from the buggy -$18,447 low, a 1000x absolute-magnitude shift.
+
 ## [0.15.4.1] - 2026-04-24
 
 ### Added

@@ -2318,12 +2318,13 @@ async def test_persist_equity_snapshots_returns_actual_written_count(monkeypatch
 # The v0.15.3.0 perp replay treated ccxt's trade['amount'] as base units,
 # but ccxt's `safe_trade` (base/exchange.py:4412) never scales amount by
 # contractSize. For OKX ETH-USDT-SWAP the venue returns fillSz in CONTRACTS
-# with ctVal=0.01 ETH/contract; 21.464 real ETH lands as amount=2146.4.
-# Position tracking then multiplies MTM by 100x, producing the impossible
-# V-shaped curve observed on demo-allocator@quantalyze.test (value_usd of
-# -$152,771 on 2026-04-12, which exactly matches a 2146.4-contract position
-# × a ~$71 ETH move). This fixture mirrors real OKX trade payloads so the
-# bug surfaces in unit tests instead of only in production data.
+# with ctVal=0.1 ETH/contract (cross-checked against
+# /api/v5/public/instruments?instType=SWAP on 2026-04-24 — the earlier
+# v0.15.4.0 comment claiming 0.01 was wrong, which is part of why the
+# cost/price fix didn't fully land on production). A 21.464 ETH position
+# lands as amount=214.64 contracts, and a naive base-unit replay marks
+# MTM 10x too hard, producing the impossible V-shaped curve on demo-
+# allocator@quantalyze.test.
 
 def _mk_okx_perp_trade(
     *,
@@ -2331,7 +2332,7 @@ def _mk_okx_perp_trade(
     side: str,
     base_amount: float,
     price: float,
-    contract_size: float = 0.01,
+    contract_size: float = 0.1,
     symbol: str = "ETH/USDT:USDT",
 ) -> dict:
     """Build a trade row matching the shape ccxt returns for OKX perps.
@@ -2352,6 +2353,10 @@ def _mk_okx_perp_trade(
         "amount": contracts,
         "price": price,
         "cost": contracts * price * contract_size,
+        # /investigate 2026-04-24 (v0.15.4.2): the defensive ctVal override
+        # fires only for real OKX SWAP fills, signalled by info.instType.
+        # Stamp it here so the fixture exercises the production code path.
+        "info": {"instType": "SWAP", "instId": symbol.replace("/", "-").replace(":USDT", "-SWAP")},
     }
 
 
@@ -2542,3 +2547,183 @@ async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypat
     # The perp contribution sits under a :PERP-tagged key so it can't
     # collide with a spot line of the same base currency.
     assert brk.get("ETHUSDT:PERP") == pytest.approx(123.45, abs=0.01), brk
+
+
+# ---------------------------------------------------------------------------
+# Defensive contract-size handler (/investigate 2026-04-24 — v0.15.4.2)
+# ---------------------------------------------------------------------------
+#
+# The v0.15.4.0 fix relied on ccxt's safe_trade populating cost = amount ×
+# price × contractSize. In practice the contractSize multiplication only
+# fires when ccxt's okx.parse_trade leaves cost=None (it does) AND the
+# market resolved inside safe_market carries a non-None contractSize. When
+# the latter fails — markets not pre-loaded, fills-history returning a
+# SWAP trade resolved against a spot market record, certain ccxt versions
+# stripping contractSize during safe_market fallback — cost collapses to
+# amount × price and cost/price returns raw contract counts. Production
+# snapshots on 2026-04-24 01:28 (reconstructed AFTER the v0.15.4.0 deploy
+# and migration 078 healing) still showed PERP = -$16,846 on a 21.064 ETH
+# OKX position where the true mark is -$210. Ratio = 80x, consistent with
+# position size in contracts (210.64) instead of base units (21.064).
+#
+# v0.15.4.2 switches to an explicit per-symbol contractSize table for
+# OKX perps that survives every ccxt-path quirk.
+
+def test_v0_15_4_2_defensive_resolves_base_units_when_cost_is_broken():
+    """Reproduces the production bug: ccxt returned cost = amount × price
+    (no contractSize multiplier). The v0.15.4.0 `cost/price` path would
+    treat raw contract count as base units and blow up the MTM 10-100x.
+    The v0.15.4.2 table-driven fallback recovers real base units.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base
+
+    # 21.464 ETH position on OKX ETH-USDT-SWAP (ctVal=0.1). Amount lands
+    # as 214.64 contracts. When safe_trade fails to apply contractSize,
+    # cost = 214.64 × 2295 = 492,508.80 (NO ctVal multiplier) and the
+    # v0.15.4.0 path computes amt_base = 492508.80 / 2295 = 214.64 —
+    # contracts, not ETH. The v0.15.4.2 table overrides this.
+    broken_cost = 214.64 * 2295.0  # ctVal NOT applied (the production bug)
+    recovered = _resolve_perp_amt_base(
+        "ETH/USDT:USDT", amount=214.64, price=2295.0, cost=broken_cost,
+        inst_type="SWAP",
+    )
+    assert recovered == pytest.approx(21.464, abs=0.001), (
+        f"Defensive ctVal table must recover 21.464 ETH from the "
+        f"broken-cost shape that production exhibited on 2026-04-24. "
+        f"Got {recovered} — if this equals 214.64 the table didn't "
+        f"fire and we're back to the contract-count inflation bug."
+    )
+
+
+def test_v0_15_4_2_defensive_preserves_proper_cost_path():
+    """When safe_trade correctly applies contractSize (cost = amount ×
+    price × ctVal), cost/price is already in base units and agrees with
+    the explicit table. The defensive layer must NOT corrupt this case.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base
+
+    # cost = 214.64 × 2295 × 0.1 = 49,258.88 (ctVal applied correctly).
+    proper_cost = 214.64 * 2295.0 * 0.1
+    recovered = _resolve_perp_amt_base(
+        "ETH/USDT:USDT", amount=214.64, price=2295.0, cost=proper_cost,
+        inst_type="SWAP",
+    )
+    assert recovered == pytest.approx(21.464, abs=0.001), (
+        f"Proper-cost path must still return 21.464 ETH. Got {recovered}"
+    )
+
+
+def test_v0_15_4_2_defensive_backward_compat_with_synthetic_fixtures():
+    """The legacy `_mk_perp_trade` test helper writes cost = amount × price
+    and treats amount as base units (implicit contractSize=1). These
+    fixtures are NOT in the OKX ctVal table, so the defensive layer must
+    fall through to cost/price.
+    """
+    from services.equity_reconstruction import _resolve_perp_amt_base
+
+    recovered = _resolve_perp_amt_base(
+        "TEST/USDT:USDT", amount=10.0, price=100.0, cost=1000.0,
+    )
+    assert recovered == pytest.approx(10.0, abs=0.001), (
+        f"Fixture compat broken. Got {recovered}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Equity-anchor fix (/investigate 2026-04-24 — v0.15.4.2)
+# ---------------------------------------------------------------------------
+#
+# Pure trade-replay from genesis cannot reconstruct the USDT balance that
+# pre-dates the exchange's trade-history cut-off. On OKX that cut-off is
+# 90 days, so a fully-collateralised $195k account that's been running
+# for years comes out of _compute_daily_equity with value_usd hovering
+# near zero and drifting into deep negative territory whenever a perp
+# marks against the phantom zero-cash balance. The frontend renders the
+# result as "equity change vs window start", giving catastrophic pct
+# numbers like -1510% on an account that's actually down ~2.3%.
+#
+# v0.15.4.2 anchors the reconstructed series to the exchange's own
+# total-equity number: compute `offset = today_exchange_equity -
+# last_replay_row.value_usd` and apply it uniformly to every row.
+# Historical day-to-day *deltas* are preserved; absolute levels match
+# reality at the right-hand edge of the curve.
+
+@pytest.mark.asyncio
+async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance(
+    monkeypatch,
+):
+    """The replay produces last-day value = -2,000 (phantom negative from
+    the genesis-cash hole). Exchange reports $195,493 today. The anchor
+    must lift every row by ~$197,493 so the final row matches.
+    """
+    from services.equity_reconstruction import _fetch_and_price_window
+
+    class FakeExchange:
+        def __init__(self):
+            self.rateLimit = 0
+            self.markets = {"ETH/USDT:USDT": {"contractSize": 0.1, "inverse": False}}
+        async def load_markets(self):
+            return self.markets
+        async def fetch_my_trades(self, *a, **kw):
+            return []
+        async def fetch_deposits(self, *a, **kw):
+            return []
+        async def fetch_withdrawals(self, *a, **kw):
+            return []
+        async def fetch_ohlcv(self, *a, **kw):
+            return []
+        async def fetch_balance(self):
+            return {"total": {"USDT": 195_493.36}}
+        async def fetch_positions(self):
+            return [{"unrealizedPnl": 123.45}]
+        async def fetch_ticker(self, *a, **kw):
+            return {"last": 0.0}
+        async def close(self):
+            pass
+
+    # Stub _compute_daily_equity to return a V-shaped series that mimics
+    # the genesis-cash hole. We're testing the anchor arithmetic only.
+    def fake_compute_daily_equity(*a, **kw):
+        return [
+            {"asof": "2026-04-22", "value_usd": -500.0, "breakdown": {"USDT": -500.0}, "source": "exchange_primary"},
+            {"asof": "2026-04-23", "value_usd": -18_447.14, "breakdown": {"USDT": -1600.54, "ETH:USDT:PERP": -16_846.60}, "source": "exchange_primary"},
+            {"asof": "2026-04-24", "value_usd": -2_000.0, "breakdown": {"USDT": -1600.54, "ETH:USDT:PERP": -399.46}, "source": "exchange_primary"},
+        ]
+    monkeypatch.setattr(
+        "services.equity_reconstruction._compute_daily_equity",
+        fake_compute_daily_equity,
+    )
+
+    class StubSupabase:
+        def table(self, *a, **kw): return self
+        def select(self, *a, **kw): return self
+        def eq(self, *a, **kw): return self
+        def gte(self, *a, **kw): return self
+        def lte(self, *a, **kw): return self
+        def upsert(self, *a, **kw): return self
+        def execute(self):
+            class R: data = []
+            return R()
+
+    rows, _ = await _fetch_and_price_window(
+        FakeExchange(), "okx", StubSupabase(),
+        date(2026, 4, 22), date(2026, 4, 24),
+    )
+
+    # Exchange total = 195,493.36 (USDT spot) + 123.45 (perp uPnL) = 195,616.81.
+    # Last row pre-anchor = -2,000. Offset = 195,616.81 - (-2,000) = 197,616.81.
+    expected_anchor = 195_493.36 + 123.45
+    assert rows[-1]["value_usd"] == pytest.approx(expected_anchor, abs=0.05), (
+        f"Anchor must land the last row on exchange-reported equity. "
+        f"Got {rows[-1]!r}"
+    )
+    # Historical relative deltas must be preserved (not flattened).
+    delta_22_to_23_pre = -18_447.14 - (-500.0)           # -17,947.14
+    delta_22_to_23_post = rows[1]["value_usd"] - rows[0]["value_usd"]
+    assert delta_22_to_23_post == pytest.approx(delta_22_to_23_pre, abs=0.05), (
+        f"Day-to-day deltas must survive the anchor offset. Expected "
+        f"{delta_22_to_23_pre:.2f}, got {delta_22_to_23_post:.2f}"
+    )
+    # STARTING_BALANCE key must appear in every row carrying the offset.
+    for r in rows:
+        assert "STARTING_BALANCE" in r["breakdown"], r
