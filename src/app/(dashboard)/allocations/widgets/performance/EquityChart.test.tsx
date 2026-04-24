@@ -197,6 +197,93 @@ describe("EquityChart", () => {
     fireEvent.click(customBtn);
     expect(queryByRole("dialog", { name: "Custom date range" })).not.toBeNull();
   });
+
+  // ────────────────────────────────────────────────────────────────
+  // Readability pass (2026-04-24) — the axis/legend/summary additions
+  // that resolved the "only 100% and no other sign" complaint.
+  // ────────────────────────────────────────────────────────────────
+
+  it("renders a 0% baseline tick label on the Y-axis", () => {
+    const { container } = render(
+      <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
+    );
+    const labels = Array.from(container.querySelectorAll("svg text")).map(
+      (t) => t.textContent,
+    );
+    // The 0% baseline tick is always rendered (we clamp yMin <= 1 <= yMax).
+    expect(labels).toContain("+0%");
+  });
+
+  it("renders multiple Y-axis percentage tick labels (not just 0%)", () => {
+    const { container } = render(
+      <EquityChart equityDailyPoints={makeSeries(200)} initialPeriod="ALL" />,
+    );
+    const pctLabels = Array.from(container.querySelectorAll("svg text"))
+      .map((t) => t.textContent ?? "")
+      .filter((s) => /^[+-]?\d+(\.\d+)?%$/.test(s));
+    // We expect at least 2 percentage ticks (0% + at least one other).
+    expect(pctLabels.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders an always-visible legend entry for Portfolio", () => {
+    const { getByLabelText } = render(
+      <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
+    );
+    const legend = getByLabelText("Series legend");
+    expect(legend.textContent).toMatch(/Portfolio/);
+  });
+
+  it("renders a BTC legend entry when benchmark is supplied", () => {
+    const { getByLabelText } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(60)}
+        benchmark={makeSeries(60)}
+        initialPeriod="ALL"
+      />,
+    );
+    const legend = getByLabelText("Series legend");
+    expect(legend.textContent).toMatch(/BTC/);
+  });
+
+  it("renders an always-visible current-return summary (no hover needed)", () => {
+    const { getByLabelText } = render(
+      <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
+    );
+    // The summary is aria-labeled "Return over <period>" (ALL here).
+    const summary = getByLabelText("Return over ALL");
+    // A signed percentage is present.
+    expect(summary.textContent).toMatch(/[+-]\d+\.\d+%/);
+  });
+
+  it("gradient uses the --chart-strategy design token (no hardcoded hex)", () => {
+    const { container } = render(
+      <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
+    );
+    // jsdom doesn't namespace-resolve the SVG descendant selector reliably;
+    // walk the DOM and grab <stop> nodes by tagName.
+    const svg = container.querySelector("svg")!;
+    const stops = Array.from(svg.getElementsByTagName("stop"));
+    expect(stops.length).toBeGreaterThan(0);
+    for (const s of stops) {
+      const color = s.getAttribute("stop-color") ?? "";
+      expect(color).toMatch(/var\(--chart-strategy\)/);
+    }
+  });
+
+  it("benchmark path uses the --chart-benchmark design token (no hardcoded hex)", () => {
+    const { container } = render(
+      <EquityChart
+        equityDailyPoints={makeSeries(60)}
+        benchmark={makeSeries(60)}
+        initialPeriod="ALL"
+      />,
+    );
+    const dashed = container.querySelector(
+      'svg path[stroke-dasharray="3 3"]',
+    ) as SVGPathElement | null;
+    expect(dashed).not.toBeNull();
+    expect(dashed?.getAttribute("stroke")).toBe("var(--chart-benchmark)");
+  });
 });
 
 // Re-export to silence a "vi unused" lint nit on jsdom-only test env.

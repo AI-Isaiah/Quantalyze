@@ -259,17 +259,39 @@ export function EquityChart({
   }
 
   // ── Projections ────────────────────────────────────────────────────
-  const pad = { t: 20, r: 48, b: 28, l: 8 };
+  // pad.r carries the Y-axis tick labels on the right edge. Sized for
+  // "+XX.X%" labels without clipping.
+  const pad = { t: 20, r: 56, b: 28, l: 8 };
   const height = 260;
   const chartW = Math.max(1, width - pad.l - pad.r);
   const chartH = Math.max(1, height - pad.t - pad.b);
   const n = visible.length;
 
-  // Y range over portfolio + benchmark + overlays. Drop nulls.
+  // Period-relative normalization — re-anchor everything to 1.0 at the
+  // visible window's first point. The composite is f7-anchored to the
+  // first-positive value (stable across period switches), but renders a
+  // line that starts at some arbitrary value like 1.15 at the 6M window
+  // start. Re-anchoring here makes the axis meaningful: the line always
+  // departs from 0% at the left edge and ticks read as "percent change
+  // since period start" — matching the tooltip arithmetic below.
+  const basePort = visible[0]?.value ?? 1;
+  const visibleNormalized = visible.map((p) => p.value / basePort);
+
+  const baseBench =
+    visibleBenchmark
+      ? visibleBenchmark.find((v): v is number => v != null) ?? null
+      : null;
+  const visibleBenchmarkNormalized: Array<number | null> | null =
+    visibleBenchmark && baseBench != null
+      ? visibleBenchmark.map((v) => (v == null ? null : v / baseBench))
+      : null;
+
+  // Y range over portfolio + benchmark + overlays (all period-relative
+  // and centered on 1.0). Drop nulls.
   const allValues: number[] = [];
-  for (const p of visible) allValues.push(p.value);
-  if (visibleBenchmark) {
-    for (const v of visibleBenchmark) if (v != null) allValues.push(v);
+  for (const v of visibleNormalized) allValues.push(v);
+  if (visibleBenchmarkNormalized) {
+    for (const v of visibleBenchmarkNormalized) if (v != null) allValues.push(v);
   }
   for (const o of overlaySeries) {
     for (const v of o.series) if (v != null) allValues.push(v);
@@ -288,7 +310,33 @@ export function EquityChart({
       else if (v > yMax) yMax = v;
     }
   }
+  // Keep 1.0 (the 0% baseline) inside the plotted range so the baseline
+  // reference line is always visible — without this, a strictly-up line
+  // clips the 0% tick off-screen.
+  yMin = Math.min(yMin, 1);
+  yMax = Math.max(yMax, 1);
+  // 4% visual padding so the line doesn't kiss the top or bottom edge.
+  const yPadding = (yMax - yMin) * 0.04 || 0.002;
+  yMin -= yPadding;
+  yMax += yPadding;
   const yRange = yMax - yMin || 1;
+
+  // Y-axis ticks — snap to "nice" percentage steps so labels don't read
+  // "+1.37%". Always includes 1.0 so the 0% baseline sits on a tick.
+  const yTicks: number[] = (() => {
+    const spanPct = (yMax - yMin) * 100;
+    const stepPctRaw = spanPct / 4;
+    const pow = Math.pow(10, Math.floor(Math.log10(stepPctRaw || 1)));
+    const candidates = [1, 2, 2.5, 5, 10].map((c) => c * pow);
+    const stepPct =
+      candidates.find((c) => c >= stepPctRaw) ?? candidates[candidates.length - 1];
+    const stepVal = stepPct / 100;
+    const ticks = new Set<number>();
+    ticks.add(1);
+    for (let v = 1 - stepVal; v >= yMin; v -= stepVal) ticks.add(v);
+    for (let v = 1 + stepVal; v <= yMax; v += stepVal) ticks.add(v);
+    return Array.from(ticks).sort((a, b) => a - b);
+  })();
 
   const x = (i: number) =>
     n <= 1 ? pad.l + chartW / 2 : pad.l + (i / (n - 1)) * chartW;
@@ -389,15 +437,6 @@ export function EquityChart({
     if (i >= 0 && i < n) setHoverIdx(i);
   }
 
-  // ── Tooltip arithmetic ────────────────────────────────────────────
-  // Tooltip values are percent-from-window-start: (value / first - 1).
-  // Composite is anchored to the f7 base, but the WINDOW base differs per
-  // period; we report period-relative percent here to match the designer.
-  const periodBaseComposite = visible[0]?.value ?? 1;
-  const periodBaseBench = visibleBenchmark
-    ? visibleBenchmark.find((v): v is number => v != null) ?? null
-    : null;
-
   // ── Period toggle + range picker handlers ────────────────────────
   const setPeriodChecked = (p: Period) => {
     if (p === "CUSTOM") {
@@ -416,57 +455,136 @@ export function EquityChart({
     setPickerOpen(false);
   };
 
+  // ── Always-visible summary (current period return) ────────────────
+  // Shows the last point's period-relative return without requiring hover.
+  // This is the "what am I looking at?" label the axis+legend was missing.
+  const currentReturnPct =
+    visibleNormalized.length > 0
+      ? (visibleNormalized[visibleNormalized.length - 1] - 1) * 100
+      : 0;
+  const currentReturnPositive = currentReturnPct >= 0;
+  const periodLabel = period === "CUSTOM" ? "Custom range" : period;
+
   // ── Render ────────────────────────────────────────────────────────
   return (
     <div ref={wrapRef} className="relative w-full">
-      {/* Period toggle */}
+      {/* Period toggle + always-visible current-return summary */}
       <div
-        role="tablist"
-        aria-label="Period"
         style={{
           display: "flex",
-          gap: 4,
-          marginBottom: 8,
-          position: "relative",
           alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 6,
           flexWrap: "wrap",
         }}
       >
-        {PERIODS.map((p) => {
-          const active = period === p;
-          return (
-            <button
-              key={p}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => setPeriodChecked(p)}
-              style={{
-                padding: "3px 9px",
-                fontSize: 11,
-                fontFamily: "Geist Mono, monospace",
-                background: active ? "var(--accent)" : "transparent",
-                color: active ? "#fff" : "var(--text-secondary)",
-                border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
-                borderRadius: 4,
-                cursor: "pointer",
-                fontVariantNumeric: "tabular-nums",
-              }}
-            >
-              {p}
-            </button>
-          );
-        })}
-        {pickerOpen && (
-          <CustomRangePicker
-            isOpen={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            onApply={applyCustom}
-            min={firstDate(composite)}
-            max={new Date()}
-            initialRange={customRange}
-          />
+        <div
+          role="tablist"
+          aria-label="Period"
+          style={{
+            display: "flex",
+            gap: 4,
+            position: "relative",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          {PERIODS.map((p) => {
+            const active = period === p;
+            return (
+              <button
+                key={p}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setPeriodChecked(p)}
+                style={{
+                  padding: "3px 9px",
+                  fontSize: 11,
+                  fontFamily: "Geist Mono, monospace",
+                  background: active ? "var(--accent)" : "transparent",
+                  color: active
+                    ? "var(--color-surface, #fff)"
+                    : "var(--text-secondary)",
+                  border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
+                  borderRadius: 4,
+                  cursor: "pointer",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {p}
+              </button>
+            );
+          })}
+          {pickerOpen && (
+            <CustomRangePicker
+              isOpen={pickerOpen}
+              onClose={() => setPickerOpen(false)}
+              onApply={applyCustom}
+              min={firstDate(composite)}
+              max={new Date()}
+              initialRange={customRange}
+            />
+          )}
+        </div>
+
+        <div
+          aria-label={`Return over ${periodLabel}`}
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            gap: 6,
+            fontFamily: "Geist Mono, monospace",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          <span
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            {periodLabel}
+          </span>
+          <span
+            style={{
+              fontSize: 18,
+              fontWeight: 600,
+              color: currentReturnPositive
+                ? "var(--positive)"
+                : "var(--negative)",
+            }}
+          >
+            {currentReturnPositive ? "+" : ""}
+            {currentReturnPct.toFixed(2)}%
+          </span>
+        </div>
+      </div>
+
+      {/* Always-visible legend strip — matches the paths rendered below. */}
+      <div
+        aria-label="Series legend"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          marginBottom: 6,
+          fontSize: 11,
+          fontFamily: "DM Sans",
+          color: "var(--text-muted)",
+          flexWrap: "wrap",
+        }}
+      >
+        <LegendSwatch color="var(--chart-strategy)" label="Portfolio" />
+        {visibleBenchmarkNormalized && (
+          <LegendSwatch color="var(--chart-benchmark)" label="BTC" dashed />
         )}
+        {overlaySeries.map((o) => (
+          <LegendSwatch key={o.id} color={o.color} label={o.label} />
+        ))}
       </div>
 
       <div style={{ position: "relative" }}>
@@ -479,13 +597,56 @@ export function EquityChart({
           onMouseMove={handleMove}
           onMouseLeave={() => setHoverIdx(null)}
         >
-          {/* Gradient fill */}
+          {/* Gradient fill — uses the chart-strategy token rather than a
+              hardcoded hex so it stays in sync with DESIGN.md. */}
           <defs>
             <linearGradient id="eq-grad" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#1B6B5A" stopOpacity="0.22" />
-              <stop offset="100%" stopColor="#1B6B5A" stopOpacity="0" />
+              <stop
+                offset="0%"
+                stopColor="var(--chart-strategy)"
+                stopOpacity="0.22"
+              />
+              <stop
+                offset="100%"
+                stopColor="var(--chart-strategy)"
+                stopOpacity="0"
+              />
             </linearGradient>
           </defs>
+
+          {/* Y-axis gridlines + tick labels (right side). The 0% baseline
+              is rendered stronger so the reader has a visual anchor. */}
+          {yTicks.map((v, i) => {
+            const isBaseline = Math.abs(v - 1) < 1e-9;
+            const yPos = y(v);
+            const pct = (v - 1) * 100;
+            const label = `${pct >= 0 ? "+" : ""}${pct.toFixed(pct !== 0 && Math.abs(pct) < 10 ? 1 : 0)}%`;
+            return (
+              <g key={i}>
+                <line
+                  x1={pad.l}
+                  x2={width - pad.r}
+                  y1={yPos}
+                  y2={yPos}
+                  stroke={isBaseline ? "var(--text-muted)" : "var(--border)"}
+                  strokeWidth={isBaseline ? 1 : 1}
+                  strokeOpacity={isBaseline ? 0.5 : 0.5}
+                  strokeDasharray={isBaseline ? "4 3" : "2 4"}
+                />
+                <text
+                  x={width - pad.r + 4}
+                  y={yPos + 3}
+                  fontSize={10.5}
+                  fill={isBaseline ? "var(--text-secondary)" : "var(--text-muted)"}
+                  fontFamily="Geist Mono"
+                  textAnchor="start"
+                  style={{ fontVariantNumeric: "tabular-nums" }}
+                >
+                  {label}
+                </text>
+              </g>
+            );
+          })}
 
           {/* X-axis baseline + tick labels */}
           <line
@@ -510,18 +671,19 @@ export function EquityChart({
             </text>
           ))}
 
-          {/* Benchmark (dashed) */}
-          {visibleBenchmark && (
+          {/* Benchmark (dashed) — normalized to period start so it
+              departs from the 0% baseline alongside the portfolio. */}
+          {visibleBenchmarkNormalized && (
             <path
-              d={toPath(visibleBenchmark)}
+              d={toPath(visibleBenchmarkNormalized)}
               fill="none"
-              stroke="#64748b"
+              stroke="var(--chart-benchmark)"
               strokeWidth={1.25}
               strokeDasharray="3 3"
             />
           )}
 
-          {/* Holding overlays */}
+          {/* Holding overlays (already period-normalized above) */}
           {overlaySeries.map((o) => (
             <path
               key={o.id}
@@ -534,12 +696,9 @@ export function EquityChart({
           ))}
 
           {/* Portfolio area + line */}
+          <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
           <path
-            d={toArea(visible.map((p) => p.value))}
-            fill="url(#eq-grad)"
-          />
-          <path
-            d={toPath(visible.map((p) => p.value))}
+            d={toPath(visibleNormalized)}
             fill="none"
             stroke="var(--chart-strategy)"
             strokeWidth={1.75}
@@ -553,16 +712,16 @@ export function EquityChart({
                 x2={x(hoverIdx)}
                 y1={pad.t}
                 y2={pad.t + chartH}
-                stroke="#94A3B8"
+                stroke="var(--chart-benchmark)"
                 strokeWidth={1}
                 strokeDasharray="2 2"
               />
               <circle
                 cx={x(hoverIdx)}
-                cy={y(visible[hoverIdx].value)}
+                cy={y(visibleNormalized[hoverIdx])}
                 r={3.5}
                 fill="var(--chart-strategy)"
-                stroke="#fff"
+                stroke="var(--color-surface, #fff)"
                 strokeWidth={1.5}
               />
             </g>
@@ -572,16 +731,12 @@ export function EquityChart({
         {/* Tooltip popover */}
         {hoverIdx != null && hoverIdx < n && (() => {
           const i = hoverIdx;
-          const portCur = visible[i].value;
-          const portPct = (portCur / periodBaseComposite - 1) * 100;
-          const benchCur =
-            visibleBenchmark && visibleBenchmark[i] != null
-              ? visibleBenchmark[i]!
+          const portPct = (visibleNormalized[i] - 1) * 100;
+          const benchNorm =
+            visibleBenchmarkNormalized && visibleBenchmarkNormalized[i] != null
+              ? visibleBenchmarkNormalized[i]!
               : null;
-          const benchPct =
-            benchCur != null && periodBaseBench != null
-              ? (benchCur / periodBaseBench - 1) * 100
-              : null;
+          const benchPct = benchNorm != null ? (benchNorm - 1) * 100 : null;
           const left = Math.min(Math.max(x(i) + 10, 8), width - 220);
           return (
             <div
@@ -626,7 +781,7 @@ export function EquityChart({
               {benchPct != null && (
                 <TooltipRow
                   label="BTC"
-                  color="#64748b"
+                  color="var(--chart-benchmark)"
                   pct={benchPct}
                   dashed
                 />
@@ -666,6 +821,42 @@ export function EquityChart({
       </div>
       {/* Intraday toggles (1D / 1W) deferred per CONTEXT §deferred */}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LegendSwatch — tiny always-visible legend entry for the series above the
+// chart. Separate from TooltipRow because legend rows don't carry values.
+// ---------------------------------------------------------------------------
+function LegendSwatch({
+  color,
+  label,
+  dashed,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+}) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        color: "var(--text-secondary)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-block",
+          width: 14,
+          height: 0,
+          borderTop: `${dashed ? "1.5px dashed" : "2px solid"} ${color}`,
+        }}
+      />
+      {label}
+    </span>
   );
 }
 
