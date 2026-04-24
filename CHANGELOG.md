@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.4.1] - 2026-04-24
+
+### Added
+
+- **Supabase migration GitHub Action with production approval gate.**
+  New `.github/workflows/supabase-migrate.yml` runs on merge to main when
+  `supabase/migrations/**` changes (plus manual `workflow_dispatch`). A
+  `plan` job prints `supabase migration list` so the remote-vs-local diff
+  is visible before the apply step can start, and an `apply` job gated on
+  the `production` GitHub environment requires reviewer approval before
+  `supabase db push` runs. Removes the "open terminal and remember
+  `supabase db push`" step that left migration 078 (the v0.15.4.0 heal)
+  un-applied for ~20 minutes after the deploy succeeded, while preserving
+  a human checkpoint for destructive migrations. One-time setup: secrets
+  `SUPABASE_ACCESS_TOKEN` + `SUPABASE_DB_PASSWORD`, variable
+  `SUPABASE_PROJECT_REF`, and a protected `production` environment with
+  required reviewers. No untrusted `github.event.*` fields are
+  interpolated into `run:` blocks, so there is no surface for workflow
+  script injection.
+
 ## [0.15.4.0] - 2026-04-24
 
 ### Fixed

@@ -1,0 +1,77 @@
+name: Supabase Migrate
+
+# Applies Supabase migrations to production on merge to main.
+#
+# Flow:
+#   1. `plan` job runs on every trigger and prints `supabase migration list`
+#      so the remote-vs-local diff is visible in the run log BEFORE the
+#      apply step can start.
+#   2. `apply` job is gated on the `production` GitHub environment —
+#      required-reviewer approval must be granted in the GitHub UI before
+#      it runs. Once approved, `supabase db push` applies only the
+#      migrations not yet present in the remote migration history.
+#
+# Required GitHub repo configuration (one-time setup):
+#   - Secret `SUPABASE_ACCESS_TOKEN`: a personal access token with
+#     permission to manage the project (Supabase dashboard -> Account ->
+#     Access Tokens).
+#   - Secret `SUPABASE_DB_PASSWORD`: the database password for the target
+#     project (Supabase dashboard -> Project -> Settings -> Database).
+#   - Variable `SUPABASE_PROJECT_REF`: the project ref (e.g. `khslejtfbuezsmvmtsdn`).
+#   - Environment `production` (Settings -> Environments -> New environment)
+#     with required reviewers configured — this is the approval gate.
+#
+# Security note: this workflow consumes only repository secrets and
+# variables. No untrusted github.event.* fields (PR titles, commit
+# messages, etc.) are interpolated into `run:` blocks, so there is no
+# surface for script-injection via attacker-controlled input.
+#
+# Manual trigger: use the "Run workflow" button in the Actions tab to
+# re-run against the current state of main (useful after fixing a failed
+# apply).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+  workflow_dispatch:
+
+concurrency:
+  group: supabase-migrate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: List migration diff (remote vs local)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          supabase migration list
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Push migrations to production
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+          supabase db push
