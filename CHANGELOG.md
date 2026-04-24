@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.4.0] - 2026-04-24
+
+### Fixed
+
+- **Root cause of the V-shaped equity curve: OKX contract-size inflation.**
+  The previous four fixes (v0.15.3.1 – v0.15.3.4) all targeted "stale rows
+  block fresh reconstruct" — but the *fresh* reconstruct was producing
+  garbage too. CCXT's `safe_trade` returns `trade['amount']` as raw `fillSz`,
+  which for OKX linear perpetuals is in *contracts* with `ctVal = 0.01`
+  ETH/contract, not base units. A 21.464 ETH position on OKX arrived in the
+  replay as `amount = 2146.4` and every $1 ETH move marked the position
+  100x too hard. Demo allocator's 2026-04-12 snapshot landed at
+  `value_usd = -$152,771` on a fully-collateralised account, matching a
+  2146.4-contract position × a ~$71 ETH move almost exactly. The perp
+  branch of `_compute_daily_equity` now derives base-unit size from
+  `cost / price` (CCXT's `cost` is always quote-denominated, so the ratio
+  recovers base units independent of `contractSize`). Backward-compatible
+  with existing synthetic fixtures (where `cost = amount × price` yields
+  `cost/price = amount`). New regression test
+  `test_okx_contract_size_bug_no_100x_inflation_on_eth_perp` reproduces
+  the exact production V-shape in a fixture that mirrors real OKX trade
+  shape; fails without the fix, passes with it.
+
+- **Refresh job treated perp notional as equity.** `allocator_positions.py`
+  writes derivative `value_usd = size_usd` (full notional, e.g.
+  21.464 ETH × $2336 = $50,172) because the positions table also feeds
+  the strategy engine. The refresh loop then summed `value_usd` across
+  every holding, adding $50,172 to today's equity on top of the USDT
+  margin that was already counted in the spot row — demo's 2026-04-23
+  snapshot landed at $245,665 when the actual equity was ~$195,493 plus
+  a few hundred of unrealised PnL. The fix uses `unrealized_pnl_usd` for
+  rows where `holding_type = 'derivative'` and tags the breakdown key
+  `{SYMBOL}:PERP` so it can't collide with a spot line of the same base
+  currency. Regression:
+  `test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional`.
+
+### Migrations
+
+- **`078_equity_contract_size_healing.sql`** — purges every row in
+  `allocator_equity_snapshots` (all of them were produced by pre-v0.15.4.0
+  code, which was either v0.15.3.0's contract-size bug or the later
+  refresh-job notional bug) and deletes `compute_jobs` rows where
+  `kind = 'reconstruct_allocator_history' AND status = 'done'` so the
+  per-api_key idempotency gate (migration 076) no longer blocks the
+  fixed code from running. Enqueues a fresh reconstruct for every
+  connected, active `api_key` so affected users see the corrected curve
+  on the next worker claim cycle (≤ 30s post-deploy) without having to
+  delete + re-upload their key.
+
+### Notes
+
+- Scope of the healing migration: 3 allocators, ~13 snapshot rows on
+  production as of 2026-04-24. All snapshot data is derived state and
+  fully recomputable from upstream sources (exchange APIs +
+  `token_price_history`).
+- Starting-balance anchor (for users whose initial funding predates the
+  730-day `BACKFILL_CAP_DAYS` window) is a distinct scenario and is
+  filed for a follow-up phase. It is not required to fix the reported
+  V-shaped curve.
+
 ## [0.15.3.4] - 2026-04-24
 
 ### Fixed
