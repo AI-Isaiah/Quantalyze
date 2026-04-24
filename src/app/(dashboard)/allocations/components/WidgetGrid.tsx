@@ -151,16 +151,27 @@ function WidgetCell({
       ) as 1 | 2 | 3 | 4;
       handleEl.dataset.pendingW = String(target);
     }
+    function cleanup() {
+      delete handleEl.dataset.pendingW;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+    }
     function up() {
       const pending = Number(handleEl.dataset.pendingW ?? startW) as 1 | 2 | 3 | 4;
       const finalW = (pending >= 1 && pending <= 4 ? pending : startW) as 1 | 2 | 3 | 4;
       if (finalW !== startW) onResize(k, finalW);
-      delete handleEl.dataset.pendingW;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      cleanup();
+    }
+    // Touch resize interrupted by a system gesture (notification, scroll
+    // hand-off) fires pointercancel — must release listeners or they leak
+    // on the next render of the cell.
+    function cancel() {
+      cleanup();
     }
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
   }
 
   return (

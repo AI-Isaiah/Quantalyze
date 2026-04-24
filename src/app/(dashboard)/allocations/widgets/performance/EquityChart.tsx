@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { CustomRangePicker } from "../../components/CustomRangePicker";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -148,11 +149,6 @@ function firstDate(points: DailyPoint[]): Date {
   return new Date(parseISO(points[0].date));
 }
 
-// Lazy import of the picker (it lives next to this widget). Done as a
-// named import here because we need it eagerly for the popover render —
-// the picker is a small client component, not worth a Suspense boundary.
-import { CustomRangePicker } from "../../components/CustomRangePicker";
-
 // ---------------------------------------------------------------------------
 // EquityChart — public component
 // ---------------------------------------------------------------------------
@@ -278,8 +274,20 @@ export function EquityChart({
   for (const o of overlaySeries) {
     for (const v of o.series) if (v != null) allValues.push(v);
   }
-  const yMin = allValues.length ? Math.min(...allValues) : 0;
-  const yMax = allValues.length ? Math.max(...allValues) : 1;
+  // Manual loop instead of Math.min(...allValues) — on the ALL period with
+  // benchmark + ~20 overlay series the array grows to ~50k+ values, and
+  // spreading into Math.min/max blows the JS call stack at ~125k args.
+  let yMin = 0;
+  let yMax = 1;
+  if (allValues.length) {
+    yMin = allValues[0];
+    yMax = allValues[0];
+    for (let i = 1; i < allValues.length; i++) {
+      const v = allValues[i];
+      if (v < yMin) yMin = v;
+      else if (v > yMax) yMax = v;
+    }
+  }
   const yRange = yMax - yMin || 1;
 
   const x = (i: number) =>

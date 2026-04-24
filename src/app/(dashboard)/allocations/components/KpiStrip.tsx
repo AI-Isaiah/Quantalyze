@@ -109,12 +109,14 @@ const AVG_RHO_HONEST_NULL_SUB =
   "Requires per-holding correlation data (pending)";
 const AVG_RHO_LOADED_SUB = "average pairwise correlation across holdings";
 
-/** Inline color hint for the value text — green/red for signed metrics. */
-function valueColor(raw: number | null): React.CSSProperties | undefined {
-  if (raw == null) return undefined;
-  if (raw > 0) return { color: "#16A34A" };
-  if (raw < 0) return { color: "#DC2626" };
-  return undefined;
+/** Color-token className for the value text — green/red for signed metrics.
+ * Uses DESIGN.md tokens (text-positive / text-negative) so the strip stays
+ * in lockstep with the rest of the dashboard's signed-value rendering. */
+function valueColorClass(raw: number | null): string {
+  if (raw == null) return "";
+  if (raw > 0) return "text-positive";
+  if (raw < 0) return "text-negative";
+  return "";
 }
 
 export function KpiStrip({
@@ -256,8 +258,7 @@ export function KpiStrip({
               plan literal suggested it; serif is reserved for display /
               page titles per DESIGN.md typography section. */}
           <div
-            className="mt-1 font-mono text-lg font-medium tabular-nums"
-            style={valueColor(label === "AUM" ? null : raw)}
+            className={`mt-1 font-mono text-lg font-medium tabular-nums ${valueColorClass(label === "AUM" ? null : raw)}`}
           >
             {formatted}
           </div>

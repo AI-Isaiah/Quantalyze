@@ -3,6 +3,22 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { HoldingsTable } from "./HoldingsTable";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 
+// next/navigation mock — DesignHoldingsTable calls useRouter() so the banner
+// dismiss handler can fire router.refresh() (Plan 09.1 simplify pass).
+const mockRouterRefresh = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: mockRouterRefresh,
+    replace: vi.fn(),
+    push: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  usePathname: () => "/allocations",
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 /**
  * Phase 09.1 Plan 08 — HoldingsTable sub-row tests.
  *

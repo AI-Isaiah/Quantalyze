@@ -34,6 +34,7 @@
  */
 
 import { Fragment, useMemo, useState, type CSSProperties } from "react";
+import { useRouter } from "next/navigation";
 import {
   HoldingNoteIconButton,
   HoldingNoteRow,
@@ -389,6 +390,7 @@ function DesignHoldingsTable({
   showRevoked,
   onShowRevokedChange,
 }: DesignProps) {
+  const router = useRouter();
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({
     key: "alloc",
     dir: "desc",
@@ -409,8 +411,13 @@ function DesignHoldingsTable({
   }, [rows, revokedStatusByHoldingId, showRevoked]);
 
   const sortedRows = useMemo(() => {
-    return [...visibleRows].sort((a, b) =>
-      compareDesignRows(a, b, sort.key, sort.dir),
+    // Tie-break on row id so equal sort values produce a deterministic order
+    // across re-renders. Without this, sub-row HoldingDetail components
+    // remount on every sort with null/equal values because React sees
+    // different child keys per render.
+    return [...visibleRows].sort(
+      (a, b) =>
+        compareDesignRows(a, b, sort.key, sort.dir) || a.id.localeCompare(b.id),
     );
   }, [visibleRows, sort]);
 
@@ -577,14 +584,15 @@ function DesignHoldingsTable({
                           onAllocatedClick={() => setExpandedRowId(row.id)}
                           onRejectedClick={() => setExpandedRowId(row.id)}
                           onDismiss={() => {
-                            // banner is row-scoped; on dismiss we collapse
-                            // the row (the banner stays mounted because
-                            // dismissal is server-side; UI optimistically
-                            // hides via the parent state when the server
-                            // round-trip completes).
-                            setExpandedRowId((prev) =>
-                              prev === row.id ? null : prev,
-                            );
+                            // Dismissal is server-side (BridgeOutcomeBanner
+                            // POSTs the decision before calling onDismiss).
+                            // Refresh the route to re-fetch
+                            // getMyAllocationDashboard so the holding drops
+                            // out of `flaggedHoldings` and the banner
+                            // unmounts. Without this the banner re-renders
+                            // from the memoized prop and the user sees no
+                            // feedback until full page reload.
+                            router.refresh();
                           }}
                         />
                       </td>

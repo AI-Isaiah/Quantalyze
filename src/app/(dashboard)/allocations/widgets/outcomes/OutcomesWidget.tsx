@@ -535,28 +535,6 @@ function TimelineRow({
 }) {
   const pill = useMemo(() => deriveOutcomeStatusPill(outcome), [outcome]);
 
-  const bestDelta = useMemo(() => {
-    if (outcome.kind === "rejected")
-      return { value: "—", tone: "neutral" as const };
-    const label = deriveOutcomeLabel({
-      kind: outcome.kind,
-      allocated_at: outcome.allocated_at,
-      delta_30d: outcome.delta_30d,
-      delta_90d: outcome.delta_90d,
-      delta_180d: outcome.delta_180d,
-      estimated_delta_bps: outcome.estimated_delta_bps,
-      estimated_days: outcome.estimated_days,
-      needs_recompute: outcome.needs_recompute,
-      created_at: outcome.created_at,
-      today,
-    });
-    return { value: label.value, tone: label.tone };
-  }, [outcome, today]);
-  // Preserve the binding so the design's accessible "best delta" derivation
-  // still runs (downstream label parity tests rely on the helper running on
-  // every outcome row).
-  void bestDelta;
-
   const dateIso =
     outcome.kind === "allocated" && outcome.allocated_at
       ? outcome.allocated_at
@@ -566,16 +544,14 @@ function TimelineRow({
     outcome.match_decision?.original_strategy ?? null;
   const replacementStrategy = outcome.replacement_strategy ?? null;
 
-  const pillS = pillStyle(pill);
-  // Preserve the pill style derivation (still runs on every render so any
-  // future re-introduction of pill UI stays in lockstep with the helper).
-  void pillS;
-
-  // "Size" is rendered as a compact USD pill — derived from the
-  // percent_allocated decimal (informational only; storage unit unchanged).
-  const sizeUsd =
+  // "Size" renders as a percent badge (e.g. "12.5%") — the underlying
+  // `percent_allocated` is the canonical storage unit. Designer comp shows
+  // a dollar amount, but until allocator AUM is wired through the payload
+  // we render the percent honestly rather than fabricating a $-value from
+  // a magic-number proxy.
+  const sizePercent =
     outcome.kind === "allocated" && outcome.percent_allocated != null
-      ? outcome.percent_allocated * 1000
+      ? outcome.percent_allocated
       : null;
 
   function deltaCell(v: number | null) {
@@ -661,11 +637,14 @@ function TimelineRow({
           </div>
         </td>
 
-        {/* Size */}
+        {/* Size — rendered as percent of portfolio (canonical storage unit).
+            Designer comp shows $-amount, but allocator AUM isn't wired
+            through the payload yet. Showing the honest percent avoids
+            fabricating a $-figure from a magic-number proxy. */}
         <td className="px-4 py-3 text-right font-mono text-[13px] tabular-nums">
-          {sizeUsd != null ? (
+          {sizePercent != null ? (
             <span style={{ color: "#1A1A2E" }}>
-              {formatUsdCompact(sizeUsd)}
+              {sizePercent.toFixed(1)}%
             </span>
           ) : (
             <span style={{ color: "#718096" }}>{"—"}</span>
