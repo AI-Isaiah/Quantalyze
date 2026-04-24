@@ -1150,6 +1150,25 @@ async def _fetch_and_price_window(
     for sym, series, err in primary_results:
         if series is not None:
             ohlcv_by_symbol[sym] = series
+            # /investigate 2026-04-24 (v0.15.4.3) temporary instrumentation:
+            # log the first and last OHLCV bars per symbol so we can see if
+            # production is receiving bars with realistic per-day closes or
+            # a stuck single value. Log the unique close count too — if all
+            # 90 bars report the same close, we know the fetch_ohlcv response
+            # shape is broken.
+            try:
+                uniq_closes = sorted({round(c, 2) for _, c in series})
+                first_iso, first_close = series[0] if series else (None, None)
+                last_iso, last_close = series[-1] if series else (None, None)
+                logger.info(
+                    "OHLCV_DEBUG sym=%s n_bars=%d n_unique_closes=%d "
+                    "first=(%s, %s) last=(%s, %s) sample_closes=%r",
+                    sym, len(series), len(uniq_closes),
+                    first_iso, first_close, last_iso, last_close,
+                    uniq_closes[:5] + ["..."] + uniq_closes[-5:] if len(uniq_closes) > 10 else uniq_closes,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("OHLCV_DEBUG failed sym=%s: %s", sym, exc)
 
     # Pass 2 — sequential CoinGecko fallback for BadSymbol results. Kept
     # sequential so the 2s inter-call throttle (COINGECKO_MIN_SLEEP_SECS)
