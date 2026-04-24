@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.5.0] - 2026-04-24
+
+### Changed
+
+- **Sidebar Discovery is now grouped by asset class.** The "DISCOVERY"
+  section in the left nav used to be a flat list of five categories.
+  It now renders two sub-group labels inside the single heading:
+  "Digital Assets" (Crypto SMA, CFD, Emerging Crypto, Crypto Decks)
+  and "TradFi" (TradFi Decks). The grouping lives in
+  `DISCOVERY_CATEGORIES` via a new `group` field and is preserved in
+  first-seen order. Empty sub-groups disappear cleanly when
+  `populatedSlugs` filtering removes every category in a bucket, so
+  allocators with only crypto exchanges connected don't see a dangling
+  "TradFi" header. Matches the final iteration of the Allocator
+  Dashboard design handoff (`gWpaR-hg2TAdfzK09xjoLw`).
+
 ## [0.15.4.3] - 2026-04-24
 
 ### Fixed
