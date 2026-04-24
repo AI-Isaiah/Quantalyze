@@ -711,6 +711,15 @@ def _compute_daily_equity(
                     amt_base = _resolve_perp_amt_base(
                         raw_symbol, amt, price, cost, inst_type=inst_type,
                     )
+                    # /investigate 2026-04-24 (v0.15.4.3) temporary log: one
+                    # line per fill so we can see if inst_type / cost shape
+                    # differs in prod vs local. Rate is bounded by the trade
+                    # count (≤500 fills/day for a fully-collateralised
+                    # allocator), so this is safe to emit at INFO level.
+                    logger.info(
+                        "PERP_FILL_DEBUG iso=%s sym=%s side=%s amt=%.6f price=%.4f cost=%.4f inst_type=%r amt_base=%.6f",
+                        iso, raw_symbol, side, amt, price, cost, inst_type, amt_base,
+                    )
                     signed = amt_base if side == "buy" else -amt_base
                     pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
                     cur_size = pos["size"]
@@ -807,6 +816,16 @@ def _compute_daily_equity(
             if px is None:
                 continue
             unrealized = size * (px - avg_entry)
+            # /investigate 2026-04-24 (v0.15.4.3) temporary instrumentation:
+            # surface size/avg/close at EOD mark so we can compare prod vs
+            # local. Remove in the next release once the prod/local
+            # divergence (same code, same trades, different PERP magnitude)
+            # is nailed. Log level=INFO so it survives production log
+            # sampling.
+            logger.info(
+                "PERP_MARK_DEBUG iso=%s symbol=%s size=%.6f avg_entry=%.4f close=%.4f unrealized=%.4f",
+                iso, perp_sym, size, avg_entry, px, unrealized,
+            )
             if unrealized == 0.0:
                 continue
             key = f"{base}:{quote_sym}:PERP"
