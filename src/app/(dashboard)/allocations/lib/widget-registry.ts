@@ -3,6 +3,23 @@ import type { WidgetMeta } from "./types";
 // ---------------------------------------------------------------------------
 // Widget Registry — all 39 widgets for the My Allocation dashboard
 // ---------------------------------------------------------------------------
+//
+// Phase 09.1 Plan 05 / D-08 — picker no longer surfaces "soon" badges for
+// correlation / funding / flows. The designer prototype carried "soon"
+// badges for these three concepts; in the live registry:
+//   - correlation-matrix → status: "ready" (registered below; widgets/risk/
+//     CorrelationMatrix). No demotion needed; the "soon" treatment in the
+//     designer was a placeholder while the real widget existed.
+//   - funding-rates      → not registered (no widget exists yet — picker
+//     simply doesn't list it; nothing to demote).
+//   - flows-ledger       → not registered (no widget exists yet — picker
+//     simply doesn't list it; nothing to demote).
+// All entries below currently carry status: "ready". The D-08 stance is
+// the registry's source of truth: NO entry should carry status: "todo"
+// (or any future "coming-soon" marker) without a real registered widget
+// behind it. The Plan 05 WidgetPicker filters by status === "ready" so
+// any future "todo" entry would silently disappear from the picker —
+// which is preferred over a misleading badge.
 
 export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
   // ── Performance (10) ────────────────────────────────────────────────
