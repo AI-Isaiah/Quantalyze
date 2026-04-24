@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { HoldingsTable } from "./HoldingsTable";
+import { HoldingsTable, type HoldingRow as HoldingRowType } from "./HoldingsTable";
 
 /**
  * Phase 08 Plan 02 Task 2 — HoldingsTable tests (MANAGE-02).
@@ -22,7 +22,7 @@ import { HoldingsTable } from "./HoldingsTable";
  *   - Plural/singular rules for the hidden-footer count.
  */
 
-type HoldingRow = React.ComponentProps<typeof HoldingsTable>["holdings"][number];
+type HoldingRow = HoldingRowType;
 
 function makeHolding(overrides: Partial<HoldingRow> = {}): HoldingRow {
   return {
