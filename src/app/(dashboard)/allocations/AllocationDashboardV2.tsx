@@ -15,6 +15,7 @@ import { WidgetPicker } from "./components/WidgetPicker";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
+import { Tweaks, type TweakState } from "./components/Tweaks";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 
 /**
@@ -79,6 +80,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerTriggerRef = useRef<HTMLButtonElement>(null);
   const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
+  // Plan 11 / D-19 — Tweaks panel state. `bridgeVariant` flows to BridgeWidget
+  // when wired (polish follow-up); other knobs are persisted but DOM-application
+  // is a follow-up. The setter is fed to <Tweaks onChange={setTweaks}/> at the
+  // bottom of the body.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [tweaks, setTweaks] = useState<TweakState | null>(null);
 
   const {
     portfolio,
@@ -261,6 +268,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           renderWidget={renderWidget}
         />
       </div>
+      {/* Plan 11 / D-19 — QA-only Tweaks panel. Internally returns null when
+          QA_MODE is false, so the floating trigger never renders for
+          allocator-facing production builds. */}
+      <Tweaks onChange={setTweaks} />
     </div>
   );
 }
