@@ -209,40 +209,54 @@ describe("OutcomesWidget", () => {
 // ===========================================================================
 
 describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
-  it("className presence check: labels render in DM Sans 11px uppercase tracking-wider (per DASHBOARD-02 className spec)", () => {
+  it("className presence check: labels render in 10.5px uppercase tracking-wider (Phase 09.1 Plan 10 designer KPIStripCell)", () => {
     renderWidget([makeOutcome({ id: "o1" })]);
-    const label = screen.getByText("TOTAL");
-    expect(label.className).toContain("text-[11px]");
+    const label = screen.getByText("Total outcomes");
+    expect(label.className).toContain("text-[10.5px]");
     expect(label.className).toContain("uppercase");
     expect(label.className).toContain("tracking-wider");
   });
 
-  it("className presence check: values render in font-mono text-[13px] tabular-nums (per DASHBOARD-02 className spec)", () => {
+  it("className presence check: values render in font-mono text-[22px] tabular-nums (Phase 09.1 Plan 10 designer KPIStripCell)", () => {
     renderWidget([makeOutcome({ id: "o1" })]);
-    const value = screen.getByText("1"); // totalOutcomes value for 1 row
-    expect(value.className).toContain("font-mono");
-    expect(value.className).toContain("text-[13px]");
-    expect(value.className).toContain("tabular-nums");
+    // totalOutcomes value "1" — pick the font-mono node (the visible "1"
+    // in the Total outcomes cell; sub-copy "0 pending cycle" is muted DM Sans).
+    const candidates = screen.getAllByText("1");
+    const valueNode = candidates.find((n) =>
+      n.className.includes("font-mono"),
+    );
+    expect(valueNode).toBeDefined();
+    expect(valueNode!.className).toContain("font-mono");
+    expect(valueNode!.className).toContain("text-[22px]");
+    expect(valueNode!.className).toContain("tabular-nums");
   });
 
-  it("className presence check: win-rate color >50% -> text/style #16A34A; <50% -> #DC2626; =null -> #1A1A2E", () => {
-    // >50%: single win
+  it("className presence check: avg-realized-α color >=0 -> #16A34A; <0 -> #DC2626; null -> em-dash (Phase 09.1 Plan 10 designer KPIStripCell color prop)", () => {
+    // >=0: positive avg realized α (single win). The KPI strip and the
+    // row's Δ 30d cell both render +4.0%, so disambiguate by picking the
+    // KPI-cell node (text-[22px]) vs the row delta cell (text-[13px]).
     const { unmount } = renderWidget([
       makeOutcome({ id: "o1", percent_allocated: 10, delta_30d: 0.04 }),
     ]);
-    const winRateValWon = screen.getByText("100%");
-    expect(winRateValWon.getAttribute("style")).toContain("16A34A");
+    const avgWinKpi = screen
+      .getAllByText("+4.0%")
+      .find((n) => n.className.includes("text-[22px]"));
+    expect(avgWinKpi).toBeDefined();
+    expect(avgWinKpi!.getAttribute("style")).toContain("16A34A");
     unmount();
 
-    // <50%: single loss
+    // <0: negative avg realized α (single loss)
     const { unmount: unmount2 } = renderWidget([
       makeOutcome({ id: "o2", percent_allocated: 10, delta_30d: -0.04 }),
     ]);
-    const winRateValLost = screen.getByText("0%");
-    expect(winRateValLost.getAttribute("style")).toContain("DC2626");
+    const avgLossKpi = screen
+      .getAllByText("-4.0%")
+      .find((n) => n.className.includes("text-[22px]"));
+    expect(avgLossKpi).toBeDefined();
+    expect(avgLossKpi!.getAttribute("style")).toContain("DC2626");
     unmount2();
 
-    // null: no matured rows
+    // null: no matured rows -> em-dash visible in the strip
     renderWidget([
       makeOutcome({
         id: "o3",
@@ -252,7 +266,6 @@ describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
         delta_180d: null,
       }),
     ]);
-    // When winRate is null, UI renders em-dash "—"
     const dashes = screen.getAllByText("\u2014");
     expect(dashes.length).toBeGreaterThan(0);
   });
@@ -272,6 +285,22 @@ describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
     expect(
       screen.getByText(/Avg realized delta:.*\+4\.0%.*1 pending/),
     ).toBeInTheDocument();
+  });
+
+  it("renders 3-cell KPI strip with 'Hit rate (90d)', 'Avg realized α (90d)', 'Total outcomes' labels (Phase 09.1 Plan 10 D-06)", () => {
+    renderWidget([makeOutcome({ id: "o1" })]);
+    expect(screen.getByText("Hit rate (90d)")).toBeInTheDocument();
+    expect(
+      screen.getByText("Avg realized α (90d)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Total outcomes")).toBeInTheDocument();
+  });
+
+  it("renders 'Bridge outcomes' h3 header with 'Feedback loop' badge (Phase 09.1 Plan 10 designer header)", () => {
+    renderWidget([makeOutcome({ id: "o1" })]);
+    const header = screen.getByRole("heading", { level: 3 });
+    expect(header.textContent).toContain("Bridge outcomes");
+    expect(header.textContent).toContain("Feedback loop");
   });
 });
 
@@ -310,7 +339,10 @@ describe("OutcomesWidget — Timeline (inline TimelineTable + TimelineRow)", () 
     );
   });
 
-  it("4-state status pill: allocated-win / allocated-loss / allocated-pending / rejected-mandate_conflict", () => {
+  it("delta columns: allocated-win renders +%, allocated-loss renders -%, pending renders 'pending' (Phase 09.1 Plan 10 designer table replaces 4-state status pill)", () => {
+    // Phase 09.1 Plan 10 (D-06): the row no longer shows the
+    // "Allocated 12% — win" pill text. Delta values appear directly in
+    // 3 dedicated columns (delta_30 / delta_90 / delta_180), color-coded by sign.
     renderWidget([
       makeOutcome({
         id: "win",
@@ -339,17 +371,25 @@ describe("OutcomesWidget — Timeline (inline TimelineTable + TimelineRow)", () 
         replacement_strategy: { id: "srej", name: "Rejected Strat" },
       }),
     ]);
+    // Win: +4.0% in green (delta_30d row cell — disambiguate from the KPI
+    // cell at text-[22px] which also renders +4.0% for a single-win outcome).
+    const winCell = screen
+      .getAllByText("+4.0%")
+      .find((n) => n.className.includes("text-[13px]"));
+    expect(winCell).toBeDefined();
+    expect(winCell!.getAttribute("style")).toContain("16A34A");
+    // Loss: -3.0% in red (delta_30d row cell — same disambiguation).
+    const lossCell = screen
+      .getAllByText("-3.0%")
+      .find((n) => n.className.includes("text-[13px]"));
+    expect(lossCell).toBeDefined();
+    expect(lossCell!.getAttribute("style")).toContain("DC2626");
+    // Pending allocated row: at least one literal "pending" cell renders
+    // in the delta columns (italic muted copy per designer outcomes.jsx:84).
+    expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
+    // Rejected row still renders its replacement strategy name link.
     expect(
-      screen.getByText(/Allocated 12%\s*\u2014\s*win/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Allocated 15%\s*\u2014\s*loss/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Allocated 8%\s*\u2014\s*pending/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Rejected\s*\u2014\s*Mandate conflict/),
+      screen.getByRole("link", { name: "Rejected Strat" }),
     ).toBeInTheDocument();
   });
 
@@ -426,7 +466,7 @@ describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
     await waitFor(() => expect(curvesCount()).toBe(1));
   });
 
-  it("pending-window column shows 'Pending' pill + animate-pulse placeholder rectangle", async () => {
+  it("pending-window column shows 'Window open' copy in the 3 window cards (Phase 09.1 Plan 10 designer OutcomeDetail)", async () => {
     renderWidget([
       makeOutcome({
         id: "o-pending",
@@ -440,9 +480,10 @@ describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
     });
     fireEvent.click(caret);
     await waitFor(() => {
-      // three "Pending" pills inside the expanded panel
-      const pendingPills = screen.getAllByText("Pending");
-      expect(pendingPills.length).toBeGreaterThanOrEqual(3);
+      // three "Window open" cells inside the expanded panel (one per window
+      // card 30d/90d/180d). Designer outcomes.jsx:158-161.
+      const openCards = screen.getAllByText("Window open");
+      expect(openCards.length).toBeGreaterThanOrEqual(3);
     });
   });
 });
