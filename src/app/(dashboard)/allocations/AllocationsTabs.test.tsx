@@ -151,7 +151,7 @@ describe("AllocationsTabs — PURGE-07 / D-04 / f3", () => {
 
   it("Scenario stub contains only the heading + body strings (no interactive controls)", () => {
     setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
+    const { container } = render(<AllocationsTabs {...STUB_PROPS} />);
     // The stub must have the heading text.
     expect(
       screen.getByText("Scenario builder coming soon"),
@@ -162,11 +162,13 @@ describe("AllocationsTabs — PURGE-07 / D-04 / f3", () => {
         "Model what-if outcomes by adding or removing strategies and holdings from your live composition. Available in the next update.",
       ),
     ).toBeInTheDocument();
-    // The only interactive controls under the rendered tree should be the
-    // two tab buttons themselves (role="tab" in the tablist above). No
-    // other interactive controls inside the stub body — role="button"
-    // returns nothing, and role="tab" returns exactly Performance + Scenario.
-    expect(screen.queryAllByRole("button")).toEqual([]);
+    // The Scenario panel body itself must contain no interactive controls.
+    // (Phase 09.1 D-20 added a "+ Allocation" button in the page chrome above
+    // the tablist — that lives outside the Scenario panel and is excluded
+    // by scoping the query to the scenario tabpanel.)
+    const scenarioPanel = container.querySelector("#panel-scenario");
+    expect(scenarioPanel).not.toBeNull();
+    expect(scenarioPanel!.querySelectorAll("button")).toHaveLength(0);
     const tabs = screen.getAllByRole("tab");
     const tabLabels = tabs.map((b) => b.textContent?.trim());
     expect(tabLabels).toEqual(["Performance", "Scenario"]);
