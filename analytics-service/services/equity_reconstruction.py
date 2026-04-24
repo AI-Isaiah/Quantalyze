@@ -612,7 +612,27 @@ def _compute_daily_equity(
                         price = cost / amt
                     if price <= 0:
                         continue
-                    signed = amt if side == "buy" else -amt
+                    # /investigate 2026-04-24: OKX contract-size normalisation.
+                    # CCXT's safe_trade (base/exchange.py:4412) returns
+                    # amount = raw fillSz, which for OKX perpetuals is in
+                    # CONTRACTS (ctVal=0.01 ETH for ETH-USDT-SWAP, 0.001 BTC
+                    # for BTC-USDT-SWAP, etc.). safe_trade DOES recompute
+                    # `cost` correctly as amount × price × contractSize,
+                    # so cost/price recovers base units independent of
+                    # contractSize. Without this, a 21.464 ETH short on
+                    # OKX lands as size=2146.4 and every $1 ETH move marks
+                    # the position 100x too hard — the V-shaped curve
+                    # reported 2026-04-22 (value_usd=-$152,771 on a fully-
+                    # collateralised account). For fixtures using the
+                    # synthetic "amount as base units" convention (the
+                    # test helper _mk_perp_trade, where cost=amount×price
+                    # and contractSize is implicitly 1), cost/price equals
+                    # amount — so this is backward-compatible.
+                    if cost > 0:
+                        amt_base = cost / price
+                    else:
+                        amt_base = amt
+                    signed = amt_base if side == "buy" else -amt_base
                     pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
                     cur_size = pos["size"]
                     cur_avg = pos["avg_entry"]
@@ -935,7 +955,10 @@ async def _fetch_today_holdings(
     def _sel():
         return (
             supabase.table("allocator_holdings")
-            .select("symbol, quantity, mark_price, value_usd, venue, holding_type, api_key_id")
+            .select(
+                "symbol, quantity, mark_price, value_usd, "
+                "unrealized_pnl_usd, venue, holding_type, api_key_id"
+            )
             .eq("allocator_id", allocator_id)
             .eq("asof", today_iso)
             .execute()
@@ -1221,16 +1244,39 @@ async def run_refresh_allocator_equity_daily_job(job: dict) -> DispatchResult:
         # Read today's holdings (populated by Phase 06 poll_allocator_positions)
         holdings = await _fetch_today_holdings(ctx.supabase, allocator_id, today_iso)
 
-        # Compute single-day equity from holdings' value_usd fan-in
+        # Compute single-day equity from holdings' value_usd fan-in.
+        #
+        # /investigate 2026-04-24: perp derivative rows must contribute
+        # unrealized_pnl_usd, NOT value_usd. allocator_positions.py:191
+        # stores value_usd = size_usd (full notional, e.g. 21.464 ETH ×
+        # $2336 = $50,172) because the positions table is the source of
+        # truth for BOTH the strategy engine (which wants notional) and
+        # the allocator dashboard (which wants equity contribution). On
+        # unified-margin venues like OKX the perp's USDT margin is
+        # already counted in the spot USDT balance — summing notional on
+        # top double-counts. Demo 2026-04-23 snapshot: $195,493 USDT +
+        # $50,172 ETH perp notional = $245,665 reported, when actual
+        # equity was ~$195,493 + a few hundred of unrealised PnL. Use
+        # unrealized_pnl_usd and tag the breakdown key with ":PERP" so
+        # it can't collide with a spot symbol of the same base currency.
         total = 0.0
         breakdown: dict[str, float] = {}
         for h in holdings:
             sym = (h.get("symbol") or "").upper()
-            v = float(h.get("value_usd") or 0.0)
             if not sym:
                 continue
-            breakdown[sym] = round(breakdown.get(sym, 0.0) + v, 2)
-            total += v
+            htype = (h.get("holding_type") or "").lower()
+            if htype == "derivative":
+                upnl = float(h.get("unrealized_pnl_usd") or 0.0)
+                if upnl == 0.0:
+                    continue
+                key = f"{sym}:PERP"
+                breakdown[key] = round(breakdown.get(key, 0.0) + upnl, 2)
+                total += upnl
+            else:
+                v = float(h.get("value_usd") or 0.0)
+                breakdown[sym] = round(breakdown.get(sym, 0.0) + v, 2)
+                total += v
 
         if not breakdown:
             logger.info(

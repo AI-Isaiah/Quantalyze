@@ -2309,3 +2309,236 @@ async def test_persist_equity_snapshots_returns_actual_written_count(monkeypatch
         "reported days_written=5 while the dashboard showed zero change. "
         f"Got count={count}; must reflect actual Postgres writes."
     )
+
+
+# ---------------------------------------------------------------------------
+# OKX contract-size regression (/investigate 2026-04-24 — v0.15.4.0)
+# ---------------------------------------------------------------------------
+#
+# The v0.15.3.0 perp replay treated ccxt's trade['amount'] as base units,
+# but ccxt's `safe_trade` (base/exchange.py:4412) never scales amount by
+# contractSize. For OKX ETH-USDT-SWAP the venue returns fillSz in CONTRACTS
+# with ctVal=0.01 ETH/contract; 21.464 real ETH lands as amount=2146.4.
+# Position tracking then multiplies MTM by 100x, producing the impossible
+# V-shaped curve observed on demo-allocator@quantalyze.test (value_usd of
+# -$152,771 on 2026-04-12, which exactly matches a 2146.4-contract position
+# × a ~$71 ETH move). This fixture mirrors real OKX trade payloads so the
+# bug surfaces in unit tests instead of only in production data.
+
+def _mk_okx_perp_trade(
+    *,
+    iso: str,
+    side: str,
+    base_amount: float,
+    price: float,
+    contract_size: float = 0.01,
+    symbol: str = "ETH/USDT:USDT",
+) -> dict:
+    """Build a trade row matching the shape ccxt returns for OKX perps.
+
+    base_amount is the real position size in base units (e.g. 21.464 ETH).
+    The fixture writes amount = base_amount / contract_size (i.e. contracts,
+    as the venue reports fillSz) and cost = contracts × price × contract_size
+    (i.e. quote units, as ccxt's safe_trade computes).
+    """
+    contracts = base_amount / contract_size
+    ts_ms = int(
+        datetime.fromisoformat(iso).replace(tzinfo=timezone.utc).timestamp() * 1000
+    )
+    return {
+        "timestamp": ts_ms,
+        "symbol": symbol,
+        "side": side,
+        "amount": contracts,
+        "price": price,
+        "cost": contracts * price * contract_size,
+    }
+
+
+def test_okx_contract_size_bug_no_100x_inflation_on_eth_perp():
+    """Regression: OKX perp trades arrive with amount in contracts, not base
+    units. For ETH/USDT:USDT the contractSize is 0.01 ETH, so a 21.464 ETH
+    position lands as amount=2146.4. The pre-fix replay summed MTM on the
+    raw contract count and blew the curve up 100x (demo allocator's
+    2026-04-12 snapshot = -$152,771 for an account that could only ever
+    mark ±a few thousand dollars against a 21 ETH position).
+
+    The fix derives base-unit size from cost/price, which is correct for
+    any linear contract regardless of contractSize, and reduces to amount
+    on spot-amount-shaped fixtures (the legacy _mk_perp_trade helper).
+    """
+    from services.equity_reconstruction import _compute_daily_equity
+
+    d0 = date(2026, 4, 10)  # open short 21.464 ETH @ 2500
+    d1 = date(2026, 4, 11)  # hold; ETH close rises to 2571 (+$71)
+    d2 = date(2026, 4, 12)  # close short @ 2571
+
+    deposits = [{
+        "timestamp": int(
+            datetime(d0.year, d0.month, d0.day, tzinfo=timezone.utc).timestamp() * 1000
+        ),
+        "currency": "USDT",
+        "amount": 50_000.0,
+    }]
+    trades = [
+        _mk_okx_perp_trade(iso=d0.isoformat(), side="sell", base_amount=21.464, price=2500.0),
+        _mk_okx_perp_trade(iso=d2.isoformat(), side="buy",  base_amount=21.464, price=2571.0),
+    ]
+    ohlcv_by_symbol = {
+        "ETH": [
+            (d0.isoformat(), 2500.0),
+            (d1.isoformat(), 2571.0),
+            (d2.isoformat(), 2571.0),
+        ],
+    }
+
+    rows = _compute_daily_equity(
+        trades=trades,
+        deposits=deposits,
+        withdrawals=[],
+        ohlcv_by_symbol=ohlcv_by_symbol,
+        coingecko_by_symbol={},
+        start_date=d0,
+        end_date=d2,
+    )
+    by_date = {r["asof"]: r for r in rows}
+
+    # Day 0: open short at entry → no MTM move yet. Equity = 50,000.
+    assert by_date[d0.isoformat()]["value_usd"] == pytest.approx(50_000.0, abs=0.01), (
+        f"day 0 open must not move cash: {by_date[d0.isoformat()]!r}"
+    )
+    # Day 1: short 21.464 ETH held through +$71 move. Unrealised = -21.464
+    # × 71 = -1523.94. Equity = 50,000 - 1523.94 = 48,476.06.
+    # PRE-FIX: unrealised = -2146.4 × 71 = -152,394. Equity = -102,394. V-shape.
+    expected_d1 = 50_000.0 - 21.464 * 71.0
+    assert by_date[d1.isoformat()]["value_usd"] == pytest.approx(expected_d1, abs=0.5), (
+        f"day 1 MTM must scale by contractSize — treating amount as base "
+        f"units inflates 100x and drops equity to ~-$102k (the production "
+        f"V-shape). Expected ~{expected_d1:.2f}; got "
+        f"{by_date[d1.isoformat()]!r}"
+    )
+    # Day 2: close at 2571 → realised = -21.464 × (2571-2500) = -1523.94.
+    # Equity = 50,000 - 1523.94 = 48,476.06. No open position → no perp mark.
+    assert by_date[d2.isoformat()]["value_usd"] == pytest.approx(
+        50_000.0 - 21.464 * 71.0, abs=0.5
+    ), f"day 2 close: {by_date[d2.isoformat()]!r}"
+    # Hard floor: equity must never go negative on a fully-collateralised
+    # $50k account running a 21 ETH short — that only happens when the
+    # contract-size inflation bug multiplies MTM by 100x.
+    for iso_key, row in by_date.items():
+        assert row["value_usd"] > 0, (
+            f"equity went non-positive on {iso_key} — contract-size "
+            f"inflation regression: {row!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Refresh-job perp-notional regression (/investigate 2026-04-24 — v0.15.4.0)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_refresh_daily_uses_unrealized_pnl_for_perp_not_notional(monkeypatch):
+    """allocator_positions.py:191 writes derivative value_usd = size_usd
+    (full notional) because the positions table also feeds the strategy
+    engine. The refresh job used to sum value_usd across all rows, so a
+    21.464 ETH perp position at $2336 added $50,172 to today's equity on
+    TOP of the USDT margin that was already counted in the spot row —
+    demo allocator's 2026-04-23 snapshot landed at $245,665 when actual
+    equity was ~$195,493 + a few hundred of unrealised PnL.
+
+    The fix skips value_usd on derivative rows and instead contributes
+    unrealized_pnl_usd (which is the genuine equity delta vs the margin
+    already sitting in the USDT line). Spot rows are unchanged.
+    """
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_audit(monkeypatch)
+
+    today = date(2026, 4, 23)
+
+    # Seed yesterday so refresh doesn't short-circuit on empty history.
+    y = today - timedelta(days=1)
+    fake_supabase.store[("allocator_equity_snapshots", (ALLOCATOR_ID, y.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "asof": y.isoformat(),
+        "value_usd": 200_000.0,
+        "breakdown": {"USDT": 200_000.0},
+        "source": "exchange_primary",
+        "reconstructed_at": "2026-04-22T00:00:00Z",
+        "history_depth_months": 3,
+    }
+
+    # Today: $195,493.36 USDT spot (includes perp margin on OKX unified
+    # margin) + one open ETH perp at 21.464 ETH notional $50,172.12 with
+    # $123.45 unrealised PnL. Pre-fix total = 195,493 + 50,172 = 245,665.
+    # Post-fix total = 195,493 + 123.45 = 195,616.81.
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "USDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "api_key_id": API_KEY_ID_1,
+        "venue": "okx",
+        "symbol": "USDT",
+        "asof": today.isoformat(),
+        "quantity": 195_493.357,
+        "mark_price": 1.0,
+        "value_usd": 195_493.36,
+        "unrealized_pnl_usd": None,
+        "holding_type": "spot",
+    }
+    fake_supabase.store[("allocator_holdings", (ALLOCATOR_ID, "okx", "ETHUSDT", today.isoformat()))] = {
+        "allocator_id": ALLOCATOR_ID,
+        "api_key_id": API_KEY_ID_1,
+        "venue": "okx",
+        "symbol": "ETHUSDT",
+        "asof": today.isoformat(),
+        "quantity": 21.464,
+        "mark_price": 2336.94,
+        "value_usd": 50_172.12,       # notional — must NOT contribute
+        "unrealized_pnl_usd": 123.45,  # the only legitimate derivative contribution
+        "holding_type": "derivative",
+    }
+
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "okx"
+    mock_exchange.close = AsyncMock()
+    _install_fake_preflight(monkeypatch, "okx", fake_supabase, mock_exchange)
+
+    from services import equity_reconstruction as er
+
+    today_dt = datetime(today.year, today.month, today.day, 5, 0, tzinfo=timezone.utc)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return today_dt if tz else today_dt.replace(tzinfo=None)
+
+    monkeypatch.setattr(er, "datetime", _FakeDatetime)
+
+    result = await run_refresh_allocator_equity_daily_job(
+        {"id": "refresh-1", "kind": "refresh_allocator_equity_daily", "api_key_id": API_KEY_ID_1}
+    )
+
+    from services.job_worker import DispatchOutcome
+    assert result.outcome == DispatchOutcome.DONE, result
+
+    written = [
+        r for r in fake_supabase.rows_for("allocator_equity_snapshots")
+        if r["asof"] == today.isoformat()
+    ]
+    assert len(written) == 1, f"expected one row for today; got {written!r}"
+    row = written[0]
+
+    expected_total = 195_493.36 + 123.45
+    assert row["value_usd"] == pytest.approx(expected_total, abs=0.05), (
+        f"PRE-FIX BUG: refresh summed perp notional (50,172.12) as equity "
+        f"on top of USDT margin that was already counted in the spot line, "
+        f"inflating today's snapshot by $50k. Expected {expected_total:.2f} "
+        f"(USDT cash + unrealised PnL); got {row['value_usd']}"
+    )
+    brk = row["breakdown"]
+    assert "ETHUSDT" not in brk, (
+        f"perp notional must NOT appear in the breakdown under the bare "
+        f"symbol — that key is reserved for spot holdings. Got {brk!r}"
+    )
+    assert brk.get("USDT") == pytest.approx(195_493.36, abs=0.01)
+    # The perp contribution sits under a :PERP-tagged key so it can't
+    # collide with a spot line of the same base currency.
+    assert brk.get("ETHUSDT:PERP") == pytest.approx(123.45, abs=0.01), brk
