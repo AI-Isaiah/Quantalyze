@@ -772,7 +772,10 @@ export function AllocationDashboard({
     // page.tsx already wraps this subtree in <main>; use <section> here to
     // avoid two <main> landmarks per document (HTML5 + WCAG landmark nav).
     return (
-      <section className="max-w-[1280px] mx-auto p-6 pb-20">
+      <section
+        data-legacy-dashboard="true"
+        className="max-w-[1280px] mx-auto p-6 pb-20"
+      >
         <EmptyState hasSyncing={false} />
         {zeroHoldingsNoticesCard}
       </section>
@@ -791,6 +794,7 @@ export function AllocationDashboard({
           two <main> landmarks per document. */}
       <section
         ref={dashboardContainerRef}
+        data-legacy-dashboard="true"
         className="max-w-[1280px] mx-auto p-6 pb-20"
       >
       {/* Header — page.tsx owns the <h1>My Allocation</h1> via PageHeader;
