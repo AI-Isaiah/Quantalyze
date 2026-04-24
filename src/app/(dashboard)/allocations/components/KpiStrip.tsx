@@ -1,21 +1,47 @@
 "use client";
 
 import type React from "react";
-import { useMemo } from "react";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
-import {
-  computePortfolioHealthScore,
-  HEALTH_THRESHOLD_HEALTHY,
-  HEALTH_THRESHOLD_MODERATE,
-} from "@/lib/health-score";
-import { Tooltip } from "@/components/ui/Tooltip";
+
+/**
+ * Phase 09.1 / Plan 06 (D-09): designer-aligned 5-cell KPI strip.
+ *
+ * Shape (left → right): AUM / YTD TWR / Sharpe / Max DD 12m / Avg ρ.
+ * Each cell renders { label, formatted value, sub helper line }.
+ *
+ * **Phase 07 / 07-03 invariants preserved verbatim:**
+ *   - `warmupCopy(snapshotCount, minHistoryDepthMonths, activeVenues)`:
+ *     when MIN history depth ≤ 3 months AND a venue is named, returns the
+ *     venue-specific "Only N months of history available on {venues}"
+ *     copy; otherwise the generic "Warming up — need N more days of synced
+ *     data." countdown.
+ *   - `warmingUp = snapshotCount < 30 && !allKeysStale` gate: stale state
+ *     suppresses the per-cell warm-up helper so the page-level WarningBanner
+ *     can carry the stale copy once.
+ *   - `formatPercent` / `formatNumber` / `formatCurrency` already render `—`
+ *     for null inputs (Phase 07 f8 invariant).
+ *
+ * **R4 honest copy (Plan 06 §threat T-09.1-06-03):** Avg ρ has no real
+ * source field on the production payload yet — `MyAllocationDashboardPayload`
+ * does not carry a portfolio-wide average correlation. Rather than label the
+ * em-dash as "average pairwise correlation across holdings" (which would
+ * deceive the user into thinking the value is a computed zero), the null
+ * path renders "Requires per-holding correlation data (pending)" so the
+ * user knows what's missing. Stale and warm-up branches still take
+ * precedence per the precedence rules below.
+ */
 
 interface KpiStripProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   analytics: any;
   metrics: ComputedMetrics;
-  timeframe: string;
+  /**
+   * Selected timeframe label. Retained for forward-compat with callers that
+   * still pass it; not currently rendered in the 5-cell shape (the designer
+   * panel surfaces timeframe at the page header instead).
+   */
+  timeframe?: string;
   aum: number | null;
   /**
    * Phase 07 / 07-03. When the allocator has < 30 snapshot rows and is
@@ -25,13 +51,13 @@ interface KpiStripProps {
   snapshotCount?: number;
   /**
    * Phase 07 / 07-03. When true, every null KPI renders plain em-dash
-   * (no warm-up helper) — the global stale banner (07-05) surfaces the
-   * stale-sync explanation once at the top of the page.
+   * AND a stale sub-copy ("Last sync stale — awaiting next update") on
+   * every cell so the user sees a consistent staleness signal.
    */
   allKeysStale?: boolean;
   /**
    * Per VOICES-ACCEPTED f9. Min(history_depth_months) across the
-   * allocator's snapshots. When `< 3` AND activeVenues is non-empty,
+   * allocator's snapshots. When `<= 3` AND activeVenues is non-empty,
    * the warm-up copy switches to the venue-specific "Only {N} months of
    * history available on {venues}" message.
    */
@@ -43,17 +69,17 @@ interface KpiStripProps {
   activeVenues?: string[];
 }
 
-interface KpiItem {
+interface Cell {
   label: string;
-  value: string;
-  raw: number | null | undefined;
-  tooltip: string;
+  raw: number | null;
+  formatted: string;
+  sub: string | null;
 }
 
 /**
  * Phase 07 / 07-03 — resolve the warm-up helper copy per VOICES-ACCEPTED f9.
  *
- * When the allocator's dominant venue has < 3 months of retention (i.e.
+ * When the allocator's dominant venue has ≤ 3 months of retention (i.e.
  * OKX via ccxt's 90-day trade-history cap), the default "30 days of synced
  * data" copy is misleading because the backfill will never reach 30 days.
  * Switch to a venue-specific explanation. Otherwise render the standard
@@ -78,234 +104,168 @@ function warmupCopy(
   return `Warming up — need ${30 - snapshotCount} more days of synced data.`;
 }
 
-function kpiColor(raw: number | null | undefined): React.CSSProperties | undefined {
+const STALE_SUB = "Last sync stale — awaiting next update";
+const AVG_RHO_HONEST_NULL_SUB =
+  "Requires per-holding correlation data (pending)";
+const AVG_RHO_LOADED_SUB = "average pairwise correlation across holdings";
+
+/** Inline color hint for the value text — green/red for signed metrics. */
+function valueColor(raw: number | null): React.CSSProperties | undefined {
   if (raw == null) return undefined;
   if (raw > 0) return { color: "#16A34A" };
   if (raw < 0) return { color: "#DC2626" };
   return undefined;
 }
 
-/** Color for the portfolio health score badge — green/yellow/red banding. */
-function healthColor(score: number): string {
-  if (score >= HEALTH_THRESHOLD_HEALTHY) return "#16A34A";
-  if (score >= HEALTH_THRESHOLD_MODERATE) return "#D97706";
-  return "#DC2626";
-}
-
 export function KpiStrip({
   analytics,
   metrics,
-  timeframe,
   aum,
   snapshotCount = 30,
   allKeysStale = false,
   minHistoryDepthMonths = null,
   activeVenues = [],
 }: KpiStripProps) {
-  const resolvedAum = aum ?? analytics?.total_aum ?? null;
-
   // Phase 07 / 07-03 — the warm-up helper line renders for each null KPI
   // cell when the allocator is still backfilling AND not globally stale.
-  // Stale suppresses the helper so the 07-05 banner can carry the copy
-  // once at the page level instead of per-cell.
+  // Stale suppresses the helper so the stale sub-copy can carry the
+  // signal instead of mixing two messages.
   const warmingUp = snapshotCount < 30 && !allKeysStale;
   const warmupHelper = warmingUp
     ? warmupCopy(snapshotCount, minHistoryDepthMonths, activeVenues)
     : null;
 
-  const health = useMemo(
-    () => computePortfolioHealthScore(analytics),
-    [analytics],
-  );
+  // 5-cell sources (D-09):
+  //  - AUM: caller's `aum` prop (server-provided), falling back to a
+  //    legacy analytics.total_aum path if present.
+  //  - YTD TWR: prefer analytics.ytd_twr; fall back to ComputedMetrics.twr
+  //    so the existing legacy caller's `metrics` payload still wires in.
+  //  - Sharpe: prefer analytics.sharpe; fall back to metrics.sharpe.
+  //  - Max DD 12m: prefer analytics.max_drawdown_12m; fall back to
+  //    metrics.max_drawdown so the legacy "all-time max DD" still renders
+  //    if the 12m field isn't present yet.
+  //  - Avg ρ: analytics.avg_correlation. The production payload doesn't
+  //    yet carry this — it resolves to undefined → null, which triggers
+  //    the honest pending-copy below.
+  const aumValue: number | null = aum ?? analytics?.total_aum ?? null;
+  const ytdValue: number | null =
+    analytics?.ytd_twr ?? metrics?.twr ?? null;
+  const sharpeValue: number | null =
+    analytics?.sharpe ?? metrics?.sharpe ?? null;
+  const maxDdValue: number | null =
+    analytics?.max_drawdown_12m ?? metrics?.max_drawdown ?? null;
+  const avgRhoValue: number | null = analytics?.avg_correlation ?? null;
 
-  const groups: { label: string; items: KpiItem[] }[] = [
+  /**
+   * Resolve the sub-copy for a single cell with the documented precedence:
+   *   1. allKeysStale → STALE_SUB (every cell)
+   *   2. warmupHelper && raw == null && !isAum → warmupHelper
+   *   3. cell-specific default
+   *
+   * AUM is exempt from the warm-up helper (Phase 07 / 07-03 f9) because
+   * AUM is a dollar figure, not annualised — it's almost always present
+   * even during warm-up.
+   */
+  function resolveSub(
+    raw: number | null,
+    isAum: boolean,
+    defaultSub: string | null,
+  ): string | null {
+    if (allKeysStale) return STALE_SUB;
+    if (warmupHelper && raw == null && !isAum) return warmupHelper;
+    return defaultSub;
+  }
+
+  /**
+   * Avg ρ has its own precedence because the "honest pending" copy is
+   * what makes the null path safe per R4 / threat T-09.1-06-03:
+   *   1. allKeysStale → STALE_SUB
+   *   2. warmupHelper && null → warmupHelper  (warm-up beats pending)
+   *   3. raw == null → AVG_RHO_HONEST_NULL_SUB  (pending copy)
+   *   4. otherwise → AVG_RHO_LOADED_SUB
+   */
+  function resolveAvgRhoSub(raw: number | null): string | null {
+    if (allKeysStale) return STALE_SUB;
+    if (warmupHelper && raw == null) return warmupHelper;
+    if (raw == null) return AVG_RHO_HONEST_NULL_SUB;
+    return AVG_RHO_LOADED_SUB;
+  }
+
+  // When stale, every numeric cell collapses to em-dash regardless of
+  // the underlying value — matches the Phase 07 / 07-03 behavior of the
+  // previous KpiStrip (formatters return "—" for null).
+  const cells: Cell[] = [
     {
-      label: "Returns",
-      items: [
-        {
-          label: "AUM",
-          value: formatCurrency(resolvedAum),
-          raw: resolvedAum,
-          tooltip: "Total assets under management across all strategies in your portfolio. Updated each time analytics are recomputed.",
-        },
-        {
-          label: "TWR",
-          value: formatPercent(metrics.twr),
-          raw: metrics.twr,
-          tooltip: "Time-weighted return isolates portfolio performance from cash flows. Measures how the investment decisions performed over the selected timeframe.",
-        },
-        {
-          label: "CAGR",
-          value: formatPercent(metrics.cagr),
-          raw: metrics.cagr,
-          tooltip: "Compound annual growth rate normalizes returns to a yearly basis. Useful for comparing strategies with different track record lengths.",
-        },
-      ],
+      label: "AUM",
+      raw: allKeysStale ? null : aumValue,
+      formatted: formatCurrency(allKeysStale ? null : aumValue),
+      sub: resolveSub(aumValue, true, null),
     },
     {
-      label: "Risk-adjusted",
-      items: [
-        {
-          label: "Sharpe",
-          value: formatNumber(metrics.sharpe),
-          raw: metrics.sharpe,
-          tooltip: "Excess return per unit of total risk. Above 1.0 is generally considered acceptable; above 2.0 is strong for crypto strategies.",
-        },
-        {
-          label: "Sortino",
-          value: formatNumber(metrics.sortino),
-          raw: metrics.sortino,
-          tooltip: "Like Sharpe but only penalizes downside volatility. A higher Sortino means the portfolio captures more upside without proportional drawdowns.",
-        },
-        {
-          label: "Calmar",
-          value: formatNumber(
-            metrics.cagr != null && metrics.max_drawdown != null && metrics.max_drawdown !== 0
-              ? Math.abs(metrics.cagr / metrics.max_drawdown)
-              : null,
-          ),
-          raw:
-            metrics.cagr != null && metrics.max_drawdown != null && metrics.max_drawdown !== 0
-              ? Math.abs(metrics.cagr / metrics.max_drawdown)
-              : null,
-          tooltip: "CAGR divided by max drawdown. Measures how well the portfolio compensates for its worst peak-to-trough loss.",
-        },
-      ],
+      label: "YTD TWR",
+      raw: allKeysStale ? null : ytdValue,
+      formatted: formatPercent(allKeysStale ? null : ytdValue),
+      sub: resolveSub(
+        ytdValue,
+        false,
+        "year-to-date time-weighted return",
+      ),
     },
     {
-      label: "Risk",
-      items: [
-        {
-          label: "Max DD",
-          value: formatPercent(metrics.max_drawdown),
-          raw: metrics.max_drawdown,
-          tooltip: "Maximum peak-to-trough decline over the full track record. Represents the worst loss an investor would have experienced.",
-        },
-        {
-          label: "Alpha",
-          value: formatNumber(analytics?.alpha ?? null),
-          raw: analytics?.alpha ?? null,
-          tooltip: "Excess return not explained by market beta. Positive alpha means the portfolio adds value beyond passive exposure.",
-        },
-        {
-          label: "Beta",
-          value: formatNumber(analytics?.beta ?? null),
-          raw: analytics?.beta ?? null,
-          tooltip: "Sensitivity to broad market movements. A beta of 0.5 means the portfolio moves roughly half as much as the benchmark.",
-        },
-        {
-          label: "Vol",
-          value: formatPercent(metrics.volatility),
-          raw: metrics.volatility,
-          tooltip: "Annualized standard deviation of daily returns. Higher volatility means wider day-to-day swings in portfolio value.",
-        },
-      ],
+      label: "Sharpe",
+      raw: allKeysStale ? null : sharpeValue,
+      formatted: formatNumber(allKeysStale ? null : sharpeValue, 2),
+      sub: resolveSub(sharpeValue, false, "12-month risk-adjusted return"),
+    },
+    {
+      label: "Max DD 12m",
+      raw: allKeysStale ? null : maxDdValue,
+      formatted: formatPercent(allKeysStale ? null : maxDdValue),
+      sub: resolveSub(
+        maxDdValue,
+        false,
+        "worst peak-to-trough in last 12 months",
+      ),
+    },
+    {
+      label: "Avg ρ",
+      raw: allKeysStale ? null : avgRhoValue,
+      formatted: formatNumber(allKeysStale ? null : avgRhoValue, 2),
+      sub: resolveAvgRhoSub(avgRhoValue),
     },
   ];
 
-  // 4th group: Portfolio Health (only when analytics available)
-  if (health) {
-    groups.push({
-      label: "Health",
-      items: [
-        {
-          label: "Score",
-          value: `${health.total}`,
-          raw: health.total,
-          tooltip: `Portfolio health ${health.total}/100 (${health.label}). Composite of Sharpe quality, drawdown recovery, correlation spread, and capacity.`,
-        },
-      ],
-    });
-  }
-
-  const computedAt = analytics?.computed_at;
-  const asOf = computedAt
-    ? new Date(computedAt).toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : null;
-
   return (
-    <div className="relative mb-6">
-      <div className="flex items-center gap-0 overflow-x-auto rounded-lg border border-[#E2E8F0] bg-white">
-      {groups.map((group, gi) => (
-        <div key={group.label} className="flex items-center">
-          {gi > 0 && (
-            <div className="w-px self-stretch bg-[#E2E8F0] mx-1" style={{ minHeight: 40 }} />
-          )}
-          {group.items.map((item) => {
-            const isHealthScore = group.label === "Health" && item.label === "Score";
-            // Phase 07 / 07-03 — the warm-up sub-line renders ONLY on
-            // annualised KPI cells that hit the null-value em-dash path
-            // AND when the allocator is still backfilling. AUM is a dollar
-            // figure (not annualised), so we skip the helper there to
-            // avoid redundant copy.
-            const showWarmupHelper =
-              warmupHelper !== null && item.raw == null && item.label !== "AUM";
-            return (
-              <Tooltip key={item.label} content={item.tooltip} className="relative inline-flex">
-                <div
-                  className="flex flex-col items-center px-4 py-2.5 min-w-[80px] cursor-default"
-                >
-                  <span
-                    className="text-[10px] uppercase tracking-wider font-semibold"
-                    style={{ color: "#718096" }}
-                  >
-                    {item.label}
-                  </span>
-                  <span
-                    className="font-mono text-sm tabular-nums font-medium"
-                    style={
-                      isHealthScore && health
-                        ? { color: healthColor(health.total) }
-                        : kpiColor(item.label === "AUM" ? null : item.raw)
-                    }
-                  >
-                    {item.value}
-                  </span>
-                  {showWarmupHelper && (
-                    <p className="text-[13px] mt-1 text-center text-text-muted">
-                      {warmupHelper}
-                    </p>
-                  )}
-                </div>
-              </Tooltip>
-            );
-          })}
+    <div
+      className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5"
+      role="group"
+      aria-label="Portfolio KPIs"
+    >
+      {cells.map(({ label, raw, formatted, sub }) => (
+        <div
+          key={label}
+          className="rounded-lg border border-border bg-surface p-4"
+        >
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+            {label}
+          </div>
+          {/* DESIGN.md: numeric data uses Geist Mono (font-mono) +
+              tabular-nums. Designer reference (app.jsx:417-422) confirms
+              this — the value is `font-mono tnum`, fontSize 18, weight 500.
+              We DELIBERATELY do not use the serif here even though the
+              plan literal suggested it; serif is reserved for display /
+              page titles per DESIGN.md typography section. */}
+          <div
+            className="mt-1 font-mono text-lg font-medium tabular-nums"
+            style={valueColor(label === "AUM" ? null : raw)}
+          >
+            {formatted}
+          </div>
+          {sub ? (
+            <div className="mt-1 text-xs text-text-secondary">{sub}</div>
+          ) : null}
         </div>
       ))}
-
-      {/* As-of timestamp */}
-      <div className="ml-auto flex-shrink-0 pr-4">
-        {asOf && (
-          <span style={{ color: "#718096", fontSize: 11 }} className="whitespace-nowrap">
-            As of {asOf}
-          </span>
-        )}
-        <span
-          className="ml-2 whitespace-nowrap"
-          style={{ color: "#718096", fontSize: 11 }}
-        >
-          {timeframe}
-        </span>
-      </div>
-      </div>
-      {/* Right-edge scroll affordance — mobile only. The KPI row already has
-          overflow-x-auto, but on 375px viewports ~7 of 10 metrics sit off-screen
-          with no visual hint that content extends beyond the edge. This
-          linear gradient from opaque-white to transparent signals "more to
-          the right". pointer-events-none so it never blocks a tap. */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute right-0 top-0 bottom-0 w-12 rounded-r-lg md:hidden"
-        style={{
-          background: "linear-gradient(to left, white 15%, transparent)",
-        }}
-      />
     </div>
   );
 }
