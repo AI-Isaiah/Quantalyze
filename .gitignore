@@ -44,6 +44,9 @@ yarn-error.log*
 .claude/
 .planning/
 
+# Per-developer AI scratchpads (ADVERSARIAL_USER_NOTES.md etc.) — never committed.
+tasks/
+
 # supabase CLI local state
 supabase/.temp/
 
