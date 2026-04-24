@@ -2,6 +2,31 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useDashboardConfig, useDashboardConfigV2 } from "./useDashboardConfig";
 import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
+import {
+  DESIGNER_KEY_TO_WIDGET_ID,
+  resolveWidgetId,
+} from "../lib/widget-registry";
+
+/**
+ * Phase 09.1 Plan 05 / D-19 — write-time normalization.
+ *
+ * `useDashboardConfigV2` now resolves designer short keys ("bridge", "kpi",
+ * "equity", ...) to WIDGET_REGISTRY ids ("bridge-outcome-banner", "kpi-strip",
+ * "equity-curve", ...) before persisting. Every assertion below references
+ * the canonical registry id; helper `keyOf(shortKey)` resolves on the fly so
+ * the tests survive any future map updates.
+ *
+ * `expectedDefaultLayout` is the post-normalization shape of DEFAULT_LAYOUT
+ * — what the hook actually puts in `config.tiles` when the persisted blob
+ * is missing or version-mismatched.
+ */
+function keyOf(shortOrId: string): string {
+  return resolveWidgetId(shortOrId);
+}
+const expectedDefaultLayout = DEFAULT_LAYOUT.map((t) => ({
+  ...t,
+  k: keyOf(t.k),
+}));
 
 // ---------------------------------------------------------------------------
 // Mock localStorage (Phase 08 Plan 02 idiom — vi.stubGlobal is the reliable
@@ -145,7 +170,7 @@ describe("useDashboardConfigV2", () => {
     vi.clearAllMocks();
   });
 
-  it("v3 reset: legacy-shape persisted blob (layoutVersion: 3) → V2 loads v4 DEFAULT_LAYOUT", () => {
+  it("v3 reset: legacy-shape persisted blob (layoutVersion: 3) → V2 loads v4 DEFAULT_LAYOUT (normalized)", () => {
     store.set(
       STORAGE_KEY,
       JSON.stringify({
@@ -157,12 +182,17 @@ describe("useDashboardConfigV2", () => {
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    expect(result.current.config.tiles).toEqual(DEFAULT_LAYOUT);
+    // D-19: tiles ship through resolveWidgetId at default-load time, so
+    // every k is a WIDGET_REGISTRY id — never a designer short key.
+    expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
     expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
     expect(result.current.config.timeframe).toBe("YTD");
   });
 
-  it("v4 preserve: persisted v4 blob with custom {k,w} tiles → V2 loads them unchanged", () => {
+  it("v4 preserve + normalize: persisted v4 blob with short-key tiles → V2 loads them with registry-id k", () => {
+    // D-19 belt-and-braces: even if a partially-migrated blob lands in
+    // localStorage with designer short keys, the read path normalizes them
+    // to registry ids before render. Widths are preserved verbatim.
     const custom = {
       tiles: [
         { k: "bridge", w: 4 },
@@ -176,25 +206,33 @@ describe("useDashboardConfigV2", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
     expect(result.current.config.tiles.length).toBe(2);
-    expect(result.current.config.tiles[0].k).toBe("bridge");
+    expect(result.current.config.tiles[0].k).toBe(keyOf("bridge"));
     expect(result.current.config.tiles[0].w).toBe(4);
-    expect(result.current.config.tiles[1].k).toBe("kpi");
+    expect(result.current.config.tiles[1].k).toBe(keyOf("kpi"));
     expect(result.current.config.tiles[1].w).toBe(2);
     expect(result.current.config.timeframe).toBe("1M");
   });
 
-  it("addWidget is idempotent — calling addWidget('bridge') when bridge already present is a no-op", () => {
+  it("addWidget is idempotent — calling addWidget(<bridge short key>) when the resolved registry id is already present is a no-op", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
+    const bridgeId = keyOf("bridge");
     const before = result.current.config.tiles.length;
-    expect(result.current.config.tiles.some((t) => t.k === "bridge")).toBe(true);
+    expect(result.current.config.tiles.some((t) => t.k === bridgeId)).toBe(true);
 
     act(() => {
+      // Pass the designer short key — write-time normalization should
+      // resolve it to bridgeId, find the existing tile, and no-op.
       result.current.addWidget("bridge");
     });
 
     expect(result.current.config.tiles.length).toBe(before);
-    // Confirm there's still only ONE bridge tile (no duplicates).
-    expect(result.current.config.tiles.filter((t) => t.k === "bridge").length).toBe(1);
+    expect(
+      result.current.config.tiles.filter((t) => t.k === bridgeId).length,
+    ).toBe(1);
+    // The designer short key MUST NOT leak into config.tiles — D-19.
+    expect(result.current.config.tiles.some((t) => t.k === "bridge")).toBe(
+      bridgeId === "bridge",
+    );
   });
 
   it("addWidget appends a NEW widget with the registry-clamped default width", () => {
@@ -212,25 +250,31 @@ describe("useDashboardConfigV2", () => {
     expect(result.current.config.tiles.length).toBe(before + 1);
   });
 
-  it("removeWidget filters the tile out by k", () => {
+  it("removeWidget filters the tile out by k (registry id)", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
-    expect(result.current.config.tiles.some((t) => t.k === "bridge")).toBe(true);
+    const bridgeId = keyOf("bridge");
+    expect(result.current.config.tiles.some((t) => t.k === bridgeId)).toBe(true);
 
     act(() => {
-      result.current.removeWidget("bridge");
+      // removeWidget takes the canonical registry id; tiles[*].k is
+      // already normalized so no resolve step is required on this API.
+      result.current.removeWidget(bridgeId);
     });
 
-    expect(result.current.config.tiles.some((t) => t.k === "bridge")).toBe(false);
+    expect(result.current.config.tiles.some((t) => t.k === bridgeId)).toBe(
+      false,
+    );
   });
 
-  it("resizeWidget updates the tile's w in place", () => {
+  it("resizeWidget updates the tile's w in place (registry id)", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
+    const bridgeId = keyOf("bridge");
 
     act(() => {
-      result.current.resizeWidget("bridge", 2);
+      result.current.resizeWidget(bridgeId, 2);
     });
 
-    const bridge = result.current.config.tiles.find((t) => t.k === "bridge");
+    const bridge = result.current.config.tiles.find((t) => t.k === bridgeId);
     expect(bridge).toBeDefined();
     expect(bridge!.w).toBe(2);
   });
@@ -238,25 +282,28 @@ describe("useDashboardConfigV2", () => {
   it("moveWidget reorders one tile to another tile's position via splice", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    // Default order is [bridge, kpi, equity, holdings, allocation, mandate, outcomes].
-    expect(result.current.config.tiles[0].k).toBe("bridge");
-    expect(result.current.config.tiles[6].k).toBe("outcomes");
+    // Default order is [bridge, kpi, equity, holdings, allocation, mandate,
+    // outcomes] — all normalized to their registry ids on load (D-19).
+    expect(result.current.config.tiles[0].k).toBe(keyOf("bridge"));
+    expect(result.current.config.tiles[6].k).toBe(keyOf("outcomes"));
 
     act(() => {
-      result.current.moveWidget("outcomes", "bridge");
+      result.current.moveWidget(keyOf("outcomes"), keyOf("bridge"));
     });
 
     // outcomes moved into bridge's position (idx 0); bridge shifts right.
-    expect(result.current.config.tiles[0].k).toBe("outcomes");
-    expect(result.current.config.tiles.findIndex((t) => t.k === "bridge")).toBeGreaterThan(0);
+    expect(result.current.config.tiles[0].k).toBe(keyOf("outcomes"));
+    expect(
+      result.current.config.tiles.findIndex((t) => t.k === keyOf("bridge")),
+    ).toBeGreaterThan(0);
   });
 
-  it("malformed JSON: non-parseable blob → V2 loads DEFAULT_LAYOUT", () => {
+  it("malformed JSON: non-parseable blob → V2 loads DEFAULT_LAYOUT (normalized)", () => {
     store.set(STORAGE_KEY, "not-json");
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    expect(result.current.config.tiles).toEqual(DEFAULT_LAYOUT);
+    expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
     expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
   });
 
@@ -277,8 +324,8 @@ describe("useDashboardConfigV2", () => {
       ({ result } = renderHook(() => useDashboardConfigV2()));
     }).not.toThrow();
 
-    // Falls back to v4 defaults.
-    expect(result!.current.config.tiles).toEqual(DEFAULT_LAYOUT);
+    // Falls back to v4 defaults (post-D-19 normalization).
+    expect(result!.current.config.tiles).toEqual(expectedDefaultLayout);
     expect(result!.current.config.layoutVersion).toBe(LAYOUT_VERSION);
 
     // Restore so subsequent tests see the normal mock.
@@ -304,8 +351,8 @@ describe("useDashboardConfigV2", () => {
 
     act(() => {
       result.current.addWidget("correlation-matrix");
-      result.current.removeWidget("bridge");
-      result.current.resizeWidget("kpi", 2);
+      result.current.removeWidget(keyOf("bridge"));
+      result.current.resizeWidget(keyOf("kpi"), 2);
     });
 
     // The V2 state lives at the canonical key.
@@ -335,7 +382,7 @@ describe("useDashboardConfigV2", () => {
 
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    expect(result.current.config.tiles).toEqual(DEFAULT_LAYOUT);
+    expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
   });
 
   it("setTimeframe updates the timeframe and persists", () => {
@@ -350,12 +397,12 @@ describe("useDashboardConfigV2", () => {
     expect(stored.timeframe).toBe("3M");
   });
 
-  it("resetToDefaults restores the v4 DEFAULT_LAYOUT", () => {
+  it("resetToDefaults restores the v4 DEFAULT_LAYOUT (normalized)", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
     act(() => {
-      result.current.removeWidget("bridge");
-      result.current.removeWidget("kpi");
+      result.current.removeWidget(keyOf("bridge"));
+      result.current.removeWidget(keyOf("kpi"));
     });
     expect(result.current.config.tiles.length).toBe(DEFAULT_LAYOUT.length - 2);
 
@@ -363,8 +410,41 @@ describe("useDashboardConfigV2", () => {
       result.current.resetToDefaults();
     });
 
-    expect(result.current.config.tiles).toEqual(DEFAULT_LAYOUT);
+    expect(result.current.config.tiles).toEqual(expectedDefaultLayout);
     expect(result.current.config.layoutVersion).toBe(LAYOUT_VERSION);
     expect(result.current.config.timeframe).toBe("YTD");
+  });
+
+  it("D-19 write-time normalization: addWidget with a designer short key lands the registry id in tiles", () => {
+    // Seed a minimal v4 blob so the V2 hook loads cleanly.
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [{ k: "correlation-matrix", w: 2 }],
+        timeframe: "YTD",
+        layoutVersion: 4,
+      }),
+    );
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+
+    // Find an unambiguous short key → registry id mapping. "allocation"
+    // resolves to "allocation-donut" and neither is seeded, so the test
+    // verifies that the short key is resolved before the tile is pushed.
+    const shortKey = "allocation";
+    const registryId = DESIGNER_KEY_TO_WIDGET_ID[shortKey];
+    expect(registryId).toBe("allocation-donut");
+
+    act(() => {
+      result.current.addWidget(shortKey);
+    });
+
+    // The tile MUST land under the registry id, never the short key.
+    expect(result.current.config.tiles.some((t) => t.k === registryId)).toBe(
+      true,
+    );
+    expect(result.current.config.tiles.some((t) => t.k === shortKey)).toBe(
+      false,
+    );
   });
 });

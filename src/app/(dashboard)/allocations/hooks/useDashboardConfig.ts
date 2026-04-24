@@ -7,7 +7,19 @@ import type {
   LegacyDashboardConfig,
   LegacyTileConfig,
 } from "../lib/types";
-import { WIDGET_REGISTRY } from "../lib/widget-registry";
+// Phase 09.1 Plan 05 / D-19: write-time normalization. `resolveWidgetId` is
+// a thin wrapper around `DESIGNER_KEY_TO_WIDGET_ID` that collapses designer
+// short keys ("bridge", "kpi", ...) onto WIDGET_REGISTRY ids before any
+// tile is persisted. Importing the map alongside the resolver keeps the
+// normalization source-of-truth visible in the hook's dependency surface.
+import {
+  WIDGET_REGISTRY,
+  resolveWidgetId,
+  DESIGNER_KEY_TO_WIDGET_ID,
+} from "../lib/widget-registry";
+// Re-export so the contract (DESIGNER_KEY_TO_WIDGET_ID drives write-time
+// normalization inside this hook) is discoverable from the hook module.
+export { DESIGNER_KEY_TO_WIDGET_ID };
 import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 
 /**
@@ -231,8 +243,30 @@ function looksLikeLegacyTile(tile: unknown): boolean {
   );
 }
 
+/**
+ * Phase 09.1 Plan 05 / D-19 — normalize DEFAULT_LAYOUT short keys to their
+ * canonical WIDGET_REGISTRY ids at import time. The registered tile shape
+ * post-normalization carries `k = resolveWidgetId(originalKey)`, so the
+ * persisted blob and the render path NEVER see designer short keys.
+ *
+ * This means downstream consumers (AllocationDashboardV2 render, the f2
+ * STRATEGY_COMPOSITE gate, the picker `activeKeys` set) can reason about
+ * `t.k` as a registry id without any short-key fallback logic.
+ */
+function normalizeTilesToRegistryIds(tiles: readonly TileConfig[]): TileConfig[] {
+  return tiles.map((t) => {
+    const resolved = resolveWidgetId(t.k);
+    if (resolved === t.k) return { ...t };
+    return { ...t, k: resolved };
+  });
+}
+
 function defaultV2Config(): DashboardConfig {
-  return { tiles: DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION };
+  return {
+    tiles: normalizeTilesToRegistryIds(DEFAULT_LAYOUT),
+    timeframe: "YTD",
+    layoutVersion: LAYOUT_VERSION,
+  };
 }
 
 function loadV2Config(): DashboardConfig {
@@ -255,7 +289,10 @@ function loadV2Config(): DashboardConfig {
       ) {
         return defaultV2Config();
       }
-      return parsed;
+      // Phase 09.1 Plan 05 / D-19 — normalize any persisted short keys to
+      // WIDGET_REGISTRY ids on read, so even a hand-edited localStorage
+      // blob can't slip designer short keys through to the render path.
+      return { ...parsed, tiles: normalizeTilesToRegistryIds(parsed.tiles) };
     }
   } catch {
     // Corrupted JSON — fall through to defaults.
@@ -290,11 +327,17 @@ export function useDashboardConfigV2(): UseDashboardConfigV2Return {
 
   const addWidget = useCallback((k: string) => {
     setConfig((prev) => {
+      // Phase 09.1 Plan 05 / D-19 — normalize short keys to registry ids
+      // at write time. After this point, prev.tiles[*].k IS guaranteed to
+      // be a valid WIDGET_REGISTRY id; any caller passing a designer
+      // short key (or even an unknown id) is collapsed onto the registry
+      // namespace before the idempotent-add check runs.
+      const resolved = resolveWidgetId(k);
       // D-03 idempotent add — designer-bundle/app.jsx:42-44.
-      if (prev.tiles.some((t) => t.k === k)) return prev;
-      const meta = WIDGET_REGISTRY[k];
+      if (prev.tiles.some((t) => t.k === resolved)) return prev;
+      const meta = WIDGET_REGISTRY[resolved];
       const w = clampWidth(meta?.defaultW);
-      return { ...prev, tiles: [...prev.tiles, { k, w }] };
+      return { ...prev, tiles: [...prev.tiles, { k: resolved, w }] };
     });
   }, []);
 
