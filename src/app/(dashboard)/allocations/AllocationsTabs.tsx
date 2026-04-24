@@ -1,10 +1,36 @@
 "use client";
 
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AllocationDashboard } from "./AllocationDashboard";
+import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+
+// Phase 09.1 Plan 01 / D-17 — feature flag controlling whether the
+// Performance tab renders AllocationDashboardV2 (the new designer-provided
+// shell, scaffolded as an empty body for plans 02..11 to fill in) or the
+// legacy AllocationDashboard.
+//
+// Storage values are canonical strings "true" / "false". SSR + Safari
+// private-mode default to `false` (conservative — show legacy until the V2
+// surface is ready and bake-tested). The `?ui=v2` URL override is a
+// per-request opt-in that does NOT write to localStorage; it is also gated
+// by NEXT_PUBLIC_QA_MODE so allocator-facing production URLs cannot bypass
+// the legacy body during the bake window.
+const UI_V2_STORAGE_KEY = "allocations.ui_v2";
+
+function loadUiV2Flag(): boolean {
+  if (typeof window === "undefined") return false; // SSR + Safari private-mode default: legacy (D-17 conservative)
+  try {
+    const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 // Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
 // Phase 07 is a monitoring surface where data changes slowly (daily equity,
@@ -60,6 +86,20 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   // Per VOICES-ACCEPTED f3: derive each render — no local state snapshot.
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
+
+  // D-17: feature flag — localStorage OR (?ui=v2 URL override gated by NEXT_PUBLIC_QA_MODE).
+  // The URL override is NOT written to localStorage — it is a per-request override only.
+  // useState initializer returns the SSR-safe default (false); the useEffect below
+  // re-reads on mount so a client with localStorage["allocations.ui_v2"]="true" sees V2
+  // on the second render. This avoids the React 19 hydration mismatch that would fire
+  // if the initial render branched on a window-only value.
+  const qaMode = process.env.NEXT_PUBLIC_QA_MODE === "true";
+  const uiOverride = qaMode && searchParams.get("ui") === "v2";
+  const [uiV2Flag, setUiV2Flag] = useState<boolean>(() => loadUiV2Flag());
+  useEffect(() => {
+    setUiV2Flag(loadUiV2Flag());
+  }, []);
+  const uiV2 = uiV2Flag || uiOverride;
 
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=performance
   // (redundant), strip it so the canonical URL is /allocations. Runs
@@ -118,6 +158,22 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   return (
     <div>
+      {/* D-20 — primary "+ Allocation" header button. Routes to the Scenario
+          tab via the same changeTab mechanism the tabs themselves use, so URL
+          + tab state stay in sync. Pre-Phase-10 lands on ScenarioStub; Phase
+          10 fills the composer behind the same URL. No alternative routing
+          (no /allocations/new route, no modal) — the Scenario tab IS the
+          allocation entry point. */}
+      <div className="flex items-center justify-end gap-2 mb-3">
+        <button
+          type="button"
+          onClick={() => changeTab("scenario")}
+          className="inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          aria-label="Add allocation — open Scenario tab"
+        >
+          + Allocation
+        </button>
+      </div>
       <div
         role="tablist"
         aria-label="Allocation surfaces"
@@ -158,7 +214,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         aria-labelledby="tab-performance"
         hidden={activeTab !== "performance"}
       >
-        {activeTab === "performance" && <AllocationDashboard {...props} />}
+        {activeTab === "performance" && (uiV2 ? <AllocationDashboardV2 {...props} /> : <AllocationDashboard {...props} />)}
       </div>
       <div
         role="tabpanel"
