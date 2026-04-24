@@ -33,6 +33,22 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     description: "Cumulative portfolio growth over time with composite + per-strategy lines.",
     status: "ready",
   },
+  // Phase 09.1 Plan 07 / D-10 — V2 SVG equity chart with period toggle
+  // (1M/3M/6M/YTD/1Y/ALL/CUSTOM, default 6M), crosshair hover, and
+  // holding overlays. Replaces the Recharts-based equity-curve for
+  // V2 Overview tiles (DESIGNER_KEY_TO_WIDGET_ID["equity"] points here
+  // post-Plan 07). The legacy "equity-curve" entry stays so persisted
+  // user layouts pre-Plan-07 continue to render.
+  "equity-chart": {
+    id: "equity-chart",
+    name: "Equity Chart",
+    category: "performance",
+    icon: "▲",
+    defaultW: 4,
+    defaultH: 4,
+    description: "SVG equity chart with period toggle, crosshair, and holding overlays.",
+    status: "ready",
+  },
   "drawdown-chart": {
     id: "drawdown-chart",
     name: "Drawdown Chart",
@@ -477,9 +493,11 @@ export const WIDGET_CATEGORIES = [
 // WIDGET_COMPONENTS directly by t.k — no `?? t.k` fallback required.
 //
 // Mapping notes:
-//   - "equity" currently routes to "equity-curve" (existing widget). Plan
-//     07 introduces "equity-chart" as the V2 SVG renderer; that plan will
-//     flip this entry.
+//   - "equity" routes to "equity-chart" — Plan 07 flipped this entry from
+//     "equity-curve" to the new V2 SVG renderer (Phase 09.1 / D-10).
+//     Persisted layouts already carrying "equity-curve" continue to
+//     render the legacy widget; only newly-defaulted layouts pick up the
+//     SVG chart.
 //   - "mandate" currently routes to "mandate-compliance" — there is no
 //     widget for it yet, so the renderer falls back to a generic "Unknown
 //     widget" message until Plan 10 lands "mandate-snapshot" (which may
@@ -495,7 +513,7 @@ export const WIDGET_CATEGORIES = [
 export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
   bridge: "bridge-outcome-banner",
   kpi: "kpi-strip",
-  equity: "equity-curve",
+  equity: "equity-chart",
   holdings: "holdings-table",
   allocation: "allocation-donut",
   mandate: "mandate-compliance",

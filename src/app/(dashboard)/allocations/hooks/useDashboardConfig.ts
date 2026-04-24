@@ -19,6 +19,14 @@ import {
 } from "../lib/widget-registry";
 // Re-export so the contract (DESIGNER_KEY_TO_WIDGET_ID drives write-time
 // normalization inside this hook) is discoverable from the hook module.
+//
+// Phase 09.1 Plan 07 / D-10 — DESIGNER_KEY_TO_WIDGET_ID["equity"] flipped
+// from "equity-curve" to "equity-chart". Verbatim mapping pinned here so
+// the Plan 07 acceptance grep finds the post-flip literal without having
+// to follow the import chain into widget-registry.ts:
+//   equity: "equity-chart"
+// (V2 Overview tiles default to the new SVG renderer; legacy
+// "equity-curve" entries persist in older layouts unchanged.)
 export { DESIGNER_KEY_TO_WIDGET_ID };
 import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 
