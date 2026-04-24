@@ -12,8 +12,12 @@ import type { WidgetProps } from "../lib/types";
 type LazyWidget = React.LazyExoticComponent<ComponentType<WidgetProps>>;
 
 export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
-  // ── Performance (10) ────────────────────────────────────────────────
+  // ── Performance (11) ────────────────────────────────────────────────
   "equity-curve": lazy(() => import("./performance/EquityCurve")),
+  // Phase 09.1 Plan 07 — V2 SVG equity chart with period toggle + crosshair
+  // + holding overlays. Default-export is the WidgetProps adapter; the
+  // named EquityChart export is consumed directly by tests.
+  "equity-chart": lazy(() => import("./performance/EquityChart")),
   "drawdown-chart": lazy(() => import("./performance/DrawdownChart")),
   "monthly-returns": lazy(() => import("./performance/MonthlyReturns")),
   "annual-returns": lazy(() => import("./performance/AnnualReturns")),

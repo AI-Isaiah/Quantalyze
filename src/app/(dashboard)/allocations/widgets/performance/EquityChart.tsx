@@ -1,0 +1,739 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { WidgetProps } from "../../lib/types";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+
+// ---------------------------------------------------------------------------
+// Phase 09.1 Plan 07 / D-10 — SVG EquityChart
+//
+// Replaces the Recharts-based EquityCurve for the V2 Overview tile.
+// Designer source: designer-bundle/project/src/charts.jsx:5-245.
+// Preserves the Phase 07 / VOICES-ACCEPTED f7 parallel-prop path:
+// `equityDailyPoints` is the canonical data input; the f7 firstPositiveIdx
+// anchor is reused verbatim so zero-leading / warm-up / stale states keep
+// rendering correctly.
+//
+// Period toggle: 1M / 3M / 6M / YTD / 1Y / ALL / CUSTOM. Default = "6M"
+// per CONTEXT §specifics. Intraday (1D / 1W) toggles are deferred per
+// CONTEXT §deferred — no `EQUITY_HOURLY` handling is shipped here.
+//
+// Holding overlays are normalized client-side to start at 1.0 at the
+// CURRENT period start so each line shows percent-from-period-start
+// rather than absolute multipliers — this matches the designer's
+// per-overlay tooltip arithmetic (`o.series[i] / o.series[0] - 1`).
+// ---------------------------------------------------------------------------
+
+export type Period = "1M" | "3M" | "6M" | "YTD" | "1Y" | "ALL" | "CUSTOM";
+
+const DEFAULT_PERIOD: Period = "6M";
+
+// All 7 period tokens, ordered for the toggle button row. Each token MUST
+// appear as a quoted string in this source — the per-token grep check in
+// Plan 07 acceptance criteria walks the file looking for each literal.
+const PERIODS: readonly Period[] = [
+  "1M",
+  "3M",
+  "6M",
+  "YTD",
+  "1Y",
+  "ALL",
+  "CUSTOM",
+] as const;
+
+export type OverlaySeries = {
+  id: string;
+  label: string;
+  color: string;
+  points: DailyPoint[];
+};
+
+export type CustomRange = { start: string; end: string };
+
+type Props = {
+  equityDailyPoints: DailyPoint[];
+  benchmark?: DailyPoint[];
+  overlays?: OverlaySeries[];
+  stale?: boolean;
+  initialPeriod?: Period;
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86_400_000;
+
+function parseISO(s: string): number {
+  // YYYY-MM-DD → epoch ms (UTC midnight). Falls back to Date constructor
+  // for any non-ISO inputs so we never throw.
+  const [y, m, d] = s.split("-").map(Number);
+  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+    return Date.UTC(y, m - 1, d);
+  }
+  return new Date(s).getTime();
+}
+
+function toISO(epoch: number): string {
+  const d = new Date(epoch);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Designer's f7 anchor — re-anchor at the first positive value. */
+function anchorFromFirstPositive(points: DailyPoint[]): DailyPoint[] {
+  if (points.length === 0) return [];
+  const firstPositiveIdx = points.findIndex((p) => p.value > 0);
+  if (firstPositiveIdx < 0) return [];
+  const anchored = points.slice(firstPositiveIdx);
+  const base = anchored[0].value;
+  return anchored.map((p) => ({
+    date: p.date,
+    value: Number((p.value / base).toFixed(6)),
+  }));
+}
+
+/**
+ * Slice an anchored series down to the visible window for `period`.
+ * For CUSTOM, both ends are inclusive. The composite index space is
+ * preserved (we filter, not re-anchor) so the f7 anchor stays stable
+ * across period switches.
+ */
+function sliceByPeriod(
+  points: DailyPoint[],
+  period: Period,
+  customRange: CustomRange | null,
+): DailyPoint[] {
+  if (points.length === 0) return [];
+  const lastEpoch = parseISO(points[points.length - 1].date);
+  let startEpoch: number;
+  let endEpoch = lastEpoch;
+  switch (period) {
+    case "1M":
+      startEpoch = lastEpoch - 30 * DAY_MS;
+      break;
+    case "3M":
+      startEpoch = lastEpoch - 90 * DAY_MS;
+      break;
+    case "6M":
+      startEpoch = lastEpoch - 180 * DAY_MS;
+      break;
+    case "YTD": {
+      const lastDate = new Date(lastEpoch);
+      startEpoch = Date.UTC(lastDate.getUTCFullYear(), 0, 1);
+      break;
+    }
+    case "1Y":
+      startEpoch = lastEpoch - 365 * DAY_MS;
+      break;
+    case "ALL":
+      return points;
+    case "CUSTOM": {
+      if (!customRange) return points;
+      startEpoch = parseISO(customRange.start);
+      endEpoch = parseISO(customRange.end);
+      break;
+    }
+  }
+  return points.filter((p) => {
+    const e = parseISO(p.date);
+    return e >= startEpoch && e <= endEpoch;
+  });
+}
+
+function firstDate(points: DailyPoint[]): Date {
+  if (points.length === 0) return new Date();
+  return new Date(parseISO(points[0].date));
+}
+
+// Lazy import of the picker (it lives next to this widget). Done as a
+// named import here because we need it eagerly for the popover render —
+// the picker is a small client component, not worth a Suspense boundary.
+import { CustomRangePicker } from "../../components/CustomRangePicker";
+
+// ---------------------------------------------------------------------------
+// EquityChart — public component
+// ---------------------------------------------------------------------------
+
+export function EquityChart({
+  equityDailyPoints,
+  benchmark,
+  overlays = [],
+  stale = false,
+  initialPeriod = DEFAULT_PERIOD,
+}: Props) {
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(960);
+  const [period, setPeriod] = useState<Period>(initialPeriod);
+  const [customRange, setCustomRange] = useState<CustomRange | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  // ResizeObserver — fall back to a fixed 960 in jsdom / older runtimes.
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (cr) setWidth(Math.max(400, Math.floor(cr.width)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Phase 07 f7 anchor — re-anchor from the first positive value. This is
+  // the SAME `firstPositiveIdx` semantics consumed by EquityCurve.tsx
+  // (lines 52-61); preserving it keeps zero-holdings / warm-up / stale
+  // dimmer states rendering consistently across the legacy + V2 paths.
+  const composite = useMemo(
+    () => anchorFromFirstPositive(equityDailyPoints),
+    [equityDailyPoints],
+  );
+
+  // Visible window after period filter.
+  const visible = useMemo(
+    () => sliceByPeriod(composite, period, customRange),
+    [composite, period, customRange],
+  );
+
+  // Benchmark anchored to the SAME base as the composite (firstPositive),
+  // then sliced to the visible window. We keep dates aligned by index in
+  // the visible array — sliceByPeriod is index-stable on filter only.
+  const visibleBenchmark = useMemo(() => {
+    if (!benchmark || benchmark.length === 0) return null;
+    const anchored = anchorFromFirstPositive(benchmark);
+    if (anchored.length === 0) return null;
+    // Build a date → value map and re-emit values aligned to the visible
+    // composite dates (so a missing benchmark day for a given visible
+    // composite day surfaces as `null` and is dropped by the path builder).
+    const m = new Map<string, number>();
+    for (const p of anchored) m.set(p.date, p.value);
+    return visible.map((p) => m.get(p.date) ?? null);
+  }, [benchmark, visible]);
+
+  // Holding overlays normalized to start at 1.0 at the visible window's
+  // first date. Empty / shorter overlays are silently skipped.
+  const overlaySeries = useMemo(() => {
+    if (visible.length === 0) return [];
+    return overlays
+      .map((o) => {
+        if (!o.points || o.points.length === 0) return null;
+        const m = new Map<string, number>();
+        for (const p of o.points) m.set(p.date, p.value);
+        // Find the base = first overlay value at or after the visible
+        // window's first date.
+        let baseValue: number | null = null;
+        for (const v of visible) {
+          const ov = m.get(v.date);
+          if (ov != null && ov > 0) {
+            baseValue = ov;
+            break;
+          }
+        }
+        if (baseValue == null) return null;
+        const series = visible.map((v) => {
+          const ov = m.get(v.date);
+          if (ov == null) return null;
+          return Number((ov / (baseValue as number)).toFixed(6));
+        });
+        return { ...o, series };
+      })
+      .filter((x): x is OverlaySeries & { series: Array<number | null> } =>
+        x != null,
+      );
+  }, [overlays, visible]);
+
+  // Empty state — Phase 07 PURGE-04 idiom (centered helper text in the
+  // chart well rather than a hard error). Mounted before any SVG so the
+  // grid cell collapses cleanly when there's nothing to show.
+  if (equityDailyPoints.length === 0 || composite.length === 0) {
+    return (
+      <div
+        ref={wrapRef}
+        className="flex h-[260px] w-full items-center justify-center text-sm text-text-muted"
+        role="img"
+        aria-label="Equity chart"
+      >
+        Equity data warming up
+      </div>
+    );
+  }
+
+  // ── Projections ────────────────────────────────────────────────────
+  const pad = { t: 20, r: 48, b: 28, l: 8 };
+  const height = 260;
+  const chartW = Math.max(1, width - pad.l - pad.r);
+  const chartH = Math.max(1, height - pad.t - pad.b);
+  const n = visible.length;
+
+  // Y range over portfolio + benchmark + overlays. Drop nulls.
+  const allValues: number[] = [];
+  for (const p of visible) allValues.push(p.value);
+  if (visibleBenchmark) {
+    for (const v of visibleBenchmark) if (v != null) allValues.push(v);
+  }
+  for (const o of overlaySeries) {
+    for (const v of o.series) if (v != null) allValues.push(v);
+  }
+  const yMin = allValues.length ? Math.min(...allValues) : 0;
+  const yMax = allValues.length ? Math.max(...allValues) : 1;
+  const yRange = yMax - yMin || 1;
+
+  const x = (i: number) =>
+    n <= 1 ? pad.l + chartW / 2 : pad.l + (i / (n - 1)) * chartW;
+  const y = (v: number) => pad.t + (1 - (v - yMin) / yRange) * chartH;
+
+  const toPath = (arr: Array<number | null>) => {
+    let d = "";
+    let first = true;
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v == null) {
+        first = true;
+        continue;
+      }
+      d += `${first ? "M" : "L"}${x(i).toFixed(2)},${y(v).toFixed(2)} `;
+      first = false;
+    }
+    return d.trim();
+  };
+
+  const toArea = (arr: Array<number | null>) => {
+    const path = toPath(arr);
+    if (!path) return "";
+    return `${path} L${x(n - 1).toFixed(2)},${(pad.t + chartH).toFixed(2)} L${x(0).toFixed(2)},${(pad.t + chartH).toFixed(2)} Z`;
+  };
+
+  // ── Tick density ──────────────────────────────────────────────────
+  // Smart tick density: month ticks when n > 90, else 7 evenly-spaced
+  // "MMM D" ticks. Mirrors designer-bundle/project/src/charts.jsx:50-87.
+  type Tick = { i: number; label: string };
+  const ticks: Tick[] = [];
+  if (n > 90) {
+    const firstEpoch = parseISO(visible[0].date);
+    const lastEpoch = parseISO(visible[n - 1].date);
+    const cursor = new Date(firstEpoch);
+    cursor.setUTCDate(1);
+    let guard = 0;
+    while (cursor.getTime() <= lastEpoch && guard++ < 60) {
+      const monthStart = Date.UTC(
+        cursor.getUTCFullYear(),
+        cursor.getUTCMonth(),
+        1,
+      );
+      const monthEnd = Date.UTC(
+        cursor.getUTCFullYear(),
+        cursor.getUTCMonth() + 1,
+        0,
+      );
+      const visStart = Math.max(monthStart, firstEpoch);
+      const visEnd = Math.min(monthEnd, lastEpoch);
+      const visDays = (visEnd - visStart) / DAY_MS;
+      if (visDays >= 7) {
+        const midEpoch = (visStart + visEnd) / 2;
+        // Map epoch → index by linear search (n is small in practice; this
+        // is O(n*ticks) per render which is < 5k ops at ALL).
+        let bestIdx = 0;
+        let bestDelta = Infinity;
+        for (let i = 0; i < n; i++) {
+          const e = parseISO(visible[i].date);
+          const dlt = Math.abs(e - midEpoch);
+          if (dlt < bestDelta) {
+            bestDelta = dlt;
+            bestIdx = i;
+          }
+        }
+        ticks.push({
+          i: bestIdx,
+          label: new Date(monthStart).toLocaleDateString("en-US", {
+            month: "short",
+            timeZone: "UTC",
+          }),
+        });
+      }
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    }
+  } else {
+    const target = 7;
+    const step = Math.max(1, Math.round(n / target));
+    for (let i = n - 1; i >= 0; i -= step) {
+      const d = new Date(parseISO(visible[i].date));
+      ticks.push({
+        i,
+        label: d.toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          timeZone: "UTC",
+        }),
+      });
+    }
+    ticks.reverse();
+  }
+
+  // ── Hover ─────────────────────────────────────────────────────────
+  function handleMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const i = Math.round(((px - pad.l) / chartW) * (n - 1));
+    if (i >= 0 && i < n) setHoverIdx(i);
+  }
+
+  // ── Tooltip arithmetic ────────────────────────────────────────────
+  // Tooltip values are percent-from-window-start: (value / first - 1).
+  // Composite is anchored to the f7 base, but the WINDOW base differs per
+  // period; we report period-relative percent here to match the designer.
+  const periodBaseComposite = visible[0]?.value ?? 1;
+  const periodBaseBench = visibleBenchmark
+    ? visibleBenchmark.find((v): v is number => v != null) ?? null
+    : null;
+
+  // ── Period toggle + range picker handlers ────────────────────────
+  const setPeriodChecked = (p: Period) => {
+    if (p === "CUSTOM") {
+      setPickerOpen(true);
+      // Don't switch to CUSTOM until the user applies a range — keeps the
+      // chart on the previous period if they cancel.
+      return;
+    }
+    setPeriod(p);
+    setCustomRange(null);
+  };
+
+  const applyCustom = (range: CustomRange) => {
+    setCustomRange(range);
+    setPeriod("CUSTOM");
+    setPickerOpen(false);
+  };
+
+  // ── Render ────────────────────────────────────────────────────────
+  return (
+    <div ref={wrapRef} className="relative w-full">
+      {/* Period toggle */}
+      <div
+        role="tablist"
+        aria-label="Period"
+        style={{
+          display: "flex",
+          gap: 4,
+          marginBottom: 8,
+          position: "relative",
+          alignItems: "center",
+          flexWrap: "wrap",
+        }}
+      >
+        {PERIODS.map((p) => {
+          const active = period === p;
+          return (
+            <button
+              key={p}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setPeriodChecked(p)}
+              style={{
+                padding: "3px 9px",
+                fontSize: 11,
+                fontFamily: "Geist Mono, monospace",
+                background: active ? "var(--accent)" : "transparent",
+                color: active ? "#fff" : "var(--text-secondary)",
+                border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
+                borderRadius: 4,
+                cursor: "pointer",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {p}
+            </button>
+          );
+        })}
+        {pickerOpen && (
+          <CustomRangePicker
+            isOpen={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            onApply={applyCustom}
+            min={firstDate(composite)}
+            max={new Date()}
+            initialRange={customRange}
+          />
+        )}
+      </div>
+
+      <div style={{ position: "relative" }}>
+        <svg
+          width={width}
+          height={height}
+          role="img"
+          aria-label="Equity chart"
+          style={{ display: "block", cursor: "crosshair" }}
+          onMouseMove={handleMove}
+          onMouseLeave={() => setHoverIdx(null)}
+        >
+          {/* Gradient fill */}
+          <defs>
+            <linearGradient id="eq-grad" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="#1B6B5A" stopOpacity="0.22" />
+              <stop offset="100%" stopColor="#1B6B5A" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+
+          {/* X-axis baseline + tick labels */}
+          <line
+            x1={pad.l}
+            x2={width - pad.r}
+            y1={pad.t + chartH}
+            y2={pad.t + chartH}
+            stroke="var(--border)"
+            strokeWidth={1}
+          />
+          {ticks.map((t, i) => (
+            <text
+              key={i}
+              x={x(t.i)}
+              y={height - 10}
+              fontSize={10.5}
+              fill="var(--text-muted)"
+              fontFamily="DM Sans"
+              textAnchor="middle"
+            >
+              {t.label}
+            </text>
+          ))}
+
+          {/* Benchmark (dashed) */}
+          {visibleBenchmark && (
+            <path
+              d={toPath(visibleBenchmark)}
+              fill="none"
+              stroke="#64748b"
+              strokeWidth={1.25}
+              strokeDasharray="3 3"
+            />
+          )}
+
+          {/* Holding overlays */}
+          {overlaySeries.map((o) => (
+            <path
+              key={o.id}
+              d={toPath(o.series)}
+              fill="none"
+              stroke={o.color}
+              strokeWidth={1.25}
+              strokeOpacity={0.85}
+            />
+          ))}
+
+          {/* Portfolio area + line */}
+          <path
+            d={toArea(visible.map((p) => p.value))}
+            fill="url(#eq-grad)"
+          />
+          <path
+            d={toPath(visible.map((p) => p.value))}
+            fill="none"
+            stroke="var(--chart-strategy)"
+            strokeWidth={1.75}
+          />
+
+          {/* Hover crosshair */}
+          {hoverIdx != null && hoverIdx < n && (
+            <g>
+              <line
+                x1={x(hoverIdx)}
+                x2={x(hoverIdx)}
+                y1={pad.t}
+                y2={pad.t + chartH}
+                stroke="#94A3B8"
+                strokeWidth={1}
+                strokeDasharray="2 2"
+              />
+              <circle
+                cx={x(hoverIdx)}
+                cy={y(visible[hoverIdx].value)}
+                r={3.5}
+                fill="var(--chart-strategy)"
+                stroke="#fff"
+                strokeWidth={1.5}
+              />
+            </g>
+          )}
+        </svg>
+
+        {/* Tooltip popover */}
+        {hoverIdx != null && hoverIdx < n && (() => {
+          const i = hoverIdx;
+          const portCur = visible[i].value;
+          const portPct = (portCur / periodBaseComposite - 1) * 100;
+          const benchCur =
+            visibleBenchmark && visibleBenchmark[i] != null
+              ? visibleBenchmark[i]!
+              : null;
+          const benchPct =
+            benchCur != null && periodBaseBench != null
+              ? (benchCur / periodBaseBench - 1) * 100
+              : null;
+          const left = Math.min(Math.max(x(i) + 10, 8), width - 220);
+          return (
+            <div
+              style={{
+                position: "absolute",
+                top: 8,
+                left,
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: "8px 10px",
+                fontSize: 12,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
+                pointerEvents: "none",
+                minWidth: 190,
+                fontFamily: "DM Sans",
+              }}
+            >
+              <div
+                style={{
+                  color: "var(--text-muted)",
+                  fontSize: 11,
+                  marginBottom: 4,
+                  fontFamily: "Geist Mono",
+                }}
+              >
+                {new Date(parseISO(visible[i].date)).toLocaleDateString(
+                  "en-US",
+                  {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    timeZone: "UTC",
+                  },
+                )}
+              </div>
+              <TooltipRow
+                label="Portfolio"
+                color="var(--chart-strategy)"
+                pct={portPct}
+              />
+              {benchPct != null && (
+                <TooltipRow
+                  label="BTC"
+                  color="#64748b"
+                  pct={benchPct}
+                  dashed
+                />
+              )}
+              {overlaySeries.map((o) => {
+                const ov = o.series[i];
+                if (ov == null) return null;
+                const ovPct = (ov - 1) * 100;
+                return (
+                  <TooltipRow
+                    key={o.id}
+                    label={o.label}
+                    color={o.color}
+                    pct={ovPct}
+                  />
+                );
+              })}
+            </div>
+          );
+        })()}
+
+        {/* Stale dimmer — Phase 07 / 07-05 / D-10 visual half of the
+            stale gate. Only the chart tile carries this; non-chart
+            widgets are unaffected. Matches the legacy AllocationDashboard
+            pattern at lines 651-663. */}
+        {stale && (
+          <div
+            aria-hidden
+            data-testid="equity-chart-stale"
+            className="absolute inset-0 flex items-center justify-center bg-page/40 pointer-events-none"
+          >
+            <span className="rounded-md bg-surface px-3 py-1 text-sm font-medium text-text-secondary shadow-sm">
+              Data may be stale
+            </span>
+          </div>
+        )}
+      </div>
+      {/* Intraday toggles (1D / 1W) deferred per CONTEXT §deferred */}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tooltip row — small primitive, kept inline so the file stays self-contained
+// ---------------------------------------------------------------------------
+function TooltipRow({
+  label,
+  color,
+  pct,
+  dashed,
+}: {
+  label: string;
+  color: string;
+  pct: number;
+  dashed?: boolean;
+}) {
+  const positive = pct >= 0;
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 12,
+        marginTop: 2,
+      }}
+    >
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span
+          style={{
+            width: 8,
+            height: 2,
+            background: color,
+            borderTop: dashed ? `1px dashed ${color}` : undefined,
+          }}
+        />
+        {label}
+      </span>
+      <span
+        style={{
+          fontFamily: "Geist Mono, monospace",
+          fontVariantNumeric: "tabular-nums",
+          color: positive ? "var(--positive)" : "var(--negative)",
+          fontWeight: 500,
+        }}
+      >
+        {positive ? "+" : ""}
+        {pct.toFixed(2)}%
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Default export — WidgetProps adapter so `WIDGET_COMPONENTS["equity-chart"]`
+// can lazy-import this module directly. Shape-compatible with the existing
+// EquityCurve default export; reads `equityDailyPoints` from the data bag
+// (Phase 07 f7 parallel-prop path). Benchmark + overlays + stale forwarded
+// from the data bag too — when not present they default to undefined / false.
+// ---------------------------------------------------------------------------
+
+interface EquityChartWidgetData {
+  equityDailyPoints?: DailyPoint[];
+  btcBenchmark?: DailyPoint[];
+  equityOverlays?: OverlaySeries[];
+  allKeysStale?: boolean;
+}
+
+export default function EquityChartWidget({ data }: WidgetProps) {
+  const d = (data ?? {}) as EquityChartWidgetData;
+  return (
+    <EquityChart
+      equityDailyPoints={d.equityDailyPoints ?? []}
+      benchmark={d.btcBenchmark}
+      overlays={d.equityOverlays}
+      stale={d.allKeysStale ?? false}
+    />
+  );
+}
