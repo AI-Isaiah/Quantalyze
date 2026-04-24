@@ -42,6 +42,17 @@ vi.mock("next/navigation", async () => ({
   usePathname: vi.fn(() => "/allocations"),
 }));
 
+// --- QA_MODE module mock (Plan 11 V3 — module-scope constant) --------------
+// AllocationsTabs no longer reads `process.env.NEXT_PUBLIC_QA_MODE` directly;
+// it imports `QA_MODE` from `@/lib/qa-mode`. We toggle that constant via a
+// `let` captured by the hoisted mock factory, exactly as Tweaks.test.tsx does.
+let qaModeValue = false;
+vi.mock("@/lib/qa-mode", () => ({
+  get QA_MODE() {
+    return qaModeValue;
+  },
+}));
+
 import { useSearchParams, useRouter } from "next/navigation";
 
 // --- Component body mocks ---------------------------------------------------
@@ -123,13 +134,15 @@ describe("AllocationsTabs — feature flag routing (D-17)", () => {
       forward: vi.fn(),
       prefetch: vi.fn(),
     } as unknown as ReturnType<typeof useRouter>);
-    // Default: no QA-mode env, no URL override.
-    vi.stubEnv("NEXT_PUBLIC_QA_MODE", "");
+    // Default: QA mode off (Plan 11 V3 — module-scope constant via vi.mock,
+    // not env stubbing), no URL override.
+    qaModeValue = false;
     setSearchParams("");
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    qaModeValue = false;
   });
 
   it("flag-on (localStorage='true') → V2 shell renders, legacy absent", () => {
@@ -154,7 +167,7 @@ describe("AllocationsTabs — feature flag routing (D-17)", () => {
   });
 
   it("?ui=v2 + NEXT_PUBLIC_QA_MODE=true (no localStorage) → V2 shell renders", () => {
-    vi.stubEnv("NEXT_PUBLIC_QA_MODE", "true");
+    qaModeValue = true;
     setSearchParams("ui=v2");
     const { container } = render(<AllocationsTabs {...STUB_PROPS} />);
     expect(container.querySelector("[data-ui-v2-shell]")).not.toBeNull();
@@ -190,7 +203,7 @@ describe("AllocationsTabs — feature flag routing (D-17)", () => {
       u2();
       // QA-gated URL override render.
       lsStore.clear();
-      vi.stubEnv("NEXT_PUBLIC_QA_MODE", "true");
+      qaModeValue = true;
       setSearchParams("ui=v2");
       const { unmount: u3 } = render(<AllocationsTabs {...STUB_PROPS} />);
       u3();
