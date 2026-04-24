@@ -11,7 +11,7 @@ import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } 
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 import type { OutcomeRow } from "@/lib/queries";
 import type { FlaggedHolding } from "./lib/holding-outcome-adapter";
-import type { TileConfig } from "./lib/types";
+import type { LegacyTileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
 import { useTimeframe } from "./hooks/useTimeframe";
@@ -228,7 +228,7 @@ const STRATEGY_COMPOSITE_WIDGETS = new Set<string>([
 
 interface ToastState {
   widgetName: string;
-  tile: TileConfig;
+  tile: LegacyTileConfig;
 }
 
 // ---------------------------------------------------------------------------
