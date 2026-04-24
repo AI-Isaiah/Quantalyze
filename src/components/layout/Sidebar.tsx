@@ -6,7 +6,13 @@ import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
-interface NavItem { label: string; href: string; icon: IconComponent }
+interface NavItem {
+  label: string;
+  href: string;
+  icon: IconComponent;
+  /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label. */
+  badge?: number;
+}
 interface NavSubGroup { label: string; items: NavItem[] }
 interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[] }
 
@@ -14,6 +20,7 @@ function buildNavSections(
   populatedSlugs?: string[],
   isAdmin?: boolean,
   isAllocator?: boolean,
+  flaggedCount?: number,
 ): NavSection[] {
   const categories = populatedSlugs
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
@@ -49,7 +56,12 @@ function buildNavSections(
   const workspaceItems: NavItem[] = [];
   if (isAllocator && !isAdmin) {
     workspaceItems.push(
-      { label: "My Allocation", href: "/allocations", icon: PortfolioIcon },
+      {
+        label: "My Allocation",
+        href: "/allocations",
+        icon: PortfolioIcon,
+        badge: flaggedCount,
+      },
       { label: "Scenarios", href: "/scenarios", icon: BarChartIcon },
       {
         label: "Recommendations",
@@ -105,6 +117,7 @@ export function Sidebar({
   isAdmin,
   isAllocator,
   variant = "desktop",
+  flaggedCount,
 }: {
   populatedSlugs?: string[];
   isAdmin?: boolean;
@@ -114,11 +127,15 @@ export function Sidebar({
    *  component can live inside the MobileSidebarDrawer overlay without
    *  fighting for position with the backdrop or the slide-in panel. */
   variant?: "desktop" | "drawer";
+  /** Phase 09.1 Plan 11 / R5 — flaggedHoldings.length sourced upstream
+   *  via DashboardChrome's `useFlaggedCountStore()` (no new server
+   *  query). Renders as a badge on "My Allocation" when > 0. */
+  flaggedCount?: number;
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
-    () => buildNavSections(populatedSlugs, isAdmin, isAllocator),
-    [populatedSlugs, isAdmin, isAllocator],
+    () => buildNavSections(populatedSlugs, isAdmin, isAllocator, flaggedCount),
+    [populatedSlugs, isAdmin, isAllocator, flaggedCount],
   );
 
   return (
@@ -186,6 +203,8 @@ function NavItemLink({
   pathname: string;
 }) {
   const active = pathname === item.href || pathname.startsWith(item.href + "/");
+  const badge = item.badge;
+  const showBadge = typeof badge === "number" && badge > 0;
   return (
     <li>
       <Link
@@ -197,7 +216,15 @@ function NavItemLink({
         }`}
       >
         <item.icon className="h-4 w-4 shrink-0" />
-        {item.label}
+        <span>{item.label}</span>
+        {showBadge && (
+          <span
+            aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
+            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-medium text-white"
+          >
+            {badge}
+          </span>
+        )}
       </Link>
     </li>
   );

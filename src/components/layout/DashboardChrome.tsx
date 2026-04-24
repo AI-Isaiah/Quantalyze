@@ -8,6 +8,7 @@ import { MobileTopBar } from "@/components/layout/MobileTopBar";
 import { MobileSidebarDrawer } from "@/components/layout/MobileSidebarDrawer";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { LegalFooter } from "@/components/legal/LegalFooter";
+import { useFlaggedCountStore } from "@/app/(dashboard)/allocations/AllocationContext";
 
 interface DashboardChromeProps {
   populatedSlugs?: string[];
@@ -24,6 +25,16 @@ interface DashboardChromeProps {
  *
  * The pathname check happens client-side via usePathname() so we can keep the
  * parent layout server-rendered (it still needs to do the auth lookup).
+ *
+ * Phase 09.1 Plan 11 / R5 accepted — `flaggedCount` for the "My Allocation"
+ * sidebar badge sources from the cross-tree store published by
+ * AllocationProvider (which lives _below_ this component in the React tree
+ * because AllocationProvider is mounted inside `/allocations/page.tsx` and
+ * DashboardChrome lives in `(dashboard)/layout.tsx` which wraps it). Plain
+ * Context cannot bridge that boundary, so AllocationContext.tsx exposes a
+ * `useSyncExternalStore`-backed bridge — `useFlaggedCountStore()` here. On
+ * non-allocations routes the provider is absent → store value is `0` →
+ * Sidebar hides the badge. No new server query is introduced.
  */
 export function DashboardChrome({
   populatedSlugs,
@@ -32,6 +43,9 @@ export function DashboardChrome({
   children,
 }: DashboardChromeProps) {
   const pathname = usePathname();
+  // Plan 11 / R5 — read flaggedCount from the cross-tree store; Sidebar
+  // renders the badge on "My Allocation" when > 0.
+  const flaggedCount = useFlaggedCountStore();
 
   // Mobile sidebar drawer — owned at the chrome level so both the
   // full-bleed and standard layouts can share the same hamburger +
@@ -68,6 +82,7 @@ export function DashboardChrome({
           isAllocator={isAllocator}
           populatedSlugs={populatedSlugs}
           triggerRef={hamburgerRef}
+          flaggedCount={flaggedCount}
         />
       </div>
     );
@@ -77,13 +92,16 @@ export function DashboardChrome({
     <div className="flex h-full">
       {/* Desktop sidebar */}
       <div className="hidden md:block">
+        {/* Plan 11 / R5 — pass `flaggedCount` so Sidebar can render the
+            badge on "My Allocation" when > 0. */}
         <Sidebar
           populatedSlugs={populatedSlugs}
           isAdmin={isAdmin}
           isAllocator={isAllocator}
+          flaggedCount={flaggedCount}
         />
       </div>
-      <main className="flex-1 md:ml-[260px] overflow-y-auto pb-16 md:pb-0">
+      <main aria-label="Dashboard content" className="flex-1 md:ml-[260px] overflow-y-auto pb-16 md:pb-0">
         <MobileTopBar
           ref={hamburgerRef}
           onMenuClick={() => setMenuOpen(true)}
@@ -107,6 +125,7 @@ export function DashboardChrome({
         isAllocator={isAllocator}
         populatedSlugs={populatedSlugs}
         triggerRef={hamburgerRef}
+        flaggedCount={flaggedCount}
       />
     </div>
   );

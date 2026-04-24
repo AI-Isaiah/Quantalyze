@@ -17,6 +17,7 @@ import {
   type ScenarioState,
 } from "@/lib/scenario";
 import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchangeManager";
+import { AllocationProvider } from "./AllocationContext";
 import type { Portfolio, PortfolioAnalytics } from "@/lib/types";
 
 import { TimeframeSelector, type TimeframeKey } from "@/components/ui/TimeframeSelector";
@@ -91,6 +92,13 @@ interface MyAllocationClientProps {
   analytics: PortfolioAnalytics | null;
   strategies: StrategyRow[];
   apiKeys: ApiKeyRow[];
+  // Phase 09.1 Plan 11 / R5 — optional pass-through of `flaggedHoldings`
+  // from the page payload so AllocationProvider can publish the count
+  // without a new server query. The shape is intentionally loose
+  // (anything with a `length` is acceptable) because this client is no
+  // longer the live entry point — AllocationsTabs is — and the only
+  // consumer here is the provider's `.length` read.
+  flaggedHoldings?: ReadonlyArray<unknown>;
 }
 
 // =========================================================================
@@ -102,7 +110,13 @@ export function MyAllocationClient({
   analytics,
   strategies,
   apiKeys,
+  flaggedHoldings,
 }: MyAllocationClientProps) {
+  // Plan 11 / R5 — wrap the rendered tree in AllocationProvider so any
+  // descendant consumer of AllocationContext (and any cross-tree subscriber
+  // via useFlaggedCountStore) sees the count. Read from the existing
+  // payload prop only; no new fetch.
+  const flaggedCount = flaggedHoldings?.length ?? 0;
   // Build StrategyForBuilder rows the scenario math consumes. Rows
   // without daily_returns drop out of the chart/metric computation
   // but stay in the investment list below.
@@ -332,6 +346,7 @@ export function MyAllocationClient({
   );
 
   return (
+    <AllocationProvider value={{ flaggedCount }}>
     <main className="max-w-[1280px] mx-auto p-6 pb-20">
       {/* Header */}
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -540,5 +555,6 @@ export function MyAllocationClient({
       {/* Exchange connections (inline) */}
       <AllocatorExchangeManager initialKeys={apiKeys} />
     </main>
+    </AllocationProvider>
   );
 }

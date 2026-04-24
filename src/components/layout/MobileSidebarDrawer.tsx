@@ -14,6 +14,9 @@ interface MobileSidebarDrawerProps {
    *  it when the drawer closes. Restoration is the a11y pattern that
    *  keeps keyboard users oriented after a dialog dismiss. */
   triggerRef: RefObject<HTMLButtonElement | null>;
+  /** Phase 09.1 Plan 11 / R5 — passed through to Sidebar so the
+   *  drawer-mounted nav also surfaces the My Allocation badge. */
+  flaggedCount?: number;
 }
 
 /**
@@ -40,6 +43,7 @@ export function MobileSidebarDrawer({
   isAllocator,
   populatedSlugs,
   triggerRef,
+  flaggedCount,
 }: MobileSidebarDrawerProps) {
   const pathname = usePathname();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -110,6 +114,7 @@ export function MobileSidebarDrawer({
           isAdmin={isAdmin}
           isAllocator={isAllocator}
           variant="drawer"
+          flaggedCount={flaggedCount}
         />
       </div>
     </div>
