@@ -67,13 +67,17 @@ export function Tweaks({ onChange }: Props) {
   // V3 accepted — QA-mode gate via module-scope constant. Test seam:
   // `vi.mock("@/lib/qa-mode", () => ({ QA_MODE: true }))` flips this to
   // truthy without touching `process.env`.
-  if (!QA_MODE) return null;
-
+  //
+  // Hooks MUST run before any early return — React's hook ordering rule.
+  // QA_MODE is a module-scope constant, so the conditional return below
+  // is stable for the lifetime of the component (no mid-life toggle). The
+  // hooks above are therefore called in the same order on every render.
   const [isOpen, setIsOpen] = useState(false);
   const [state, setState] = useState<TweakState>(TWEAK_DEFAULTS);
 
   // Hydrate from localStorage post-mount (avoids SSR mismatch).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState(loadTweaks());
   }, []);
 
@@ -86,6 +90,8 @@ export function Tweaks({ onChange }: Props) {
     }
     onChange?.(state);
   }, [state, onChange]);
+
+  if (!QA_MODE) return null;
 
   return (
     <>

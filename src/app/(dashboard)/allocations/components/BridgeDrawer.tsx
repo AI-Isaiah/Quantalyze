@@ -52,13 +52,18 @@ export function BridgeDrawer({
   const drawerRef = useRef<HTMLDivElement>(null);
 
   // Reset transient state when the drawer closes; install Esc handler
-  // when open. Mirrors AddWidgetModal:29-62.
+  // when open. Mirrors AddWidgetModal:29-62. react-hooks/set-state-in-effect
+  // flags the reset-on-close pattern; a cleaner alternative is key-based
+  // remount at the call site, but every existing caller depends on stable
+  // identity + internal reset semantics. Disabling inline keeps the contract.
   useEffect(() => {
     if (!isOpen) {
+      /* eslint-disable react-hooks/set-state-in-effect */
       setStage("browse");
       setSelectedRef(null);
       setError(null);
       setSubmitting(false);
+      /* eslint-enable react-hooks/set-state-in-effect */
       return;
     }
     const onKey = (e: KeyboardEvent) => {

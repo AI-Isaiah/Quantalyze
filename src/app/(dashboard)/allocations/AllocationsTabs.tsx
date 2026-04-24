@@ -136,6 +136,12 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const uiOverride = QA_MODE && searchParams.get("ui") === "v2";
   const [uiV2Flag, setUiV2Flag] = useState<boolean>(() => loadUiV2Flag());
   useEffect(() => {
+    // SSR-safe hydration: initial render uses the loadUiV2Flag() fallback
+    // (false in environments without localStorage). On mount we re-read to
+    // pick up a persisted flag. react-hooks/set-state-in-effect prefers
+    // useSyncExternalStore for external stores; leaving this as-is because
+    // the double-render is intentional and the flag is read once per mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setUiV2Flag(loadUiV2Flag());
   }, []);
   const uiV2 = uiV2Flag || uiOverride;

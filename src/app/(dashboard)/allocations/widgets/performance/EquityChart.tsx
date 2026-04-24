@@ -75,14 +75,6 @@ function parseISO(s: string): number {
   return new Date(s).getTime();
 }
 
-function toISO(epoch: number): string {
-  const d = new Date(epoch);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 /** Designer's f7 anchor — re-anchor at the first positive value. */
 function anchorFromFirstPositive(points: DailyPoint[]): DailyPoint[] {
   if (points.length === 0) return [];
