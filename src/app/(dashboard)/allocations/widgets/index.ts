@@ -12,8 +12,12 @@ import type { WidgetProps } from "../lib/types";
 type LazyWidget = React.LazyExoticComponent<ComponentType<WidgetProps>>;
 
 export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
-  // ── Performance (10) ────────────────────────────────────────────────
+  // ── Performance (11) ────────────────────────────────────────────────
   "equity-curve": lazy(() => import("./performance/EquityCurve")),
+  // Phase 09.1 Plan 07 — V2 SVG equity chart with period toggle + crosshair
+  // + holding overlays. Default-export is the WidgetProps adapter; the
+  // named EquityChart export is consumed directly by tests.
+  "equity-chart": lazy(() => import("./performance/EquityChart")),
   "drawdown-chart": lazy(() => import("./performance/DrawdownChart")),
   "monthly-returns": lazy(() => import("./performance/MonthlyReturns")),
   "annual-returns": lazy(() => import("./performance/AnnualReturns")),
@@ -101,4 +105,11 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
 
   // ── Outcomes (1) ───────────────────────────────────────────────────
   "outcomes-timeline": lazy(() => import("./outcomes/OutcomesWidget")),
+
+  // ── Bridge (1) — Phase 09.1 Plan 09 / D-14 + D-15 ──────────────────
+  // Hero Bridge widget. The lazy chunk pulls in the BridgeWidget
+  // component + the BridgeDrawer it composes. The default export is a
+  // thin WidgetProps adapter that pulls flaggedHoldings + the match
+  // decisions map out of the dashboard payload (data prop).
+  "bridge-hero": lazy(() => import("./bridge/BridgeHeroWidget")),
 };

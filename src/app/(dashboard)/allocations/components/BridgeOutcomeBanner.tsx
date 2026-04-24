@@ -42,11 +42,13 @@ export function BridgeOutcomeBanner({
       if (!res.ok) throw new Error(`dismiss failed ${res.status}`);
       onDismiss();
     } catch (err) {
-      // Log error but don't block UI — on next load the banner may reappear
-      // if the server-side dismissal wasn't persisted (TTL will handle it).
+      // Surface the failure rather than optimistically hiding. Hiding on
+      // failure created a flicker bug for callers like HoldingsTable
+      // whose onDismiss triggers router.refresh — the refresh re-fetches,
+      // finds the holding still flagged, and re-mounts an identical
+      // banner. Leaving the banner visible lets the user retry and
+      // matches the "your action wasn't recorded" semantic.
       console.error("[BridgeOutcomeBanner] dismiss error:", err);
-      // Still call onDismiss optimistically so the strip disappears immediately
-      onDismiss();
     } finally {
       setDismissing(false);
     }

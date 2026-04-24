@@ -3,23 +3,24 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 /**
- * Phase 07 Plan 04 Task 1 — TDD Red gate tests for AllocationsTabs
- * (PURGE-07 / VOICES-ACCEPTED f3).
+ * Phase 09.1 Plan 02 Task 3 — 6-tab routing tests for AllocationsTabs.
+ * Supersedes the Phase 07 2-tab suite. Verifies tab-shell routing only;
+ * each panel body is mocked to a marker div so this file doesn't depend
+ * on widget grids, holdings tables, or any downstream Plan 04/05/08/10
+ * implementation.
  *
- * Covered behaviours:
- *   1. Default tab — searchParams={} → Performance visible, Scenario absent.
- *   2. Explicit ?tab=performance → Performance visible.
- *   3. ?tab=scenario → Scenario stub "Scenario builder coming soon" visible;
- *      Performance content absent.
- *   4. ?tab=bogus → silent fallback to Performance (D-04).
- *   5. Click Scenario button → router.replace called with a URL containing
- *      tab=scenario and { scroll: false }.
- *   6. Scenario stub has no interactive controls (no button onClick handlers).
- *   7. (f3) Browser back/forward: initial render with tab=scenario → scenario
- *      visible; rerender with searchParams={} → Performance visible. This
- *      test MUST fail if activeTab is snapshotted via useState. The plan
- *      explicitly diverges from ProfileTabs.tsx — activeTab MUST be derived
- *      from searchParams on every render.
+ * Cases (per 09.1-02-PLAN.md Task 3):
+ *   1. No tab param → Overview active.
+ *   2. ?tab=holdings → Holdings active.
+ *   3. ?tab=outcomes → Outcomes active.
+ *   4. ?tab=mandate  → Mandate active.
+ *   5. ?tab=risk     → Risk active.
+ *   6. ?tab=scenario → Scenario active.
+ *   7. ?tab=performance (legacy Phase 07 alias) → Overview + router.replace
+ *      strips the param.
+ *   8. ?tab=xyz (unknown) → Overview silent fallback (D-04). No URL cleanup
+ *      because unknown is not in {overview, performance}.
+ *   9. ArrowRight wraps focus across all 6 tabs in D-05 order.
  */
 
 // --- next/navigation mocks --------------------------------------------------
@@ -38,17 +39,50 @@ vi.mock("next/navigation", async () => {
 
 import { useSearchParams, useRouter } from "next/navigation";
 
-// --- AllocationDashboard stub -----------------------------------------------
+// --- Panel/body stubs -------------------------------------------------------
 //
-// Mock AllocationDashboard with a simple marker so we can assert on tab
-// visibility without mounting the full widget grid + WIDGET_COMPONENTS
-// lazy-loaded tree. The marker string is unique and short so queries like
-// getByText work reliably under RTL.
+// Each panel/body component renders a unique marker so the tests can assert
+// which surface is active without mounting the real implementation. Plans
+// 05/08/10 fill these bodies later — the tab-shell contract should be
+// independent of body content.
+
 vi.mock("./AllocationDashboard", () => ({
   AllocationDashboard: () => (
-    <div data-testid="allocation-dashboard-marker">
-      PERFORMANCE_TAB_CONTENT
-    </div>
+    <div data-testid="overview-legacy">OVERVIEW_LEGACY_BODY</div>
+  ),
+}));
+
+vi.mock("./AllocationDashboardV2", () => ({
+  AllocationDashboardV2: () => (
+    <div data-testid="overview-v2">OVERVIEW_V2_BODY</div>
+  ),
+}));
+
+vi.mock("./HoldingsTabPanel", () => ({
+  HoldingsTabPanel: () => (
+    <div data-testid="holdings-body">HOLDINGS_BODY</div>
+  ),
+}));
+
+vi.mock("./OutcomesTabPanel", () => ({
+  OutcomesTabPanel: () => (
+    <div data-testid="outcomes-body">OUTCOMES_BODY</div>
+  ),
+}));
+
+vi.mock("./MandateTabPanel", () => ({
+  MandateTabPanel: () => (
+    <div data-testid="mandate-body">MANDATE_BODY</div>
+  ),
+}));
+
+vi.mock("./RiskTabPanel", () => ({
+  RiskTabPanel: () => <div data-testid="risk-body">RISK_BODY</div>,
+}));
+
+vi.mock("./ScenarioStub", () => ({
+  ScenarioStub: () => (
+    <div data-testid="scenario-body">SCENARIO_BODY</div>
   ),
 }));
 
@@ -75,7 +109,6 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   equityDailyPoints: [],
   minHistoryDepthMonths: null,
   activeVenues: [],
-  // Phase 09 / D-08 + D-11 + finding f5
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
 };
@@ -86,7 +119,25 @@ function setSearchParams(query: string): void {
   );
 }
 
-describe("AllocationsTabs — PURGE-07 / D-04 / f3", () => {
+const ACTIVE_BODIES = [
+  "overview-legacy",
+  "overview-v2",
+  "holdings-body",
+  "outcomes-body",
+  "mandate-body",
+  "risk-body",
+  "scenario-body",
+] as const;
+
+function expectOnlyVisibleBody(testid: (typeof ACTIVE_BODIES)[number]): void {
+  expect(screen.getByTestId(testid)).toBeInTheDocument();
+  for (const other of ACTIVE_BODIES) {
+    if (other === testid) continue;
+    expect(screen.queryByTestId(other)).not.toBeInTheDocument();
+  }
+}
+
+describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   beforeEach(() => {
     mockReplace.mockReset();
     mockRefresh.mockReset();
@@ -101,94 +152,110 @@ describe("AllocationsTabs — PURGE-07 / D-04 / f3", () => {
     } as unknown as ReturnType<typeof useRouter>);
   });
 
-  it("default tab: searchParams={} renders Performance content", () => {
+  it("no tab param → Overview tab active, only overview body rendered", () => {
     setSearchParams("");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    expect(screen.getByText("PERFORMANCE_TAB_CONTENT")).toBeInTheDocument();
+    const { container } = render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("overview-legacy");
+    const overviewTab = screen.getByRole("tab", { name: "Overview" });
+    expect(overviewTab.getAttribute("aria-selected")).toBe("true");
     expect(
-      screen.queryByText("Scenario builder coming soon"),
-    ).not.toBeInTheDocument();
+      container.querySelector("#panel-overview")?.getAttribute("hidden"),
+    ).toBeNull();
+    expect(
+      container.querySelector("#panel-holdings")?.getAttribute("hidden"),
+    ).not.toBeNull();
   });
 
-  it("explicit performance: ?tab=performance renders Performance content", () => {
+  it("?tab=holdings → Holdings tab active", () => {
+    setSearchParams("tab=holdings");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("holdings-body");
+    expect(
+      screen.getByRole("tab", { name: "Holdings" }).getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("?tab=outcomes → Outcomes tab active", () => {
+    setSearchParams("tab=outcomes");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("outcomes-body");
+    expect(
+      screen.getByRole("tab", { name: "Outcomes" }).getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("?tab=mandate → Mandate tab active", () => {
+    setSearchParams("tab=mandate");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("mandate-body");
+    expect(
+      screen.getByRole("tab", { name: "Mandate" }).getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("?tab=risk → Risk tab active", () => {
+    setSearchParams("tab=risk");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("risk-body");
+    expect(
+      screen.getByRole("tab", { name: "Risk" }).getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("?tab=scenario → Scenario tab active", () => {
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    expectOnlyVisibleBody("scenario-body");
+    expect(
+      screen.getByRole("tab", { name: "Scenario" }).getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("?tab=performance (legacy alias) → Overview + router.replace strips the param", () => {
     setSearchParams("tab=performance");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expect(screen.getByText("PERFORMANCE_TAB_CONTENT")).toBeInTheDocument();
-  });
-
-  it("scenario: ?tab=scenario renders Scenario stub, hides Performance", () => {
-    setSearchParams("tab=scenario");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    expect(
-      screen.getByText("Scenario builder coming soon"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText("PERFORMANCE_TAB_CONTENT"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("invalid fallback: ?tab=bogus silently falls back to Performance (D-04)", () => {
-    setSearchParams("tab=bogus");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    expect(screen.getByText("PERFORMANCE_TAB_CONTENT")).toBeInTheDocument();
-    expect(
-      screen.queryByText("Scenario builder coming soon"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("click Scenario tab → router.replace called with ?tab=scenario and { scroll: false }", () => {
-    setSearchParams("");
-    render(<AllocationsTabs {...STUB_PROPS} />);
-    const scenarioButton = screen.getByRole("tab", { name: "Scenario" });
-    fireEvent.click(scenarioButton);
+    expectOnlyVisibleBody("overview-legacy");
+    // The cleanup effect must call router.replace with the tab param removed.
     expect(mockReplace).toHaveBeenCalled();
-    const call = mockReplace.mock.calls.find((c) =>
-      typeof c[0] === "string" && c[0].includes("tab=scenario"),
+    const cleanupCall = mockReplace.mock.calls.find(
+      (c) => typeof c[0] === "string" && !c[0].includes("tab="),
     );
-    expect(call, "router.replace call with tab=scenario").toBeDefined();
-    expect(call![1]).toEqual({ scroll: false });
+    expect(
+      cleanupCall,
+      "router.replace called with tab param stripped",
+    ).toBeDefined();
+    expect(cleanupCall![1]).toEqual({ scroll: false });
   });
 
-  it("Scenario stub contains only the heading + body strings (no interactive controls)", () => {
-    setSearchParams("tab=scenario");
+  it("?tab=xyz (unknown) → Overview silent fallback, no URL cleanup", () => {
+    setSearchParams("tab=xyz");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    // The stub must have the heading text.
-    expect(
-      screen.getByText("Scenario builder coming soon"),
-    ).toBeInTheDocument();
-    // And the body text (verbatim from UI-SPEC.md).
-    expect(
-      screen.getByText(
-        "Model what-if outcomes by adding or removing strategies and holdings from your live composition. Available in the next update.",
-      ),
-    ).toBeInTheDocument();
-    // The only interactive controls under the rendered tree should be the
-    // two tab buttons themselves (role="tab" in the tablist above). No
-    // other interactive controls inside the stub body — role="button"
-    // returns nothing, and role="tab" returns exactly Performance + Scenario.
-    expect(screen.queryAllByRole("button")).toEqual([]);
-    const tabs = screen.getAllByRole("tab");
-    const tabLabels = tabs.map((b) => b.textContent?.trim());
-    expect(tabLabels).toEqual(["Performance", "Scenario"]);
+    expectOnlyVisibleBody("overview-legacy");
+    // Unknown values are NOT cleaned up — only "overview" and "performance"
+    // trigger the strip effect. router.replace must not have been called.
+    expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("re-renders correct tab when searchParams change (browser back/forward re-render — f3)", () => {
-    // Initial render: searchParams has tab=scenario → Scenario visible.
-    setSearchParams("tab=scenario");
-    const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
-    expect(
-      screen.getByText("Scenario builder coming soon"),
-    ).toBeInTheDocument();
-
-    // Simulate browser-back navigation: searchParams cleared, rerender.
-    // Per VOICES-ACCEPTED f3: activeTab MUST re-derive from searchParams
-    // on every render. If AllocationsTabs uses useState(parseTab(...)),
-    // the initial scenario snapshot sticks and this assertion fails.
+  it("ArrowRight wraps focus across all 6 tabs in D-05 order", () => {
     setSearchParams("");
-    rerender(<AllocationsTabs {...STUB_PROPS} />);
-    expect(
-      screen.queryByText("Scenario builder coming soon"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("PERFORMANCE_TAB_CONTENT")).toBeInTheDocument();
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk", "Scenario"];
+    // Walk the cycle: pressing ArrowRight on each tab calls changeTab(next),
+    // which calls router.replace with the next tab in the URL.
+    for (let i = 0; i < order.length; i++) {
+      mockReplace.mockClear();
+      const current = screen.getByRole("tab", { name: order[i] });
+      fireEvent.keyDown(current, { key: "ArrowRight" });
+      const expectedNext = order[(i + 1) % order.length];
+      expect(mockReplace).toHaveBeenCalled();
+      const call = mockReplace.mock.calls[0];
+      const url = String(call[0]);
+      if (expectedNext === "Overview") {
+        // Overview is the default — no tab param in URL.
+        expect(url.includes("tab=")).toBe(false);
+      } else {
+        expect(url).toContain(`tab=${expectedNext.toLowerCase()}`);
+      }
+    }
   });
 });

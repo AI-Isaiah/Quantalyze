@@ -11,7 +11,7 @@ import type { Portfolio, PortfolioAnalytics, WeightSnapshot, PositionSnapshot } 
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 import type { OutcomeRow } from "@/lib/queries";
 import type { FlaggedHolding } from "./lib/holding-outcome-adapter";
-import type { TileConfig } from "./lib/types";
+import type { LegacyTileConfig } from "./lib/types";
 import { WIDGET_REGISTRY } from "./lib/widget-registry";
 import { useDashboardConfig } from "./hooks/useDashboardConfig";
 import { useTimeframe } from "./hooks/useTimeframe";
@@ -228,7 +228,7 @@ const STRATEGY_COMPOSITE_WIDGETS = new Set<string>([
 
 interface ToastState {
   widgetName: string;
-  tile: TileConfig;
+  tile: LegacyTileConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +772,10 @@ export function AllocationDashboard({
     // page.tsx already wraps this subtree in <main>; use <section> here to
     // avoid two <main> landmarks per document (HTML5 + WCAG landmark nav).
     return (
-      <section className="max-w-[1280px] mx-auto p-6 pb-20">
+      <section
+        data-legacy-dashboard="true"
+        className="max-w-[1280px] mx-auto p-6 pb-20"
+      >
         <EmptyState hasSyncing={false} />
         {zeroHoldingsNoticesCard}
       </section>
@@ -791,6 +794,7 @@ export function AllocationDashboard({
           two <main> landmarks per document. */}
       <section
         ref={dashboardContainerRef}
+        data-legacy-dashboard="true"
         className="max-w-[1280px] mx-auto p-6 pb-20"
       >
       {/* Header — page.tsx owns the <h1>My Allocation</h1> via PageHeader;

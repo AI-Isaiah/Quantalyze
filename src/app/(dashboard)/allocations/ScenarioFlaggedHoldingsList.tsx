@@ -27,6 +27,14 @@ import { AllocatedForm } from "./components/AllocatedForm";
 import { RejectedForm } from "./components/RejectedForm";
 import { OutcomeRecordedRow } from "./components/OutcomeRecordedRow";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+// Phase 09.1 Plan 09 / R2 accepted — Send-intro endpoint extracted to a
+// shared helper so the new BridgeDrawer can consume the SAME wire shape
+// without a string-literal fetch URL. The existing ScenarioFlaggedHoldingsList
+// flow continues to behave identically: the helper issues the same
+// POST /api/match/decisions/holding request, so the existing test
+// (ScenarioFlaggedHoldingsList.test.tsx) which mocks `global.fetch`
+// continues to see the same call signature.
+import { sendBridgeIntro } from "@/lib/bridge/send-intro";
 
 export interface ScenarioFlaggedHoldingsListProps {
   flaggedHoldings: FlaggedHolding[];
@@ -92,44 +100,32 @@ function BannerSubRowContent({
 
   if (mode === "dismissed") return null;
 
-  /** finding f2: POST to /api/match/decisions/holding if no decision exists yet */
+  /**
+   * finding f2: ensure a match_decision row exists, then transition to the
+   * allocated/rejected sub-form. R2 accepted: routes through the shared
+   * `sendBridgeIntro` helper (Plan 09) instead of an inline fetch literal,
+   * so the BridgeDrawer can reuse the same wire shape.
+   */
   async function ensureDecisionThen(targetMode: "allocated" | "rejected") {
     if (effectiveDecisions[ref]) {
       setMode(targetMode);
       return;
     }
     setErrorByRef((e) => ({ ...e, [ref]: null }));
-    try {
-      const res = await fetch("/api/match/decisions/holding", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          holding_ref: ref,
-          top_candidate_strategy_id: h.top_candidate_strategy_id,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setErrorByRef((e) => ({
-          ...e,
-          [ref]:
-            (body as Record<string, string>)?.error ??
-            "This comparison isn't available.",
-        }));
-        return;
-      }
-      const { match_decision_id } = (await res.json()) as {
-        match_decision_id: string;
-      };
-      setLocalDecisionsByRef((d) => ({ ...d, [ref]: { id: match_decision_id } }));
-      setMode(targetMode);
-      router.refresh();
-    } catch {
-      setErrorByRef((e) => ({
-        ...e,
-        [ref]: "Network error. Please retry.",
-      }));
+    const result = await sendBridgeIntro({
+      holdingRef: ref,
+      topCandidateStrategyId: h.top_candidate_strategy_id,
+    });
+    if (!result.ok) {
+      setErrorByRef((e) => ({ ...e, [ref]: result.error }));
+      return;
     }
+    setLocalDecisionsByRef((d) => ({
+      ...d,
+      [ref]: { id: result.matchDecisionId },
+    }));
+    setMode(targetMode);
+    router.refresh();
   }
 
   const errorMsg = errorByRef[ref];
@@ -195,11 +191,16 @@ export function ScenarioFlaggedHoldingsList({
 
   const maxWeight = allocatorPreferences?.max_weight ?? null;
 
+  // Phase 09.1 Plan 10 (D-07): token-only restyle — list container gets a
+  // surface card frame, header row uses design tokens, numeric cells use
+  // the canonical `font-mono` class. Behavior (state machine, handlers,
+  // API call shape, refs) is UNCHANGED — see the BannerSubRowContent
+  // component above.
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm font-sans">
+    <div className="overflow-x-auto rounded-lg border border-border bg-surface p-4">
+      <table className="w-full font-sans text-sm">
         <thead>
-          <tr className="border-b border-[#E2E8F0] text-left text-[10px] uppercase tracking-wider text-text-muted">
+          <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text-muted">
             <th className="pb-2 pr-4 font-medium" />
             <th className="pb-2 pr-4 font-medium">Holding</th>
             <th className="pb-2 pr-4 font-medium">Candidate Strategy</th>
@@ -218,11 +219,13 @@ export function ScenarioFlaggedHoldingsList({
 
             return (
               <Fragment key={ref}>
-                <tr className="border-b border-[#E2E8F0] hover:bg-surface-hover">
+                <tr className="border-b border-border transition-colors hover:bg-[#FAFBFC]">
                   <td className="py-3 pr-4">
                     <button
                       type="button"
-                      aria-label={isExpanded ? "Collapse review" : "Expand review"}
+                      aria-label={
+                        isExpanded ? "Collapse review" : "Expand review"
+                      }
                       aria-expanded={isExpanded}
                       onClick={toggleExpand}
                       className="flex h-6 w-6 items-center justify-center rounded text-text-muted transition-colors hover:text-text-secondary"
@@ -231,7 +234,10 @@ export function ScenarioFlaggedHoldingsList({
                     </button>
                   </td>
                   <td className="py-3 pr-4">
-                    <span className="font-mono text-text-primary">
+                    <span
+                      className="font-mono text-text-primary"
+                      style={{ fontFamily: "var(--font-mono)" }}
+                    >
                       {h.symbol}
                     </span>
                     <span className="ml-1 text-xs text-text-muted">
@@ -241,7 +247,10 @@ export function ScenarioFlaggedHoldingsList({
                   <td className="py-3 pr-4 text-text-secondary">
                     {h.top_candidate_name}
                   </td>
-                  <td className="py-3 pr-4 font-mono text-text-primary">
+                  <td
+                    className="py-3 pr-4 font-mono text-text-primary"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                  >
                     {h.top_candidate_composite}
                   </td>
                   <td className="py-3">

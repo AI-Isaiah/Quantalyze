@@ -3,6 +3,23 @@ import type { WidgetMeta } from "./types";
 // ---------------------------------------------------------------------------
 // Widget Registry — all 39 widgets for the My Allocation dashboard
 // ---------------------------------------------------------------------------
+//
+// Phase 09.1 Plan 05 / D-08 — picker no longer surfaces "soon" badges for
+// correlation / funding / flows. The designer prototype carried "soon"
+// badges for these three concepts; in the live registry:
+//   - correlation-matrix → status: "ready" (registered below; widgets/risk/
+//     CorrelationMatrix). No demotion needed; the "soon" treatment in the
+//     designer was a placeholder while the real widget existed.
+//   - funding-rates      → not registered (no widget exists yet — picker
+//     simply doesn't list it; nothing to demote).
+//   - flows-ledger       → not registered (no widget exists yet — picker
+//     simply doesn't list it; nothing to demote).
+// All entries below currently carry status: "ready". The D-08 stance is
+// the registry's source of truth: NO entry should carry status: "todo"
+// (or any future "coming-soon" marker) without a real registered widget
+// behind it. The Plan 05 WidgetPicker filters by status === "ready" so
+// any future "todo" entry would silently disappear from the picker —
+// which is preferred over a misleading badge.
 
 export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
   // ── Performance (10) ────────────────────────────────────────────────
@@ -14,6 +31,22 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     defaultW: 12,
     defaultH: 4,
     description: "Cumulative portfolio growth over time with composite + per-strategy lines.",
+    status: "ready",
+  },
+  // Phase 09.1 Plan 07 / D-10 — V2 SVG equity chart with period toggle
+  // (1M/3M/6M/YTD/1Y/ALL/CUSTOM, default 6M), crosshair hover, and
+  // holding overlays. Replaces the Recharts-based equity-curve for
+  // V2 Overview tiles (DESIGNER_KEY_TO_WIDGET_ID["equity"] points here
+  // post-Plan 07). The legacy "equity-curve" entry stays so persisted
+  // user layouts pre-Plan-07 continue to render.
+  "equity-chart": {
+    id: "equity-chart",
+    name: "Equity Chart",
+    category: "performance",
+    icon: "▲",
+    defaultW: 4,
+    defaultH: 4,
+    description: "SVG equity chart with period toggle, crosshair, and holding overlays.",
     status: "ready",
   },
   "drawdown-chart": {
@@ -425,6 +458,23 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     description: "Timeline of recorded Bridge outcomes with win-rate KPIs and delta sparklines.",
     status: "ready",
   },
+
+  // ── Bridge (1) — Phase 09.1 Plan 09 / D-14 + D-15 ───────────────
+  // Hero Bridge widget: portfolio-level entry point with Review CTA that
+  // opens BridgeDrawer (cross-holdings browse → confirm). Default Overview
+  // tile per D-15. Per-row inline BridgeOutcomeBanner stays on Plan 08's
+  // HoldingsTable (D-14 / S3 accepted) — no double-mount because this
+  // widget renders a portfolio-level summary, not a per-holding banner.
+  "bridge-hero": {
+    id: "bridge-hero",
+    name: "Bridge",
+    category: "intelligence",
+    icon: "B",
+    defaultW: 4,
+    defaultH: 3,
+    description: "Hero Bridge widget — flagged holdings summary + Review drawer.",
+    status: "ready",
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -442,3 +492,66 @@ export const WIDGET_CATEGORIES = [
   { id: "meta" as const, name: "Meta", icon: "≡" },
   { id: "outcomes" as const, name: "Outcomes", icon: "\u25C8" },
 ];
+
+// ---------------------------------------------------------------------------
+// Designer short-key → WIDGET_REGISTRY id map (Phase 09.1 Plan 05 / D-19)
+// ---------------------------------------------------------------------------
+//
+// The designer bundle (designer-bundle/project/src/app.jsx:18-26) refers to
+// the 7 default Overview widgets by short keys ("bridge", "kpi", "equity",
+// "holdings", "allocation", "mandate", "outcomes"). The live registry uses
+// kebab-case ids ("bridge-outcome-banner", "kpi-strip", "equity-curve",
+// etc.). The two label spaces must never mix in persisted state.
+//
+// `resolveWidgetId(k)` returns the canonical WIDGET_REGISTRY id for a
+// given input. The hook applies this at write time (addWidget) AND when
+// importing DEFAULT_LAYOUT short keys, so config.tiles[*].k is ALWAYS a
+// valid registry id post-normalization. The render path can then index
+// WIDGET_COMPONENTS directly by t.k — no `?? t.k` fallback required.
+//
+// Mapping notes:
+//   - "equity" routes to "equity-chart" — Plan 07 flipped this entry from
+//     "equity-curve" to the new V2 SVG renderer (Phase 09.1 / D-10).
+//     Persisted layouts already carrying "equity-curve" continue to
+//     render the legacy widget; only newly-defaulted layouts pick up the
+//     SVG chart.
+//   - "mandate" currently routes to "mandate-compliance" — there is no
+//     widget for it yet, so the renderer falls back to a generic "Unknown
+//     widget" message until Plan 10 lands "mandate-snapshot" (which may
+//     also become the canonical mapping for "mandate").
+//   - "kpi" / "holdings" / "bridge" point to ids that don't yet exist in
+//     the registry. The picker only ever surfaces real registry ids, so
+//     these short keys CAN'T be re-introduced via addWidget; the
+//     mapping exists for the DEFAULT_LAYOUT import path only.
+//
+// If a short key has no entry in this map AND is not already a valid
+// WIDGET_REGISTRY id, `resolveWidgetId` returns it unchanged (the
+// renderer will then surface the "Unknown widget" fallback).
+export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
+  // Phase 09.1 Plan 09 / D-15 — Hero Bridge widget is the default Overview
+  // tile for the "bridge" short key. Was "bridge-outcome-banner" pre-Plan-09;
+  // the per-row BridgeOutcomeBanner stays in Plan 08's HoldingsTable
+  // (D-14 / S3 accepted) and is no longer the portfolio-level surface.
+  // Existing persisted V2 configs that already carry "bridge-outcome-banner"
+  // as a tile id continue to render the legacy banner widget (write-time
+  // normalization only — no migration code needed).
+  bridge: "bridge-hero",
+  kpi: "kpi-strip",
+  equity: "equity-chart",
+  holdings: "holdings-table",
+  allocation: "allocation-donut",
+  mandate: "mandate-compliance",
+  outcomes: "outcomes-timeline",
+};
+
+/**
+ * Resolve a designer short key OR a registry id to its canonical
+ * WIDGET_REGISTRY id. Pass-through when the input is already a registry
+ * id; map lookup when the input is a known short key. Unknown values
+ * pass through unchanged so the renderer's "unknown widget" path can
+ * make the mismatch visible.
+ */
+export function resolveWidgetId(k: string): string {
+  if (k in WIDGET_REGISTRY) return k;
+  return DESIGNER_KEY_TO_WIDGET_ID[k] ?? k;
+}

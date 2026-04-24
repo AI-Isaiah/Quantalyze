@@ -6,6 +6,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.5.0] - 2026-04-24
+
+Milestone 09.1 — Allocator Dashboard UI refresh against the designer handoff.
+Six major waves of work plus the sidebar grouping refresh, all behind the
+`allocations.ui_v2` feature flag.
+
+### Added
+
+- **Allocator Dashboard V2 shell** behind `allocations.ui_v2` feature flag.
+  New `AllocationDashboardV2` entry, `WidgetGrid` drag-drop layout,
+  `WidgetChrome`, `WidgetPicker` popover, `+Allocation` button. Per-widget
+  `{k,w}` TileConfig shape, `LAYOUT_VERSION` bumped 3→4 with migration path.
+- **Six-tab navigation** (Overview / Holdings / Outcomes / Mandate / Risk /
+  Allocation) replacing the 2-tab structure. Tab panels load the new widget
+  contents behind the flag and fall back to legacy shell when flag is off.
+- **Hero Bridge widget** with 2-stage drawer (D-14/D-15/D-16). Extracted
+  `send-intro` helper so bridge-routing is testable in isolation;
+  `BridgeOutcomeBanner` per-row on the Holdings table reports bridge state.
+- **EquityChart (SVG)** replaces the Recharts-based EquityCurve for the V2
+  Overview tile. Supports 1M/3M/6M/YTD/1Y/ALL/CUSTOM period toggle, custom
+  range picker, benchmark + overlays, f7 first-positive anchoring preserved.
+- **Holdings table — DesignHoldingRow mode** with `toDesignHoldings` adapter
+  and 3-tab sub-row `HoldingDetail` (Overview / Outcome / Mandate). Outcome
+  form ships with the disabled Modified option (D-14/D-11).
+- **Mandate + Risk tab bodies** (D-06), with Scenario surfaces restyled to
+  design tokens (D-07).
+- **Outcomes widget** restyled to the designer shape and wired into the
+  Outcomes tab body.
+- **KpiStrip** rewritten to the designer 5-cell shape (D-09) with honest-copy
+  R4 assertions.
+- **QA-gated Tweaks panel** plus shared `QA_MODE` module and sidebar
+  flagged-count badge via `AllocationContext`.
+
+### Changed
+
+- **Equity chart is readable now.** The V2 SVG EquityChart previously
+  rendered an f7-anchored line with no Y-axis, no baseline reference, and no
+  always-visible return summary, leaving allocators staring at a bare green
+  curve with "100%" their only reference point. Replaced with: period-
+  relative normalization (the line always departs from 0% at the left edge),
+  5-tick Y-axis with snapped "nice" percentages (+5%, +10%, +15% not
+  "+7.37%"), dashed 0% baseline reference, always-visible current-return
+  summary top-right (big +/- percentage in positive/negative tokens),
+  always-visible legend strip (Portfolio, BTC, overlays). Gradient +
+  benchmark + crosshair now use `var(--chart-strategy)` and
+  `var(--chart-benchmark)` tokens instead of hardcoded `#1B6B5A` and
+  `#64748b` hex literals — design tokens stay in sync with DESIGN.md.
+- **Sidebar Discovery grouping.** The "DISCOVERY" section in the left nav
+  used to be a flat list of five categories. It now renders two sub-group
+  labels inside the single heading: "Digital Assets" (Crypto SMA, CFD,
+  Emerging Crypto, Crypto Decks) and "TradFi" (TradFi Decks). Empty
+  sub-groups disappear cleanly when `populatedSlugs` filtering removes every
+  category in a bucket.
+
+### Fixed
+
+- **BridgeOutcomeBanner no longer hides on dismiss failure.** The banner
+  previously disappeared optimistically on dismiss, even when the dismiss
+  API call failed silently — leaving the allocator with zero feedback that
+  the action hadn't landed.
+
+### Tests
+
+- `EquityChart.test.tsx` extended from 10 to 17 tests covering Y-axis
+  baseline label, tick rendering, legend entries (Portfolio + BTC), always-
+  visible current-return summary, and token-correct gradient + benchmark
+  stroke (no hardcoded hex).
+- `BridgeDrawer` state-machine suite + D-16 helper-routing invariant.
+- `HoldingsTable` DesignHoldingRow + 10-case sub-row test.
+- `AllocationsTabs` 6-tab routing (9 cases).
+- `Tweaks` gate + sidebar badge tests; feature-flag test migrated to
+  `vi.mock`.
+- V2 hook (`useDashboardConfig` split) + LAYOUT_VERSION v4 default-layout
+  invariants.
+- Full suite: 1737 passed / 87 skipped across 186 files.
+
 ## [0.15.4.3] - 2026-04-24
 
 ### Fixed

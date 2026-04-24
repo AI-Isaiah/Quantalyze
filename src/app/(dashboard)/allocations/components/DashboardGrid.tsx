@@ -10,7 +10,7 @@ import {
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 
-import type { DashboardConfig } from "../lib/types";
+import type { LegacyDashboardConfig } from "../lib/types";
 import { WIDGET_REGISTRY } from "../lib/widget-registry";
 import { TileWrapper } from "./TileWrapper";
 
@@ -32,7 +32,7 @@ function WidgetSkeleton() {
 // ---------------------------------------------------------------------------
 
 interface DashboardGridProps {
-  config: DashboardConfig;
+  config: LegacyDashboardConfig;
   onLayoutChange: (layout: Layout) => void;
   onClose: (tileId: string) => void;
   renderWidget: (widgetId: string) => ReactNode;

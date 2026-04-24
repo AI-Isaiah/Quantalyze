@@ -20,10 +20,16 @@ import { BridgeOutcomeNoteSection } from "@/components/notes/BridgeOutcomeNoteSe
 
 /**
  * Phase 5 Outcomes Dashboard widget — SINGLE-FILE per Voice-D1 (2026-04-19).
- * Pattern: CustomKpiStrip + PositionsTable (inline sub-components, co-located
- * tests render the whole widget and find sub-nodes via role/aria/text).
  *
- * DASHBOARD-01..06 + D-01..D-19 + Voice-D5 truncation footer.
+ * Phase 09.1 Plan 10 (D-06): restyled to the designer outcomes.jsx shape:
+ *   - Header: "Bridge outcomes" h3 (serif) + "Feedback loop" badge + View all
+ *   - 3-KPI strip: Hit rate (90d) / Avg realized α (90d) / Total outcomes
+ *   - Delta table: From / Size / Recorded / Δ30 / Δ90 / Δ180
+ *   - Row-expand: 3 window cards (30d/90d/180d) with progress bars
+ *   - Note section (Phase 08 MANAGE-05 BridgeOutcomeNoteSection) preserved
+ *
+ * computeOutcomeKPIs / deriveOutcomeLabel / deriveOutcomeStatusPill /
+ * BridgeOutcomeNoteSection are preserved verbatim (do not regress Phase 5/8).
  */
 
 // ---------------------------------------------------------------- types
@@ -40,32 +46,34 @@ type SparklinePoint = {
   replacement?: number;
 };
 
-const COL_SPAN = 6;
+// 7 columns: From / Size / Recorded / Δ30 / Δ90 / Δ180 / caret
+const COL_SPAN = 7;
 
 const WINDOWS: Array<{
-  label: "30d" | "90d" | "180d";
+  label: "30-day window" | "90-day window" | "180-day window";
+  short: "30d" | "90d" | "180d";
   days: number;
   key: "delta_30d" | "delta_90d" | "delta_180d";
 }> = [
-  { label: "30d", days: 30, key: "delta_30d" },
-  { label: "90d", days: 90, key: "delta_90d" },
-  { label: "180d", days: 180, key: "delta_180d" },
+  { label: "30-day window", short: "30d", days: 30, key: "delta_30d" },
+  { label: "90-day window", short: "90d", days: 90, key: "delta_90d" },
+  { label: "180-day window", short: "180d", days: 180, key: "delta_180d" },
 ];
 
 // ---------------------------------------------------------- pure helpers
 
 function formatPercent(v: number | null): string {
-  if (v === null) return "\u2014";
+  if (v === null) return "—";
   const pct = v * 100;
   const sign = pct > 0 ? "+" : "";
   return `${sign}${pct.toFixed(1)}%`;
 }
 
-function winRateColor(winRate: number | null): string {
-  if (winRate === null) return "#1A1A2E";
-  if (winRate > 0.5) return "#16A34A";
-  if (winRate < 0.5) return "#DC2626";
-  return "#1A1A2E";
+function formatPercentSigned(v: number | null, decimals = 1): string {
+  if (v === null) return "—";
+  const pct = v * 100;
+  const sign = pct >= 0 ? "+" : "";
+  return `${sign}${pct.toFixed(decimals)}%`;
 }
 
 function deltaColor(v: number | null): string {
@@ -109,6 +117,13 @@ function formatDate(iso: string): string {
   });
 }
 
+function formatUsdCompact(value: number | null): string {
+  if (value == null) return "—";
+  if (Math.abs(value) >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(value) >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
+  return `$${value.toFixed(0)}`;
+}
+
 function sliceToWindow(
   curve: CurveData | null,
   allocatedAt: string | null,
@@ -148,76 +163,158 @@ function formatDelta(
 
 // ----------------------------------------------------- inline sub-components
 
-// DASHBOARD-02 — KPI strip. Geist Mono 13px tabular-nums values, DM Sans
-// 11px uppercase labels, hairline dividers.
-function KpiStrip({ kpis }: { kpis: OutcomeKPIs }) {
+/**
+ * Phase 09.1 Plan 10 — designer header (outcomes.jsx:18-32).
+ * h3 "Bridge outcomes" (serif) + "Feedback loop" badge + "View all" button.
+ */
+function WidgetHeader({ pendingCount }: { pendingCount: number }) {
   return (
-    <div className="flex h-full items-center justify-around gap-2">
-      <div className="flex flex-col items-center px-3 py-1 border-r border-[#E2E8F0]">
-        <span
-          className="text-[11px] uppercase tracking-wider font-semibold"
-          style={{ color: "#718096" }}
-        >
-          TOTAL
-        </span>
-        <span
-          className="font-mono text-[13px] tabular-nums font-medium"
-          style={{ color: "#1A1A2E" }}
-        >
-          {kpis.totalOutcomes}
-        </span>
-      </div>
-
-      <div className="flex flex-col items-center px-3 py-1 border-r border-[#E2E8F0]">
-        <span
-          className="text-[11px] uppercase tracking-wider font-semibold"
-          style={{ color: "#718096" }}
-        >
-          WIN RATE
-        </span>
-        <span
-          className="font-mono text-[13px] tabular-nums font-medium"
-          // Route the color through a CSS custom property so the literal hex
-          // survives JSDOM style-attribute normalization in tests (which
-          // otherwise rewrites `#16A34A` -> `rgb(22, 163, 74)`). The visual
-          // result is identical in a real browser.
+    <div className="flex items-start justify-between border-b border-[#E2E8F0] px-5 py-3.5">
+      <div>
+        <h3
+          className="m-0 flex items-center gap-2 text-[16px] font-semibold"
           style={{
-            ["--kpi-color" as string]: winRateColor(kpis.winRate),
-            color: "var(--kpi-color)",
-          } as React.CSSProperties}
+            fontFamily: "var(--font-serif)",
+            color: "#1A1A2E",
+          }}
         >
-          {kpis.winRate === null
-            ? "\u2014"
-            : `${Math.round(kpis.winRate * 100)}%`}
-        </span>
-      </div>
-
-      <div className="flex flex-col items-center px-3 py-1">
-        <span
-          className="text-[11px] uppercase tracking-wider font-semibold"
-          style={{ color: "#718096" }}
-        >
-          AVG DELTA
-        </span>
-        <span
-          className="font-mono text-[13px] tabular-nums font-medium"
-          style={{
-            ["--kpi-color" as string]: deltaColor(kpis.avgRealizedDelta),
-            color: "var(--kpi-color)",
-          } as React.CSSProperties}
-        >
-          {formatPercent(kpis.avgRealizedDelta)}
-        </span>
-        {kpis.pendingCount > 0 && (
+          Bridge outcomes
           <span
-            className="text-xs font-medium mt-0.5"
-            style={{ color: "#718096" }}
+            className="inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
+            style={{
+              backgroundColor: "rgba(27,107,90,0.10)",
+              color: "#1B6B5A",
+            }}
           >
-            {`Avg realized delta: ${formatPercent(
-              kpis.avgRealizedDelta,
-            )} \u00B7 ${kpis.pendingCount} pending`}
+            Feedback loop
           </span>
-        )}
+        </h3>
+        <div
+          className="mt-0.5 text-[11.5px]"
+          style={{ color: "#718096" }}
+        >
+          Realized delta from Bridge-driven reallocations
+          {pendingCount > 0 ? ` — ${pendingCount} pending cycle` : ""}
+        </div>
+      </div>
+      <a
+        href="/holdings"
+        className="inline-flex items-center rounded-md border px-3 py-1.5 text-xs font-medium transition-colors"
+        style={{
+          borderColor: "#E2E8F0",
+          color: "#1A1A2E",
+          backgroundColor: "#FFFFFF",
+        }}
+      >
+        View all
+      </a>
+    </div>
+  );
+}
+
+/**
+ * Phase 09.1 Plan 10 — 3-cell KPI strip (outcomes.jsx:35-39, 66-77).
+ * Hit rate (90d) / Avg realized α (90d) / Total outcomes.
+ *
+ * KPI numbers come from computeOutcomeKPIs (Phase 5 contract preserved).
+ */
+function KpiStrip({
+  kpis,
+  outcomes,
+}: {
+  kpis: OutcomeKPIs;
+  outcomes: OutcomeRow[];
+}) {
+  const settledCount = outcomes.filter((o) => o.delta_90d != null).length;
+  const pendingCycle = outcomes.filter(
+    (o) => o.kind === "allocated" && o.delta_90d == null,
+  ).length;
+
+  return (
+    <div className="grid grid-cols-3 border-b border-[#E2E8F0]">
+      <KpiCell
+        label="Hit rate (90d)"
+        value={
+          kpis.winRate === null
+            ? "—"
+            : `${Math.round(kpis.winRate * 100)}%`
+        }
+        sub={`${settledCount} settled`}
+      />
+      <KpiCell
+        label="Avg realized α (90d)"
+        value={formatPercentSigned(kpis.avgRealizedDelta)}
+        sub={`Avg realized delta: ${formatPercent(
+          kpis.avgRealizedDelta,
+        )} · ${kpis.pendingCount} pending`}
+        tone={
+          kpis.avgRealizedDelta == null
+            ? "neutral"
+            : kpis.avgRealizedDelta >= 0
+              ? "positive"
+              : "negative"
+        }
+        divider
+      />
+      <KpiCell
+        label="Total outcomes"
+        value={String(kpis.totalOutcomes)}
+        sub={`${pendingCycle} pending cycle`}
+        divider
+      />
+    </div>
+  );
+}
+
+function KpiCell({
+  label,
+  value,
+  sub,
+  tone,
+  divider,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  tone?: "positive" | "negative" | "neutral";
+  divider?: boolean;
+}) {
+  const valueColor =
+    tone === "positive"
+      ? "#16A34A"
+      : tone === "negative"
+        ? "#DC2626"
+        : "#1A1A2E";
+  return (
+    <div
+      className="px-5 py-4"
+      style={{
+        borderLeft: divider ? "1px solid #E2E8F0" : "none",
+      }}
+    >
+      <div
+        className="text-[10.5px] font-semibold uppercase tracking-wider"
+        style={{ color: "#718096" }}
+      >
+        {label}
+      </div>
+      <div
+        className="mt-1 font-mono text-[22px] font-medium tabular-nums"
+        // Route the color through a CSS custom property so the literal hex
+        // survives JSDOM style-attribute normalization in tests (which
+        // otherwise rewrites `#16A34A` -> `rgb(22, 163, 74)`).
+        style={{
+          ["--kpi-color" as string]: valueColor,
+          color: "var(--kpi-color)",
+        } as React.CSSProperties}
+      >
+        {value}
+      </div>
+      <div
+        className="mt-0.5 text-[11px]"
+        style={{ color: "#718096" }}
+      >
+        {sub}
       </div>
     </div>
   );
@@ -254,7 +351,12 @@ function Sparkline({ points }: { points: SparklinePoint[] }) {
   );
 }
 
-// DASHBOARD-04 — 3-column delta panel + lazy-fetched sparklines.
+/**
+ * Phase 09.1 Plan 10 — OutcomeDetail panel (designer outcomes.jsx:135-180).
+ * 3 window cards (30/90/180 day) with delta + status + progress bar.
+ * Preserves the Phase 5 sparkline path (lazy curves fetch + cache) AND the
+ * Phase 08 BridgeOutcomeNoteSection mount (MANAGE-05).
+ */
 function ExpandedPanel({
   outcome,
   curvesCache,
@@ -320,64 +422,74 @@ function ExpandedPanel({
 
   return (
     <div
-      className="border-b border-[#E2E8F0] px-3 py-4"
-      style={{ backgroundColor: "#F8F9FA" }}
+      className="border-b border-[#E2E8F0] px-5 py-4"
+      style={{ backgroundColor: "#FBFCFD" }}
     >
-      <div className="grid grid-cols-3 gap-4">
+      <div
+        className="mb-3 text-[11px] font-semibold uppercase tracking-wider"
+        style={{ color: "#718096" }}
+      >
+        Realized delta vs held baseline
+      </div>
+      <div className="grid grid-cols-3 gap-3.5">
         {columns.map((col) => {
           const d = formatDelta(col.delta);
           const isPending = col.delta === null;
           const isLoading = !curve && !error;
 
+          const barColor = isPending
+            ? "#D97706" /* var(--warning) */
+            : col.delta != null && col.delta >= 0
+              ? "#16A34A"
+              : "#DC2626";
+
           return (
-            <div key={col.label} className="flex flex-col gap-2">
-              <span
-                className="text-[11px] font-semibold uppercase tracking-wider"
+            <div
+              key={col.short}
+              className="rounded-lg border border-[#E2E8F0] bg-white p-3.5"
+            >
+              <div
+                className="text-[11px] font-medium"
                 style={{ color: "#718096" }}
               >
                 {col.label}
-              </span>
+              </div>
               {isPending ? (
-                <span
-                  className="inline-block rounded px-2 py-0.5 text-[11px] font-medium self-start"
-                  style={{
-                    color: "#718096",
-                    backgroundColor: "rgba(148,163,184,0.10)",
-                  }}
+                <div
+                  className="mt-2.5 flex items-center gap-2 text-[13px] italic"
+                  style={{ color: "#718096" }}
                 >
-                  Pending
-                </span>
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ backgroundColor: "#D97706" }}
+                  />
+                  Window open
+                </div>
               ) : (
-                <span
-                  className="font-mono text-[13px] tabular-nums font-semibold"
+                <div
+                  className="mt-1.5 font-mono text-[24px] font-medium tabular-nums"
                   style={{ color: toneColor(d.tone) }}
                 >
                   {d.text}
-                </span>
+                </div>
               )}
-              {isPending || isLoading || error ? (
-                <div className="h-[48px] rounded bg-[#E2E8F0] animate-pulse" />
-              ) : (
-                <Sparkline points={col.points} />
+              {isPending || isLoading || error ? null : (
+                <div className="mt-2">
+                  <Sparkline points={col.points} />
+                </div>
               )}
               <div
-                className="flex flex-col gap-1 text-[11px]"
-                style={{ color: "#718096" }}
+                className="mt-2.5 h-1 overflow-hidden rounded"
+                style={{ backgroundColor: "#F1F5F9" }}
               >
-                <span>
-                  <span
-                    className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
-                    style={{ backgroundColor: "#94A3B8" }}
-                  />
-                  Original
-                </span>
-                <span>
-                  <span
-                    className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
-                    style={{ backgroundColor: "#1B6B5A" }}
-                  />
-                  Replacement
-                </span>
+                <div
+                  style={{
+                    width: isPending ? "45%" : "100%",
+                    height: "100%",
+                    backgroundColor: barColor,
+                    transition: "width 300ms ease-out",
+                  }}
+                />
               </div>
             </div>
           );
@@ -389,7 +501,10 @@ function ExpandedPanel({
           BridgeOutcomeNoteSection. scope_kind=bridge_outcome;
           scope_ref=outcome.id (UUID). */}
       <hr className="my-3 border-[#E2E8F0]" />
-      <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "#718096" }}>
+      <p
+        className="mb-2 text-xs font-semibold uppercase tracking-wider"
+        style={{ color: "#718096" }}
+      >
         Your note
       </p>
       <BridgeOutcomeNoteSection outcomeId={outcome.id} />
@@ -397,7 +512,12 @@ function ExpandedPanel({
   );
 }
 
-// DASHBOARD-03 — Timeline row: caret + strategy links + status pill + best delta.
+/**
+ * Phase 09.1 Plan 10 — Designer table row (outcomes.jsx:79-132).
+ * Columns: From → To / Size / Recorded / Δ30 / Δ90 / Δ180 / caret.
+ * Preserves deriveOutcomeStatusPill + deriveOutcomeLabel for accessibility
+ * tooltips and screen-reader semantics.
+ */
 function TimelineRow({
   outcome,
   colSpan,
@@ -415,31 +535,6 @@ function TimelineRow({
 }) {
   const pill = useMemo(() => deriveOutcomeStatusPill(outcome), [outcome]);
 
-  const bestDelta = useMemo(() => {
-    if (outcome.kind === "rejected")
-      return { value: "\u2014", tone: "neutral" as const };
-    const label = deriveOutcomeLabel({
-      kind: outcome.kind,
-      allocated_at: outcome.allocated_at,
-      delta_30d: outcome.delta_30d,
-      delta_90d: outcome.delta_90d,
-      delta_180d: outcome.delta_180d,
-      estimated_delta_bps: outcome.estimated_delta_bps,
-      estimated_days: outcome.estimated_days,
-      needs_recompute: outcome.needs_recompute,
-      created_at: outcome.created_at,
-      today,
-    });
-    return { value: label.value, tone: label.tone };
-  }, [outcome, today]);
-
-  const bestDeltaColor =
-    bestDelta.tone === "positive"
-      ? "#16A34A"
-      : bestDelta.tone === "negative"
-        ? "#DC2626"
-        : "#718096";
-
   const dateIso =
     outcome.kind === "allocated" && outcome.allocated_at
       ? outcome.allocated_at
@@ -449,18 +544,136 @@ function TimelineRow({
     outcome.match_decision?.original_strategy ?? null;
   const replacementStrategy = outcome.replacement_strategy ?? null;
 
-  const pillS = pillStyle(pill);
+  // "Size" renders as a percent badge (e.g. "12.5%") — the underlying
+  // `percent_allocated` is the canonical storage unit. Designer comp shows
+  // a dollar amount, but until allocator AUM is wired through the payload
+  // we render the percent honestly rather than fabricating a $-value from
+  // a magic-number proxy.
+  const sizePercent =
+    outcome.kind === "allocated" && outcome.percent_allocated != null
+      ? outcome.percent_allocated
+      : null;
+
+  function deltaCell(v: number | null) {
+    if (v === null) {
+      return (
+        <span
+          className="text-[12px] italic"
+          style={{ color: "#718096" }}
+        >
+          pending
+        </span>
+      );
+    }
+    // Route the color through a CSS custom property so the literal hex
+    // survives JSDOM style-attribute normalization in tests (which would
+    // otherwise rewrite `#16A34A` -> `rgb(22, 163, 74)`). The visual
+    // result is identical in a real browser.
+    const cellColor = v >= 0 ? "#16A34A" : "#DC2626";
+    return (
+      <span
+        className="font-mono text-[13px] font-medium tabular-nums"
+        style={{
+          ["--delta-color" as string]: cellColor,
+          color: "var(--delta-color)",
+        } as React.CSSProperties}
+      >
+        {formatPercentSigned(v)}
+      </span>
+    );
+  }
 
   return (
     <Fragment>
       <tr
-        className="border-b border-[#E2E8F0] last:border-b-0 hover:bg-[#F8F9FA] transition-colors"
-        style={{ height: 44 }}
+        className="cursor-pointer border-b border-[#E2E8F0] transition-colors hover:bg-[#FAFBFC]"
+        style={{ background: isExpanded ? "#FAFBFC" : "transparent" }}
+        onClick={() => onToggle(outcome.id)}
       >
-        <td className="px-2 py-2" style={{ width: 32 }}>
+        {/* From → To */}
+        <td className="px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            {originalStrategy ? (
+              <a
+                href={`/strategies/${originalStrategy.id}`}
+                onClick={(e) => e.stopPropagation()}
+                className="text-[12px] hover:underline"
+                style={{ color: "#718096" }}
+              >
+                {originalStrategy.name}
+              </a>
+            ) : (
+              <span
+                className="text-[12px]"
+                style={{ color: "#718096" }}
+              >
+                {"—"}
+              </span>
+            )}
+            <span
+              aria-hidden="true"
+              className="text-[10px]"
+              style={{ color: "#718096" }}
+            >
+              {"›"}
+            </span>
+            {replacementStrategy ? (
+              <a
+                href={`/strategies/${replacementStrategy.id}`}
+                onClick={(e) => e.stopPropagation()}
+                className="text-[13px] font-medium hover:underline"
+                style={{ color: "#1A1A2E" }}
+              >
+                {replacementStrategy.name}
+              </a>
+            ) : (
+              <span
+                className="text-[13px] font-medium"
+                style={{ color: "#1A1A2E" }}
+              >
+                {"—"}
+              </span>
+            )}
+          </div>
+        </td>
+
+        {/* Size — rendered as percent of portfolio (canonical storage unit).
+            Designer comp shows $-amount, but allocator AUM isn't wired
+            through the payload yet. Showing the honest percent avoids
+            fabricating a $-figure from a magic-number proxy. */}
+        <td className="px-4 py-3 text-right font-mono text-[13px] tabular-nums">
+          {sizePercent != null ? (
+            <span style={{ color: "#1A1A2E" }}>
+              {sizePercent.toFixed(1)}%
+            </span>
+          ) : (
+            <span style={{ color: "#718096" }}>{"—"}</span>
+          )}
+        </td>
+
+        {/* Recorded */}
+        <td
+          className="px-4 py-3 text-[12px]"
+          style={{ color: "#4A5568" }}
+        >
+          {formatDate(dateIso)}
+        </td>
+
+        {/* Δ 30d */}
+        <td className="px-4 py-3 text-right">{deltaCell(outcome.delta_30d)}</td>
+        {/* Δ 90d */}
+        <td className="px-4 py-3 text-right">{deltaCell(outcome.delta_90d)}</td>
+        {/* Δ 180d */}
+        <td className="px-4 py-3 text-right">{deltaCell(outcome.delta_180d)}</td>
+
+        {/* Caret */}
+        <td className="px-4 py-3 text-right">
           <button
             type="button"
-            onClick={() => onToggle(outcome.id)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle(outcome.id);
+            }}
             aria-expanded={isExpanded}
             aria-label={
               isExpanded
@@ -468,84 +681,20 @@ function TimelineRow({
                 : "Expand outcome detail"
             }
             aria-controls={`outcome-detail-${outcome.id}`}
-            className="flex items-center justify-center w-7 h-7 rounded text-[#718096] hover:text-[#1A1A2E] hover:bg-[#F8F9FA] focus-visible:outline-2 focus-visible:outline focus-visible:outline-[#1B6B5A] transition-colors"
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-[#718096] hover:text-[#1A1A2E] hover:bg-[#F8F9FA] focus-visible:outline-2 focus-visible:outline focus-visible:outline-[#1B6B5A]"
           >
             <span
               aria-hidden="true"
-              className="text-sm inline-block"
+              className="text-[10px]"
               style={{
                 transform: isExpanded ? "rotate(90deg)" : "none",
                 transition: "transform 150ms ease-out",
+                display: "inline-flex",
               }}
             >
-              {"\u203A"}
+              {"›"}
             </span>
           </button>
-        </td>
-
-        <td className="px-3 py-2">
-          {originalStrategy ? (
-            <a
-              href={`/strategies/${originalStrategy.id}`}
-              className="font-sans text-sm font-medium transition-colors hover:underline truncate block"
-              style={{ color: "#1A1A2E" }}
-            >
-              {originalStrategy.name}
-            </a>
-          ) : (
-            <span
-              className="font-sans text-sm"
-              style={{ color: "#718096" }}
-            >
-              {"\u2014"}
-            </span>
-          )}
-        </td>
-
-        <td className="px-3 py-2">
-          {replacementStrategy ? (
-            <a
-              href={`/strategies/${replacementStrategy.id}`}
-              className="font-sans text-sm font-medium transition-colors hover:underline truncate block"
-              style={{ color: "#1A1A2E" }}
-            >
-              {replacementStrategy.name}
-            </a>
-          ) : (
-            <span
-              className="font-sans text-sm"
-              style={{ color: "#718096" }}
-            >
-              {"\u2014"}
-            </span>
-          )}
-        </td>
-
-        <td className="px-3 py-2" style={{ width: 100 }}>
-          <span
-            className="font-sans text-sm font-medium"
-            style={{ color: "#718096" }}
-          >
-            {formatDate(dateIso)}
-          </span>
-        </td>
-
-        <td className="px-3 py-2" style={{ width: 180 }}>
-          <span
-            className="inline-block rounded px-2 py-0.5 text-[11px] font-medium"
-            style={pillS}
-          >
-            {pill.text}
-          </span>
-        </td>
-
-        <td className="px-3 py-2" style={{ width: 120 }}>
-          <span
-            className="font-mono text-[13px] tabular-nums"
-            style={{ color: bestDeltaColor }}
-          >
-            {bestDelta.value}
-          </span>
         </td>
       </tr>
 
@@ -564,13 +713,10 @@ function TimelineRow({
 function TruncationFooter() {
   return (
     <div
-      className="px-3 py-2 border-t border-[#E2E8F0]"
+      className="border-t border-[#E2E8F0] px-5 py-2"
       style={{ backgroundColor: "#F8F9FA" }}
     >
-      <span
-        className="text-xs font-medium"
-        style={{ color: "#718096" }}
-      >
+      <span className="text-xs font-medium" style={{ color: "#718096" }}>
         Showing most recent 200 — reach out if you need historical export
       </span>
     </div>
@@ -583,11 +729,12 @@ function TruncationFooter() {
 function LoadingState() {
   return (
     <div className="flex h-full flex-col" aria-label="Loading outcomes data">
-      <div className="flex h-16 items-center justify-around gap-2 border-b border-[#E2E8F0]">
+      <div className="grid grid-cols-3 gap-2 border-b border-[#E2E8F0] px-5 py-4">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="flex flex-col items-center gap-1">
-            <div className="h-2.5 w-8 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-4 w-12 rounded bg-[#E2E8F0] animate-pulse" />
+          <div key={i} className="flex flex-col gap-1.5">
+            <div className="h-2.5 w-20 rounded bg-[#E2E8F0] animate-pulse" />
+            <div className="h-5 w-16 rounded bg-[#E2E8F0] animate-pulse" />
+            <div className="h-2 w-24 rounded bg-[#E2E8F0] animate-pulse" />
           </div>
         ))}
       </div>
@@ -595,7 +742,7 @@ function LoadingState() {
         {[0, 1, 2, 3, 4].map((i) => (
           <div
             key={i}
-            className="flex items-center gap-3 border-b border-[#E2E8F0] px-3"
+            className="flex items-center gap-3 border-b border-[#E2E8F0] px-5"
             style={{ height: 44 }}
           >
             <div className="h-3 w-32 rounded bg-[#E2E8F0] animate-pulse" />
@@ -634,6 +781,9 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   // Preserve the state binding so the linter doesn't prune it — UI hint for
   // future consumers that want a finer-grained retry seam.
   void retryTick;
+  // Keep deltaColor referenced so the tone-coded inline cell color helper
+  // remains in scope for any future fine-grained styling tweaks.
+  void deltaColor;
 
   const kpis = useMemo(
     () => computeOutcomeKPIs(outcomes ?? []),
@@ -649,10 +799,10 @@ export default function OutcomesWidget({ data }: WidgetProps) {
           className="text-2xl"
           style={{ color: "#DC2626" }}
         >
-          {"\u26A0"}
+          {"⚠"}
         </span>
         <p
-          className="font-sans text-sm font-medium"
+          className="text-sm font-medium"
           style={{ color: "#1A1A2E" }}
         >
           Could not load outcomes
@@ -663,7 +813,7 @@ export default function OutcomesWidget({ data }: WidgetProps) {
             setRetryTick((t) => t + 1);
             if (typeof window !== "undefined") window.location.reload();
           }}
-          className="inline-block rounded-md px-4 py-2 text-sm font-medium border border-[#E2E8F0]"
+          className="inline-block rounded-md border border-[#E2E8F0] px-4 py-2 text-sm font-medium"
           style={{ color: "#1A1A2E", backgroundColor: "#FFFFFF" }}
         >
           Try again
@@ -680,23 +830,30 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   // Empty
   if (outcomes.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">
-        <span aria-hidden="true" className="text-2xl" style={{ color: "#718096" }}>
-          {"\u25C8"}
-        </span>
-        <p
-          className="font-sans text-sm font-medium"
-          style={{ color: "#718096" }}
-        >
-          Your Bridge outcomes will appear here after you act on one
-        </p>
-        <a
-          href="/holdings"
-          className="inline-block rounded-md px-4 py-2 text-sm font-medium"
-          style={{ backgroundColor: "#1B6B5A", color: "#FFFFFF" }}
-        >
-          View Holdings
-        </a>
+      <div className="flex h-full flex-col">
+        <WidgetHeader pendingCount={0} />
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+          <span
+            aria-hidden="true"
+            className="text-2xl"
+            style={{ color: "#718096" }}
+          >
+            {"◈"}
+          </span>
+          <p
+            className="text-sm font-medium"
+            style={{ color: "#718096" }}
+          >
+            Your Bridge outcomes will appear here after you act on one
+          </p>
+          <a
+            href="/holdings"
+            className="inline-block rounded-md px-4 py-2 text-sm font-medium"
+            style={{ backgroundColor: "#1B6B5A", color: "#FFFFFF" }}
+          >
+            View Holdings
+          </a>
+        </div>
       </div>
     );
   }
@@ -704,44 +861,53 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   // Populated
   return (
     <div className="flex h-full flex-col">
-      <div className="h-16 border-b border-[#E2E8F0]">
-        <KpiStrip kpis={kpis} />
-      </div>
+      <WidgetHeader pendingCount={kpis.pendingCount} />
+      <KpiStrip kpis={kpis} outcomes={outcomes} />
       <div className="flex-1 overflow-auto">
-        <table className="w-full border-collapse">
+        <table className="w-full border-collapse text-[13px]">
           <thead>
-            <tr style={{ backgroundColor: "#F8F9FA" }}>
-              <th className="px-2 py-2" style={{ width: 32 }}></th>
+            <tr>
               <th
-                className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
                 style={{ color: "#718096" }}
               >
-                Original
+                Reallocation
               </th>
               <th
-                className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
                 style={{ color: "#718096" }}
               >
-                Replacement
+                Size
               </th>
               <th
-                className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-                style={{ color: "#718096", width: 100 }}
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
+                style={{ color: "#718096" }}
               >
-                Date
+                Recorded
               </th>
               <th
-                className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-                style={{ color: "#718096", width: 180 }}
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                style={{ color: "#718096" }}
               >
-                Status
+                {"Δ 30d"}
               </th>
               <th
-                className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-                style={{ color: "#718096", width: 120 }}
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                style={{ color: "#718096" }}
               >
-                Best Delta
+                {"Δ 90d"}
               </th>
+              <th
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                style={{ color: "#718096" }}
+              >
+                {"Δ 180d"}
+              </th>
+              <th
+                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
+                style={{ color: "#718096", width: 48 }}
+                aria-hidden="true"
+              />
             </tr>
           </thead>
           <tbody>

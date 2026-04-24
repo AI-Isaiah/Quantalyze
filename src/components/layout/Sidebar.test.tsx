@@ -104,3 +104,79 @@ describe("Sidebar workspace order — allocator view", () => {
     ).toBeTruthy();
   });
 });
+
+/**
+ * Discovery sub-groups — per the Allocator Dashboard design handoff.
+ *
+ * Discovery lives under a single "DISCOVERY" heading with two
+ * sub-group labels inside: "Digital Assets" (crypto SMA / CFD /
+ * emerging crypto / crypto decks) and "TradFi" (TradFi decks).
+ * This mirrors how allocators already think about strategy sourcing —
+ * crypto vs traditional finance — and avoids a flat list that grows
+ * unboundedly as new categories land.
+ */
+describe("Sidebar Discovery sub-groups", () => {
+  it("renders a single 'DISCOVERY' heading, not one per group", () => {
+    render(<Sidebar isAllocator={true} />);
+    expect(screen.getAllByText("DISCOVERY")).toHaveLength(1);
+  });
+
+  it("renders 'Digital Assets' and 'TradFi' sub-group labels under Discovery", () => {
+    render(<Sidebar isAllocator={true} />);
+    expect(screen.getByText("Digital Assets")).toBeInTheDocument();
+    expect(screen.getByText("TradFi")).toBeInTheDocument();
+  });
+
+  it("places 'Digital Assets' before 'TradFi'", () => {
+    render(<Sidebar isAllocator={true} />);
+    const digital = screen.getByText("Digital Assets");
+    const tradfi = screen.getByText("TradFi");
+    expect(
+      digital.compareDocumentPosition(tradfi) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("groups 'Crypto SMA' under the 'Digital Assets' sub-group and 'TradFi Decks' under 'TradFi'", () => {
+    render(<Sidebar isAllocator={true} />);
+    const digital = screen.getByText("Digital Assets");
+    const tradfi = screen.getByText("TradFi");
+    const cryptoSma = screen.getByText("Crypto SMA");
+    const tradfiDecks = screen.getByText("TradFi Decks");
+    // Crypto SMA falls between the two sub-group labels.
+    expect(
+      digital.compareDocumentPosition(cryptoSma) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      cryptoSma.compareDocumentPosition(tradfi) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // TradFi Decks comes after the TradFi sub-group label.
+    expect(
+      tradfi.compareDocumentPosition(tradfiDecks) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("hides the entire Discovery section when no categories are populated", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    expect(screen.queryByText("DISCOVERY")).toBeNull();
+    expect(screen.queryByText("Digital Assets")).toBeNull();
+    expect(screen.queryByText("TradFi")).toBeNull();
+  });
+
+  it("hides a sub-group that becomes empty after populatedSlugs filtering", () => {
+    // Only digital-assets slugs are populated — the TradFi sub-group
+    // should disappear entirely rather than render an empty header.
+    render(
+      <Sidebar
+        populatedSlugs={["crypto-sma", "cfd"]}
+        isAllocator={true}
+      />,
+    );
+    expect(screen.getByText("Digital Assets")).toBeInTheDocument();
+    expect(screen.queryByText("TradFi")).toBeNull();
+    expect(screen.queryByText("TradFi Decks")).toBeNull();
+  });
+});

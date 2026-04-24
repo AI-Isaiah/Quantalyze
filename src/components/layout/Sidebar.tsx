@@ -6,17 +6,41 @@ import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
-interface NavItem { label: string; href: string; icon: IconComponent }
-interface NavSection { heading: string; items: NavItem[] }
+interface NavItem {
+  label: string;
+  href: string;
+  icon: IconComponent;
+  /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label. */
+  badge?: number;
+}
+interface NavSubGroup { label: string; items: NavItem[] }
+interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[] }
 
 function buildNavSections(
   populatedSlugs?: string[],
   isAdmin?: boolean,
   isAllocator?: boolean,
+  flaggedCount?: number,
 ): NavSection[] {
   const categories = populatedSlugs
     ? DISCOVERY_CATEGORIES.filter((cat) => populatedSlugs.includes(cat.slug))
     : DISCOVERY_CATEGORIES;
+
+  // Bucket categories by `group` preserving first-seen order so the
+  // Discovery section renders as stable sub-groups (Digital Assets → TradFi).
+  const discoveryGroups: NavSubGroup[] = [];
+  for (const cat of categories) {
+    let bucket = discoveryGroups.find((g) => g.label === cat.group);
+    if (!bucket) {
+      bucket = { label: cat.group, items: [] };
+      discoveryGroups.push(bucket);
+    }
+    bucket.items.push({
+      label: cat.name,
+      href: `/discovery/${cat.slug}`,
+      icon: SearchIcon,
+    });
+  }
 
   // v0.4.0 pivot: allocator workspace and manager/crypto-team workspace
   // are distinct now.
@@ -32,7 +56,12 @@ function buildNavSections(
   const workspaceItems: NavItem[] = [];
   if (isAllocator && !isAdmin) {
     workspaceItems.push(
-      { label: "My Allocation", href: "/allocations", icon: PortfolioIcon },
+      {
+        label: "My Allocation",
+        href: "/allocations",
+        icon: PortfolioIcon,
+        badge: flaggedCount,
+      },
       { label: "Scenarios", href: "/scenarios", icon: BarChartIcon },
       {
         label: "Recommendations",
@@ -54,14 +83,14 @@ function buildNavSections(
       heading: "MY WORKSPACE",
       items: workspaceItems,
     },
-    ...(categories.length > 0
+    ...(discoveryGroups.length > 0
       ? [{
           heading: "DISCOVERY",
-          items: categories.map((cat) => ({
-            label: cat.name,
-            href: `/discovery/${cat.slug}`,
-            icon: SearchIcon,
-          })),
+          // Discovery renders via `subGroups`; keep `items` empty so
+          // consumers that only inspect `items` still render the
+          // heading without duplicating links.
+          items: [],
+          subGroups: discoveryGroups,
         }]
       : []),
     ...(isAdmin
@@ -88,6 +117,7 @@ export function Sidebar({
   isAdmin,
   isAllocator,
   variant = "desktop",
+  flaggedCount,
 }: {
   populatedSlugs?: string[];
   isAdmin?: boolean;
@@ -97,11 +127,15 @@ export function Sidebar({
    *  component can live inside the MobileSidebarDrawer overlay without
    *  fighting for position with the backdrop or the slide-in panel. */
   variant?: "desktop" | "drawer";
+  /** Phase 09.1 Plan 11 / R5 — flaggedHoldings.length sourced upstream
+   *  via DashboardChrome's `useFlaggedCountStore()` (no new server
+   *  query). Renders as a badge on "My Allocation" when > 0. */
+  flaggedCount?: number;
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
-    () => buildNavSections(populatedSlugs, isAdmin, isAllocator),
-    [populatedSlugs, isAdmin, isAllocator],
+    () => buildNavSections(populatedSlugs, isAdmin, isAllocator, flaggedCount),
+    [populatedSlugs, isAdmin, isAllocator, flaggedCount],
   );
 
   return (
@@ -124,30 +158,75 @@ export function Sidebar({
             <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-sidebar-text/50">
               {section.heading}
             </p>
-            <ul className="space-y-0.5">
-              {section.items.map((item) => {
-                const active = pathname === item.href || pathname.startsWith(item.href + "/");
-                return (
-                  <li key={item.href}>
-                    <Link
-                      href={item.href}
-                      className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
-                        active
-                          ? "bg-sidebar-active text-sidebar-text-active"
-                          : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
-                      }`}
-                    >
-                      <item.icon className="h-4 w-4 shrink-0" />
-                      {item.label}
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
+            {section.items.length > 0 && (
+              <ul className="space-y-0.5">
+                {section.items.map((item) => (
+                  <NavItemLink
+                    key={item.href}
+                    item={item}
+                    pathname={pathname}
+                  />
+                ))}
+              </ul>
+            )}
+            {section.subGroups?.map((group, idx) => (
+              <div
+                key={group.label}
+                className={idx === 0 ? "" : "mt-3"}
+              >
+                <p className="mb-1 px-3 text-[10px] font-medium uppercase tracking-wider text-sidebar-text/35">
+                  {group.label}
+                </p>
+                <ul className="space-y-0.5">
+                  {group.items.map((item) => (
+                    <NavItemLink
+                      key={item.href}
+                      item={item}
+                      pathname={pathname}
+                    />
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
         ))}
       </nav>
     </aside>
+  );
+}
+
+function NavItemLink({
+  item,
+  pathname,
+}: {
+  item: NavItem;
+  pathname: string;
+}) {
+  const active = pathname === item.href || pathname.startsWith(item.href + "/");
+  const badge = item.badge;
+  const showBadge = typeof badge === "number" && badge > 0;
+  return (
+    <li>
+      <Link
+        href={item.href}
+        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+          active
+            ? "bg-sidebar-active text-sidebar-text-active"
+            : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
+        }`}
+      >
+        <item.icon className="h-4 w-4 shrink-0" />
+        <span>{item.label}</span>
+        {showBadge && (
+          <span
+            aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
+            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-medium text-white"
+          >
+            {badge}
+          </span>
+        )}
+      </Link>
+    </li>
   );
 }
 
