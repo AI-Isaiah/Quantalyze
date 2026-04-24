@@ -13,7 +13,11 @@ import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
  * `ScenarioFlaggedHoldingsList` instead of the stub card. The stub card is
  * preserved verbatim as the empty-state fallback.
  *
- * Copy strings are verbatim from 07-UI-SPEC.md §Copywriting. Do not
+ * Phase 09.1 Plan 10 (D-07): restyle-only token cleanup — explicit
+ * `var(--font-serif)` on the heading, design-token spacing, no behavior
+ * change. Phase 10 replaces the body with the Scenario composer.
+ *
+ * Copy strings are preserved from 07-UI-SPEC.md §Copywriting. Do not
  * modify without a design review.
  */
 export interface ScenarioStubProps {
@@ -42,12 +46,17 @@ export function ScenarioStub({
     );
   }
 
+  // Phase 09.1 Plan 10 — restyled empty-state. Card padding + serif heading
+  // via the explicit CSS var so the design-token map is unambiguous.
   return (
     <Card className="py-12 text-center">
-      <h2 className="font-serif text-2xl text-text-primary mb-2">
+      <h2
+        className="mb-2 text-2xl text-text-primary"
+        style={{ fontFamily: "var(--font-serif)" }}
+      >
         Scenario builder coming soon
       </h2>
-      <p className="text-sm text-text-secondary max-w-md mx-auto">
+      <p className="mx-auto max-w-md text-sm text-text-secondary">
         Model what-if outcomes by adding or removing strategies and holdings
         from your live composition. Available in the next update.
       </p>

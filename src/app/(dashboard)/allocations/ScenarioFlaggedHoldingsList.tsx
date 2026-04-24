@@ -195,11 +195,16 @@ export function ScenarioFlaggedHoldingsList({
 
   const maxWeight = allocatorPreferences?.max_weight ?? null;
 
+  // Phase 09.1 Plan 10 (D-07): token-only restyle — list container gets a
+  // surface card frame, header row uses design tokens, numeric cells use
+  // the canonical `font-mono` class. Behavior (state machine, handlers,
+  // API call shape, refs) is UNCHANGED — see the BannerSubRowContent
+  // component above.
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm font-sans">
+    <div className="overflow-x-auto rounded-lg border border-border bg-surface p-4">
+      <table className="w-full font-sans text-sm">
         <thead>
-          <tr className="border-b border-[#E2E8F0] text-left text-[10px] uppercase tracking-wider text-text-muted">
+          <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text-muted">
             <th className="pb-2 pr-4 font-medium" />
             <th className="pb-2 pr-4 font-medium">Holding</th>
             <th className="pb-2 pr-4 font-medium">Candidate Strategy</th>
@@ -218,11 +223,13 @@ export function ScenarioFlaggedHoldingsList({
 
             return (
               <Fragment key={ref}>
-                <tr className="border-b border-[#E2E8F0] hover:bg-surface-hover">
+                <tr className="border-b border-border transition-colors hover:bg-[#FAFBFC]">
                   <td className="py-3 pr-4">
                     <button
                       type="button"
-                      aria-label={isExpanded ? "Collapse review" : "Expand review"}
+                      aria-label={
+                        isExpanded ? "Collapse review" : "Expand review"
+                      }
                       aria-expanded={isExpanded}
                       onClick={toggleExpand}
                       className="flex h-6 w-6 items-center justify-center rounded text-text-muted transition-colors hover:text-text-secondary"
@@ -231,7 +238,10 @@ export function ScenarioFlaggedHoldingsList({
                     </button>
                   </td>
                   <td className="py-3 pr-4">
-                    <span className="font-mono text-text-primary">
+                    <span
+                      className="font-mono text-text-primary"
+                      style={{ fontFamily: "var(--font-mono)" }}
+                    >
                       {h.symbol}
                     </span>
                     <span className="ml-1 text-xs text-text-muted">
@@ -241,7 +251,10 @@ export function ScenarioFlaggedHoldingsList({
                   <td className="py-3 pr-4 text-text-secondary">
                     {h.top_candidate_name}
                   </td>
-                  <td className="py-3 pr-4 font-mono text-text-primary">
+                  <td
+                    className="py-3 pr-4 font-mono text-text-primary"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                  >
                     {h.top_candidate_composite}
                   </td>
                   <td className="py-3">
