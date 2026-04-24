@@ -9,6 +9,7 @@ import { HoldingsTabPanel } from "./HoldingsTabPanel";
 import { OutcomesTabPanel } from "./OutcomesTabPanel";
 import { MandateTabPanel } from "./MandateTabPanel";
 import { RiskTabPanel } from "./RiskTabPanel";
+import { QA_MODE } from "@/lib/qa-mode";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // Phase 09.1 Plan 01 / D-17 — feature flag controlling whether the
@@ -128,8 +129,11 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // re-reads on mount so a client with localStorage["allocations.ui_v2"]="true" sees V2
   // on the second render. This avoids the React 19 hydration mismatch that would fire
   // if the initial render branched on a window-only value.
-  const qaMode = process.env.NEXT_PUBLIC_QA_MODE === "true";
-  const uiOverride = qaMode && searchParams.get("ui") === "v2";
+  // Phase 09.1 Plan 11 / V3 accepted — share the QA_MODE module-scope
+  // constant with Tweaks.tsx so both consumers route through the same
+  // import surface (single mock path in tests, single audit point for
+  // production env reads).
+  const uiOverride = QA_MODE && searchParams.get("ui") === "v2";
   const [uiV2Flag, setUiV2Flag] = useState<boolean>(() => loadUiV2Flag());
   useEffect(() => {
     setUiV2Flag(loadUiV2Flag());

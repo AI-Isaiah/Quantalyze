@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { getMyAllocationDashboard } from "@/lib/queries";
 import { AllocationsTabs } from "./AllocationsTabs";
+import { AllocationProvider } from "./AllocationContext";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -41,7 +42,13 @@ export default async function MyAllocationPage() {
         description="Your live exchange-verified portfolio."
       />
       <Suspense fallback={<div />}>
-        <AllocationsTabs {...payload} />
+        {/* Plan 11 / R5 — publish flaggedHoldings.length from the existing
+            payload through AllocationProvider; DashboardChrome / Sidebar
+            (mounted above this tree) read the count via the provider's
+            cross-tree store. No new server query. */}
+        <AllocationProvider value={{ flaggedCount: payload.flaggedHoldings.length }}>
+          <AllocationsTabs {...payload} />
+        </AllocationProvider>
       </Suspense>
     </main>
   );
