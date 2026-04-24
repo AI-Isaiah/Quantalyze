@@ -27,6 +27,14 @@ import { AllocatedForm } from "./components/AllocatedForm";
 import { RejectedForm } from "./components/RejectedForm";
 import { OutcomeRecordedRow } from "./components/OutcomeRecordedRow";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+// Phase 09.1 Plan 09 / R2 accepted — Send-intro endpoint extracted to a
+// shared helper so the new BridgeDrawer can consume the SAME wire shape
+// without a string-literal fetch URL. The existing ScenarioFlaggedHoldingsList
+// flow continues to behave identically: the helper issues the same
+// POST /api/match/decisions/holding request, so the existing test
+// (ScenarioFlaggedHoldingsList.test.tsx) which mocks `global.fetch`
+// continues to see the same call signature.
+import { sendBridgeIntro } from "@/lib/bridge/send-intro";
 
 export interface ScenarioFlaggedHoldingsListProps {
   flaggedHoldings: FlaggedHolding[];
@@ -92,44 +100,32 @@ function BannerSubRowContent({
 
   if (mode === "dismissed") return null;
 
-  /** finding f2: POST to /api/match/decisions/holding if no decision exists yet */
+  /**
+   * finding f2: ensure a match_decision row exists, then transition to the
+   * allocated/rejected sub-form. R2 accepted: routes through the shared
+   * `sendBridgeIntro` helper (Plan 09) instead of an inline fetch literal,
+   * so the BridgeDrawer can reuse the same wire shape.
+   */
   async function ensureDecisionThen(targetMode: "allocated" | "rejected") {
     if (effectiveDecisions[ref]) {
       setMode(targetMode);
       return;
     }
     setErrorByRef((e) => ({ ...e, [ref]: null }));
-    try {
-      const res = await fetch("/api/match/decisions/holding", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          holding_ref: ref,
-          top_candidate_strategy_id: h.top_candidate_strategy_id,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setErrorByRef((e) => ({
-          ...e,
-          [ref]:
-            (body as Record<string, string>)?.error ??
-            "This comparison isn't available.",
-        }));
-        return;
-      }
-      const { match_decision_id } = (await res.json()) as {
-        match_decision_id: string;
-      };
-      setLocalDecisionsByRef((d) => ({ ...d, [ref]: { id: match_decision_id } }));
-      setMode(targetMode);
-      router.refresh();
-    } catch {
-      setErrorByRef((e) => ({
-        ...e,
-        [ref]: "Network error. Please retry.",
-      }));
+    const result = await sendBridgeIntro({
+      holdingRef: ref,
+      topCandidateStrategyId: h.top_candidate_strategy_id,
+    });
+    if (!result.ok) {
+      setErrorByRef((e) => ({ ...e, [ref]: result.error }));
+      return;
     }
+    setLocalDecisionsByRef((d) => ({
+      ...d,
+      [ref]: { id: result.matchDecisionId },
+    }));
+    setMode(targetMode);
+    router.refresh();
   }
 
   const errorMsg = errorByRef[ref];

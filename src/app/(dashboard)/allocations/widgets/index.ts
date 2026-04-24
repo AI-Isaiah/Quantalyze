@@ -105,4 +105,11 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
 
   // ── Outcomes (1) ───────────────────────────────────────────────────
   "outcomes-timeline": lazy(() => import("./outcomes/OutcomesWidget")),
+
+  // ── Bridge (1) — Phase 09.1 Plan 09 / D-14 + D-15 ──────────────────
+  // Hero Bridge widget. The lazy chunk pulls in the BridgeWidget
+  // component + the BridgeDrawer it composes. The default export is a
+  // thin WidgetProps adapter that pulls flaggedHoldings + the match
+  // decisions map out of the dashboard payload (data prop).
+  "bridge-hero": lazy(() => import("./bridge/BridgeHeroWidget")),
 };

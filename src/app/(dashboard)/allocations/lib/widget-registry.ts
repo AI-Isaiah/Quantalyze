@@ -458,6 +458,23 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     description: "Timeline of recorded Bridge outcomes with win-rate KPIs and delta sparklines.",
     status: "ready",
   },
+
+  // ── Bridge (1) — Phase 09.1 Plan 09 / D-14 + D-15 ───────────────
+  // Hero Bridge widget: portfolio-level entry point with Review CTA that
+  // opens BridgeDrawer (cross-holdings browse → confirm). Default Overview
+  // tile per D-15. Per-row inline BridgeOutcomeBanner stays on Plan 08's
+  // HoldingsTable (D-14 / S3 accepted) — no double-mount because this
+  // widget renders a portfolio-level summary, not a per-holding banner.
+  "bridge-hero": {
+    id: "bridge-hero",
+    name: "Bridge",
+    category: "intelligence",
+    icon: "B",
+    defaultW: 4,
+    defaultH: 3,
+    description: "Hero Bridge widget — flagged holdings summary + Review drawer.",
+    status: "ready",
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -511,7 +528,14 @@ export const WIDGET_CATEGORIES = [
 // WIDGET_REGISTRY id, `resolveWidgetId` returns it unchanged (the
 // renderer will then surface the "Unknown widget" fallback).
 export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
-  bridge: "bridge-outcome-banner",
+  // Phase 09.1 Plan 09 / D-15 — Hero Bridge widget is the default Overview
+  // tile for the "bridge" short key. Was "bridge-outcome-banner" pre-Plan-09;
+  // the per-row BridgeOutcomeBanner stays in Plan 08's HoldingsTable
+  // (D-14 / S3 accepted) and is no longer the portfolio-level surface.
+  // Existing persisted V2 configs that already carry "bridge-outcome-banner"
+  // as a tile id continue to render the legacy banner widget (write-time
+  // normalization only — no migration code needed).
+  bridge: "bridge-hero",
   kpi: "kpi-strip",
   equity: "equity-chart",
   holdings: "holdings-table",
