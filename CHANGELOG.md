@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.4.3] - 2026-04-24
+
+### Fixed
+
+- **Equity curve is finally correct (the OHLCV pagination bug that
+  survived two prior fixes).** `_fetch_ohlcv_daily` broke the paginate
+  loop on `len(page) < 1000` as an end-of-data heuristic. OKX's candles
+  endpoint caps at 300 bars per page. For the 730-day backfill window
+  every reconstruct requested, the loop terminated after ONE page 300
+  days in, leaving the last ~430 days of OHLCV unfetched. `_price_on`'s
+  bisect-on-or-before then returned the last bar's close (`2025-02-17
+  $2744.46`) for every date after Feb 2025. Result: demo allocator's
+  21-ETH short on 2026-04-23 got marked to stale $2744.46 and reported
+  PERP=-$16,846 when real unrealised PnL was -$210. Frontend rendered
+  -1510%. Production instrumentation made it visible: `OHLCV_DEBUG
+  sym=ETH n_bars=300 n_unique_closes=300 first=(2024-04-24, 3140.61)
+  last=(2025-02-17, 2744.46)`. Fix: remove the premature break. Trust
+  cursor-advance + empty-page as the only terminators. Safety ceiling
+  of 10 iterations × 1000 bars caps runaway loops.
+
+  Why v0.15.4.0 (cost/price) didn't catch this: position sizes were
+  correct (cost/price returns base units when ctVal is applied via
+  safe_trade). The bug lived one layer deeper, in OHLCV fetch, where
+  the wrong mark price silently multiplied a correctly-sized position
+  by the wrong delta. Why v0.15.4.2 (anchor) didn't catch this: the
+  anchor lifts the last row onto exchange-reported equity but trusts
+  historical deltas. A stale mark that persists across every day
+  keeps historical deltas plausible on individual days, then blows up
+  on days where a short sits against it. Root cause: pagination.
+
+### Tests
+
+- 546 passed / 5 skipped in analytics-service (+1 from v0.15.4.2).
+  New: `test_v0_15_4_3_ohlcv_paginates_past_venue_page_cap` uses a
+  stub exchange that returns at most 300 bars per request and asserts
+  the loop paginates until all 730 bars are collected (3+ calls to
+  `fetch_ohlcv`). Fails with the old `len < 1000` break.
+
 ## [0.15.4.2] - 2026-04-24
 
 ### Fixed

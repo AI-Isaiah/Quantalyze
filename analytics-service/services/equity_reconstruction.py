@@ -399,7 +399,20 @@ async def _fetch_transfers(
 async def _fetch_ohlcv_daily(
     exchange: Any, symbol: str, start_ms: int, end_ms: int,
 ) -> list[list]:
-    """Daily close OHLCV in [start_ms, end_ms]. Paginate 1000 candles/call.
+    """Daily close OHLCV in [start_ms, end_ms]. Paginate until we reach
+    end_ms or the venue stops returning new data.
+
+    /investigate 2026-04-24 (v0.15.4.3): previously broke the loop on
+    ``len(page) < 1000`` as an end-of-data heuristic. OKX's candles
+    endpoint caps at 300 bars/page, so for any backfill window wider
+    than 300 days (we fetch BACKFILL_CAP_DAYS=730 days on every
+    reconstruct) the loop terminated after ONE page, 300 days deep,
+    leaving the last ~430 days of daily closes unfetched. _price_on's
+    bisect then returned the final bar's close (2025-02-17, $2744.46)
+    for every modern date, marking the allocator's 21 ETH short to a
+    stale price and reporting PERP=-$16,846 on an account whose real
+    unrealised PnL was -$210. Remove the premature break — trust the
+    cursor-advance and empty-page conditions instead.
 
     Raises ccxt.BadSymbol for symbols the venue does not list — caller
     uses this as the CoinGecko-fallback trigger.
@@ -407,7 +420,12 @@ async def _fetch_ohlcv_daily(
     all_rows: list[list] = []
     cursor_ms = start_ms
     day_ms = 24 * 60 * 60 * 1000
-    while cursor_ms <= end_ms:
+    # Safety ceiling: 10 pages × 1000 bars = 10000 candles, more than
+    # any 2-year daily window needs. Prevents infinite loops on a
+    # venue whose cursor-advance reports the wrong max_ts.
+    for _ in range(10):
+        if cursor_ms > end_ms:
+            break
         page = await exchange.fetch_ohlcv(symbol, "1d", cursor_ms, 1000)
         page = page or []
         if not page:
@@ -415,10 +433,14 @@ async def _fetch_ohlcv_daily(
         all_rows.extend(page)
         max_ts = max((int(row[0]) for row in page), default=cursor_ms)
         if max_ts <= cursor_ms:
+            # Cursor didn't advance — we've reached the end of the
+            # venue's data for this window, or the venue returned
+            # duplicates. Either way, stop.
+            break
+        if max_ts >= end_ms:
+            # Reached the requested end — no need to fetch further.
             break
         cursor_ms = max_ts + day_ms
-        if len(page) < 1000:
-            break
         await _rate_limit_sleep(exchange)
     return all_rows
 
@@ -711,15 +733,6 @@ def _compute_daily_equity(
                     amt_base = _resolve_perp_amt_base(
                         raw_symbol, amt, price, cost, inst_type=inst_type,
                     )
-                    # /investigate 2026-04-24 (v0.15.4.3) temporary log: one
-                    # line per fill so we can see if inst_type / cost shape
-                    # differs in prod vs local. Rate is bounded by the trade
-                    # count (≤500 fills/day for a fully-collateralised
-                    # allocator), so this is safe to emit at INFO level.
-                    logger.info(
-                        "PERP_FILL_DEBUG iso=%s sym=%s side=%s amt=%.6f price=%.4f cost=%.4f inst_type=%r amt_base=%.6f",
-                        iso, raw_symbol, side, amt, price, cost, inst_type, amt_base,
-                    )
                     signed = amt_base if side == "buy" else -amt_base
                     pos = perp_positions.get(raw_symbol, {"size": 0.0, "avg_entry": 0.0})
                     cur_size = pos["size"]
@@ -816,16 +829,6 @@ def _compute_daily_equity(
             if px is None:
                 continue
             unrealized = size * (px - avg_entry)
-            # /investigate 2026-04-24 (v0.15.4.3) temporary instrumentation:
-            # surface size/avg/close at EOD mark so we can compare prod vs
-            # local. Remove in the next release once the prod/local
-            # divergence (same code, same trades, different PERP magnitude)
-            # is nailed. Log level=INFO so it survives production log
-            # sampling.
-            logger.info(
-                "PERP_MARK_DEBUG iso=%s symbol=%s size=%.6f avg_entry=%.4f close=%.4f unrealized=%.4f",
-                iso, perp_sym, size, avg_entry, px, unrealized,
-            )
             if unrealized == 0.0:
                 continue
             key = f"{base}:{quote_sym}:PERP"
@@ -1150,25 +1153,6 @@ async def _fetch_and_price_window(
     for sym, series, err in primary_results:
         if series is not None:
             ohlcv_by_symbol[sym] = series
-            # /investigate 2026-04-24 (v0.15.4.3) temporary instrumentation:
-            # log the first and last OHLCV bars per symbol so we can see if
-            # production is receiving bars with realistic per-day closes or
-            # a stuck single value. Log the unique close count too — if all
-            # 90 bars report the same close, we know the fetch_ohlcv response
-            # shape is broken.
-            try:
-                uniq_closes = sorted({round(c, 2) for _, c in series})
-                first_iso, first_close = series[0] if series else (None, None)
-                last_iso, last_close = series[-1] if series else (None, None)
-                logger.info(
-                    "OHLCV_DEBUG sym=%s n_bars=%d n_unique_closes=%d "
-                    "first=(%s, %s) last=(%s, %s) sample_closes=%r",
-                    sym, len(series), len(uniq_closes),
-                    first_iso, first_close, last_iso, last_close,
-                    uniq_closes[:5] + ["..."] + uniq_closes[-5:] if len(uniq_closes) > 10 else uniq_closes,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("OHLCV_DEBUG failed sym=%s: %s", sym, exc)
 
     # Pass 2 — sequential CoinGecko fallback for BadSymbol results. Kept
     # sequential so the 2s inter-call throttle (COINGECKO_MIN_SLEEP_SECS)

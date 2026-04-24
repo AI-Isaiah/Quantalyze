@@ -2727,3 +2727,70 @@ async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance
     # STARTING_BALANCE key must appear in every row carrying the offset.
     for r in rows:
         assert "STARTING_BALANCE" in r["breakdown"], r
+
+
+# ---------------------------------------------------------------------------
+# OHLCV pagination fix (/investigate 2026-04-24 — v0.15.4.3)
+# ---------------------------------------------------------------------------
+#
+# _fetch_ohlcv_daily used to break the paginate loop on `len(page) < 1000`
+# as an end-of-data heuristic. OKX's candles endpoint caps at 300 bars per
+# request. For any backfill window wider than 300 days (we fetch 730 every
+# time a reconstruct runs), the loop stopped after ONE page 300 days in,
+# leaving the recent ~430 days of OHLCV unfetched. _price_on's bisect then
+# returned the last bar's close for every date after Feb 2025 — production
+# marked a 21-ETH short to a stale $2744.46 and reported PERP=-$16,846
+# when real unrealised PnL was -$210. Dashboard rendered -1510%.
+
+
+@pytest.mark.asyncio
+async def test_v0_15_4_3_ohlcv_paginates_past_venue_page_cap():
+    """Venue returns 300 bars per page, not 1000. The old `len < 1000`
+    break ended pagination after one page. Fix: iterate until cursor
+    reaches end_ms or the venue stops returning new data.
+    """
+    from services.equity_reconstruction import _fetch_ohlcv_daily
+
+    day_ms = 24 * 60 * 60 * 1000
+
+    class ShortPageExchange:
+        def __init__(self):
+            # 730 daily bars (2 years), simulating OKX's per-page cap of
+            # 300. Each fetch returns up to 300 bars from `since` forward.
+            self.start_ts = 1_700_000_000_000
+            self.total_bars = 730
+            self.rateLimit = 0
+            self.call_count = 0
+
+        async def fetch_ohlcv(self, symbol, timeframe, since_ms, limit):
+            self.call_count += 1
+            idx = (since_ms - self.start_ts) // day_ms
+            if idx < 0:
+                idx = 0
+            if idx >= self.total_bars:
+                return []
+            page_cap = 300  # venue-enforced
+            end_idx = min(idx + page_cap, self.total_bars)
+            return [
+                [self.start_ts + i * day_ms, 0, 0, 0, 100.0 + i, 0]
+                for i in range(idx, end_idx)
+            ]
+
+    ex = ShortPageExchange()
+    start_ms = ex.start_ts
+    end_ms = ex.start_ts + 729 * day_ms
+    rows = await _fetch_ohlcv_daily(ex, "ETH/USDT", start_ms, end_ms)
+
+    assert len(rows) == 730, (
+        f"Expected all 730 bars fetched via pagination. Got {len(rows)}. "
+        f"If this is 300, the venue-page-cap bug is back (fetch_ohlcv "
+        f"returned one short page and _fetch_ohlcv_daily broke out)."
+    )
+    assert ex.call_count >= 3, (
+        f"Expected at least 3 paginated fetch_ohlcv calls (730 bars / "
+        f"300/page). Got {ex.call_count}. Pagination did not fire."
+    )
+    # Closes should be monotonic per the stub (close = 100 + i)
+    closes = [r[4] for r in rows]
+    assert closes[0] == 100.0
+    assert closes[-1] == 100.0 + 729
