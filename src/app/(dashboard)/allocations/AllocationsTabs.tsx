@@ -5,10 +5,14 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AllocationDashboard } from "./AllocationDashboard";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
+import { HoldingsTabPanel } from "./HoldingsTabPanel";
+import { OutcomesTabPanel } from "./OutcomesTabPanel";
+import { MandateTabPanel } from "./MandateTabPanel";
+import { RiskTabPanel } from "./RiskTabPanel";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // Phase 09.1 Plan 01 / D-17 — feature flag controlling whether the
-// Performance tab renders AllocationDashboardV2 (the new designer-provided
+// Overview tab renders AllocationDashboardV2 (the new designer-provided
 // shell, scaffolded as an empty body for plans 02..11 to fill in) or the
 // legacy AllocationDashboard.
 //
@@ -39,17 +43,29 @@ function loadUiV2Flag(): boolean {
 const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 
 /**
- * Phase 07 Plan 04 / PURGE-07 / D-04 — Tabs shell for /allocations.
+ * Phase 09.1 Plan 02 / D-05 / D-06 — Tabs shell for /allocations.
  *
- * Two surfaces:
- *   - Performance (default) — wraps the existing AllocationDashboard.
- *   - Scenario (stub) — placeholder Card for the future Phase 10 builder.
+ * Six surfaces (D-05 order):
+ *   - Overview (default) — wraps AllocationDashboardV2 (under flag) or
+ *     legacy AllocationDashboard.
+ *   - Holdings — full-width HoldingsTable (Plan 08 fills body).
+ *   - Outcomes — full-width OutcomesWidget (Plan 10 restyles).
+ *   - Mandate — link to /profile?tab=mandate + future MandateSnapshot
+ *     (Plan 10 fills body).
+ *   - Risk — curated grid of 6 risk widgets (Plan 10 fills body).
+ *   - Scenario — placeholder Card for the Phase 10 builder.
  *
- * URL state (D-04):
- *   /allocations                  → Performance
- *   /allocations?tab=performance  → Performance (param deleted on mount)
+ * URL state (D-04 / D-05):
+ *   /allocations                  → Overview
+ *   /allocations?tab=overview     → Overview (param deleted on mount)
+ *   /allocations?tab=performance  → Overview (legacy Phase 07 alias; param
+ *                                   deleted on mount for clean bookmarks)
+ *   /allocations?tab=holdings     → Holdings
+ *   /allocations?tab=outcomes     → Outcomes
+ *   /allocations?tab=mandate      → Mandate
+ *   /allocations?tab=risk         → Risk
  *   /allocations?tab=scenario     → Scenario
- *   /allocations?tab=<anything>   → Performance (silent fallback)
+ *   /allocations?tab=<unknown>    → Overview (D-04 silent fallback)
  *
  * Per VOICES-ACCEPTED f3: `activeTab` is DERIVED from `searchParams` on
  * every render — NOT snapshotted in local component state. This diverges
@@ -61,23 +77,42 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * the URL without scrolling; the URL change triggers a re-render which
  * re-derives activeTab. No local state for `activeTab` is kept.
  *
- * Live-refresh polling (Phase 06 D-11 inheritance): 5s router.refresh()
- * while Performance is active AND document.visibilityState is visible.
- * Never polls while on Scenario (no data to refresh).
+ * Live-refresh polling (Phase 06 D-11 inheritance): 30s router.refresh()
+ * while Overview is active AND document.visibilityState is visible.
+ * Never polls while on any other tab (no data to refresh per render).
  *
  * Suspense: This component calls `useSearchParams()` which triggers the
  * Next.js 16 CSR-bailout rule — the caller (page.tsx) wraps us in
  * <Suspense fallback={<div />}>.
  */
 
-const TAB_KEYS = ["performance", "scenario"] as const;
+const TAB_KEYS = ["overview", "holdings", "outcomes", "mandate", "risk", "scenario"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
 
 function parseTab(raw: string | null): TabKey {
-  // D-04: anything that is not literally "scenario" collapses to
-  // "performance" — silent fallback for missing, empty, or invalid values.
-  return raw === "scenario" ? "scenario" : "performance";
+  // D-05: 6-tab set. Overview is default. Anything else (null, empty, unknown
+  // values, the legacy "performance" alias) collapses to "overview" — silent
+  // fallback preserves D-04.
+  switch (raw) {
+    case "holdings":
+    case "outcomes":
+    case "mandate":
+    case "risk":
+    case "scenario":
+      return raw;
+    default:
+      return "overview"; // Phase 07 "performance" URL also lands here.
+  }
 }
+
+const TAB_LABELS: Record<TabKey, string> = {
+  overview: "Overview",
+  holdings: "Holdings",
+  outcomes: "Outcomes",
+  mandate: "Mandate",
+  risk: "Risk",
+  scenario: "Scenario",
+};
 
 export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const router = useRouter();
@@ -101,13 +136,14 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   }, []);
   const uiV2 = uiV2Flag || uiOverride;
 
-  // Scroll-safe URL cleanup: if the allocator lands on ?tab=performance
-  // (redundant), strip it so the canonical URL is /allocations. Runs
-  // after render to avoid touching render-phase state; shallow-replace
-  // does not trigger another data fetch.
+  // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
+  // (the new default — redundant) OR ?tab=performance (legacy Phase 07
+  // alias — bookmark compat), strip it so the canonical URL is
+  // /allocations. Runs after render to avoid touching render-phase state;
+  // shallow-replace does not trigger another data fetch.
   useEffect(() => {
     const current = searchParams.get("tab");
-    if (current === "performance") {
+    if (current === "overview" || current === "performance") {
       const params = new URLSearchParams(searchParams.toString());
       params.delete("tab");
       const qs = params.toString();
@@ -115,10 +151,11 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     }
   }, [searchParams, router, pathname]);
 
-  // Live-refresh polling — only while on Performance + document visible
-  // (Phase 06 D-11 inherited pattern). Never polls on Scenario.
+  // Live-refresh polling — only while on Overview + document visible
+  // (Phase 06 D-11 inherited pattern). Never polls on Holdings / Outcomes /
+  // Mandate / Risk / Scenario.
   useEffect(() => {
-    if (activeTab !== "performance") return;
+    if (activeTab !== "overview") return;
     const id = setInterval(() => {
       if (document.visibilityState === "visible") router.refresh();
     }, PERFORMANCE_POLL_INTERVAL_MS);
@@ -129,7 +166,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // re-derives activeTab. No local state for activeTab.
   const changeTab = (key: TabKey) => {
     const params = new URLSearchParams(searchParams.toString());
-    if (key === "performance") params.delete("tab");
+    if (key === "overview") params.delete("tab");
     else params.set("tab", key);
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
@@ -138,7 +175,11 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // WAI-ARIA authoring-practices tab pattern: Arrow keys move focus between
   // tabs, Home/End jump to first/last. Tab/Shift-Tab leaves the tablist.
   const tabRefs = useRef<Record<TabKey, HTMLButtonElement | null>>({
-    performance: null,
+    overview: null,
+    holdings: null,
+    outcomes: null,
+    mandate: null,
+    risk: null,
     scenario: null,
   });
   const handleTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>, key: TabKey) => {
@@ -181,7 +222,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
       >
         {TAB_KEYS.map((key) => {
           const isActive = activeTab === key;
-          const label = key === "performance" ? "Performance" : "Scenario";
+          const label = TAB_LABELS[key];
           return (
             <button
               key={key}
@@ -210,11 +251,43 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
       <div
         role="tabpanel"
-        id="panel-performance"
-        aria-labelledby="tab-performance"
-        hidden={activeTab !== "performance"}
+        id="panel-overview"
+        aria-labelledby="tab-overview"
+        hidden={activeTab !== "overview"}
       >
-        {activeTab === "performance" && (uiV2 ? <AllocationDashboardV2 {...props} /> : <AllocationDashboard {...props} />)}
+        {activeTab === "overview" && (uiV2 ? <AllocationDashboardV2 {...props} /> : <AllocationDashboard {...props} />)}
+      </div>
+      <div
+        role="tabpanel"
+        id="panel-holdings"
+        aria-labelledby="tab-holdings"
+        hidden={activeTab !== "holdings"}
+      >
+        {activeTab === "holdings" && <HoldingsTabPanel {...props} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="panel-outcomes"
+        aria-labelledby="tab-outcomes"
+        hidden={activeTab !== "outcomes"}
+      >
+        {activeTab === "outcomes" && <OutcomesTabPanel {...props} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="panel-mandate"
+        aria-labelledby="tab-mandate"
+        hidden={activeTab !== "mandate"}
+      >
+        {activeTab === "mandate" && <MandateTabPanel {...props} />}
+      </div>
+      <div
+        role="tabpanel"
+        id="panel-risk"
+        aria-labelledby="tab-risk"
+        hidden={activeTab !== "risk"}
+      >
+        {activeTab === "risk" && <RiskTabPanel {...props} />}
       </div>
       <div
         role="tabpanel"
