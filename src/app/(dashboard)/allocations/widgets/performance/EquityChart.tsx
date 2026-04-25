@@ -918,12 +918,63 @@ interface EquityChartWidgetData {
 
 export default function EquityChartWidget({ data }: WidgetProps) {
   const d = (data ?? {}) as EquityChartWidgetData;
+  // PR1 QA — pixel-faithful card chrome from designer-bundle/project/src/app.jsx
+  // (Equity curve case, lines 451-478): Card with title row "Equity curve"
+  // separated from the chart body by a hairline border. Period toggle +
+  // legend remain inside the EquityChart body so the existing keyboard /
+  // ARIA tab semantics are unchanged.
   return (
-    <EquityChart
-      equityDailyPoints={d.equityDailyPoints ?? []}
-      benchmark={d.btcBenchmark}
-      overlays={d.equityOverlays}
-      stale={d.allKeysStale ?? false}
-    />
+    <div
+      role="region"
+      aria-label="Equity curve"
+      style={{
+        background: "var(--surface)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-lg, 8px)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "8px 14px",
+          borderBottom: "1px solid var(--border)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <h3
+          style={{
+            margin: 0,
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--text-primary)",
+          }}
+        >
+          Equity curve
+        </h3>
+        {d.allKeysStale ? (
+          <span
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+            }}
+          >
+            data stale
+          </span>
+        ) : null}
+      </div>
+      <div style={{ padding: 10 }}>
+        <EquityChart
+          equityDailyPoints={d.equityDailyPoints ?? []}
+          benchmark={d.btcBenchmark}
+          overlays={d.equityOverlays}
+          stale={d.allKeysStale ?? false}
+        />
+      </div>
+    </div>
   );
 }
