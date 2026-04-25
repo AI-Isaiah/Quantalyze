@@ -178,7 +178,20 @@ function WidgetCell({
     <div
       data-widget-id={k}
       draggable
-      onDragStart={() => setDraggingK(k)}
+      onDragStart={(e) => {
+        // Phase A5 — Firefox refuses to initiate a drag operation unless
+        // dataTransfer has at least one item, so without setData() the
+        // dragstart fires but no subsequent dragover / drop ever does.
+        // Chromium and WebKit are lenient and synthesise a drag without
+        // any payload; Firefox is strict to spec. Setting "text/plain" to
+        // the widget key is the canonical idiom and lets external drop
+        // targets (if any future feature wants them) consume the key
+        // without pulling extra metadata. effectAllowed = "move" mirrors
+        // the visual cue Chromium picks by default.
+        e.dataTransfer.setData("text/plain", k);
+        e.dataTransfer.effectAllowed = "move";
+        setDraggingK(k);
+      }}
       onDragEnd={() => {
         setDraggingK(null);
         setDragOverK(null);

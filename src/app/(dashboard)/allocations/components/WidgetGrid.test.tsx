@@ -59,6 +59,30 @@ beforeEach(() => {
   }
 });
 
+/** jsdom's DragEvent leaves dataTransfer undefined. Real browsers — and
+ *  the Phase A5 Firefox DnD fix in WidgetGrid.tsx — always populate it.
+ *  This helper hands fireEvent.dragStart a minimal stub matching the
+ *  parts the production handler touches (setData + effectAllowed). */
+function makeDataTransferStub() {
+  const setDataCalls: Array<[string, string]> = [];
+  let effectAllowed = "";
+  const stub = {
+    setData: (type: string, value: string) => {
+      setDataCalls.push([type, value]);
+    },
+    get effectAllowed() {
+      return effectAllowed;
+    },
+    set effectAllowed(value: string) {
+      effectAllowed = value;
+    },
+    types: [] as string[],
+    files: [] as File[],
+    items: [] as DataTransferItem[],
+  } as unknown as DataTransfer;
+  return { stub, setDataCalls, getEffectAllowed: () => effectAllowed };
+}
+
 describe("WidgetGrid", () => {
   it("renders one .widget-cell per tile", () => {
     const props = makeProps();
@@ -97,12 +121,29 @@ describe("WidgetGrid", () => {
       '[data-widget-id="equity-curve"]',
     )!;
 
-    fireEvent.dragStart(sourceCell);
+    fireEvent.dragStart(sourceCell, { dataTransfer: makeDataTransferStub().stub });
     fireEvent.dragOver(targetCell);
     fireEvent.drop(targetCell);
 
     expect(props.onMove).toHaveBeenCalledTimes(1);
     expect(props.onMove).toHaveBeenCalledWith("kpi-strip", "equity-curve");
+  });
+
+  it("A5: dragStart sets dataTransfer payload (Firefox requires setData to initiate drag)", () => {
+    const props = makeProps();
+    const { container } = render(<WidgetGrid {...props} />);
+    const sourceCell = container.querySelector<HTMLDivElement>(
+      '[data-widget-id="kpi-strip"]',
+    )!;
+
+    const { stub, setDataCalls, getEffectAllowed } = makeDataTransferStub();
+    fireEvent.dragStart(sourceCell, { dataTransfer: stub });
+
+    // Pre-fix Firefox would silently fail to initiate a drag because
+    // dataTransfer remained empty. The contract pins setData("text/plain",
+    // <widgetKey>) — anything missing breaks Firefox without warning.
+    expect(setDataCalls).toContainEqual(["text/plain", "kpi-strip"]);
+    expect(getEffectAllowed()).toBe("move");
   });
 
   it("clicking the close button in the chrome fires onRemove(k)", () => {
@@ -142,7 +183,7 @@ describe("WidgetGrid", () => {
     const cell = container.querySelector<HTMLDivElement>(
       '[data-widget-id="kpi-strip"]',
     )!;
-    fireEvent.dragStart(cell);
+    fireEvent.dragStart(cell, { dataTransfer: makeDataTransferStub().stub });
     fireEvent.dragOver(cell);
     fireEvent.drop(cell);
     expect(props.onMove).not.toHaveBeenCalled();
