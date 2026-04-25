@@ -20,6 +20,7 @@ import type {
   DisclosureTier,
   ManagerIdentity,
 } from "./types";
+import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -684,6 +685,15 @@ export interface MyAllocationDashboardPayload {
    * (match_decisions lacks owner-self-SELECT RLS — queries.ts:968-976 precedent).
    */
   matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
+  /**
+   * Phase 09.1 PR1 (dashboard parity) — allocator's mandate preferences row.
+   * Null when no row exists yet OR when the `allocator_preferences` table is
+   * not provisioned. Consumed by the V2 Overview MandateSnapshot widget via
+   * `lib/mandate-gates.ts` `deriveMandateGates`. The mandate widget renders
+   * an empty state when this is null. Editing surface lives at
+   * /profile?tab=mandate (`MandateForm`); this projection is read-only.
+   */
+  mandate: AllocatorPreferences | null;
 }
 
 /**
@@ -868,6 +878,12 @@ export const getMyAllocationDashboard = cache(
       // Admin client required: match_decisions has no allocator-self-SELECT RLS.
       // Explicit .eq("allocator_id", userId) is the ownership gate (Pattern D).
       phase09MatchDecisionsRes,
+      // Phase 09.1 PR1 (dashboard parity) — allocator_preferences row.
+      // Reuses getOwnPreferences which already swallows PGRST205 (table
+      // missing) into null so the dashboard renders cleanly on environments
+      // pre-migration-011. Consumed by the V2 MandateSnapshot widget via
+      // lib/mandate-gates.ts.
+      mandate,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -900,6 +916,7 @@ export const getMyAllocationDashboard = cache(
         .select("id, original_holding_ref")
         .eq("allocator_id", userId)
         .not("original_holding_ref", "is", null),
+      getOwnPreferences(supabase, userId),
     ]);
 
     const equitySnapshots = (phase07EquityRes.data ??
@@ -1009,6 +1026,7 @@ export const getMyAllocationDashboard = cache(
         outcomes: [] as OutcomeRow[],
         flaggedHoldings,
         matchDecisionsByHoldingRef,
+        mandate,
         ...phase07,
       };
     }
@@ -1234,6 +1252,7 @@ export const getMyAllocationDashboard = cache(
       outcomes,
       flaggedHoldings,
       matchDecisionsByHoldingRef,
+      mandate,
       ...phase07,
     };
   },
