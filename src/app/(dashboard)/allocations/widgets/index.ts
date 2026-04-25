@@ -112,4 +112,15 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   // thin WidgetProps adapter that pulls flaggedHoldings + the match
   // decisions map out of the dashboard payload (data prop).
   "bridge-hero": lazy(() => import("./bridge/BridgeHeroWidget")),
+
+  // ── Default-Overview placeholder aliases (v0.15.7.0 retire-V1 follow-up)
+  // DESIGNER_KEY_TO_WIDGET_ID maps the designer short keys ("kpi",
+  // "holdings") to canonical ids ("kpi-strip", "holdings-table") that
+  // never got dedicated components. Until purpose-built widgets land,
+  // alias them to the closest existing equivalents so the Overview tab
+  // renders content instead of the "Unknown widget" debug fallback.
+  "kpi-strip": lazy(() =>
+    import("./meta/CustomKpiStrip").then((m) => ({ default: m.CustomKpiStrip })),
+  ),
+  "holdings-table": lazy(() => import("./positions/PositionsTable")),
 };

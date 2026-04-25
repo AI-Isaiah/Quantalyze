@@ -201,7 +201,7 @@ describe("useDashboardConfigV2", () => {
         { k: "kpi", w: 2 },
       ] as const,
       timeframe: "1M",
-      layoutVersion: 4,
+      layoutVersion: 5,
     };
     store.set(STORAGE_KEY, JSON.stringify(custom));
 
@@ -284,10 +284,11 @@ describe("useDashboardConfigV2", () => {
   it("moveWidget reorders one tile to another tile's position via splice", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    // Default order is [bridge, kpi, equity, holdings, allocation, mandate,
+    // Default order is [bridge, kpi, equity, holdings, allocation,
     // outcomes] — all normalized to their registry ids on load (D-19).
+    // ("mandate" was dropped in v0.15.7.0 follow-up — no widget yet.)
     expect(result.current.config.tiles[0].k).toBe(keyOf("bridge"));
-    expect(result.current.config.tiles[6].k).toBe(keyOf("outcomes"));
+    expect(result.current.config.tiles[5].k).toBe(keyOf("outcomes"));
 
     act(() => {
       result.current.moveWidget(keyOf("outcomes"), keyOf("bridge"));
