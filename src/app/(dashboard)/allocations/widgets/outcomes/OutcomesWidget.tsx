@@ -63,13 +63,6 @@ const WINDOWS: Array<{
 
 // ---------------------------------------------------------- pure helpers
 
-function deltaColor(v: number | null): string {
-  if (v === null) return "#718096";
-  if (v > 0) return "#16A34A";
-  if (v < 0) return "#DC2626";
-  return "#1A1A2E";
-}
-
 function toneColor(
   tone: "positive" | "negative" | "neutral",
 ): string {
@@ -414,7 +407,7 @@ function ExpandedPanel({
   return (
     <div
       className="border-b border-[var(--color-border)] px-5 py-4"
-      style={{ backgroundColor: "#FBFCFD" /* off-token panel tint */ }}
+      style={{ backgroundColor: "var(--color-surface-subtle)" }}
     >
       <div
         className="mb-3 text-[11px] font-semibold uppercase tracking-wider"
@@ -471,7 +464,7 @@ function ExpandedPanel({
               )}
               <div
                 className="mt-2.5 h-1 overflow-hidden rounded"
-                style={{ backgroundColor: "#F1F5F9" /* off-token track */ }}
+                style={{ backgroundColor: "var(--color-track)" }}
               >
                 <div
                   style={{
@@ -763,18 +756,6 @@ export default function OutcomesWidget({ data }: WidgetProps) {
 
   const curvesCache = useRef<Map<string, CurveData>>(new Map());
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  // `retryTick` forces a remount of the upstream fetch by way of parent-level
-  // state change; the widget itself has no fetch seam for outcome rows (they
-  // arrive via getMyAllocationDashboard) so "Try again" simply forces the
-  // page-level reload via window.location.reload. Keeping the button present
-  // is the copy contract in UI-SPEC state matrix §error.
-  const [retryTick, setRetryTick] = useState(0);
-  // Preserve the state binding so the linter doesn't prune it — UI hint for
-  // future consumers that want a finer-grained retry seam.
-  void retryTick;
-  // Keep deltaColor referenced so the tone-coded inline cell color helper
-  // remains in scope for any future fine-grained styling tweaks.
-  void deltaColor;
 
   const kpis = useMemo(
     () => computeOutcomeKPIs(outcomes ?? []),
@@ -801,7 +782,6 @@ export default function OutcomesWidget({ data }: WidgetProps) {
         <button
           type="button"
           onClick={() => {
-            setRetryTick((t) => t + 1);
             if (typeof window !== "undefined") window.location.reload();
           }}
           className="inline-block rounded-md border border-[var(--color-border)] px-4 py-2 text-sm font-medium"

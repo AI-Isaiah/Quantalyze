@@ -34,7 +34,13 @@ accessibility, and a Firefox compatibility fix.
   new local impls from reappearing.
 - **OutcomesWidget colors** swapped from ~70 hardcoded hex literals to
   `var(--color-*)` design tokens. Same visible pixels, single source of
-  truth in `globals.css`.
+  truth in `globals.css`. Two new tokens — `--color-surface-subtle`
+  (#FBFCFD) and `--color-track` (#F1F5F9) — cover the expanded-row tint
+  and progress-rail shades that previously bypassed the system.
+- **WidgetChrome reorder-mode toggle** moves the aria-live announcement
+  out of the `setKbdMode` updater. React's rules forbid side effects
+  inside updater functions; the previous shape worked in production but
+  double-fired the announce in dev Strict Mode.
 
 ### Fixed
 
@@ -46,6 +52,13 @@ accessibility, and a Firefox compatibility fix.
   is now set on `dragstart`, satisfying Firefox's strict requirement that
   a drag operation carry at least one item. Chromium and WebKit were
   silently lenient; Firefox initiated nothing.
+
+### Removed
+
+- **Dead `retryTick` state and `deltaColor` helper in OutcomesWidget.**
+  Both were retained behind `void` linter suppressions as "future seams"
+  but had no live callers. The error-state "Try again" button now calls
+  `window.location.reload()` directly without the dummy state churn.
 
 ### Documentation
 

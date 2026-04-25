@@ -314,6 +314,14 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         })}
       </div>
 
+      {/* Tabpanel pattern below has two cooperating conditions, by design:
+          - `hidden={activeTab !== X}` — ARIA tabs APG: inactive tabpanels
+            stay in the DOM (id + role for aria-controls) but are marked
+            hidden so screen readers skip them.
+          - `{activeTab === X && <Panel />}` — A6 lazy-mount: heavy panels
+            unmount when not visible so `next/dynamic({ ssr: false })`
+            chunks only fetch on first visit and don't keep work running
+            in the background. Removing either changes behavior. */}
       <div
         role="tabpanel"
         id="panel-overview"

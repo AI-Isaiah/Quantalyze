@@ -87,15 +87,17 @@ export function WidgetChrome({ k, w, onResize, onRemove, onMove }: Props) {
   function handleDragKeyDown(e: React.KeyboardEvent<HTMLButtonElement>) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      setKbdMode((v) => {
-        const next = !v;
-        announce(
-          next
-            ? `Reorder mode active for ${k}. Use arrow keys to move, Home or End to jump to the first or last position, Escape to exit.`
-            : `Reorder mode exited for ${k}.`,
-        );
-        return next;
-      });
+      // Compute next mode from the closed-over kbdMode (the handler is
+      // re-created each render, so this read is fresh). Fire side effects
+      // OUTSIDE the setState updater — React's rules say updaters must be
+      // pure, and Strict Mode double-invokes them in dev.
+      const next = !kbdMode;
+      announce(
+        next
+          ? `Reorder mode active for ${k}. Use arrow keys to move, Home or End to jump to the first or last position, Escape to exit.`
+          : `Reorder mode exited for ${k}.`,
+      );
+      setKbdMode(next);
       return;
     }
     // Home / End are available outside kbdMode for focus traversal across
