@@ -29,6 +29,7 @@
 import { useState } from "react";
 import { BridgeDrawer } from "./BridgeDrawer";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
+import type { OutcomeRow } from "@/lib/queries";
 
 export type BridgeWidgetVariant = "full" | "card" | "subtle";
 
@@ -37,41 +38,125 @@ export interface BridgeWidgetProps {
   matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
   /** Driven by the Tweaks panel (Plan 11); default "full" per D-15. */
   variant?: BridgeWidgetVariant;
+  /**
+   * PR2 (HANDOFF G4) — outcomes feed for the rich "All clear" empty state.
+   * The dashboard payload provides `outcomes` sorted DESC by created_at,
+   * capped at 200 most-recent. The empty-state card reads outcomes[0] for
+   * the "Last reviewed" line and outcomes.length for the trailing-window
+   * count. When omitted (e.g. older callers, isolated tests), the empty
+   * state degrades to the "no reviews recorded yet" copy.
+   */
+  outcomes?: ReadonlyArray<OutcomeRow>;
+}
+
+/**
+ * PR2 helper — render a created_at ISO timestamp as a short relative phrase
+ * ("today", "yesterday", "3 days ago", "2 weeks ago", "Mar 15, 2026"). The
+ * prototype's empty-state target reads "Last reviewed 3 days ago", so the
+ * rendering must collapse to that compact, conversational form. Falls back
+ * to the original ISO string if the input is unparseable so the card never
+ * renders "NaN days ago".
+ */
+function formatRelativeDate(iso: string, now: Date = new Date()): string {
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return iso;
+  const elapsedMs = now.getTime() - ts;
+  const days = Math.floor(elapsedMs / 86_400_000);
+  if (days < 0) return "today"; // future timestamps clamp to "today"
+  if (days === 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  if (days < 14) return "a week ago";
+  if (days < 60) return `${Math.floor(days / 7)} weeks ago`;
+  if (days < 365) return `${Math.floor(days / 30)} months ago`;
+  // Older than a year — fall back to absolute date for clarity.
+  return new Date(ts).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 export function BridgeWidget({
   flaggedHoldings,
   matchDecisionsByHoldingRef,
   variant = "full",
+  outcomes = [],
 }: BridgeWidgetProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const hasBreaches = flaggedHoldings.length > 0;
 
   if (!hasBreaches) {
-    // FIX per CONTEXT §specifics — app.jsx:131 designer bug. The "Show last
-    // recommendation" button routes to historic outcomes (Outcomes tab),
-    // NOT a setBannerDismissed(false) toggle.
+    // PR2 (HANDOFF G4) — rich empty-state replacement. Uses the prototype's
+    // cream gradient + orange Bridge pill so the empty state reads as part
+    // of the same visual family as the active-breach state instead of a
+    // plain white card. Surfaces the most recent recorded outcome when one
+    // exists, with a relative-date phrase ("Last reviewed 3 days ago") and
+    // the count of reviews on file. The CTA always routes to the Outcomes
+    // tab (NOT a dismissal toggle — see CONTEXT §specifics, app.jsx:131
+    // designer bug). When `outcomes` is empty, the card collapses to the
+    // "Bridge will alert..." copy without crashing.
+    const hasOutcomes = outcomes.length > 0;
+    const lastOutcome = hasOutcomes ? outcomes[0] : null;
+    const outcomeCount = outcomes.length;
+    const reviewsLabel =
+      outcomeCount === 1
+        ? "1 review on file"
+        : `${outcomeCount} reviews on file`;
+
     return (
       <div
         role="region"
         aria-label="Bridge status"
-        className="rounded-lg border border-border bg-surface p-6"
+        data-testid="bridge-empty-state"
+        className="rounded-lg border p-6"
+        style={{
+          borderColor: "#FED7AA",
+          background: "linear-gradient(135deg, #FFF7ED 0%, #FFFAF3 100%)",
+        }}
       >
-        <div className="text-xs uppercase tracking-wide text-text-muted">
+        <div
+          className="text-xs uppercase"
+          style={{ color: "#D97706", letterSpacing: "0.08em" }}
+        >
           Bridge
         </div>
-        <div className="mt-2 text-lg font-medium text-text-primary">
-          No active breaches
+        <div
+          className="mt-2 text-xl font-semibold text-text-primary"
+          style={{
+            fontFamily: "var(--font-serif, Fraunces, Georgia, serif)",
+          }}
+        >
+          All clear
         </div>
         <div className="mt-1 text-sm text-text-secondary">
-          Your allocations are within mandate. Review past recommendations for
-          context.
+          Your allocations are within mandate. Bridge will alert as soon as a
+          holding trips one of your gates.
         </div>
+        {hasOutcomes && lastOutcome ? (
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
+            <span>
+              Last reviewed{" "}
+              <span
+                className="text-text-secondary"
+                data-testid="bridge-empty-last-reviewed"
+              >
+                {formatRelativeDate(lastOutcome.created_at)}
+              </span>
+            </span>
+            <span aria-hidden>·</span>
+            <span data-testid="bridge-empty-review-count">{reviewsLabel}</span>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-text-muted">
+            No reviews recorded yet.
+          </div>
+        )}
         <a
           href="/allocations?tab=outcomes"
-          className="mt-4 inline-block text-sm text-accent hover:underline"
+          className="mt-4 inline-block text-sm font-medium text-accent hover:underline"
         >
-          Show last recommendation →
+          {hasOutcomes ? "View outcomes" : "Show last recommendation"} →
         </a>
       </div>
     );
