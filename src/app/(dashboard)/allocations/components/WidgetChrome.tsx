@@ -26,7 +26,34 @@ import { SizeStepper } from "./SizeStepper";
  *     buttons (Move up / Move down / Remove). This guarantees a non-
  *     hover screen-reader path for every reorder operation, so there is
  *     no hover-only escape hatch.
+ *   - Phase A4 a11y additions:
+ *       * Home / End on the drag handle traverse focus across all widget
+ *         drag handles (outside kbdMode) or move the widget to the first /
+ *         last position (inside kbdMode). The "first" / "last" sentinels
+ *         are resolved by AllocationDashboardV2's onMoveWrapper.
+ *       * A polite aria-live region inside the chrome announces reorder-
+ *         mode toggles, moves, and resizes so screen-reader users hear
+ *         state changes without polling the DOM.
  */
+
+const DRAG_HANDLE_SELECTOR = ".widget-chrome .drag-handle";
+
+/** Focus the drag handle of the first or last widget cell in document
+ *  order. Returns true if focus moved (i.e., a sibling existed). The
+ *  selector pinned in DRAG_HANDLE_SELECTOR is scoped to widget chrome so
+ *  it never traverses sibling pickers / modals that might also render
+ *  drag-styled buttons. */
+function focusEndpointHandle(end: "first" | "last"): boolean {
+  if (typeof document === "undefined") return false;
+  const handles = document.querySelectorAll<HTMLButtonElement>(
+    DRAG_HANDLE_SELECTOR,
+  );
+  if (handles.length === 0) return false;
+  const target = end === "first" ? handles[0] : handles[handles.length - 1];
+  if (!target) return false;
+  target.focus();
+  return true;
+}
 
 type Props = {
   k: string;
@@ -46,25 +73,65 @@ type Props = {
 export function WidgetChrome({ k, w, onResize, onRemove, onMove }: Props) {
   const [kbdMode, setKbdMode] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
+
+  function announce(message: string) {
+    // Setting the same string twice would be deduped by aria-atomic
+    // re-render, so append a zero-width space to force a fresh
+    // announcement when the same action fires repeatedly (e.g., user
+    // presses ArrowDown twice and both announcements need to surface).
+    setAnnouncement((prev) => (prev === message ? `${message} ` : message));
+  }
 
   function handleDragKeyDown(e: React.KeyboardEvent<HTMLButtonElement>) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      setKbdMode((v) => !v);
+      setKbdMode((v) => {
+        const next = !v;
+        announce(
+          next
+            ? `Reorder mode active for ${k}. Use arrow keys to move, Home or End to jump to the first or last position, Escape to exit.`
+            : `Reorder mode exited for ${k}.`,
+        );
+        return next;
+      });
+      return;
+    }
+    // Home / End are available outside kbdMode for focus traversal across
+    // sibling widgets, so the keyboard-only user can jump to either end of
+    // the grid without holding Tab.
+    if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      if (kbdMode) {
+        const end = e.key === "Home" ? "first" : "last";
+        onMove(k, end);
+        announce(`Moved ${k} to ${end} position.`);
+      } else {
+        const moved = focusEndpointHandle(e.key === "Home" ? "first" : "last");
+        if (moved) announce(`Focused ${e.key === "Home" ? "first" : "last"} widget.`);
+      }
       return;
     }
     if (!kbdMode) return;
     if (e.key === "ArrowUp") {
       e.preventDefault();
       onMove(k, "prev");
+      announce(`Moved ${k} up.`);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       onMove(k, "next");
+      announce(`Moved ${k} down.`);
     } else if (e.key === "Escape") {
       e.preventDefault();
       setKbdMode(false);
+      announce(`Reorder mode exited for ${k}.`);
     }
+  }
+
+  function handleResizeWithAnnouncement(next: 1 | 2 | 3 | 4) {
+    onResize(k, next);
+    announce(`Resized ${k} to width ${next}.`);
   }
 
   // Outside-click dismiss for the overflow menu (matches AddWidgetModal:29-62
@@ -95,7 +162,29 @@ export function WidgetChrome({ k, w, onResize, onRemove, onMove }: Props) {
         pointerEvents: "auto",
       }}
     >
-      <SizeStepper current={w} onChange={(next) => onResize(k, next)} />
+      {/* A4 — visually-hidden polite aria-live region. Sits inside the
+          chrome so the assertive technology surface stays scoped to this
+          widget instead of competing with sibling widgets' announcements. */}
+      <div
+        className="widget-chrome-live-region"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid={`widget-chrome-live-${k}`}
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          padding: 0,
+          margin: -1,
+          overflow: "hidden",
+          clip: "rect(0 0 0 0)",
+          whiteSpace: "nowrap",
+          border: 0,
+        }}
+      >
+        {announcement}
+      </div>
+      <SizeStepper current={w} onChange={handleResizeWithAnnouncement} />
       <button
         type="button"
         aria-label="Reorder widget"

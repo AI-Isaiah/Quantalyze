@@ -263,4 +263,78 @@ describe("WidgetGrid", () => {
       HTMLElement.prototype.getBoundingClientRect = origRect;
     }
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase A4 keyboard a11y additions — Home / End traversal + aria-live
+  // announcements. Drag-handle key handlers and the visually-hidden
+  // aria-live region live in WidgetChrome but are easiest to exercise
+  // through WidgetGrid because the focusEndpointHandle DOM query needs
+  // multiple sibling chrome instances mounted.
+  // ────────────────────────────────────────────────────────────────────
+
+  it("A4: Home outside kbdMode focuses the FIRST drag handle; End focuses the LAST", () => {
+    const props = makeProps();
+    const { container } = render(<WidgetGrid {...props} />);
+    const handles = container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Reorder widget"]',
+    );
+    expect(handles.length).toBe(TILES.length);
+
+    // Start with focus on the middle widget's handle.
+    handles[1].focus();
+    expect(document.activeElement).toBe(handles[1]);
+
+    fireEvent.keyDown(handles[1], { key: "Home" });
+    expect(document.activeElement).toBe(handles[0]);
+
+    fireEvent.keyDown(handles[0], { key: "End" });
+    expect(document.activeElement).toBe(handles[handles.length - 1]);
+
+    // No move calls fired — focus traversal only outside kbdMode.
+    expect(props.onMove).not.toHaveBeenCalled();
+  });
+
+  it("A4: Home / End inside kbdMode call onMove(k, 'first' / 'last') instead of moving focus", () => {
+    const props = makeProps();
+    const { container } = render(<WidgetGrid {...props} />);
+    const middleHandle = container
+      .querySelector<HTMLDivElement>('[data-widget-id="equity-curve"]')!
+      .querySelector<HTMLButtonElement>('button[aria-label="Reorder widget"]')!;
+
+    // Enter kbdMode via Enter, then Home.
+    fireEvent.keyDown(middleHandle, { key: "Enter" });
+    expect(middleHandle.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.keyDown(middleHandle, { key: "Home" });
+    expect(props.onMove).toHaveBeenCalledWith("equity-curve", "first");
+
+    fireEvent.keyDown(middleHandle, { key: "End" });
+    expect(props.onMove).toHaveBeenCalledWith("equity-curve", "last");
+  });
+
+  it("A4: aria-live region announces reorder-mode toggles, moves, and resizes", () => {
+    const props = makeProps();
+    const { container, getByTestId } = render(<WidgetGrid {...props} />);
+    const dragHandle = container
+      .querySelector<HTMLDivElement>('[data-widget-id="kpi-strip"]')!
+      .querySelector<HTMLButtonElement>('button[aria-label="Reorder widget"]')!;
+    const liveRegion = getByTestId("widget-chrome-live-kpi-strip");
+
+    // Empty initially.
+    expect(liveRegion.getAttribute("aria-live")).toBe("polite");
+    expect(liveRegion.textContent?.trim()).toBe("");
+
+    // Enter kbdMode → announcement contains "Reorder mode active".
+    fireEvent.keyDown(dragHandle, { key: "Enter" });
+    expect(liveRegion.textContent).toContain("Reorder mode active");
+    expect(liveRegion.textContent).toContain("kpi-strip");
+
+    // ArrowDown → "Moved kpi-strip down."
+    fireEvent.keyDown(dragHandle, { key: "ArrowDown" });
+    expect(liveRegion.textContent).toContain("Moved kpi-strip down");
+
+    // Escape → "Reorder mode exited"
+    fireEvent.keyDown(dragHandle, { key: "Escape" });
+    expect(liveRegion.textContent).toContain("Reorder mode exited");
+  });
 });
