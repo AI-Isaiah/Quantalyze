@@ -6,6 +6,109 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.8.0] - 2026-04-25
+
+Phase 09.1 PR1 — **Default-Overview parity**. The V2 Overview tab now
+matches the `Allocator Dashboard - Standalone.html` prototype's seven-tile
+layout byte-for-byte. Two designer-key aliases retire (`kpi-strip` and
+`holdings-table`), one new tile lands (`mandate-snapshot`), and the
+"What we noticed" insight strip mounts above the grid. The mandate
+field is renamed from "Liquidity preference" to "Minimum AUM" across
+every UI surface so allocators see one consistent vocabulary on edit
+(MandateForm) and read (the new dashboard tile).
+
+### Added
+
+- **MandateSnapshotWidget (`widgets/risk/MandateSnapshotWidget`).**
+  Pixel-faithful port of the prototype's `MandateSnapshot` panel
+  (designer source: prototype `app.jsx:481-514`). 5-row pass/fail
+  layout: Max single allocation / Min Sharpe (90d) / Max DD floor /
+  Min AUM / Style concentration. Header reports "Auto-saved · N/M
+  gates pass" against live `allocator_preferences`. Edit → ghost-button
+  link routes to `/profile?tab=mandate`. Failing rows tint the current
+  cell with `var(--negative)`. Empty-state preserves the 5-row
+  structural shape with em-dashes so the layout never collapses.
+- **KpiStripWidget (`widgets/meta/KpiStripWidget`).** Pixel-faithful
+  port of the prototype's `KPIPanel` (designer source: prototype
+  `app.jsx:397-443`). Single-card / 5-divided-cells layout with the
+  prototype's exact responsive break-points at 1100px (3 cols) and
+  720px (2 cols). Reads PortfolioAnalytics directly:
+  `total_aum`/`return_ytd`/`return_mtd`/`portfolio_sharpe`/
+  `portfolio_max_drawdown`/`portfolio_volatility`/
+  `avg_pairwise_correlation`. Distinct from the existing
+  `custom-kpi-strip` (kept for picker/legacy callers); existing
+  `components/KpiStrip.tsx` stays untouched and continues to power
+  OutcomesWidget's per-window strip.
+- **HoldingsTableWidget (`widgets/positions/HoldingsTableWidget`).**
+  Compact dashboard variant of `components/HoldingsTable.tsx` (NEW
+  MODE). Same wiring as `HoldingsTabPanel` — `toDesignHoldings`
+  adapter, `revokedStatusByHoldingId` joined over `apiKeys`, and
+  `flaggedHoldingsByRef` keyed via `buildHoldingRef`. Distinct from
+  `positions-table` (kept) which is the wider Holdings-tab detail
+  surface.
+- **Mandate gate compute helper (`lib/mandate-gates.ts`).**
+  `deriveMandateGates(mandate, analytics, holdingsSummary, strategies)`
+  → 5 GateRow records. Pure derivation. `LIQUIDITY_TO_MIN_AUM` map
+  (high $10M / medium $1M / low $100K) sources the new Min AUM gate
+  from the existing `liquidity_preference` enum tier. Each gate
+  degrades to `ok=null` when threshold or current value is missing.
+  28 unit tests pin every gate's pass/fail/null path + edge cases.
+- **InsightStrip mounted on `AllocationDashboardV2`** sibling to
+  WidgetGrid, above the grid, below AlertBanner. Reuses the existing
+  `src/components/portfolio/InsightStrip` and its 7-rule client-side
+  `computeAllInsights` output. Empty-state copy "No unusual activity in
+  the trailing window." matches the prototype fallback verbatim. PR1
+  deliberately skips the server-side `insights[]` payload field that
+  HANDOFF.md proposed — the existing rules fire from `analytics` plus
+  optional `flaggedCount`, so no payload widening is needed for first-
+  cut value.
+- **`mandate: AllocatorPreferences | null` projected onto
+  `MyAllocationDashboardPayload`** (`lib/queries.ts`). Fetched via
+  `getOwnPreferences` in the Step-1 parallel wave (one extra
+  `Promise.all` entry — no new round). PGRST205 (table missing pre-
+  migration-011) is already swallowed into null upstream. Read-only
+  projection — editing surface stays at `/profile?tab=mandate`.
+
+### Changed
+
+- **`DEFAULT_LAYOUT` → 7 tiles, `LAYOUT_VERSION` 5 → 6.** Restores the
+  `mandate` tile dropped in v0.15.7.0 (now backed by a real widget) and
+  narrows `outcomes` from full-width (4) to half (2) so it shares row 5
+  with mandate(2). Final shape:
+  bridge(4) / kpi(4) / equity(4) / holdings(3)+allocation(1) /
+  mandate(2)+outcomes(2). Existing v5 configs reset cleanly to the new
+  shape (Voice-D8 reset-on-mismatch precedent — same as Phase 05 1→2,
+  Phase 08 2→3, D-02 3→4, v0.15.7.0 4→5).
+- **`DESIGNER_KEY_TO_WIDGET_ID["mandate"]`** was `"mandate-compliance"`
+  (no registered widget → "Unknown widget" fallback for the seven-tile
+  default). Now points at `"mandate-snapshot"`. Persisted V2 configs
+  that already carry the literal `"mandate-compliance"` tile id continue
+  to render the unknown fallback (write-time normalization only — no
+  migration code needed).
+- **`DESIGNER_KEY_TO_WIDGET_ID["kpi"]` and `["holdings"]`** stop
+  aliasing onto `custom-kpi-strip` / `positions-table`. Both short keys
+  now resolve to the new first-class registry entries (`kpi-strip` and
+  `holdings-table`).
+- **Mandate UI field rename** — "Liquidity preference" → "Minimum AUM"
+  on every surface that reads or writes the `liquidity_preference`
+  column: `MandateForm.tsx` (allocator self-edit), `MandateTabPanel.tsx`
+  (Mandate-tab snapshot row), and `PreferencesPanel.tsx` (admin-only
+  edit). `MandateSegmentedRadio` option labels relabeled from
+  "High (AUM > $10M)" / "Medium ($1M-$10M)" / "Low (<$1M)" to "$10M+" /
+  "$1M – $10M" / "<$1M" so the UX reads coherently with the new field
+  name. Underlying enum values (`high|medium|low`) unchanged — schema,
+  RPC, matching engine (`lib/admin/match.ts` SELECT projection), and
+  `mandate-columns-schema-sync` test all stay untouched.
+
+### Deferred (post-PR1)
+
+- Bridge "All clear" empty-state polish (G4) — PR2.
+- "Restore default layout" button (Q4) — PR3.
+- CustomRangePicker dual-month grid (G6) — PR3.
+- Discovery sidebar Digital-Assets / TradFi sub-groups (G7) — PR3.
+- Tweaks panel allocator-visibility decision (G5) — PR3 product call.
+- Server-side `insights: PortfolioInsight[]` payload field (Q3) — TBD.
+
 ## [0.15.7.0] - 2026-04-25
 
 V2 dashboard goes default for every allocator. The Phase 09.1 work
