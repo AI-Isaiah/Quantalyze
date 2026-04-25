@@ -106,7 +106,7 @@ describe("MandateForm", () => {
     // Correlation ceiling + max drawdown + liquidity + style exclusions now visible.
     expect(screen.getByLabelText("Correlation ceiling")).toBeInTheDocument();
     expect(screen.getByLabelText("Max drawdown tolerance")).toBeInTheDocument();
-    expect(screen.getByRole("radiogroup", { name: "Liquidity preference" })).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: "Minimum AUM" })).toBeInTheDocument();
     expect(screen.getByText("Excluded styles")).toBeInTheDocument();
   });
 
@@ -171,7 +171,9 @@ describe("MandateForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Advanced constraints" }));
     expect(screen.getByLabelText("Correlation ceiling")).toBeInTheDocument();
     expect(screen.getByLabelText("Max drawdown tolerance")).toBeInTheDocument();
-    expect(screen.getByText("Liquidity preference")).toBeInTheDocument();
+    // Phase 09.1 PR1 — field renamed from "Liquidity preference" to "Minimum AUM"
+    // (underlying enum unchanged; option labels relabeled to dollar tiers).
+    expect(screen.getByText("Minimum AUM")).toBeInTheDocument();
     expect(screen.getByText("Excluded styles")).toBeInTheDocument();
   });
 

@@ -11,15 +11,20 @@ interface Props {
 }
 
 const OPTIONS: { value: Value; label: string }[] = [
-  { value: "high", label: "High (AUM > $10M)" },
-  { value: "medium", label: "Medium ($1M-$10M)" },
-  { value: "low", label: "Low (<$1M)" },
+  // Phase 09.1 PR1 (dashboard parity) — relabeled from "High/Medium/Low"
+  // tier names to dollar-amount tiers so the field reads coherently as
+  // "Minimum AUM" (the field-level rename in MandateForm.tsx). Underlying
+  // enum values (`high|medium|low`) are unchanged — schema, RPC, matching
+  // engine, and schema-sync tests all stay untouched.
+  { value: "high", label: "$10M+" },
+  { value: "medium", label: "$1M – $10M" },
+  { value: "low", label: "<$1M" },
 ];
 
 /**
- * Liquidity preference — 3-segment radiogroup (D-05, UI-SPEC).
- * Clicking the currently-selected option clears the value (pass `null`)
- * so the Reset affordance is baked into the control itself.
+ * Minimum AUM tier — 3-segment radiogroup (D-05, UI-SPEC; Phase 09.1 PR1
+ * field rename). Clicking the currently-selected option clears the value
+ * (pass `null`) so the Reset affordance is baked into the control itself.
  */
 export function MandateSegmentedRadio({ label, helper, value, onChange, error }: Props) {
   return (

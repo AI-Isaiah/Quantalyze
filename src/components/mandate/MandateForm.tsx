@@ -352,7 +352,7 @@ export function MandateForm({ initial }: Props) {
             />
 
             <MandateSegmentedRadio
-              label="Liquidity preference"
+              label="Minimum AUM"
               helper="Minimum strategy AUM we should recommend."
               value={liquidity}
               onChange={onLiquidityChange}
