@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 import AllocationDonut from "./AllocationDonut";
+import AllocationByStyleWidget from "./AllocationByStyleWidget";
 import AllocationOverTime from "./AllocationOverTime";
 import WeightDriftMonitor from "./WeightDriftMonitor";
 import RebalanceSuggestions from "./RebalanceSuggestions";
@@ -88,6 +89,71 @@ describe("AllocationDonut", () => {
       />,
     );
     expect(screen.getByText("Allocation data unavailable.")).toBeTruthy();
+  });
+});
+
+describe("AllocationByStyleWidget", () => {
+  // PR1 QA — pixel-faithful port of the prototype's AllocationBreakdown.
+  // Three strategies in the mockData all share strategy_types[0] =
+  // "trend-following", so the widget should collapse to one style row at
+  // 100%; subtitle should read "fully deployed" because Σweights = 1.0.
+  it("renders header + style legend with one tag aggregating three strategies", () => {
+    render(<AllocationByStyleWidget {...widgetProps} />);
+    expect(screen.getByText("Allocation by style")).toBeTruthy();
+    // Subtitle: "1 style · fully deployed" (Σweights = 0.4 + 0.35 + 0.25 = 1.0)
+    expect(screen.getByText(/1 style · fully deployed/)).toBeTruthy();
+    expect(screen.getByText("trend-following")).toBeTruthy();
+    expect(screen.getByText("100.0%")).toBeTruthy();
+  });
+
+  it("groups multiple style tags and shows cash share when underdeployed", () => {
+    const mixed = {
+      ...mockData,
+      strategies: [
+        {
+          ...mockData.strategies[0],
+          current_weight: 0.5,
+          strategy: { ...mockData.strategies[0].strategy, strategy_types: ["arbitrage"] },
+        },
+        {
+          ...mockData.strategies[1],
+          current_weight: 0.3,
+          strategy: { ...mockData.strategies[1].strategy, strategy_types: ["market-neutral"] },
+        },
+      ],
+    };
+    render(<AllocationByStyleWidget {...widgetProps} data={mixed} />);
+    // 0.5 + 0.3 = 0.8 → 20% cash, 2 styles
+    expect(screen.getByText(/2 styles · 20.0% cash/)).toBeTruthy();
+    expect(screen.getByText("arbitrage")).toBeTruthy();
+    expect(screen.getByText("market-neutral")).toBeTruthy();
+    expect(screen.getByText("50.0%")).toBeTruthy();
+    expect(screen.getByText("30.0%")).toBeTruthy();
+  });
+
+  it("renders empty-state when no strategies have positive weight", () => {
+    render(
+      <AllocationByStyleWidget
+        {...widgetProps}
+        data={{ ...mockData, strategies: [] }}
+      />,
+    );
+    expect(screen.getByText("No active allocations")).toBeTruthy();
+  });
+
+  it("falls back to 'Other' when strategy_types is empty", () => {
+    const untagged = {
+      ...mockData,
+      strategies: [
+        {
+          ...mockData.strategies[0],
+          current_weight: 1,
+          strategy: { ...mockData.strategies[0].strategy, strategy_types: [] },
+        },
+      ],
+    };
+    render(<AllocationByStyleWidget {...widgetProps} data={untagged} />);
+    expect(screen.getByText("Other")).toBeTruthy();
   });
 });
 
