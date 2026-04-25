@@ -61,9 +61,11 @@ const LEGACY_LAYOUT_VERSION = 3;
 // LEGACY hook tests — useDashboardConfig
 // ---------------------------------------------------------------------------
 //
-// The legacy hook still ships during the bake window (D-17). It reads/writes
-// the SAME storage key as the V2 hook (D-02), so both versions land in this
-// file to make the cross-hook reset behaviour easy to assert.
+// The legacy hook is dormant post-v0.15.7.0 (no live callers — the V1
+// AllocationDashboard root that consumed it was removed). Tests stay green
+// until the follow-up legacy-tree cleanup PR deletes the hook itself. Both
+// hooks read/write the SAME storage key (D-02), so the cross-hook reset
+// behaviour stays asserted while the dormant code is on disk.
 
 describe("useDashboardConfig (legacy)", () => {
   beforeEach(() => {

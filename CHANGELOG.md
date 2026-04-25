@@ -19,6 +19,15 @@ now the only Overview surface in production.
   The `localStorage.allocations.ui_v2` opt-in gate and the QA-mode-only
   `?ui=v2` URL override are gone. There is no longer a code path to the
   legacy V1 dashboard from this surface.
+- **`AllocationDashboardV2.widget-gating.test.tsx` now enumerates all 18
+  composite widget ids end-to-end** (was 2). Adding a future widget to the
+  gate Set without wiring it through the picker fails this test.
+
+### Added
+
+- **`HoldingsTabPanel.test.tsx`** — regression coverage for the
+  `revokedStatusByHoldingId` join (apiKeys × holdingsSummary). Replaces
+  the T12b coverage that lived in the deleted V1 `revoked-holdings.test.tsx`.
 
 ### Removed
 
@@ -30,14 +39,36 @@ now the only Overview surface in production.
 - **`loadUiV2Flag` + `UI_V2_STORAGE_KEY` + the `useState`/`useEffect` flag
   state in `AllocationsTabs`.** The QA_MODE import is dropped from this
   file (still used elsewhere for the Tweaks panel).
+- **`react-grid-layout` dependency + `DashboardGrid.tsx` + `TileWrapper.tsx`.**
+  The V2 path uses the in-house `WidgetGrid` (HTML5 DnD, zero external
+  deps); the legacy grid host had no live importers post-cutover. Drops
+  ~70KB min+gz from `node_modules` and removes a category of accidental
+  future imports.
+- **`AllocationDashboardV2`'s captured-but-unused `tweaks` state.** The
+  `bridgeVariant` knob from `<Tweaks>` was never read by V2 — the
+  `eslint-disable @typescript-eslint/no-unused-vars` is gone with it.
+  Tweaks still persists internally to `localStorage`; no allocator-facing
+  change.
+- **`docs/runbooks/allocations-ui-v2-rollback.md`.** The runbook documented
+  on-call procedures for the `allocations.ui_v2` flag — that flag no
+  longer exists. Rollback is now `git revert` of this version's commit.
+- **`docs/runbooks/posthog-usage-funnel.md`.** Cited the deleted V1
+  `AllocationDashboard.tsx` as the source for `session_start` and
+  `widget_viewed` events; the V1-specific framing made the runbook a
+  net-negative for on-call.
 
 ### Notes
 
-A deeper legacy tree is now dormant: the legacy `useDashboardConfig` hook,
-`DashboardGrid`, `TileWrapper`, the `LegacyTileConfig` interface, and the
-HoldingsTable LEGACY MODE branch had no live callers other than the deleted
-`AllocationDashboard`. They remain on disk pending an explicit follow-up
-cleanup pass — this PR's scope was the dashboard root + flag only.
+- **InsightStrip is intentionally retired on the Overview surface.** V1
+  unconditionally rendered `<InsightStrip>` (rebalance drift +
+  flagged-holdings insights) above the dashboard grid. V2's
+  `BridgeHeroWidget` is the designer's replacement for that "what I
+  didn't know" mood. `<InsightStrip>` still ships on `/demo` and other
+  surfaces.
+- A deeper legacy tree is still dormant after this PR: the legacy
+  `useDashboardConfig` hook, the `LegacyTileConfig` interface, and the
+  `HoldingsTable` LEGACY MODE branch. They remain on disk pending an
+  explicit follow-up cleanup pass.
 
 ## [0.15.6.0] - 2026-04-25
 

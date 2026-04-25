@@ -4,41 +4,27 @@ import { render, waitFor } from "@testing-library/react";
 /**
  * Phase 09.1 Plan 05 — V2 widget-gating invariants.
  *
- * Mirrors the legacy `AllocationDashboard.widget-gating.test.tsx` shape but
- * targets `AllocationDashboardV2`. The contract:
- *
- *   1. When `strategies.length === 0`, the 18 STRATEGY_COMPOSITE_WIDGETS
- *      are filtered out of the V2 grid (must NOT be in the DOM).
+ *   1. When `strategies.length === 0`, ALL 18 STRATEGY_COMPOSITE_WIDGETS are
+ *      filtered out of the V2 grid (must NOT be in the DOM).
  *   2. Non-composite widgets render regardless of strategies length.
  *   3. When `strategies.length > 0`, the gate is inactive — composite
  *      widgets render alongside non-composite ones.
  *
  * The test stubs the V2 hook to inject a known config + WIDGET_COMPONENTS
  * to a deterministic stub-per-id, then asserts on `[data-widget-id]`
- * markers (the same markers WidgetGrid emits on every cell).
+ * markers (the same markers WidgetGrid emits on every cell). The composite
+ * id list is enumerated end-to-end so a future addition to the gate Set in
+ * AllocationDashboardV2.tsx that isn't wired into the picker (or vice
+ * versa) will fail this test.
  */
 
-// --- Required mocks --------------------------------------------------------
-
-vi.mock("@/lib/analytics/usage-events-client", () => ({
-  trackUsageEventClient: vi.fn(),
-  identifyUsageUser: vi.fn(),
-}));
-
-vi.mock("./components/AlertBanner", () => ({
-  AlertBanner: () => <div data-testid="alert-banner-stub" />,
-}));
-
-// Stub the WIDGET_COMPONENTS map: each id resolves to a tiny stub that
-// emits a marker so we can assert on the rendered DOM.
-vi.mock("./widgets", () => {
-  const ids = [
-    // Always-render core (non-composite registry ids).
-    "kpi-strip",
-    "equity-curve",
-    "outcomes-timeline",
-    "allocation-donut",
-    // The 18 strategy-composite registry ids — at least the ones we exercise.
+// Mirror of STRATEGY_COMPOSITE_WIDGETS in AllocationDashboardV2.tsx — kept
+// in lockstep so adding a widget to the gate Set without updating the
+// surrounding consumers fails this test. Hoisted via `vi.hoisted` so the
+// `vi.mock` factories below (which Vitest hoists to the top of the file)
+// can reference them without a TDZ error.
+const { COMPOSITE_IDS, NON_COMPOSITE_IDS } = vi.hoisted(() => ({
+  COMPOSITE_IDS: [
     "rolling-sharpe",
     "rolling-volatility",
     "cumulative-vs-benchmark",
@@ -57,9 +43,31 @@ vi.mock("./widgets", () => {
     "best-worst-periods",
     "performance-by-period",
     "var-expected-shortfall",
-  ];
+  ] as const,
+  NON_COMPOSITE_IDS: [
+    "kpi-strip",
+    "equity-curve",
+    "outcomes-timeline",
+    "allocation-donut",
+  ] as const,
+}));
+
+// --- Required mocks --------------------------------------------------------
+
+vi.mock("@/lib/analytics/usage-events-client", () => ({
+  trackUsageEventClient: vi.fn(),
+  identifyUsageUser: vi.fn(),
+}));
+
+vi.mock("./components/AlertBanner", () => ({
+  AlertBanner: () => <div data-testid="alert-banner-stub" />,
+}));
+
+// Stub the WIDGET_COMPONENTS map: each id resolves to a tiny stub that
+// emits a marker so we can assert on the rendered DOM.
+vi.mock("./widgets", () => {
   const WIDGET_COMPONENTS: Record<string, React.ComponentType<unknown>> = {};
-  for (const id of ids) {
+  for (const id of [...NON_COMPOSITE_IDS, ...COMPOSITE_IDS]) {
     WIDGET_COMPONENTS[id] = () => (
       <div data-testid={`widget-body-${id}`}>widget-body-{id}</div>
     );
@@ -67,15 +75,12 @@ vi.mock("./widgets", () => {
   return { WIDGET_COMPONENTS };
 });
 
-// Tiles fixture used by the V2 hook stub. We seed BOTH composite and
-// non-composite registry ids so the gate has something to filter (and
-// something to keep).
+// Tiles fixture used by the V2 hook stub. Seed every composite id (so the
+// gate has 18 things to filter) plus every non-composite id (so the gate
+// has 4 things to keep).
 const STUB_TILES_WITH_COMPOSITE = [
-  { k: "kpi-strip", w: 4 as const },
-  { k: "equity-curve", w: 4 as const },
-  { k: "correlation-matrix", w: 2 as const }, // composite — filtered when no strategies
-  { k: "rolling-sharpe", w: 2 as const }, // composite — filtered when no strategies
-  { k: "allocation-donut", w: 1 as const }, // non-composite — always renders
+  ...NON_COMPOSITE_IDS.map((k) => ({ k, w: 2 as const })),
+  ...COMPOSITE_IDS.map((k) => ({ k, w: 2 as const })),
 ];
 
 vi.mock("./hooks/useDashboardConfig", () => ({
@@ -91,17 +96,6 @@ vi.mock("./hooks/useDashboardConfig", () => ({
     moveWidget: vi.fn(),
     setTimeframe: vi.fn(),
     resetToDefaults: vi.fn(),
-  }),
-  // The legacy hook export must stay defined or other callers break in
-  // the same module graph; provide a no-op so this file compiles.
-  useDashboardConfig: () => ({
-    config: { tiles: [], timeframe: "YTD", layoutVersion: 3 },
-    addTile: vi.fn(),
-    removeTile: vi.fn(),
-    updateLayout: vi.fn(),
-    updateTileConfig: vi.fn(),
-    restoreTile: vi.fn(),
-    resetToDefault: vi.fn(),
   }),
 }));
 
@@ -198,40 +192,37 @@ function withStrategy() {
 // --- Tests -----------------------------------------------------------------
 
 describe("AllocationDashboardV2 — widget-gating (V2 f2)", () => {
-  it("when strategies=[], composite widgets are filtered out of the V2 grid", async () => {
+  it("when strategies=[], all 18 composite widgets are filtered out and all 4 non-composite widgets render", async () => {
     const { container } = render(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       <AllocationDashboardV2 {...(NO_STRATEGY_PAYLOAD as any)} />,
     );
 
-    // Non-composite widgets render via their data-widget-id markers.
+    // Wait for at least one non-composite to render (signals first paint).
     await waitFor(() => {
       expect(
         container.querySelector('[data-widget-id="kpi-strip"]'),
-        "kpi-strip should render in the V2 grid",
       ).not.toBeNull();
     });
-    expect(
-      container.querySelector('[data-widget-id="equity-curve"]'),
-      "equity-curve should render in the V2 grid",
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-widget-id="allocation-donut"]'),
-      "allocation-donut (non-composite) should render in the V2 grid",
-    ).not.toBeNull();
 
-    // Composite widgets must be filtered out of the DOM (gate active).
-    expect(
-      container.querySelector('[data-widget-id="correlation-matrix"]'),
-      "correlation-matrix (composite) should NOT render when strategies=[]",
-    ).toBeNull();
-    expect(
-      container.querySelector('[data-widget-id="rolling-sharpe"]'),
-      "rolling-sharpe (composite) should NOT render when strategies=[]",
-    ).toBeNull();
+    // Every non-composite must render.
+    for (const id of NON_COMPOSITE_IDS) {
+      expect(
+        container.querySelector(`[data-widget-id="${id}"]`),
+        `${id} (non-composite) should render in the V2 grid`,
+      ).not.toBeNull();
+    }
+
+    // Every composite must be filtered.
+    for (const id of COMPOSITE_IDS) {
+      expect(
+        container.querySelector(`[data-widget-id="${id}"]`),
+        `${id} (composite) should NOT render when strategies=[]`,
+      ).toBeNull();
+    }
   });
 
-  it("when strategies has rows, composite widgets DO render (gate inactive)", async () => {
+  it("when strategies has rows, all 18 composite widgets DO render (gate inactive)", async () => {
     const { container } = render(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       <AllocationDashboardV2 {...(withStrategy() as any)} />,
@@ -239,21 +230,23 @@ describe("AllocationDashboardV2 — widget-gating (V2 f2)", () => {
 
     await waitFor(() => {
       expect(
-        container.querySelector('[data-widget-id="correlation-matrix"]'),
-        "correlation-matrix should render when strategies has rows",
+        container.querySelector('[data-widget-id="kpi-strip"]'),
       ).not.toBeNull();
     });
-    expect(
-      container.querySelector('[data-widget-id="rolling-sharpe"]'),
-      "rolling-sharpe should render when strategies has rows",
-    ).not.toBeNull();
+
+    // Every composite must render when strategies has at least one row.
+    for (const id of COMPOSITE_IDS) {
+      expect(
+        container.querySelector(`[data-widget-id="${id}"]`),
+        `${id} (composite) should render when strategies has rows`,
+      ).not.toBeNull();
+    }
 
     // Sanity: non-composite widgets also render.
-    expect(
-      container.querySelector('[data-widget-id="kpi-strip"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-widget-id="equity-curve"]'),
-    ).not.toBeNull();
+    for (const id of NON_COMPOSITE_IDS) {
+      expect(
+        container.querySelector(`[data-widget-id="${id}"]`),
+      ).not.toBeNull();
+    }
   });
 });
