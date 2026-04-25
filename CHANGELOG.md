@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.9.0] - 2026-04-25
+
+Phase 09.1 PR1 follow-up — **Dashboard parity QA** (manual /qa pass). Side-by-
+side comparison of `/allocations` against the standalone HTML prototype
+surfaced four visible gaps the first pass of PR1 left on the table. Three are
+fixed here; the fourth (Bridge "no breaches" empty-state polish) is explicitly
+deferred to PR2 per HANDOFF.md.
+
+### Fixed
+
+- **Equity curve card chrome.** EquityChartWidget now wraps the SVG chart in
+  a card with the prototype's "Equity curve" title row and a hairline
+  separator (designer source: prototype `app.jsx:451-478`). The chart
+  rendered chrome-less inside the widget cell before this fix; that was the
+  most visually broken thing on Overview.
+- **Header sprawl.** Removed the page-level `PageHeader` ("My Allocation" +
+  "Your live exchange-verified portfolio." subtitle + standalone "+ Allocation"
+  button row) and folded its content into AllocationsTabs as one inline
+  header row: title + portfolio entity name on the left, tab list +
+  "+ Allocation" button on the right, separated from the body by a single
+  hairline. Mirrors prototype `app.jsx:460-510`. Eliminates ~120px of
+  vertical sprawl above the fold and recovers the prototype's information
+  density.
+- **Allocation tile swap (donut → "Allocation by style").** The default
+  Overview "allocation" tile rendered AllocationDonut (pie chart) but the
+  prototype shows a stacked-bar + per-style legend. New widget at
+  `widgets/allocation/AllocationByStyleWidget.tsx` (faithful port of
+  prototype `app.jsx` AllocationBreakdown, lines 530-575). Wired by:
+  registering `"allocation-by-style"` in `widget-registry.ts` (donut stays in
+  the picker), flipping `DESIGNER_KEY_TO_WIDGET_ID["allocation"]` from
+  `"allocation-donut"` to `"allocation-by-style"`, and bumping
+  `LAYOUT_VERSION` 6 → 7 so v6 users get a one-time reset (without the bump
+  the new widget would never surface for anyone who already loaded v6 once,
+  because their persisted tiles[] has the donut id baked in).
+
+### Deferred (PR2)
+
+- **Bridge "No active breaches" empty-state polish (G4 in HANDOFF).** The
+  empty state still renders as a plain white card while the active-breach
+  state already uses the prototype's cream gradient. HANDOFF.md scopes this
+  to PR2 ("Bridge empty-state polish, half a day"). Left untouched.
+
 ## [0.15.8.0] - 2026-04-25
 
 Phase 09.1 PR1 — **Default-Overview parity**. The V2 Overview tab now
