@@ -34,11 +34,17 @@ export default function BridgeHeroWidget({ data }: WidgetProps) {
   const payload = data as MyAllocationDashboardPayload | undefined;
   const flaggedHoldings = payload?.flaggedHoldings ?? [];
   const matchDecisionsByHoldingRef = payload?.matchDecisionsByHoldingRef ?? {};
+  // PR2 (HANDOFF G4) — forward `outcomes` so the rich empty state can
+  // surface "Last reviewed N days ago" + the count of reviews on file.
+  // The dashboard payload already provides this list (sorted DESC,
+  // capped at 200) so no new fetch is needed.
+  const outcomes = payload?.outcomes ?? [];
 
   return (
     <BridgeWidget
       flaggedHoldings={flaggedHoldings}
       matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
+      outcomes={outcomes}
     />
   );
 }
