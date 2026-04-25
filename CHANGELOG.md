@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.10.0] - 2026-04-26
+
+Phase 09.1 PR2 — **Bridge empty-state polish** (HANDOFF.md G4). The "No
+active breaches" branch of the Bridge widget no longer reads as a plain white
+card disconnected from the active-breach hero. It now uses the prototype's
+cream gradient + orange "BRIDGE" pill so the two states read as the same
+component, and surfaces the most recent recorded outcome inline.
+
+### Added
+
+- **Rich "All clear" empty state** in `components/BridgeWidget.tsx`. Renders
+  when `flaggedHoldings.length === 0`. Carries:
+  - Serif "All clear" headline (`var(--font-serif)`)
+  - "Last reviewed {relative date} · N reviews on file" line, computed
+    from `outcomes[0].created_at` and `outcomes.length`. The relative-date
+    helper handles today / yesterday / N days / N weeks / N months / older
+    absolute date so the copy never reads "NaN days ago"
+  - "View outcomes →" CTA routing to `/allocations?tab=outcomes` (the
+    canonical destination per CONTEXT §specifics; replaces the
+    setBannerDismissed designer bug from `app.jsx:131`)
+  - Graceful "No reviews recorded yet." fallback when `outcomes[]` is empty
+- **`outcomes` prop on BridgeWidget**, defaulted to `[]`. Threaded from the
+  dashboard payload through `BridgeHeroWidget` so existing isolated callers
+  (tests, BridgeOutcomeBanner per-row path) keep working unchanged.
+- **`BridgeWidget.test.tsx`** with 10 tests covering the relative-date
+  formatter (today / yesterday / days / weeks / months), singular vs plural
+  review count, CTA copy + href in both empty-state branches, prop omission,
+  and active-breach hero non-regression.
+
 ## [0.15.9.0] - 2026-04-25
 
 Phase 09.1 PR1 follow-up — **Dashboard parity QA** (manual /qa pass). Side-by-
