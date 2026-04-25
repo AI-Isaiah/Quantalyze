@@ -211,56 +211,73 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     }
   };
 
+  // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
+  // (lines 460-510): "My Allocation" + entity name on the left, tab list +
+  // primary action on the right, all collapsed into ONE flex row separated
+  // from the body by a single hairline. Replaces the multi-row sprawl of
+  // PageHeader (now removed from page.tsx) + standalone "+ Allocation" row.
+  // Entity name reads from props.portfolio.name; falls back to omitting the
+  // subtitle if the allocator has no portfolio yet.
+  const entityName = props.portfolio?.name ?? null;
+
   return (
     <div>
-      {/* D-20 — primary "+ Allocation" header button. Routes to the Scenario
-          tab via the same changeTab mechanism the tabs themselves use, so URL
-          + tab state stay in sync. Pre-Phase-10 lands on ScenarioStub; Phase
-          10 fills the composer behind the same URL. No alternative routing
-          (no /allocations/new route, no modal) — the Scenario tab IS the
-          allocation entry point. */}
-      <div className="flex items-center justify-end gap-2 mb-3">
-        <button
-          type="button"
-          onClick={() => changeTab("scenario")}
-          className="inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-          aria-label="Add allocation — open Scenario tab"
+      <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-2.5">
+        <div className="flex items-baseline gap-2.5">
+          <h1 className="font-display text-[22px] leading-none tracking-tight text-text-primary">
+            My Allocation
+          </h1>
+          {entityName ? (
+            <span className="text-[11px] uppercase tracking-[0.06em] text-text-muted">
+              {entityName}
+            </span>
+          ) : null}
+        </div>
+        <div
+          role="tablist"
+          aria-label="Allocation surfaces"
+          className="ml-auto flex items-center gap-1"
         >
-          + Allocation
-        </button>
-      </div>
-      <div
-        role="tablist"
-        aria-label="Allocation surfaces"
-        className="flex gap-1 border-b border-border mb-6"
-      >
-        {TAB_KEYS.map((key) => {
-          const isActive = activeTab === key;
-          const label = TAB_LABELS[key];
-          return (
-            <button
-              key={key}
-              ref={(el) => {
-                tabRefs.current[key] = el;
-              }}
-              type="button"
-              role="tab"
-              id={`tab-${key}`}
-              aria-selected={isActive}
-              aria-controls={`panel-${key}`}
-              tabIndex={isActive ? 0 : -1}
-              onClick={() => changeTab(key)}
-              onKeyDown={(e) => handleTabKeyDown(e, key)}
-              className={
-                isActive
-                  ? "px-4 py-2.5 text-sm font-medium border-b-2 -mb-px border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                  : "px-4 py-2.5 text-sm font-medium border-b-2 -mb-px border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-              }
-            >
-              {label}
-            </button>
-          );
-        })}
+          {TAB_KEYS.map((key) => {
+            const isActive = activeTab === key;
+            const label = TAB_LABELS[key];
+            return (
+              <button
+                key={key}
+                ref={(el) => {
+                  tabRefs.current[key] = el;
+                }}
+                type="button"
+                role="tab"
+                id={`tab-${key}`}
+                aria-selected={isActive}
+                aria-controls={`panel-${key}`}
+                tabIndex={isActive ? 0 : -1}
+                onClick={() => changeTab(key)}
+                onKeyDown={(e) => handleTabKeyDown(e, key)}
+                className={
+                  isActive
+                    ? "px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    : "px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                }
+              >
+                {label}
+              </button>
+            );
+          })}
+          <span aria-hidden className="mx-2 h-4 w-px bg-border" />
+          {/* D-20 — primary "+ Allocation" header button. Routes to the
+              Scenario tab via the same changeTab mechanism the tabs use, so
+              URL + tab state stay in sync. */}
+          <button
+            type="button"
+            onClick={() => changeTab("scenario")}
+            className="inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            aria-label="Add allocation — open Scenario tab"
+          >
+            + Allocation
+          </button>
+        </div>
       </div>
 
       {/* Tabpanel pattern below has two cooperating conditions, by design:
