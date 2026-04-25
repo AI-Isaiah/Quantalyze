@@ -1,6 +1,14 @@
 import type { TileConfig } from "./types";
 
 /**
+ * PR1 QA (dashboard parity): bumped 6 → 7. The PR1 short-key resolution
+ * for "allocation" was flipped from "allocation-donut" → "allocation-by-style"
+ * during the QA pass; without a version bump, allocators who already loaded
+ * v6 once would have the donut id baked into their persisted tiles[] and
+ * would never see the new widget. Bumping forces a one-time reset so the
+ * new Overview default (with the prototype's stacked-bar style legend)
+ * lands.
+ *
  * Phase 09.1 PR1 (dashboard parity): bumped 5 → 6. Restores the
  * `mandate` tile on the default Overview now that PR1 ships a real
  * `mandate-snapshot` widget (widgets/risk/MandateSnapshotWidget) and
@@ -19,7 +27,7 @@ import type { TileConfig } from "./types";
  * Voice-D8 accepted precedent: on mismatch, each hook's loadConfig resets to
  * its own defaults; no banner; users with custom layouts lose them once.
  */
-export const LAYOUT_VERSION = 6;
+export const LAYOUT_VERSION = 7;
 
 /**
  * Phase 09.1 PR1 (dashboard parity): 7-tile Overview default matching

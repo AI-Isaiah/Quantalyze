@@ -46,7 +46,7 @@ vi.mock("./hooks/useDashboardConfig", () => ({
     config: {
       tiles: STUB_TILES,
       timeframe: "YTD",
-      layoutVersion: 6,
+      layoutVersion: 7,
     },
     addWidget: vi.fn(),
     removeWidget: vi.fn(),

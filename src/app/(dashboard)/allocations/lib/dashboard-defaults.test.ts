@@ -4,17 +4,21 @@ import { resolveWidgetId } from "./widget-registry";
 import { WIDGET_COMPONENTS } from "../widgets";
 
 // ---------------------------------------------------------------------------
-// Phase 09.1 PR1 (dashboard parity) — v6 default layout invariants
+// PR1 QA (dashboard parity) — v7 default layout invariants
 // ---------------------------------------------------------------------------
 //
 // These assertions pin the shape that WidgetGrid + the V2 hook's
 // reset-on-mismatch path consume. If a future phase touches DEFAULT_LAYOUT
 // or LAYOUT_VERSION, this file fails first — preventing accidental drift
 // (e.g. a 6th "outcomes" entry, a width outside 1..4, or a missing key).
+//
+// v7 (this file) adds the QA bump: short-key "allocation" now resolves to
+// "allocation-by-style" instead of "allocation-donut", so persisted v6
+// configs need a one-time reset to surface the new widget.
 
-describe("dashboard-defaults v6 invariants", () => {
-  it("LAYOUT_VERSION is 6 (PR1 — restore mandate tile + narrow outcomes for screenshot parity)", () => {
-    expect(LAYOUT_VERSION).toBe(6);
+describe("dashboard-defaults v7 invariants", () => {
+  it("LAYOUT_VERSION is 7 (PR1 QA — flip allocation short key to allocation-by-style)", () => {
+    expect(LAYOUT_VERSION).toBe(7);
   });
 
   it("DEFAULT_LAYOUT has exactly 7 entries (PR1 — bridge/kpi/equity/holdings/allocation/mandate/outcomes)", () => {
