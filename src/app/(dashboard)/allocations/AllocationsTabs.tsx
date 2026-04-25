@@ -7,6 +7,7 @@ import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
 import { TweaksProvider } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
+import { Tweaks } from "./components/Tweaks";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
@@ -356,7 +357,6 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
             </svg>
             <span>Export</span>
           </button>
-          <TweaksToggle />
           {/* D-20 — primary "+ Allocation" header button. Routes to the
               Scenario tab via the same changeTab mechanism the tabs use, so
               URL + tab state stay in sync. */}
@@ -432,6 +432,12 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
           />
         )}
       </div>
+      {/* PR3 (HANDOFF G5) — Floating Tweaks chip + panel mounted at the
+          dashboard root so they stay visible across all tabs (Overview
+          / Holdings / Outcomes / Mandate / Risk / Scenario) and float
+          bottom-right per the truth screenshot. */}
+      <TweaksToggle />
+      <Tweaks />
     </div>
     </TweaksProvider>
   );

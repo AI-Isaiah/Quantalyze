@@ -15,7 +15,6 @@ import { WidgetPicker } from "./components/WidgetPicker";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
-import { Tweaks } from "./components/Tweaks";
 import { useTweaks } from "./context/TweaksContext";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
@@ -372,10 +371,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           renderWidget={renderWidget}
         />
       </div>
-      {/* PR3 (HANDOFF G5) — Tweaks panel mount. QA gate is gone; the
-          panel renders bottom-right whenever TweaksContext.panelOpen is
-          true (toggled by the TweaksToggle chip in AllocationsTabs). */}
-      <Tweaks />
+      {/* PR3 (HANDOFF G5) — Tweaks panel + toggle now mount at the
+          AllocationsTabs root (a level above this component) so they
+          stay visible across all tabs. Removed from this component to
+          avoid double-mounting the panel/toggle on Overview. */}
     </div>
   );
 }
