@@ -73,9 +73,9 @@ function deltaColor(v: number | null): string {
 function toneColor(
   tone: "positive" | "negative" | "neutral",
 ): string {
-  if (tone === "positive") return "#16A34A";
-  if (tone === "negative") return "#DC2626";
-  return "#718096";
+  if (tone === "positive") return "var(--color-positive)";
+  if (tone === "negative") return "var(--color-negative)";
+  return "var(--color-text-muted)";
 }
 
 function pillStyle(
@@ -156,21 +156,21 @@ function formatDelta(
  */
 function WidgetHeader({ pendingCount }: { pendingCount: number }) {
   return (
-    <div className="flex items-start justify-between border-b border-[#E2E8F0] px-5 py-3.5">
+    <div className="flex items-start justify-between border-b border-[var(--color-border)] px-5 py-3.5">
       <div>
         <h3
           className="m-0 flex items-center gap-2 text-[16px] font-semibold"
           style={{
             fontFamily: "var(--font-serif)",
-            color: "#1A1A2E",
+            color: "var(--color-text-primary)",
           }}
         >
           Bridge outcomes
           <span
             className="inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider"
             style={{
-              backgroundColor: "rgba(27,107,90,0.10)",
-              color: "#1B6B5A",
+              backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)",
+              color: "var(--color-accent)",
             }}
           >
             Feedback loop
@@ -178,7 +178,7 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
         </h3>
         <div
           className="mt-0.5 text-[11.5px]"
-          style={{ color: "#718096" }}
+          style={{ color: "var(--color-text-muted)" }}
         >
           Realized delta from Bridge-driven reallocations
           {pendingCount > 0 ? ` — ${pendingCount} pending cycle` : ""}
@@ -188,9 +188,9 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
         href="/holdings"
         className="inline-flex items-center rounded-md border px-3 py-1.5 text-xs font-medium transition-colors"
         style={{
-          borderColor: "#E2E8F0",
-          color: "#1A1A2E",
-          backgroundColor: "#FFFFFF",
+          borderColor: "var(--color-border)",
+          color: "var(--color-text-primary)",
+          backgroundColor: "var(--color-surface)",
         }}
       >
         View all
@@ -218,7 +218,7 @@ function KpiStrip({
   ).length;
 
   return (
-    <div className="grid grid-cols-3 border-b border-[#E2E8F0]">
+    <div className="grid grid-cols-3 border-b border-[var(--color-border)]">
       <KpiCell
         label="Hit rate (90d)"
         value={
@@ -277,12 +277,12 @@ function KpiCell({
     <div
       className="px-5 py-4"
       style={{
-        borderLeft: divider ? "1px solid #E2E8F0" : "none",
+        borderLeft: divider ? "1px solid var(--color-border)" : "none",
       }}
     >
       <div
         className="text-[10.5px] font-semibold uppercase tracking-wider"
-        style={{ color: "#718096" }}
+        style={{ color: "var(--color-text-muted)" }}
       >
         {label}
       </div>
@@ -290,7 +290,10 @@ function KpiCell({
         className="mt-1 font-mono text-[22px] font-medium tabular-nums"
         // Route the color through a CSS custom property so the literal hex
         // survives JSDOM style-attribute normalization in tests (which
-        // otherwise rewrites `#16A34A` -> `rgb(22, 163, 74)`).
+        // otherwise rewrites `#16A34A` -> `rgb(22, 163, 74)`). Tests at
+        // outcomes.test.tsx:245/256 assert the hex literally, so valueColor
+        // stays as a hex literal and the swap to var() tokens stops at the
+        // surrounding chrome (border, label, sub).
         style={{
           ["--kpi-color" as string]: valueColor,
           color: "var(--kpi-color)",
@@ -300,7 +303,7 @@ function KpiCell({
       </div>
       <div
         className="mt-0.5 text-[11px]"
-        style={{ color: "#718096" }}
+        style={{ color: "var(--color-text-muted)" }}
       >
         {sub}
       </div>
@@ -410,12 +413,12 @@ function ExpandedPanel({
 
   return (
     <div
-      className="border-b border-[#E2E8F0] px-5 py-4"
-      style={{ backgroundColor: "#FBFCFD" }}
+      className="border-b border-[var(--color-border)] px-5 py-4"
+      style={{ backgroundColor: "#FBFCFD" /* off-token panel tint */ }}
     >
       <div
         className="mb-3 text-[11px] font-semibold uppercase tracking-wider"
-        style={{ color: "#718096" }}
+        style={{ color: "var(--color-text-muted)" }}
       >
         Realized delta vs held baseline
       </div>
@@ -426,30 +429,30 @@ function ExpandedPanel({
           const isLoading = !curve && !error;
 
           const barColor = isPending
-            ? "#D97706" /* var(--warning) */
+            ? "var(--color-warning)"
             : col.delta != null && col.delta >= 0
-              ? "#16A34A"
-              : "#DC2626";
+              ? "var(--color-positive)"
+              : "var(--color-negative)";
 
           return (
             <div
               key={col.short}
-              className="rounded-lg border border-[#E2E8F0] bg-white p-3.5"
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3.5"
             >
               <div
                 className="text-[11px] font-medium"
-                style={{ color: "#718096" }}
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {col.label}
               </div>
               {isPending ? (
                 <div
                   className="mt-2.5 flex items-center gap-2 text-[13px] italic"
-                  style={{ color: "#718096" }}
+                  style={{ color: "var(--color-text-muted)" }}
                 >
                   <span
                     className="inline-block h-2 w-2 rounded-full"
-                    style={{ backgroundColor: "#D97706" }}
+                    style={{ backgroundColor: "var(--color-warning)" }}
                   />
                   Window open
                 </div>
@@ -468,7 +471,7 @@ function ExpandedPanel({
               )}
               <div
                 className="mt-2.5 h-1 overflow-hidden rounded"
-                style={{ backgroundColor: "#F1F5F9" }}
+                style={{ backgroundColor: "#F1F5F9" /* off-token track */ }}
               >
                 <div
                   style={{
@@ -488,10 +491,10 @@ function ExpandedPanel({
           delta grid (UI-SPEC §4c). Uses the shared Plan 03 primitives via
           BridgeOutcomeNoteSection. scope_kind=bridge_outcome;
           scope_ref=outcome.id (UUID). */}
-      <hr className="my-3 border-[#E2E8F0]" />
+      <hr className="my-3 border-[var(--color-border)]" />
       <p
         className="mb-2 text-xs font-semibold uppercase tracking-wider"
-        style={{ color: "#718096" }}
+        style={{ color: "var(--color-text-muted)" }}
       >
         Your note
       </p>
@@ -547,7 +550,7 @@ function TimelineRow({
       return (
         <span
           className="text-[12px] italic"
-          style={{ color: "#718096" }}
+          style={{ color: "var(--color-text-muted)" }}
         >
           pending
         </span>
@@ -574,7 +577,7 @@ function TimelineRow({
   return (
     <Fragment>
       <tr
-        className="cursor-pointer border-b border-[#E2E8F0] transition-colors hover:bg-[#FAFBFC]"
+        className="cursor-pointer border-b border-[var(--color-border)] transition-colors hover:bg-[#FAFBFC]"
         style={{ background: isExpanded ? "#FAFBFC" : "transparent" }}
         onClick={() => onToggle(outcome.id)}
       >
@@ -586,14 +589,14 @@ function TimelineRow({
                 href={`/strategies/${originalStrategy.id}`}
                 onClick={(e) => e.stopPropagation()}
                 className="text-[12px] hover:underline"
-                style={{ color: "#718096" }}
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {originalStrategy.name}
               </a>
             ) : (
               <span
                 className="text-[12px]"
-                style={{ color: "#718096" }}
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {"—"}
               </span>
@@ -601,7 +604,7 @@ function TimelineRow({
             <span
               aria-hidden="true"
               className="text-[10px]"
-              style={{ color: "#718096" }}
+              style={{ color: "var(--color-text-muted)" }}
             >
               {"›"}
             </span>
@@ -610,14 +613,14 @@ function TimelineRow({
                 href={`/strategies/${replacementStrategy.id}`}
                 onClick={(e) => e.stopPropagation()}
                 className="text-[13px] font-medium hover:underline"
-                style={{ color: "#1A1A2E" }}
+                style={{ color: "var(--color-text-primary)" }}
               >
                 {replacementStrategy.name}
               </a>
             ) : (
               <span
                 className="text-[13px] font-medium"
-                style={{ color: "#1A1A2E" }}
+                style={{ color: "var(--color-text-primary)" }}
               >
                 {"—"}
               </span>
@@ -631,18 +634,18 @@ function TimelineRow({
             fabricating a $-figure from a magic-number proxy. */}
         <td className="px-4 py-3 text-right font-mono text-[13px] tabular-nums">
           {sizePercent != null ? (
-            <span style={{ color: "#1A1A2E" }}>
+            <span style={{ color: "var(--color-text-primary)" }}>
               {sizePercent.toFixed(1)}%
             </span>
           ) : (
-            <span style={{ color: "#718096" }}>{"—"}</span>
+            <span style={{ color: "var(--color-text-muted)" }}>{"—"}</span>
           )}
         </td>
 
         {/* Recorded */}
         <td
           className="px-4 py-3 text-[12px]"
-          style={{ color: "#4A5568" }}
+          style={{ color: "var(--color-text-secondary)" }}
         >
           {formatDate(dateIso)}
         </td>
@@ -669,7 +672,7 @@ function TimelineRow({
                 : "Expand outcome detail"
             }
             aria-controls={`outcome-detail-${outcome.id}`}
-            className="inline-flex h-6 w-6 items-center justify-center rounded text-[#718096] hover:text-[#1A1A2E] hover:bg-[#F8F9FA] focus-visible:outline-2 focus-visible:outline focus-visible:outline-[#1B6B5A]"
+            className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-page)] focus-visible:outline-2 focus-visible:outline focus-visible:outline-[var(--color-accent)]"
           >
             <span
               aria-hidden="true"
@@ -701,10 +704,10 @@ function TimelineRow({
 function TruncationFooter() {
   return (
     <div
-      className="border-t border-[#E2E8F0] px-5 py-2"
-      style={{ backgroundColor: "#F8F9FA" }}
+      className="border-t border-[var(--color-border)] px-5 py-2"
+      style={{ backgroundColor: "var(--color-page)" }}
     >
-      <span className="text-xs font-medium" style={{ color: "#718096" }}>
+      <span className="text-xs font-medium" style={{ color: "var(--color-text-muted)" }}>
         Showing most recent 200 — reach out if you need historical export
       </span>
     </div>
@@ -717,12 +720,12 @@ function TruncationFooter() {
 function LoadingState() {
   return (
     <div className="flex h-full flex-col" aria-label="Loading outcomes data">
-      <div className="grid grid-cols-3 gap-2 border-b border-[#E2E8F0] px-5 py-4">
+      <div className="grid grid-cols-3 gap-2 border-b border-[var(--color-border)] px-5 py-4">
         {[0, 1, 2].map((i) => (
           <div key={i} className="flex flex-col gap-1.5">
-            <div className="h-2.5 w-20 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-5 w-16 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-2 w-24 rounded bg-[#E2E8F0] animate-pulse" />
+            <div className="h-2.5 w-20 rounded bg-[var(--color-border)] animate-pulse" />
+            <div className="h-5 w-16 rounded bg-[var(--color-border)] animate-pulse" />
+            <div className="h-2 w-24 rounded bg-[var(--color-border)] animate-pulse" />
           </div>
         ))}
       </div>
@@ -730,14 +733,14 @@ function LoadingState() {
         {[0, 1, 2, 3, 4].map((i) => (
           <div
             key={i}
-            className="flex items-center gap-3 border-b border-[#E2E8F0] px-5"
+            className="flex items-center gap-3 border-b border-[var(--color-border)] px-5"
             style={{ height: 44 }}
           >
-            <div className="h-3 w-32 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-3 w-32 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-3 w-16 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-3 w-24 rounded bg-[#E2E8F0] animate-pulse" />
-            <div className="h-3 w-20 rounded bg-[#E2E8F0] animate-pulse" />
+            <div className="h-3 w-32 rounded bg-[var(--color-border)] animate-pulse" />
+            <div className="h-3 w-32 rounded bg-[var(--color-border)] animate-pulse" />
+            <div className="h-3 w-16 rounded bg-[var(--color-border)] animate-pulse" />
+            <div className="h-3 w-24 rounded bg-[var(--color-border)] animate-pulse" />
+            <div className="h-3 w-20 rounded bg-[var(--color-border)] animate-pulse" />
           </div>
         ))}
       </div>
@@ -785,13 +788,13 @@ export default function OutcomesWidget({ data }: WidgetProps) {
         <span
           aria-hidden="true"
           className="text-2xl"
-          style={{ color: "#DC2626" }}
+          style={{ color: "var(--color-negative)" }}
         >
           {"⚠"}
         </span>
         <p
           className="text-sm font-medium"
-          style={{ color: "#1A1A2E" }}
+          style={{ color: "var(--color-text-primary)" }}
         >
           Could not load outcomes
         </p>
@@ -801,8 +804,8 @@ export default function OutcomesWidget({ data }: WidgetProps) {
             setRetryTick((t) => t + 1);
             if (typeof window !== "undefined") window.location.reload();
           }}
-          className="inline-block rounded-md border border-[#E2E8F0] px-4 py-2 text-sm font-medium"
-          style={{ color: "#1A1A2E", backgroundColor: "#FFFFFF" }}
+          className="inline-block rounded-md border border-[var(--color-border)] px-4 py-2 text-sm font-medium"
+          style={{ color: "var(--color-text-primary)", backgroundColor: "var(--color-surface)" }}
         >
           Try again
         </button>
@@ -824,20 +827,20 @@ export default function OutcomesWidget({ data }: WidgetProps) {
           <span
             aria-hidden="true"
             className="text-2xl"
-            style={{ color: "#718096" }}
+            style={{ color: "var(--color-text-muted)" }}
           >
             {"◈"}
           </span>
           <p
             className="text-sm font-medium"
-            style={{ color: "#718096" }}
+            style={{ color: "var(--color-text-muted)" }}
           >
             Your Bridge outcomes will appear here after you act on one
           </p>
           <a
             href="/holdings"
             className="inline-block rounded-md px-4 py-2 text-sm font-medium"
-            style={{ backgroundColor: "#1B6B5A", color: "#FFFFFF" }}
+            style={{ backgroundColor: "var(--color-accent)", color: "var(--color-surface)" }}
           >
             View Holdings
           </a>
@@ -856,44 +859,44 @@ export default function OutcomesWidget({ data }: WidgetProps) {
           <thead>
             <tr>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
-                style={{ color: "#718096" }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 Reallocation
               </th>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
-                style={{ color: "#718096" }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 Size
               </th>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
-                style={{ color: "#718096" }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 Recorded
               </th>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
-                style={{ color: "#718096" }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 30d"}
               </th>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
-                style={{ color: "#718096" }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 90d"}
               </th>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
-                style={{ color: "#718096" }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 180d"}
               </th>
               <th
-                className="border-b border-[#E2E8F0] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
-                style={{ color: "#718096", width: 48 }}
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
+                style={{ color: "var(--color-text-muted)", width: 48 }}
                 aria-hidden="true"
               />
             </tr>
