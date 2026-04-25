@@ -47,6 +47,9 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   "tracking-error": lazy(() =>
     import("./risk/TrackingError").then((m) => ({ default: m.TrackingError })),
   ),
+  // PR1 (dashboard parity) — V2 Overview mandate tile, default-routed by
+  // DESIGNER_KEY_TO_WIDGET_ID["mandate"] post-PR1.
+  "mandate-snapshot": lazy(() => import("./risk/MandateSnapshotWidget")),
 
   // ── Allocation (5) ─────────────────────────────────────────────────
   "allocation-donut": lazy(() => import("./allocation/AllocationDonut")),

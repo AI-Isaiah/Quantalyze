@@ -201,6 +201,22 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     description: "Standard deviation of active returns vs benchmark.",
     status: "ready",
   },
+  // Phase 09.1 PR1 (dashboard parity) — V2 Overview MandateSnapshot tile.
+  // Renders the prototype's 5-row pass/fail mandate panel against live
+  // allocator_preferences + portfolio analytics via lib/mandate-gates.ts.
+  // DESIGNER_KEY_TO_WIDGET_ID["mandate"] points here (was "mandate-compliance"
+  // pre-PR1, which had no registered widget and rendered the "Unknown widget"
+  // fallback for the seven-tile default Overview).
+  "mandate-snapshot": {
+    id: "mandate-snapshot",
+    name: "Mandate Snapshot",
+    category: "risk",
+    icon: "◆",
+    defaultW: 2,
+    defaultH: 3,
+    description: "Live pass/fail of mandate gates against current portfolio.",
+    status: "ready",
+  },
 
   // ── Allocation (5) ─────────────────────────────────────────────────
   "allocation-donut": {
@@ -540,7 +556,13 @@ export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
   equity: "equity-chart",
   holdings: "holdings-table",
   allocation: "allocation-donut",
-  mandate: "mandate-compliance",
+  // PR1 (dashboard parity) — was "mandate-compliance" (unregistered, rendered
+  // "Unknown widget" fallback). Now points at the new MandateSnapshotWidget
+  // (widgets/risk/MandateSnapshotWidget.tsx) so the seven-tile DEFAULT_LAYOUT
+  // resolves cleanly. Persisted V2 configs that already carry
+  // "mandate-compliance" as a tile id continue to render the unknown-widget
+  // fallback (write-time normalization only — no migration code needed).
+  mandate: "mandate-snapshot",
   outcomes: "outcomes-timeline",
 };
 
