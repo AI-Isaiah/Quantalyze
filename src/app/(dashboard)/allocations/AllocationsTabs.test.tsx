@@ -137,6 +137,20 @@ function expectOnlyVisibleBody(testid: (typeof ACTIVE_BODIES)[number]): void {
   }
 }
 
+// Phase A6 — Holdings / Outcomes / Mandate / Risk tab bodies are now
+// loaded via next/dynamic({ ssr: false }), so they only appear after the
+// lazy chunk resolves. findByTestId polls until the body appears or the
+// jest timeout elapses, which is the right abstraction for lazy modules.
+async function expectOnlyVisibleBodyAsync(
+  testid: (typeof ACTIVE_BODIES)[number],
+): Promise<void> {
+  await screen.findByTestId(testid);
+  for (const other of ACTIVE_BODIES) {
+    if (other === testid) continue;
+    expect(screen.queryByTestId(other)).not.toBeInTheDocument();
+  }
+}
+
 describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   beforeEach(() => {
     mockReplace.mockReset();
@@ -166,37 +180,37 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     ).not.toBeNull();
   });
 
-  it("?tab=holdings → Holdings tab active", () => {
+  it("?tab=holdings → Holdings tab active", async () => {
     setSearchParams("tab=holdings");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("holdings-body");
+    await expectOnlyVisibleBodyAsync("holdings-body");
     expect(
       screen.getByRole("tab", { name: "Holdings" }).getAttribute("aria-selected"),
     ).toBe("true");
   });
 
-  it("?tab=outcomes → Outcomes tab active", () => {
+  it("?tab=outcomes → Outcomes tab active", async () => {
     setSearchParams("tab=outcomes");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("outcomes-body");
+    await expectOnlyVisibleBodyAsync("outcomes-body");
     expect(
       screen.getByRole("tab", { name: "Outcomes" }).getAttribute("aria-selected"),
     ).toBe("true");
   });
 
-  it("?tab=mandate → Mandate tab active", () => {
+  it("?tab=mandate → Mandate tab active", async () => {
     setSearchParams("tab=mandate");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("mandate-body");
+    await expectOnlyVisibleBodyAsync("mandate-body");
     expect(
       screen.getByRole("tab", { name: "Mandate" }).getAttribute("aria-selected"),
     ).toBe("true");
   });
 
-  it("?tab=risk → Risk tab active", () => {
+  it("?tab=risk → Risk tab active", async () => {
     setSearchParams("tab=risk");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("risk-body");
+    await expectOnlyVisibleBodyAsync("risk-body");
     expect(
       screen.getByRole("tab", { name: "Risk" }).getAttribute("aria-selected"),
     ).toBe("true");

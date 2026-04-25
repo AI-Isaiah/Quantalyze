@@ -2,15 +2,70 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import dynamic from "next/dynamic";
 import { AllocationDashboard } from "./AllocationDashboard";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
-import { HoldingsTabPanel } from "./HoldingsTabPanel";
-import { OutcomesTabPanel } from "./OutcomesTabPanel";
-import { MandateTabPanel } from "./MandateTabPanel";
-import { RiskTabPanel } from "./RiskTabPanel";
 import { QA_MODE } from "@/lib/qa-mode";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+
+// Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
+// next/dynamic with ssr: false. Together they pull in HoldingsTable +
+// HoldingDetail + OutcomeForm + BridgeOutcomeBanner + OutcomesWidget +
+// MandateForm + RiskAttribution surfaces, plus their charts and primitives
+// — easily ~1500 LOC of code the Overview tab never needs. Deferring them
+// from the initial bundle and HTML keeps the first paint of the dashboard
+// aligned with the Overview path that >90% of allocators land on.
+//
+// AllocationsTabs is itself a "use client" component, so the deferred
+// chunks hydrate in lock-step with the user's first interaction with
+// each non-Overview tab. The fallback below renders a centered skeleton
+// strip while the dynamic chunk fetches.
+function TabBodyFallback({ label }: { label: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label={`Loading ${label}`}
+      className="flex h-64 items-center justify-center"
+    >
+      <div className="flex flex-col items-center gap-3">
+        <div
+          aria-hidden="true"
+          className="h-2 w-32 rounded bg-[var(--color-border)] animate-pulse"
+        />
+        <div
+          aria-hidden="true"
+          className="h-2 w-24 rounded bg-[var(--color-border)] animate-pulse"
+        />
+        <span className="sr-only">Loading {label}</span>
+      </div>
+    </div>
+  );
+}
+
+const HoldingsTabPanel = dynamic(
+  () =>
+    import("./HoldingsTabPanel").then((m) => ({ default: m.HoldingsTabPanel })),
+  { ssr: false, loading: () => <TabBodyFallback label="Holdings" /> },
+);
+
+const OutcomesTabPanel = dynamic(
+  () =>
+    import("./OutcomesTabPanel").then((m) => ({ default: m.OutcomesTabPanel })),
+  { ssr: false, loading: () => <TabBodyFallback label="Outcomes" /> },
+);
+
+const MandateTabPanel = dynamic(
+  () =>
+    import("./MandateTabPanel").then((m) => ({ default: m.MandateTabPanel })),
+  { ssr: false, loading: () => <TabBodyFallback label="Mandate" /> },
+);
+
+const RiskTabPanel = dynamic(
+  () => import("./RiskTabPanel").then((m) => ({ default: m.RiskTabPanel })),
+  { ssr: false, loading: () => <TabBodyFallback label="Risk" /> },
+);
 
 // Phase 09.1 Plan 01 / D-17 — feature flag controlling whether the
 // Overview tab renders AllocationDashboardV2 (the new designer-provided
