@@ -26,6 +26,7 @@ import { NoteRender } from "@/components/notes/NoteRender";
 import { NoteSaveStatus } from "@/components/notes/NoteSaveStatus";
 import { useNoteAutoSave } from "@/components/notes/useNoteAutoSave";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
+import { formatPercent } from "@/lib/utils";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import { OutcomeForm } from "./OutcomeForm";
 
@@ -38,11 +39,6 @@ export type HoldingDetailProps = {
   onRecorded?: (outcomeId: string) => void;
   onClose?: () => void;
 };
-
-function formatPercent(n: number | null): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(2)}%`;
-}
 
 function formatNumber(n: number | null, digits = 2): string {
   if (n == null || !Number.isFinite(n)) return "—";
@@ -183,10 +179,10 @@ export function HoldingDetail({
           className="grid grid-cols-2 gap-3 text-xs md:grid-cols-3"
         >
           <Metric label="Allocation" value={formatUsd(row.alloc)} />
-          <Metric label="Weight" value={formatPercent(row.weight)} />
-          <Metric label="MTD" value={formatPercent(row.mtd)} />
+          <Metric label="Weight" value={formatPercent(row.weight, 2, { signed: false })} />
+          <Metric label="MTD" value={formatPercent(row.mtd, 2)} />
           <Metric label="Sharpe" value={formatNumber(row.sharpe)} />
-          <Metric label="Max DD" value={formatPercent(row.dd)} />
+          <Metric label="Max DD" value={formatPercent(row.dd, 2)} />
           <Metric label="Age" value={formatDays(row.age)} />
         </div>
       ) : null}

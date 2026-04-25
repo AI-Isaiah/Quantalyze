@@ -7,6 +7,7 @@ import type {
   MyAllocationDashboardPayload,
   OutcomeRow,
 } from "@/lib/queries";
+import { formatPercent } from "@/lib/utils";
 import { computeOutcomeKPIs, type OutcomeKPIs } from "@/lib/outcomes-kpi";
 import {
   deriveOutcomeLabel,
@@ -61,20 +62,6 @@ const WINDOWS: Array<{
 ];
 
 // ---------------------------------------------------------- pure helpers
-
-function formatPercent(v: number | null): string {
-  if (v === null) return "—";
-  const pct = v * 100;
-  const sign = pct > 0 ? "+" : "";
-  return `${sign}${pct.toFixed(1)}%`;
-}
-
-function formatPercentSigned(v: number | null, decimals = 1): string {
-  if (v === null) return "—";
-  const pct = v * 100;
-  const sign = pct >= 0 ? "+" : "";
-  return `${sign}${pct.toFixed(decimals)}%`;
-}
 
 function deltaColor(v: number | null): string {
   if (v === null) return "#718096";
@@ -243,9 +230,10 @@ function KpiStrip({
       />
       <KpiCell
         label="Avg realized α (90d)"
-        value={formatPercentSigned(kpis.avgRealizedDelta)}
+        value={formatPercent(kpis.avgRealizedDelta, 1)}
         sub={`Avg realized delta: ${formatPercent(
           kpis.avgRealizedDelta,
+          1,
         )} · ${kpis.pendingCount} pending`}
         tone={
           kpis.avgRealizedDelta == null
@@ -578,7 +566,7 @@ function TimelineRow({
           color: "var(--delta-color)",
         } as React.CSSProperties}
       >
-        {formatPercentSigned(v)}
+        {formatPercent(v, 1)}
       </span>
     );
   }
