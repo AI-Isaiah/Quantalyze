@@ -436,11 +436,12 @@ describe("useDashboardConfigV2", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
     // Find an unambiguous short key → registry id mapping. "allocation"
-    // resolves to "allocation-donut" and neither is seeded, so the test
-    // verifies that the short key is resolved before the tile is pushed.
+    // resolves to "allocation-by-style" (PR1 QA flipped this from
+    // "allocation-donut"); neither is seeded so the test verifies the
+    // short key is resolved before the tile is pushed.
     const shortKey = "allocation";
     const registryId = DESIGNER_KEY_TO_WIDGET_ID[shortKey];
-    expect(registryId).toBe("allocation-donut");
+    expect(registryId).toBe("allocation-by-style");
 
     act(() => {
       result.current.addWidget(shortKey);

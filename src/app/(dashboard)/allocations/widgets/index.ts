@@ -51,7 +51,10 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   // DESIGNER_KEY_TO_WIDGET_ID["mandate"] post-PR1.
   "mandate-snapshot": lazy(() => import("./risk/MandateSnapshotWidget")),
 
-  // ── Allocation (5) ─────────────────────────────────────────────────
+  // ── Allocation (6) ─────────────────────────────────────────────────
+  // PR1 QA — "allocation-by-style" is the V2 Overview default; the donut
+  // remains in the picker as an alternative.
+  "allocation-by-style": lazy(() => import("./allocation/AllocationByStyleWidget")),
   "allocation-donut": lazy(() => import("./allocation/AllocationDonut")),
   "allocation-over-time": lazy(() => import("./allocation/AllocationOverTime")),
   "weight-drift-monitor": lazy(() => import("./allocation/WeightDriftMonitor")),
