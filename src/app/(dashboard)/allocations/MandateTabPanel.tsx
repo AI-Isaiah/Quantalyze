@@ -65,9 +65,18 @@ function MandateSnapshotCard({
     });
   }
   if (mandate.liquidity_preference) {
+    // Phase 09.1 PR1 (dashboard parity) — UI-rename of "Liquidity
+    // preference" to "Minimum AUM". Underlying enum value is unchanged;
+    // value display maps the tier string to its dollar-amount label so
+    // the snapshot row reads coherently with the new field name.
+    const aumTierLabel: Record<NonNullable<typeof mandate.liquidity_preference>, string> = {
+      high: "$10M+",
+      medium: "$1M – $10M",
+      low: "<$1M",
+    };
     rows.push({
-      label: "Liquidity preference",
-      value: mandate.liquidity_preference,
+      label: "Minimum AUM",
+      value: aumTierLabel[mandate.liquidity_preference],
     });
   }
 

@@ -105,6 +105,7 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   activeVenues: [],
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
+  mandate: null,
 };
 
 function setSearchParams(query: string): void {

@@ -47,8 +47,14 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   "tracking-error": lazy(() =>
     import("./risk/TrackingError").then((m) => ({ default: m.TrackingError })),
   ),
+  // PR1 (dashboard parity) — V2 Overview mandate tile, default-routed by
+  // DESIGNER_KEY_TO_WIDGET_ID["mandate"] post-PR1.
+  "mandate-snapshot": lazy(() => import("./risk/MandateSnapshotWidget")),
 
-  // ── Allocation (5) ─────────────────────────────────────────────────
+  // ── Allocation (6) ─────────────────────────────────────────────────
+  // PR1 QA — "allocation-by-style" is the V2 Overview default; the donut
+  // remains in the picker as an alternative.
+  "allocation-by-style": lazy(() => import("./allocation/AllocationByStyleWidget")),
   "allocation-donut": lazy(() => import("./allocation/AllocationDonut")),
   "allocation-over-time": lazy(() => import("./allocation/AllocationOverTime")),
   "weight-drift-monitor": lazy(() => import("./allocation/WeightDriftMonitor")),
@@ -113,14 +119,18 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   // decisions map out of the dashboard payload (data prop).
   "bridge-hero": lazy(() => import("./bridge/BridgeHeroWidget")),
 
-  // ── Default-Overview placeholder aliases (v0.15.7.0 retire-V1 follow-up)
-  // DESIGNER_KEY_TO_WIDGET_ID maps the designer short keys ("kpi",
-  // "holdings") to canonical ids ("kpi-strip", "holdings-table") that
-  // never got dedicated components. Until purpose-built widgets land,
-  // alias them to the closest existing equivalents so the Overview tab
-  // renders content instead of the "Unknown widget" debug fallback.
-  "kpi-strip": lazy(() =>
-    import("./meta/CustomKpiStrip").then((m) => ({ default: m.CustomKpiStrip })),
-  ),
-  "holdings-table": lazy(() => import("./positions/PositionsTable")),
+  // ── Default-Overview de-aliased components (Phase 09.1 PR1) ──────────
+  // The designer short keys "kpi" and "holdings" used to alias to existing
+  // widgets (custom-kpi-strip, positions-table) because purpose-built
+  // components didn't exist. PR1 lands first-class registry entries:
+  //   - kpi-strip      → meta/KpiStripWidget       (5-cell strip with
+  //                       prototype's exact 1-card / 5-divided-cells
+  //                       layout — distinct from custom-kpi-strip's
+  //                       4-card flex layout).
+  //   - holdings-table → positions/HoldingsTableWidget (compact dashboard
+  //                       variant of components/HoldingsTable's NEW MODE,
+  //                       distinct from positions-table which is the wider
+  //                       detail surface on the Holdings tab).
+  "kpi-strip": lazy(() => import("./meta/KpiStripWidget")),
+  "holdings-table": lazy(() => import("./positions/HoldingsTableWidget")),
 };

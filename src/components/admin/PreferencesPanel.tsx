@@ -285,24 +285,27 @@ export function PreferencesPanel({
             />
           </div>
 
-          {/* Liquidity preference — 3-button segmented radio */}
+          {/* Minimum AUM — 3-button segmented radio. Phase 09.1 PR1 UI
+              rename: was "Liquidity preference". Underlying column name
+              `liquidity_preference` is unchanged; only the displayed
+              label, aria-label, and option labels are updated. */}
           <div>
             <p className="text-sm font-medium text-text-primary mb-2">
-              Liquidity preference
+              Minimum AUM
             </p>
             <div
               role="radiogroup"
-              aria-label="Liquidity preference"
+              aria-label="Minimum AUM"
               className="flex gap-2"
             >
               {(["high", "medium", "low"] as const).map((value) => {
                 const active = liquidityPreference === value;
                 const label =
                   value === "high"
-                    ? "High (AUM > $10M)"
+                    ? "$10M+"
                     : value === "medium"
-                      ? "Medium ($1M-$10M)"
-                      : "Low (<$1M)";
+                      ? "$1M – $10M"
+                      : "<$1M";
                 return (
                   <button
                     key={value}

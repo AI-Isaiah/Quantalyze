@@ -201,7 +201,10 @@ describe("useDashboardConfigV2", () => {
         { k: "kpi", w: 2 },
       ] as const,
       timeframe: "1M",
-      layoutVersion: 5,
+      // Track LAYOUT_VERSION rather than hard-coding the literal: this
+      // test asserts a matching-version blob is preserved verbatim, so any
+      // future bump (PR1 5→6, etc.) keeps the assertion truthful.
+      layoutVersion: LAYOUT_VERSION,
     };
     store.set(STORAGE_KEY, JSON.stringify(custom));
 
@@ -284,11 +287,12 @@ describe("useDashboardConfigV2", () => {
   it("moveWidget reorders one tile to another tile's position via splice", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
-    // Default order is [bridge, kpi, equity, holdings, allocation,
-    // outcomes] — all normalized to their registry ids on load (D-19).
-    // ("mandate" was dropped in v0.15.7.0 follow-up — no widget yet.)
+    // Default order is [bridge, kpi, equity, holdings, allocation, mandate,
+    // outcomes] — all normalized to their registry ids on load (D-19). PR1
+    // restored mandate at index 5 and moved outcomes to index 6 (was 5
+    // when mandate was dropped in v0.15.7.0).
     expect(result.current.config.tiles[0].k).toBe(keyOf("bridge"));
-    expect(result.current.config.tiles[5].k).toBe(keyOf("outcomes"));
+    expect(result.current.config.tiles.at(-1)?.k).toBe(keyOf("outcomes"));
 
     act(() => {
       result.current.moveWidget(keyOf("outcomes"), keyOf("bridge"));
@@ -432,11 +436,12 @@ describe("useDashboardConfigV2", () => {
     const { result } = renderHook(() => useDashboardConfigV2());
 
     // Find an unambiguous short key → registry id mapping. "allocation"
-    // resolves to "allocation-donut" and neither is seeded, so the test
-    // verifies that the short key is resolved before the tile is pushed.
+    // resolves to "allocation-by-style" (PR1 QA flipped this from
+    // "allocation-donut"); neither is seeded so the test verifies the
+    // short key is resolved before the tile is pushed.
     const shortKey = "allocation";
     const registryId = DESIGNER_KEY_TO_WIDGET_ID[shortKey];
-    expect(registryId).toBe("allocation-donut");
+    expect(registryId).toBe("allocation-by-style");
 
     act(() => {
       result.current.addWidget(shortKey);

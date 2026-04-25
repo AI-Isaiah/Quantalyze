@@ -201,8 +201,40 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     description: "Standard deviation of active returns vs benchmark.",
     status: "ready",
   },
+  // Phase 09.1 PR1 (dashboard parity) — V2 Overview MandateSnapshot tile.
+  // Renders the prototype's 5-row pass/fail mandate panel against live
+  // allocator_preferences + portfolio analytics via lib/mandate-gates.ts.
+  // DESIGNER_KEY_TO_WIDGET_ID["mandate"] points here (was "mandate-compliance"
+  // pre-PR1, which had no registered widget and rendered the "Unknown widget"
+  // fallback for the seven-tile default Overview).
+  "mandate-snapshot": {
+    id: "mandate-snapshot",
+    name: "Mandate Snapshot",
+    category: "risk",
+    icon: "◆",
+    defaultW: 2,
+    defaultH: 3,
+    description: "Live pass/fail of mandate gates against current portfolio.",
+    status: "ready",
+  },
 
-  // ── Allocation (5) ─────────────────────────────────────────────────
+  // ── Allocation (6) ─────────────────────────────────────────────────
+  // PR1 QA — "allocation-by-style" is the V2 Overview default after the
+  // dashboard-parity QA pass; DESIGNER_KEY_TO_WIDGET_ID["allocation"] points
+  // here. Faithful port of designer-bundle/project/src/app.jsx
+  // (AllocationBreakdown). The "allocation-donut" pie variant remains
+  // registered as an alternative the WidgetPicker still surfaces.
+  "allocation-by-style": {
+    id: "allocation-by-style",
+    name: "Allocation by Style",
+    category: "allocation",
+    icon: "◉",
+    defaultW: 2,
+    defaultH: 3,
+    description:
+      "Exposure by style tag — stacked bar + per-style weight legend.",
+    status: "ready",
+  },
   "allocation-donut": {
     id: "allocation-donut",
     name: "Allocation Donut",
@@ -286,7 +318,24 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Positions (5) ──────────────────────────────────────────────────
+  // ── Positions (5+1 with PR1) ──────────────────────────────────────
+  // Phase 09.1 PR1 (dashboard parity) — V2 Overview holdings tile.
+  // Compact dashboard variant of components/HoldingsTable's NEW MODE.
+  // Distinct from `positions-table` (kept) which is the wider detail
+  // surface on the Holdings tab. DESIGNER_KEY_TO_WIDGET_ID["holdings"]
+  // points here. Picker filter (status: ready) surfaces this as a real
+  // entry post-PR1.
+  "holdings-table": {
+    id: "holdings-table",
+    name: "Holdings Table",
+    category: "positions",
+    icon: "▦",
+    defaultW: 3,
+    defaultH: 4,
+    description:
+      "Active positions with inline outcome recording — compact dashboard variant.",
+    status: "ready",
+  },
   "positions-table": {
     id: "positions-table",
     name: "Positions Table",
@@ -416,6 +465,22 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
   },
 
   // ── Meta (3) ───────────────────────────────────────────────────────
+  // Phase 09.1 PR1 (dashboard parity) — V2 Overview KPI strip. Distinct
+  // from `custom-kpi-strip` (kept for picker/legacy callers): KpiStripWidget
+  // renders the prototype's 5-cell vertical-bar-divided layout with
+  // AUM/YTD-TWR/Sharpe/Max-DD-12m/Avg-ρ. DESIGNER_KEY_TO_WIDGET_ID["kpi"]
+  // points here. Picker filter (status: ready) surfaces this as a real
+  // entry post-PR1.
+  "kpi-strip": {
+    id: "kpi-strip",
+    name: "KPI Strip",
+    category: "meta",
+    icon: "≡",
+    defaultW: 4,
+    defaultH: 2,
+    description: "Portfolio-wide KPI strip — AUM, YTD TWR, Sharpe, Max DD 12m, Avg ρ.",
+    status: "ready",
+  },
   "custom-kpi-strip": {
     id: "custom-kpi-strip",
     name: "Custom KPI Strip",
@@ -539,8 +604,20 @@ export const DESIGNER_KEY_TO_WIDGET_ID: Record<string, string> = {
   kpi: "kpi-strip",
   equity: "equity-chart",
   holdings: "holdings-table",
-  allocation: "allocation-donut",
-  mandate: "mandate-compliance",
+  // PR1 QA (dashboard parity) — was "allocation-donut" (pie chart). Now
+  // points at the new AllocationByStyleWidget so the seven-tile
+  // DEFAULT_LAYOUT renders the prototype's stacked-bar + style legend
+  // instead of a donut. Persisted V2 configs that already carry
+  // "allocation-donut" as a tile id continue to render the donut
+  // (write-time normalization only — no migration code needed).
+  allocation: "allocation-by-style",
+  // PR1 (dashboard parity) — was "mandate-compliance" (unregistered, rendered
+  // "Unknown widget" fallback). Now points at the new MandateSnapshotWidget
+  // (widgets/risk/MandateSnapshotWidget.tsx) so the seven-tile DEFAULT_LAYOUT
+  // resolves cleanly. Persisted V2 configs that already carry
+  // "mandate-compliance" as a tile id continue to render the unknown-widget
+  // fallback (write-time normalization only — no migration code needed).
+  mandate: "mandate-snapshot",
   outcomes: "outcomes-timeline",
 };
 

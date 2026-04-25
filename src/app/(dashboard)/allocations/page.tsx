@@ -1,6 +1,5 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
-import { PageHeader } from "@/components/layout/PageHeader";
 import { getMyAllocationDashboard } from "@/lib/queries";
 import { AllocationsTabs } from "./AllocationsTabs";
 import { AllocationProvider } from "./AllocationContext";
@@ -37,12 +36,14 @@ export default async function MyAllocationPage() {
 
   return (
     <main className="max-w-[1280px] mx-auto p-6 pb-20">
-      <PageHeader
-        title="My Allocation"
-        description="Your live exchange-verified portfolio."
-      />
       <Suspense fallback={<div />}>
-        {/* Plan 11 / R5 — publish flaggedHoldings.length from the existing
+        {/* PR1 QA — page-level PageHeader removed in favor of the
+            AllocationsTabs inline header (title + entity name + tabs +
+            actions in ONE row), matching designer-bundle/project/src/app.jsx
+            lines 460-510. Eliminates the multi-row vertical sprawl visible
+            in the QA pass.
+
+            Plan 11 / R5 — publish flaggedHoldings.length from the existing
             payload through AllocationProvider; DashboardChrome / Sidebar
             (mounted above this tree) read the count via the provider's
             cross-tree store. No new server query. */}
