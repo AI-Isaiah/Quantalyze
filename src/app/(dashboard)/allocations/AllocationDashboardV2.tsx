@@ -289,32 +289,39 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         className="relative"
         style={{ marginTop: 8 }}
       >
-        <div
+        {/* PR3 (dashboard parity) — the in-dashboard "+ Add widget" button
+            is gone; the tab-row Widget chip in AllocationsTabs is the new
+            entry point. The picker still mounts here, but the trigger is
+            an invisible 0-size anchor so the existing positioning math
+            in WidgetPicker (anchorRef-relative) keeps working. The chip
+            opens the picker via a CustomEvent listened to in the
+            useEffect above. */}
+        <button
+          ref={pickerTriggerRef}
+          type="button"
+          aria-hidden
+          tabIndex={-1}
+          onClick={() => setPickerOpen((v) => !v)}
           style={{
-            position: "relative",
-            display: "flex",
-            justifyContent: "flex-end",
-            marginBottom: 8,
+            position: "absolute",
+            top: 0,
+            right: 0,
+            width: 0,
+            height: 0,
+            padding: 0,
+            margin: 0,
+            border: 0,
+            background: "transparent",
+            pointerEvents: "none",
           }}
-        >
-          <button
-            ref={pickerTriggerRef}
-            type="button"
-            onClick={() => setPickerOpen((v) => !v)}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-3 py-1 text-xs text-text-secondary hover:bg-page focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-            aria-haspopup="dialog"
-            aria-expanded={pickerOpen}
-          >
-            + Add widget
-          </button>
-          <WidgetPicker
-            isOpen={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            anchorRef={pickerTriggerRef}
-            activeKeys={activeKeys}
-            onPick={addWidget}
-          />
-        </div>
+        />
+        <WidgetPicker
+          isOpen={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          anchorRef={pickerTriggerRef}
+          activeKeys={activeKeys}
+          onPick={addWidget}
+        />
         {filteredStrategyTileCount > 0 ? (
           // PR3 (HANDOFF G9) — friendlier empty-grid fallback. When a user
           // has added strategy-composite tiles via the picker but has no

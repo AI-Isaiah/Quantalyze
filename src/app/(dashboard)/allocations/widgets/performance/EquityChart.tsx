@@ -456,20 +456,16 @@ export function EquityChart({
     setPickerOpen(false);
   };
 
-  // ── Always-visible summary (current period return) ────────────────
-  // Shows the last point's period-relative return without requiring hover.
-  // This is the "what am I looking at?" label the axis+legend was missing.
-  const currentReturnPct =
-    visibleNormalized.length > 0
-      ? (visibleNormalized[visibleNormalized.length - 1] - 1) * 100
-      : 0;
-  const currentReturnPositive = currentReturnPct >= 0;
-  const periodLabel = period === "CUSTOM" ? "Custom range" : period;
-
   // ── Render ────────────────────────────────────────────────────────
   return (
     <div ref={wrapRef} className="relative w-full">
-      {/* Period toggle + always-visible current-return summary */}
+      {/* PR3 (dashboard parity) — single header row matching the truth
+          screenshot: legend chips, period toggle, and "sync just now"
+          stamp on the right. The active period button uses the subtle
+          accent-10 background + accent text from the prototype, not the
+          solid-fill style. The always-visible return summary is gone —
+          truth shows the value via Y-axis labels + the sync timestamp,
+          which is the cleaner read. */}
       <div
         style={{
           display: "flex",
@@ -485,7 +481,7 @@ export function EquityChart({
           aria-label="Period"
           style={{
             display: "flex",
-            gap: 4,
+            gap: 2,
             position: "relative",
             alignItems: "center",
             flexWrap: "wrap",
@@ -501,17 +497,21 @@ export function EquityChart({
                 aria-selected={active}
                 onClick={() => setPeriodChecked(p)}
                 style={{
-                  padding: "3px 9px",
+                  padding: "3px 8px",
                   fontSize: 11,
-                  fontFamily: "Geist Mono, monospace",
-                  background: active ? "var(--accent)" : "transparent",
+                  fontWeight: 500,
+                  fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                  background: active
+                    ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                    : "transparent",
                   color: active
-                    ? "var(--color-surface, #fff)"
-                    : "var(--text-secondary)",
-                  border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
-                  borderRadius: 4,
+                    ? "var(--color-accent)"
+                    : "var(--color-text-muted)",
+                  border: "none",
+                  borderRadius: 3,
                   cursor: "pointer",
                   fontVariantNumeric: "tabular-nums",
+                  letterSpacing: "0.04em",
                 }}
               >
                 {p}
@@ -531,37 +531,13 @@ export function EquityChart({
         </div>
 
         <div
-          aria-label={`Return over ${periodLabel}`}
           style={{
-            display: "flex",
-            alignItems: "baseline",
-            gap: 6,
-            fontFamily: "Geist Mono, monospace",
-            fontVariantNumeric: "tabular-nums",
+            fontSize: 11,
+            color: "var(--color-text-muted)",
+            fontFamily: "var(--font-sans)",
           }}
         >
-          <span
-            style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              textTransform: "uppercase",
-              letterSpacing: "0.04em",
-            }}
-          >
-            {periodLabel}
-          </span>
-          <span
-            style={{
-              fontSize: 18,
-              fontWeight: 600,
-              color: currentReturnPositive
-                ? "var(--positive)"
-                : "var(--negative)",
-            }}
-          >
-            {currentReturnPositive ? "+" : ""}
-            {currentReturnPct.toFixed(2)}%
-          </span>
+          sync just now
         </div>
       </div>
 
