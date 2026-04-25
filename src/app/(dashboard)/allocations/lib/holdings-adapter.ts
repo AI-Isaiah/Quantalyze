@@ -84,11 +84,9 @@ export interface HoldingsAdapterInputs {
    * D-18 (R1 accepted): caller-supplied holding→strategy correspondence,
    * keyed by `buildHoldingRef(venue, symbol, holding_type)`. When absent
    * OR when a row's ref has no entry, `strategy` resolves to null. The
-   * adapter NEVER invents a join; HoldingsTabPanel (Plan 08) ports the
-   * legacy correspondence it needs from AllocationDashboard.tsx. Today
-   * the legacy body has NO holding→strategy join (enrichedHoldings joins
-   * apiKeys for sync_status only), so defaulting to null matches the
-   * current UI behavior exactly.
+   * adapter NEVER invents a join. There is no holding→strategy join on
+   * the dashboard payload today (apiKeys are joined for sync_status only),
+   * so defaulting to null matches the current UI behavior exactly.
    */
   holdingToStrategyId?: Record<string, string>;
   /** Injectable "now" for age computation. Defaults to `new Date()`. */

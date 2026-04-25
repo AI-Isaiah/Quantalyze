@@ -1,12 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
-import { AllocationDashboard } from "./AllocationDashboard";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
-import { QA_MODE } from "@/lib/qa-mode";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
@@ -67,31 +65,6 @@ const RiskTabPanel = dynamic(
   { ssr: false, loading: () => <TabBodyFallback label="Risk" /> },
 );
 
-// Phase 09.1 Plan 01 / D-17 — feature flag controlling whether the
-// Overview tab renders AllocationDashboardV2 (the new designer-provided
-// shell, scaffolded as an empty body for plans 02..11 to fill in) or the
-// legacy AllocationDashboard.
-//
-// Storage values are canonical strings "true" / "false". SSR + Safari
-// private-mode default to `false` (conservative — show legacy until the V2
-// surface is ready and bake-tested). The `?ui=v2` URL override is a
-// per-request opt-in that does NOT write to localStorage; it is also gated
-// by NEXT_PUBLIC_QA_MODE so allocator-facing production URLs cannot bypass
-// the legacy body during the bake window.
-const UI_V2_STORAGE_KEY = "allocations.ui_v2";
-
-function loadUiV2Flag(): boolean {
-  if (typeof window === "undefined") return false; // SSR + Safari private-mode default: legacy (D-17 conservative)
-  try {
-    const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
-    if (raw === "true") return true;
-    if (raw === "false") return false;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
 // Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
 // Phase 07 is a monitoring surface where data changes slowly (daily equity,
 // periodic trades) so 30s is enough for a timely read without re-fetching the
@@ -102,8 +75,7 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * Phase 09.1 Plan 02 / D-05 / D-06 — Tabs shell for /allocations.
  *
  * Six surfaces (D-05 order):
- *   - Overview (default) — wraps AllocationDashboardV2 (under flag) or
- *     legacy AllocationDashboard.
+ *   - Overview (default) — wraps AllocationDashboardV2.
  *   - Holdings — full-width HoldingsTable (Plan 08 fills body).
  *   - Outcomes — full-width OutcomesWidget (Plan 10 restyles).
  *   - Mandate — link to /profile?tab=mandate + future MandateSnapshot
@@ -177,29 +149,6 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   // Per VOICES-ACCEPTED f3: derive each render — no local state snapshot.
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
-
-  // D-17: feature flag — localStorage OR (?ui=v2 URL override gated by NEXT_PUBLIC_QA_MODE).
-  // The URL override is NOT written to localStorage — it is a per-request override only.
-  // useState initializer returns the SSR-safe default (false); the useEffect below
-  // re-reads on mount so a client with localStorage["allocations.ui_v2"]="true" sees V2
-  // on the second render. This avoids the React 19 hydration mismatch that would fire
-  // if the initial render branched on a window-only value.
-  // Phase 09.1 Plan 11 / V3 accepted — share the QA_MODE module-scope
-  // constant with Tweaks.tsx so both consumers route through the same
-  // import surface (single mock path in tests, single audit point for
-  // production env reads).
-  const uiOverride = QA_MODE && searchParams.get("ui") === "v2";
-  const [uiV2Flag, setUiV2Flag] = useState<boolean>(() => loadUiV2Flag());
-  useEffect(() => {
-    // SSR-safe hydration: initial render uses the loadUiV2Flag() fallback
-    // (false in environments without localStorage). On mount we re-read to
-    // pick up a persisted flag. react-hooks/set-state-in-effect prefers
-    // useSyncExternalStore for external stores; leaving this as-is because
-    // the double-render is intentional and the flag is read once per mount.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setUiV2Flag(loadUiV2Flag());
-  }, []);
-  const uiV2 = uiV2Flag || uiOverride;
 
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07
@@ -328,7 +277,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         aria-labelledby="tab-overview"
         hidden={activeTab !== "overview"}
       >
-        {activeTab === "overview" && (uiV2 ? <AllocationDashboardV2 {...props} /> : <AllocationDashboard {...props} />)}
+        {activeTab === "overview" && <AllocationDashboardV2 {...props} />}
       </div>
       <div
         role="tabpanel"

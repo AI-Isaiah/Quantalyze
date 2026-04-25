@@ -9,10 +9,9 @@
  *   `onShowRevokedChange`).
  *     Preserves the Phase 08 MANAGE-02 surface byte-for-byte: revoked-key
  *     strikethrough + amber chip + Show-revoked toggle + hidden-footer copy
- *     + per-row note icon + lazy-loading note sub-row. AllocationDashboard
- *     (the legacy V1 root) still consumes this mode and the existing
- *     HoldingsTable.test.tsx + AllocationDashboard.revoked-holdings.test.tsx
- *     suites stay green. No behaviour change for legacy callers.
+ *     + per-row note icon + lazy-loading note sub-row. Now dormant — the
+ *     V1 dashboard root that consumed it was removed in v0.15.7.0. Mode is
+ *     retained pending a follow-up legacy-tree cleanup.
  *
  *   NEW MODE (Plan 08 props: `rows` of DesignHoldingRow +
  *   `revokedStatusByHoldingId` + `flaggedHoldingsByRef` +

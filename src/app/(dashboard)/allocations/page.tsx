@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
  * it here with a minimal fallback so the route stays statically
  * optimizable and the build produces no useSearchParams/Suspense warning.
  *
- * Empty-state handling (zero holdings) migrates into the AllocationDashboard
+ * Empty-state handling (zero holdings) migrates into the AllocationDashboardV2
  * render path in 07-05 (WarningBanner + minimal 4-widget view). Phase 06
  * moved the "Connect Exchange" key-management flow to `/profile?tab=exchanges`;
  * the inline exchange-manager widget no longer lives on this page.

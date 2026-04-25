@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.7.0] - 2026-04-25
+
+V2 dashboard goes default for every allocator. The Phase 09.1 work
+(AllocationDashboardV2 + hero Bridge widget + 2-stage drawer + EquityChart
+readability pass + Holdings / Mandate / Risk / Outcomes panel bodies) is
+now the only Overview surface in production.
+
+### Changed
+
+- **`/allocations` Overview tab renders `AllocationDashboardV2` unconditionally.**
+  The `localStorage.allocations.ui_v2` opt-in gate and the QA-mode-only
+  `?ui=v2` URL override are gone. There is no longer a code path to the
+  legacy V1 dashboard from this surface.
+
+### Removed
+
+- **Legacy `AllocationDashboard.tsx` + its three test suites** (regression-001,
+  revoked-holdings, widget-gating) — the V1 Overview body is no longer
+  reachable from any route.
+- **`AllocationsTabs.feature-flag.test.tsx`** — the feature flag it pinned
+  no longer exists.
+- **`loadUiV2Flag` + `UI_V2_STORAGE_KEY` + the `useState`/`useEffect` flag
+  state in `AllocationsTabs`.** The QA_MODE import is dropped from this
+  file (still used elsewhere for the Tweaks panel).
+
+### Notes
+
+A deeper legacy tree is now dormant: the legacy `useDashboardConfig` hook,
+`DashboardGrid`, `TileWrapper`, the `LegacyTileConfig` interface, and the
+HoldingsTable LEGACY MODE branch had no live callers other than the deleted
+`AllocationDashboard`. They remain on disk pending an explicit follow-up
+cleanup pass — this PR's scope was the dashboard root + flag only.
+
 ## [0.15.6.0] - 2026-04-25
 
 Phase A of the-big-fix saga — seven deferred review findings from the 09.1

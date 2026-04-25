@@ -456,13 +456,13 @@ describe("useDashboardConfigV2", () => {
 // Pre-fix: each hook persisted its in-memory state via useEffect on every
 // render — including the very first render. So mounting the dormant hook
 // against a foreign-version blob clobbered the persisted layout with the
-// dormant hook's defaults, which is what made `allocations.ui_v2` toggles
-// reset the user's customisations.
+// dormant hook's defaults, which would reset the user's customisations
+// whenever the two hooks were mounted in alternation.
 //
 // Post-fix: the first persist is skipped. Loading is observational; only
-// user-initiated setConfig calls write back. Toggling the flag five times
-// (mount V2 → mount legacy → mount V2 → ...) preserves whatever blob the
-// authoritative hook wrote, plus any subsequent mutations.
+// user-initiated setConfig calls write back. Mounting V2 → legacy → V2 → ...
+// preserves whatever blob the authoritative hook wrote, plus any subsequent
+// mutations.
 
 describe("dual-hook ping-pong (Phase A3 regression)", () => {
   beforeEach(() => {

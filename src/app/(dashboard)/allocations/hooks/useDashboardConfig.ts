@@ -31,14 +31,11 @@ export { DESIGNER_KEY_TO_WIDGET_ID };
 import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 
 /**
- * D-02 single-source-of-truth: BOTH legacy `useDashboardConfig` and the new
- * `useDashboardConfigV2` read/write the same localStorage key. The two hooks
- * coexist during the bake window: each `loadConfig` resets to its OWN default
- * layout when `parsed.layoutVersion` doesn't match what the hook expects
- * (Voice-D8 accepted precedent — same as Phase 05 1→2 and Phase 08 2→3
- * bumps). Flipping the `allocations.ui_v2` flag does not create orphan
- * parallel state — both bodies see the same persisted blob and the receiving
- * hook resets if it doesn't recognise the version.
+ * D-02 single-source-of-truth: `useDashboardConfig` and `useDashboardConfigV2`
+ * read/write the same localStorage key. Each `loadConfig` resets to its OWN
+ * default layout when `parsed.layoutVersion` doesn't match what the hook
+ * expects (Voice-D8 accepted precedent — same as Phase 05 1→2 and Phase 08
+ * 2→3 bumps), so neither hook clobbers the other's persisted blob.
  */
 const STORAGE_KEY = "quantalyze-dashboard-config";
 
