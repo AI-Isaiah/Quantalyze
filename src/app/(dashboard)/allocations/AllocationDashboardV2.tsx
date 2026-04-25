@@ -109,6 +109,17 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // back to defaults (showOutcomes = true) per useTweaks() contract.
   const { state: tweaks } = useTweaks();
 
+  // PR3 (HANDOFF G9) — count strategy-composite tiles being filtered out
+  // when strategies.length === 0 so the dashboard can surface a friendly
+  // "Connect a strategy to unlock N widgets" callout instead of leaving
+  // the user with an unexpectedly sparse grid. Only trips when the user
+  // has added picker tiles that depend on strategies.
+  const filteredStrategyTileCount = useMemo(() => {
+    if (strategies.length > 0) return 0;
+    return config.tiles.filter((t) => STRATEGY_COMPOSITE_WIDGETS.has(t.k))
+      .length;
+  }, [config.tiles, strategies.length]);
+
   // Phase 07 f2 gate — filter strategy-composite widgets when no strategies.
   // Hook ordering: this useMemo and the subsequent ones MUST stay above any
   // early return so React's hook-order invariant holds across renders.
@@ -305,6 +316,54 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             onPick={addWidget}
           />
         </div>
+        {filteredStrategyTileCount > 0 ? (
+          // PR3 (HANDOFF G9) — friendlier empty-grid fallback. When a user
+          // has added strategy-composite tiles via the picker but has no
+          // strategies connected, the f2 gate filters them out and the
+          // grid feels broken. This callout names what's missing and
+          // points at /discovery, where strategies live.
+          <div
+            role="note"
+            data-testid="empty-grid-callout"
+            className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-surface-subtle px-4 py-3 text-sm"
+          >
+            <div className="flex items-start gap-3">
+              <span
+                aria-hidden
+                className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/10 text-accent"
+              >
+                <svg
+                  width="11"
+                  height="11"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                >
+                  <circle cx="7" cy="7" r="4" />
+                  <path d="M13 13l-2.5-2.5" />
+                </svg>
+              </span>
+              <div>
+                <div className="font-medium text-text-primary">
+                  Connect a strategy to unlock {filteredStrategyTileCount}{" "}
+                  {filteredStrategyTileCount === 1 ? "widget" : "widgets"}
+                </div>
+                <div className="text-xs text-text-muted">
+                  Risk &amp; performance tiles need at least one strategy in
+                  your portfolio before they can render.
+                </div>
+              </div>
+            </div>
+            <a
+              href="/discovery"
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent/40 bg-surface px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              Browse strategies →
+            </a>
+          </div>
+        ) : null}
         <WidgetGrid
           tiles={visibleTiles}
           onResize={resizeWidget}
