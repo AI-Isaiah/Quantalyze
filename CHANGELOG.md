@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.6.0] - 2026-04-25
+
+Phase A of the-big-fix saga — seven deferred review findings from the 09.1
+ship resolved as one PR. No new user features; cleanup, performance,
+accessibility, and a Firefox compatibility fix.
+
+### Added
+
+- **Home / End keyboard traversal across widget headers** in V2 dashboard.
+  Outside reorder mode, jump focus to the first or last widget. Inside
+  reorder mode, move the active widget to first or last position in one
+  keypress instead of N arrow taps.
+- **Per-widget aria-live announcements** for every chrome interaction.
+  Reorder-mode toggles, moves, and resizes are spoken to screen readers.
+
+### Changed
+
+- **Holdings / Outcomes / Mandate / Risk tab bodies are now lazy-loaded**
+  via next/dynamic with ssr disabled. The Overview tab no longer carries
+  ~1500 LOC of widget code that >90% of allocators never reach. Each
+  panel hydrates on its first activation with a centered skeleton fallback.
+- **Single-source formatPercent** — three local re-implementations
+  (HoldingsTable / HoldingDetail / OutcomesWidget) replaced by the
+  canonical helper at `src/lib/utils.ts`. Same MTD now renders the same
+  way across all four files that used to diverge. A contract test prevents
+  new local impls from reappearing.
+- **OutcomesWidget colors** swapped from ~70 hardcoded hex literals to
+  `var(--color-*)` design tokens. Same visible pixels, single source of
+  truth in `globals.css`.
+
+### Fixed
+
+- **`allocations.ui_v2` toggle no longer wipes the user's customised
+  layout.** Both legacy and V2 dashboard hooks now skip their first
+  persist effect — load is observational, only real user mutations write
+  through. Five toggle cycles preserve a customised V2 blob end-to-end.
+- **Firefox drag-and-drop in the V2 widget grid.** `dataTransfer.setData`
+  is now set on `dragstart`, satisfying Firefox's strict requirement that
+  a drag operation carry at least one item. Chromium and WebKit were
+  silently lenient; Firefox initiated nothing.
+
+### Documentation
+
+- **`docs/runbooks/allocations-ui-v2-rollback.md`** explicitly calls out
+  that flipping `allocations.ui_v2 = false` does NOT revert the new
+  Holdings / Outcomes / Mandate / Risk tab body code, only the Overview
+  routing. Includes operator triage flow keyed on which tab is affected.
+
 ## [0.15.5.0] - 2026-04-24
 
 Milestone 09.1 — Allocator Dashboard UI refresh against the designer handoff.
