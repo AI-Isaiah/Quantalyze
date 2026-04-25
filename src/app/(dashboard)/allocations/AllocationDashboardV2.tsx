@@ -16,6 +16,7 @@ import { WIDGET_COMPONENTS } from "./widgets";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { Tweaks } from "./components/Tweaks";
+import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 
 /**
@@ -84,6 +85,8 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     strategies,
     holdingsSummary = [],
     hasSyncing = false,
+    analytics,
+    flaggedHoldings = [],
   } = props;
 
   const holdingsEmpty = holdingsSummary.length === 0;
@@ -228,6 +231,20 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   return (
     <div data-ui-v2-shell="true" className="relative">
       {portfolio != null && <AlertBanner portfolioId={portfolio.id} />}
+      {/* Phase 09.1 PR1 (dashboard parity, HANDOFF.md G3) — "What we
+          noticed" insight strip mounted above the grid (sibling to
+          WidgetGrid). Reuses the existing src/components/portfolio
+          InsightStrip with its 7-rule client-side computeAllInsights
+          output. PR1 deliberately skips the server-side `insights[]`
+          payload field that HANDOFF.md proposed — the existing rules
+          fire from `analytics` + (optional) `flaggedCount`, so no
+          payload widening is needed for first-cut value. */}
+      <InsightStrip
+        analytics={analytics}
+        portfolioId={portfolio?.id ?? null}
+        flaggedCount={flaggedHoldings.length}
+        className="mt-3 px-1"
+      />
       <div
         ref={dashboardContainerRef}
         className="relative"
