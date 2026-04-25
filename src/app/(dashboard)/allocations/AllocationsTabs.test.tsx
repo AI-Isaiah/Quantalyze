@@ -210,13 +210,15 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     ).toBe("true");
   });
 
-  it("?tab=scenario → Scenario tab active", () => {
+  it("?tab=scenario → Scenario panel visible (PR3: hidden from tablist, still routable via URL + + Allocation chip)", () => {
     setSearchParams("tab=scenario");
     render(<AllocationsTabs {...STUB_PROPS} />);
     expectOnlyVisibleBody("scenario-body");
-    expect(
-      screen.getByRole("tab", { name: "Scenario" }).getAttribute("aria-selected"),
-    ).toBe("true");
+    // PR3 (HANDOFF dashboard parity) — Scenario is no longer rendered as
+    // a button in the tablist (truth screenshot is 5 tabs). It remains
+    // routable via ?tab=scenario and via the green "+ Allocation" chip,
+    // so the panel is mounted but no tab role exists for it.
+    expect(screen.queryByRole("tab", { name: "Scenario" })).toBeNull();
   });
 
   it("?tab=performance (legacy alias) → Overview + router.replace strips the param", () => {
@@ -244,12 +246,11 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     expect(mockReplace).not.toHaveBeenCalled();
   });
 
-  it("ArrowRight wraps focus across all 6 tabs in D-05 order", () => {
+  it("ArrowRight wraps focus across the 5 visible tabs in D-05 order (PR3: Scenario excluded)", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk", "Scenario"];
-    // Walk the cycle: pressing ArrowRight on each tab calls changeTab(next),
-    // which calls router.replace with the next tab in the URL.
+    // PR3 — visible tablist is 5 tabs (no Scenario). Wrap from Risk → Overview.
+    const order = ["Overview", "Holdings", "Outcomes", "Mandate", "Risk"];
     for (let i = 0; i < order.length; i++) {
       mockReplace.mockClear();
       const current = screen.getByRole("tab", { name: order[i] });

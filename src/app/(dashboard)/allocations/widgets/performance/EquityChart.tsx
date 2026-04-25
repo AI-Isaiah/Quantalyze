@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
+import { useTweakValue } from "../../context/TweaksContext";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -158,6 +159,14 @@ export function EquityChart({
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  // PR3 (HANDOFF G5) — Tweaks-context knobs. `chartStyle` gates the
+  // gradient area fill so the prototype's Line / Area segmented control
+  // flips the visual; `showBench` gates the BTC dashed overlay + legend
+  // chip. Outside the provider both default to truthy values matching
+  // the existing render.
+  const chartStyle = useTweakValue("chartStyle");
+  const showBench = useTweakValue("showBench");
 
   // ResizeObserver — fall back to a fixed 960 in jsdom / older runtimes.
   useEffect(() => {
@@ -571,7 +580,7 @@ export function EquityChart({
         }}
       >
         <LegendSwatch color="var(--chart-strategy)" label="Portfolio" />
-        {visibleBenchmarkNormalized && (
+        {showBench && visibleBenchmarkNormalized && (
           <LegendSwatch color="var(--chart-benchmark)" label="BTC" dashed />
         )}
         {overlaySeries.map((o) => (
@@ -664,8 +673,9 @@ export function EquityChart({
           ))}
 
           {/* Benchmark (dashed) — normalized to period start so it
-              departs from the 0% baseline alongside the portfolio. */}
-          {visibleBenchmarkNormalized && (
+              departs from the 0% baseline alongside the portfolio.
+              Hidden when Tweaks → Benchmark overlay = Off. */}
+          {showBench && visibleBenchmarkNormalized && (
             <path
               d={toPath(visibleBenchmarkNormalized)}
               fill="none"
@@ -687,8 +697,12 @@ export function EquityChart({
             />
           ))}
 
-          {/* Portfolio area + line */}
-          <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
+          {/* Portfolio area + line. Tweaks → Equity chart = Line drops
+              the gradient fill so the chart renders as a stroke-only
+              line, mirroring the prototype tweak. */}
+          {chartStyle === "area" && (
+            <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
+          )}
           <path
             d={toPath(visibleNormalized)}
             fill="none"

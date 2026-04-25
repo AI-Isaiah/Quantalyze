@@ -16,6 +16,7 @@ import { WIDGET_COMPONENTS } from "./widgets";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
 import { Tweaks } from "./components/Tweaks";
+import { useTweaks } from "./context/TweaksContext";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 
@@ -80,6 +81,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const pickerTriggerRef = useRef<HTMLButtonElement>(null);
   const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
 
+  // PR3 — listen for the AllocationsTabs "Widget" chip's custom event so
+  // clicking it opens the picker without prop-drilling state up two levels.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onOpen = () => setPickerOpen(true);
+    window.addEventListener("allocations:open-widget-picker", onOpen);
+    return () =>
+      window.removeEventListener("allocations:open-widget-picker", onOpen);
+  }, []);
+
   const {
     portfolio,
     strategies,
@@ -91,13 +102,31 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
+  // PR3 (HANDOFF G5) — read showOutcomes from TweaksContext so the user
+  // can hide the outcomes timeline tile via the panel without removing it
+  // from their persisted layout. The provider is mounted in
+  // AllocationsTabs; rendering this component outside that provider falls
+  // back to defaults (showOutcomes = true) per useTweaks() contract.
+  const { state: tweaks } = useTweaks();
+
   // Phase 07 f2 gate — filter strategy-composite widgets when no strategies.
   // Hook ordering: this useMemo and the subsequent ones MUST stay above any
   // early return so React's hook-order invariant holds across renders.
   const visibleTiles = useMemo(() => {
-    if (strategies.length > 0) return config.tiles;
-    return config.tiles.filter((t) => !STRATEGY_COMPOSITE_WIDGETS.has(t.k));
-  }, [config.tiles, strategies.length]);
+    let tiles = config.tiles;
+    if (strategies.length === 0) {
+      tiles = tiles.filter((t) => !STRATEGY_COMPOSITE_WIDGETS.has(t.k));
+    }
+    if (!tweaks.showOutcomes) {
+      // Outcomes-timeline tile registry id can come from either the short
+      // key "outcomes" (truth default) or the full id "outcomes-timeline"
+      // (post-normalization layouts). Filter both.
+      tiles = tiles.filter(
+        (t) => t.k !== "outcomes" && t.k !== "outcomes-timeline",
+      );
+    }
+    return tiles;
+  }, [config.tiles, strategies.length, tweaks.showOutcomes]);
 
   const activeKeys = useMemo(
     () => new Set(config.tiles.map((t) => t.k)),
@@ -284,9 +313,9 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           renderWidget={renderWidget}
         />
       </div>
-      {/* Plan 11 / D-19 — QA-only Tweaks panel. Internally returns null when
-          QA_MODE is false, so the floating trigger never renders for
-          allocator-facing production builds. */}
+      {/* PR3 (HANDOFF G5) — Tweaks panel mount. QA gate is gone; the
+          panel renders bottom-right whenever TweaksContext.panelOpen is
+          true (toggled by the TweaksToggle chip in AllocationsTabs). */}
       <Tweaks />
     </div>
   );

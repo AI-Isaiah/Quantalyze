@@ -5,6 +5,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
 import { ScenarioStub } from "./ScenarioStub";
+import { TweaksProvider } from "./context/TweaksContext";
+import { TweaksToggle } from "./components/TweaksToggle";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
@@ -117,6 +119,18 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
 const TAB_KEYS = ["overview", "holdings", "outcomes", "mandate", "risk", "scenario"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
 
+// PR3 (dashboard parity) — the truth design's tab strip is 5 tabs (no
+// Scenario). Scenario remains routable via ?tab=scenario so the
+// "+ Allocation" chip still works, and the panel still renders below,
+// but no button for it lives in the visible tablist.
+const VISIBLE_TAB_KEYS: readonly TabKey[] = [
+  "overview",
+  "holdings",
+  "outcomes",
+  "mandate",
+  "risk",
+] as const;
+
 function parseTab(raw: string | null): TabKey {
   // D-05: 6-tab set. Overview is default. Anything else (null, empty, unknown
   // values, the legacy "performance" alias) collapses to "overview" — silent
@@ -197,18 +211,34 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
     scenario: null,
   });
   const handleTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>, key: TabKey) => {
-    const idx = TAB_KEYS.indexOf(key);
+    // PR3 — keyboard nav only walks VISIBLE_TAB_KEYS (5 surfaces). Scenario
+    // is reachable via "+ Allocation" / direct URL so excluding it from
+    // arrow nav doesn't strand the panel.
+    const idx = VISIBLE_TAB_KEYS.indexOf(key);
+    if (idx < 0) return;
     let next: TabKey | null = null;
-    if (e.key === "ArrowRight") next = TAB_KEYS[(idx + 1) % TAB_KEYS.length];
+    const len = VISIBLE_TAB_KEYS.length;
+    if (e.key === "ArrowRight") next = VISIBLE_TAB_KEYS[(idx + 1) % len];
     else if (e.key === "ArrowLeft")
-      next = TAB_KEYS[(idx - 1 + TAB_KEYS.length) % TAB_KEYS.length];
-    else if (e.key === "Home") next = TAB_KEYS[0];
-    else if (e.key === "End") next = TAB_KEYS[TAB_KEYS.length - 1];
+      next = VISIBLE_TAB_KEYS[(idx - 1 + len) % len];
+    else if (e.key === "Home") next = VISIBLE_TAB_KEYS[0];
+    else if (e.key === "End") next = VISIBLE_TAB_KEYS[len - 1];
     if (next) {
       e.preventDefault();
       changeTab(next);
       tabRefs.current[next]?.focus();
     }
+  };
+
+  // PR3 (dashboard parity) — count badges on Holdings + Outcomes tabs
+  // matching the truth screenshot ("Holdings 8", "Outcomes 4"). Counts
+  // come straight from the payload arrays already on `props`; no new
+  // queries needed.
+  const holdingsCount = props.holdingsSummary?.length ?? 0;
+  const outcomesCount = props.outcomes?.length ?? 0;
+  const tabCount: Partial<Record<TabKey, number>> = {
+    holdings: holdingsCount,
+    outcomes: outcomesCount,
   };
 
   // PR1 QA — inline header row matching designer-bundle/project/src/app.jsx
@@ -221,6 +251,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const entityName = props.portfolio?.name ?? null;
 
   return (
+    <TweaksProvider>
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-2.5">
         <div className="flex items-baseline gap-2.5">
@@ -238,9 +269,10 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
           aria-label="Allocation surfaces"
           className="ml-auto flex items-center gap-1"
         >
-          {TAB_KEYS.map((key) => {
+          {VISIBLE_TAB_KEYS.map((key) => {
             const isActive = activeTab === key;
             const label = TAB_LABELS[key];
+            const count = tabCount[key];
             return (
               <button
                 key={key}
@@ -257,22 +289,81 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
                 onKeyDown={(e) => handleTabKeyDown(e, key)}
                 className={
                   isActive
-                    ? "px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                    : "px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    ? "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                    : "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                 }
               >
                 {label}
+                {typeof count === "number" && count > 0 ? (
+                  <span
+                    aria-hidden
+                    className={
+                      isActive
+                        ? "rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-mono leading-none text-accent"
+                        : "rounded-full bg-page px-1.5 py-0.5 text-[10px] font-mono leading-none text-text-muted"
+                    }
+                  >
+                    {count}
+                  </span>
+                ) : null}
               </button>
             );
           })}
           <span aria-hidden className="mx-2 h-4 w-px bg-border" />
+          {/* PR3 (dashboard parity) — Widget + Export chip buttons match
+              the truth screenshot's tab-row chip group. Widget opens the
+              widget picker (currently scoped to Overview only — clicking
+              elsewhere returns the user to Overview where the picker
+              lives). Export is a stub for the next polish iteration. */}
+          <button
+            type="button"
+            onClick={() => {
+              // Route to Overview where the widget picker is mounted, then
+              // dispatch a custom event that AllocationDashboardV2 listens
+              // for to open the picker. The event-based bridge avoids
+              // hoisting picker state out of the dashboard.
+              changeTab("overview");
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("allocations:open-widget-picker"));
+              }
+            }}
+            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            aria-label="Add widget"
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+              <rect x="2" y="2" width="5" height="5" rx="0.5" />
+              <rect x="9" y="2" width="5" height="5" rx="0.5" />
+              <rect x="2" y="9" width="5" height="5" rx="0.5" />
+              <rect x="9" y="9" width="5" height="5" rx="0.5" />
+            </svg>
+            <span>Widget</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              // Stub: export-CSV / export-PDF flows are owned by the
+              // Holdings tab today. Route there until the global export
+              // surface lands.
+              changeTab("holdings");
+            }}
+            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            aria-label="Export"
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M8 2v8" />
+              <path d="M5 7l3 3 3-3" />
+              <path d="M3 13h10" />
+            </svg>
+            <span>Export</span>
+          </button>
+          <TweaksToggle />
           {/* D-20 — primary "+ Allocation" header button. Routes to the
               Scenario tab via the same changeTab mechanism the tabs use, so
               URL + tab state stay in sync. */}
           <button
             type="button"
             onClick={() => changeTab("scenario")}
-            className="inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            className="ml-1 inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             aria-label="Add allocation — open Scenario tab"
           >
             + Allocation
@@ -342,5 +433,6 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         )}
       </div>
     </div>
+    </TweaksProvider>
   );
 }
