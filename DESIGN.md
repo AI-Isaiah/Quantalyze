@@ -45,6 +45,8 @@
 - **Warning:** #D97706 — transient retry states, non-critical warnings (added 2026-04-11)
 - **Border:** #E2E8F0 — subtle dividers
 - **Border focus:** #1B6B5A — accent color for focused inputs
+- **Surface subtle:** #FBFCFD — near-white tint for nested panels (expanded rows, secondary surfaces) where surface-on-surface needs separation without a border
+- **Track:** #F1F5F9 — neutral progress-bar / slider rail background; lighter than --color-border so the filled portion stays visually dominant
 - **Chart strategy:** #1B6B5A — equity curve color
 - **Chart benchmark:** #94A3B8 — benchmark overlay (muted)
 - **Dark mode:** Not planned. Institutional finance is light mode.

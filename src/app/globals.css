@@ -22,6 +22,8 @@
 
   --color-border: #E2E8F0;
   --color-border-focus: #1B6B5A;
+  --color-surface-subtle: #FBFCFD;
+  --color-track: #F1F5F9;
 
   /* Badge colors */
   --color-badge-directional: #1B6B5A;

@@ -448,3 +448,91 @@ describe("useDashboardConfigV2", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase A3 regression — observe-without-write on mount.
+// ---------------------------------------------------------------------------
+//
+// Pre-fix: each hook persisted its in-memory state via useEffect on every
+// render — including the very first render. So mounting the dormant hook
+// against a foreign-version blob clobbered the persisted layout with the
+// dormant hook's defaults, which is what made `allocations.ui_v2` toggles
+// reset the user's customisations.
+//
+// Post-fix: the first persist is skipped. Loading is observational; only
+// user-initiated setConfig calls write back. Toggling the flag five times
+// (mount V2 → mount legacy → mount V2 → ...) preserves whatever blob the
+// authoritative hook wrote, plus any subsequent mutations.
+
+describe("dual-hook ping-pong (Phase A3 regression)", () => {
+  beforeEach(() => {
+    store.clear();
+    vi.clearAllMocks();
+  });
+
+  it("V2 hook mounting against an existing v3 blob does NOT overwrite localStorage on mount", () => {
+    const v3Blob = JSON.stringify({
+      tiles: [{ i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 }],
+      timeframe: "YTD",
+      layoutVersion: 3,
+    });
+    store.set(STORAGE_KEY, v3Blob);
+
+    const { unmount } = renderHook(() => useDashboardConfigV2());
+
+    // The hook returns v4 defaults in-memory (existing reset-on-mismatch
+    // contract — see "v3 reset" test above). But the persisted blob must
+    // remain v3, so the legacy hook can read it back unchanged after a
+    // toggle.
+    expect(store.get(STORAGE_KEY)).toBe(v3Blob);
+    unmount();
+  });
+
+  it("legacy hook mounting against an existing v4 blob does NOT overwrite localStorage on mount", () => {
+    const v4Blob = JSON.stringify({
+      tiles: [
+        { k: keyOf("bridge"), w: 4 },
+        { k: keyOf("kpi"), w: 2 },
+      ],
+      timeframe: "1M",
+      layoutVersion: LAYOUT_VERSION,
+    });
+    store.set(STORAGE_KEY, v4Blob);
+
+    const { unmount } = renderHook(() => useDashboardConfig());
+
+    expect(store.get(STORAGE_KEY)).toBe(v4Blob);
+    unmount();
+  });
+
+  it("toggling the flag 5x preserves the V2 blob the user customised", () => {
+    // User on V2 customises layout → real persist call.
+    const { result: v2, unmount: unmountV2 } = renderHook(() =>
+      useDashboardConfigV2(),
+    );
+    act(() => {
+      v2.current.addWidget("correlation-matrix");
+    });
+    const customisedBlob = store.get(STORAGE_KEY);
+    expect(customisedBlob).toBeDefined();
+    unmountV2();
+
+    // Five toggle cycles: V1 mount → unmount → V2 mount → unmount → ...
+    for (let i = 0; i < 5; i++) {
+      const legacy = renderHook(() => useDashboardConfig());
+      legacy.unmount();
+      const v2Round = renderHook(() => useDashboardConfigV2());
+      v2Round.unmount();
+    }
+
+    // The user's customised v4 blob is still in storage — neither hook
+    // clobbered it on its observational mount.
+    expect(store.get(STORAGE_KEY)).toBe(customisedBlob);
+
+    // And remounting V2 yields the same customised tiles.
+    const { result: final } = renderHook(() => useDashboardConfigV2());
+    expect(
+      final.current.config.tiles.some((t) => t.k === "correlation-matrix"),
+    ).toBe(true);
+  });
+});

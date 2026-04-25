@@ -153,12 +153,14 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   }, []);
 
   // D-04 keyboard-reorder + overflow-menu sentinel resolver. WidgetChrome
-  // calls onMove(k, "prev" | "next" | <real-k>); resolve "prev" / "next" to
-  // the adjacent tile's k against config.tiles (NOT visibleTiles — moving
-  // is meaningful even if the tile is currently hidden by the f2 gate, but
-  // since hidden tiles aren't rendered in the grid the keyboard path is
-  // only reachable for visible ones; using config.tiles keeps the
-  // semantics consistent with moveWidget's tiles-array operator).
+  // calls onMove(k, "prev" | "next" | "first" | "last" | <real-k>); resolve
+  // sentinels to the adjacent tile's k against config.tiles (NOT
+  // visibleTiles — moving is meaningful even if the tile is currently hidden
+  // by the f2 gate, but since hidden tiles aren't rendered in the grid the
+  // keyboard path is only reachable for visible ones; using config.tiles
+  // keeps the semantics consistent with moveWidget's tiles-array operator).
+  // Phase A4 added "first" / "last" so Home / End in kbdMode jumps to either
+  // end of the grid in one keypress instead of N arrow presses.
   const onMoveWrapper = useCallback(
     (fromK: string, toK: string) => {
       const idx = config.tiles.findIndex((t) => t.k === fromK);
@@ -168,6 +170,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         targetIdx = idx > 0 ? idx - 1 : null;
       } else if (toK === "next") {
         targetIdx = idx < config.tiles.length - 1 ? idx + 1 : null;
+      } else if (toK === "first") {
+        targetIdx = idx > 0 ? 0 : null;
+      } else if (toK === "last") {
+        targetIdx =
+          idx < config.tiles.length - 1 ? config.tiles.length - 1 : null;
       } else {
         // Real destination key — pass through.
         moveWidget(fromK, toK);

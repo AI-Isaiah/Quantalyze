@@ -59,7 +59,7 @@ quantalyze/
   e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
   .github/workflows/  # CI + nightly probes (demo PDF cold-start)
   docs/
-    runbooks/         # Operational runbooks (match-engine.md)
+    runbooks/         # Operational runbooks (match-engine.md, allocations-ui-v2-rollback.md, ...)
     superpowers/plans/ # Design + implementation plans from /autoplan
     pitch/            # Cap-intro partner pitch artifacts (qualification script, term sheet, one-pager)
     demos/            # Demo scripts + before/after metric capture for the partner demo

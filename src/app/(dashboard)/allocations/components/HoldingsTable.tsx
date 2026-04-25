@@ -40,6 +40,7 @@ import {
   HoldingNoteRow,
 } from "@/components/notes/HoldingNoteRow";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
+import { formatPercent } from "@/lib/utils";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
 import { HoldingDetail } from "./HoldingDetail";
@@ -81,11 +82,6 @@ function formatPnl(n: number | null): string {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   })}`;
-}
-
-function formatPercent(n: number | null): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(2)}%`;
 }
 
 function formatNumber(n: number | null, digits = 2): string {
@@ -560,11 +556,11 @@ function DesignHoldingsTable({
                     <td className="px-4 py-2 text-xs text-text-secondary">
                       {venueLabel(row.venue)} · {row.symbol}
                     </td>
-                    <td className={numericCell}>{formatPercent(row.weight)}</td>
+                    <td className={numericCell}>{formatPercent(row.weight, 2, { signed: false })}</td>
                     <td className={numericCell}>{formatUsd(row.alloc)}</td>
-                    <td className={numericCell}>{formatPercent(row.mtd)}</td>
+                    <td className={numericCell}>{formatPercent(row.mtd, 2)}</td>
                     <td className={numericCell}>{formatNumber(row.sharpe)}</td>
-                    <td className={numericCell}>{formatPercent(row.dd)}</td>
+                    <td className={numericCell}>{formatPercent(row.dd, 2)}</td>
                     <td className={numericCell}>{formatDays(row.age)}</td>
                   </tr>
 
