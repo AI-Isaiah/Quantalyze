@@ -11,12 +11,10 @@ import { HoldingsTable, type HoldingRow as HoldingRowType } from "./HoldingsTabl
  *   - Strikethrough + amber "Key revoked" chip for rows whose source
  *     key has sync_status='revoked'.
  *   - Toggle "Show revoked-key holdings" default ON at render time
- *     (the default comes from the caller — AllocationDashboard owns
- *     the localStorage-backed state; the component itself honours
+ *     (the default comes from the caller; the component itself honours
  *     `showRevoked` verbatim).
  *   - Toggle OFF filters revoked rows from the table ONLY (caller's
- *     responsibility to NOT filter KPI / chart inputs — proved in
- *     AllocationDashboard.revoked-holdings.test.tsx T12).
+ *     responsibility to NOT filter KPI / chart inputs).
  *   - Hidden-footer "{N} holding(s) hidden from revoked keys · Show all"
  *     with the Show-all button firing onShowRevokedChange(true).
  *   - Plural/singular rules for the hidden-footer count.

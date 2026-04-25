@@ -797,8 +797,7 @@ export function EquityChart({
 
         {/* Stale dimmer — Phase 07 / 07-05 / D-10 visual half of the
             stale gate. Only the chart tile carries this; non-chart
-            widgets are unaffected. Matches the legacy AllocationDashboard
-            pattern at lines 651-663. */}
+            widgets are unaffected. */}
         {stale && (
           <div
             aria-hidden

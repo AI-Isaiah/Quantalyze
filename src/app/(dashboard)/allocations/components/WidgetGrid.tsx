@@ -5,12 +5,10 @@ import type { TileConfig } from "../lib/types";
 import { WidgetChrome } from "./WidgetChrome";
 
 /**
- * Phase 09.1 Plan 05 — WidgetGrid (replaces DashboardGrid for the V2 path)
+ * Phase 09.1 Plan 05 — WidgetGrid.
  *
  * 4-col CSS-grid host with HTML5 drag-and-drop reorder + pointer-based
- * resize that snaps to 1/2/3/4 columns (D-01 full contract). Replaces the
- * legacy `react-grid-layout`-based DashboardGrid for the `allocations.ui_v2`
- * flag-on path.
+ * resize that snaps to 1/2/3/4 columns (D-01 full contract).
  *
  * Source reference: designer-bundle/project/src/widget-grid.jsx (lines 7-163,
  * especially 100-135 for the pointer-resize handle structure).

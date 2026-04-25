@@ -46,12 +46,6 @@ import { useSearchParams, useRouter } from "next/navigation";
 // 05/08/10 fill these bodies later — the tab-shell contract should be
 // independent of body content.
 
-vi.mock("./AllocationDashboard", () => ({
-  AllocationDashboard: () => (
-    <div data-testid="overview-legacy">OVERVIEW_LEGACY_BODY</div>
-  ),
-}));
-
 vi.mock("./AllocationDashboardV2", () => ({
   AllocationDashboardV2: () => (
     <div data-testid="overview-v2">OVERVIEW_V2_BODY</div>
@@ -120,7 +114,6 @@ function setSearchParams(query: string): void {
 }
 
 const ACTIVE_BODIES = [
-  "overview-legacy",
   "overview-v2",
   "holdings-body",
   "outcomes-body",
@@ -169,7 +162,7 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   it("no tab param → Overview tab active, only overview body rendered", () => {
     setSearchParams("");
     const { container } = render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("overview-legacy");
+    expectOnlyVisibleBody("overview-v2");
     const overviewTab = screen.getByRole("tab", { name: "Overview" });
     expect(overviewTab.getAttribute("aria-selected")).toBe("true");
     expect(
@@ -228,7 +221,7 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   it("?tab=performance (legacy alias) → Overview + router.replace strips the param", () => {
     setSearchParams("tab=performance");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("overview-legacy");
+    expectOnlyVisibleBody("overview-v2");
     // The cleanup effect must call router.replace with the tab param removed.
     expect(mockReplace).toHaveBeenCalled();
     const cleanupCall = mockReplace.mock.calls.find(
@@ -244,7 +237,7 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   it("?tab=xyz (unknown) → Overview silent fallback, no URL cleanup", () => {
     setSearchParams("tab=xyz");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("overview-legacy");
+    expectOnlyVisibleBody("overview-v2");
     // Unknown values are NOT cleaned up — only "overview" and "performance"
     // trigger the strip effect. router.replace must not have been called.
     expect(mockReplace).not.toHaveBeenCalled();

@@ -15,7 +15,7 @@ import { WidgetPicker } from "./components/WidgetPicker";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
-import { Tweaks, type TweakState } from "./components/Tweaks";
+import { Tweaks } from "./components/Tweaks";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 
 /**
@@ -36,9 +36,8 @@ import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
  *     and the gate compares tile keys directly against the Set — no
  *     render-time short-key coalescing is needed.
  *   - data-widget-id markers fire widget_viewed analytics via an
- *     IntersectionObserver scoped to the dashboard container (clones the
- *     legacy AllocationDashboard.tsx:343-387 pattern). Threshold is 0.5
- *     to match the legacy behaviour exactly.
+ *     IntersectionObserver scoped to the dashboard container. Threshold
+ *     is 0.5.
  *   - AlertBanner mounted above the grid when portfolio is non-null.
  *
  * Plan 05 / D-04 wrapper: WidgetGrid's onMove receives the sentinel
@@ -48,11 +47,10 @@ import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
  * pass through unchanged.
  */
 
-// Phase 07 / VOICES-ACCEPTED f2 — copy verbatim from
-// AllocationDashboard.tsx:204-223. After Plan 05 Task 3's write-time
-// normalization, config.tiles[*].k IS the registry id, so the gate
-// compares tile keys directly against this Set with no render-time
-// short-key coalescing required.
+// Phase 07 / VOICES-ACCEPTED f2 — strategy-composite widget gate. After
+// Plan 05 Task 3's write-time normalization, config.tiles[*].k IS the
+// registry id, so the gate compares tile keys directly against this Set
+// with no render-time short-key coalescing required.
 const STRATEGY_COMPOSITE_WIDGETS = new Set<string>([
   "rolling-sharpe",
   "rolling-volatility",
@@ -80,12 +78,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerTriggerRef = useRef<HTMLButtonElement>(null);
   const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
-  // Plan 11 / D-19 — Tweaks panel state. `bridgeVariant` flows to BridgeWidget
-  // when wired (polish follow-up); other knobs are persisted but DOM-application
-  // is a follow-up. The setter is fed to <Tweaks onChange={setTweaks}/> at the
-  // bottom of the body.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [tweaks, setTweaks] = useState<TweakState | null>(null);
 
   const {
     portfolio,
@@ -111,7 +103,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   // Phase 07 IntersectionObserver — fire widget_viewed once per session per
   // widget when 50% crosses the viewport. MutationObserver picks up tiles
-  // added later by the picker. Mirrors AllocationDashboard.tsx:343-387.
+  // added later by the picker.
   const widgetViewsFiredRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (typeof IntersectionObserver === "undefined") return;
@@ -278,7 +270,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {/* Plan 11 / D-19 — QA-only Tweaks panel. Internally returns null when
           QA_MODE is false, so the floating trigger never renders for
           allocator-facing production builds. */}
-      <Tweaks onChange={setTweaks} />
+      <Tweaks />
     </div>
   );
 }

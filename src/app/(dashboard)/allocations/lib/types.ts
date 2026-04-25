@@ -18,10 +18,10 @@ export interface DashboardConfig {
 }
 
 /**
- * Phase 09.1 D-02 transition alias — legacy v3 tile shape, consumed ONLY by
- * AllocationDashboard.tsx (legacy body), components/DashboardGrid.tsx,
- * components/TileWrapper.tsx. Deleted in the post-bake cleanup PR when the
- * V2 flag flips default-true.
+ * Phase 09.1 D-02 transition alias — legacy v3 tile shape, consumed by
+ * components/DashboardGrid.tsx and components/TileWrapper.tsx. The V1
+ * dashboard root that wired these together was removed in v0.15.7.0;
+ * remaining usages are dormant pending a follow-up legacy-tree cleanup.
  */
 export interface LegacyTileConfig {
   i: string;

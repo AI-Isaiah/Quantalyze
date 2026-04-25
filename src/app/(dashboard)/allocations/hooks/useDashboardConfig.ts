@@ -31,31 +31,27 @@ export { DESIGNER_KEY_TO_WIDGET_ID };
 import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 
 /**
- * D-02 single-source-of-truth: BOTH legacy `useDashboardConfig` and the new
- * `useDashboardConfigV2` read/write the same localStorage key. The two hooks
- * coexist during the bake window: each `loadConfig` resets to its OWN default
- * layout when `parsed.layoutVersion` doesn't match what the hook expects
- * (Voice-D8 accepted precedent — same as Phase 05 1→2 and Phase 08 2→3
- * bumps). Flipping the `allocations.ui_v2` flag does not create orphan
- * parallel state — both bodies see the same persisted blob and the receiving
- * hook resets if it doesn't recognise the version.
+ * D-02 single-source-of-truth: `useDashboardConfig` and `useDashboardConfigV2`
+ * read/write the same localStorage key. Each `loadConfig` resets to its OWN
+ * default layout when `parsed.layoutVersion` doesn't match what the hook
+ * expects (Voice-D8 accepted precedent — same as Phase 05 1→2 and Phase 08
+ * 2→3 bumps), so neither hook clobbers the other's persisted blob.
  */
 const STORAGE_KEY = "quantalyze-dashboard-config";
 
 /**
- * Phase 09.1 D-02: the legacy hook's "what version it knows about". Hardcoded
- * here (not imported from dashboard-defaults.ts which now exports v4) so the
- * legacy body keeps resetting to legacy v3 defaults when it sees a v4 blob
- * left behind by V2. After the post-bake cleanup PR drops the legacy code
- * paths entirely, this constant + LEGACY_DEFAULT_LAYOUT both go away.
+ * The legacy hook's "what version it knows about". Hardcoded here (not
+ * imported from dashboard-defaults.ts which now exports v4) so the dormant
+ * legacy hook resets to v3 defaults when it sees a v4 blob. The legacy hook
+ * itself is dormant post-v0.15.7.0 (no live callers); this constant +
+ * LEGACY_DEFAULT_LAYOUT both go away in the follow-up legacy-tree cleanup.
  */
 const LAYOUT_VERSION_LEGACY = 3;
 
 /**
  * Legacy v3 default layout — frozen snapshot of what `dashboard-defaults.ts`
- * exported before the v4 bump. Lives here so flag-off allocators landing on
- * the legacy hook after a V2 user has written `layoutVersion: 4` reset to
- * the same v3 defaults they'd have seen pre-09.1.
+ * exported before the v4 bump. Retained while the legacy hook is dormant;
+ * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
  */
 const LEGACY_DEFAULT_LAYOUT: LegacyTileConfig[] = [
   { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },

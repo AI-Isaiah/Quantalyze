@@ -61,9 +61,11 @@ const LEGACY_LAYOUT_VERSION = 3;
 // LEGACY hook tests — useDashboardConfig
 // ---------------------------------------------------------------------------
 //
-// The legacy hook still ships during the bake window (D-17). It reads/writes
-// the SAME storage key as the V2 hook (D-02), so both versions land in this
-// file to make the cross-hook reset behaviour easy to assert.
+// The legacy hook is dormant post-v0.15.7.0 (no live callers — the V1
+// AllocationDashboard root that consumed it was removed). Tests stay green
+// until the follow-up legacy-tree cleanup PR deletes the hook itself. Both
+// hooks read/write the SAME storage key (D-02), so the cross-hook reset
+// behaviour stays asserted while the dormant code is on disk.
 
 describe("useDashboardConfig (legacy)", () => {
   beforeEach(() => {
@@ -456,13 +458,13 @@ describe("useDashboardConfigV2", () => {
 // Pre-fix: each hook persisted its in-memory state via useEffect on every
 // render — including the very first render. So mounting the dormant hook
 // against a foreign-version blob clobbered the persisted layout with the
-// dormant hook's defaults, which is what made `allocations.ui_v2` toggles
-// reset the user's customisations.
+// dormant hook's defaults, which would reset the user's customisations
+// whenever the two hooks were mounted in alternation.
 //
 // Post-fix: the first persist is skipped. Loading is observational; only
-// user-initiated setConfig calls write back. Toggling the flag five times
-// (mount V2 → mount legacy → mount V2 → ...) preserves whatever blob the
-// authoritative hook wrote, plus any subsequent mutations.
+// user-initiated setConfig calls write back. Mounting V2 → legacy → V2 → ...
+// preserves whatever blob the authoritative hook wrote, plus any subsequent
+// mutations.
 
 describe("dual-hook ping-pong (Phase A3 regression)", () => {
   beforeEach(() => {

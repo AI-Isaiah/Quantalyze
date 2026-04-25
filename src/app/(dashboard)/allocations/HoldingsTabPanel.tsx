@@ -10,14 +10,12 @@
  *   1. `toDesignHoldings` (Plan 04 adapter) joins holdingsSummary + flagged
  *      + matchDecisions + strategies into the designer row shape. The
  *      adapter's R1 contract requires the caller to supply the
- *      holding→strategy correspondence. The legacy body has NO such
- *      correspondence today (AllocationDashboard.tsx:697-724 joins apiKeys
- *      for sync_status only), so we pass an empty `holdingToStrategyId`
- *      map and the adapter falls through to strategy=null for every row —
- *      matching the legacy UI behavior exactly.
+ *      holding→strategy correspondence. There is no such correspondence
+ *      surfaced on this payload today, so we pass an empty
+ *      `holdingToStrategyId` map and the adapter falls through to
+ *      strategy=null for every row.
  *   2. `revokedStatusByHoldingId` is built from props.holdingsSummary ×
- *      props.apiKeys here, mirroring the enrichedHoldings logic from
- *      AllocationDashboard. Key format: `buildHoldingRef(h)` — same
+ *      props.apiKeys here. Key format: `buildHoldingRef(h)` — same
  *      format the adapter emits as `DesignHoldingRow.id`.
  *   3. `flaggedHoldingsByRef` is keyed by the same buildHoldingRef so the
  *      OutcomeForm in the row-expand "Record outcome" tab gets the right
@@ -43,9 +41,8 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
   const apiKeys = props.apiKeys ?? [];
   const strategies = props.strategies ?? [];
 
-  // ── Map api_key.id → sync_status. Mirrors the enrichedHoldings build at
-  //    AllocationDashboard.tsx:697-724. Defensive default 'unknown' when
-  //    the FK doesn't resolve (RESTRICT FK should prevent this in practice).
+  // ── Map api_key.id → sync_status. Defensive default 'unknown' when the FK
+  //    doesn't resolve (RESTRICT FK should prevent this in practice).
   const keyStatusById = useMemo(() => {
     const m = new Map<string, string>();
     for (const k of apiKeys) {
