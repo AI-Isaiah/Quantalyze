@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type {
   DashboardConfig,
   TileConfig,
@@ -138,7 +138,18 @@ export interface UseDashboardConfigReturn {
 export function useDashboardConfig(): UseDashboardConfigReturn {
   const [config, setConfig] = useState<LegacyDashboardConfig>(loadLegacyConfig);
 
+  // Phase A3 — observe-without-write on mount. The persist effect always runs
+  // once after the initial render; without this guard, mounting the legacy
+  // hook against a V2-shape blob would clobber the user's V2 layout with v3
+  // defaults the moment the flag flips back. We skip the first persist so
+  // load is purely observational; subsequent setConfig calls (real user
+  // mutations) write through normally.
+  const hasMutated = useRef(false);
   useEffect(() => {
+    if (!hasMutated.current) {
+      hasMutated.current = true;
+      return;
+    }
     persistLegacy(config);
   }, [config]);
 
@@ -329,7 +340,18 @@ export interface UseDashboardConfigV2Return {
 export function useDashboardConfigV2(): UseDashboardConfigV2Return {
   const [config, setConfig] = useState<DashboardConfig>(loadV2Config);
 
+  // Phase A3 — same observe-without-write guard as the legacy hook. Mounting
+  // V2 against a v3 (legacy-shape) blob must not overwrite the persisted
+  // legacy layout with v4 defaults; that pattern is what made flag toggles
+  // ping-pong customisations into the void. The persist effect skips its
+  // first run; user-driven mutations (addWidget / resizeWidget / etc.)
+  // flip the ref and write normally.
+  const hasMutated = useRef(false);
   useEffect(() => {
+    if (!hasMutated.current) {
+      hasMutated.current = true;
+      return;
+    }
     persistV2(config);
   }, [config]);
 
