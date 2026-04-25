@@ -432,6 +432,22 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
   },
 
   // ── Meta (3) ───────────────────────────────────────────────────────
+  // Phase 09.1 PR1 (dashboard parity) — V2 Overview KPI strip. Distinct
+  // from `custom-kpi-strip` (kept for picker/legacy callers): KpiStripWidget
+  // renders the prototype's 5-cell vertical-bar-divided layout with
+  // AUM/YTD-TWR/Sharpe/Max-DD-12m/Avg-ρ. DESIGNER_KEY_TO_WIDGET_ID["kpi"]
+  // points here. Picker filter (status: ready) surfaces this as a real
+  // entry post-PR1.
+  "kpi-strip": {
+    id: "kpi-strip",
+    name: "KPI Strip",
+    category: "meta",
+    icon: "≡",
+    defaultW: 4,
+    defaultH: 2,
+    description: "Portfolio-wide KPI strip — AUM, YTD TWR, Sharpe, Max DD 12m, Avg ρ.",
+    status: "ready",
+  },
   "custom-kpi-strip": {
     id: "custom-kpi-strip",
     name: "Custom KPI Strip",

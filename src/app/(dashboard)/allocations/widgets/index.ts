@@ -116,14 +116,23 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   // decisions map out of the dashboard payload (data prop).
   "bridge-hero": lazy(() => import("./bridge/BridgeHeroWidget")),
 
-  // ── Default-Overview placeholder aliases (v0.15.7.0 retire-V1 follow-up)
-  // DESIGNER_KEY_TO_WIDGET_ID maps the designer short keys ("kpi",
-  // "holdings") to canonical ids ("kpi-strip", "holdings-table") that
-  // never got dedicated components. Until purpose-built widgets land,
-  // alias them to the closest existing equivalents so the Overview tab
-  // renders content instead of the "Unknown widget" debug fallback.
-  "kpi-strip": lazy(() =>
-    import("./meta/CustomKpiStrip").then((m) => ({ default: m.CustomKpiStrip })),
-  ),
+  // ── Default-Overview de-aliased components (Phase 09.1 PR1) ──────────
+  // The designer short keys "kpi" and "holdings" used to alias to existing
+  // widgets (custom-kpi-strip, positions-table) because purpose-built
+  // components didn't exist. PR1 lands first-class registry entries:
+  //   - kpi-strip      → meta/KpiStripWidget       (5-cell strip with
+  //                       prototype's exact 1-card / 5-divided-cells
+  //                       layout — distinct from custom-kpi-strip's
+  //                       4-card flex layout).
+  //   - holdings-table → positions/HoldingsTableWidget (compact dashboard
+  //                       variant of components/HoldingsTable's NEW MODE,
+  //                       distinct from positions-table which is the wider
+  //                       detail surface on the Holdings tab).
+  "kpi-strip": lazy(() => import("./meta/KpiStripWidget")),
+  // Phase 09.1 PR1 (dashboard parity) staged delivery — `holdings-table`
+  // de-alias lands in the next commit (positions/HoldingsTableWidget).
+  // Until then, keep the existing alias so the dashboard-defaults
+  // "every short key resolves" guard stays green and `git bisect` between
+  // the two commits never trips an "Unknown widget" fallback.
   "holdings-table": lazy(() => import("./positions/PositionsTable")),
 };
