@@ -129,10 +129,5 @@ export const WIDGET_COMPONENTS: Record<string, LazyWidget> = {
   //                       distinct from positions-table which is the wider
   //                       detail surface on the Holdings tab).
   "kpi-strip": lazy(() => import("./meta/KpiStripWidget")),
-  // Phase 09.1 PR1 (dashboard parity) staged delivery — `holdings-table`
-  // de-alias lands in the next commit (positions/HoldingsTableWidget).
-  // Until then, keep the existing alias so the dashboard-defaults
-  // "every short key resolves" guard stays green and `git bisect` between
-  // the two commits never trips an "Unknown widget" fallback.
-  "holdings-table": lazy(() => import("./positions/PositionsTable")),
+  "holdings-table": lazy(() => import("./positions/HoldingsTableWidget")),
 };

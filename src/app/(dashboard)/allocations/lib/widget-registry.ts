@@ -302,7 +302,24 @@ export const WIDGET_REGISTRY: Record<string, WidgetMeta> = {
     status: "ready",
   },
 
-  // ── Positions (5) ──────────────────────────────────────────────────
+  // ── Positions (5+1 with PR1) ──────────────────────────────────────
+  // Phase 09.1 PR1 (dashboard parity) — V2 Overview holdings tile.
+  // Compact dashboard variant of components/HoldingsTable's NEW MODE.
+  // Distinct from `positions-table` (kept) which is the wider detail
+  // surface on the Holdings tab. DESIGNER_KEY_TO_WIDGET_ID["holdings"]
+  // points here. Picker filter (status: ready) surfaces this as a real
+  // entry post-PR1.
+  "holdings-table": {
+    id: "holdings-table",
+    name: "Holdings Table",
+    category: "positions",
+    icon: "▦",
+    defaultW: 3,
+    defaultH: 4,
+    description:
+      "Active positions with inline outcome recording — compact dashboard variant.",
+    status: "ready",
+  },
   "positions-table": {
     id: "positions-table",
     name: "Positions Table",
