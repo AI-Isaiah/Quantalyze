@@ -153,6 +153,42 @@ describe("addStrategyBrowse", () => {
     expect(second).toBe(first);
     expect(second.addedStrategies.length).toBe(1);
   });
+
+  it("T1.4_R1 addStrategyBrowse preserves disabled-row weights (regression — review-pass P2)", () => {
+    // Setup: two holdings, BTC at 0.6, ETH at 0.4. Toggle ETH OFF — its
+    // 0.4 weight is preserved in weightOverrides (toggleHolding stores the
+    // off-row's weight so a future toggle-on can restore it).
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const ethOff = toggleHolding(initial, "holding:binance:ETH:spot");
+    const ethStoredWeight = ethOff.weightOverrides["holding:binance:ETH:spot"];
+    expect(ethStoredWeight).toBeCloseTo(0.4, 9);
+    expect(ethOff.toggleByScopeRef["holding:binance:ETH:spot"]).toBe(false);
+
+    // Add a strategy via Browse. Pre-fix this would have built nextWeights
+    // from {} and only carried over the ENABLED rows, dropping ETH's
+    // preserved 0.4. Post-fix nextWeights starts from a copy of the full
+    // weightOverrides map so the disabled-row weight survives.
+    const withStrat = addStrategyBrowse(ethOff, STRAT_A);
+    expect(withStrat.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(
+      0.4,
+      9,
+    );
+    expect(withStrat.toggleByScopeRef["holding:binance:ETH:spot"]).toBe(false);
+
+    // Now toggle ETH back ON. toggleHolding's "Toggle ON" branch restores
+    // the original 0.4 only when the stored weight is in (0, 1) — pre-fix
+    // the stored weight was 0 (dropped) and the path would fall back to
+    // equal-distribution. Post-fix the original 0.4 survives, and toggling
+    // ON scales the OTHER enabled rows by (1 - 0.4) so they re-balance to
+    // 0.6 in aggregate while ETH's slot is exactly 0.4.
+    const ethOn = toggleHolding(withStrat, "holding:binance:ETH:spot");
+    expect(ethOn.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(
+      0.4,
+      9,
+    );
+    // Sum of enabled weights still totals 1.0 within tolerance.
+    expect(sumEnabled(ethOn)).toBeCloseTo(1.0, 9);
+  });
 });
 
 describe("addStrategyBridge", () => {

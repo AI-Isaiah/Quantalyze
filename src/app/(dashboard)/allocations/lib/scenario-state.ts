@@ -252,6 +252,15 @@ export function toggleHolding(
  *
  * M9 dedupe: if the strategy's id is already in `addedStrategies`, returns
  * the SAME draft reference (no-op).
+ *
+ * Disabled-row weight preservation (review fix P2): seed `nextWeights` from
+ * the entire `weightOverrides` map (not an empty object) so any preserved
+ * weight on a CURRENTLY DISABLED row survives the add. Without this, the
+ * iteration below — which only touches `enabledBefore` ids — would drop the
+ * disabled row's preserved value, and a subsequent toggle-on of that row
+ * would fall back to equal-distribution instead of restoring the original
+ * stored weight (toggleHolding's "Toggle ON" branch only restores when
+ * `w > 0 && w < 1`).
  */
 export function addStrategyBrowse(
   draft: ScenarioDraft,
@@ -264,7 +273,8 @@ export function addStrategyBrowse(
   const n = enabledBefore.length;
   const newWeight = 1 / (n + 1);
   const scale = 1 - newWeight;
-  const nextWeights: Record<string, number> = {};
+  // Seed from existing overrides so disabled-row preserved weights survive.
+  const nextWeights: Record<string, number> = { ...draft.weightOverrides };
   for (const id of enabledBefore) {
     nextWeights[id] = (draft.weightOverrides[id] ?? 0) * scale;
   }
@@ -391,11 +401,19 @@ export function setWeightOverride(
 // ---------------------------------------------------------------------------
 
 /** SSR-safe localStorage read. Returns null on SSR, missing key, schema-version
- *  mismatch, or any parse/access error. */
+ *  mismatch, or any parse/access error.
+ *
+ *  Mock-surface note: we use bare `localStorage` (not `window.localStorage`)
+ *  inside the function body so test mocks installed via
+ *  `vi.stubGlobal("localStorage", mock)` actually intercept the calls.
+ *  The `typeof window === "undefined"` SSR sentinel above still short-circuits
+ *  on the server before any access — bare `localStorage` resolves to the
+ *  global in browsers and would throw a ReferenceError on Node, but the
+ *  guard prevents that path. */
 export function loadScenarioDraft(allocatorId: string): ScenarioDraft | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(scenarioStorageKey(allocatorId));
+    const raw = localStorage.getItem(scenarioStorageKey(allocatorId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ScenarioDraft;
     if (parsed.schema_version !== SCENARIO_SCHEMA_VERSION) return null;
@@ -411,7 +429,7 @@ export function loadScenarioDraft(allocatorId: string): ScenarioDraft | null {
 export function saveScenarioDraft(allocatorId: string, draft: ScenarioDraft): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(
+    localStorage.setItem(
       scenarioStorageKey(allocatorId),
       JSON.stringify(draft),
     );
@@ -424,7 +442,7 @@ export function saveScenarioDraft(allocatorId: string, draft: ScenarioDraft): vo
 export function clearScenarioDraft(allocatorId: string): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.removeItem(scenarioStorageKey(allocatorId));
+    localStorage.removeItem(scenarioStorageKey(allocatorId));
   } catch {
     // Storage unavailable — silent fail.
   }
