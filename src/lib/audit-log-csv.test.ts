@@ -119,15 +119,23 @@ describe("serializeAuditLogCsv", () => {
       action: 'has,comma', // forces RFC 4180 quoting in the action cell
       entity_type: 'has"quote', // forces RFC 4180 quoting + internal-quote doubling
       entity_id: null,
-      metadata: { msg: "line1\nline2" }, // newline inside JSON forces quoting
+      // The JS source `"line1\nline2"` is a real LF byte. JSON.stringify
+      // serializes that byte to the two-char escape sequence backslash-n,
+      // so the resulting JSON `{"msg":"line1\nline2"}` contains a comma
+      // and double-quotes (which trigger RFC 4180 wrapping) but NOT a
+      // raw newline. The cell is still quoted, just because of the
+      // commas and quotes.
+      metadata: { msg: "line1\nline2" },
     };
     const output = serializeAuditLogCsv([row]);
     // action cell is "has,comma" (quoted)
     expect(output).toContain(',"has,comma",');
     // entity_type cell is "has""quote" (quoted with internal doubled quote)
     expect(output).toContain('"has""quote"');
-    // metadata cell quotes the JSON because it contains a newline
-    expect(output).toContain('"{""msg"":""line1\nline2""}"');
+    // metadata cell quotes the JSON because it contains commas + double-quotes.
+    // Use String.raw so the assertion's `\n` is the literal two-char sequence
+    // backslash-n that JSON.stringify produced (NOT a real LF).
+    expect(output).toContain(String.raw`"{""msg"":""line1\nline2""}"`);
   });
 
   it("emits an empty string (not 'null') for entity_id: null", () => {
