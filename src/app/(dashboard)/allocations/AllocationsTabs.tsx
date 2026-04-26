@@ -228,7 +228,13 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // opted out (raw=="false" on the client, but SSR rendered the V2 path).
   const [isUiV2, setUiV2Flag] = useState<boolean>(true);
   useEffect(() => {
+    // The setState-in-effect is intentional and bounded: it fires AT MOST
+    // ONCE on mount, only when the localStorage rollback flag is set to
+    // the literal string "false". The alternative (useSyncExternalStore)
+    // is overkill for a one-shot post-mount read of a stable value.
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (loadUiV2Flag() === false) setUiV2Flag(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
