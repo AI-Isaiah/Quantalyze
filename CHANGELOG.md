@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.12.1] - 2026-04-26
+
+**Phase 10 QA pass.** Three live-DB defects surfaced during human UAT against
+localhost dev, fixed end-to-end with regression coverage.
+
+### Fixed
+
+- Browse strategies drawer no longer shows "Couldn't load strategies." The
+  route was selecting `alias` from `strategies` but that column lives on
+  `portfolio_strategies` (per-allocator override). Switched to `name` +
+  `codename` across route, drawer, and tests. New T9 regression test asserts
+  the SELECT column list contains `name` and not `alias`.
+- Commit scenario no longer silently rejects $0 holdings. Schema
+  `size_at_decision_usd` relaxed from `.positive()` to `.nonnegative()` (the
+  field is metadata-only on the wire — RPC 082 does not consume it). Composer
+  now coalesces `h.value_usd` defensively for sold-down holdings.
+- Submit-all in the commit drawer now actually works. Inline `RejectedForm` /
+  `AllocatedForm` were rendered with `onRecorded={() => {}}` no-ops, so the
+  user-collected `rejection_reason` (required for voluntary_remove) and
+  `percent_allocated` (required for voluntary_add) never reached the wire and
+  every batch returned 400. Drawer now holds per-row state, renders controlled
+  inputs, merges into diffs at submit time, and surfaces top-level errors when
+  the response shape is `{ error, issues }` rather than `{ errors }`. Submit
+  button is disabled until all required inputs are filled. End-to-end
+  verified against live Supabase — voluntary_remove + voluntary_add round-trip
+  through the commit RPC and land in the Outcomes timeline.
+
 ## [0.15.12.0] - 2026-04-26
 
 **Phase 10 — Scenario Builder and What-If.** SCENARIO-01..09 ship: allocators can
