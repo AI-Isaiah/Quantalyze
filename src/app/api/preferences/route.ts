@@ -6,7 +6,7 @@ import {
   validateSelfEditableInput,
   getOwnPreferences,
 } from "@/lib/preferences";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { mandateAutoSaveLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 
 export async function GET(): Promise<NextResponse> {
@@ -35,7 +35,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const rl = await checkLimit(userActionLimiter, `preferences:${user.id}`);
+  const rl = await checkLimit(mandateAutoSaveLimiter, `preferences:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },

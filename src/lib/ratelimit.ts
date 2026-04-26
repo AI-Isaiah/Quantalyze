@@ -81,6 +81,15 @@ export const exportLimiter = makeLimiter(1, "86400 s");
 // .planning/phases/05-outcomes-dashboard/VOICES-ACCEPTED.md D10.
 export const bridgeOutcomeCurvesLimiter = makeLimiter(60, "60 s");
 
+// 30/minute per authenticated user — Phase 2 mandate auto-save (WR-02).
+// MandateForm fans a single mandate edit out into 8+ field-level PUTs
+// (3 strategy chips + 2 exchange chips + max_weight slide + ticket-size
+// blur + archetype blur is a realistic burst). userActionLimiter at
+// 5/min would 429 on the 6th save and surface "Saving too fast" mid-edit.
+// 30/min absorbs that burst, leaves headroom for a second pass, and
+// stays well under abuse thresholds for the auth-only PUT path.
+export const mandateAutoSaveLimiter = makeLimiter(30, "60 s");
+
 export type CheckLimitResult =
   | { success: true }
   | { success: false; retryAfter: number };
