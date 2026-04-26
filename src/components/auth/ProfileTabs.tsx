@@ -11,6 +11,7 @@ import {
   ExchangesTabContent,
   type ExchangesTabContentProps,
 } from "@/components/exchanges/ExchangesTabContent";
+import { AuditLogSubsection } from "@/app/(dashboard)/profile/components/AuditLogSubsection";
 import type { Profile } from "@/lib/types";
 import type { AllocatorPreferences } from "@/lib/preferences";
 
@@ -18,6 +19,9 @@ const ALL_TABS = [
   { key: "personal", label: "Personal Info" },
   { key: "mandate", label: "Mandate", allocatorOnly: true },
   { key: "exchanges", label: "Exchanges", allocatorOnly: true },
+  // Phase 11 / S6 / D-05 — allocator-only Security tab housing the
+  // self-serve audit-log CSV download (linked from /security#data-handling-summary).
+  { key: "security", label: "Security", allocatorOnly: true },
   { key: "organizations", label: "Organizations" },
   { key: "account", label: "Account" },
 ] as const;
@@ -25,7 +29,11 @@ const ALL_TABS = [
 type TabKey = (typeof ALL_TABS)[number]["key"];
 
 const VALID_TAB_KEYS = ALL_TABS.map((t) => t.key) as readonly TabKey[];
-const ALLOCATOR_ONLY_KEYS: readonly TabKey[] = ["mandate", "exchanges"];
+const ALLOCATOR_ONLY_KEYS: readonly TabKey[] = [
+  "mandate",
+  "exchanges",
+  "security",
+];
 
 function parseTabParam(raw: string | null, isAllocator: boolean): TabKey {
   if (!raw) return "personal";
@@ -97,6 +105,14 @@ export function ProfileTabs({
           initialKeys={exchanges.initialKeys}
           activePortfolio={exchanges.activePortfolio}
         />
+      )}
+      {activeTab === "security" && isAllocator && (
+        <div>
+          {/* Phase 11 / S6 / D-05 — Allocator self-serve audit-log CSV.
+              Future security subsections (key encryption details, MFA, etc.)
+              will mount alongside the AuditLogSubsection inside this body. */}
+          <AuditLogSubsection />
+        </div>
       )}
       {activeTab === "organizations" && <OrganizationTab />}
       {activeTab === "account" && (

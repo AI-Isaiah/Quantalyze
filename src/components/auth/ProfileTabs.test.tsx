@@ -1,0 +1,112 @@
+/**
+ * Phase 11 Plan 06 / S6 / D-05 — ProfileTabs Security tab integration tests.
+ *
+ * Locked contract:
+ *   - ALL_TABS includes a `security` entry with `allocatorOnly: true`
+ *   - Non-allocator users do NOT see the Security tab
+ *   - Allocator users DO see the Security tab
+ *   - When activeTab === 'security', AuditLogSubsection renders inside
+ *     the tab body
+ *   - parseTabParam('security', isAllocator=true) → 'security' (allowed)
+ *   - parseTabParam('security', isAllocator=false) → 'personal' (gated)
+ *
+ * The router/searchParams hooks from next/navigation are stubbed because
+ * jsdom has no router context.
+ */
+
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+} from "vitest";
+import { render, screen } from "@testing-library/react";
+import { ProfileTabs } from "./ProfileTabs";
+import type { Profile } from "@/lib/types";
+
+// next/navigation hooks are not available in jsdom — supply minimal stubs.
+const searchParamsState = { tab: null as string | null };
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
+  usePathname: () => "/profile",
+  useSearchParams: () => ({
+    get: (k: string) => (k === "tab" ? searchParamsState.tab : null),
+    toString: () =>
+      searchParamsState.tab ? `tab=${searchParamsState.tab}` : "",
+  }),
+}));
+
+// AuditLogSubsection's fetch is stubbed so the tab-render test doesn't
+// trigger an actual network request when the security tab mounts.
+const mockFetch = vi.fn();
+beforeEach(() => {
+  globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+  searchParamsState.tab = null;
+});
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+const PROFILE_FIXTURE: Profile = {
+  id: "11111111-1111-1111-1111-111111111111",
+  email: "test@example.test",
+  display_name: "Test",
+  full_name: "Test User",
+  role: "allocator",
+  bio: null,
+  years_trading: null,
+  aum_range: null,
+  organization_id: null,
+  created_at: new Date("2026-01-01").toISOString(),
+  updated_at: new Date("2026-01-01").toISOString(),
+} as unknown as Profile;
+
+describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
+  it("Test 1 — allocator sees the Security tab", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    expect(
+      screen.getByRole("button", { name: "Security" }),
+    ).toBeInTheDocument();
+  });
+
+  it("Test 2 — non-allocator does NOT see the Security tab", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={false} />);
+    expect(screen.queryByRole("button", { name: "Security" })).toBeNull();
+  });
+
+  it("Test 3 — when ?tab=security and user is allocator, AuditLogSubsection renders", () => {
+    searchParamsState.tab = "security";
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    // The subsection's own heading is the most stable assertion target.
+    expect(
+      screen.getByRole("heading", { name: "Audit log" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /Download audit log CSV/,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("Test 4 — when ?tab=security and user is NOT allocator, falls back to Personal Info tab", () => {
+    searchParamsState.tab = "security";
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={false} />);
+    // Audit log heading must NOT render — security path is gated by
+    // ALLOCATOR_ONLY_KEYS in parseTabParam, so the visibility predicate
+    // falls through to the personal tab (ProfileForm).
+    expect(screen.queryByRole("heading", { name: "Audit log" })).toBeNull();
+  });
+
+  it("Test 5 — Security tab appears AFTER Exchanges and BEFORE Organizations in tab order", () => {
+    render(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    const buttons = screen.getAllByRole("button").map((b) => b.textContent);
+    const exchangesIdx = buttons.indexOf("Exchanges");
+    const securityIdx = buttons.indexOf("Security");
+    const organizationsIdx = buttons.indexOf("Organizations");
+    expect(exchangesIdx).toBeGreaterThanOrEqual(0);
+    expect(securityIdx).toBeGreaterThan(exchangesIdx);
+    expect(organizationsIdx).toBeGreaterThan(securityIdx);
+  });
+});
