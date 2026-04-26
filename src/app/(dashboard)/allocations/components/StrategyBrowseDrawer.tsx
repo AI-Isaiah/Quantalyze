@@ -106,11 +106,22 @@ export function StrategyBrowseDrawer({
     new Set(),
   );
   const drawerRef = useRef<HTMLDivElement>(null);
+  // Review-pass P2 fix — track active "Added ✓ → permanently dimmed"
+  // setTimeout ids so the close-reset effect AND unmount can clear them
+  // before they fire. Without this, an allocator who dismisses the drawer
+  // within the 2s window would see the permanentlyDimmed state mutate
+  // AFTER the drawer's transient state was already cleared.
+  const dimTimerIdsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   // Fetch on open — single round-trip per drawer activation.
+  // Review-pass P2 fix — switch from a `cancelled` flag to AbortController
+  // so the underlying fetch is actually aborted on close/unmount, not just
+  // its result ignored. Custom fetcher overrides (used in tests) don't get
+  // the signal — they continue to use the cancellation flag.
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
+    const controller = new AbortController();
     /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setError(null);
@@ -118,7 +129,9 @@ export function StrategyBrowseDrawer({
     const loader =
       fetchStrategies ??
       (async () => {
-        const res = await fetch("/api/strategies/browse");
+        const res = await fetch("/api/strategies/browse", {
+          signal: controller.signal,
+        });
         if (!res.ok) {
           throw new Error(`Failed to load strategies (${res.status})`);
         }
@@ -133,6 +146,9 @@ export function StrategyBrowseDrawer({
       })
       .catch((e: unknown) => {
         if (cancelled) return;
+        // AbortError surfaces here when controller.abort() ran before the
+        // network response — silently drop, the drawer is already closed.
+        if (e instanceof DOMException && e.name === "AbortError") return;
         setError(
           e instanceof Error ? e.message : "Couldn't load strategies",
         );
@@ -140,10 +156,14 @@ export function StrategyBrowseDrawer({
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [isOpen, fetchStrategies]);
 
   // Esc handler + state reset on close. Mirrors BridgeDrawer:59-74 pattern.
+  // Review-pass P2 fix — clear any in-flight "Added ✓" → dim setTimeouts
+  // when the drawer closes, so they can't mutate state after the transient
+  // bookkeeping was already wiped.
   useEffect(() => {
     if (!isOpen) {
       /* eslint-disable react-hooks/set-state-in-effect */
@@ -153,6 +173,9 @@ export function StrategyBrowseDrawer({
       setRecentlyAdded(new Set());
       setPermanentlyDimmed(new Set());
       /* eslint-enable react-hooks/set-state-in-effect */
+      // Drain pending dim timers so they don't fire post-close.
+      for (const id of dimTimerIdsRef.current) clearTimeout(id);
+      dimTimerIdsRef.current.clear();
       return;
     }
     const onKey = (e: KeyboardEvent) => {
@@ -161,6 +184,18 @@ export function StrategyBrowseDrawer({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [isOpen, onClose]);
+
+  // Review-pass P2 fix — unmount cleanup. The close-reset path above
+  // covers the open→close transition, but a parent unmounting while
+  // isOpen=true would orphan timers. This effect runs once on mount and
+  // its cleanup runs once on unmount, draining whatever remains.
+  useEffect(() => {
+    const timers = dimTimerIdsRef.current;
+    return () => {
+      for (const id of timers) clearTimeout(id);
+      timers.clear();
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -207,7 +242,11 @@ export function StrategyBrowseDrawer({
       next.add(s.id);
       return next;
     });
-    setTimeout(() => {
+    // Review-pass P2 fix — track the timer id so the close-reset and
+    // unmount paths can clear it. Self-removes from the tracking set on
+    // fire so memory doesn't leak across many adds in one session.
+    const timerId = setTimeout(() => {
+      dimTimerIdsRef.current.delete(timerId);
       setRecentlyAdded((prev) => {
         const next = new Set(prev);
         next.delete(s.id);
@@ -219,6 +258,7 @@ export function StrategyBrowseDrawer({
         return next;
       });
     }, 2000);
+    dimTimerIdsRef.current.add(timerId);
   }
 
   function toggleSet(

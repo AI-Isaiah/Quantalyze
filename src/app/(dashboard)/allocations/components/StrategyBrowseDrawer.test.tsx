@@ -142,7 +142,12 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     await flush();
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(fetchSpy).toHaveBeenCalledWith("/api/strategies/browse");
+    // Review-pass P2 fix — fetch now passes an AbortController signal as
+    // its second arg so the request can be aborted on close/unmount.
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/strategies/browse",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
 
     vi.unstubAllGlobals();
   });

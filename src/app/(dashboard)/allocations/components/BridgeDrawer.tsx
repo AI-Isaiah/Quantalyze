@@ -138,13 +138,20 @@ export function BridgeDrawer({
    */
   function handleAddToScenario() {
     if (!selected || !onAddToScenario) return;
-    onAddToScenario(buildHoldingRef(selected), {
-      id: selected.top_candidate_strategy_id,
-      name: selected.top_candidate_name,
-      markets: [selected.venue],
-      strategy_types: [],
-    });
-    onClose();
+    // Review-pass P2 fix — wrap the callback in try/finally so onClose
+    // ALWAYS runs even if the host throws synchronously. Without this,
+    // a callback exception would strand the drawer open with no path
+    // for the allocator to dismiss without page reload.
+    try {
+      onAddToScenario(buildHoldingRef(selected), {
+        id: selected.top_candidate_strategy_id,
+        name: selected.top_candidate_name,
+        markets: [selected.venue],
+        strategy_types: [],
+      });
+    } finally {
+      onClose();
+    }
   }
 
   const candidates = flaggedHoldings.filter(
