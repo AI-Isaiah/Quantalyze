@@ -379,3 +379,88 @@ here so the next session can opportunistically close them.
   Supabase round-trips in `_find_strategy_rank_in_latest_batch_before`.
 - Partner-import processes CSV rows sequentially — a 10-row CSV is 30-40
   round-trips. Batch-upsert profiles + strategies in one call per table.
+
+---
+
+## ~~Claude design deferred items pr4~~ — ✅ DONE in PR4
+
+All four items shipped in a single PR:
+- **#1 Equity card single-row header**: lifted `period` / `customRange` /
+  `pickerOpen` state into `EquityChartWidget` (controlled-state escape
+  hatch on `EquityChart` via new `period` / `onPeriodChange` /
+  `customRange` / `onCustomRangeChange` / `hideHeader` / `hideLegend`
+  props). Uncontrolled mode preserved for ScenarioComposer + standalone
+  tests. Wrapper now renders title + legend chips + period toggle +
+  CUSTOM picker + sync stamp on a single header row, byte-aligned with
+  `designer-bundle/project/src/app.jsx:142-200`.
+- **#2 KPI strip cell separators**: `KpiStripWidget` was already
+  rendering `borderLeft` separators but referenced an undefined
+  `var(--border)`; fixed to `var(--color-border)` so the dividers
+  resolve through the Tailwind v4 `@theme inline` token.
+- **#3 `displayFont` Tweaks knob**: `TweaksProvider` now writes
+  `body[data-display-font]` and `globals.css` carries a single rule
+  that swaps `.font-display { font-family: var(--font-sans); }` when
+  the attribute reads `"sans"`. Zero consumer-side changes.
+- **#4 Y-axis tick density**: `EquityChart`'s `yTicks` walker now
+  enforces a 5-tick minimum by selecting the LARGEST nice-candidate
+  step that still produces ≥ 5 ticks, accepting sub-1% steps like
+  `0.25%` on tight ranges so test-data renders never collapse to 3
+  ticks.
+
+Source: `.gstack/qa-reports/qa-report-allocations-2026-04-26.md` §Remaining
+minor deltas. Original write-up retained below for reference.
+
+### 1. Equity card single-row header
+**Severity: Low.** Truth has `Equity curve` title + Portfolio/BTC legend
+chips + period toggle (1M/3M/6M/YTD/1Y/ALL/CUSTOM) + `sync 2m ago` stamp
+all on the SAME row inside the card header. Production currently splits
+into two rows (card header with title alone; chart body with the
+toggle/legend/sync stamp).
+
+To match exactly we need to lift `period` and `customRange` state from
+`EquityChart` up into `EquityChartWidget`, then render the rich header in
+the wrapper card. The internal SVG component then becomes presentational
+(props in, no internal toggle state). Touches: `EquityChart.tsx`
+(state-removal + props), `EquityChartWidget` (header markup +
+state owner), `EquityChart.test.tsx` (most period-click tests move up to
+the widget level), every other consumer of `EquityChart` (none today,
+but worth checking before lifting). Not invasive in raw LOC, but it's
+the kind of refactor that needs its own commit and its own QA pass.
+
+### 2. KPI strip cell separators
+**Severity: Low (cosmetic).** Truth has a subtle `1px var(--color-border)`
+vertical rule between adjacent KPI cells (AUM | YTD TWR | Sharpe | Max DD
+12M | Avg ρ). Production renders them as a clean 5-column grid with no
+divider. The fix is one CSS change in `KpiStrip.tsx` — likely a
+`divide-x divide-border` Tailwind utility on the row, or per-cell
+`border-l border-border first:border-l-0`.
+
+### 3. `displayFont` Tweaks knob is a no-op
+**Severity: Low.** PR3's `TweaksContext` exposes `displayFont` as a
+`"serif" | "sans"` knob in the panel, but no consumer reads it yet.
+Production headings already use `.font-display` (which resolves to
+Instrument Serif via `--font-serif`); the knob would need to flip every
+display-headline consumer to either the serif class or a sans fallback.
+
+Approach: add a `useDisplayFontClass()` hook in `TweaksContext.tsx` that
+returns `"font-display"` or an empty string, then wire it into every
+heading where the knob should bite (My Allocation H1, KPI cell labels,
+Bridge "All clear" headline, Equity curve title, Holdings header,
+Allocation by style header, etc.). Probably 8-15 sites. Or — simpler —
+toggle a `data-display-font="sans"` attribute on `<body>` in the provider
+and add a single CSS rule that swaps `.font-display { font-family:
+var(--font-sans); }` when the attribute is set. The attribute approach
+is one-line and avoids touching every consumer.
+
+### 4. Y-axis tick density on narrow ranges
+**Severity: Low.** The `yTicks` calculation in `EquityChart.tsx` adapts
+to the visible data range — when returns hover near zero (test data
+case), only 3 ticks render (`+0% / -0.5% / -1.0%`). Truth shows 5 evenly
+spaced ticks (`0.0% / 7.1% / 14.2% / 21.4% / 28.5%`) because the truth
+data has a much wider return range.
+
+The algorithm IS working as designed (snap to "nice" 1/2/2.5/5/10
+percentage steps based on span). The PR4 question is whether to force a
+minimum of 5 ticks regardless of span — at the cost of awkward
+fractional steps like `0.25%` on tight ranges. Probably worth a /qa pass
+on a real account with realistic returns before deciding.

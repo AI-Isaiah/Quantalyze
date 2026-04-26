@@ -141,6 +141,15 @@ body[data-density="loose"] {
   font-weight: 400;
 }
 
+/* Tweaks → Display font knob (serif | sans). When the knob is set to
+   "sans", every .font-display heading flips to DM Sans without each
+   consumer needing to read the knob value. The default ("serif") leaves
+   the rule above intact. See TweaksContext.tsx. */
+body[data-display-font="sans"] .font-display {
+  font-family: var(--font-sans);
+  font-weight: 500;
+}
+
 /* --- MandateForm range slider — institutional track + precise thumb.
    Uses --slider-fill (0-100) inline style for the accent-fill ratio; all
    colors flow through DESIGN.md tokens via var(--color-*) + color-mix().
