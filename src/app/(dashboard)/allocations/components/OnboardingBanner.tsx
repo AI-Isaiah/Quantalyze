@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import { WarningBanner } from "@/components/ui/WarningBanner";
+import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
 
 /**
  * Phase 11 / 11-05 / S1 / ONBOARD-01 — Onboarding banner.
@@ -28,37 +28,13 @@ import { WarningBanner } from "@/components/ui/WarningBanner";
 const STORAGE_KEY = "allocations.onboarding_banner_dismissed";
 
 export function OnboardingBanner() {
-  const [dismissed, setDismissed] = useState(false);
+  // Phase 11 review fix IN-01: useSessionStorageBoolean consolidates the
+  // SSR-safe "render-then-hide-after-mount" pattern (RESEARCH Pitfall 6)
+  // and the dismiss-flag write. First paint renders the banner; the
+  // post-mount effect inside the hook may flip dismissed=true.
+  const [dismissed, setDismissed] = useSessionStorageBoolean(STORAGE_KEY);
 
-  useEffect(() => {
-    // Read sessionStorage post-mount per RESEARCH Pitfall 6 (SSR-safe). If
-    // the user has already dismissed in this tab session, hide via state
-    // update — first paint still rendered the banner so there's no CLS.
-    //
-    // The setState-in-effect is intentional and bounded: it fires AT MOST
-    // ONCE on mount, only when the dismissal flag is set. Same precedent
-    // as AllocationsTabs.tsx loadUiV2Flag effect (line 230-238).
-    /* eslint-disable react-hooks/set-state-in-effect */
-    try {
-      if (sessionStorage.getItem(STORAGE_KEY) === "1") {
-        setDismissed(true);
-      }
-    } catch {
-      // sessionStorage unavailable (private mode, blocked storage, etc.)
-      // — fail open: leave banner visible. The user can still dismiss for
-      // this render via the × button (which also no-ops gracefully).
-    }
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, []);
-
-  const handleDismiss = () => {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, "1");
-    } catch {
-      // best-effort write — local state still hides the banner.
-    }
-    setDismissed(true);
-  };
+  const handleDismiss = () => setDismissed(true);
 
   if (dismissed) return null;
 

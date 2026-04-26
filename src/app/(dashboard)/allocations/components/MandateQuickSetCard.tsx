@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { STRATEGY_TYPES } from "@/lib/constants";
+import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
 
 /**
  * Phase 11 / 11-05 / S2 / ONBOARD-02 — Mandate quick-set card.
@@ -42,29 +43,22 @@ interface Props {
 }
 
 export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
-  const [dismissed, setDismissed] = useState(false);
+  // Phase 11 review fix IN-01: useSessionStorageBoolean consolidates the
+  // SSR-safe "render-then-hide-after-mount" pattern (RESEARCH Pitfall 6)
+  // and the dismiss-flag write. Same precedent as OnboardingBanner.
+  // `dismissed` represents the *persisted* dismiss state (Skip button —
+  // sessionStorage flag). The post-save transient hide is a separate
+  // local-only `savedHidden` so a successful save does NOT write the
+  // sessionStorage flag (the server-side mandateIsSet=true on next page
+  // load is the canonical "keep hidden" signal — this matches the
+  // pre-IN-01 behavior).
+  const [dismissed, setDismissed] = useSessionStorageBoolean(STORAGE_KEY);
+  const [savedHidden, setSavedHidden] = useState(false);
   // BLOCK-2: empty string on first render (NOT "15"). Phase 02 D-09 LOCKED.
   const [maxWeightPct, setMaxWeightPct] = useState<string>("");
   const [preferredTypes, setPreferredTypes] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Read sessionStorage post-mount (RESEARCH Pitfall 6 — SSR-safe).
-    //
-    // The setState-in-effect is intentional and bounded: it fires AT MOST
-    // ONCE on mount, only when the dismissal flag is set. Same precedent
-    // as AllocationsTabs.tsx loadUiV2Flag effect (line 230-238).
-    /* eslint-disable react-hooks/set-state-in-effect */
-    try {
-      if (sessionStorage.getItem(STORAGE_KEY) === "1") {
-        setDismissed(true);
-      }
-    } catch {
-      // sessionStorage unavailable — fail open (card stays visible).
-    }
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, []);
 
   // BLOCK-2: Save is disabled when the input is empty (also during in-flight
   // save). Trim handles whitespace-only values. This is the only path that
@@ -110,7 +104,10 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
 
       // Success — hide card for the rest of the session; rely on
       // server-side mandateIsSet=true on next page load to keep it hidden.
-      setDismissed(true);
+      // IN-01 fidelity: a successful save does NOT write the
+      // sessionStorage flag — only Skip does — so the hook's setDismissed
+      // is bypassed in favor of a local-only transient hide.
+      setSavedHidden(true);
       onSaved?.();
     } catch (err) {
       setError("Could not save mandate. Please try again.");
@@ -121,11 +118,8 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
   };
 
   const handleSkip = () => {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, "1");
-    } catch {
-      // best-effort write
-    }
+    // Phase 11 IN-01: setDismissed(true) handles both the sessionStorage
+    // write and the local-state update via the shared hook.
     setDismissed(true);
     onSkipped?.();
   };
@@ -136,7 +130,7 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
     );
   };
 
-  if (dismissed) return null;
+  if (dismissed || savedHidden) return null;
 
   return (
     <Card padding="md">
