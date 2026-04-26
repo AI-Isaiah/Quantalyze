@@ -109,4 +109,35 @@ describe("ProfileTabs — Security tab visibility (S6 / D-05)", () => {
     expect(securityIdx).toBeGreaterThan(exchangesIdx);
     expect(organizationsIdx).toBeGreaterThan(securityIdx);
   });
+
+  it("Phase 11 IN-06 — activeTab derives per-render from searchParams (back/forward parity)", () => {
+    // Mount with ?tab=security — Audit log heading visible.
+    searchParamsState.tab = "security";
+    const { rerender } = render(
+      <ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "Audit log" }),
+    ).toBeInTheDocument();
+
+    // Simulate browser back: searchParams flips to ?tab=mandate.
+    // Under the previous useState(initialTab) snapshot pattern, the
+    // Audit-log heading would persist because activeTab stayed locked
+    // to its mount-time value. With the IN-06 derive-per-render fix the
+    // re-render reflects the new searchParams and the security panel
+    // unmounts.
+    searchParamsState.tab = "mandate";
+    rerender(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    expect(
+      screen.queryByRole("heading", { name: "Audit log" }),
+    ).toBeNull();
+
+    // Simulate browser forward: searchParams returns to ?tab=security.
+    // The security panel must re-mount.
+    searchParamsState.tab = "security";
+    rerender(<ProfileTabs profile={PROFILE_FIXTURE} isAllocator={true} />);
+    expect(
+      screen.getByRole("heading", { name: "Audit log" }),
+    ).toBeInTheDocument();
+  });
 });

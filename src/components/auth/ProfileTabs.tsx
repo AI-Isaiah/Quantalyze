@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { ProfileForm } from "./ProfileForm";
@@ -60,20 +59,26 @@ export function ProfileTabs({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const initialTab = parseTabParam(searchParams.get("tab"), isAllocator);
-  const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
+  // Phase 11 review fix IN-06: derive activeTab per render from
+  // searchParams instead of snapshotting in local state. The previous
+  // useState(initialTab) snapshot pattern broke browser back/forward —
+  // searchParams updates would not be reflected because `activeTab`
+  // stayed at the mount-time value. Same fix as
+  // AllocationsTabs.tsx:222-224 (Phase 09.1 / VOICES-ACCEPTED f3:
+  // "derive each render — no local state snapshot").
+  const activeTab: TabKey = parseTabParam(searchParams.get("tab"), isAllocator);
 
-  // Sync active tab → URL param (shallow; preserves back/forward and sharable links).
-  useEffect(() => {
-    const current = searchParams.get("tab");
-    const next = activeTab === "personal" ? null : activeTab;
-    if (current === next) return;
+  // Tab click handler: push the new tab to the URL so the next render
+  // reads it via parseTabParam above. shallow=true preserves back/forward
+  // and sharable links.
+  const setActiveTab = (next: TabKey) => {
+    const target = next === "personal" ? null : next;
     const params = new URLSearchParams(searchParams.toString());
-    if (next) params.set("tab", next);
+    if (target) params.set("tab", target);
     else params.delete("tab");
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
-  }, [activeTab, searchParams, router, pathname]);
+  };
 
   const tabs = ALL_TABS.filter((t) => !("allocatorOnly" in t && t.allocatorOnly) || isAllocator);
 
