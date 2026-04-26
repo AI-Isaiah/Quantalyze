@@ -210,7 +210,7 @@ Plans:
 Plans:
 - [ ] 11-01-PLAN.md — Migration 084 first_api_key_added trigger + stamp_first_sync_success RPC + [BLOCKING] schema push + live-DB regression — requirements ONBOARD-05
 - [ ] 11-02-PLAN.md — GET /api/me/audit-log/export route + audit-log-csv.ts serializer + RFC 4180 escape + RLS isolation test — requirements ONBOARD-03
-- [ ] 11-03-PLAN.md — onboarding-funnel.ts maybeEmit* helpers + 5-event UsageEvent extension + /allocations page.tsx readers + Python worker RPC call + outcome-marker stamps in scenario-commit/match-decisions — requirements ONBOARD-05
+- [x] 11-03-PLAN.md — onboarding-funnel.ts maybeEmit* helpers + 5-event UsageEvent extension + /allocations page.tsx readers + Python worker RPC call + outcome-marker stamps in scenario-commit/match-decisions — requirements ONBOARD-05
 - [ ] 11-04-PLAN.md — WidgetState 5-mode primitive (loading/empty/partial/error/success) + EmptyState non-duplication meta-test + 7 DEFAULT_LAYOUT widget × 5 state Vitest fixtures — requirements ONBOARD-04
 - [ ] 11-05-PLAN.md — queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render — requirements ONBOARD-01, ONBOARD-02
 - [ ] 11-06-PLAN.md — /security S4a SOC-2 banner + S4b inline egress IPs + S4c audit-log link + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — requirements ONBOARD-03
