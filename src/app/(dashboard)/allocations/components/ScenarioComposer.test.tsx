@@ -748,7 +748,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // -------------------------------------------------------------------------
   // T_C18 — Click Commit fires onCommitRequested callback
   // -------------------------------------------------------------------------
-  it("T_C18 Click Commit (with diff_count>0) → onCommitRequested callback fires", () => {
+  it("T_C18 Click Commit (with diff_count>0, useInternalCommitDrawer=false) → onCommitRequested callback fires", () => {
+    // Review-pass P2 fix: when useInternalCommitDrawer is left at its
+    // default (true), the composer opens its own ScenarioCommitDrawer and
+    // SUPPRESSES the legacy onCommitRequested callback so two
+    // confirmation surfaces cannot stack. T_C18 exercises the legacy
+    // host-owned-UI path — opt out of the internal drawer to verify the
+    // callback still fires for callers that prefer to own the commit UI.
     const payload = makePayload();
     const onCommitRequested = vi.fn();
     render(
@@ -757,6 +763,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
         onCommitRequested={onCommitRequested}
+        useInternalCommitDrawer={false}
       />,
     );
     fireEvent.click(

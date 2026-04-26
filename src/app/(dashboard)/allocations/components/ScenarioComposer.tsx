@@ -79,6 +79,22 @@ import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 import type { AddedStrategy } from "../lib/scenario-state";
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Review-pass P2 fix. When the allocator opens the composer with zero
+ * holdings AND has added at least one strategy, `scenarioAum` collapses to
+ * 0 and the wealth-curve denominators (`scenarioWealthSeries.value *
+ * scenarioAum`) collapse to a degenerate flat-zero series. Substitute a
+ * symbolic 1 USD baseline so the chart renders the SHAPE of the projection
+ * (relative wealth movement) instead of a flat line. The KPI strip + delta
+ * pills remain unaffected — they read fractional metrics from the engine
+ * directly, not USD-scaled values.
+ */
+const SYNTHETIC_BASELINE_AUM = 1;
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -98,8 +114,20 @@ export interface ScenarioComposerProps {
   payload: MyAllocationDashboardPayload;
   allocatorId: string;
   allocatorMandate: AllocatorMandateForFit | null;
-  /** Plan 07 wires this to ScenarioCommitDrawer; in this plan it's a stub. */
+  /** Legacy callback API. When `useInternalCommitDrawer === false`, the
+   *  composer fires this callback INSTEAD of opening its own
+   *  ScenarioCommitDrawer — host owns the commit-confirmation surface.
+   *  When `useInternalCommitDrawer === true` (default), the composer
+   *  opens its internal drawer and does NOT fire this callback, avoiding
+   *  the dual-drawer stack the previous (always-fire-both) code created
+   *  whenever a host wired `onCommitRequested` to also open a modal. */
   onCommitRequested?: (diffs: ScenarioCommitDiff[]) => void;
+  /** Review-pass P2 fix. Defaults to `true` — composer opens its own
+   *  ScenarioCommitDrawer (Plan 07 wiring). Set `false` to delegate the
+   *  commit gesture to the host via `onCommitRequested` and suppress the
+   *  internal drawer entirely (legacy / forward-compat API for tests
+   *  and future hosts that prefer to own the commit UI). */
+  useInternalCommitDrawer?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +172,7 @@ export function ScenarioComposer({
   allocatorId,
   allocatorMandate,
   onCommitRequested,
+  useInternalCommitDrawer = true,
 }: ScenarioComposerProps) {
   const {
     holdingsSummary,
@@ -329,9 +358,21 @@ export function ScenarioComposer({
     return sum;
   }, [scenario.draft.toggleByScopeRef, holdingsSummary]);
 
+  // Review-pass P2 fix — when the allocator has added strategies but the
+  // live holdings list is empty (or all toggled off), `scenarioAum` is 0
+  // and the USD-scaled drawdown series degenerates to a flat zero. Fall
+  // back to a symbolic 1 USD so the curve renders the SHAPE of the
+  // projection. The KPI strip is sourced from fractional engine metrics
+  // and is unaffected by this substitution.
+  const effectiveScenarioAumForChart =
+    scenarioAum > 0 ? scenarioAum : SYNTHETIC_BASELINE_AUM;
   const scenarioDailyPointsForDrawdown: DailyPoint[] = useMemo(
-    () => scenarioWealthSeries.map((p) => ({ date: p.date, value: p.value * scenarioAum })),
-    [scenarioWealthSeries, scenarioAum],
+    () =>
+      scenarioWealthSeries.map((p) => ({
+        date: p.date,
+        value: p.value * effectiveScenarioAumForChart,
+      })),
+    [scenarioWealthSeries, effectiveScenarioAumForChart],
   );
 
   // -------------------------------------------------------------------------
@@ -362,6 +403,12 @@ export function ScenarioComposer({
         const improved = direction === "up-good" ? d > 0 : d < 0;
         tier = improved ? "positive" : "negative";
       }
+      // Sign convention matches KpiStrip.formatSignedDelta verbatim:
+      // ASCII '+' for non-negative, Unicode minus '−' (U+2212) for
+      // negative. The mix is deliberate (typographic minus reads as a
+      // single signed-numeric glyph in the proportional font; the ASCII
+      // plus matches the rest of the dashboard's signed-percentage UI).
+      // Single source of truth for the convention lives in KpiStrip.
       const sign = d >= 0 ? "+" : "−";
       items.push({ label, value: `${sign}${formatter(Math.abs(d))}`, tier });
     }
@@ -424,13 +471,19 @@ export function ScenarioComposer({
           (scenario.draft.weightOverrides[a.id] ?? 0) * scenarioAum,
       });
     }
-    // Plan 07 — open the ScenarioCommitDrawer with the built diff list.
-    // The legacy onCommitRequested callback prop is preserved for any
-    // existing test wiring (T_C18) and for callers that prefer to handle
-    // the commit gesture themselves.
+    // Review-pass P2 fix — single-source the commit-drawer surface. When
+    // `useInternalCommitDrawer === true` (default) the composer owns the
+    // drawer and SUPPRESSES the legacy onCommitRequested callback so a
+    // host that wires onCommitRequested to also open a modal cannot stack
+    // two confirmation surfaces on top of each other. When `false`, the
+    // host is signalling "I own the commit UI" — fire onCommitRequested
+    // and skip opening the internal drawer.
     setCommitDiffs(diffs);
-    setCommitDrawerOpen(true);
-    onCommitRequested?.(diffs);
+    if (useInternalCommitDrawer) {
+      setCommitDrawerOpen(true);
+    } else {
+      onCommitRequested?.(diffs);
+    }
   }
 
   // -------------------------------------------------------------------------
