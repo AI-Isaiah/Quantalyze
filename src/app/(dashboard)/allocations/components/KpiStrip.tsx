@@ -32,9 +32,28 @@ import type { ComputedMetrics } from "@/lib/scenario";
  * precedence per the precedence rules below.
  */
 
+/**
+ * 09.1-REVIEW IN-06 — narrow the analytics prop to the exact denormalized
+ * shape this component reads. The shape is NOT `PortfolioAnalytics` from
+ * `@/lib/types` (that's a different DB-row mirror with `return_ytd` etc.);
+ * production callers either pass `{}` (ScenarioComposer) or skip mounting
+ * the bare `KpiStrip` entirely in favor of the per-widget `KpiStripWidget`
+ * adapter. The fields below are the union of what `cells[]` consults.
+ *
+ * All fields are optional + nullable: callers may pass partial objects or
+ * `null`, and a missing field is treated identically to an explicit null
+ * via the `analytics?.field ?? metrics?.fallback ?? null` chain.
+ */
+export interface KpiStripAnalytics {
+  total_aum?: number | null;
+  ytd_twr?: number | null;
+  sharpe?: number | null;
+  max_drawdown_12m?: number | null;
+  avg_correlation?: number | null;
+}
+
 interface KpiStripProps {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  analytics: any;
+  analytics: KpiStripAnalytics | null;
   metrics: ComputedMetrics;
   /**
    * Selected timeframe label. Retained for forward-compat with callers that
