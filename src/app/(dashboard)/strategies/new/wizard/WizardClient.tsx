@@ -11,6 +11,8 @@ import { ConnectKeyStep, type ConnectKeySuccess } from "./steps/ConnectKeyStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
 import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
 import { SubmitStep } from "./steps/SubmitStep";
+import { WithdrawalWarningStrip } from "./WithdrawalWarningStrip";
+import { WizardIpAllowlistHint } from "./WizardIpAllowlistHint";
 import {
   clearWizardState,
   loadWizardState,
@@ -342,6 +344,16 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
             </div>
           </div>
         )}
+
+        {/* Phase 11 / S5 + S7 — persistent safety strips visible across all
+            wizard steps. Mounted in the parent layout (NOT per-step) so the
+            warnings cannot drift out of any single step's render path. Two
+            single-purpose components rendered adjacently per CONTEXT D-07
+            and D-08 — DO NOT merge into a 2-line strip. */}
+        <div className="mb-4">
+          <WithdrawalWarningStrip />
+          <WizardIpAllowlistHint />
+        </div>
 
         {step === "connect_key" && (
           <ConnectKeyStep
