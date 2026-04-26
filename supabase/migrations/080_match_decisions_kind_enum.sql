@@ -7,6 +7,14 @@
 --   voluntary_add       — allocator adds a strategy via Browse drawer (no original holding)
 --   voluntary_modify    — pure weight-change; no toggle, no swap (D-17 ship)
 --
+-- Schema-name reconciliation (Rule 1 deviation):
+--   The plan + RESEARCH refer to the recommended/added strategy column on match_decisions
+--   as `suggested_strategy_id`. The live schema (since migration 011) calls this column
+--   `strategy_id` (NOT NULL until this migration). Per-kind CHECKs in this migration use
+--   the actual column name `strategy_id`. The voluntary_remove kind requires this column
+--   to be NULL — STEP 2 below drops the NOT NULL constraint to enable that. Pattern matches
+--   migration 072 STEP 1 which dropped NOT NULL on original_strategy_id before the XOR.
+--
 -- ADR-0023 sync: same-commit update documents the new enum + Phase 10 audit metadata
 -- shape (the existing match.decision_record audit kind carries voluntary diffs unchanged
 -- via metadata.kind, per Phase 09 D-14 precedent).
@@ -20,9 +28,9 @@
 -- The DO block at the end asserts the branch is reachable.
 --
 -- L1/M2 backfill assertions: every existing match_decisions row passes the new
--- bridge_recommended CHECK (suggested_strategy_id NOT NULL AND one of original_*
--- NOT NULL). The DO block verifies this before COMMIT — any pre-existing data that
--- would violate the new invariants raises EXCEPTION → transaction rollback.
+-- bridge_recommended CHECK (strategy_id NOT NULL AND one of original_* NOT NULL).
+-- The DO block verifies this before COMMIT — any pre-existing data that would violate
+-- the new invariants raises EXCEPTION → transaction rollback.
 --
 -- Application path: authored here; applied via Supabase Management API
 -- (POST /v1/projects/{ref}/database/query) to bypass `supabase db push` migration-history
@@ -46,33 +54,45 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 -- --------------------------------------------------------------------------
--- STEP 2: Add nullable kind column for backfill window
+-- STEP 2: DROP NOT NULL on match_decisions.strategy_id
+-- --------------------------------------------------------------------------
+-- Pattern from migration 072 STEP 1 (which had to drop NOT NULL on
+-- original_strategy_id before adding the XOR CHECK). voluntary_remove kind
+-- requires strategy_id IS NULL — without this DROP, voluntary_remove INSERTs
+-- would fail the column-level NOT NULL before reaching the per-kind CHECK.
+ALTER TABLE match_decisions
+  ALTER COLUMN strategy_id DROP NOT NULL;
+
+-- --------------------------------------------------------------------------
+-- STEP 3: Add nullable kind column for backfill window
 -- --------------------------------------------------------------------------
 ALTER TABLE match_decisions
   ADD COLUMN IF NOT EXISTS kind match_decision_kind;
 
 COMMENT ON COLUMN match_decisions.kind IS
   'Phase 10 / SCENARIO-07 (D-10/D-11/D-17). Discriminator gating per-kind CHECK constraints. '
-  'bridge_recommended: pre-Phase-10 + Bridge-recommended path (suggested_strategy_id NOT NULL '
-  'AND one of original_* NOT NULL). voluntary_remove: allocator-toggled-off holding '
-  '(original_holding_ref NOT NULL, both strategy fields NULL). voluntary_add: '
-  'browse-added strategy with no original holding (suggested_strategy_id NOT NULL, '
+  'bridge_recommended: pre-Phase-10 + Bridge-recommended path (strategy_id NOT NULL '
+  'AND one of original_* NOT NULL — strategy_id is the suggested/recommended strategy '
+  'in the live schema; the plan refers to it as suggested_strategy_id). voluntary_remove: '
+  'allocator-toggled-off holding (original_holding_ref NOT NULL, both strategy fields NULL). '
+  'voluntary_add: browse-added strategy with no original holding (strategy_id NOT NULL, '
   'both original_* NULL). voluntary_modify: weight-change-only on existing holding '
-  '(original_holding_ref NOT NULL, suggested_strategy_id NULL). Pre-Phase-10 rows '
-  'backfilled to bridge_recommended in migration 080 STEP 3.';
+  '(original_holding_ref NOT NULL, strategy_id NULL). Pre-Phase-10 rows backfilled to '
+  'bridge_recommended in migration 080 STEP 4.';
 
 -- --------------------------------------------------------------------------
--- STEP 3: Backfill existing rows → 'bridge_recommended'
+-- STEP 4: Backfill existing rows → 'bridge_recommended'
 -- --------------------------------------------------------------------------
 -- All pre-Phase-10 rows satisfy the bridge_recommended CHECK trivially:
 -- they passed the Phase 09 XOR (one of original_* NOT NULL) and the engine
--- always wrote suggested_strategy_id for any row that reached match_decisions.
+-- always wrote strategy_id (NOT NULL until STEP 2 above) for any row that
+-- reached match_decisions.
 UPDATE match_decisions
    SET kind = 'bridge_recommended'
  WHERE kind IS NULL;
 
 -- --------------------------------------------------------------------------
--- STEP 4: Lock down kind column — NOT NULL + DEFAULT
+-- STEP 5: Lock down kind column — NOT NULL + DEFAULT
 -- --------------------------------------------------------------------------
 -- DEFAULT 'bridge_recommended' preserves backward compatibility: any pre-Phase-10
 -- INSERT that omits the kind column lands as bridge_recommended (which is exactly
@@ -83,25 +103,29 @@ ALTER TABLE match_decisions
   ALTER COLUMN kind SET DEFAULT 'bridge_recommended';
 
 -- --------------------------------------------------------------------------
--- STEP 5: DROP the Phase 09 XOR constraint
+-- STEP 6: DROP the Phase 09 XOR constraint
 -- --------------------------------------------------------------------------
 -- The XOR constraint required exactly one of original_strategy_id /
 -- original_holding_ref to be set. voluntary_remove keeps original_holding_ref
 -- but voluntary_add requires both NULL — the XOR makes voluntary_add impossible.
--- Per-kind CHECKs (STEP 6) replace XOR with kind-aware invariants.
+-- Per-kind CHECKs (STEP 7) replace XOR with kind-aware invariants.
 ALTER TABLE match_decisions
   DROP CONSTRAINT IF EXISTS match_decisions_original_xor;
 
 -- --------------------------------------------------------------------------
--- STEP 6: Per-kind invariant CHECK constraints (4 total)
+-- STEP 7: Per-kind invariant CHECK constraints (4 total)
 -- --------------------------------------------------------------------------
+-- Note: `strategy_id` is the live schema's name for what the plan calls
+-- `suggested_strategy_id` (the recommended/added strategy on a decision row).
+-- Pre-Phase-10 rows always have strategy_id NOT NULL — they backfill cleanly
+-- into bridge_recommended.
 
--- bridge_recommended: suggested_strategy_id NOT NULL AND (one of original_* NOT NULL)
+-- bridge_recommended: strategy_id NOT NULL AND (one of original_* NOT NULL)
 -- This is the EXACT shape pre-Phase-10 rows have, so backfill satisfies trivially.
 ALTER TABLE match_decisions
   ADD CONSTRAINT match_decisions_kind_bridge_recommended CHECK (
     kind <> 'bridge_recommended' OR (
-      suggested_strategy_id IS NOT NULL
+      strategy_id IS NOT NULL
       AND (original_strategy_id IS NOT NULL OR original_holding_ref IS NOT NULL)
     )
   );
@@ -112,46 +136,46 @@ ALTER TABLE match_decisions
   ADD CONSTRAINT match_decisions_kind_voluntary_remove CHECK (
     kind <> 'voluntary_remove' OR (
       original_holding_ref IS NOT NULL
-      AND suggested_strategy_id IS NULL
+      AND strategy_id IS NULL
       AND original_strategy_id IS NULL
     )
   );
 
--- voluntary_add: only suggested_strategy_id is set; both original_* NULL.
+-- voluntary_add: only strategy_id is set; both original_* NULL.
 -- Models "allocator added a strategy via Browse — no original holding" semantics.
 ALTER TABLE match_decisions
   ADD CONSTRAINT match_decisions_kind_voluntary_add CHECK (
     kind <> 'voluntary_add' OR (
-      suggested_strategy_id IS NOT NULL
+      strategy_id IS NOT NULL
       AND original_holding_ref IS NULL
       AND original_strategy_id IS NULL
     )
   );
 
 -- voluntary_modify: original_holding_ref NOT NULL (the holding being rebalanced);
--- suggested_strategy_id IS NULL (no swap involved). original_strategy_id may be NULL
+-- strategy_id IS NULL (no swap involved). original_strategy_id may be NULL
 -- (typical scenario tweak) or NOT NULL (legacy mixed-portfolio rebalance — rare).
 ALTER TABLE match_decisions
   ADD CONSTRAINT match_decisions_kind_voluntary_modify CHECK (
     kind <> 'voluntary_modify' OR (
       original_holding_ref IS NOT NULL
-      AND suggested_strategy_id IS NULL
+      AND strategy_id IS NULL
     )
   );
 
 -- --------------------------------------------------------------------------
--- STEP 7 (H2): Extend compute_bridge_outcome_deltas() with voluntary_add CTE branch
+-- STEP 8 (H2): Extend compute_bridge_outcome_deltas() with voluntary_add CTE branch
 -- --------------------------------------------------------------------------
 -- voluntary_add rows have BOTH original_holding_ref AND original_strategy_id NULL,
 -- so neither existing branch in migration 073 fires. Without this third branch
 -- they would be silently skipped from delta tracking forever (RESEARCH Pitfall 5).
 --
--- The branch joins on suggested_strategy_id against strategy_analytics.returns_series
--- using the same extract_delta() / extract_estimated() helpers the strategy branch
--- uses (they take a series + allocated_at and return the realized delta over N days).
--- Idempotency guard preserved: WHERE delta_30d IS NULL OR needs_recompute = TRUE.
+-- The branch joins on bridge_outcomes.strategy_id against
+-- strategy_analytics.returns_series using the same extract_delta() / extract_estimated()
+-- helpers the strategy branch uses. Idempotency guard preserved:
+-- WHERE delta_30d IS NULL OR needs_recompute = TRUE.
 --
--- We replace the entire function body to add the new branch — preserves the migration
+-- Replaces the entire function body to add the new branch — preserves the migration
 -- 073 strategy + holding branches verbatim and appends the voluntary_add branch.
 CREATE OR REPLACE FUNCTION public.compute_bridge_outcome_deltas()
 RETURNS TABLE(updated_count INT, failed_count INT, batch_started_at TIMESTAMPTZ)
@@ -274,8 +298,10 @@ BEGIN
   ),
   -- ---------------- voluntary_add branch (NEW — Phase 10 / H2) ----------------
   -- voluntary_add rows: md.kind='voluntary_add', original_* both NULL,
-  -- suggested_strategy_id NOT NULL. Match against strategy_analytics.returns_series
-  -- the same way the strategy branch does — but gate on md.kind to be unambiguous.
+  -- strategy_id (the suggested strategy) NOT NULL. Match against
+  -- strategy_analytics.returns_series the same way the strategy branch does — but
+  -- gate on md.kind='voluntary_add' to be unambiguous and avoid double-counting
+  -- bridge_recommended rows that the strategy branch already covers.
   voluntary_add_candidates AS (
     SELECT
       bo.id,
@@ -288,7 +314,7 @@ BEGIN
       AND bo.allocated_at IS NOT NULL
       AND (bo.delta_30d IS NULL OR bo.needs_recompute = TRUE)
       AND md.kind = 'voluntary_add'
-      AND md.suggested_strategy_id IS NOT NULL
+      AND md.strategy_id IS NOT NULL
       AND md.original_holding_ref IS NULL
       AND md.original_strategy_id IS NULL
   ),
@@ -343,7 +369,7 @@ REVOKE ALL ON FUNCTION public.compute_bridge_outcome_deltas FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.compute_bridge_outcome_deltas TO service_role;
 
 -- --------------------------------------------------------------------------
--- STEP 8: Self-verifying DO block (7 assertions a-g)
+-- STEP 9: Self-verifying DO block (7 assertions a-g)
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -405,10 +431,10 @@ BEGIN
   SELECT COUNT(*) INTO v_constraint_violators
     FROM match_decisions
    WHERE NOT (
-     (kind <> 'bridge_recommended' OR (suggested_strategy_id IS NOT NULL AND (original_strategy_id IS NOT NULL OR original_holding_ref IS NOT NULL)))
-     AND (kind <> 'voluntary_remove' OR (original_holding_ref IS NOT NULL AND suggested_strategy_id IS NULL AND original_strategy_id IS NULL))
-     AND (kind <> 'voluntary_add' OR (suggested_strategy_id IS NOT NULL AND original_holding_ref IS NULL AND original_strategy_id IS NULL))
-     AND (kind <> 'voluntary_modify' OR (original_holding_ref IS NOT NULL AND suggested_strategy_id IS NULL))
+     (kind <> 'bridge_recommended' OR (strategy_id IS NOT NULL AND (original_strategy_id IS NOT NULL OR original_holding_ref IS NOT NULL)))
+     AND (kind <> 'voluntary_remove' OR (original_holding_ref IS NOT NULL AND strategy_id IS NULL AND original_strategy_id IS NULL))
+     AND (kind <> 'voluntary_add' OR (strategy_id IS NOT NULL AND original_holding_ref IS NULL AND original_strategy_id IS NULL))
+     AND (kind <> 'voluntary_modify' OR (original_holding_ref IS NOT NULL AND strategy_id IS NULL))
    );
   IF v_constraint_violators > 0 THEN
     RAISE EXCEPTION 'Migration 080 assertion (f) failed: % existing rows violate the new per-kind CHECKs', v_constraint_violators;
