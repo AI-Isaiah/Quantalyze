@@ -2,6 +2,7 @@
 
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { deriveSnapshotDrawdowns } from "../../lib/drawdown";
 import { buildCompositeReturns } from "../lib/composite-returns";
 import { useMemo, useState } from "react";
 import {
@@ -45,26 +46,12 @@ interface DrawdownChartProps extends WidgetProps {
  */
 type VisibilityMode = "live" | "scenario" | "both";
 
-/**
- * Phase 07 / WR-01 — derive drawdown series from a cumulative USD snapshot
- * series. Seeds peak at `max(first, 0)` so a leading 0 or negative value
- * (e.g. an allocator whose first reconstructed day has no priceable
- * holdings, or a derivative margin account below zero) does NOT emit
- * NaN/Infinity via (0-0)/0. Exported for direct unit testing.
- */
-export function deriveSnapshotDrawdowns(
-  points: DailyPoint[],
-): { date: string; value: number }[] {
-  if (points.length === 0) return [];
-  let peak = Math.max(points[0].value, 0);
-  const result: { date: string; value: number }[] = [];
-  for (const d of points) {
-    if (d.value > peak) peak = d.value;
-    const dd = peak > 0 ? (d.value - peak) / peak : 0;
-    result.push({ date: d.date, value: dd });
-  }
-  return result;
-}
+// Phase 07 / WR-01 — derive drawdown series from a cumulative USD snapshot
+// series. Re-export from the server-safe `../../lib/drawdown` module so
+// existing import sites (ScenarioComposer, tests, this file) keep working
+// while server-side queries.ts can import directly from drawdown.ts
+// without crossing the "use client" boundary.
+export { deriveSnapshotDrawdowns };
 
 export default function DrawdownChart({
   data,

@@ -13,7 +13,7 @@ import {
   type ScenarioState,
   type StrategyForBuilder,
 } from "@/lib/scenario";
-import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/widgets/performance/DrawdownChart";
+import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawdown";
 import type { FlaggedHolding } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
 import type {
   Strategy,
