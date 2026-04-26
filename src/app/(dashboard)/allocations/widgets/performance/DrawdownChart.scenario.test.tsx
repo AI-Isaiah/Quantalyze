@@ -1,9 +1,27 @@
 import { render, fireEvent } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { cloneElement, createElement, type ReactElement } from "react";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import DrawdownChart, { deriveSnapshotDrawdowns } from "./DrawdownChart";
+
+// Recharts ResponsiveContainer produces width=0/height=0 in jsdom by
+// default which suppresses the SVG path render and breaks DOM-introspection
+// tests. Stub it with a fixed-size wrapper so child paths actually render.
+vi.mock("recharts", async () => {
+  const actual = await vi.importActual<typeof import("recharts")>("recharts");
+  const FakeResponsiveContainer = ({ children }: { children: ReactElement }) => {
+    const child = children as ReactElement<{ width?: number; height?: number }>;
+    const cloned = cloneElement(child, { width: 600, height: 200 });
+    return createElement(
+      "div",
+      { style: { width: 600, height: 200 } },
+      cloned,
+    );
+  };
+  return { ...actual, ResponsiveContainer: FakeResponsiveContainer };
+});
 
 // ---------------------------------------------------------------------------
 // Phase 10 / 10-04 Task 3 — DrawdownChart scenarioDailyPoints overlay.
