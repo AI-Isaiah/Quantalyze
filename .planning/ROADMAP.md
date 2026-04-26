@@ -213,7 +213,7 @@ Plans:
 - [x] 11-03-PLAN.md — onboarding-funnel.ts maybeEmit* helpers + 5-event UsageEvent extension + /allocations page.tsx readers + Python worker RPC call + outcome-marker stamps in scenario-commit/match-decisions — requirements ONBOARD-05
 - [ ] 11-04-PLAN.md — WidgetState 5-mode primitive (loading/empty/partial/error/success) + EmptyState non-duplication meta-test + 7 DEFAULT_LAYOUT widget × 5 state Vitest fixtures — requirements ONBOARD-04
 - [ ] 11-05-PLAN.md — queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render — requirements ONBOARD-01, ONBOARD-02
-- [ ] 11-06-PLAN.md — /security S4a SOC-2 banner + S4b inline egress IPs + S4c audit-log link + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — requirements ONBOARD-03
+- [x] 11-06-PLAN.md — /security S4a SOC-2 banner + S4c audit-log link + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — requirements ONBOARD-03 (S4b inline egress IPs deferred — no static analytics-service IPs today; existing email-path body preserved)
 - [ ] 11-07-PLAN.md — e2e/onboarding-funnel.spec.ts (full happy-path + 5-marker assertion) + seed/cleanup helpers + ci.yml gated step + GitHub secrets checkpoint — requirements ONBOARD-06
 **UI hint**: yes
 **Complexity:** Medium — polish work is fragmented across widgets; CI wire-up for Playwright is a known-unknown (4 of 21 specs currently run).
