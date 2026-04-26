@@ -355,16 +355,21 @@ function ExpandedPanel({
     () => curvesCache.current.get(outcome.id) ?? null,
   );
   const [error, setError] = useState<string | null>(null);
-  const aborted = useRef(false);
 
   useEffect(() => {
-    aborted.current = false;
+    // 09.1-REVIEW WR-04: closure-captured per-effect cancelled flag.
+    // A shared useRef would be reset to false by the new effect *before*
+    // the previous effect's catch handler had a chance to read it,
+    // letting a stale non-Abort failure paint error state onto the
+    // wrong outcome. `cancelled` is per-effect-instance — the new
+    // effect cannot mutate the previous closure's value.
+    let cancelled = false;
     const controller = new AbortController();
 
     if (curvesCache.current.has(outcome.id)) {
       setCurve(curvesCache.current.get(outcome.id)!);
       return () => {
-        aborted.current = true;
+        cancelled = true;
         controller.abort();
       };
     }
@@ -377,19 +382,19 @@ function ExpandedPanel({
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as CurveData;
-        if (!aborted.current) {
+        if (!cancelled) {
           curvesCache.current.set(outcome.id, data);
           setCurve(data);
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        if (!aborted.current) setError("Failed to load curves");
+        if (!cancelled) setError("Failed to load curves");
       }
     }
     void fetchCurves();
 
     return () => {
-      aborted.current = true;
+      cancelled = true;
       controller.abort();
     };
   }, [outcome.id, curvesCache]);

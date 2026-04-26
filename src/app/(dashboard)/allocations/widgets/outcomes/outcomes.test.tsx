@@ -486,6 +486,81 @@ describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
       expect(openCards.length).toBeGreaterThanOrEqual(3);
     });
   });
+
+  // 09.1-REVIEW WR-04: contract test — a fetch that rejects with a
+  // non-Abort error after the panel has been collapsed and re-expanded
+  // must NEVER paint "Failed to load curves" into the fresh panel.
+  //
+  // Today the bug is mostly latent because ExpandedPanel unmounts on
+  // collapse (giving each mount a fresh useRef), but the closure-captured
+  // `cancelled` fix is still strictly safer and protects against future
+  // refactors that keep the panel mounted while swapping outcome.id
+  // (where the shared-ref reset-on-rerun race the reviewer described
+  // would re-emerge). This test pins the externally-observable contract.
+  it("WR-04: stale fetch failure from collapsed panel does NOT paint error after re-expand", async () => {
+    // Route by URL — the curves request is the only one we want to
+    // hold pending; the BridgeOutcomeNoteSection's /api/notes GET that
+    // mounts alongside the panel must resolve cleanly so it does not
+    // confound this assertion.
+    let rejectCurves1: ((err: Error) => void) | null = null;
+    let curvesCallCount = 0;
+    fetchMock = vi.fn().mockImplementation((input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/curves")) {
+        curvesCallCount += 1;
+        if (curvesCallCount === 1) {
+          return new Promise((_resolve, reject) => {
+            rejectCurves1 = reject;
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            original: [{ date: "2026-03-01", nav: 100 }],
+            replacement: [{ date: "2026-03-01", nav: 102 }],
+            allocated_at: "2026-03-01",
+          }),
+        });
+      }
+      // /api/notes GET — return 404 so the note section drops into its
+      // empty-state branch without further chatter.
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = fetchMock as unknown as typeof fetch;
+
+    renderWidget([makeOutcome({ id: "o-race-1" })]);
+    const caret = screen.getByRole("button", {
+      name: /Expand outcome detail/,
+    });
+
+    // 1. Expand -> first curves fetch starts (deferred).
+    fireEvent.click(caret);
+    await waitFor(() => expect(curvesCallCount).toBe(1));
+
+    // 2. Collapse — panel unmount fires the effect cleanup.
+    fireEvent.click(caret);
+
+    // 3. Re-expand BEFORE the in-flight fetch rejects. With the old
+    //    shared-ref pattern (aborted = useRef(false)), the new effect
+    //    body resets aborted.current=false here, BEFORE step 4's catch
+    //    handler runs — letting the stale failure leak. With the
+    //    closure-captured `cancelled` fix, fetch #1's closure retained
+    //    its own cancelled=true from cleanup, so the catch is a no-op.
+    fireEvent.click(caret);
+    await waitFor(() => expect(curvesCallCount).toBe(2));
+
+    // 4. NOW reject fetch #1 with a non-Abort failure.
+    await act(async () => {
+      rejectCurves1!(new Error("network failure"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 5. The fresh panel must NOT show the stale fetch #1 error.
+    expect(screen.queryByText("Failed to load curves")).not.toBeInTheDocument();
+  });
 });
 
 // ===========================================================================
