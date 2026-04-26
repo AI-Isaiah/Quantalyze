@@ -217,14 +217,13 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
   it("T8 — mandate-fit chip copy matches the computed tier per row", async () => {
     renderDrawer();
     await flush();
-    // Arbitrage Gamma → strategy_type "arbitrage" is excluded → red → "Weak mandate fit".
-    expect(screen.getByText("Weak mandate fit")).toBeInTheDocument();
+    // Arbitrage Gamma → strategy_type "arbitrage" excluded → red → "Weak mandate fit".
+    // Trend Delta — coinbase only, prefs binance+okx → 0/1 overlap → also red.
+    // → at least 2 weak chips render.
+    expect(screen.getAllByText("Weak mandate fit").length).toBeGreaterThanOrEqual(2);
     // Momentum Alpha (binance), Mean Reversion Beta (okx), Momentum OKX (okx)
-    // — all 1.0 fraction overlap of single-market with prefs → green → "Strong mandate fit".
-    expect(screen.getAllByText("Strong mandate fit").length).toBeGreaterThanOrEqual(1);
-    // Trend Delta — coinbase only, prefs binance+okx → 0/1 overlap → red.
-    // Verifies all three chip strings appear at least once across the 5 rows.
-    expect(screen.getAllByText("Weak mandate fit").length).toBeGreaterThanOrEqual(1);
+    // — all 1.0 fraction overlap of single-market with prefs → green → "Strong".
+    expect(screen.getAllByText("Strong mandate fit").length).toBeGreaterThanOrEqual(3);
   });
 
   it("T9 — row Add button calls onAdd(strategy) with the right id", async () => {
