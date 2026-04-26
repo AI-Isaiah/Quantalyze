@@ -214,7 +214,7 @@ Plans:
 - [ ] 11-04-PLAN.md — WidgetState 5-mode primitive (loading/empty/partial/error/success) + EmptyState non-duplication meta-test + 7 DEFAULT_LAYOUT widget × 5 state Vitest fixtures — requirements ONBOARD-04
 - [ ] 11-05-PLAN.md — queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render — requirements ONBOARD-01, ONBOARD-02
 - [x] 11-06-PLAN.md — /security S4a SOC-2 banner + S4c audit-log link + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — requirements ONBOARD-03 (S4b inline egress IPs deferred — no static analytics-service IPs today; existing email-path body preserved)
-- [ ] 11-07-PLAN.md — e2e/onboarding-funnel.spec.ts (full happy-path + 5-marker assertion) + seed/cleanup helpers + ci.yml gated step + GitHub secrets checkpoint — requirements ONBOARD-06
+- [x] 11-07-PLAN.md — e2e/onboarding-funnel.spec.ts (full happy-path + 5-marker assertion via auth.users.raw_user_meta_data) + e2e/onboarding-banner-smoke.spec.ts (RISK-2 always-on, fork-PR safe) + seed/cleanup helpers (strict TEST_SUPABASE_* env-var assertions) + ci.yml mods (BLOCK-3 gated step on `vars.E2E_TEST_DB_CONFIGURED == 'true'`; smoke spec wired into existing 4-spec always-on line) — requirements ONBOARD-06 (Task 3 user-side test-DB setup deferred; gated step dormant until user adds 3 secrets + 1 variable post-merge)
 **UI hint**: yes
 **Complexity:** Medium — polish work is fragmented across widgets; CI wire-up for Playwright is a known-unknown (4 of 21 specs currently run).
 
