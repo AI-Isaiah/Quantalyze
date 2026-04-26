@@ -129,12 +129,54 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts
+          npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts
           kill $SERVER_PID 2>/dev/null || true
         env:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
           SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
+          ADMIN_EMAIL: test@example.com
+          PLATFORM_NAME: Quantalyze
+          PLATFORM_EMAIL: test@quantalyze.com
+      # Plan 11-07 / BLOCK-3: gated step runs the full onboarding-funnel
+      # spec against a dedicated test Supabase project. Gate uses the repo
+      # VARIABLE `E2E_TEST_DB_CONFIGURED` (NOT `secrets.X != ''`) — vars
+      # are exposed in PR contexts so a typo in the variable name surfaces
+      # in the workflow log. A `secrets.X != ''` gate would mask typos
+      # behind redaction and silently disable the spec. See nightly.yml:17
+      # for the analogous precedent. When the variable is unset (fork PRs,
+      # repos without test-DB setup), both steps below skip silently.
+      - name: Build with test Supabase env (for onboarding-funnel spec, BLOCK-3 gated)
+        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+          ADMIN_EMAIL: test@example.com
+          PLATFORM_NAME: Quantalyze
+          PLATFORM_EMAIL: test@quantalyze.com
+      - name: Run onboarding-funnel spec (BLOCK-3 gated on vars.E2E_TEST_DB_CONFIGURED)
+        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+        run: |
+          npm run start &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "Server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          npx playwright test e2e/onboarding-funnel.spec.ts --timeout 60000
+          kill $SERVER_PID 2>/dev/null || true
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
+          TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+          TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
