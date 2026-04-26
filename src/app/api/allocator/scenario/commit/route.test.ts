@@ -49,22 +49,15 @@ vi.mock("@/lib/api/withAuth", () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock supabase server client
-// ---------------------------------------------------------------------------
-
-vi.mock("@/lib/supabase/server", () => ({
-  createClient: async () => ({
-    from: vi.fn(() => ({})),
-  }),
-}));
-
-// ---------------------------------------------------------------------------
-// Mock admin client — admin.rpc('commit_scenario_batch', ...) is the H4 hook
+// Mock supabase server client — user-scoped supabase.rpc('commit_scenario_batch')
+// is the H4 hook (must be user-scoped so the RPC's auth.uid() guard passes;
+// service-role admin client would set auth.uid() to NULL and fail closed).
 // ---------------------------------------------------------------------------
 
 const mockRpc = vi.fn();
-vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({
+    from: vi.fn(() => ({})),
     rpc: mockRpc,
   }),
 }));

@@ -33,7 +33,12 @@
  * T-10-01 mitigation: the body's `allocator_id` (if any) is silently dropped
  * by zod's strip default. The RPC always receives `p_allocator_id = user.id`
  * sourced from withAuth; the RPC additionally re-asserts auth.uid() matches
- * (defence-in-depth).
+ * (defence-in-depth). The RPC is invoked via the USER-SCOPED supabase client
+ * (not the service-role admin client) so auth.uid() resolves to the caller's
+ * user.id — service-role would set auth.uid() to NULL and the migration 082
+ * guard `IF v_caller IS NULL OR v_caller <> p_allocator_id THEN RAISE` would
+ * fail closed, breaking every commit. SECURITY DEFINER inside the RPC still
+ * bypasses RLS for the body, so per-row ownership probes are the gate.
  */
 
 import type { NextRequest } from "next/server";
@@ -41,7 +46,6 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
@@ -155,21 +159,25 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
   }
 
   const supabase = await createClient();
-  const admin = createAdminClient();
 
-  // H4 — single Postgres transaction via SECURITY DEFINER RPC. The RPC
-  // enforces auth.uid() = p_allocator_id (defence-in-depth), runs per-row
-  // ownership/strategy gates inside one BEGIN..COMMIT scope, performs the
-  // M7 reuse-or-create lookup for bridge_recommended diffs, and RAISE
-  // EXCEPTIONs on any failure (rolling back the entire batch). NO partial
-  // state — the route either gets ok=true with all rows recorded, or
-  // ok=false with per-row errors and recorded=0.
-  const { data: rpcData, error: rpcErr } = await admin.rpc(
+  // H4 — single Postgres transaction via SECURITY DEFINER RPC. Invoked through
+  // the user-scoped supabase client so auth.uid() resolves to user.id and the
+  // RPC's `IF v_caller IS NULL OR v_caller <> p_allocator_id THEN RAISE` guard
+  // passes. The RPC runs per-row ownership/strategy gates inside one
+  // BEGIN..COMMIT scope, performs M7 reuse-or-create for bridge_recommended,
+  // and RAISE EXCEPTIONs on any failure (rolling back the entire batch). NO
+  // partial state — full-success or full-failure.
+  const { data: rpcData, error: rpcErr } = await supabase.rpc(
     "commit_scenario_batch",
     { p_allocator_id: user.id, p_diffs: parsed.data.diffs },
   );
 
   if (rpcErr) {
+    console.error("scenario_commit RPC error", {
+      user: user.id,
+      message: rpcErr.message,
+      code: rpcErr.code,
+    });
     return NextResponse.json(
       { error: "Commit failed", message: rpcErr.message },
       { status: 500 },
@@ -181,6 +189,11 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     // FULL FAILURE — single-tx rolled back. Return per-row errors so the
     // drawer can surface them inline. NO audit events emitted (the batch
     // was rolled back, so emitting audit would mis-represent on-disk state).
+    console.error("scenario_commit full failure", {
+      user: user.id,
+      diff_count: parsed.data.diffs.length,
+      errors: rpcResult?.errors ?? [{ index: -1, error: "Unknown commit failure" }],
+    });
     return NextResponse.json(
       {
         recorded: 0,
