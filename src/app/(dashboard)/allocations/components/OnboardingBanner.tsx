@@ -66,12 +66,21 @@ export function OnboardingBanner() {
     <WarningBanner className="border-l-4 border-warning bg-warning/5">
       <div className="flex items-center gap-4">
         <div className="flex-1">
-          <h3
+          {/*
+            Phase 11 review fix WR-03: this heading was previously <h3>, but
+            the page outline on /allocations is <h1>My Allocation</h1> at
+            the AllocationsTabs section heading and nothing at h2 yet. The
+            banner is the FIRST top-level subsection on the page, so h2 is
+            the correct level. h1 → h3 was a WCAG 1.3.1 skip (screen-reader
+            heading-navigation gap). Peer subsection headings on the same
+            page (MandateQuickSetCard, AuditLogSubsection) already use <h2>.
+          */}
+          <h2
             id="onboarding-banner-heading"
             className="text-lg font-semibold text-text-primary leading-snug"
           >
             Connect your exchange to see real performance
-          </h3>
+          </h2>
           <p className="text-sm text-text-secondary leading-relaxed mt-1">
             Add a read-only API key — we&apos;ll pull your real holdings within
             one sync cycle and populate Performance, Bridge, and Scenario.

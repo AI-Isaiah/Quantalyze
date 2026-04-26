@@ -97,9 +97,19 @@ describe("OnboardingBanner (Phase 11 / S1) — verbatim copy + behavior", () => 
     // findByText on a previously-present node will throw if absent.
     // Use a microtask flush via Promise.resolve to allow the effect to settle.
     await Promise.resolve();
+    // Phase 11 WR-03: heading is <h2> (was <h3> — h1→h3 skip violated WCAG 1.3.1).
     expect(
-      container.querySelector("h3#onboarding-banner-heading"),
+      container.querySelector("h2#onboarding-banner-heading"),
     ).toBeNull();
+  });
+
+  it("Phase 11 WR-03: renders the heading as <h2> (not <h3>) — WCAG 1.3.1 heading-level integrity", () => {
+    const { container } = render(<OnboardingBanner />);
+    const heading = container.querySelector("#onboarding-banner-heading");
+    expect(heading).not.toBeNull();
+    expect(heading?.tagName).toBe("H2");
+    // Belt-and-braces: assert no <h3> with this id exists.
+    expect(container.querySelector("h3#onboarding-banner-heading")).toBeNull();
   });
 
   it("clicking dismiss writes the sessionStorage flag and hides the banner", () => {
