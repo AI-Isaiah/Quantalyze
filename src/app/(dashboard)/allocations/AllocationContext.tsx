@@ -91,12 +91,22 @@ export function AllocationProvider({
 }) {
   // Publish into the cross-tree store so DashboardChrome / Sidebar
   // (mounted above us) can read the count without a new server fetch.
+  //
+  // WR-02 fix: split publish-on-change from clear-on-unmount. The
+  // previous implementation combined both in a single effect with
+  // `value.flaggedCount` in its deps, which meant the cleanup ran on
+  // EVERY value change (count → 0 → newCount in two commits). Under
+  // React 18 strict mode the badge also flickered count → 0 → count on
+  // initial mount. Subscribers now see clean transitions between
+  // non-zero counts, with the unmount cleanup intact so a stale value
+  // doesn't leak into other routes' sidebars when navigating away.
   useEffect(() => {
     setFlaggedCount(value.flaggedCount);
-    // On unmount (route change off /allocations), clear the count so a
-    // stale value doesn't leak into other routes' sidebars.
-    return () => setFlaggedCount(0);
   }, [value.flaggedCount]);
+
+  useEffect(() => {
+    return () => setFlaggedCount(0);
+  }, []);
 
   return (
     <AllocationContext.Provider value={value}>
