@@ -460,7 +460,12 @@ export function ScenarioComposer({
       diffs.push({
         kind: "voluntary_remove",
         holding_ref: scopeRef,
-        size_at_decision_usd: h.value_usd,
+        // Defensive coalesce — holdingsSummary types value_usd as `number`,
+        // but in-flight rows from coingecko_fallback / mixed sources can land
+        // as null/undefined for sold-down holdings (BTC at $0 etc). Schema
+        // accepts non-negative; the field is metadata-only on the wire (RPC
+        // 082 does not consume it), so `?? 0` is safe.
+        size_at_decision_usd: Number.isFinite(h.value_usd) ? h.value_usd : 0,
       });
     }
     for (const a of scenario.draft.addedStrategies) {

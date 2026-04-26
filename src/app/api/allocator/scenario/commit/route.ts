@@ -73,7 +73,7 @@ const REJECTION_REASONS = [
 const VoluntaryRemoveDiff = z.object({
   kind: z.literal("voluntary_remove"),
   holding_ref: z.string().regex(HOLDING_REF_RE),
-  size_at_decision_usd: z.number().positive(),
+  size_at_decision_usd: z.number().nonnegative(),
   effective_date: z.string().date().optional(),
   note: z.string().max(2000).nullish(),
   rejection_reason: z.enum(REJECTION_REASONS),
@@ -83,7 +83,7 @@ const VoluntaryAddDiff = z.object({
   kind: z.literal("voluntary_add"),
   strategy_id: z.string().uuid(),
   percent_allocated: z.number().min(0).max(100),
-  size_at_decision_usd: z.number().positive(),
+  size_at_decision_usd: z.number().nonnegative(),
   effective_date: z.string().date().optional(),
   note: z.string().max(2000).nullish(),
 });
@@ -92,7 +92,7 @@ const VoluntaryModifyDiff = z.object({
   kind: z.literal("voluntary_modify"),
   holding_ref: z.string().regex(HOLDING_REF_RE),
   new_weight: z.number().min(0).max(1),
-  size_at_decision_usd: z.number().positive(),
+  size_at_decision_usd: z.number().nonnegative(),
   effective_date: z.string().date().optional(),
   note: z.string().max(2000).nullish(),
 });
@@ -102,7 +102,7 @@ const BridgeRecommendedDiff = z.object({
   holding_ref: z.string().regex(HOLDING_REF_RE),
   strategy_id: z.string().uuid(),
   percent_allocated: z.number().min(0).max(100),
-  size_at_decision_usd: z.number().positive(),
+  size_at_decision_usd: z.number().nonnegative(),
   effective_date: z.string().date().optional(),
   note: z.string().max(2000).nullish(),
 });
