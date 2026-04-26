@@ -23,14 +23,17 @@
  * entries within 90-day window` is prepended so a recipient who opens the
  * file in a spreadsheet sees the cap documented at the top.
  *
- * CSV-injection note: formula start chars (=, +, -, @, TAB, CR) ARE handled
- * at PARSE time by `sanitizeCsvValue` in `csv.ts`. Export side here only
- * conforms to RFC 4180 — the receiving spreadsheet is responsible for its
- * own formula-execution policy. Stripping `=` etc. on export would silently
- * mutate legitimate audit values that happen to start with those chars
- * (e.g., a metadata field whose value is `=2026-04-26` could legitimately
- * be a string the audit-emitter wrote). The right place to neutralize
- * formula injection is on the import path, which `csv.ts` already does.
+ * CSV-injection note (Phase 11 review fix WR-01): the export-side consumer
+ * of this CSV is Excel / Google Sheets / Numbers — NOT the project's own
+ * `csv.ts` parse path. A spreadsheet evaluates a cell as a formula when its
+ * first character is `=`, `+`, `-`, `@`, TAB, or CR. The audit log can
+ * contain attacker-controlled metadata (e.g., a note copied through another
+ * flow), so we apply OWASP CSV-injection guidance and prefix any cell whose
+ * first byte matches a formula-lead char with a single-quote (`'`). The
+ * single-quote forces spreadsheet apps to render the cell as the literal
+ * string. Recipients who legitimately wanted a formula get a one-character
+ * fix on their end. The import-time guard in `csv.ts` (`sanitizeCsvValue`)
+ * still applies to any future round-trip parse.
  */
 
 /**
@@ -65,16 +68,34 @@ export interface AuditLogRow {
  * wrap the entire value in double-quotes and double-up any internal quotes.
  * Otherwise return the value unchanged.
  *
- * Note: this is the EXPORT-side helper. The PARSE-side guard in `csv.ts`
- * (`sanitizeCsvValue`) is what neutralizes CSV-injection on import — it is
- * intentionally NOT applied here so legitimate audit values are not
- * mutated on the way out.
+ * Note: this is the EXPORT-side RFC-4180 helper. Formula-injection
+ * neutralization is handled separately by `neutralizeFormulaPrefix` (see
+ * Phase 11 review fix WR-01) — call that first when serializing user-
+ * supplied content into a CSV that will be opened in a spreadsheet app.
  */
 export function escapeCsvValue(value: string): string {
   if (/[,"\n\r]/.test(value)) {
     return `"${value.replace(/"/g, '""')}"`;
   }
   return value;
+}
+
+/**
+ * Phase 11 review fix WR-01 — CSV formula-injection neutralization.
+ *
+ * Spreadsheet apps (Excel / Google Sheets / Numbers) evaluate a cell as a
+ * formula when its first byte is `=`, `+`, `-`, `@`, TAB (`\t`), or CR
+ * (`\r`). Prefixing a single-quote (`'`) forces the apps to render the
+ * cell as the literal string. The guard MUST run before `escapeCsvValue`
+ * so the leading `'` becomes part of the quoted payload (and thus part
+ * of the rendered cell text), not a quoting artefact.
+ *
+ * Empty strings pass through unchanged (no first char to inspect).
+ */
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+
+export function neutralizeFormulaPrefix(value: string): string {
+  return FORMULA_LEAD.test(value) ? `'${value}` : value;
 }
 
 /**
@@ -105,12 +126,19 @@ export function serializeAuditLogCsv(rows: AuditLogRow[]): string {
   const body = rows
     .map((row) => {
       const summary = row.metadata ? JSON.stringify(row.metadata) : "";
+      // Phase 11 review fix WR-01: neutralize formula-injection lead chars
+      // (`=`, `+`, `-`, `@`, TAB, CR) on every user-influenced cell BEFORE
+      // RFC-4180 quoting. `created_at` is an ISO timestamp emitted by
+      // Postgres and never starts with a formula char, so it's exempt.
+      // `entity_id` is a UUID-or-null and likewise exempt, but we run the
+      // guard anyway as defense-in-depth in case a future schema change
+      // widens the column.
       return [
         row.created_at,
-        escapeCsvValue(row.action),
-        escapeCsvValue(row.entity_type),
-        row.entity_id ?? "",
-        escapeCsvValue(summary),
+        escapeCsvValue(neutralizeFormulaPrefix(row.action)),
+        escapeCsvValue(neutralizeFormulaPrefix(row.entity_type)),
+        row.entity_id ? neutralizeFormulaPrefix(row.entity_id) : "",
+        escapeCsvValue(neutralizeFormulaPrefix(summary)),
       ].join(",");
     })
     .join("\n");
