@@ -52,14 +52,23 @@ const STRATEGY_PUBLISHED = "00000000-0000-0000-0000-000000001090";
 const STRATEGY_DRAFT = "00000000-0000-0000-0000-000000001091";
 const STRATEGY_M7 = "00000000-0000-0000-0000-000000001092";
 
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const HAS_ANON_KEY = Boolean(ANON_KEY);
+
 describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)", () => {
   advertiseLiveDbSkipReason("scenario-commit-batch-tx");
 
   let admin: SupabaseClient;
+  // userClientA: signed in as allocator A — used for RPC calls so auth.uid() is set
+  let userClientA: SupabaseClient;
+  // userClientB: signed in as allocator B — used to test cross-tenant rejection
+  let userClientB: SupabaseClient;
   let allocatorAId: string;
   let allocatorAEmail: string;
   let allocatorAPassword: string;
   let allocatorBId: string;
+  let allocatorBEmail: string;
+  let allocatorBPassword: string;
   const trackedMatchDecisionIds: string[] = [];
   const trackedBridgeOutcomeIds: string[] = [];
 
@@ -90,10 +99,52 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
       );
 
     // Allocator B — used to test cross-tenant ownership/auth.uid() mismatch
-    allocatorBId = await createTestUser(
-      admin,
-      `phase10-rpc-B-${ts}@test.local`,
-    );
+    allocatorBEmail = `phase10-rpc-B-${ts}@test.local`;
+    allocatorBPassword = `LiveDbTest${ts}!`;
+    const bResult = await admin.auth.admin.createUser({
+      email: allocatorBEmail,
+      password: allocatorBPassword,
+      email_confirm: true,
+    });
+    if (bResult.error || !bResult.data.user) {
+      throw new Error(
+        `Failed to create allocator B: ${bResult.error?.message}`,
+      );
+    }
+    allocatorBId = bResult.data.user.id;
+    await admin
+      .from("profiles")
+      .upsert(
+        { id: allocatorBId, display_name: allocatorBEmail },
+        { onConflict: "id" },
+      );
+
+    // Build user-scoped Supabase clients for both allocators (anon key + signInWithPassword).
+    // The RPC is gated on auth.uid() = p_allocator_id; calling via the service-role client
+    // would fire the v_caller IS NULL branch of the guard. The route layer always invokes
+    // with a real authenticated session; tests must mirror that contract.
+    if (HAS_ANON_KEY) {
+      userClientA = createClient(LIVE_DB_URL!, ANON_KEY!);
+      const signInA = await userClientA.auth.signInWithPassword({
+        email: allocatorAEmail,
+        password: allocatorAPassword,
+      });
+      if (signInA.error) {
+        throw new Error(
+          `Failed to sign in allocator A: ${signInA.error.message}`,
+        );
+      }
+      userClientB = createClient(LIVE_DB_URL!, ANON_KEY!);
+      const signInB = await userClientB.auth.signInWithPassword({
+        email: allocatorBEmail,
+        password: allocatorBPassword,
+      });
+      if (signInB.error) {
+        throw new Error(
+          `Failed to sign in allocator B: ${signInB.error.message}`,
+        );
+      }
+    }
 
     // Seed strategies — published (happy paths) + draft (gate path) + M7 anchor
     const seed = await admin.from("strategies").upsert(
@@ -131,54 +182,87 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
       { onConflict: "strategy_id" },
     );
 
-    // Seed allocator_holdings rows so ownership probes succeed.
-    // The holding_ref format is "holding:{venue}:{symbol}:{holding_type}";
-    // allocator_holdings.scope_ref must match the diff's holding_ref.
-    // (Phase 06 D-16 + Phase 09 D-02 — text scope_ref by design, no FK.)
-    // Allocator A's owned holdings:
+    // Seed api_keys (FK target for allocator_holdings.api_key_id NOT NULL) for both
+    // allocators. The encrypted column carries a sentinel value — no decrypt is
+    // performed in this test path.
+    const apiKeyAId = "00000000-0000-0000-0000-000000001095";
+    const apiKeyBId = "00000000-0000-0000-0000-000000001096";
+    await admin.from("api_keys").upsert(
+      [
+        {
+          id: apiKeyAId,
+          user_id: allocatorAId,
+          exchange: "binance",
+          label: "Phase10 RPC test (synthetic)",
+          api_key_encrypted: "test-only:not-a-real-secret",
+          is_active: true,
+          kek_version: 1,
+        },
+        {
+          id: apiKeyBId,
+          user_id: allocatorBId,
+          exchange: "okx",
+          label: "Phase10 RPC test B (synthetic)",
+          api_key_encrypted: "test-only:not-a-real-secret",
+          is_active: true,
+          kek_version: 1,
+        },
+      ],
+      { onConflict: "id" },
+    );
+
+    // Seed allocator_holdings rows so the RPC's ownership probe (which JOINs against
+    // (venue, symbol, holding_type) parsed from the diff's holding_ref via
+    // parse_holding_ref) succeeds. Note: allocator_holdings has NO scope_ref column
+    // by design — the canonical scope columns are (venue, symbol, holding_type).
     const today = new Date().toISOString().slice(0, 10);
-    await admin.from("allocator_holdings").upsert(
+    const holdingsRes = await admin.from("allocator_holdings").upsert(
       [
         {
           allocator_id: allocatorAId,
+          api_key_id: apiKeyAId,
           asof: today,
           venue: "binance",
           symbol: "BTC",
           holding_type: "spot",
-          scope_ref: "holding:binance:BTC:spot",
+          side: "long",
+          quantity: 1,
           value_usd: 100,
-          weight: 0.5,
+          mark_price: 100,
         },
         {
           allocator_id: allocatorAId,
+          api_key_id: apiKeyAId,
           asof: today,
           venue: "binance",
           symbol: "ETH",
           holding_type: "spot",
-          scope_ref: "holding:binance:ETH:spot",
+          side: "long",
+          quantity: 1,
           value_usd: 100,
-          weight: 0.5,
+          mark_price: 100,
         },
-      ],
-      { onConflict: "allocator_id,asof,venue,symbol,holding_type" },
-    );
-    // Allocator B's owned holding (used to assert cross-tenant rejection)
-    await admin.from("allocator_holdings").upsert(
-      [
         {
           allocator_id: allocatorBId,
+          api_key_id: apiKeyBId,
           asof: today,
           venue: "okx",
           symbol: "SOL",
           holding_type: "spot",
-          scope_ref: "holding:okx:SOL:spot",
+          side: "long",
+          quantity: 1,
           value_usd: 50,
-          weight: 1.0,
+          mark_price: 50,
         },
       ],
-      { onConflict: "allocator_id,asof,venue,symbol,holding_type" },
+      { onConflict: "allocator_id,venue,symbol,asof" },
     );
-  });
+    if (holdingsRes.error) {
+      throw new Error(
+        `Failed to seed allocator_holdings: ${holdingsRes.error.message}`,
+      );
+    }
+  }, 60_000);
 
   afterAll(async () => {
     if (!HAS_LIVE_DB) return;
@@ -208,6 +292,10 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
       .delete()
       .in("allocator_id", [allocatorAId, allocatorBId]);
     await admin
+      .from("api_keys")
+      .delete()
+      .in("user_id", [allocatorAId, allocatorBId]);
+    await admin
       .from("strategy_analytics")
       .delete()
       .in("strategy_id", [STRATEGY_PUBLISHED, STRATEGY_DRAFT, STRATEGY_M7]);
@@ -217,7 +305,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
       .in("id", [STRATEGY_PUBLISHED, STRATEGY_DRAFT, STRATEGY_M7]);
     await admin.auth.admin.deleteUser(allocatorAId);
     await admin.auth.admin.deleteUser(allocatorBId);
-  });
+  }, 60_000);
 
   // ===========================================================================
   // RPC introspection cases (Management API)
@@ -302,7 +390,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
   it.skipIf(!HAS_LIVE_DB)(
     "T_RPC_RETURN_SHAPE_OK: single voluntary_remove diff returns {ok:true, recorded:[...]}",
     async () => {
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -350,7 +438,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
       // Two diffs: (1) valid voluntary_remove for owned holding ETH (would succeed
       // standalone); (2) voluntary_remove for an UN-OWNED holding_ref → ownership
       // probe RAISES → entire batch rolls back.
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -398,7 +486,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
         .eq("allocator_id", allocatorAId);
       const beforeCount = before.count ?? 0;
 
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -428,28 +516,14 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
     30_000,
   );
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_ANON_KEY)(
     "T_RPC_AUTH_UID_MISMATCH: caller's auth.uid() <> p_allocator_id → REJECT",
     async () => {
-      // Sign in as allocator A through a non-service-role client, then call
-      // the RPC with p_allocator_id = allocatorBId. The auth.uid() guard
-      // inside the RPC body must reject before any INSERT.
-      const userClient = createClient(
-        LIVE_DB_URL!,
-        // public anon key not in env; use the published value from .env.local —
-        // but we don't have it here. Use sign-in via service-role-flagged
-        // password sign-in: createClient with the SERVICE_ROLE_KEY DOES bypass
-        // auth.uid() (returns NULL). Instead, simulate the mismatch via signInWithPassword
-        // against the public anon endpoint — but we lack the anon key.
-        //
-        // Workaround: directly call the RPC with p_allocator_id = allocatorBId
-        // using the service-role client. service_role's auth.uid() returns NULL,
-        // so the guard `v_caller IS NULL OR v_caller <> p_allocator_id` rejects
-        // exactly the same way (NULL branch). This still proves the guard fires.
-        process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      );
-
-      const { data, error } = await userClient.rpc(
+      // Allocator A is signed in on userClientA. Calling the RPC with
+      // p_allocator_id = allocatorBId triggers the auth.uid() <> p_allocator_id
+      // branch of the guard inside the RPC body — must RAISE EXCEPTION before
+      // any INSERT.
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -464,13 +538,13 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       );
-      // Error envelope OR RAISE EXCEPTION — both rejected. The auth.uid() guard
-      // RAISES with ERRCODE 42501.
+      // The auth.uid() guard RAISES with ERRCODE 42501 (insufficient_privilege).
+      expect(error).not.toBeNull();
       expect(
-        error !== null ||
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (data as any)?.ok === false,
+        error?.code === "42501" ||
+          error?.message?.includes("auth.uid() <> p_allocator_id"),
       ).toBe(true);
+      expect(data).toBeNull();
     },
     30_000,
   );
@@ -484,7 +558,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
         .eq("allocator_id", allocatorAId);
       const beforeCount = before.count ?? 0;
 
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -517,7 +591,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
   it.skipIf(!HAS_LIVE_DB)(
     "T_RPC_VA_HAPPY: voluntary_add for published strategy → match_decisions(kind=voluntary_add) + bridge_outcomes(kind=allocated, strategy_id=NEW)",
     async () => {
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -585,7 +659,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
         .eq("allocator_id", allocatorAId)
         .eq("kind", "voluntary_remove");
 
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -647,7 +721,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
         .eq("kind", "bridge_recommended");
       expect(before.count).toBe(0);
 
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
@@ -717,7 +791,7 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
         .eq("allocator_id", allocatorAId)
         .eq("match_decision_id", existingMdId);
 
-      const { data, error } = await admin.rpc(
+      const { data, error } = await userClientA.rpc(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         "commit_scenario_batch" as any,
         {
