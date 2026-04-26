@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.13.0] - 2026-04-26
+
+**Dashboard parity PR4 — final cosmetic polish.** Closes the four remaining
+deltas from PR3's pixel-by-pixel comparison of `/allocations` against
+`Allocator Dashboard - Standalone.html`. The Equity card now reads as a
+single line (title, legend chips, period toggle, sync stamp), KPI cell
+separators actually resolve through the design tokens, the Display-font
+Tweaks knob is no longer a no-op, and narrow-range equity charts get five
+y-axis ticks instead of three.
+
+### Changed
+
+- Equity card header collapses to a single row matching the truth
+  screenshot. `EquityChartWidget` now owns `period` / `customRange` /
+  `pickerOpen` state and renders the title + Portfolio/BTC legend chips +
+  1M/3M/6M/YTD/1Y/ALL/CUSTOM toggle + sync stamp inline above a hairline
+  divider. The inner SVG chart runs in a controlled-state mode via new
+  `period` / `onPeriodChange` / `customRange` / `onCustomRangeChange` /
+  `hideHeader` / `hideLegend` props, with the uncontrolled fallback
+  preserved verbatim for `ScenarioComposer` and the standalone test
+  surface (all 31 EquityChart + KpiStripWidget tests still pass via the
+  uncontrolled path).
+- Equity y-axis tick walker now enforces a 5-tick floor. The previous
+  "snap to 1/2/2.5/5/10" picker rounded UP and collapsed narrow data
+  ranges to three labels (`+0% / -0.5% / -1.0%`). The new walker scans
+  candidates from `0.001%` to `5000%` and selects the LARGEST nice step
+  that still produces ≥ 5 ticks — accepts sub-1% steps like `0.25%` on
+  tight ranges so the strip never goes thin again.
+
+### Fixed
+
+- KPI cell separators on `/allocations` are now visible. `KpiStripWidget`
+  was rendering `borderLeft: "1px solid var(--border)"` and the
+  responsive `border-top` overrides referenced the same undefined
+  variable. The Tailwind v4 `@theme inline` block exposes
+  `--color-border` (not `--border`), so every separator was silently
+  invalid. Switched all four references to `var(--color-border)`.
+- Display-font Tweaks knob is no longer a no-op. `TweaksProvider` now
+  writes `body[data-display-font]` on every state change, and a single
+  rule in `globals.css` swaps `.font-display { font-family:
+  var(--font-sans); font-weight: 500; }` when the attribute reads
+  `"sans"`. Zero consumer-side changes — every existing
+  `className="font-display"` heading flips between Instrument Serif and
+  DM Sans through the body attribute.
+
 ## [0.15.12.2] - 2026-04-26
 
 **UAT cleanup, phases 1, 2, 8.** Audited the 11 outstanding human-UAT items
