@@ -546,3 +546,27 @@ recommended traffic.
 Reference: `.planning/phases/10-scenario-builder-and-what-if/10-CONTEXT.md` §D-10/D-11/D-17
 and `.planning/phases/10-scenario-builder-and-what-if/10-02-PLAN.md` (migration 080 + 081 + 082
 trio + atomic D-23 commit cadence).
+
+Migration 083 ships three review-pass hardening fixes on top of the 080/081/082 trio: (1) the
+M7 reuse-or-create path inside `commit_scenario_batch` switches from a SELECT-then-conditional-INSERT
+sequence to `INSERT ... ON CONFLICT (allocator_id, strategy_id, COALESCE(original_holding_ref, ''))
+WHERE decision='thumbs_up' DO UPDATE ... RETURNING id` targeting migration 074's
+`uniq_match_dec_thumbup_per_pair_holding` partial UNIQUE index, so two concurrent commits with
+the same `bridge_recommended` tuple collapse to ONE `match_decisions` row instead of one
+winner + one unique-violation; (2) the self-verifying DO block now qualifies all `pg_proc`
+lookups via `'public.commit_scenario_batch(uuid,jsonb)'::regprocedure` so a same-name function
+in a different schema cannot confuse the assertion path; (3) a partial UNIQUE index
+`bridge_outcomes_legacy_per_strategy_holding_when_md_null` on
+`(allocator_id, strategy_id, COALESCE(original_holding_ref, ''))` `WHERE match_decision_id IS NULL`
+restores migration 072's per-strategy invariant for any strategy-sourced `bridge_outcomes` row
+whose `match_decision_id` link was nulled out via the `ON DELETE SET NULL` cascade — migration 081
+moved the bridge_outcomes UNIQUE to `(allocator_id, match_decision_id)` which over Postgres's
+NULL-distinct semantics no longer blocks duplicate legacy-shape rows when `match_decision_id`
+is NULL. Pre-flight verification (Supabase Management API on 2026-04-26) confirmed zero
+existing duplicates. **No new audit event kind is registered for Migration 083.** The
+match-decision-record action remains the audited unit; the M7 reuse-or-create just folds the
+race-loser onto the same `match_decision_id` (and therefore the same audit row) the winner
+already wrote.
+
+Reference: `supabase/migrations/083_commit_scenario_batch_race_fix.sql`,
+`src/__tests__/scenario-commit-batch-race.test.ts`.
