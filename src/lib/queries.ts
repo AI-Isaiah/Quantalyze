@@ -1237,15 +1237,16 @@ export const getMyAllocationDashboard = cache(
       phase07.holdingsSummary,
     );
 
-    // Phase 10 / H3 — Source the authenticated allocator's user.id from
-    // supabase.auth.getUser() and propagate it through the payload. Both
-    // branches (!portfolio + portfolio-exists) emit it so consumers (Plan
-    // 06a localStorage scoping, Plan 07 ownership probe) can rely on it.
-    // Falls back to the input userId argument if auth.getUser() returns
-    // no user — caller (Server Component) already gates on auth, so this
-    // is defensive only.
-    const { data: authData } = await supabase.auth.getUser();
-    const allocator_id = authData.user?.id ?? userId;
+    // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
+    // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
+    // can rely on it. Trust the `userId` argument: callers (the Server
+    // Component path via getMyAllocationDashboard) ALREADY resolved
+    // auth.getUser() and pass its id here. The previous review-pass
+    // (P2) noted that re-fetching auth.getUser() inside this query was a
+    // redundant network round-trip — drop it. If a future caller wants
+    // to pass an arbitrary id, the existing ownership predicates
+    // (.eq("allocator_id", userId)) below still gate every read.
+    const allocator_id = userId;
 
     if (!portfolio) {
       // No real portfolio yet — still return a full Phase 07 payload so
