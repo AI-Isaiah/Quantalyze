@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.12.2] - 2026-04-26
+
+**UAT cleanup, phases 1, 2, 8.** Audited the 11 outstanding human-UAT items
+left over from PR #78. One real defect surfaced and fixed; one e2e suite hard-
+skipped as Phase 9.1 superseded with rebuild plan. The other nine items were
+verified at the code level against the live source (banner em-dash, dismiss
+24h TTL, OutcomeRecordedRow rendering, useMandateAutoSave hook, server-side
+strategy-note scope, BridgeOutcomeNoteSection cancelled flag, disconnect
+cascade RPCs) and live-DB tests passed clean (`HAS_LIVE_DB=1`, 10/10).
+
+### Fixed
+
+- Mandate auto-save no longer 429s mid-burst. `/api/preferences` was wired to
+  the 5/min `userActionLimiter` (a tight cap meant for sensitive POSTs like
+  attestation, deletion, GDPR exports), but `MandateForm` fans a single edit
+  out into 8+ field-level PUTs in under a minute (3 strategy chips + 2
+  exchange chips + max_weight slide + ticket-size blur + archetype blur).
+  The 6th save was guaranteed to surface "Saving too fast" inline. Added a
+  dedicated `mandateAutoSaveLimiter` at 30/60s and wired it into the route.
+  New regression `TC11 — WR-02 burst tolerance` in `route.test.ts` uses
+  sentinel-tagged limiters so the test fails the moment the route ever drifts
+  back to `userActionLimiter`.
+
+### Changed
+
+- `e2e/bridge-outcome.spec.ts` is hard-skipped pending a Phase 9.1 fixture
+  rebuild. The pre-9.1 fixture (`portfolio_strategies` + `match_decisions`
+  with `decision='sent_as_intro'`) no longer reaches the per-row banner —
+  Phase 9.1 moved banner mounting into the Holdings-tab design-mode table,
+  which derives `bridgeCandidate` from
+  `matchDecisionsByHoldingRef[buildHoldingRef(holding)]`. The rebuild needs
+  `allocator_holdings` + `match_batches.holding_flags` + `match_decisions.
+  original_holding_ref`. Suite carries a file-level docstring describing the
+  rebuild plan; the existing fixture now sets `original_strategy_id` so the
+  insert satisfies migration 080's per-kind invariant constraint and re-runs
+  cleanly once the hard-skip is lifted. Banner contract is still covered by
+  Phase 9.1 unit tests + the code-level review documented at
+  `.gstack/deploy-reports/2026-04-26-uat-cleanup-phases-1-2-8.md`.
+
 ## [0.15.12.1] - 2026-04-26
 
 **Phase 10 QA pass.** Three live-DB defects surfaced during human UAT against

@@ -37,6 +37,12 @@ vi.mock("next/server", async () => {
   };
 });
 
+// Sentinels expose limiter identity to checkLimit so TC11 (WR-02) can assert
+// the route is wired to the 30/min mandate limiter, not the 5/min user-action
+// limiter that 429'd at action #6 of the WR-02 8-action burst.
+const USER_ACTION_LIMITER_SENTINEL = { __id: "userActionLimiter", __limit: "5/60s" };
+const MANDATE_AUTO_SAVE_LIMITER_SENTINEL = { __id: "mandateAutoSaveLimiter", __limit: "30/60s" };
+
 const STATE = vi.hoisted(() => ({
   authUser: {
     id: "00000000-0000-0000-0000-000000000001",
@@ -46,6 +52,7 @@ const STATE = vi.hoisted(() => ({
   rpcState: {} as Record<string, { data: unknown; error: { code?: string; message?: string } | null }>,
   checkLimitResult: { success: true, retryAfter: 0 } as { success: boolean; retryAfter: number },
   csrfResponse: null as ReturnType<typeof import("next/server").NextResponse.json> | null,
+  lastCheckLimitArg: null as unknown,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -65,8 +72,12 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: null,
-  checkLimit: async () => STATE.checkLimitResult,
+  userActionLimiter: USER_ACTION_LIMITER_SENTINEL,
+  mandateAutoSaveLimiter: MANDATE_AUTO_SAVE_LIMITER_SENTINEL,
+  checkLimit: async (limiter: unknown) => {
+    STATE.lastCheckLimitArg = limiter;
+    return STATE.checkLimitResult;
+  },
 }));
 
 vi.mock("@/lib/csrf", () => ({
@@ -100,6 +111,7 @@ beforeEach(() => {
   STATE.rpcState = {};
   STATE.checkLimitResult = { success: true, retryAfter: 0 };
   STATE.csrfResponse = null;
+  STATE.lastCheckLimitArg = null;
 });
 
 afterEach(() => {
@@ -304,5 +316,20 @@ describe("PUT /api/preferences", () => {
 
     await drainAuditMicrotasks();
     expect(STATE.rpcCalls).toHaveLength(0);
+  });
+
+  it("TC11 — WR-02 burst tolerance: PUT uses 30/min mandateAutoSaveLimiter, not 5/min userActionLimiter", async () => {
+    // MandateForm fans a single edit out into 8+ field-level PUTs (3 strategy
+    // chips + 2 exchange chips + max_weight slide + ticket-size blur +
+    // archetype blur). The 5/min userActionLimiter would 429 on the 6th save
+    // mid-burst and surface "Saving too fast" inline. Wiring the dedicated
+    // 30/min limiter instead absorbs the burst while keeping the auth-only
+    // PUT path well under abuse thresholds.
+    const { PUT } = await import("./route");
+
+    await PUT(makeRequest({ max_weight: 0.25 }));
+
+    expect(STATE.lastCheckLimitArg).toBe(MANDATE_AUTO_SAVE_LIMITER_SENTINEL);
+    expect(STATE.lastCheckLimitArg).not.toBe(USER_ACTION_LIMITER_SENTINEL);
   });
 });
