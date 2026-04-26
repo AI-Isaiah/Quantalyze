@@ -74,7 +74,8 @@ export function KpiStripWidget({ data }: WidgetProps) {
             data-i={i}
             style={{
               padding: "8px 14px",
-              borderLeft: i === 0 ? "none" : "1px solid var(--border)",
+              borderLeft:
+                i === 0 ? "none" : "1px solid var(--color-border)",
               minWidth: 0,
               display: "flex",
               flexDirection: "column",
@@ -143,14 +144,14 @@ export function KpiStripWidget({ data }: WidgetProps) {
       <style>{`
         @media (max-width: 1100px) {
           .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
-          .kpi-cell[data-i="3"] { border-left: none !important; border-top: 1px solid var(--border); }
-          .kpi-cell[data-i="4"] { border-top: 1px solid var(--border); }
+          .kpi-cell[data-i="3"] { border-left: none !important; border-top: 1px solid var(--color-border); }
+          .kpi-cell[data-i="4"] { border-top: 1px solid var(--color-border); }
         }
         @media (max-width: 720px) {
           .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-          .kpi-cell { border-left: none !important; border-top: 1px solid var(--border) !important; }
+          .kpi-cell { border-left: none !important; border-top: 1px solid var(--color-border) !important; }
           .kpi-cell[data-i="0"], .kpi-cell[data-i="1"] { border-top: none !important; }
-          .kpi-cell[data-i="2"], .kpi-cell[data-i="4"] { border-left: 1px solid var(--border) !important; }
+          .kpi-cell[data-i="2"], .kpi-cell[data-i="4"] { border-left: 1px solid var(--color-border) !important; }
         }
       `}</style>
     </div>
