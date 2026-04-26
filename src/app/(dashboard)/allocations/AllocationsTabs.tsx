@@ -424,9 +424,30 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
               // dispatch a custom event that AllocationDashboardV2 listens
               // for to open the picker. The event-based bridge avoids
               // hoisting picker state out of the dashboard.
+              //
+              // WR-01 fix: when the user is on a non-Overview tab,
+              // AllocationDashboardV2 is unmounted (lazy via `activeTab ===
+              // "overview" && <AllocationDashboardV2 />`), so its
+              // open-picker listener does not exist yet. Dispatching
+              // synchronously drops the event. Defer the dispatch to the
+              // next microtask so React has flushed the tab change render
+              // and the new effect has registered the listener before we
+              // fire. AllocationDashboardV2 is a direct (non-dynamic)
+              // import so its mount-time effect runs in the same tick as
+              // the render — one microtask is sufficient.
+              const wasAlreadyOnOverview = activeTab === "overview";
               changeTab("overview");
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(new CustomEvent("allocations:open-widget-picker"));
+              if (typeof window === "undefined") return;
+              const dispatch = () =>
+                window.dispatchEvent(
+                  new CustomEvent("allocations:open-widget-picker"),
+                );
+              if (wasAlreadyOnOverview) {
+                // Listener already exists — fire immediately to preserve
+                // the previous behavior on Overview.
+                dispatch();
+              } else {
+                queueMicrotask(dispatch);
               }
             }}
             className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
