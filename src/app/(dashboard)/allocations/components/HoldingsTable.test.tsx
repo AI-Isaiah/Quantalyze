@@ -168,7 +168,7 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
     ).toBeInTheDocument();
   });
 
-  it("T7: amber chip carries the --color-warning token #D97706 via inline style (serialised to rgb by jsdom)", () => {
+  it("T7: amber chip carries the --color-warning token via inline style (Phase 09.1 IN-01 fix)", () => {
     const holdings = [
       makeHolding({
         id: "h2",
@@ -184,10 +184,14 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     const chip = screen.getByText("Key revoked");
-    // jsdom serialises inline-style hex values to rgb() form at DOM read
-    // time. #D97706 → rgb(217, 119, 6) and #FEF3C7 → rgb(254, 243, 199).
+    // Phase 09.1 IN-01: text color now references the DESIGN.md
+    // `--color-warning` token instead of the hard-coded #D97706 hex.
+    // jsdom does NOT resolve var() — it preserves the literal — so the
+    // assertion checks for the var() reference. Background and border
+    // remain Bridge-family literals (FEF3C7 / FDE68A) pending a
+    // design-system extension; jsdom serialises hex backgrounds to rgb().
     const style = chip.getAttribute("style") ?? "";
-    expect(style).toContain("rgb(217, 119, 6)");
+    expect(style).toContain("var(--color-warning)");
     expect(style).toContain("rgb(254, 243, 199)");
   });
 });

@@ -47,7 +47,11 @@ import { HoldingDetail } from "./HoldingDetail";
 // ─────────────────────────────────────────────────────────── shared utilities
 
 const AMBER_CHIP_STYLE: CSSProperties = {
-  color: "#D97706",
+  // 09.1-REVIEW IN-01: text uses the DESIGN.md `--color-warning` token
+  // (#D97706, added 2026-04-11). The chip's surface (#FEF3C7) and border
+  // (#FDE68A) are intentional Bridge-family tints that DESIGN.md does
+  // not yet declare; left as literals pending design-system extension.
+  color: "var(--color-warning)",
   backgroundColor: "#FEF3C7",
   border: "1px solid #FDE68A",
 };

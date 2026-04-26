@@ -117,7 +117,7 @@ export function BridgeWidget({
       >
         <div
           className="text-xs uppercase"
-          style={{ color: "#D97706", letterSpacing: "0.08em" }}
+          style={{ color: "var(--color-warning)", letterSpacing: "0.08em" }}
         >
           Bridge
         </div>
@@ -203,7 +203,7 @@ export function BridgeWidget({
         >
           <div
             className="text-xs uppercase"
-            style={{ color: "#D97706", letterSpacing: "0.08em" }}
+            style={{ color: "var(--color-warning)", letterSpacing: "0.08em" }}
           >
             Bridge
           </div>
@@ -242,7 +242,7 @@ export function BridgeWidget({
       >
         <div
           className="text-xs uppercase"
-          style={{ color: "#D97706", letterSpacing: "0.08em" }}
+          style={{ color: "var(--color-warning)", letterSpacing: "0.08em" }}
         >
           Bridge flagged
         </div>

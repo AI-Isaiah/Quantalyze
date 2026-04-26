@@ -218,7 +218,7 @@ export function BridgeDrawer({
               <div
                 className="text-xs"
                 style={{
-                  color: "#D97706",
+                  color: "var(--color-warning)",
                   letterSpacing: "0.08em",
                   textTransform: "uppercase",
                 }}
