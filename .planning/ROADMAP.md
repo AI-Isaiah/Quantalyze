@@ -180,7 +180,7 @@ Plans:
 - [x] 10-03-PLAN.md — getMyAllocationDashboard payload extension (holdingReturnsByScopeRef) + GET /api/strategies/browse route + reconstruction helper unit tests
 - [x] 10-04-PLAN.md — KpiStrip mode='scenario' delta pills + EquityChart scenarioSeries overlay + DrawdownChart scenarioDailyPoints overlay + 3-state visibility toggles (additive extensions)
 - [x] 10-05-PLAN.md — StrategyBrowseDrawer 620px slide-over (search + filters + mandate-fit pill) + BridgeDrawer 'Add to scenario' CTA + mandate-fit.ts client-side approximation
-- [ ] 10-06a-PLAN.md — useScenarioState hook (per-allocator scoped storage key, auth-change clear) + ScenarioFooter sticky bar (diff count + delta summary + Reset/Commit)
+- [x] 10-06a-PLAN.md — useScenarioState hook (per-allocator scoped storage key, auth-change clear) + ScenarioFooter sticky bar (diff count + delta summary + Reset/Commit)
 - [ ] 10-06b-PLAN.md — ScenarioComposer body assembly (KpiStrip + charts + composition list + Bridge inline + Browse drawer + footer + reset modal + fingerprint banner) + AllocationsTabs v2-flag branch wiring (ScenarioComposer | ScenarioStub)
 - [ ] 10-07-PLAN.md — POST /api/allocator/scenario/commit (discriminated zod + per-kind ownership gates + admin client + audit) + ScenarioCommitDrawer 720px grouped sections + composer wire-in + live-DB RLS regression
 **UI hint**: yes
