@@ -182,6 +182,30 @@ export default function SecurityPage() {
             >
               Compliance posture
             </h2>
+            {/* Phase 11 / S4a / D-06 — SOC-2 status banner. Verbatim
+                CONTEXT D-06 phrasing; LOCKED. Inserted near top of section,
+                BEFORE the existing pre-audit-company paragraph. */}
+            <div
+              role="status"
+              aria-live="polite"
+              className="mt-6 mb-6 rounded-lg border-l-4 border-warning bg-warning/5 px-4 py-3"
+            >
+              <p className="text-sm leading-relaxed text-text-primary">
+                <span className="font-semibold">
+                  SOC 2 status: pre-audit, preparing for SOC 2 Type 1.
+                </span>{" "}
+                <span className="text-text-secondary">
+                  Allocators evaluating us under diligence —{" "}
+                  <a
+                    href="mailto:security@quantalyze.com?subject=Posture%20letter%20request"
+                    className="text-accent underline-offset-4 hover:underline"
+                  >
+                    request a posture letter
+                  </a>
+                  .
+                </span>
+              </p>
+            </div>
             <div className="mt-4 space-y-4 text-[14px] leading-relaxed text-text-primary">
               <p>
                 We are a pre-audit company. Preparing for SOC 2 Type 1;
@@ -290,6 +314,19 @@ export default function SecurityPage() {
                 </tr>
               </tbody>
             </table>
+            {/* Phase 11 / S4c / D-05 — public audit-log link line. Verbatim
+                CONTEXT D-05 phrasing; LOCKED. Editorial pointer to the
+                authenticated /profile?tab=security audit-log subsection. */}
+            <p className="mt-6 text-[14px] leading-relaxed text-text-muted">
+              If you have an account, you can{" "}
+              <a
+                href="/profile?tab=security"
+                className="text-accent underline-offset-4 hover:underline"
+              >
+                download your audit log
+              </a>{" "}
+              from your profile.
+            </p>
           </section>
 
           <section
