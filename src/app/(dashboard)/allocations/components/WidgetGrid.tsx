@@ -200,7 +200,16 @@ function WidgetCell({
       }}
       onDrop={(e) => {
         e.preventDefault();
-        if (draggingK && draggingK !== k) onMove(draggingK, k);
+        // 09.1-REVIEW IN-02: prefer the dataTransfer payload (set in
+        // onDragStart) over the React closure variable. dataTransfer
+        // survives detached drag sessions and external drop targets,
+        // and avoids any future state-management refactor closing
+        // over a stale draggingK value. Falls back to the closure
+        // when dataTransfer / getData is unavailable (jsdom or
+        // synthetic drop events).
+        const fromTransfer = e.dataTransfer?.getData?.("text/plain") ?? "";
+        const fromK = fromTransfer || draggingK;
+        if (fromK && fromK !== k) onMove(fromK, k);
         setDraggingK(null);
         setDragOverK(null);
       }}

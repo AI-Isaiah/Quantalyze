@@ -146,6 +146,30 @@ describe("WidgetGrid", () => {
     expect(getEffectAllowed()).toBe("move");
   });
 
+  // 09.1-REVIEW IN-02: drop handler prefers dataTransfer payload over the
+  // React closure variable. When dataTransfer carries a different key
+  // (e.g. via an external drop target or a future detached-DnD refactor),
+  // the move MUST honor the payload — not the stale closure.
+  it("IN-02: onDrop reads source key from dataTransfer.getData, falling back to closure", () => {
+    const props = makeProps();
+    const { container } = render(<WidgetGrid {...props} />);
+    const targetCell = container.querySelector<HTMLDivElement>(
+      '[data-widget-id="equity-curve"]',
+    )!;
+
+    // Synthetic drop with a dataTransfer payload — no preceding dragStart.
+    // Without the IN-02 fix, the handler would read the (null) closure
+    // draggingK and skip the onMove call. With the fix, it reads from
+    // dataTransfer and fires onMove with the payload key.
+    const dropTransfer = {
+      getData: (type: string) => (type === "text/plain" ? "kpi-strip" : ""),
+    } as unknown as DataTransfer;
+    fireEvent.drop(targetCell, { dataTransfer: dropTransfer });
+
+    expect(props.onMove).toHaveBeenCalledTimes(1);
+    expect(props.onMove).toHaveBeenCalledWith("kpi-strip", "equity-curve");
+  });
+
   it("clicking the close button in the chrome fires onRemove(k)", () => {
     const props = makeProps();
     const { container } = render(<WidgetGrid {...props} />);
