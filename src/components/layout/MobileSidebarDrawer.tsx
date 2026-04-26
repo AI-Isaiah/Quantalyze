@@ -48,6 +48,11 @@ export function MobileSidebarDrawer({
   const pathname = usePathname();
   const panelRef = useRef<HTMLDivElement>(null);
   const previousPathname = useRef(pathname);
+  // WR-03 fix: track previous open state so focus restoration only fires
+  // on the actual close transition (open=true → open=false), not on
+  // initial mount with open=false. Initialized to `open` so the first
+  // effect sees prevOpen === open and skips the focus call.
+  const prevOpenRef = useRef(open);
 
   // Close on route change. Guarded so the initial mount with open=false
   // doesn't trigger onClose on first paint.
@@ -59,10 +64,15 @@ export function MobileSidebarDrawer({
   }, [pathname, open, onClose]);
 
   // Escape key + body scroll lock + initial focus when the drawer opens.
-  // Focus restoration on close goes to the hamburger via triggerRef.
+  // Focus restoration on close goes to the hamburger via triggerRef —
+  // but only on the actual close transition (was-open → not-open), so
+  // the initial mount with open=false does not steal focus from the
+  // route's natural tab-stop (WR-03).
   useEffect(() => {
+    const wasOpen = prevOpenRef.current;
+    prevOpenRef.current = open;
     if (!open) {
-      triggerRef.current?.focus();
+      if (wasOpen) triggerRef.current?.focus();
       return;
     }
     const onKey = (e: KeyboardEvent) => {
