@@ -487,12 +487,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // Capture the onAdd callback the StrategyBrowseDrawer receives so we can
     // simulate a row-Add from inside the (mocked) drawer.
     let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(
-      ({ isOpen, onAdd }: { isOpen: boolean; onAdd: (s: unknown) => void }) => {
-        capturedOnAdd = onAdd;
-        return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      },
-    );
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     render(
       <ScenarioComposer
         payload={payload}
@@ -513,8 +515,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         strategy_types: ["momentum"],
       });
     });
-    // Composition list now shows the added strategy
-    expect(screen.getByText(/Browse Strategy 1/i)).toBeInTheDocument();
+    // Composition list now shows the added strategy (the visible name +
+    // the toggle aria-label both carry the strategy name; getAllByText is
+    // the accurate matcher).
+    expect(screen.getAllByText(/Browse Strategy 1/i).length).toBeGreaterThan(
+      0,
+    );
     // Footer diff count chip moved off "No changes yet"
     expect(screen.queryByText("No changes yet")).toBeNull();
   });
@@ -697,12 +703,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C17 Composition row for an added strategy renders Remove × with aria-label='Remove from scenario'", () => {
     const payload = makePayload();
     let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(
-      ({ isOpen, onAdd }: { isOpen: boolean; onAdd: (s: unknown) => void }) => {
-        capturedOnAdd = onAdd;
-        return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      },
-    );
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     render(
       <ScenarioComposer
         payload={payload}
@@ -819,12 +827,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       holdingReturnsByScopeRef: {},
     });
     let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(
-      ({ isOpen, onAdd }: { isOpen: boolean; onAdd: (s: unknown) => void }) => {
-        capturedOnAdd = onAdd;
-        return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      },
-    );
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     render(
       <ScenarioComposer
         payload={payload}
@@ -926,12 +936,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("T_C_ADAPT1 buildStrategyForBuilderSet receives addedStrategies of AddedStrategy[] shape (lightweight, no daily_returns at call site)", () => {
     const payload = makePayload();
     let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(
-      ({ isOpen, onAdd }: { isOpen: boolean; onAdd: (s: unknown) => void }) => {
-        capturedOnAdd = onAdd;
-        return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      },
-    );
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     render(
       <ScenarioComposer
         payload={payload}
@@ -983,12 +995,19 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
             id: ADDED_ID,
             name: "Added Strategy A",
             codename: null,
-            disclosure_tier: "public",
+            disclosure_tier: "institutional",
             strategy_types: ["momentum"],
             markets: ["binance"],
             start_date: "2025-01-01",
             strategy_analytics: {
-              daily_returns: [{ date: "2026-01-01", value: 0.002 }],
+              // The runtime payload from queries.ts surfaces daily_returns as a
+              // DailyPoint[] for the scenario sandbox path even though the
+              // upstream StrategyAnalytics TS type declares it as a year-keyed
+              // nested record. Cast keeps the test fixture honest about what
+              // the composer's adapter call site actually consumes.
+              daily_returns: [
+                { date: "2026-01-01", value: 0.002 },
+              ] as unknown as Record<string, Record<string, number>>,
               cagr: 0.18,
               sharpe: 1.4,
               volatility: 0.12,
@@ -999,12 +1018,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ],
     });
     let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(
-      ({ isOpen, onAdd }: { isOpen: boolean; onAdd: (s: unknown) => void }) => {
-        capturedOnAdd = onAdd;
-        return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      },
-    );
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     render(
       <ScenarioComposer
         payload={payload}
@@ -1026,7 +1047,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     const lastCall = calls[calls.length - 1];
-    const returnsLookup = lastCall[4];
+    // The adapter signature uses a phantom-branded `StrategyForBuilderId`
+    // key on the lookup map. Cast to `Record<string, DailyPoint[]>` so the
+    // raw string ADDED_ID indexes the runtime object cleanly.
+    const returnsLookup = lastCall[4] as unknown as Record<
+      string,
+      Array<{ date: string; value: number }>
+    >;
     expect(returnsLookup[ADDED_ID]).toBeDefined();
     expect(Array.isArray(returnsLookup[ADDED_ID])).toBe(true);
     expect(returnsLookup[ADDED_ID][0].date).toBe("2026-01-01");
@@ -1048,12 +1075,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
             id: ADDED_ID,
             name: "Meta Strategy",
             codename: null,
-            disclosure_tier: "verified",
+            disclosure_tier: "institutional",
             strategy_types: ["momentum"],
             markets: ["binance"],
             start_date: "2025-01-01",
             strategy_analytics: {
-              daily_returns: [],
+              daily_returns: {} as Record<string, Record<string, number>>,
               cagr: 0.22,
               sharpe: 1.55,
               volatility: 0.15,
@@ -1064,12 +1091,14 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ],
     });
     let capturedOnAdd: ((s: unknown) => void) | null = null;
-    vi.mocked(StrategyBrowseDrawer).mockImplementation(
-      ({ isOpen, onAdd }: { isOpen: boolean; onAdd: (s: unknown) => void }) => {
-        capturedOnAdd = onAdd;
-        return isOpen ? <div data-testid="browse-drawer-mock" /> : null;
-      },
-    );
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
     render(
       <ScenarioComposer
         payload={payload}
@@ -1091,9 +1120,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const calls = vi.mocked(buildStrategyForBuilderSet).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     const lastCall = calls[calls.length - 1];
-    const metadataLookup = lastCall[5];
+    // Cast through `unknown` for the same brand-key reason as T_C_ADAPT2.
+    const metadataLookup = lastCall[5] as unknown as Record<
+      string,
+      { disclosure_tier: string; cagr: number | null; sharpe: number | null }
+    >;
     expect(metadataLookup[ADDED_ID]).toBeDefined();
-    expect(metadataLookup[ADDED_ID].disclosure_tier).toBe("verified");
+    expect(metadataLookup[ADDED_ID].disclosure_tier).toBe("institutional");
     expect(metadataLookup[ADDED_ID].cagr).toBe(0.22);
     expect(metadataLookup[ADDED_ID].sharpe).toBe(1.55);
   });
