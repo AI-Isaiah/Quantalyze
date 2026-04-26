@@ -42,15 +42,21 @@ function buildAnalytics(
 }
 
 describe("<InsightStrip>", () => {
-  it("renders fallback copy when no insights fire", () => {
-    render(<InsightStrip analytics={buildAnalytics()} />);
-    expect(
-      screen.getByText("No unusual activity in the trailing window."),
-    ).toBeInTheDocument();
+  it("PR3 (dashboard parity) — renders nothing when no insights fire and no flaggedCount", () => {
+    // PR3 silenced the empty-state strip to match the truth screenshot —
+    // when there's nothing to say, the strip stays out of the layout.
+    const { container } = render(<InsightStrip analytics={buildAnalytics()} />);
+    expect(container.firstChild).toBeNull();
   });
 
-  it("renders the section header even with no insights", () => {
-    render(<InsightStrip analytics={buildAnalytics()} />);
+  it("PR3 — still renders the section header when insights or flaggedCount are present", () => {
+    render(
+      <InsightStrip
+        analytics={buildAnalytics()}
+        portfolioId="p-1"
+        flaggedCount={1}
+      />,
+    );
     expect(screen.getByText("What we noticed")).toBeInTheDocument();
   });
 
@@ -103,11 +109,9 @@ describe("<InsightStrip>", () => {
     expect(screen.getByText("High severity:")).toBeInTheDocument();
   });
 
-  it("renders null analytics gracefully", () => {
-    render(<InsightStrip analytics={null} />);
-    expect(
-      screen.getByText("No unusual activity in the trailing window."),
-    ).toBeInTheDocument();
+  it("PR3 — renders nothing for null analytics with no flaggedCount (was: 'No unusual activity' fallback)", () => {
+    const { container } = render(<InsightStrip analytics={null} />);
+    expect(container.firstChild).toBeNull();
   });
 
   it("exposes severity to screen readers via an sr-only label", () => {

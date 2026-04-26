@@ -85,6 +85,16 @@ export function InsightStrip({
     portfolioAgeDays,
   ).slice(0, max);
 
+  // PR3 (dashboard parity) — when zero insights fire AND no flagged
+  // holdings, render nothing. The truth screenshot doesn't show the
+  // "WHAT WE NOTICED → No unusual activity" empty state, and a loud
+  // empty section above the Bridge banner pushes the rest of the
+  // dashboard down. Returning null when there's nothing to say keeps
+  // the layout flush with the truth.
+  if (insights.length === 0 && !flaggedCount) {
+    return null;
+  }
+
   return (
     <section
       aria-label="Portfolio insights"
@@ -93,7 +103,7 @@ export function InsightStrip({
       <p className="text-[10px] uppercase tracking-wider text-text-muted font-medium">
         What we noticed
       </p>
-      {insights.length === 0 && !flaggedCount ? (
+      {false ? (
         <p className="text-sm text-text-secondary">
           No unusual activity in the trailing window.
         </p>

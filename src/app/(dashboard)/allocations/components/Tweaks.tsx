@@ -1,247 +1,300 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { QA_MODE } from "@/lib/qa-mode";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
+import { useTweaks, type TweakState } from "../context/TweaksContext";
 
 /**
- * Phase 09.1 Plan 11 / D-19 — QA-only Tweaks panel.
+ * PR3 (HANDOFF G5) — Tweaks panel
  *
- * Visibility is gated on the module-scope `QA_MODE` constant from
- * `@/lib/qa-mode` so the gate is testable via `vi.mock("@/lib/qa-mode")`
- * with no `vi.stubEnv` calls. In production the constant is `false` and
- * the component returns `null` before any DOM is rendered.
+ * QA-mode gate is GONE. Allocators see the panel via the TweaksToggle
+ * chip in the header; clicking it opens this 300px floating popover at
+ * bottom-right (matching `designer-bundle/project/src/tweaks.jsx:38-99`).
  *
- * The designer-bundle's cross-window prototype bridge is intentionally
- * stripped per D-19; persistence happens in `localStorage` only. Other
- * presentation knobs (density, accentIntensity, displayFont, chartStyle,
- * showBench, showOutcomes) are wired here as state but the consumers
- * mounting them onto the DOM is a polish follow-up. `bridgeVariant` is
- * the most user-visible knob and flows through `onChange`.
+ * The panel reads the 7-knob state from TweaksContext; the provider
+ * applies side effects (body[data-density], root --color-accent swap).
+ * Each segmented row mirrors the prototype's labels exactly so the
+ * pixel-by-pixel comparison check passes.
+ *
+ * Persistence is in localStorage under "allocations.tweaks" (same key
+ * as the QA-gated v0.15.x panel — stored preferences survive the lift).
  */
 
-export type TweakState = {
-  density: "compact" | "comfortable" | "spacious";
-  accentIntensity: "muted" | "default" | "loud";
-  displayFont: "sans" | "serif";
-  bridgeVariant: "subtle" | "card" | "full";
-  chartStyle: "line" | "area";
-  showOutcomes: boolean;
-  showBench: boolean;
-};
+export function Tweaks() {
+  const { state, set, reset, panelOpen, closePanel } = useTweaks();
+  const panelRef = useRef<HTMLDivElement>(null);
 
-const TWEAK_DEFAULTS: TweakState = {
-  density: "comfortable",
-  accentIntensity: "muted",
-  displayFont: "serif",
-  bridgeVariant: "full",
-  chartStyle: "area",
-  showOutcomes: true,
-  showBench: true,
-};
-
-const STORAGE_KEY = "allocations.tweaks";
-
-function loadTweaks(): TweakState {
-  if (typeof window === "undefined") return TWEAK_DEFAULTS;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return TWEAK_DEFAULTS;
-    const parsed = JSON.parse(raw);
-    // Tolerate missing keys: if a user persisted state from an earlier
-    // shape with fewer knobs, fill the gaps with TWEAK_DEFAULTS.
-    return { ...TWEAK_DEFAULTS, ...parsed };
-  } catch {
-    // Malformed JSON / Safari private-mode quota / SecurityError —
-    // fall back to defaults; never let this take the dashboard down.
-    return TWEAK_DEFAULTS;
-  }
-}
-
-type Props = {
-  onChange?: (state: TweakState) => void;
-};
-
-// density, accentIntensity, displayFont, chartStyle, showBench, showOutcomes —
-// wired as polish follow-up. `bridgeVariant` is propagated via `onChange`.
-export function Tweaks({ onChange }: Props) {
-  // V3 accepted — QA-mode gate via module-scope constant. Test seam:
-  // `vi.mock("@/lib/qa-mode", () => ({ QA_MODE: true }))` flips this to
-  // truthy without touching `process.env`.
-  //
-  // Hooks MUST run before any early return — React's hook ordering rule.
-  // QA_MODE is a module-scope constant, so the conditional return below
-  // is stable for the lifetime of the component (no mid-life toggle). The
-  // hooks above are therefore called in the same order on every render.
-  const [isOpen, setIsOpen] = useState(false);
-  const [state, setState] = useState<TweakState>(TWEAK_DEFAULTS);
-
-  // Hydrate from localStorage post-mount (avoids SSR mismatch).
+  // Outside-click + Esc dismissal — clones AddWidgetModal:29-62 pattern.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState(loadTweaks());
-  }, []);
+    if (!panelOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closePanel();
+    };
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      // Don't close when clicking the toggle itself — TweaksToggle handles
+      // that. Identify the toggle via its data attribute.
+      if (target?.closest("[data-tweaks-toggle]")) return;
+      if (panelRef.current && !panelRef.current.contains(target)) closePanel();
+    };
+    const t = setTimeout(() => {
+      document.addEventListener("keydown", onKey);
+      document.addEventListener("mousedown", onClick);
+    }, 0);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onClick);
+    };
+  }, [panelOpen, closePanel]);
 
-  // Persist + notify on every change.
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Safari private-mode / quota — non-fatal.
-    }
-    onChange?.(state);
-  }, [state, onChange]);
-
-  if (!QA_MODE) return null;
+  if (!panelOpen) return null;
 
   return (
-    <>
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label="Tweaks"
+      style={{
+        position: "fixed",
+        bottom: 20,
+        right: 20,
+        width: 300,
+        maxHeight: "80vh",
+        overflowY: "auto",
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
+        borderRadius: 10,
+        boxShadow: "0 12px 32px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.06)",
+        zIndex: 50,
+        padding: 16,
+        fontFamily: "var(--font-sans)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 4,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-text-primary)" }}>
+            Tweaks
+          </div>
+          <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
+            Design variations · live
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={closePanel}
+          aria-label="Close tweaks"
+          style={{
+            width: 26,
+            height: 26,
+            border: "1px solid var(--color-border)",
+            background: "var(--color-surface)",
+            borderRadius: 4,
+            cursor: "pointer",
+            color: "var(--color-text-secondary)",
+            display: "grid",
+            placeItems: "center",
+            fontSize: 14,
+            lineHeight: 1,
+            fontFamily: "var(--font-sans)",
+          }}
+        >
+          ×
+        </button>
+      </div>
+
+      <Row label="Density">
+        <Seg active={state.density === "tight"} onClick={() => set("density", "tight")}>
+          Tight
+        </Seg>
+        <Seg
+          active={state.density === "comfortable"}
+          onClick={() => set("density", "comfortable")}
+        >
+          Regular
+        </Seg>
+        <Seg active={state.density === "loose"} onClick={() => set("density", "loose")}>
+          Loose
+        </Seg>
+      </Row>
+
+      <Row label="Accent">
+        <Seg
+          active={state.accentIntensity === "muted"}
+          onClick={() => set("accentIntensity", "muted")}
+        >
+          Muted
+        </Seg>
+        <Seg
+          active={state.accentIntensity === "full"}
+          onClick={() => set("accentIntensity", "full")}
+        >
+          Full
+        </Seg>
+      </Row>
+
+      <Row label="Display font">
+        <Seg
+          active={state.displayFont === "serif"}
+          onClick={() => set("displayFont", "serif")}
+        >
+          Serif
+        </Seg>
+        <Seg
+          active={state.displayFont === "sans"}
+          onClick={() => set("displayFont", "sans")}
+        >
+          Sans
+        </Seg>
+      </Row>
+
+      <Row label="Bridge banner">
+        <Seg
+          active={state.bridgeVariant === "subtle"}
+          onClick={() => set("bridgeVariant", "subtle")}
+        >
+          Subtle
+        </Seg>
+        <Seg
+          active={state.bridgeVariant === "card"}
+          onClick={() => set("bridgeVariant", "card")}
+        >
+          Card
+        </Seg>
+        <Seg
+          active={state.bridgeVariant === "full"}
+          onClick={() => set("bridgeVariant", "full")}
+        >
+          Hero
+        </Seg>
+      </Row>
+
+      <Row label="Equity chart">
+        <Seg
+          active={state.chartStyle === "line"}
+          onClick={() => set("chartStyle", "line")}
+        >
+          Line
+        </Seg>
+        <Seg
+          active={state.chartStyle === "area"}
+          onClick={() => set("chartStyle", "area")}
+        >
+          Area
+        </Seg>
+      </Row>
+
+      <Row label="Benchmark overlay">
+        <Seg active={state.showBench} onClick={() => set("showBench", true)}>
+          On
+        </Seg>
+        <Seg active={!state.showBench} onClick={() => set("showBench", false)}>
+          Off
+        </Seg>
+      </Row>
+
+      <Row label="Outcomes widget">
+        <Seg active={state.showOutcomes} onClick={() => set("showOutcomes", true)}>
+          Show
+        </Seg>
+        <Seg active={!state.showOutcomes} onClick={() => set("showOutcomes", false)}>
+          Hide
+        </Seg>
+      </Row>
+
       <button
         type="button"
-        onClick={() => setIsOpen((v) => !v)}
-        aria-label="Open tweaks panel"
-        className="fixed bottom-4 right-4 z-50 flex h-10 w-10 items-center justify-center rounded-full bg-accent text-white shadow-lg"
+        onClick={reset}
+        style={{
+          marginTop: 10,
+          padding: "8px 10px",
+          background: "var(--color-page)",
+          borderRadius: 6,
+          fontSize: 10.5,
+          color: "var(--color-text-muted)",
+          lineHeight: 1.5,
+          width: "100%",
+          textAlign: "left",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "var(--font-sans)",
+        }}
       >
-        ⚙
+        Reset to defaults
       </button>
-      {isOpen && (
-        <div
-          role="dialog"
-          aria-label="Tweaks"
-          className="fixed bottom-16 right-4 z-50 w-[300px] rounded-lg border border-border bg-surface p-4 shadow-xl"
-        >
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-sm font-medium">Tweaks</div>
-            <button
-              type="button"
-              aria-label="Close tweaks"
-              onClick={() => setIsOpen(false)}
-            >
-              ×
-            </button>
-          </div>
-
-          <TweakSelect
-            label="Density"
-            value={state.density}
-            options={["compact", "comfortable", "spacious"]}
-            onChange={(v) =>
-              setState((s) => ({ ...s, density: v as TweakState["density"] }))
-            }
-          />
-          <TweakSelect
-            label="Accent"
-            value={state.accentIntensity}
-            options={["muted", "default", "loud"]}
-            onChange={(v) =>
-              setState((s) => ({
-                ...s,
-                accentIntensity: v as TweakState["accentIntensity"],
-              }))
-            }
-          />
-          <TweakSelect
-            label="Font"
-            value={state.displayFont}
-            options={["sans", "serif"]}
-            onChange={(v) =>
-              setState((s) => ({
-                ...s,
-                displayFont: v as TweakState["displayFont"],
-              }))
-            }
-          />
-          <TweakSelect
-            label="Bridge"
-            value={state.bridgeVariant}
-            options={["subtle", "card", "full"]}
-            onChange={(v) =>
-              setState((s) => ({
-                ...s,
-                bridgeVariant: v as TweakState["bridgeVariant"],
-              }))
-            }
-          />
-          <TweakSelect
-            label="Chart"
-            value={state.chartStyle}
-            options={["line", "area"]}
-            onChange={(v) =>
-              setState((s) => ({
-                ...s,
-                chartStyle: v as TweakState["chartStyle"],
-              }))
-            }
-          />
-          <TweakToggle
-            label="Show benchmark"
-            checked={state.showBench}
-            onChange={(v) => setState((s) => ({ ...s, showBench: v }))}
-          />
-          <TweakToggle
-            label="Show outcomes"
-            checked={state.showOutcomes}
-            onChange={(v) => setState((s) => ({ ...s, showOutcomes: v }))}
-          />
-
-          <button
-            type="button"
-            onClick={() => setState(TWEAK_DEFAULTS)}
-            className="mt-3 text-xs text-accent hover:underline"
-          >
-            Reset to defaults
-          </button>
-        </div>
-      )}
-    </>
+    </div>
   );
 }
 
-function TweakSelect({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (v: string) => void;
-}) {
+// Re-export the state type so call sites that imported it from the old
+// path keep working (Tweaks.test.tsx, BridgeWidget tests).
+export type { TweakState } from "../context/TweaksContext";
+
+// ───────────────────────────────────────────────────────── primitives
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="my-2 flex items-center justify-between text-xs">
-      <span>{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded border border-border px-1 py-0.5"
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "10px 0",
+        borderBottom: "1px solid var(--color-border)",
+      }}
+    >
+      <span
+        style={{
+          fontSize: 12,
+          color: "var(--color-text-secondary)",
+          fontWeight: 500,
+        }}
       >
-        {options.map((o) => (
-          <option key={o} value={o}>
-            {o}
-          </option>
-        ))}
-      </select>
-    </label>
+        {label}
+      </span>
+      <div style={{ display: "flex", gap: 4 }}>{children}</div>
+    </div>
   );
 }
 
-function TweakToggle({
-  label,
-  checked,
-  onChange,
+function Seg({
+  active,
+  onClick,
+  children,
 }: {
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
 }) {
+  const baseStyle: CSSProperties = {
+    padding: "4px 10px",
+    border: `1px solid ${active ? "var(--color-accent)" : "var(--color-border)"}`,
+    background: active
+      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+      : "var(--color-surface)",
+    color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
+    borderRadius: 4,
+    fontSize: 11.5,
+    fontWeight: 500,
+    cursor: "pointer",
+    fontFamily: "var(--font-sans)",
+  };
   return (
-    <label className="my-2 flex items-center justify-between text-xs">
-      <span>{label}</span>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-    </label>
+    <button type="button" onClick={onClick} style={baseStyle}>
+      {children}
+    </button>
   );
 }
+
+// Matches the legacy default export so existing AllocationDashboardV2
+// imports keep working through the refactor.
+export default Tweaks;
+
+// Re-export TweakState alias for backward-compat with old test paths.
+// Original Tweaks.tsx exported `Tweaks` (named) — preserved above.

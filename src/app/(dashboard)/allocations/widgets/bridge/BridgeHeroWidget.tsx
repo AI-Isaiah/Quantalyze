@@ -17,8 +17,14 @@
 import type { WidgetProps } from "../../lib/types";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { BridgeWidget } from "../../components/BridgeWidget";
+import { useTweakValue } from "../../context/TweaksContext";
 
 export default function BridgeHeroWidget({ data }: WidgetProps) {
+  // PR3 (HANDOFF G5) — read bridgeVariant from TweaksContext so the
+  // panel's Subtle / Card / Hero segmented control flips the rendered
+  // shape live. Outside the provider this returns the default "full".
+  const variant = useTweakValue("bridgeVariant");
+
   const hasError = Boolean(
     data && typeof data === "object" && (data as { __error?: unknown }).__error,
   );
@@ -45,6 +51,7 @@ export default function BridgeHeroWidget({ data }: WidgetProps) {
       flaggedHoldings={flaggedHoldings}
       matchDecisionsByHoldingRef={matchDecisionsByHoldingRef}
       outcomes={outcomes}
+      variant={variant}
     />
   );
 }

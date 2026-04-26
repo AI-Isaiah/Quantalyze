@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
+import { useTweakValue } from "../../context/TweaksContext";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -158,6 +159,14 @@ export function EquityChart({
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  // PR3 (HANDOFF G5) — Tweaks-context knobs. `chartStyle` gates the
+  // gradient area fill so the prototype's Line / Area segmented control
+  // flips the visual; `showBench` gates the BTC dashed overlay + legend
+  // chip. Outside the provider both default to truthy values matching
+  // the existing render.
+  const chartStyle = useTweakValue("chartStyle");
+  const showBench = useTweakValue("showBench");
 
   // ResizeObserver — fall back to a fixed 960 in jsdom / older runtimes.
   useEffect(() => {
@@ -447,20 +456,16 @@ export function EquityChart({
     setPickerOpen(false);
   };
 
-  // ── Always-visible summary (current period return) ────────────────
-  // Shows the last point's period-relative return without requiring hover.
-  // This is the "what am I looking at?" label the axis+legend was missing.
-  const currentReturnPct =
-    visibleNormalized.length > 0
-      ? (visibleNormalized[visibleNormalized.length - 1] - 1) * 100
-      : 0;
-  const currentReturnPositive = currentReturnPct >= 0;
-  const periodLabel = period === "CUSTOM" ? "Custom range" : period;
-
   // ── Render ────────────────────────────────────────────────────────
   return (
     <div ref={wrapRef} className="relative w-full">
-      {/* Period toggle + always-visible current-return summary */}
+      {/* PR3 (dashboard parity) — single header row matching the truth
+          screenshot: legend chips, period toggle, and "sync just now"
+          stamp on the right. The active period button uses the subtle
+          accent-10 background + accent text from the prototype, not the
+          solid-fill style. The always-visible return summary is gone —
+          truth shows the value via Y-axis labels + the sync timestamp,
+          which is the cleaner read. */}
       <div
         style={{
           display: "flex",
@@ -476,7 +481,7 @@ export function EquityChart({
           aria-label="Period"
           style={{
             display: "flex",
-            gap: 4,
+            gap: 2,
             position: "relative",
             alignItems: "center",
             flexWrap: "wrap",
@@ -492,17 +497,21 @@ export function EquityChart({
                 aria-selected={active}
                 onClick={() => setPeriodChecked(p)}
                 style={{
-                  padding: "3px 9px",
+                  padding: "3px 8px",
                   fontSize: 11,
-                  fontFamily: "Geist Mono, monospace",
-                  background: active ? "var(--accent)" : "transparent",
+                  fontWeight: 500,
+                  fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                  background: active
+                    ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                    : "transparent",
                   color: active
-                    ? "var(--color-surface, #fff)"
-                    : "var(--text-secondary)",
-                  border: `1px solid ${active ? "var(--accent)" : "var(--border)"}`,
-                  borderRadius: 4,
+                    ? "var(--color-accent)"
+                    : "var(--color-text-muted)",
+                  border: "none",
+                  borderRadius: 3,
                   cursor: "pointer",
                   fontVariantNumeric: "tabular-nums",
+                  letterSpacing: "0.04em",
                 }}
               >
                 {p}
@@ -522,37 +531,13 @@ export function EquityChart({
         </div>
 
         <div
-          aria-label={`Return over ${periodLabel}`}
           style={{
-            display: "flex",
-            alignItems: "baseline",
-            gap: 6,
-            fontFamily: "Geist Mono, monospace",
-            fontVariantNumeric: "tabular-nums",
+            fontSize: 11,
+            color: "var(--color-text-muted)",
+            fontFamily: "var(--font-sans)",
           }}
         >
-          <span
-            style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              textTransform: "uppercase",
-              letterSpacing: "0.04em",
-            }}
-          >
-            {periodLabel}
-          </span>
-          <span
-            style={{
-              fontSize: 18,
-              fontWeight: 600,
-              color: currentReturnPositive
-                ? "var(--positive)"
-                : "var(--negative)",
-            }}
-          >
-            {currentReturnPositive ? "+" : ""}
-            {currentReturnPct.toFixed(2)}%
-          </span>
+          sync just now
         </div>
       </div>
 
@@ -571,7 +556,7 @@ export function EquityChart({
         }}
       >
         <LegendSwatch color="var(--chart-strategy)" label="Portfolio" />
-        {visibleBenchmarkNormalized && (
+        {showBench && visibleBenchmarkNormalized && (
           <LegendSwatch color="var(--chart-benchmark)" label="BTC" dashed />
         )}
         {overlaySeries.map((o) => (
@@ -664,8 +649,9 @@ export function EquityChart({
           ))}
 
           {/* Benchmark (dashed) — normalized to period start so it
-              departs from the 0% baseline alongside the portfolio. */}
-          {visibleBenchmarkNormalized && (
+              departs from the 0% baseline alongside the portfolio.
+              Hidden when Tweaks → Benchmark overlay = Off. */}
+          {showBench && visibleBenchmarkNormalized && (
             <path
               d={toPath(visibleBenchmarkNormalized)}
               fill="none"
@@ -687,8 +673,12 @@ export function EquityChart({
             />
           ))}
 
-          {/* Portfolio area + line */}
-          <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
+          {/* Portfolio area + line. Tweaks → Equity chart = Line drops
+              the gradient fill so the chart renders as a stroke-only
+              line, mirroring the prototype tweak. */}
+          {chartStyle === "area" && (
+            <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
+          )}
           <path
             d={toPath(visibleNormalized)}
             fill="none"

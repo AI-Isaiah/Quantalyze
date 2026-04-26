@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import Link from "next/link";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { useDashboardConfigV2 } from "./hooks/useDashboardConfig";
 import { WidgetGrid } from "./components/WidgetGrid";
@@ -15,7 +16,7 @@ import { WidgetPicker } from "./components/WidgetPicker";
 import { WIDGET_COMPONENTS } from "./widgets";
 import { EmptyState } from "./EmptyState";
 import { AlertBanner } from "./components/AlertBanner";
-import { Tweaks } from "./components/Tweaks";
+import { useTweaks } from "./context/TweaksContext";
 import { InsightStrip } from "@/components/portfolio/InsightStrip";
 import { trackUsageEventClient } from "@/lib/analytics/usage-events-client";
 
@@ -80,6 +81,16 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   const pickerTriggerRef = useRef<HTMLButtonElement>(null);
   const dashboardContainerRef = useRef<HTMLDivElement | null>(null);
 
+  // PR3 — listen for the AllocationsTabs "Widget" chip's custom event so
+  // clicking it opens the picker without prop-drilling state up two levels.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onOpen = () => setPickerOpen(true);
+    window.addEventListener("allocations:open-widget-picker", onOpen);
+    return () =>
+      window.removeEventListener("allocations:open-widget-picker", onOpen);
+  }, []);
+
   const {
     portfolio,
     strategies,
@@ -91,13 +102,42 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
   const holdingsEmpty = holdingsSummary.length === 0;
 
+  // PR3 (HANDOFF G5) — read showOutcomes from TweaksContext so the user
+  // can hide the outcomes timeline tile via the panel without removing it
+  // from their persisted layout. The provider is mounted in
+  // AllocationsTabs; rendering this component outside that provider falls
+  // back to defaults (showOutcomes = true) per useTweaks() contract.
+  const { state: tweaks } = useTweaks();
+
+  // PR3 (HANDOFF G9) — count strategy-composite tiles being filtered out
+  // when strategies.length === 0 so the dashboard can surface a friendly
+  // "Connect a strategy to unlock N widgets" callout instead of leaving
+  // the user with an unexpectedly sparse grid. Only trips when the user
+  // has added picker tiles that depend on strategies.
+  const filteredStrategyTileCount = useMemo(() => {
+    if (strategies.length > 0) return 0;
+    return config.tiles.filter((t) => STRATEGY_COMPOSITE_WIDGETS.has(t.k))
+      .length;
+  }, [config.tiles, strategies.length]);
+
   // Phase 07 f2 gate — filter strategy-composite widgets when no strategies.
   // Hook ordering: this useMemo and the subsequent ones MUST stay above any
   // early return so React's hook-order invariant holds across renders.
   const visibleTiles = useMemo(() => {
-    if (strategies.length > 0) return config.tiles;
-    return config.tiles.filter((t) => !STRATEGY_COMPOSITE_WIDGETS.has(t.k));
-  }, [config.tiles, strategies.length]);
+    let tiles = config.tiles;
+    if (strategies.length === 0) {
+      tiles = tiles.filter((t) => !STRATEGY_COMPOSITE_WIDGETS.has(t.k));
+    }
+    if (!tweaks.showOutcomes) {
+      // Outcomes-timeline tile registry id can come from either the short
+      // key "outcomes" (truth default) or the full id "outcomes-timeline"
+      // (post-normalization layouts). Filter both.
+      tiles = tiles.filter(
+        (t) => t.k !== "outcomes" && t.k !== "outcomes-timeline",
+      );
+    }
+    return tiles;
+  }, [config.tiles, strategies.length, tweaks.showOutcomes]);
 
   const activeKeys = useMemo(
     () => new Set(config.tiles.map((t) => t.k)),
@@ -250,32 +290,87 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         className="relative"
         style={{ marginTop: 8 }}
       >
-        <div
+        {/* PR3 (dashboard parity) — the in-dashboard "+ Add widget" button
+            is gone; the tab-row Widget chip in AllocationsTabs is the new
+            entry point. The picker still mounts here, but the trigger is
+            an invisible 0-size anchor so the existing positioning math
+            in WidgetPicker (anchorRef-relative) keeps working. The chip
+            opens the picker via a CustomEvent listened to in the
+            useEffect above. */}
+        <button
+          ref={pickerTriggerRef}
+          type="button"
+          aria-hidden
+          tabIndex={-1}
+          onClick={() => setPickerOpen((v) => !v)}
           style={{
-            position: "relative",
-            display: "flex",
-            justifyContent: "flex-end",
-            marginBottom: 8,
+            position: "absolute",
+            top: 0,
+            right: 0,
+            width: 0,
+            height: 0,
+            padding: 0,
+            margin: 0,
+            border: 0,
+            background: "transparent",
+            pointerEvents: "none",
           }}
-        >
-          <button
-            ref={pickerTriggerRef}
-            type="button"
-            onClick={() => setPickerOpen((v) => !v)}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-3 py-1 text-xs text-text-secondary hover:bg-page focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-            aria-haspopup="dialog"
-            aria-expanded={pickerOpen}
+        />
+        <WidgetPicker
+          isOpen={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          anchorRef={pickerTriggerRef}
+          activeKeys={activeKeys}
+          onPick={addWidget}
+        />
+        {filteredStrategyTileCount > 0 ? (
+          // PR3 (HANDOFF G9) — friendlier empty-grid fallback. When a user
+          // has added strategy-composite tiles via the picker but has no
+          // strategies connected, the f2 gate filters them out and the
+          // grid feels broken. This callout names what's missing and
+          // points at /discovery, where strategies live.
+          <div
+            role="note"
+            data-testid="empty-grid-callout"
+            className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-surface-subtle px-4 py-3 text-sm"
           >
-            + Add widget
-          </button>
-          <WidgetPicker
-            isOpen={pickerOpen}
-            onClose={() => setPickerOpen(false)}
-            anchorRef={pickerTriggerRef}
-            activeKeys={activeKeys}
-            onPick={addWidget}
-          />
-        </div>
+            <div className="flex items-start gap-3">
+              <span
+                aria-hidden
+                className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/10 text-accent"
+              >
+                <svg
+                  width="11"
+                  height="11"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                >
+                  <circle cx="7" cy="7" r="4" />
+                  <path d="M13 13l-2.5-2.5" />
+                </svg>
+              </span>
+              <div>
+                <div className="font-medium text-text-primary">
+                  Connect a strategy to unlock {filteredStrategyTileCount}{" "}
+                  {filteredStrategyTileCount === 1 ? "widget" : "widgets"}
+                </div>
+                <div className="text-xs text-text-muted">
+                  Risk &amp; performance tiles need at least one strategy in
+                  your portfolio before they can render.
+                </div>
+              </div>
+            </div>
+            <Link
+              href="/discovery"
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent/40 bg-surface px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              Browse strategies →
+            </Link>
+          </div>
+        ) : null}
         <WidgetGrid
           tiles={visibleTiles}
           onResize={resizeWidget}
@@ -284,10 +379,10 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
           renderWidget={renderWidget}
         />
       </div>
-      {/* Plan 11 / D-19 — QA-only Tweaks panel. Internally returns null when
-          QA_MODE is false, so the floating trigger never renders for
-          allocator-facing production builds. */}
-      <Tweaks />
+      {/* PR3 (HANDOFF G5) — Tweaks panel + toggle now mount at the
+          AllocationsTabs root (a level above this component) so they
+          stay visible across all tabs. Removed from this component to
+          avoid double-mounting the panel/toggle on Overview. */}
     </div>
   );
 }

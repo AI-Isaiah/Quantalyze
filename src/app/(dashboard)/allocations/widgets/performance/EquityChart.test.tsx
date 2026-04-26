@@ -245,14 +245,16 @@ describe("EquityChart", () => {
     expect(legend.textContent).toMatch(/BTC/);
   });
 
-  it("renders an always-visible current-return summary (no hover needed)", () => {
-    const { getByLabelText } = render(
+  it("PR3 (dashboard parity) — renders 'sync just now' stamp instead of always-visible return summary", () => {
+    // PR3 dropped the right-side return-summary div ("ALL +1.23%") that
+    // collided with the prototype's "sync 2m ago" affordance. The Y-axis
+    // labels + hover crosshair already surface the period return; the
+    // sync stamp is the truth-screenshot's right-aligned chrome.
+    const { getByText, queryByLabelText } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
-    // The summary is aria-labeled "Return over <period>" (ALL here).
-    const summary = getByLabelText("Return over ALL");
-    // A signed percentage is present.
-    expect(summary.textContent).toMatch(/[+-]\d+\.\d+%/);
+    expect(getByText("sync just now")).toBeTruthy();
+    expect(queryByLabelText("Return over ALL")).toBeNull();
   });
 
   it("gradient uses the --chart-strategy design token (no hardcoded hex)", () => {

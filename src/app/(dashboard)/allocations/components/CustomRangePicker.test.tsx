@@ -164,4 +164,118 @@ describe("CustomRangePicker", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
+
+  // ───────────────────────────────────────────────────── PR3 (HANDOFF G6)
+  // dual-month grid + presets rail coverage
+
+  it("PR3 — renders both presets rail and two month grids", () => {
+    const { getByText, getAllByText } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={MIN}
+        max={MAX}
+      />,
+    );
+    // Presets rail labels (matching prototype range-picker.jsx:121-130).
+    expect(getByText(/Last 7 days/i)).toBeTruthy();
+    expect(getByText(/Last 30 days/i)).toBeTruthy();
+    expect(getByText(/Last 90 days/i)).toBeTruthy();
+    expect(getByText(/Month to date/i)).toBeTruthy();
+    expect(getByText(/Year to date/i)).toBeTruthy();
+    // Two month-nav arrows: ‹ on left grid, › on right grid.
+    expect(getAllByText("‹").length).toBeGreaterThanOrEqual(1);
+    expect(getAllByText("›").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("PR3 — preset 'Last 7 days' sets a 7-day window ending at MAX", () => {
+    const onApply = vi.fn();
+    const { getByText, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={MIN}
+        max={MAX}
+      />,
+    );
+    fireEvent.click(getByText(/Last 7 days/i));
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    const arg = onApply.mock.calls[0][0];
+    // End is MAX; start is 6 days before (inclusive 7-day window).
+    expect(arg.end).toBe("2024-06-30");
+    expect(arg.start).toBe("2024-06-24");
+  });
+
+  it("PR3 — preset 'Year to date' sets January 1st of the MAX year as start", () => {
+    const onApply = vi.fn();
+    const { getByText, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={MIN}
+        max={MAX}
+      />,
+    );
+    fireEvent.click(getByText(/Year to date/i));
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    const arg = onApply.mock.calls[0][0];
+    expect(arg.start).toBe("2024-01-01");
+    expect(arg.end).toBe("2024-06-30");
+  });
+
+  it("PR3 — preset 'Max' uses min..max as the range", () => {
+    const onApply = vi.fn();
+    const { getByText, getByRole } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={onApply}
+        min={MIN}
+        max={MAX}
+      />,
+    );
+    fireEvent.click(getByText(/^Max$/));
+    fireEvent.click(getByRole("button", { name: /apply/i }));
+    const arg = onApply.mock.calls[0][0];
+    expect(arg.start).toBe("2024-01-01");
+    expect(arg.end).toBe("2024-06-30");
+  });
+
+  it("PR3 — day count chip reads '180 days' for a 180-day window", () => {
+    const min = new Date(2024, 0, 1);
+    const max = new Date(2024, 5, 28); // 180 days inclusive
+    const { getByText } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-01-01", end: "2024-06-28" }}
+      />,
+    );
+    expect(getByText(/180 days/i)).toBeTruthy();
+  });
+
+  it("PR3 — left + right month grids show consecutive months", () => {
+    const min = new Date(2024, 2, 1); // March 2024
+    const max = new Date(2024, 5, 30); // June 30, 2024
+    const { getByText } = render(
+      <CustomRangePicker
+        isOpen
+        onClose={() => {}}
+        onApply={() => {}}
+        min={min}
+        max={max}
+        initialRange={{ start: "2024-03-15", end: "2024-04-15" }}
+      />,
+    );
+    // initialRange.start is March 15 → leftMonth = March, rightMonth = April.
+    expect(getByText(/March 2024/)).toBeTruthy();
+    expect(getByText(/April 2024/)).toBeTruthy();
+  });
 });

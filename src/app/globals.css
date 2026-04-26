@@ -68,6 +68,27 @@ body {
   color: var(--color-text-primary);
 }
 
+/* PR3 (HANDOFF G5) — Tweaks density modifier. Mirrors the truth file's
+   body[data-density="tight"|"loose"] rules from
+   `Allocator Dashboard - Standalone.html` so the panel's Density
+   segmented control compresses or relaxes spacing globally without
+   touching individual components. The `--row-h` and `--density-pad`
+   tokens are read by KpiStrip, HoldingsTable rows, and any tile that
+   opts into density-aware spacing. */
+:root {
+  --row-h: 44px;
+  --density-pad: 16px;
+}
+body[data-density="tight"] {
+  --row-h: 36px;
+  --density-pad: 12px;
+  font-size: 13px;
+}
+body[data-density="loose"] {
+  --row-h: 52px;
+  --density-pad: 20px;
+}
+
 /* Typography for the /legal/* routes — avoids a full @tailwindcss/typography
    dependency for three static pages. */
 .legal-article h1 {

@@ -131,8 +131,29 @@ function renderShell(payloadOverrides: Partial<typeof BASE_PAYLOAD> = {}) {
 }
 
 describe("AllocationDashboardV2 — InsightStrip mount (PR1)", () => {
-  it("mounts <section aria-label='Portfolio insights'> above WidgetGrid in DOM order", async () => {
-    const { container } = renderShell();
+  it("mounts <section aria-label='Portfolio insights'> above WidgetGrid in DOM order (when there's anything to render)", async () => {
+    // PR3 — InsightStrip returns null when there's nothing to say. Pass a
+    // non-empty flaggedHoldings list so the section actually mounts and
+    // the DOM-order assertions below have something to check.
+    const { container } = renderShell({
+      // BASE_PAYLOAD's flaggedHoldings: [] gets inferred as never[];
+      // cast the whole array so a populated row passes typecheck.
+      flaggedHoldings: [
+        {
+          holding_ref: "holding:binance:BTC:spot",
+          venue: "binance",
+          symbol: "BTC",
+          holding_type: "spot",
+          value_usd: 90000,
+          weight: 1,
+          breach_reasons: ["max_weight"],
+          top_candidate_strategy_id: "strat-x",
+          top_candidate_strategy_name: "Helios Perp Basis",
+          top_candidate_composite: 80,
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any,
+    });
 
     // Wait for the grid to mount.
     await waitFor(() => {
@@ -164,14 +185,21 @@ describe("AllocationDashboardV2 — InsightStrip mount (PR1)", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("empty-state copy matches HANDOFF.md fallback verbatim when zero insights AND zero flagged", async () => {
-    const { findByText } = renderShell({
+  it("PR3 (dashboard parity) — InsightStrip stays unmounted when zero insights AND zero flagged", () => {
+    // PR3 silenced the loud empty state to match the truth screenshot:
+    // when there's nothing to say, the strip renders null so the Bridge
+    // banner sits flush below the tab row instead of being pushed down
+    // by a "WHAT WE NOTICED · No unusual activity" block.
+    const { queryByText, queryByRole } = renderShell({
       analytics: null,
       flaggedHoldings: [],
     });
     expect(
-      await findByText("No unusual activity in the trailing window."),
-    ).toBeInTheDocument();
+      queryByText("No unusual activity in the trailing window."),
+    ).toBeNull();
+    expect(
+      queryByRole("region", { name: "Portfolio insights" }),
+    ).toBeNull();
   });
 
   it("flagged-holdings count surfaces a 'Bridge flagged N holding(s)' bullet linking to Scenario", async () => {

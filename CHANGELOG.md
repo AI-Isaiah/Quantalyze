@@ -6,6 +6,88 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.11.0] - 2026-04-26
+
+Phase 09.1 PR3 — **Dashboard parity finalization** (HANDOFF.md G5/G6/G9 +
+truth-screenshot QA pass). Closes the last visual deltas between the
+prototype `Allocator Dashboard - Standalone.html` and production. The
+allocator dashboard is now ~85% pixel-identical to the truth, with the
+remaining 15% being state-lifting refactors deferred to a follow-up.
+
+### Added
+
+- **TweaksContext provider + floating chip + 7-knob plumbing** (HANDOFF G5).
+  The QA_MODE gate is gone; allocators see a `✻ Tweaks` chip floating at
+  fixed bottom-right (matching the prototype). Clicking opens a 300px
+  segmented panel that controls:
+  - `density` → `body[data-density]` (CSS `--row-h` / `--density-pad` /
+    font-size globally swap)
+  - `accentIntensity` → `document.documentElement.style.setProperty("--color-accent", ...)`
+    (every `--color-accent` consumer flips in lock-step)
+  - `displayFont`, `bridgeVariant`, `chartStyle`, `showBench`, `showOutcomes`
+    → consumed by widgets via `useTweakValue(key)` hook
+  Persistence: `localStorage["allocations.tweaks"]` (same key as the QA-gated
+  v0.15.x panel — stored preferences survive the lift).
+- **CustomRangePicker dual-month grid + presets rail** (HANDOFF G6). Faithful
+  port of `range-picker.jsx`:
+  - Presets rail: Last 7 / 14 / 30 / 60 / 90 days, MTD, YTD, Max
+  - Two side-by-side `MonthGrid` components with hover preview, start/end
+    edges, in-range highlight
+  - Navigation arrows on outer months, Esc + outside-click dismiss
+  - Day count chip + ISO range label in footer
+  Preserves the f7 contract (isOpen / onClose / onApply / min / max /
+  initialRange) so existing EquityChart callers don't change.
+- **Friendlier empty-grid fallback** (HANDOFF G9). When `strategies.length
+  === 0` AND the user has added strategy-composite tiles via the picker,
+  the dashboard surfaces a "Connect a strategy to unlock N widgets"
+  callout above the grid linking to `/discovery`. Avoids the unexpectedly
+  sparse layout when the f2 gate filters out correlation-matrix /
+  rolling-sharpe / etc. without explanation.
+- **Tab-row count badges + chip group**. Holdings + Outcomes tabs now show
+  a count badge (`props.holdingsSummary.length`, `props.outcomes.length`).
+  Right of the tab list: Widget / Export / + Allocation chips, with the
+  Widget chip dispatching `CustomEvent("allocations:open-widget-picker")`
+  for the in-dashboard picker to consume.
+- **Visible-tab list** of 5 surfaces (Overview / Holdings / Outcomes /
+  Mandate / Risk). Scenario stays routable via `?tab=scenario` and the
+  green "+ Allocation" chip; no button for it lives in the tablist
+  (matches truth screenshot).
+- **Equity card "sync just now" stamp** replaces the always-visible return
+  summary (`ALL +1.23%`) that collided with the prototype's right-aligned
+  sync-timestamp affordance. Period buttons now use the subtle accent-10
+  background + accent text from the prototype, no border.
+
+### Changed
+
+- **InsightStrip silenced when empty**. The "WHAT WE NOTICED · No unusual
+  activity in the trailing window" empty state was loud and didn't match
+  the truth screenshot. Component now returns null when there are zero
+  firing insights AND zero flagged holdings; the Bridge banner sits flush
+  below the tab row instead of being pushed down.
+- **In-Overview "+ Add widget" button removed**. The tab-row Widget chip
+  is the new entry point; the picker still mounts inside the dashboard
+  against an invisible 0-size anchor so the existing positioning math
+  keeps working.
+- **AllocationsTabs.tsx**: `TweaksToggle` + `Tweaks` panel mount at the
+  AllocationsTabs root so they stay visible across all tabs (Overview /
+  Holdings / Outcomes / Mandate / Risk / Scenario), not just Overview.
+
+### Tests
+
+- 1813 vitest tests pass (87 skipped pre-existing). New coverage:
+  - `Tweaks.test.tsx` — 15 tests covering toggle + panel open/close,
+    each segmented control persisting, density `body[data-density]`,
+    accent `--color-accent` swap, defaults reset, malformed-JSON
+    fallback, outside-provider fallback, postMessage invariant
+  - `CustomRangePicker.test.tsx` — 13 tests (7 backward-compat from PR1
+    + 6 new dual-month / presets coverage including Last 7 days / YTD /
+    Max preset window math)
+  - `AllocationsTabs.test.tsx` — updated for the 5-tab visible set + the
+    Scenario routing-only behavior
+  - `InsightStrip.test.tsx` + `AllocationDashboardV2.insight-strip.test.tsx`
+    — updated for the new render-null-when-empty contract
+- Typecheck clean
+
 ## [0.15.10.0] - 2026-04-26
 
 Phase 09.1 PR2 — **Bridge empty-state polish** (HANDOFF.md G4). The "No
