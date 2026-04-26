@@ -77,10 +77,14 @@ export function WidgetChrome({ k, w, onResize, onRemove, onMove }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
 
   function announce(message: string) {
-    // Setting the same string twice would be deduped by aria-atomic
-    // re-render, so append a zero-width space to force a fresh
+    // 09.1-REVIEW IN-03: Setting the same string twice would be deduped
+    // by aria-atomic re-render, so append a single trailing space to
+    // make the new value !== the previous one and force a fresh
     // announcement when the same action fires repeatedly (e.g., user
     // presses ArrowDown twice and both announcements need to surface).
+    // Screen readers strip trailing whitespace before reading, so the
+    // user hears the same phrase. (Earlier comment incorrectly claimed
+    // a zero-width space — the actual code uses a regular space.)
     setAnnouncement((prev) => (prev === message ? `${message} ` : message));
   }
 
