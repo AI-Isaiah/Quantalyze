@@ -51,6 +51,11 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
 
   useEffect(() => {
     // Read sessionStorage post-mount (RESEARCH Pitfall 6 — SSR-safe).
+    //
+    // The setState-in-effect is intentional and bounded: it fires AT MOST
+    // ONCE on mount, only when the dismissal flag is set. Same precedent
+    // as AllocationsTabs.tsx loadUiV2Flag effect (line 230-238).
+    /* eslint-disable react-hooks/set-state-in-effect */
     try {
       if (sessionStorage.getItem(STORAGE_KEY) === "1") {
         setDismissed(true);
@@ -58,6 +63,7 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
     } catch {
       // sessionStorage unavailable — fail open (card stays visible).
     }
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   // BLOCK-2: Save is disabled when the input is empty (also during in-flight

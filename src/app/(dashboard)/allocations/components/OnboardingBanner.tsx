@@ -34,6 +34,11 @@ export function OnboardingBanner() {
     // Read sessionStorage post-mount per RESEARCH Pitfall 6 (SSR-safe). If
     // the user has already dismissed in this tab session, hide via state
     // update — first paint still rendered the banner so there's no CLS.
+    //
+    // The setState-in-effect is intentional and bounded: it fires AT MOST
+    // ONCE on mount, only when the dismissal flag is set. Same precedent
+    // as AllocationsTabs.tsx loadUiV2Flag effect (line 230-238).
+    /* eslint-disable react-hooks/set-state-in-effect */
     try {
       if (sessionStorage.getItem(STORAGE_KEY) === "1") {
         setDismissed(true);
@@ -43,6 +48,7 @@ export function OnboardingBanner() {
       // — fail open: leave banner visible. The user can still dismiss for
       // this render via the × button (which also no-ops gracefully).
     }
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   const handleDismiss = () => {

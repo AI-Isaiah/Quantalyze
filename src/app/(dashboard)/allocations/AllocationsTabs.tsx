@@ -8,6 +8,12 @@ import { ScenarioStub } from "./ScenarioStub";
 import { TweaksProvider } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
+// Phase 11 / 11-05 — onboarding nudge surfaces (S1 + S2). Both render
+// above the existing tab nav when apiKeysCount === 0. Light client
+// components — kept as direct imports rather than next/dynamic so they
+// hydrate immediately on first paint (no skeleton flash for the nudge).
+import { OnboardingBanner } from "./components/OnboardingBanner";
+import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 
 // Phase A6 — Holdings / Outcomes / Mandate / Risk tab panels lazy-load via
@@ -323,9 +329,32 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   // subtitle if the allocator has no portfolio yet.
   const entityName = props.portfolio?.name ?? null;
 
+  // Phase 11 / 11-05 — onboarding nudge surface predicates.
+  //   - S1 (OnboardingBanner) renders when the allocator has zero connected
+  //     api_keys (D-02 server-side count). The component itself respects the
+  //     sessionStorage dismissal flag (D-03) post-mount.
+  //   - S2 (MandateQuickSetCard) renders when (a) S1 is showing AND (b) the
+  //     mandate is not yet set (D-04). The card respects its own
+  //     sessionStorage Skip flag post-mount.
+  // Both surfaces live ABOVE the existing tab nav and do NOT touch tab
+  // content — purely additive (UI-SPEC §Interaction Contract).
+  const showOnboardingBanner = props.apiKeysCount === 0;
+  const showMandateQuickSet =
+    props.apiKeysCount === 0 && !props.mandateIsSet;
+
   return (
     <TweaksProvider>
     <div>
+      {showOnboardingBanner && (
+        <div className="mb-6">
+          <OnboardingBanner />
+          {showMandateQuickSet && (
+            <div className="mt-3">
+              <MandateQuickSetCard />
+            </div>
+          )}
+        </div>
+      )}
       <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border pb-2.5">
         <div className="flex items-baseline gap-2.5">
           <h1 className="font-display text-[22px] leading-none tracking-tight text-text-primary">
