@@ -218,12 +218,18 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
 
   // Phase 10 / 10-06b — `allocations.ui_v2` flag drives the scenario panel
-  // body. Initialized from localStorage at first render via the SSR-safe
-  // helper above (server returns true so the SSR-rendered scenario panel
-  // matches the post-hydration default for the V2 cohort). Default-true so
-  // production users continue to land on the composer; explicit "false" is
-  // the rollback escape hatch.
-  const isUiV2 = useState<boolean>(loadUiV2Flag)[0];
+  // body. SSR-stable initialization (review-pass P1 fix): start with `true`
+  // (matches the SSR helper's server-side default) so the SSR HTML and the
+  // first client render agree byte-for-byte; React hydration succeeds without
+  // mismatch. The actual localStorage check moves to the useEffect below,
+  // which only flips the flag to `false` AFTER hydration completes — this
+  // keeps the rollback path reachable while eliminating the hydration error
+  // that an inline localStorage read would surface for users who explicitly
+  // opted out (raw=="false" on the client, but SSR rendered the V2 path).
+  const [isUiV2, setUiV2Flag] = useState<boolean>(true);
+  useEffect(() => {
+    if (loadUiV2Flag() === false) setUiV2Flag(false);
+  }, []);
 
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07

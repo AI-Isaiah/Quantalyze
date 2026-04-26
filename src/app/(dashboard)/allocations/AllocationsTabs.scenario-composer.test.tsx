@@ -356,4 +356,38 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
     const url = String(mockReplace.mock.calls[0][0]);
     expect(url).toContain("tab=scenario");
   });
+
+  // -------------------------------------------------------------------------
+  // T_AT10 — SSR-stable initial render (review-pass P1 fix). The scenario
+  //          panel must initialize with `isUiV2 = true` (matches SSR's
+  //          loadUiV2Flag default) regardless of what's in localStorage,
+  //          and only flip to false in a post-mount useEffect when the
+  //          allocator has explicitly opted out. This eliminates the
+  //          hydration-mismatch class where SSR rendered V2 but the inline
+  //          localStorage read on the client would have returned `false`.
+  // -------------------------------------------------------------------------
+  it("T_AT10 hydration-stable: SSR-equivalent initial render → ScenarioComposer; post-mount localStorage='false' → ScenarioStub", async () => {
+    // First render: localStorage is empty (SSR-equivalent — server never
+    // sees localStorage). Initial render renders the composer.
+    lsStore.clear();
+    setSearchParams("tab=scenario");
+    const { unmount } = render(<AllocationsTabs {...STUB_PROPS} />);
+    expect(
+      await screen.findByTestId("scenario-composer-body"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("scenario-stub-body")).toBeNull();
+    unmount();
+
+    // Second render: opt-out flag is set in localStorage BEFORE render.
+    // The `useState(true)` initial value still matches SSR (composer first
+    // tick), then the post-mount useEffect reads the flag and flips to
+    // ScenarioStub. We assert the stub renders after effects settle.
+    lsStore.set("allocations.ui_v2", "false");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    // After useEffect runs, the flag flips and the stub takes over.
+    expect(
+      await screen.findByTestId("scenario-stub-body"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
+  });
 });
