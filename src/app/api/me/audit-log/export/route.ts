@@ -4,6 +4,7 @@ import {
   serializeAuditLogCsv,
   type AuditLogRow,
 } from "@/lib/audit-log-csv";
+import { auditLogExportLimiter, checkLimit } from "@/lib/ratelimit";
 
 /**
  * GET /api/me/audit-log/export — Phase 11 / D-05 self-serve audit-log CSV.
@@ -26,9 +27,14 @@ import {
  *     call below.
  *
  * No CSRF check: this is a GET; CSRF defense is for state-mutating verbs.
- * No rate limiter: with the 10K cap the response is bounded at ~2 MB —
- * not a candidate for the Upstash bucket pattern that gates the GDPR
- * full-account export route.
+ *
+ * Rate limit (Phase 11 review fix IN-03): the 10K row cap bounds a
+ * SINGLE response at ~2 MB, but does not bound the request rate. A
+ * malicious authenticated user could script N-per-second hits to inflate
+ * Supabase egress without bound. `auditLogExportLimiter` caps a user at
+ * 10 exports per hour — well above any legitimate compliance/forensic
+ * review cadence and well below abuse thresholds. Distinct from
+ * `exportLimiter` (1/day for the GDPR full-account bundle).
  *
  * @audit-skip: read-only export of caller's own audit_log rows. The
  *   download itself does not mutate state; emitting an audit event for
@@ -52,6 +58,20 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Phase 11 review fix IN-03: per-user rate limit on the CSV export.
+  // 10/hour bounds Supabase egress on this endpoint without gating
+  // legitimate compliance review.
+  const rl = await checkLimit(
+    auditLogExportLimiter,
+    `audit_log_export:${user.id}`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
   }
 
   const ninetyDaysAgo = new Date(

@@ -90,6 +90,16 @@ export const bridgeOutcomeCurvesLimiter = makeLimiter(60, "60 s");
 // stays well under abuse thresholds for the auth-only PUT path.
 export const mandateAutoSaveLimiter = makeLimiter(30, "60 s");
 
+// 10/hour per authenticated user — Phase 11 review fix IN-03 audit-log
+// CSV export. The endpoint caps the SELECT at 10K rows so a single
+// response is bounded at ~2 MB, but a malicious authenticated user
+// could script an N-per-second hit to inflate Supabase egress without
+// bound. 10/hour is well above any legitimate compliance/forensic
+// review cadence (one allocator export per hour leaves room for
+// re-runs after fix-ups) and well below abuse thresholds. Distinct
+// from exportLimiter (1/day for the heavier full-account GDPR bundle).
+export const auditLogExportLimiter = makeLimiter(10, "3600 s");
+
 export type CheckLimitResult =
   | { success: true }
   | { success: false; retryAfter: number };

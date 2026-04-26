@@ -32,6 +32,22 @@ import {
 // audit.ts imports `server-only` which throws under the vitest jsdom env.
 vi.mock("server-only", () => ({}));
 
+// Phase 11 review fix IN-03 — rate-limit mock. Default to "allow" so the
+// non-rate-limit tests behave as before; per-test override flips to a 429
+// stub for the rate-limit regression.
+type CheckLimitMockResult =
+  | { success: true }
+  | { success: false; retryAfter: number };
+const RL_HOISTED = vi.hoisted(() => ({
+  checkLimit: vi.fn<
+    (limiter: unknown, key: string) => Promise<CheckLimitMockResult>
+  >(async () => ({ success: true }) as CheckLimitMockResult),
+}));
+vi.mock("@/lib/ratelimit", () => ({
+  auditLogExportLimiter: { fakeLimiter: true },
+  checkLimit: RL_HOISTED.checkLimit,
+}));
+
 // State shared across the unit-test mock and assertions.
 const STATE = vi.hoisted(() => ({
   authUser: {
@@ -111,6 +127,12 @@ afterEach(() => {
 });
 
 describe("GET /api/me/audit-log/export", () => {
+  beforeEach(() => {
+    // Reset the rate-limit mock so each test starts in the "allow" state.
+    RL_HOISTED.checkLimit.mockReset();
+    RL_HOISTED.checkLimit.mockResolvedValue({ success: true });
+  });
+
   it("Test 1 — returns 401 Unauthorized when no auth cookie present", async () => {
     STATE.authUser = null;
 
@@ -120,6 +142,28 @@ describe("GET /api/me/audit-log/export", () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toBe("Unauthorized");
+  });
+
+  it("Phase 11 IN-03 — returns 429 + Retry-After when auditLogExportLimiter trips", async () => {
+    RL_HOISTED.checkLimit.mockResolvedValueOnce({
+      success: false,
+      retryAfter: 42,
+    });
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("42");
+    const body = await res.json();
+    expect(body.error).toBe("Too many requests");
+
+    // Bucket key MUST be user-scoped so a single user's bursts can't
+    // squeeze out other users.
+    expect(RL_HOISTED.checkLimit).toHaveBeenCalledWith(
+      expect.anything(),
+      `audit_log_export:00000000-0000-0000-0000-000000000001`,
+    );
   });
 
   it("Test 2 — returns 200 with text/csv + attachment Content-Disposition", async () => {
