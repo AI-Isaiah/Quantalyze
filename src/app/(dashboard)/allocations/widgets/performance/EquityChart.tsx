@@ -58,7 +58,34 @@ type Props = {
   overlays?: OverlaySeries[];
   stale?: boolean;
   initialPeriod?: Period;
+  /**
+   * Phase 10 / 10-04 D-14. Optional scenario projection — rendered as a
+   * second SVG path overlay alongside the live baseline using
+   * `var(--color-chart-strategy)`.
+   *
+   * **Caller contract (Pitfall 1 in 10-RESEARCH.md):**
+   * `computeScenario().equity_curve` values are cumulative RETURN
+   * (e.g. 0.18 = +18%). This chart expects cumulative WEALTH starting
+   * at ~1.0. The caller (Plan 06 ScenarioComposer) MUST convert via
+   * `{ date, value: point.value + 1 }` before passing here. Mismatch
+   * results in the overlay starting at 0% instead of 100% — a visible
+   * but silent miscompare.
+   *
+   * Empty array (length=0) and `null` both hide the toggle and skip
+   * the overlay render. Existing call sites that don't pass this prop
+   * see zero behavior change.
+   */
+  scenarioSeries?: DailyPoint[] | null;
 };
+
+/**
+ * Phase 10 / 10-04. Independent visibility state for the scenario overlay
+ * vs the live baseline. Default "both" so the comparison is the
+ * first-render story; switching to "live" hides the overlay (back to the
+ * existing baseline-only rendering); "scenario" de-emphasizes the live
+ * baseline so the projection reads as the primary line.
+ */
+type VisibilityMode = "live" | "scenario" | "both";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -152,6 +179,7 @@ export function EquityChart({
   overlays = [],
   stale = false,
   initialPeriod = DEFAULT_PERIOD,
+  scenarioSeries = null,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(960);
@@ -159,6 +187,11 @@ export function EquityChart({
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  // Phase 10 / 10-04 D-14. 3-state visibility toggle for the scenario
+  // overlay. Default "both" so the live-vs-scenario comparison is the
+  // first-render story when the prop is supplied.
+  const [visibilityMode, setVisibilityMode] = useState<VisibilityMode>("both");
+  const hasScenario = !!scenarioSeries && scenarioSeries.length > 0;
 
   // PR3 (HANDOFF G5) — Tweaks-context knobs. `chartStyle` gates the
   // gradient area fill so the prototype's Line / Area segmented control
@@ -211,11 +244,33 @@ export function EquityChart({
     return visible.map((p) => m.get(p.date) ?? null);
   }, [benchmark, visible]);
 
+  // Phase 10 / 10-04. Append the scenario projection as a synthetic
+  // OverlaySeries so it flows through the existing normalization pipeline
+  // (start-of-period anchoring at 1.0, missing-day passthrough). Caller
+  // supplies WEALTH-form values starting at ~1.0 (Pitfall 1 in
+  // 10-RESEARCH.md — the +1 conversion happens upstream in
+  // ScenarioComposer, NOT here).
+  const enrichedOverlays = useMemo(() => {
+    const base = overlays ?? [];
+    if (!hasScenario) return base;
+    return [
+      ...base,
+      {
+        id: "scenario",
+        label: "Scenario",
+        color: "var(--color-chart-strategy)",
+        points: scenarioSeries!,
+      },
+    ];
+  }, [overlays, scenarioSeries, hasScenario]);
+
   // Holding overlays normalized to start at 1.0 at the visible window's
-  // first date. Empty / shorter overlays are silently skipped.
+  // first date. Empty / shorter overlays are silently skipped. Phase 10:
+  // the scenario overlay rides through this same pipeline via
+  // `enrichedOverlays` above — keeps the diff surface minimal.
   const overlaySeries = useMemo(() => {
     if (visible.length === 0) return [];
-    return overlays
+    return enrichedOverlays
       .map((o) => {
         if (!o.points || o.points.length === 0) return null;
         const m = new Map<string, number>();
@@ -241,7 +296,7 @@ export function EquityChart({
       .filter((x): x is OverlaySeries & { series: Array<number | null> } =>
         x != null,
       );
-  }, [overlays, visible]);
+  }, [enrichedOverlays, visible]);
 
   // Empty state — Phase 07 PURGE-04 idiom (centered helper text in the
   // chart well rather than a hard error). Mounted before any SVG so the
@@ -530,6 +585,59 @@ export function EquityChart({
           )}
         </div>
 
+        {/* Phase 10 / 10-04 D-14. Visibility toggle for the scenario
+            overlay. Renders ONLY when scenarioSeries is supplied and
+            non-empty so existing call sites are unaffected. UI-SPEC:
+            small inline pill radiogroup, monospace tabular-nums, accent
+            on selected. Sits between the period toggle and the sync
+            stamp so the chart header reads left-to-right:
+              [period toggle]  [series visibility]  [sync stamp]
+        */}
+        {hasScenario && (
+          <div
+            role="radiogroup"
+            aria-label="Equity series visibility"
+            style={{
+              display: "flex",
+              gap: 2,
+              alignItems: "center",
+            }}
+          >
+            {(["live", "scenario", "both"] as const).map((m) => {
+              const active = visibilityMode === m;
+              const label = m === "live" ? "Live" : m === "scenario" ? "Scenario" : "Both";
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setVisibilityMode(m)}
+                  style={{
+                    padding: "3px 8px",
+                    fontSize: 11,
+                    fontWeight: 500,
+                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                    background: active
+                      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                      : "transparent",
+                    color: active
+                      ? "var(--color-accent)"
+                      : "var(--color-text-muted)",
+                    border: "none",
+                    borderRadius: 3,
+                    cursor: "pointer",
+                    fontVariantNumeric: "tabular-nums",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div
           style={{
             fontSize: 11,
@@ -661,22 +769,39 @@ export function EquityChart({
             />
           )}
 
-          {/* Holding overlays (already period-normalized above) */}
-          {overlaySeries.map((o) => (
-            <path
-              key={o.id}
-              d={toPath(o.series)}
-              fill="none"
-              stroke={o.color}
-              strokeWidth={1.25}
-              strokeOpacity={0.85}
-            />
-          ))}
+          {/* Holding overlays (already period-normalized above). Phase 10
+              / 10-04: the scenario overlay rides through this same loop
+              with id="scenario" — filter it out when the visibility
+              toggle is on "live", and render it with a thicker 1.5px
+              stroke (UI-SPEC) so it reads as the projection peer of the
+              live baseline. */}
+          {overlaySeries
+            .filter((o) =>
+              o.id === "scenario" ? visibilityMode !== "live" : true,
+            )
+            .map((o) => {
+              const isScenario = o.id === "scenario";
+              return (
+                <path
+                  key={o.id}
+                  d={toPath(o.series)}
+                  fill="none"
+                  stroke={o.color}
+                  strokeWidth={isScenario ? 1.5 : 1.25}
+                  strokeOpacity={isScenario ? 1 : 0.85}
+                />
+              );
+            })}
 
           {/* Portfolio area + line. Tweaks → Equity chart = Line drops
               the gradient fill so the chart renders as a stroke-only
-              line, mirroring the prototype tweak. */}
-          {chartStyle === "area" && (
+              line, mirroring the prototype tweak. Phase 10 / 10-04:
+              when the visibility toggle is on "scenario", the live
+              baseline reads as a de-emphasized reference (0.3 opacity)
+              so the scenario projection takes visual priority — when
+              the toggle is on "live" or "both" (default) the existing
+              full-opacity rendering is preserved verbatim. */}
+          {chartStyle === "area" && visibilityMode !== "scenario" && (
             <path d={toArea(visibleNormalized)} fill="url(#eq-grad)" />
           )}
           <path
@@ -684,6 +809,9 @@ export function EquityChart({
             fill="none"
             stroke="var(--chart-strategy)"
             strokeWidth={1.75}
+            strokeOpacity={
+              hasScenario && visibilityMode === "scenario" ? 0.3 : 1
+            }
           />
 
           {/* Hover crosshair */}
