@@ -225,11 +225,12 @@ describe("T_D9 — M11 pre-flight modal a11y (portal'd, only ONE role=dialog at 
 
 describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => {
   it("calls fetch once with POST /api/allocator/scenario/commit + body { diffs }", async () => {
-    const fetchSpy = vi.fn(async () =>
-      new Response(
-        JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
     );
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -252,10 +253,10 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toBe("/api/allocator/scenario/commit");
-    expect(init.method).toBe("POST");
-    const body = JSON.parse(init.body);
+    const call = fetchSpy.mock.calls[0];
+    expect(call[0]).toBe("/api/allocator/scenario/commit");
+    expect(call[1].method).toBe("POST");
+    const body = JSON.parse(call[1].body);
     expect(body.diffs).toHaveLength(1);
     expect(body.diffs[0].kind).toBe("voluntary_remove");
 
@@ -268,7 +269,11 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
 // ===========================================================================
 
 describe("T_D11 — H4 full success → green confirmation card visible", () => {
+  // Use real timers for this case — waitFor relies on them, and the 1.5s
+  // success-auto-close is short enough to advance via setTimeout polling
+  // rather than via fake-timer juggling.
   it("recorded:N + errors:[] → drawer body collapses to confirmation; onSubmitSuccess fires after 1.5s timer", async () => {
+    vi.useRealTimers();
     const fetchSpy = vi.fn(async () =>
       new Response(
         JSON.stringify({
@@ -296,20 +301,18 @@ describe("T_D11 — H4 full success → green confirmation card visible", () => 
     const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
     fireEvent.click(preflightBtns[preflightBtns.length - 1]);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-
     await waitFor(() => {
       expect(screen.getByText(/1 decisions recorded/i)).toBeInTheDocument();
     });
 
     // T_D16 — after 1.5s, onClose + onSubmitSuccess fire
-    await act(async () => {
-      vi.advanceTimersByTime(1600);
-    });
-    expect(onSubmitSuccess).toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalled();
+    await waitFor(
+      () => {
+        expect(onSubmitSuccess).toHaveBeenCalled();
+        expect(onClose).toHaveBeenCalled();
+      },
+      { timeout: 3000 },
+    );
 
     vi.unstubAllGlobals();
   });

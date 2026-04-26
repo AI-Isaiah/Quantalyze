@@ -71,6 +71,7 @@ import { EquityChart } from "../widgets/performance/EquityChart";
 import DrawdownChart from "../widgets/performance/DrawdownChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { BridgeDrawer } from "./BridgeDrawer";
+import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
@@ -169,6 +170,12 @@ export function ScenarioComposer({
   const [browseOpen, setBrowseOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [resetModalOpen, setResetModalOpen] = useState(false);
+  // Plan 07 — ScenarioCommitDrawer wire-in. handleCommit builds the diffs,
+  // stashes them, then opens the drawer. onSubmitSuccess (drawer-side, full-
+  // success only per H4) calls scenario.reset() to clear localStorage and
+  // reinitialize from current live holdings.
+  const [commitDrawerOpen, setCommitDrawerOpen] = useState(false);
+  const [commitDiffs, setCommitDiffs] = useState<ScenarioCommitDiff[]>([]);
 
   // M3 — Empty state computed flag. The early-return moves to the END of
   // the hook list so React's hook ordering invariant is preserved across
@@ -417,6 +424,12 @@ export function ScenarioComposer({
           (scenario.draft.weightOverrides[a.id] ?? 0) * scenarioAum,
       });
     }
+    // Plan 07 — open the ScenarioCommitDrawer with the built diff list.
+    // The legacy onCommitRequested callback prop is preserved for any
+    // existing test wiring (T_C18) and for callers that prefer to handle
+    // the commit gesture themselves.
+    setCommitDiffs(diffs);
+    setCommitDrawerOpen(true);
     onCommitRequested?.(diffs);
   }
 
@@ -693,6 +706,21 @@ export function ScenarioComposer({
           onCancel={() => setResetModalOpen(false)}
         />
       )}
+
+      {/* Plan 07 — Scenario commit pipeline. The drawer fires the actual
+          POST /api/allocator/scenario/commit; on FULL-SUCCESS only it
+          invokes onSubmitSuccess (which calls scenario.reset() to clear
+          the draft + reinitialize from the new live holdings). Full-failure
+          keeps the drawer open with per-row errors and does NOT reset the
+          draft (the user can fix and retry). */}
+      <ScenarioCommitDrawer
+        isOpen={commitDrawerOpen}
+        onClose={() => setCommitDrawerOpen(false)}
+        diffs={commitDiffs}
+        onSubmitSuccess={() => {
+          scenario.reset();
+        }}
+      />
     </div>
   );
 }
