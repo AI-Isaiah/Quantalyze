@@ -245,7 +245,7 @@ export default function DrawdownChart({
             {visibilityMode !== "scenario" && liveDrawdownData.length > 0 && (
               <Area
                 type="monotone"
-                dataKey={hasScenario ? "liveDrawdown" : "liveDrawdown"}
+                dataKey="liveDrawdown"
                 stroke={liveStroke}
                 strokeWidth={1.5}
                 fill={`url(#${liveFillId})`}

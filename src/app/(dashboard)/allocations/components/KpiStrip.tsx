@@ -239,7 +239,7 @@ function formatSignedDelta(delta: number | null, key: string): string {
     return `${sign}${abs.toFixed(2)}`;
   }
   if (key === "aum") {
-    return `${sign}${formatCurrency(abs).replace(/^\$/, "$")}`;
+    return `${sign}${formatCurrency(abs)}`;
   }
   // Default: percent (twr, cagr, max_drawdown, volatility)
   return `${sign}${(abs * 100).toFixed(1)}%`;
@@ -294,9 +294,14 @@ export function KpiStrip({
   //  - Max DD 12m: prefer analytics.max_drawdown_12m; fall back to
   //    metrics.max_drawdown so the legacy "all-time max DD" still renders
   //    if the 12m field isn't present yet.
-  //  - Avg ρ: analytics.avg_correlation. The production payload doesn't
-  //    yet carry this — it resolves to undefined → null, which triggers
-  //    the honest pending-copy below.
+  //  - Avg ρ: prefer analytics.avg_correlation, then fall back to
+  //    metrics.avg_pairwise_correlation (review-pass P2 fix — parallel to
+  //    Plan 10's `metricKey: "avg_pairwise_correlation"` scenario-mode
+  //    lookup, so the tooltip "Live: X" pill in scenario mode reads the
+  //    same value the live-mode strip displayed). The production payload
+  //    doesn't carry analytics.avg_correlation yet; the metrics fallback
+  //    surfaces the engine-computed value when present, otherwise both
+  //    paths resolve to null → honest pending-copy below.
   const aumValue: number | null = aum ?? analytics?.total_aum ?? null;
   const ytdValue: number | null =
     analytics?.ytd_twr ?? metrics?.twr ?? null;
@@ -304,7 +309,8 @@ export function KpiStrip({
     analytics?.sharpe ?? metrics?.sharpe ?? null;
   const maxDdValue: number | null =
     analytics?.max_drawdown_12m ?? metrics?.max_drawdown ?? null;
-  const avgRhoValue: number | null = analytics?.avg_correlation ?? null;
+  const avgRhoValue: number | null =
+    analytics?.avg_correlation ?? metrics?.avg_pairwise_correlation ?? null;
 
   /**
    * Resolve the sub-copy for a single cell with the documented precedence:
