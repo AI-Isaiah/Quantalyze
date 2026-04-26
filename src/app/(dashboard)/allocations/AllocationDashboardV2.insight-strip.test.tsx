@@ -138,7 +138,6 @@ describe("AllocationDashboardV2 — InsightStrip mount (PR1)", () => {
     const { container } = renderShell({
       // BASE_PAYLOAD's flaggedHoldings: [] gets inferred as never[];
       // cast the whole array so a populated row passes typecheck.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       flaggedHoldings: [
         {
           holding_ref: "holding:binance:BTC:spot",
@@ -152,6 +151,7 @@ describe("AllocationDashboardV2 — InsightStrip mount (PR1)", () => {
           top_candidate_strategy_name: "Helios Perp Basis",
           top_candidate_composite: 80,
         },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ] as any,
     });
 

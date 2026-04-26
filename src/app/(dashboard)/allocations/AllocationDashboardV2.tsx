@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import Link from "next/link";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { useDashboardConfigV2 } from "./hooks/useDashboardConfig";
 import { WidgetGrid } from "./components/WidgetGrid";
@@ -362,12 +363,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
                 </div>
               </div>
             </div>
-            <a
+            <Link
               href="/discovery"
               className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent/40 bg-surface px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
             >
               Browse strategies →
-            </a>
+            </Link>
           </div>
         ) : null}
         <WidgetGrid
