@@ -341,40 +341,49 @@ describe("buildStrategyForBuilderSet — B4 lookup-map signature", () => {
   });
 
   it("T15 (B4 signature regression) old object-literal signature is a TypeScript error", () => {
-    // @ts-expect-error — B4 pinned signature uses positional args; an object
-    // literal with the OLD shape is rejected at compile time.
-    buildStrategyForBuilderSet({
-      holdingsSummary: HOLDINGS_2,
-      holdingReturnsByScopeRef: {
-        "holding:binance:BTC:spot": RETURNS_60D,
-        "holding:binance:ETH:spot": RETURNS_60D,
-      },
-      addedStrategies: [],
-      toggleByScopeRef: {},
-      weightOverrides: {},
-    });
+    // The @ts-expect-error directive is the assertion. We never actually invoke
+    // this code path — it lives inside a function reference that is never called.
+    const _compileOnly = () => {
+      // @ts-expect-error — B4 pinned signature uses positional args; an object
+      // literal with the OLD shape is rejected at compile time.
+      buildStrategyForBuilderSet({
+        holdingsSummary: HOLDINGS_2,
+        holdingReturnsByScopeRef: {
+          "holding:binance:BTC:spot": RETURNS_60D,
+          "holding:binance:ETH:spot": RETURNS_60D,
+        },
+        addedStrategies: [],
+        toggleByScopeRef: {},
+        weightOverrides: {},
+      });
+    };
+    expect(typeof _compileOnly).toBe("function");
   });
 });
 
 describe("H5 brand — compile-time guards", () => {
   it("T16 hand-rolled StrategyForBuilder literal CANNOT be passed where AddedStrategy is expected", () => {
-    // @ts-expect-error — H5 brand prevents pre-cast StrategyForBuilder from passing as an AddedStrategy
-    const handRolled = {
-      id: "abc",
-      name: "Strat A",
-      codename: null,
-      disclosure_tier: "public",
-      strategy_types: [],
-      markets: [],
-      start_date: null,
-      daily_returns: [],
-      cagr: null,
-      sharpe: null,
-      volatility: null,
-      max_drawdown: null,
+    // The @ts-expect-error directive is the assertion. We never actually invoke
+    // this code path — it lives inside a function reference that is never called.
+    const _compileOnly = () => {
+      const handRolled = {
+        id: "abc",
+        name: "Strat A",
+        codename: null,
+        disclosure_tier: "public",
+        strategy_types: [],
+        markets: [],
+        start_date: null,
+        daily_returns: [],
+        cagr: null,
+        sharpe: null,
+        volatility: null,
+        max_drawdown: null,
+      };
+      // @ts-expect-error — H5 brand prevents pre-cast StrategyForBuilder from passing as an AddedStrategy
+      buildStrategyForBuilderSet(HOLDINGS_2, new Set(), [handRolled], {}, {}, {});
     };
-    // @ts-expect-error — H5 brand prevents pre-cast StrategyForBuilder from passing as an AddedStrategy
-    buildStrategyForBuilderSet(HOLDINGS_2, new Set(), [handRolled], {}, {}, {});
+    expect(typeof _compileOnly).toBe("function");
   });
 
   it("T17 unbranded string CANNOT be used as a key in addedStrategyReturnsLookup", () => {
