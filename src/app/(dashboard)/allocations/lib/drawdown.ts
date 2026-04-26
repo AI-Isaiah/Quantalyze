@@ -27,3 +27,34 @@ export function deriveSnapshotDrawdowns(
   }
   return result;
 }
+
+/**
+ * 09.1-REVIEW WR-05 — fallback Max DD over a cumulative-RETURN curve.
+ *
+ * The MyAllocationClient client-side fallback emits points where
+ * `value = wealth - 1` (return form). Computing drawdown directly on
+ * the return form via `(value - peakValue) / (1 + peakValue)` blows up
+ * when peakValue approaches -1 (catastrophic-loss windows on
+ * highly-leveraged short slices). Convert to wealth and compute
+ * drawdown against peakWealth, with a peakWealth > 0 guard mirroring
+ * deriveSnapshotDrawdowns above.
+ *
+ * Returns the most-negative drawdown encountered (≤ 0). Empty / single-
+ * point curves return 0.
+ */
+export function computeMaxDDFromReturnCurve(
+  points: ReadonlyArray<{ value: number }>,
+): number {
+  if (points.length < 2) return 0;
+  let peakWealth = 1 + points[0].value;
+  let maxDD = 0;
+  for (const p of points) {
+    const wealth = 1 + p.value;
+    if (wealth > peakWealth) peakWealth = wealth;
+    if (peakWealth > 0) {
+      const dd = (wealth - peakWealth) / peakWealth;
+      if (dd < maxDD) maxDD = dd;
+    }
+  }
+  return maxDD;
+}

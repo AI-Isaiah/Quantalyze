@@ -26,6 +26,7 @@ import { MultiLineEquityChart, StrategyLegend, type StrategySeries } from "@/com
 import { AllocationPie } from "@/components/portfolio/AllocationPie";
 import { AliasEditor } from "@/components/portfolio/AliasEditor";
 import { normalizeDailyReturns, displayName, getTimeframeStart } from "@/lib/allocation-helpers";
+import { computeMaxDDFromReturnCurve } from "./lib/drawdown";
 
 /**
  * My Allocation — Scenario-Builder-style live view of the allocator's
@@ -265,13 +266,13 @@ export function MyAllocationClient({
     const twr =
       compositeCurve[compositeCurve.length - 1].value - compositeCurve[0].value;
 
-    let peak = compositeCurve[0].value;
-    let maxDD = 0;
-    for (const p of compositeCurve) {
-      if (p.value > peak) peak = p.value;
-      const dd = (p.value - peak) / (1 + peak);
-      if (dd < maxDD) maxDD = dd;
-    }
+    // 09.1-REVIEW WR-05: drawdown computed on cumulative wealth, not on
+    // return-relative form. The previous inline math divided by
+    // `(1 + peak)` where peak is the return-form value (`wealth - 1`),
+    // producing ±Infinity for peak approaching -1 on catastrophic-loss
+    // windows. The pure helper (./lib/drawdown.computeMaxDDFromReturnCurve)
+    // tracks wealth explicitly and guards peakWealth > 0.
+    const maxDD = computeMaxDDFromReturnCurve(compositeCurve);
 
     return { compositeCurve, twr, max_drawdown: maxDD };
   }, [metrics.equity_curve.length, strategiesForBuilder, scenarioState]);
