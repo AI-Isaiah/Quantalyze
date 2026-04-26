@@ -119,6 +119,24 @@ describe("<WidgetState>", () => {
     // file header doesn't false-positive against itself. The `\s*\(` tail
     // is a belt-and-braces guard that only invocations (not bare
     // identifier mentions) can fail this assertion.
+    //
+    // Phase 11 review fix IN-07 — heuristic limitation:
+    //   This is a regex check, not a full AST parse. False positives are
+    //   possible:
+    //     - A future identifier `useFooHook` (legitimately not the React
+    //       hook) would pass the assertion's word-boundary, but only the
+    //       three exact names are matched, so this case is fine.
+    //     - A line `import { useState } from "react"` (without calling
+    //       `useState(...)` inline on the same line) WOULD fail because
+    //       the regex requires `\s*\(` after the identifier; a bare
+    //       import is invisible to the regex (correct outcome).
+    //     - Conversely, a future refactor that wraps state inside a
+    //       sibling hook (e.g. `useWidgetState(...)`) would NOT trigger
+    //       the assertion even though it violates the spirit of the
+    //       Pitfall-4 statelessness rule.
+    //   If false flags become an issue, promote this assertion to a
+    //   typescript-AST scanner (e.g. ts-morph) that can statically
+    //   identify React-hook call sites.
     const raw = readFileSync(resolve(__dirname, "WidgetState.tsx"), "utf8");
     const stripped = raw
       .replace(/\/\*[\s\S]*?\*\//g, "")
