@@ -142,7 +142,7 @@ const VALID_VM = {
 const VALID_BR = {
   kind: "bridge_recommended" as const,
   holding_ref: "holding:binance:BTC:spot",
-  strategy_id: "22222222-3333-4444-5555-666666666666",
+  strategy_id: "22222222-3333-4444-9555-666666666666",
   percent_allocated: 12,
   size_at_decision_usd: 12000,
 };
@@ -502,10 +502,10 @@ describe("T_R14 — cross-tenant (T-10-01)", () => {
     });
 
     // Inject an extraneous allocator_id field — zod's strip default drops it,
-    // and the RPC always receives user.id from withAuth.
+    // and the RPC always receives user.id from withAuth. mkReq() accepts
+    // `unknown`, so the extraneous field passes through the JSON encoder.
     const res = await POST(
       mkReq({
-        // @ts-expect-error — intentional injection
         allocator_id: "alloc-OTHER",
         diffs: [VALID_VR],
       }),
