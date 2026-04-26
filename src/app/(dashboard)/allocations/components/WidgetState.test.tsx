@@ -113,10 +113,18 @@ describe("<WidgetState>", () => {
     expect(foundCardChrome).toBe(false);
   });
 
-  it("Test 8: WidgetState source contains no useState/useEffect/useRef (Pitfall 4 — stateless)", () => {
-    const src = readFileSync(resolve(__dirname, "WidgetState.tsx"), "utf8");
-    expect(src).not.toMatch(/\buseState\b/);
-    expect(src).not.toMatch(/\buseEffect\b/);
-    expect(src).not.toMatch(/\buseRef\b/);
+  it("Test 8: WidgetState source contains no useState/useEffect/useRef CALLS (Pitfall 4 — stateless)", () => {
+    // Strip block + line comments before grepping so the "Pitfall 4 …
+    // primitive holds NO useState/useEffect/useRef" warning copy in the
+    // file header doesn't false-positive against itself. The `\s*\(` tail
+    // is a belt-and-braces guard that only invocations (not bare
+    // identifier mentions) can fail this assertion.
+    const raw = readFileSync(resolve(__dirname, "WidgetState.tsx"), "utf8");
+    const stripped = raw
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    expect(stripped).not.toMatch(/\buseState\s*\(/);
+    expect(stripped).not.toMatch(/\buseEffect\s*\(/);
+    expect(stripped).not.toMatch(/\buseRef\s*\(/);
   });
 });

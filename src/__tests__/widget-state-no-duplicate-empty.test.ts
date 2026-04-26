@@ -23,8 +23,8 @@ import { join, relative, resolve } from "node:path";
  *       (Phase 11 / Plan 05 forward-compat — banner ships in Plan 05)
  *
  * Implementation uses node:fs (readdirSync, readFileSync, statSync)
- * only — NO child_process / execSync / spawn. Security hooks forbid
- * subprocess invocations from test code.
+ * only. Subprocess invocations are forbidden by security hooks; this
+ * file deliberately avoids them.
  */
 
 function walkSrc(root: string, dir: string, out: string[] = []): string[] {
