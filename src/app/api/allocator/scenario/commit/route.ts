@@ -46,9 +46,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 
 export const runtime = "nodejs";
 
@@ -218,6 +220,22 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
         bridge_outcome_id: row.bridge_outcome_id,
       },
     });
+  }
+
+  // Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_outcome_at marker.
+  // The /allocations Server Component reader emits the PostHog
+  // `first_outcome_recorded` event on the next dashboard request. Idempotent
+  // (helper reads metadata first, no-ops once stamp is set). Non-blocking:
+  // a stamp failure does NOT affect the route response or the committed
+  // batch.
+  try {
+    const admin = createAdminClient();
+    await stampOutcomeMarker(admin, user.id);
+  } catch (err) {
+    console.warn(
+      "[scenario-commit] first_outcome_at stamp failed:",
+      err instanceof Error ? err.message : err,
+    );
   }
 
   return NextResponse.json(

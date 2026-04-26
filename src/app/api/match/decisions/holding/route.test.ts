@@ -14,6 +14,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
+// `import "server-only"` (transitive via @/lib/analytics/onboarding-funnel)
+// throws in jsdom — stub it so route imports resolve under test.
+vi.mock("server-only", () => ({}));
+
+// Phase 11 / Plan 03 — onboarding marker stamp is non-blocking analytics.
+// Mock to a no-op so route tests don't depend on Supabase auth.admin.
+vi.mock("@/lib/analytics/onboarding-funnel", () => ({
+  stampOutcomeMarker: vi.fn(async () => undefined),
+}));
+
 // ---------------------------------------------------------------------------
 // Mock withAuth — invokes handler immediately with a fixed user
 // ---------------------------------------------------------------------------

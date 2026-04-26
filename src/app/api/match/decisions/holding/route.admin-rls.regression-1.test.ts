@@ -1,6 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
+// `import "server-only"` (transitive via @/lib/analytics/onboarding-funnel)
+// throws in jsdom — stub it so route imports resolve under test.
+vi.mock("server-only", () => ({}));
+
+// Phase 11 / Plan 03 — onboarding marker stamp is non-blocking analytics.
+vi.mock("@/lib/analytics/onboarding-funnel", () => ({
+  stampOutcomeMarker: vi.fn(async () => undefined),
+}));
+
 /**
  * Regression: UAT-02 (Phase 09) — POST /api/match/decisions/holding must use
  * the admin client (service role) for the match_decisions INSERT.
