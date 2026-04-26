@@ -108,6 +108,12 @@ export interface ScenarioCommitDiff {
   strategy_id?: string;
   new_weight?: number;
   size_at_decision_usd: number;
+  /** Required for voluntary_remove. Collected by ScenarioCommitDrawer. */
+  rejection_reason?: string;
+  /** Required for voluntary_add / bridge_recommended (0..100). Collected by ScenarioCommitDrawer. */
+  percent_allocated?: number;
+  /** Optional free-text note (max 2000 chars). Per-row drawer input. */
+  note?: string;
 }
 
 export interface ScenarioComposerProps {

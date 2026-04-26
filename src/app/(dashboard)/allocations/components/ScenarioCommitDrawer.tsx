@@ -36,13 +36,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AllocatedForm } from "./AllocatedForm";
-import { RejectedForm } from "./RejectedForm";
 import {
-  toVoluntaryAddDecision,
-  toVoluntaryRemoveDecision,
-} from "../lib/holding-outcome-adapter";
+  REJECTION_REASONS,
+  REJECTION_REASON_LABELS,
+} from "@/lib/bridge-outcome-schema";
 import type { ScenarioCommitDiff } from "./ScenarioComposer";
+
+interface PerRowState {
+  rejection_reason?: string;
+  percent_allocated?: number;
+  note?: string;
+}
 
 export interface ScenarioCommitDrawerProps {
   isOpen: boolean;
@@ -76,6 +80,14 @@ export function ScenarioCommitDrawer({
 }: ScenarioCommitDrawerProps) {
   const [state, setState] = useState<SubmitState>("idle");
   const [response, setResponse] = useState<SubmitResponse | null>(null);
+  // Per-row form state: index → { rejection_reason, percent_allocated, note }.
+  // The composer's diff shape carries the kind + ref + size, but the route
+  // schema also requires user-collected fields per kind:
+  //   - voluntary_remove → rejection_reason (enum) + optional note
+  //   - voluntary_add / bridge_recommended → percent_allocated + optional note
+  // Drawer holds these as a controlled-input map; Submit-all merges them
+  // into the diffs at POST time so the wire shape matches the schema.
+  const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
   const drawerRef = useRef<HTMLDivElement>(null);
 
   // Reset transient state on close; install Esc handler when open.
@@ -84,6 +96,7 @@ export function ScenarioCommitDrawer({
       /* eslint-disable react-hooks/set-state-in-effect */
       setState("idle");
       setResponse(null);
+      setPerRow({});
       /* eslint-enable react-hooks/set-state-in-effect */
       return;
     }
@@ -115,13 +128,78 @@ export function ScenarioCommitDrawer({
     (response?.errors ?? []).map((e) => [e.index, e.error] as const),
   );
 
+  // Top-level (non-per-row) failure message. The route returns Zod-shape
+  // errors as `{ error, issues }` with no per-row index, so errorByIndex
+  // is empty. Without this surface, a 400 leaves the drawer silent.
+  const topLevelError =
+    state === "failure" && errorByIndex.size === 0
+      ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ((response as any)?.error as string | undefined) ??
+        "Couldn't record decisions. Check the inputs above and try again."
+      : null;
+
+  // Validation: Submit-all is enabled only when every diff has the
+  // user-input fields the route schema requires. Inline (not useMemo) so it
+  // sits below the `if (!isOpen) return null` early return without breaking
+  // hooks order; the computation is O(diffs.length) and runs once per render.
+  const allFilled = (() => {
+    for (let i = 0; i < diffs.length; i++) {
+      const d = diffs[i];
+      const r = perRow[i];
+      if (d.kind === "voluntary_remove") {
+        if (
+          !r?.rejection_reason ||
+          !REJECTION_REASONS.some((x) => x === r.rejection_reason)
+        )
+          return false;
+      } else if (
+        d.kind === "voluntary_add" ||
+        d.kind === "bridge_recommended"
+      ) {
+        if (
+          r?.percent_allocated === undefined ||
+          !Number.isFinite(r.percent_allocated) ||
+          r.percent_allocated < 0 ||
+          r.percent_allocated > 100
+        )
+          return false;
+      }
+      // voluntary_modify needs no extra user input — new_weight is on the diff.
+    }
+    return true;
+  })();
+
+  function setRow(idx: number, patch: PerRowState) {
+    setPerRow((prev) => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
+  }
+
+  // Merge the user-collected per-row state into the diffs at submit time so
+  // the wire shape matches the route's discriminated zod union.
+  function buildSubmitDiffs(): ScenarioCommitDiff[] {
+    return diffs.map((d, i) => {
+      const r = perRow[i] ?? {};
+      const merged: ScenarioCommitDiff = { ...d };
+      if (d.kind === "voluntary_remove" && r.rejection_reason) {
+        merged.rejection_reason = r.rejection_reason;
+      }
+      if (
+        (d.kind === "voluntary_add" || d.kind === "bridge_recommended") &&
+        r.percent_allocated !== undefined
+      ) {
+        merged.percent_allocated = r.percent_allocated;
+      }
+      if (r.note && r.note.length > 0) merged.note = r.note;
+      return merged;
+    });
+  }
+
   async function handleSubmit() {
     setState("submitting");
     try {
       const res = await fetch("/api/allocator/scenario/commit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ diffs }),
+        body: JSON.stringify({ diffs: buildSubmitDiffs() }),
       });
       const json = (await res.json()) as SubmitResponse;
       setResponse(json);
@@ -226,6 +304,16 @@ export function ScenarioCommitDrawer({
 
         {state !== "success" && (
           <>
+            {topLevelError && (
+              <div
+                role="alert"
+                aria-live="polite"
+                data-testid="commit-drawer-error"
+                className="mt-6 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative"
+              >
+                {topLevelError}
+              </div>
+            )}
             {removed.length > 0 && (
               <section className="mt-6">
                 <div className="border-l-4 border-negative pl-3">
@@ -241,19 +329,7 @@ export function ScenarioCommitDrawer({
                   {removed.map((d) => {
                     const idx = diffs.indexOf(d);
                     const err = errorByIndex.get(idx);
-                    // N3 — per-row form-prop construction via Plan 01 synthetic
-                    // match_decision helpers. The synthetic shape is consumed
-                    // by the strategy-shaped form contract; the strategy_id
-                    // surfaced to RejectedForm is null for voluntary_remove
-                    // (the form just collects the rejection_reason + note;
-                    // the actual server-side INSERT happens via the commit
-                    // route's RPC delegation, NOT through RejectedForm's
-                    // postBridgeOutcome path).
-                    void toVoluntaryRemoveDecision({
-                      venue: "_",
-                      symbol: "_",
-                      holding_type: "spot",
-                    });
+                    const row = perRow[idx] ?? {};
                     return (
                       <li
                         key={`r-${idx}`}
@@ -263,12 +339,47 @@ export function ScenarioCommitDrawer({
                         <div className="text-sm font-medium text-text-primary">
                           {d.holding_ref}
                         </div>
-                        <div className="mt-2">
-                          <RejectedForm
-                            strategyId=""
-                            onRecorded={() => {}}
-                            onCancel={() => {}}
-                          />
+                        <div className="mt-2 flex flex-wrap items-end gap-3 border-t border-border pt-3 text-sm font-sans">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-text-secondary text-xs">
+                              Why not?
+                            </span>
+                            <select
+                              required
+                              value={row.rejection_reason ?? ""}
+                              onChange={(e) =>
+                                setRow(idx, {
+                                  rejection_reason: e.target.value,
+                                })
+                              }
+                              className="rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
+                              aria-label={`Why not? (${d.holding_ref})`}
+                              data-testid={`commit-rejection-${idx}`}
+                            >
+                              <option value="" disabled>
+                                Select…
+                              </option>
+                              {REJECTION_REASONS.map((r) => (
+                                <option key={r} value={r}>
+                                  {REJECTION_REASON_LABELS[r]}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="flex flex-1 min-w-[180px] flex-col gap-1">
+                            <span className="text-text-secondary text-xs">
+                              Note (optional)
+                            </span>
+                            <textarea
+                              rows={1}
+                              maxLength={2000}
+                              value={row.note ?? ""}
+                              onChange={(e) =>
+                                setRow(idx, { note: e.target.value })
+                              }
+                              className="w-full rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
+                            />
+                          </label>
                         </div>
                         {err && (
                           <div
@@ -300,9 +411,7 @@ export function ScenarioCommitDrawer({
                   {added.map((d) => {
                     const idx = diffs.indexOf(d);
                     const err = errorByIndex.get(idx);
-                    // N3 — synthetic shape construction (kept inline for grep
-                    // visibility; the actual RPC INSERT happens server-side).
-                    void toVoluntaryAddDecision(d.strategy_id ?? "");
+                    const row = perRow[idx] ?? {};
                     return (
                       <li
                         key={`a-${idx}`}
@@ -312,13 +421,44 @@ export function ScenarioCommitDrawer({
                         <div className="text-sm font-medium text-text-primary">
                           {d.strategy_id}
                         </div>
-                        <div className="mt-2">
-                          <AllocatedForm
-                            strategyId={d.strategy_id ?? ""}
-                            maxWeight={null}
-                            onRecorded={() => {}}
-                            onCancel={() => {}}
-                          />
+                        <div className="mt-2 flex flex-wrap items-end gap-3 border-t border-border pt-3 text-sm font-sans">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-text-secondary text-xs">
+                              Percent allocated
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              step={0.1}
+                              required
+                              value={row.percent_allocated ?? ""}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setRow(idx, {
+                                  percent_allocated:
+                                    v === "" ? undefined : Number(v),
+                                });
+                              }}
+                              className="font-metric w-24 rounded border border-border bg-surface px-2 py-1.5 text-sm tabular-nums text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
+                              aria-label={`Percent allocated (${d.strategy_id})`}
+                              data-testid={`commit-percent-${idx}`}
+                            />
+                          </label>
+                          <label className="flex flex-1 min-w-[180px] flex-col gap-1">
+                            <span className="text-text-secondary text-xs">
+                              Note (optional)
+                            </span>
+                            <textarea
+                              rows={1}
+                              maxLength={2000}
+                              value={row.note ?? ""}
+                              onChange={(e) =>
+                                setRow(idx, { note: e.target.value })
+                              }
+                              className="w-full rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
+                            />
+                          </label>
                         </div>
                         {err && (
                           <div
@@ -349,6 +489,7 @@ export function ScenarioCommitDrawer({
                   {modified.map((d) => {
                     const idx = diffs.indexOf(d);
                     const err = errorByIndex.get(idx);
+                    const row = perRow[idx] ?? {};
                     return (
                       <li
                         key={`m-${idx}`}
@@ -359,13 +500,21 @@ export function ScenarioCommitDrawer({
                           {d.holding_ref} · new weight{" "}
                           {((d.new_weight ?? 0) * 100).toFixed(1)}%
                         </div>
-                        <div className="mt-2">
-                          <AllocatedForm
-                            strategyId=""
-                            maxWeight={null}
-                            onRecorded={() => {}}
-                            onCancel={() => {}}
-                          />
+                        <div className="mt-2 border-t border-border pt-3 text-sm font-sans">
+                          <label className="flex flex-1 min-w-[180px] flex-col gap-1">
+                            <span className="text-text-secondary text-xs">
+                              Note (optional)
+                            </span>
+                            <textarea
+                              rows={1}
+                              maxLength={2000}
+                              value={row.note ?? ""}
+                              onChange={(e) =>
+                                setRow(idx, { note: e.target.value })
+                              }
+                              className="w-full rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50 resize-none"
+                            />
+                          </label>
                         </div>
                         {err && (
                           <div
@@ -383,13 +532,20 @@ export function ScenarioCommitDrawer({
             )}
 
             <div className="sticky bottom-0 mt-8 -mx-6 border-t border-border bg-surface p-4">
+              {!allFilled && (
+                <p className="mb-2 text-xs text-text-muted">
+                  Fill in a reason for each removal and a percent allocated for
+                  each addition before submitting.
+                </p>
+              )}
               <button
                 type="button"
                 onClick={() => setState("preflight")}
                 disabled={
                   diffs.length === 0 ||
                   state === "submitting" ||
-                  state === "preflight"
+                  state === "preflight" ||
+                  !allFilled
                 }
                 className="w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50"
                 data-testid="commit-drawer-submit"

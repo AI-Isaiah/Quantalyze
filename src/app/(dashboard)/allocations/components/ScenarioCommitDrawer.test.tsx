@@ -35,15 +35,6 @@ import {
 } from "@testing-library/react";
 import type { ScenarioCommitDiff } from "./ScenarioComposer";
 
-// Mock RejectedForm + AllocatedForm so the drawer's embedding contract is the
-// unit-under-test rather than the form internals.
-vi.mock("./RejectedForm", () => ({
-  RejectedForm: vi.fn(() => <div data-testid="rejected-form-mock" />),
-}));
-vi.mock("./AllocatedForm", () => ({
-  AllocatedForm: vi.fn(() => <div data-testid="allocated-form-mock" />),
-}));
-
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 
 const VR_DIFF: ScenarioCommitDiff = {
@@ -64,6 +55,29 @@ const VM_DIFF: ScenarioCommitDiff = {
 };
 
 const NOOP = () => {};
+
+/**
+ * Fill the per-row inline inputs for every diff so the Submit button
+ * un-disables. Mirrors the user flow: voluntary_remove needs a rejection
+ * reason; voluntary_add / bridge_recommended needs a percent allocated.
+ * voluntary_modify needs no extra input.
+ */
+function fillRequiredInputs(diffs: ScenarioCommitDiff[]) {
+  diffs.forEach((d, idx) => {
+    if (d.kind === "voluntary_remove") {
+      const sel = screen.getByTestId(
+        `commit-rejection-${idx}`,
+      ) as HTMLSelectElement;
+      fireEvent.change(sel, { target: { value: "underperforming_peers" } });
+    }
+    if (d.kind === "voluntary_add" || d.kind === "bridge_recommended") {
+      const inp = screen.getByTestId(
+        `commit-percent-${idx}`,
+      ) as HTMLInputElement;
+      fireEvent.change(inp, { target: { value: "10" } });
+    }
+  });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -155,7 +169,7 @@ describe("T_D2-T_D8 — drawer shell + grouped sections + form embedding + foote
     expect(screen.queryByText(/Weight changes/i)).toBeNull();
   });
 
-  it("T_D6: voluntary_remove row embeds RejectedForm", () => {
+  it("T_D6: voluntary_remove row exposes a rejection-reason select", () => {
     render(
       <ScenarioCommitDrawer
         isOpen
@@ -164,10 +178,10 @@ describe("T_D2-T_D8 — drawer shell + grouped sections + form embedding + foote
         onSubmitSuccess={NOOP}
       />,
     );
-    expect(screen.getByTestId("rejected-form-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("commit-rejection-0")).toBeInTheDocument();
   });
 
-  it("T_D7: voluntary_add + voluntary_modify rows embed AllocatedForm", () => {
+  it("T_D7: voluntary_add row exposes a percent-allocated input; voluntary_modify does not", () => {
     render(
       <ScenarioCommitDrawer
         isOpen
@@ -176,10 +190,13 @@ describe("T_D2-T_D8 — drawer shell + grouped sections + form embedding + foote
         onSubmitSuccess={NOOP}
       />,
     );
-    expect(screen.getAllByTestId("allocated-form-mock").length).toBe(2);
+    expect(screen.getByTestId("commit-percent-0")).toBeInTheDocument();
+    // voluntary_modify (idx 1) carries new_weight on the diff itself, so no
+    // percent-allocated input is rendered for it.
+    expect(screen.queryByTestId("commit-percent-1")).toBeNull();
   });
 
-  it("T_D8: 'Submit {N} decisions' button visible at footer", () => {
+  it("T_D8: Submit button disabled until all required inputs filled, then shows count", () => {
     render(
       <ScenarioCommitDrawer
         isOpen
@@ -190,6 +207,9 @@ describe("T_D2-T_D8 — drawer shell + grouped sections + form embedding + foote
     );
     const btn = screen.getByTestId("commit-drawer-submit") as HTMLButtonElement;
     expect(btn.textContent).toMatch(/Submit 2 decisions/i);
+    // Initially disabled: no rejection_reason or percent_allocated entered.
+    expect(btn.disabled).toBe(true);
+    fillRequiredInputs([VR_DIFF, VA_DIFF]);
     expect(btn.disabled).toBe(false);
   });
 });
@@ -208,6 +228,7 @@ describe("T_D9 — M11 pre-flight modal a11y (portal'd, only ONE role=dialog at 
         onSubmitSuccess={NOOP}
       />,
     );
+    fillRequiredInputs([VR_DIFF]);
     fireEvent.click(screen.getByTestId("commit-drawer-submit"));
     // Pre-flight modal title visible
     expect(screen.getByText(/Submit 1 decision\?/i)).toBeInTheDocument();
@@ -242,6 +263,7 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
         onSubmitSuccess={NOOP}
       />,
     );
+    fillRequiredInputs([VR_DIFF]);
     fireEvent.click(screen.getByTestId("commit-drawer-submit"));
     // Pre-flight modal "Submit" button
     const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
@@ -259,6 +281,8 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
     const body = JSON.parse(call[1].body);
     expect(body.diffs).toHaveLength(1);
     expect(body.diffs[0].kind).toBe("voluntary_remove");
+    // Drawer-collected user input MUST be merged into the wire shape.
+    expect(body.diffs[0].rejection_reason).toBe("underperforming_peers");
 
     vi.unstubAllGlobals();
   });
@@ -297,6 +321,7 @@ describe("T_D11 — H4 full success → green confirmation card visible", () => 
         onSubmitSuccess={onSubmitSuccess}
       />,
     );
+    fillRequiredInputs([VR_DIFF]);
     fireEvent.click(screen.getByTestId("commit-drawer-submit"));
     const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
     fireEvent.click(preflightBtns[preflightBtns.length - 1]);
@@ -346,6 +371,7 @@ describe("T_D12 / T_D13 — H4 full failure (no partial state)", () => {
         onSubmitSuccess={onSubmitSuccess}
       />,
     );
+    fillRequiredInputs([VR_DIFF]);
     fireEvent.click(screen.getByTestId("commit-drawer-submit"));
     const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
     fireEvent.click(preflightBtns[preflightBtns.length - 1]);
