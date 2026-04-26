@@ -33,7 +33,8 @@ const DEFAULT_PERIOD: Period = "6M";
 // All 7 period tokens, ordered for the toggle button row. Each token MUST
 // appear as a quoted string in this source — the per-token grep check in
 // Plan 07 acceptance criteria walks the file looking for each literal.
-const PERIODS: readonly Period[] = [
+// Re-exported for the EquityChartWidget single-row header (PR4 #1).
+export const PERIODS: readonly Period[] = [
   "1M",
   "3M",
   "6M",
@@ -76,6 +77,30 @@ type Props = {
    * see zero behavior change.
    */
   scenarioSeries?: DailyPoint[] | null;
+  /**
+   * PR4 #1 — Controlled-state escape hatch for `EquityChartWidget`'s
+   * single-row card header. When `period` is supplied, the chart treats
+   * the wrapper as the source of truth and forwards every period change
+   * through `onPeriodChange`. When omitted, the chart runs in
+   * uncontrolled mode (existing behavior — owns its own `period` state).
+   */
+  period?: Period;
+  onPeriodChange?: (p: Period) => void;
+  /** PR4 #1 — Controlled-state companion for the CUSTOM-range picker. */
+  customRange?: CustomRange | null;
+  onCustomRangeChange?: (r: CustomRange | null) => void;
+  /**
+   * PR4 #1 — When the wrapper renders the period toggle + sync stamp in
+   * the card header, suppress the chart's internal copy of that row so
+   * the two don't both render.
+   */
+  hideHeader?: boolean;
+  /**
+   * PR4 #1 — When the wrapper renders inline legend chips in the card
+   * header, suppress the chart's internal legend strip below the header
+   * row so the layout collapses to a single header line.
+   */
+  hideLegend?: boolean;
 };
 
 /**
@@ -93,7 +118,9 @@ type VisibilityMode = "live" | "scenario" | "both";
 
 const DAY_MS = 86_400_000;
 
-function parseISO(s: string): number {
+// Exported for `EquityChartWidget` — the wrapper needs the same f7-anchored
+// first-positive date for the CustomRangePicker's `min` bound (PR4 #1).
+export function parseISO(s: string): number {
   // YYYY-MM-DD → epoch ms (UTC midnight). Falls back to Date constructor
   // for any non-ISO inputs so we never throw.
   const [y, m, d] = s.split("-").map(Number);
@@ -103,8 +130,9 @@ function parseISO(s: string): number {
   return new Date(s).getTime();
 }
 
-/** Designer's f7 anchor — re-anchor at the first positive value. */
-function anchorFromFirstPositive(points: DailyPoint[]): DailyPoint[] {
+/** Designer's f7 anchor — re-anchor at the first positive value.
+ * Exported for `EquityChartWidget`'s picker `min` (PR4 #1). */
+export function anchorFromFirstPositive(points: DailyPoint[]): DailyPoint[] {
   if (points.length === 0) return [];
   const firstPositiveIdx = points.findIndex((p) => p.value > 0);
   if (firstPositiveIdx < 0) return [];
@@ -180,11 +208,32 @@ export function EquityChart({
   stale = false,
   initialPeriod = DEFAULT_PERIOD,
   scenarioSeries = null,
+  period: controlledPeriod,
+  onPeriodChange,
+  customRange: controlledCustomRange,
+  onCustomRangeChange,
+  hideHeader = false,
+  hideLegend = false,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(960);
-  const [period, setPeriod] = useState<Period>(initialPeriod);
-  const [customRange, setCustomRange] = useState<CustomRange | null>(null);
+  // PR4 #1 — controlled-or-uncontrolled state: when the wrapper passes
+  // `period` / `customRange`, those win; otherwise the chart manages its
+  // own state internally (current behavior — preserves all existing
+  // standalone consumers + tests).
+  const [internalPeriod, setInternalPeriod] = useState<Period>(initialPeriod);
+  const [internalCustomRange, setInternalCustomRange] =
+    useState<CustomRange | null>(null);
+  const period = controlledPeriod ?? internalPeriod;
+  const customRange = controlledCustomRange ?? internalCustomRange;
+  const setPeriod = (p: Period) => {
+    onPeriodChange?.(p);
+    if (controlledPeriod === undefined) setInternalPeriod(p);
+  };
+  const setCustomRange = (r: CustomRange | null) => {
+    onCustomRangeChange?.(r);
+    if (controlledCustomRange === undefined) setInternalCustomRange(r);
+  };
   const [pickerOpen, setPickerOpen] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   // Phase 10 / 10-04 D-14. 3-state visibility toggle for the scenario
@@ -379,13 +428,35 @@ export function EquityChart({
 
   // Y-axis ticks — snap to "nice" percentage steps so labels don't read
   // "+1.37%". Always includes 1.0 so the 0% baseline sits on a tick.
+  // PR4 #4: enforce a 5-tick minimum so narrow data ranges (test data,
+  // flat-line allocators) match the truth screenshot's density. We pick
+  // the LARGEST nice candidate that still yields >= MIN_TICKS — accepts a
+  // sub-1% step like 0.25% on tight ranges so the strip never collapses
+  // to 3 labels (+0% / -0.5% / -1.0%).
   const yTicks: number[] = (() => {
+    const MIN_TICKS = 5;
     const spanPct = (yMax - yMin) * 100;
-    const stepPctRaw = spanPct / 4;
-    const pow = Math.pow(10, Math.floor(Math.log10(stepPctRaw || 1)));
-    const candidates = [1, 2, 2.5, 5, 10].map((c) => c * pow);
-    const stepPct =
-      candidates.find((c) => c >= stepPctRaw) ?? candidates[candidates.length - 1];
+    const niceMultipliers = [1, 2, 2.5, 5];
+    const candidates: number[] = [];
+    for (let p = -3; p <= 3; p++) {
+      const pow = Math.pow(10, p);
+      for (const m of niceMultipliers) candidates.push(m * pow);
+    }
+    candidates.sort((a, b) => a - b);
+    const tickCount = (sp: number) => {
+      const stepVal = sp / 100;
+      const below = Math.floor((1 - yMin) / stepVal);
+      const above = Math.floor((yMax - 1) / stepVal);
+      return 1 + below + above;
+    };
+    // tickCount is monotonically decreasing in `c`. Walk ascending and
+    // keep the largest candidate that still meets MIN_TICKS; bail on
+    // first failure.
+    let stepPct = candidates[0];
+    for (const c of candidates) {
+      if (tickCount(c) >= MIN_TICKS) stepPct = c;
+      else break;
+    }
     const stepVal = stepPct / 100;
     const ticks = new Set<number>();
     ticks.add(1);
@@ -520,7 +591,11 @@ export function EquityChart({
           accent-10 background + accent text from the prototype, not the
           solid-fill style. The always-visible return summary is gone —
           truth shows the value via Y-axis labels + the sync timestamp,
-          which is the cleaner read. */}
+          which is the cleaner read.
+          PR4 #1 — `hideHeader` lets the wrapper move title + legend +
+          period toggle + sync stamp into a single card-header row above
+          the chart body. */}
+      {!hideHeader && (
       <div
         style={{
           display: "flex",
@@ -648,8 +723,12 @@ export function EquityChart({
           sync just now
         </div>
       </div>
+      )}
 
-      {/* Always-visible legend strip — matches the paths rendered below. */}
+      {/* Always-visible legend strip — matches the paths rendered below.
+          PR4 #1 — `hideLegend` collapses this row when the wrapper renders
+          the legend chips inline in the card-header row instead. */}
+      {!hideLegend && (
       <div
         aria-label="Series legend"
         style={{
@@ -671,6 +750,7 @@ export function EquityChart({
           <LegendSwatch key={o.id} color={o.color} label={o.label} />
         ))}
       </div>
+      )}
 
       <div style={{ position: "relative" }}>
         <svg
@@ -1025,6 +1105,13 @@ function TooltipRow({
 // EquityCurve default export; reads `equityDailyPoints` from the data bag
 // (Phase 07 f7 parallel-prop path). Benchmark + overlays + stale forwarded
 // from the data bag too — when not present they default to undefined / false.
+//
+// PR4 #1 — lifts period + customRange + pickerOpen state up here so the
+// card header can render `Equity curve` title, legend chips, period
+// toggle, and sync stamp on a single row (mirrors the truth screenshot
+// from `Allocator Dashboard - Standalone.html`). The inner `EquityChart`
+// runs in controlled mode with `hideHeader` / `hideLegend` so its own
+// versions of those rows collapse.
 // ---------------------------------------------------------------------------
 
 interface EquityChartWidgetData {
@@ -1036,26 +1123,61 @@ interface EquityChartWidgetData {
 
 export default function EquityChartWidget({ data }: WidgetProps) {
   const d = (data ?? {}) as EquityChartWidgetData;
-  // PR1 QA — pixel-faithful card chrome from designer-bundle/project/src/app.jsx
-  // (Equity curve case, lines 451-478): Card with title row "Equity curve"
-  // separated from the chart body by a hairline border. Period toggle +
-  // legend remain inside the EquityChart body so the existing keyboard /
-  // ARIA tab semantics are unchanged.
+  const showBench = useTweakValue("showBench");
+
+  const equityDailyPoints = d.equityDailyPoints ?? [];
+  const benchmark = d.btcBenchmark;
+  const overlays = d.equityOverlays ?? [];
+  const stale = d.allKeysStale ?? false;
+  const hasBenchmark = !!benchmark && benchmark.length > 0;
+
+  const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
+  const [customRange, setCustomRange] = useState<CustomRange | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  // CustomRangePicker `min` — first f7-anchored date so the picker can't
+  // resolve into the leading-zero warmup window.
+  const minDate = useMemo(() => {
+    const anchored = anchorFromFirstPositive(equityDailyPoints);
+    return anchored.length > 0
+      ? new Date(parseISO(anchored[0].date))
+      : new Date();
+  }, [equityDailyPoints]);
+
+  const handlePeriodClick = (p: Period) => {
+    if (p === "CUSTOM") {
+      setPickerOpen(true);
+      return;
+    }
+    setPeriod(p);
+    setCustomRange(null);
+  };
+
+  const applyCustom = (range: CustomRange) => {
+    setCustomRange(range);
+    setPeriod("CUSTOM");
+    setPickerOpen(false);
+  };
+
   return (
     <div
       role="region"
       aria-label="Equity curve"
       style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-lg, 8px)",
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
+        borderRadius: "0.5rem",
+        boxShadow: "var(--shadow-card)",
         overflow: "hidden",
       }}
     >
+      {/* Single-row card header — title + legend chips + period toggle +
+          sync stamp inline, byte-aligned with the prototype's "equity"
+          card (designer-bundle/project/src/app.jsx:142-200). */}
       <div
         style={{
           padding: "8px 14px",
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "1px solid var(--color-border)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -1063,36 +1185,172 @@ export default function EquityChartWidget({ data }: WidgetProps) {
           flexWrap: "wrap",
         }}
       >
-        <h3
+        <div
           style={{
-            margin: 0,
-            fontSize: 13,
-            fontWeight: 600,
-            color: "var(--text-primary)",
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            flexWrap: "wrap",
           }}
         >
-          Equity curve
-        </h3>
-        {d.allKeysStale ? (
-          <span
+          <h3
+            className="font-display"
             style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+              margin: 0,
+              fontSize: 14,
+              fontWeight: 500,
+              color: "var(--color-text-primary)",
             }}
           >
-            data stale
-          </span>
-        ) : null}
+            Equity curve
+          </h3>
+          <div
+            aria-label="Series legend"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              fontSize: 11.5,
+              fontFamily: "var(--font-sans)",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            <HeaderLegendSwatch
+              color="var(--color-chart-strategy)"
+              label="Portfolio"
+            />
+            {showBench && hasBenchmark && (
+              <HeaderLegendSwatch
+                color="var(--color-chart-benchmark)"
+                label="BTC"
+                dashed
+              />
+            )}
+            {overlays.map((o) => (
+              <HeaderLegendSwatch
+                key={o.id}
+                color={o.color}
+                label={o.label}
+              />
+            ))}
+          </div>
+          <div
+            aria-hidden
+            style={{
+              width: 1,
+              height: 14,
+              background: "var(--color-border)",
+            }}
+          />
+          <div
+            role="tablist"
+            aria-label="Period"
+            style={{
+              display: "flex",
+              gap: 2,
+              position: "relative",
+              alignItems: "center",
+              flexWrap: "wrap",
+            }}
+          >
+            {PERIODS.map((p) => {
+              const active = period === p;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => handlePeriodClick(p)}
+                  style={{
+                    padding: "3px 8px",
+                    fontSize: 11,
+                    fontWeight: 500,
+                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                    background: active
+                      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                      : "transparent",
+                    color: active
+                      ? "var(--color-accent)"
+                      : "var(--color-text-muted)",
+                    border: "none",
+                    borderRadius: 3,
+                    cursor: "pointer",
+                    fontVariantNumeric: "tabular-nums",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  {p}
+                </button>
+              );
+            })}
+            {pickerOpen && (
+              <CustomRangePicker
+                isOpen={pickerOpen}
+                onClose={() => setPickerOpen(false)}
+                onApply={applyCustom}
+                min={minDate}
+                max={new Date()}
+                initialRange={customRange}
+              />
+            )}
+          </div>
+        </div>
+        <div
+          style={{
+            fontSize: 11,
+            color: "var(--color-text-muted)",
+            fontFamily: "var(--font-sans)",
+          }}
+        >
+          {stale ? "data stale" : "sync just now"}
+        </div>
       </div>
       <div style={{ padding: 10 }}>
         <EquityChart
-          equityDailyPoints={d.equityDailyPoints ?? []}
-          benchmark={d.btcBenchmark}
-          overlays={d.equityOverlays}
-          stale={d.allKeysStale ?? false}
+          equityDailyPoints={equityDailyPoints}
+          benchmark={benchmark}
+          overlays={overlays}
+          stale={stale}
+          period={period}
+          onPeriodChange={setPeriod}
+          customRange={customRange}
+          onCustomRangeChange={setCustomRange}
+          hideHeader
+          hideLegend
         />
       </div>
     </div>
+  );
+}
+
+function HeaderLegendSwatch({
+  color,
+  label,
+  dashed,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+}) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-block",
+          width: 14,
+          height: 0,
+          borderTop: `${dashed ? "1.5px dashed" : "2px solid"} ${color}`,
+        }}
+      />
+      {label}
+    </span>
   );
 }
