@@ -108,6 +108,18 @@ export function TweaksProvider({ children }: { children: ReactNode }) {
     };
   }, [state.density]);
 
+  // Apply displayFont via body[data-display-font]. The default ("serif")
+  // leaves .font-display resolving to Instrument Serif via --font-serif;
+  // the "sans" choice swaps every display heading to DM Sans through a
+  // single CSS rule in globals.css. Body-attribute approach avoids touching
+  // every consumer's className.
+  useEffect(() => {
+    document.body.setAttribute("data-display-font", state.displayFont);
+    return () => {
+      document.body.removeAttribute("data-display-font");
+    };
+  }, [state.displayFont]);
+
   // Accent intensity — swap --color-accent + --color-accent-hover at the
   // root so all DESIGN.md token consumers (border-accent, text-accent,
   // bg-accent, var(--color-accent-hover) etc.) flip in lock-step.
