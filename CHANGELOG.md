@@ -6,6 +6,195 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.15.12.1] - 2026-04-26
+
+**Phase 10 QA pass.** Three live-DB defects surfaced during human UAT against
+localhost dev, fixed end-to-end with regression coverage.
+
+### Fixed
+
+- Browse strategies drawer no longer shows "Couldn't load strategies." The
+  route was selecting `alias` from `strategies` but that column lives on
+  `portfolio_strategies` (per-allocator override). Switched to `name` +
+  `codename` across route, drawer, and tests. New T9 regression test asserts
+  the SELECT column list contains `name` and not `alias`.
+- Commit scenario no longer silently rejects $0 holdings. Schema
+  `size_at_decision_usd` relaxed from `.positive()` to `.nonnegative()` (the
+  field is metadata-only on the wire — RPC 082 does not consume it). Composer
+  now coalesces `h.value_usd` defensively for sold-down holdings.
+- Submit-all in the commit drawer now actually works. Inline `RejectedForm` /
+  `AllocatedForm` were rendered with `onRecorded={() => {}}` no-ops, so the
+  user-collected `rejection_reason` (required for voluntary_remove) and
+  `percent_allocated` (required for voluntary_add) never reached the wire and
+  every batch returned 400. Drawer now holds per-row state, renders controlled
+  inputs, merges into diffs at submit time, and surfaces top-level errors when
+  the response shape is `{ error, issues }` rather than `{ errors }`. Submit
+  button is disabled until all required inputs are filled. End-to-end
+  verified against live Supabase — voluntary_remove + voluntary_add round-trip
+  through the commit RPC and land in the Outcomes timeline.
+
+## [0.15.12.0] - 2026-04-26
+
+**Phase 10 — Scenario Builder and What-If.** SCENARIO-01..09 ship: allocators can
+open a Scenario tab on `/allocations`, compose a draft portfolio (toggle current
+holdings off, add Bridge-recommended or browse-selected verified strategies),
+see projected KPI / equity-curve / drawdown deltas vs the live baseline, and
+commit each diff through the existing Bridge outcome-recording flow. Single-tx
+atomicity guaranteed by a SECURITY DEFINER RPC; per-allocator localStorage
+persistence with fingerprint-mismatch detection; full `allocations.ui_v2` flag
+rollback path.
+
+### Added
+
+- **`/allocations?tab=scenario` Scenario tab body** — `ScenarioComposer.tsx`
+  orchestrates KpiStrip (mode=scenario) + EquityChart (scenarioSeries) +
+  DrawdownChart (scenarioDailyPoints) + composition list + Bridge inline card +
+  `StrategyBrowseDrawer` + `ScenarioFooter`. B4-pinned adapter signature
+  `buildStrategyForBuilderSet(holdings, disabledRefs, addedStrategies, ...)`
+  feeds the frozen `src/lib/scenario.ts` engine verbatim. Wealth × scenarioAUM
+  conversion before passing to chart helpers (Pitfall 1 + Pattern 6).
+- **Pure scenario-state module** (`scenario-state.ts`) — typed draft state with
+  `defaultDraftFromHoldings` / `toggleHolding` (symmetric scale-by-(1-w) for
+  double-toggle idempotency) / `addStrategyBrowse` / `addStrategyBridge` /
+  `setWeightOverride` / `renormalizeWeights` plus SSR-safe localStorage
+  hydration via `loadScenarioDraft` / `saveScenarioDraft` /
+  `clearScenarioDraft`. Per-allocator scoped key
+  `allocations.scenario_v0_15.{allocator-uuid}` (N1 defense-in-depth).
+- **`useScenarioState` React hook** — thin wrapper over the pure module with
+  React 19 canonical render-time setState pattern for prop-derived state
+  (no setState-in-effect anti-pattern). Auth-change clear path tracked via
+  `lastClearedAllocatorId` ref.
+- **`scenario-adapter.ts`** — projects `(holdings, addedStrategies, returns
+  lookups)` into `StrategyForBuilder[]` with H5 brand `StrategyForBuilderId`
+  preventing ad-hoc strings from reaching the frozen engine.
+- **`/api/strategies/browse` route** — verified-strategies catalog feed for
+  the browse drawer; `withAuth` + `userActionLimiter` + `status='published'`
+  filter + 200-row LIMIT (M10).
+- **`StrategyBrowseDrawer`** — search + filter pills + mandate-fit pill on
+  every row (client-side `mandate-fit.ts` approximation per RESEARCH
+  Pitfall 7 since `mandate_fit_score` does not live on `strategies`).
+- **`BridgeDrawer.tsx` extension** — additive `onAddToScenario` CTA on the
+  confirm stage (all 10 existing tests preserved verbatim).
+- **`ScenarioFooter`** — sticky bottom bar with diff count + delta summary +
+  Reset (with destructive-confirm modal) + Commit.
+- **`POST /api/allocator/scenario/commit`** — discriminated zod union of 4
+  diff kinds (`bridge_recommended` / `voluntary_remove` / `voluntary_add` /
+  `voluntary_modify`) + `rejection_reason` enum REQUIRED for
+  `voluntary_remove` (M6) + 50-diff DoS cap + delegates the entire batch to
+  the `commit_scenario_batch` SECURITY DEFINER RPC for H4 single-tx
+  atomicity (CONTEXT D-09). Audit emission per row on full-success only.
+- **`ScenarioCommitDrawer`** — 720px slide-over with grouped diff sections,
+  per-row inline `RejectedForm`/`AllocatedForm`, M11 portal'd pre-flight
+  modal, H4 state machine `{idle, preflight, submitting, success, failure}`.
+- **`liveBaselineMetricsFromHoldings` SSR helper** in `src/lib/queries.ts` —
+  `holdingReturnsByScopeRef: Record<string, DailyPoint[]>` reconstructed
+  once at SSR time from `allocator_equity_snapshots.breakdown` JSONB
+  (D-04). New payload fields default to safe values on the !portfolio
+  branch.
+- **KpiStrip / EquityChart / DrawdownChart additive scenario props** — every
+  prop optional + defaults to live-only behavior. Phase 07 D-09 warmup
+  invariants intact (KpiStrip.warmup.test.tsx still GREEN).
+- **`AllocationsTabs.tsx` v2-flag branch** — `allocations.ui_v2` flag
+  re-introduced as default-true; explicit `"false"` is the rollback escape
+  hatch that brings back the legacy `ScenarioStub`. SSR-stable initial
+  render (`useEffect`-based localStorage read) prevents hydration
+  mismatch.
+
+### Database
+
+- **Migration 080** (`match_decisions_kind_enum.sql`) — `match_decision_kind`
+  enum + 4 per-kind CHECK constraints replacing the Phase 09 XOR. Existing
+  rows backfilled to `kind='bridge_recommended'`. `kind` column gets
+  `DEFAULT 'bridge_recommended'` so legacy code paths that omit `kind`
+  still succeed. `compute_bridge_outcome_deltas()` extended with a third
+  CTE branch matching `kind='voluntary_add'` so voluntary_add rows accrue
+  `delta_30d`/`90d`/`180d` once strategy `returns_series` catches up.
+- **Migration 081** (`bridge_outcomes_relax_for_voluntary.sql`) — relaxes
+  `bridge_outcomes` for voluntary kinds: nullable `strategy_id`, widens
+  UNIQUE to `(allocator_id, match_decision_id)`, kind-aware CHECK
+  accepting `allocated`/`rejected`/`voluntary_remove`/`voluntary_add`.
+- **Migration 082** (`commit_scenario_batch_rpc.sql`) — SECURITY DEFINER
+  RPC `commit_scenario_batch(p_allocator_id uuid, p_diffs jsonb)`. Asserts
+  `auth.uid() = p_allocator_id`, runs per-row ownership/strategy gates
+  inside one BEGIN..COMMIT scope, performs M7 reuse-or-create lookup for
+  bridge_recommended diffs, RAISE EXCEPTIONs on any row failure (rolling
+  back the entire batch). REVOKE FROM PUBLIC, anon; GRANT EXECUTE TO
+  authenticated only.
+- **Migration 083** (`commit_scenario_batch_race_fix.sql`) — race-safe M7
+  reuse-or-create via `INSERT … ON CONFLICT DO UPDATE … RETURNING id`
+  (replaces the original SELECT-then-INSERT TOCTOU window). Schema-
+  qualified `pg_proc` self-verifying lookups via
+  `oid = 'public.commit_scenario_batch(uuid,jsonb)'::regprocedure` form.
+  Adds partial UNIQUE index `WHERE match_decision_id IS NULL` defending
+  the migration-072 `(allocator_id, strategy_id, original_holding_ref)`
+  invariant against migration 081's relaxation.
+
+### Fixed
+
+- **P0 SSR/client boundary violation** caught by `/qa`:
+  `liveBaselineMetricsFromHoldings` (server-side) was importing
+  `deriveSnapshotDrawdowns` from `DrawdownChart.tsx` (a `"use client"`
+  module). Every `/allocations` render returned HTTP 500. Extracted the
+  pure function to `src/app/(dashboard)/allocations/lib/drawdown.ts`;
+  DrawdownChart re-exports for client consumers (zero ripple to
+  ScenarioComposer or test files).
+- **P0 commit-pipeline auth bug** caught by `/review`: route used
+  `admin.rpc()` (service-role) which set `auth.uid()` to NULL, tripping
+  the RPC's `IF v_caller IS NULL OR v_caller <> p_allocator_id THEN RAISE`
+  guard. Switched to user-scoped `supabase.rpc()` so `auth.uid()` resolves
+  to the caller's `user.id`.
+- **`addStrategyBrowse` weight drop** — toggling a holding off
+  (preserving its weight), then adding a strategy, no longer drops the
+  disabled-row's preserved weight. Toggle-back restores the original
+  weight. Regression test added.
+- **`AllocationsTabs.tsx` ui_v2 hydration mismatch** — flag is now read
+  inside `useEffect` after mount instead of via `useState(loadFlag)[0]`
+  at first render, eliminating the SSR/client divergence when
+  `localStorage.allocations.ui_v2 = "false"` is set.
+- **`ScenarioComposer` empty-state degenerate AUM** — synthetic baseline
+  AUM ($1) when `scenarioAum === 0 && addedStrategies.length > 0` so
+  charts and KPI deltas don't render `+Infinity` / `NaN` ratios.
+- **Single-source commit drawer** — `useInternalCommitDrawer` prop
+  defaults true; legacy `onCommitRequested` callback can opt out via
+  `useInternalCommitDrawer={false}`. No more dual-drawer stacking risk.
+- **localStorage mock-surface alignment** in `scenario-state.ts` — bare
+  `localStorage` (matches the test stub idiom) instead of
+  `window.localStorage`. Tests now exercise the actual production code
+  path.
+- **KpiStrip Avg ρ tooltip parity** — live mode and scenario mode now
+  source `avg_pairwise_correlation` from the same field so the
+  "Live: X" tooltip matches the live-mode displayed value.
+- **Drawer hygiene** — `StrategyBrowseDrawer` setTimeout cleanup on
+  unmount + `AbortController` on the browse fetch. `BridgeDrawer`
+  `handleAddToScenario` wrapped in try/finally so `onClose()` always
+  runs even if the callback throws.
+- **`getMyAllocationDashboard` perf** — dropped redundant
+  `auth.getUser()` round-trip (the `userId` argument is already
+  authenticated).
+- **Dead-code cleanup** — DrawdownChart identical-branch ternary
+  (`hasScenario ? "liveDrawdown" : "liveDrawdown"`), KpiStrip no-op
+  `replace(/^\$/, "$")`.
+
+### Tests
+
+- 2043 vitest tests pass / 0 failing / 140 skipped (was 1885 baseline
+  pre-Phase-10, +158 new tests across the 8 plans + review fixes + QA
+  regression test).
+- 12-case live-DB RLS regression suite (`scenario-commit-rls.test.ts`)
+  proving cross-tenant tampering is blocked + each kind insert succeeds
+  with the correct shape.
+- M7 race regression test (`scenario-commit-batch-race.test.ts`) —
+  Promise.all of two concurrent RPC calls on the same
+  `bridge_recommended` tuple → exactly one match_decisions row created,
+  zero unique-violations.
+
+### Roadmap
+
+- Phase 11 (Onboarding and Security Readiness) gains an "open decision"
+  note: with Vercel Pro lifting the prior 2-cron limit, the
+  Railway-vs-native cron architecture choice is unblocked but
+  intentionally deferred until the user decides which way to go.
+
 ## [0.15.11.0] - 2026-04-26
 
 Phase 09.1 PR3 — **Dashboard parity finalization** (HANDOFF.md G5/G6/G9 +

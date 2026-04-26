@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { AllocationDashboardV2 } from "./AllocationDashboardV2";
@@ -67,6 +67,58 @@ const RiskTabPanel = dynamic(
   () => import("./RiskTabPanel").then((m) => ({ default: m.RiskTabPanel })),
   { ssr: false, loading: () => <TabBodyFallback label="Risk" /> },
 );
+
+// Phase 10 / 10-06b — full Scenario tab body. L4: dynamic() lives at MODULE
+// scope so re-renders don't re-create the dynamic component. The loading
+// skeleton mirrors the KpiStrip + chart skeleton states from UI-SPEC States
+// Matrix to avoid a "blank → composer" flash on tab activation. The composer
+// pulls in chart + drawer dependencies that the Overview tab never needs;
+// keeping it dynamic keeps the Overview-first bundle small.
+const ScenarioComposer = dynamic(
+  () =>
+    import("./components/ScenarioComposer").then((m) => ({
+      default: m.ScenarioComposer,
+    })),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="mx-auto max-w-[1100px] py-6">
+        {/* KpiStrip skeleton — 5 cells × ~40px */}
+        <div className="grid grid-cols-5 gap-2">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div
+              key={i}
+              className="h-[40px] rounded-md bg-[rgba(15,23,42,0.04)] animate-pulse"
+            />
+          ))}
+        </div>
+        {/* Charts row skeleton — 2 charts × ~280px */}
+        <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className="h-[280px] rounded-md bg-[rgba(15,23,42,0.04)] animate-pulse" />
+          <div className="h-[280px] rounded-md bg-[rgba(15,23,42,0.04)] animate-pulse" />
+        </div>
+      </div>
+    ),
+  },
+);
+
+// Phase 10 / 10-06b — re-introduce the `allocations.ui_v2` flag handler.
+// v0.15.7.0 retired V1 / made V2 the default-for-all in production; this
+// helper preserves the BRANCH point so an explicit "false" still routes to
+// the legacy ScenarioStub for rollback safety. Default behavior (no flag,
+// or any value other than the literal string "false") returns true so
+// production users continue to land on the V2 composer.
+const UI_V2_STORAGE_KEY = "allocations.ui_v2";
+
+function loadUiV2Flag(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = window.localStorage.getItem(UI_V2_STORAGE_KEY);
+    return raw !== "false";
+  } catch {
+    return true;
+  }
+}
 
 // Live-refresh polling. Phase 06 D-11 used 5s for active-ingest sync status;
 // Phase 07 is a monitoring surface where data changes slowly (daily equity,
@@ -164,6 +216,26 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
 
   // Per VOICES-ACCEPTED f3: derive each render — no local state snapshot.
   const activeTab: TabKey = parseTab(searchParams.get("tab"));
+
+  // Phase 10 / 10-06b — `allocations.ui_v2` flag drives the scenario panel
+  // body. SSR-stable initialization (review-pass P1 fix): start with `true`
+  // (matches the SSR helper's server-side default) so the SSR HTML and the
+  // first client render agree byte-for-byte; React hydration succeeds without
+  // mismatch. The actual localStorage check moves to the useEffect below,
+  // which only flips the flag to `false` AFTER hydration completes — this
+  // keeps the rollback path reachable while eliminating the hydration error
+  // that an inline localStorage read would surface for users who explicitly
+  // opted out (raw=="false" on the client, but SSR rendered the V2 path).
+  const [isUiV2, setUiV2Flag] = useState<boolean>(true);
+  useEffect(() => {
+    // The setState-in-effect is intentional and bounded: it fires AT MOST
+    // ONCE on mount, only when the localStorage rollback flag is set to
+    // the literal string "false". The alternative (useSyncExternalStore)
+    // is overkill for a one-shot post-mount read of a stable value.
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (loadUiV2Flag() === false) setUiV2Flag(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, []);
 
   // Scroll-safe URL cleanup: if the allocator lands on ?tab=overview
   // (the new default — redundant) OR ?tab=performance (legacy Phase 07
@@ -425,12 +497,22 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
         aria-labelledby="tab-scenario"
         hidden={activeTab !== "scenario"}
       >
-        {activeTab === "scenario" && (
-          <ScenarioStub
-            flaggedHoldings={props.flaggedHoldings}
-            matchDecisionsByHoldingRef={props.matchDecisionsByHoldingRef}
-          />
-        )}
+        {activeTab === "scenario" &&
+          (isUiV2 ? (
+            // H3 — allocator_id propagated from the SSR-lifted payload.
+            // allocatorMandate is read from the existing `props.mandate`
+            // field; no new prop on AllocationsTabs is needed.
+            <ScenarioComposer
+              payload={props}
+              allocatorId={props.allocator_id}
+              allocatorMandate={props.mandate}
+            />
+          ) : (
+            <ScenarioStub
+              flaggedHoldings={props.flaggedHoldings}
+              matchDecisionsByHoldingRef={props.matchDecisionsByHoldingRef}
+            />
+          ))}
       </div>
       {/* PR3 (HANDOFF G5) — Floating Tweaks chip + panel mounted at the
           dashboard root so they stay visible across all tabs (Overview

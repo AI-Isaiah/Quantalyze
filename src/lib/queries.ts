@@ -6,7 +6,14 @@ import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identit
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import { API_KEY_USER_COLUMNS } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
-import type { DailyPoint } from "@/lib/scenario";
+import {
+  buildDateMapCache,
+  computeScenario,
+  type DailyPoint,
+  type ScenarioState,
+  type StrategyForBuilder,
+} from "@/lib/scenario";
+import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawdown";
 import type { FlaggedHolding } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
 import type {
   Strategy,
@@ -694,6 +701,49 @@ export interface MyAllocationDashboardPayload {
    * /profile?tab=mandate (`MandateForm`); this projection is read-only.
    */
   mandate: AllocatorPreferences | null;
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 10 / Plan 10-03 (scenario builder + what-if)
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Phase 10 / D-04. Per-holding daily return series reconstructed from
+   * allocator_equity_snapshots.breakdown JSONB. Keyed by scope_ref
+   * "holding:{venue}:{symbol}:{holding_type}". Empty record when no
+   * snapshots exist or no breakdown data is available. One pass at SSR
+   * time — never recomputed in the component tree.
+   *
+   * M5 multi-venue caveat: breakdown JSONB is keyed by SYMBOL only —
+   * holdings sharing the same symbol across venues (BTC@binance + BTC@okx)
+   * map to IDENTICAL return series. The composer in Plan 06b surfaces a
+   * tooltip on holding rows when scope_ref shares a series with another row.
+   */
+  holdingReturnsByScopeRef: Record<string, DailyPoint[]>;
+  /**
+   * Phase 10 / H3. The authenticated allocator's user.id, sourced from
+   * supabase.auth.getUser() server-side. Consumed by Plan 06a's per-allocator
+   * localStorage scoping (N1 defense-in-depth eliminates cross-tenant draft
+   * collision) AND by Plan 07's per-row ownership probe in the commit route.
+   * Cheapest fix for the cross-review HIGH-3 finding (allocator_id was
+   * previously not propagated through the payload).
+   */
+  allocator_id: string;
+  /**
+   * Phase 10 / M4. Live-baseline ComputedMetrics computed ONCE at SSR via
+   * computeScenario(holdings) on the all-enabled, default-weighted live set.
+   * The composer (Plan 06b) consumes this instead of re-deriving the live
+   * baseline on every render. The scenario projection adapter still runs
+   * client-side because it depends on toggle state (which is client-only).
+   * Performance hit was real at >=30 holdings × >=365 days; SSR lift removes
+   * it for the live case.
+   */
+  liveBaselineMetrics: {
+    aum: number;
+    ytdTwr: number | null;
+    sharpe: number | null;
+    maxDd: number | null;
+    avgRho: number | null;
+    equity: DailyPoint[]; // wealth-form (NOT cumulative-return) — Pitfall 1 already converted
+    drawdown: DailyPoint[]; // pre-derived via deriveSnapshotDrawdowns()
+  };
 }
 
 /**
@@ -749,6 +799,175 @@ const VENUE_DISPLAY: Record<string, string> = {
   okx: "OKX",
   bybit: "Bybit",
 };
+
+/**
+ * Phase 10 / D-04 — Reconstruct per-holding daily-return series from
+ * allocator_equity_snapshots.breakdown JSONB. Mirrors the Phase 09 Python
+ * engine convention (analytics-service/routers/match.py::_load_allocator_context):
+ * per-day per-symbol USD value differences → daily return series, ascending by asof.
+ *
+ * Caveats (per 10-RESEARCH.md Pattern 3):
+ * - M5 multi-venue: breakdown JSONB is keyed by SYMBOL only — venue is not
+ *   disambiguated. If an allocator holds BTC on both Binance and OKX, both
+ *   scope_refs (the same symbol across venues) map to the same return
+ *   series. Phase 09 Python engine accepts this approximation.
+ * - prev=0 days are skipped (avoids division by zero / non-finite values).
+ * - Series with fewer than 2 snapshots produce no returns (a return is a
+ *   difference; you need at least two values to subtract).
+ * - L6 all-NULL breakdowns: when every snapshot's breakdown column is null
+ *   the helper returns an empty record (no Object.entries on null; no crash).
+ */
+export function reconstructHoldingReturnsByScopeRef(
+  equitySnapshots: Array<{
+    asof: string;
+    breakdown: Record<string, number> | null;
+  }>,
+  holdingsSummary: Array<{
+    symbol: string;
+    venue: string;
+    holding_type: string;
+  }>,
+): Record<string, DailyPoint[]> {
+  const symbolSeriesUSD = new Map<
+    string,
+    Array<{ asof: string; value: number }>
+  >();
+  for (const snap of equitySnapshots) {
+    if (!snap.breakdown) continue;
+    for (const [symbol, value] of Object.entries(snap.breakdown)) {
+      if (!Number.isFinite(value)) continue;
+      if (!symbolSeriesUSD.has(symbol)) symbolSeriesUSD.set(symbol, []);
+      symbolSeriesUSD.get(symbol)!.push({ asof: snap.asof, value });
+    }
+  }
+  const result: Record<string, DailyPoint[]> = {};
+  for (const h of holdingsSummary) {
+    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+    const series = symbolSeriesUSD.get(h.symbol);
+    if (!series || series.length < 2) continue;
+    const sorted = [...series].sort((a, b) => a.asof.localeCompare(b.asof));
+    const dailyReturns: DailyPoint[] = [];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1].value;
+      const curr = sorted[i].value;
+      if (prev === 0) continue;
+      const ret = (curr - prev) / prev;
+      if (!Number.isFinite(ret)) continue;
+      dailyReturns.push({ date: sorted[i].asof, value: ret });
+    }
+    if (dailyReturns.length > 0) result[scopeRef] = dailyReturns;
+  }
+  return result;
+}
+
+/**
+ * Phase 10 / M4 — Compute the live-baseline `ComputedMetrics`-shaped object
+ * ONCE at SSR. The composer (Plan 06b) consumes this instead of re-deriving
+ * the live baseline on every render. The scenario projection adapter still
+ * runs client-side because it depends on toggle state (client-only).
+ *
+ * The function inlines the StrategyForBuilder set construction that Plan
+ * 01's `scenario-adapter.ts::buildStrategyForBuilderSet` will eventually
+ * own. Inlining is intentional: Plan 01 ships in the same wave (wave 1)
+ * and is not yet present on this branch, so importing from it would be a
+ * compile-time blocker. Once Plan 01 lands the helper can be swapped in
+ * with no behavioral change — the contract (StrategyForBuilder[] + all-
+ * selected ScenarioState + computeScenario) is identical.
+ *
+ * Returns the empty-default shape when no holdings have ≥2 returns
+ * (warm-up case).
+ */
+function liveBaselineMetricsFromHoldings(
+  holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"],
+  holdingReturnsByScopeRef: Record<string, DailyPoint[]>,
+): MyAllocationDashboardPayload["liveBaselineMetrics"] {
+  const totalAum = holdingsSummary.reduce(
+    (s, h) => s + (Number.isFinite(h.value_usd) ? h.value_usd : 0),
+    0,
+  );
+  const emptyDefault: MyAllocationDashboardPayload["liveBaselineMetrics"] = {
+    aum: totalAum,
+    ytdTwr: null,
+    sharpe: null,
+    maxDd: null,
+    avgRho: null,
+    equity: [],
+    drawdown: [],
+  };
+
+  // Build the StrategyForBuilder set: each holding becomes a "strategy"
+  // whose daily_returns series is its scope_ref entry in the per-holding
+  // returns map. Holdings without returns are excluded — they cannot
+  // contribute to the live baseline.
+  const strategies: StrategyForBuilder[] = [];
+  for (const h of holdingsSummary) {
+    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+    const returns = holdingReturnsByScopeRef[scopeRef];
+    if (!returns || returns.length === 0) continue;
+    strategies.push({
+      id: scopeRef,
+      name: `${h.venue} ${h.symbol}`,
+      codename: null,
+      disclosure_tier: "exploratory",
+      strategy_types: [],
+      markets: [],
+      start_date: null,
+      daily_returns: returns,
+      cagr: null,
+      sharpe: null,
+      volatility: null,
+      max_drawdown: null,
+    });
+  }
+  if (strategies.length === 0) return emptyDefault;
+
+  // All-enabled, value-weighted live set (mirrors the all-on default the
+  // composer shows on first paint). Weights normalize inside computeScenario.
+  const selected: Record<string, boolean> = {};
+  const weights: Record<string, number> = {};
+  const startDates: Record<string, string> = {};
+  for (const h of holdingsSummary) {
+    const scopeRef = `holding:${h.venue}:${h.symbol}:${h.holding_type}`;
+    if (!holdingReturnsByScopeRef[scopeRef]) continue;
+    selected[scopeRef] = true;
+    weights[scopeRef] = Math.max(0, h.value_usd ?? 0);
+  }
+  const state: ScenarioState = { selected, weights, startDates };
+  const cache = buildDateMapCache(strategies);
+  const liveCM = computeScenario(strategies, state, cache);
+
+  if (liveCM.n === 0 || liveCM.equity_curve.length === 0) return emptyDefault;
+
+  // Pitfall 1: scenario.ts emits cumulative RETURN values (0.18 = +18%).
+  // Convert to cumulative WEALTH (1.0 starting value) before storing — the
+  // EquityChart widget expects wealth-form points.
+  const equity: DailyPoint[] = liveCM.equity_curve.map((p) => ({
+    date: p.date,
+    value: p.value + 1,
+  }));
+  // Drawdown: derive once from wealth-scaled USD series (deriveSnapshotDrawdowns
+  // expects cumulative USD values, NOT 1.0-based wealth or cumulative return).
+  const drawdown = totalAum > 0
+    ? deriveSnapshotDrawdowns(
+        liveCM.equity_curve.map((p) => ({
+          date: p.date,
+          value: (p.value + 1) * totalAum,
+        })),
+      )
+    : [];
+
+  return {
+    aum: totalAum,
+    ytdTwr: liveCM.twr,
+    sharpe: liveCM.sharpe,
+    maxDd: liveCM.max_drawdown,
+    // ComputedMetrics field is `avg_pairwise_correlation` — surface it as
+    // `avgRho` on the payload to match the composer's render contract.
+    avgRho: liveCM.avg_pairwise_correlation,
+    equity,
+    drawdown,
+  };
+}
 
 /**
  * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
@@ -1010,6 +1229,25 @@ export const getMyAllocationDashboard = cache(
       }
     }
 
+    // Phase 10 / D-04 — Reconstruct per-holding daily-return series from
+    // allocator_equity_snapshots.breakdown JSONB. Reuses the equitySnapshots
+    // already fetched above; the helper is a pure JS transform (no I/O).
+    const holdingReturnsByScopeRef = reconstructHoldingReturnsByScopeRef(
+      equitySnapshots,
+      phase07.holdingsSummary,
+    );
+
+    // Phase 10 / H3 — Propagate the authenticated allocator's user.id so
+    // consumers (Plan 06a localStorage scoping, Plan 07 ownership probe)
+    // can rely on it. Trust the `userId` argument: callers (the Server
+    // Component path via getMyAllocationDashboard) ALREADY resolved
+    // auth.getUser() and pass its id here. The previous review-pass
+    // (P2) noted that re-fetching auth.getUser() inside this query was a
+    // redundant network round-trip — drop it. If a future caller wants
+    // to pass an arbitrary id, the existing ownership predicates
+    // (.eq("allocator_id", userId)) below still gate every read.
+    const allocator_id = userId;
+
     if (!portfolio) {
       // No real portfolio yet — still return a full Phase 07 payload so
       // fresh allocators with api_keys + snapshots see real equity. Legacy
@@ -1017,6 +1255,10 @@ export const getMyAllocationDashboard = cache(
       // their empty states; Phase 07 KPI / equity / drawdown widgets
       // consume the new fields via the parallel-prop path (VOICES-
       // ACCEPTED f7 + Phase 07 SC3).
+      // Phase 10 — even in the !portfolio branch the composer needs the new
+      // payload fields (additive contract). The empty-default for
+      // liveBaselineMetrics carries aum=0 (no holdings → no AUM) so the
+      // composer renders its empty state cleanly.
       return {
         portfolio: null,
         analytics: null,
@@ -1027,6 +1269,12 @@ export const getMyAllocationDashboard = cache(
         flaggedHoldings,
         matchDecisionsByHoldingRef,
         mandate,
+        holdingReturnsByScopeRef,
+        allocator_id: allocator_id,
+        liveBaselineMetrics: liveBaselineMetricsFromHoldings(
+          phase07.holdingsSummary,
+          holdingReturnsByScopeRef,
+        ),
         ...phase07,
       };
     }
@@ -1253,6 +1501,12 @@ export const getMyAllocationDashboard = cache(
       flaggedHoldings,
       matchDecisionsByHoldingRef,
       mandate,
+      holdingReturnsByScopeRef,
+      allocator_id: allocator_id,
+      liveBaselineMetrics: liveBaselineMetricsFromHoldings(
+        phase07.holdingsSummary,
+        holdingReturnsByScopeRef,
+      ),
       ...phase07,
     };
   },

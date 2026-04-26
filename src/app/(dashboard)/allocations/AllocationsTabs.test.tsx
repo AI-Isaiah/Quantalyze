@@ -80,6 +80,19 @@ vi.mock("./ScenarioStub", () => ({
   ),
 }));
 
+// Phase 10 / 10-06b — `?tab=scenario` now routes to ScenarioComposer when
+// the v2 cohort flag is on (default in v0.15.7.0+). The composer is mocked
+// to the SAME `scenario-body` testid as the legacy ScenarioStub so the
+// existing 6-tab routing tests below continue to assert "scenario panel
+// visible" without caring which branch rendered. Plan 06b's dedicated
+// scenario-composer test file (AllocationsTabs.scenario-composer.test.tsx)
+// asserts the v1/v2 branch contract directly.
+vi.mock("./components/ScenarioComposer", () => ({
+  ScenarioComposer: () => (
+    <div data-testid="scenario-body">SCENARIO_COMPOSER_BODY</div>
+  ),
+}));
+
 // --- Import after mocks -----------------------------------------------------
 
 import { AllocationsTabs } from "./AllocationsTabs";
@@ -106,6 +119,20 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
   mandate: null,
+  // Phase 10 / Plan 10-03 — additive payload fields. Empty defaults match
+  // the !portfolio + no-snapshots branch so the V1 / Stub paths render
+  // their empty states unchanged.
+  holdingReturnsByScopeRef: {},
+  allocator_id: "00000000-0000-0000-0000-000000000000",
+  liveBaselineMetrics: {
+    aum: 0,
+    ytdTwr: null,
+    sharpe: null,
+    maxDd: null,
+    avgRho: null,
+    equity: [],
+    drawdown: [],
+  },
 };
 
 function setSearchParams(query: string): void {
@@ -210,10 +237,14 @@ describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
     ).toBe("true");
   });
 
-  it("?tab=scenario → Scenario panel visible (PR3: hidden from tablist, still routable via URL + + Allocation chip)", () => {
+  it("?tab=scenario → Scenario panel visible (PR3: hidden from tablist, still routable via URL + + Allocation chip)", async () => {
     setSearchParams("tab=scenario");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    expectOnlyVisibleBody("scenario-body");
+    // Phase 10 / 10-06b — ScenarioComposer is dynamic-imported (next/dynamic
+    // ssr:false), so the body resolves on the next microtask. The sync
+    // helper would race with the loading-skeleton fallback; the async
+    // helper polls until the testid appears.
+    await expectOnlyVisibleBodyAsync("scenario-body");
     // PR3 (HANDOFF dashboard parity) — Scenario is no longer rendered as
     // a button in the tablist (truth screenshot is 5 tabs). It remains
     // routable via ?tab=scenario and via the green "+ Allocation" chip,

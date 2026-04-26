@@ -28,11 +28,43 @@ import {
 
 type Stage = "browse" | "confirm";
 
+/**
+ * Phase 10 Plan 05 / D-05. Candidate-strategy payload delivered to
+ * onAddToScenario. The shape matches Plan 01's `AddedStrategy` contract
+ * — id + name + markets + strategy_types — so the composer (Plan 06) can
+ * forward this directly to scenario-state.ts `addStrategyBridge`.
+ *
+ * markets and strategy_types are best-effort client-side approximations:
+ * markets defaults to `[holding.venue]` (the strategy is necessarily live
+ * on the holding's venue to be a valid swap candidate); strategy_types
+ * defaults to []. The composer can refine these from `payload.strategies`
+ * before passing to the scenario-state mutator if higher-fidelity metadata
+ * is available.
+ */
+export interface BridgeAddToScenarioCandidate {
+  id: string;
+  name: string;
+  markets: string[];
+  strategy_types: string[];
+}
+
 export interface BridgeDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   flaggedHoldings: FlaggedHolding[];
   matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
+  /**
+   * Phase 10 D-05. When provided, the confirm stage renders an
+   * "Add to scenario" CTA alongside the existing "Send intro". This is a
+   * CLIENT-ONLY action — no POST happens. The callback receives the
+   * flagged-holding's scope_ref + an AddedStrategy-shaped candidate
+   * payload; the composer (Plan 06) wires this to scenario-state.ts
+   * addStrategyBridge.
+   */
+  onAddToScenario?: (
+    holdingScopeRef: string,
+    candidate: BridgeAddToScenarioCandidate,
+  ) => void;
 }
 
 export function BridgeDrawer({
@@ -44,6 +76,7 @@ export function BridgeDrawer({
   // (the helper handles the "decision exists" / "create decision" split
   // server-side). Declared for forward-compat per D-16.
   matchDecisionsByHoldingRef: _matchDecisionsByHoldingRef,
+  onAddToScenario,
 }: BridgeDrawerProps) {
   const [stage, setStage] = useState<Stage>("browse");
   const [selectedRef, setSelectedRef] = useState<string | null>(null);
@@ -93,6 +126,32 @@ export function BridgeDrawer({
       return;
     }
     onClose();
+  }
+
+  /**
+   * Phase 10 D-05. Client-only "Add to scenario" — no POST. The composer
+   * (Plan 06) consumes the callback to mutate the client-side scenario draft
+   * via scenario-state.ts addStrategyBridge. markets/strategy_types are
+   * best-effort approximations from the holding's venue + an empty list;
+   * the composer can refine from `payload.strategies` if richer metadata
+   * is available before forwarding to the scenario-state mutator.
+   */
+  function handleAddToScenario() {
+    if (!selected || !onAddToScenario) return;
+    // Review-pass P2 fix — wrap the callback in try/finally so onClose
+    // ALWAYS runs even if the host throws synchronously. Without this,
+    // a callback exception would strand the drawer open with no path
+    // for the allocator to dismiss without page reload.
+    try {
+      onAddToScenario(buildHoldingRef(selected), {
+        id: selected.top_candidate_strategy_id,
+        name: selected.top_candidate_name,
+        markets: [selected.venue],
+        strategy_types: [],
+      });
+    } finally {
+      onClose();
+    }
   }
 
   const candidates = flaggedHoldings.filter(
@@ -253,14 +312,30 @@ export function BridgeDrawer({
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={handleSendIntro}
-              disabled={submitting}
-              className="self-start rounded-md bg-accent px-4 py-2 text-sm text-white hover:bg-accent/90 disabled:opacity-50"
+            <div
+              className={onAddToScenario ? "flex items-stretch gap-3" : ""}
             >
-              {submitting ? "Sending…" : "Send intro"}
-            </button>
+              <button
+                type="button"
+                onClick={handleSendIntro}
+                disabled={submitting}
+                className={`${
+                  onAddToScenario ? "flex-1" : "self-start"
+                } rounded-md bg-accent px-4 py-2 text-sm text-white hover:bg-accent/90 disabled:opacity-50`}
+              >
+                {submitting ? "Sending…" : "Send intro"}
+              </button>
+              {onAddToScenario && (
+                <button
+                  type="button"
+                  onClick={handleAddToScenario}
+                  className="flex-1 rounded-md bg-accent px-4 py-2 text-sm text-white hover:bg-accent/90"
+                  data-testid="bridge-add-to-scenario"
+                >
+                  Add to scenario
+                </button>
+              )}
+            </div>
             {error && (
               <div role="alert" className="text-xs text-negative">
                 {error}

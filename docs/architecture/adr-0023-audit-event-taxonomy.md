@@ -467,3 +467,106 @@ existing `metadata.match_decision_id`. The existing `match.decision_record` kind
 (`src/lib/audit.ts`) carries both strategy-sourced and holding-sourced decisions unchanged.
 
 Reference: `.planning/phases/09-bridge-live-against-real-holdings/09-CONTEXT.md` §D-14.
+
+## Phase 10 — Scenario Builder and What-If
+
+Migration 080 relaxes the Phase 09 `match_decisions_original_xor` CHECK and replaces it with a
+new `match_decision_kind` enum column gated by four per-kind invariant CHECK constraints. The
+enum carries four values: `bridge_recommended` (existing rows backfill into this — the
+Phase 09 XOR shape preserved), `voluntary_remove` (allocator toggled a holding off in the
+Scenario tab — `original_holding_ref` set, both strategy fields NULL), `voluntary_add`
+(allocator added a strategy via Browse drawer — `suggested_strategy_id` set, both
+`original_*` NULL), and `voluntary_modify` (pure weight-change on an existing holding —
+`original_holding_ref` set, `suggested_strategy_id` NULL). The four CHECK constraints
+(`match_decisions_kind_bridge_recommended`, `match_decisions_kind_voluntary_remove`,
+`match_decisions_kind_voluntary_add`, `match_decisions_kind_voluntary_modify`) replace the
+old XOR with kind-aware invariants. Pre-Phase-10 rows backfill to `bridge_recommended` with a
+`DEFAULT 'bridge_recommended'` on the column so all existing INSERT call sites remain
+backward-compatible. The migration's self-verifying DO block additionally asserts (L1) every
+existing row passes all four CHECKs and (M2) no backfilled `bridge_recommended` row has both
+`original_*` columns NULL.
+
+Migration 080 also extends `compute_bridge_outcome_deltas()` with a third CTE branch
+(`voluntary_add_candidates` / `voluntary_add_computed` / `voluntary_add_updated`) matching
+`md.kind = 'voluntary_add'` and joining on `suggested_strategy_id` against
+`strategy_analytics.returns_series` via the same `extract_delta` / `extract_estimated`
+helpers the strategy branch uses. Without this third branch, voluntary_add rows satisfy
+neither existing branch (both `original_*` are NULL — the holding branch needs
+`original_holding_ref` and the strategy branch needs `original_strategy_id`) and would
+silently never accrue `delta_30d/90d/180d`. The `bridge_outcomes` row for a voluntary_add
+keeps `kind='allocated'` so the existing UI banner contract is unchanged. The DO block
+asserts the new CTE name is reachable in `pg_proc.prosrc`.
+
+Migration 081 lands atomically alongside 080 to relax `bridge_outcomes` for voluntary kinds.
+`strategy_id` becomes NULL-able (voluntary_remove rows have no replacement strategy). The
+migration-072 widened unique index `bridge_outcomes_unique_per_strategy_holding` is dropped
+and replaced with `bridge_outcomes_allocator_match_decision_unique` on
+`(allocator_id, match_decision_id)` — the natural per-decision key now that voluntary kinds
+with NULL `strategy_id` exist. Strategy-sourced rows continue to enforce 1-per-decision via
+the new key (every `bridge_outcome` FKs to exactly one `match_decision` by construction).
+The migration-059 `bridge_outcomes_kind_fields_valid` consolidated CHECK is split into two
+named constraints `bridge_outcomes_kind_allocated` and `bridge_outcomes_kind_rejected` that
+require either `strategy_id NOT NULL` or `match_decision_id NOT NULL` (so voluntary kinds
+remain anchored even with NULL `strategy_id`). `bridge_outcomes.kind` itself is unchanged —
+voluntary_remove uses `kind='rejected'` (with `rejection_reason='underperforming_peers'` or
+similar from the Scenario commit drawer) and voluntary_add uses `kind='allocated'`. The
+"voluntary" semantic lives on `match_decisions.kind`, not on `bridge_outcomes.kind`.
+
+Migration 082 ships the `commit_scenario_batch(p_allocator_id uuid, p_diffs jsonb)
+RETURNS jsonb` SECURITY DEFINER RPC that the Plan 07 `POST /api/allocator/scenario/commit`
+route delegates to for the H4 single-tx invariant (CONTEXT D-09 — single Postgres
+transaction). The RPC enforces `auth.uid() = p_allocator_id` at function entry (defence-in-
+depth alongside the route's `withAuth`), runs per-row ownership probes against
+`allocator_holdings` for kinds that carry a `holding_ref` (voluntary_remove +
+voluntary_modify + bridge_recommended) and per-row strategy-status probes against
+`strategies` for kinds that carry a `strategy_id` (voluntary_add + bridge_recommended). For
+the bridge_recommended path it runs M7 reuse-or-create — `SELECT id FROM match_decisions
+WHERE (allocator_id, original_holding_ref, suggested_strategy_id) = (...) AND
+kind='bridge_recommended' LIMIT 1`; on a hit it reuses the existing match_decision id (no
+new INSERT, so the migration-074 widened unique indexes on (allocator_id, strategy_id,
+COALESCE(original_holding_ref, '')) for `decision IN ('thumbs_up','thumbs_down')` are not
+violated by retry); on a miss it INSERTs a new row. Any `RAISE EXCEPTION` inside the loop
+rolls back the entire batch (single Postgres transaction = single tx scope = all-or-nothing
+H4). The RPC returns `{ ok: true, recorded: [{index, match_decision_id, bridge_outcome_id,
+kind}, ...] }` on success. Authorisation: `REVOKE ALL FROM PUBLIC, anon` + `GRANT EXECUTE
+TO authenticated` only. `SET search_path = public, pg_temp` blocks schema-shadowing
+attacks. The self-verifying DO block asserts `prosecdef = t`, `proconfig` includes
+`search_path=public`, the auth.uid() guard string is present in `prosrc`, and the EXECUTE
+grant matrix is correct.
+
+**No new audit event kind is registered for Phase 10.** The existing `match.decision_record`
+kind in `src/lib/audit.ts` carries voluntary diffs unchanged via the existing
+`metadata.match_decision_id` field; the new `match_decisions.kind` value is captured as
+`metadata.kind` (`bridge_recommended` | `voluntary_remove` | `voluntary_add` |
+`voluntary_modify`) per the Phase 09 D-14 precedent for kind metadata in `audit_log.metadata`.
+The action being audited ("Bridge outcome recorded" / "Scenario decision committed") is
+identical regardless of kind — auditors filter on `metadata.kind` to slice voluntary vs
+recommended traffic.
+
+Reference: `.planning/phases/10-scenario-builder-and-what-if/10-CONTEXT.md` §D-10/D-11/D-17
+and `.planning/phases/10-scenario-builder-and-what-if/10-02-PLAN.md` (migration 080 + 081 + 082
+trio + atomic D-23 commit cadence).
+
+Migration 083 ships three review-pass hardening fixes on top of the 080/081/082 trio: (1) the
+M7 reuse-or-create path inside `commit_scenario_batch` switches from a SELECT-then-conditional-INSERT
+sequence to `INSERT ... ON CONFLICT (allocator_id, strategy_id, COALESCE(original_holding_ref, ''))
+WHERE decision='thumbs_up' DO UPDATE ... RETURNING id` targeting migration 074's
+`uniq_match_dec_thumbup_per_pair_holding` partial UNIQUE index, so two concurrent commits with
+the same `bridge_recommended` tuple collapse to ONE `match_decisions` row instead of one
+winner + one unique-violation; (2) the self-verifying DO block now qualifies all `pg_proc`
+lookups via `'public.commit_scenario_batch(uuid,jsonb)'::regprocedure` so a same-name function
+in a different schema cannot confuse the assertion path; (3) a partial UNIQUE index
+`bridge_outcomes_legacy_per_strategy_holding_when_md_null` on
+`(allocator_id, strategy_id, COALESCE(original_holding_ref, ''))` `WHERE match_decision_id IS NULL`
+restores migration 072's per-strategy invariant for any strategy-sourced `bridge_outcomes` row
+whose `match_decision_id` link was nulled out via the `ON DELETE SET NULL` cascade — migration 081
+moved the bridge_outcomes UNIQUE to `(allocator_id, match_decision_id)` which over Postgres's
+NULL-distinct semantics no longer blocks duplicate legacy-shape rows when `match_decision_id`
+is NULL. Pre-flight verification (Supabase Management API on 2026-04-26) confirmed zero
+existing duplicates. **No new audit event kind is registered for Migration 083.** The
+match-decision-record action remains the audited unit; the M7 reuse-or-create just folds the
+race-loser onto the same `match_decision_id` (and therefore the same audit row) the winner
+already wrote.
+
+Reference: `supabase/migrations/083_commit_scenario_batch_race_fix.sql`,
+`src/__tests__/scenario-commit-batch-race.test.ts`.

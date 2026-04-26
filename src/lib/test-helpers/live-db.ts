@@ -113,6 +113,64 @@ export async function cleanupLiveDbRow(
 }
 
 /**
+ * Whether introspection-via-Management-API is available. Tests that need to
+ * read pg_catalog / information_schema (which PostgREST does NOT expose by
+ * default) should gate on this in addition to HAS_LIVE_DB. Requires a
+ * Supabase Management API access token in SUPABASE_ACCESS_TOKEN and the
+ * project ref in SUPABASE_PROJECT_REF.
+ */
+export const SUPABASE_ACCESS_TOKEN = process.env.SUPABASE_ACCESS_TOKEN;
+export const SUPABASE_PROJECT_REF =
+  process.env.SUPABASE_PROJECT_REF ??
+  (process.env.NEXT_PUBLIC_SUPABASE_URL
+    ? process.env.NEXT_PUBLIC_SUPABASE_URL.replace(
+        /^https:\/\/([^.]+).*/,
+        "$1",
+      )
+    : undefined);
+export const HAS_INTROSPECTION =
+  Boolean(SUPABASE_ACCESS_TOKEN) && Boolean(SUPABASE_PROJECT_REF);
+
+/**
+ * Run a raw SQL query via the Supabase Management API. Returns the raw rows
+ * (or throws on HTTP error). Gate calls with `it.skipIf(!HAS_INTROSPECTION)`.
+ *
+ * The Management API endpoint POST /v1/projects/{ref}/database/query accepts
+ * `{ query: string }` and returns an array of result rows (or `[]` for DDL).
+ * It is NOT subject to PostgREST schema-cache restrictions on pg_catalog /
+ * information_schema, so this is the only path for tests that need to
+ * introspect Postgres metadata.
+ */
+export async function runIntrospectionSql<
+  T = Record<string, unknown>,
+>(query: string): Promise<T[]> {
+  if (!HAS_INTROSPECTION) {
+    throw new Error(
+      "runIntrospectionSql called without SUPABASE_ACCESS_TOKEN / " +
+        "SUPABASE_PROJECT_REF. Gate the test with it.skipIf(!HAS_INTROSPECTION).",
+    );
+  }
+  const resp = await fetch(
+    `https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_REF}/database/query`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    },
+  );
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(
+      `Management API query failed (${resp.status}): ${body.slice(0, 500)}`,
+    );
+  }
+  return (await resp.json()) as T[];
+}
+
+/**
  * Advertise why the live-DB tests were skipped. Call from a non-gated
  * `it(...)` at the end of the describe block so the reason is visible
  * in the test output.
