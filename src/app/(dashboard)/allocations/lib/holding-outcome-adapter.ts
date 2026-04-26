@@ -123,3 +123,55 @@ export function deriveEligibleForOutcome(
     existingOutcome: existing,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Phase 10 Plan 01 / Task 3 — voluntary kind synthetic shapes (D-10 + D-11).
+//
+// The Scenario commit drawer (Plan 07) constructs payload diffs to POST to
+// the commit API route. For two of the four diff kinds (voluntary_remove
+// and voluntary_add), no real Bridge match_decision exists yet — the drawer
+// uses these synthetic shapes to drive its inline form props identically to
+// the real bridge_recommended path. The actual match_decisions row insert
+// happens server-side in the commit route; the synthetic shapes are pure
+// client-side payload constructors.
+//
+// DON'T modify FlaggedHolding, buildHoldingRef, or any of the four existing
+// adapter functions — they are locked by Phase 09 D-11 and used unchanged
+// by ScenarioFlaggedHoldingsList.tsx (v1 path) and the v2 composer.
+// ---------------------------------------------------------------------------
+
+/** Synthetic match_decision shape for voluntary_remove — used by ScenarioCommitDrawer (Plan 07). */
+export interface VoluntaryRemoveDecisionShape {
+  kind: "voluntary_remove";
+  original_holding_ref: string;   // buildHoldingRef(holding)
+  suggested_strategy_id: null;
+  original_strategy_id: null;
+}
+
+/** Synthetic match_decision shape for voluntary_add — used by ScenarioCommitDrawer (Plan 07). */
+export interface VoluntaryAddDecisionShape {
+  kind: "voluntary_add";
+  original_holding_ref: null;
+  original_strategy_id: null;
+  suggested_strategy_id: string;  // strategy UUID
+}
+
+export function toVoluntaryRemoveDecision(
+  h: Pick<FlaggedHolding, "venue" | "symbol" | "holding_type">,
+): VoluntaryRemoveDecisionShape {
+  return {
+    kind: "voluntary_remove",
+    original_holding_ref: buildHoldingRef(h),
+    suggested_strategy_id: null,
+    original_strategy_id: null,
+  };
+}
+
+export function toVoluntaryAddDecision(strategyId: string): VoluntaryAddDecisionShape {
+  return {
+    kind: "voluntary_add",
+    original_holding_ref: null,
+    original_strategy_id: null,
+    suggested_strategy_id: strategyId,
+  };
+}
