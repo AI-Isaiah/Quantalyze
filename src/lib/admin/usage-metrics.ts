@@ -31,13 +31,26 @@ const POSTHOG_HOST = process.env.POSTHOG_HOST ?? "https://us.posthog.com";
 const POSTHOG_PROJECT_ID = process.env.POSTHOG_PROJECT_ID ?? "";
 const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY ?? "";
 
-import { USAGE_EVENTS, type UsageEvent } from "@/lib/analytics/usage-events-types";
-
 const REQUEST_TIMEOUT_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 50;
 
-type UsageEventName = UsageEvent;
+/**
+ * Daily-funnel events. These are the 5 original Sprint-5 events that the
+ * `getDailyFunnel()` HogQL query aggregates by day. The Phase 11 / D-13
+ * onboarding-funnel events (signup / first_api_key_added / first_sync_success
+ * / first_bridge_surfaced / first_outcome_recorded) live in a separate
+ * cohort-funnel dashboard surface keyed on the `funnel_step` property — they
+ * are NOT columns of `DailyFunnelRow`.
+ */
+const DAILY_FUNNEL_EVENTS = [
+  "session_start",
+  "widget_viewed",
+  "intro_submitted",
+  "bridge_click",
+  "alert_acknowledged",
+] as const;
+type UsageEventName = (typeof DAILY_FUNNEL_EVENTS)[number];
 
 // ---------------------------------------------------------------------------
 // Public response shapes
@@ -208,7 +221,7 @@ function emptyDailyRow(day: string): DailyFunnelRow {
 }
 
 function isUsageEvent(name: string): name is UsageEventName {
-  return (USAGE_EVENTS as readonly string[]).includes(name);
+  return (DAILY_FUNNEL_EVENTS as readonly string[]).includes(name);
 }
 
 // ---------------------------------------------------------------------------

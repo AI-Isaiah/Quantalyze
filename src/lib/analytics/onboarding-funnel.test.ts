@@ -22,8 +22,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-const trackMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("./usage-events", () => ({ trackUsageEventServer: trackMock }));
+const HOISTED = vi.hoisted(() => ({
+  trackMock: vi.fn().mockResolvedValue(undefined),
+}));
+const trackMock = HOISTED.trackMock;
+vi.mock("./usage-events", () => ({ trackUsageEventServer: HOISTED.trackMock }));
 
 import {
   maybeEmitOnboardingEvent,
