@@ -1,9 +1,15 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { getMyAllocationDashboard } from "@/lib/queries";
 import { AllocationsTabs } from "./AllocationsTabs";
 import { AllocationProvider } from "./AllocationContext";
 import { redirect } from "next/navigation";
+import {
+  maybeEmitSignup,
+  maybeEmitOnboardingEvent,
+  maybeEmitFirstBridgeSurfaced,
+} from "@/lib/analytics/onboarding-funnel";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +39,21 @@ export default async function MyAllocationPage() {
   if (!user) redirect("/login");
 
   const payload = await getMyAllocationDashboard(user.id);
+
+  // Phase 11 / Plan 03 / D-13 — fire onboarding-funnel events (single-fire
+  // via *_emitted_at sentinels on auth.users.raw_user_meta_data). All five
+  // helpers are non-blocking; allSettled prevents one analytics failure from
+  // cascading into a page render error. Each helper short-circuits when the
+  // marker has already been emitted, so the steady-state cost is metadata
+  // reads only (no PostHog or admin writes).
+  const admin = createAdminClient();
+  await Promise.allSettled([
+    maybeEmitSignup(admin, user),
+    maybeEmitOnboardingEvent(admin, user, "first_api_key_added"),
+    maybeEmitOnboardingEvent(admin, user, "first_sync_success"),
+    maybeEmitOnboardingEvent(admin, user, "first_outcome_recorded"),
+    maybeEmitFirstBridgeSurfaced(admin, user, payload.flaggedHoldings.length),
+  ]);
 
   return (
     <main className="max-w-[1280px] mx-auto p-6 pb-20">

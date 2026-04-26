@@ -873,6 +873,33 @@ async def run_poll_allocator_positions_job(job: dict) -> DispatchResult:
         },
     )
 
+    # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
+    # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
+    # The RPC is idempotent (writes only when the marker is absent), so
+    # subsequent successful syncs are a no-op for this side effect. The
+    # /allocations Server Component reader fires the PostHog
+    # `first_sync_success` event on the next dashboard request.
+    #
+    # Non-blocking: a stamp failure must not affect the compute job. The
+    # RPC failure path is logged via logger.warning per the analytics-service
+    # convention (services/audit.py error handling).
+    def _stamp_first_sync():
+        return (
+            ctx.supabase.rpc(
+                "stamp_first_sync_success",
+                {"p_user_id": allocator_id},
+            ).execute()
+        )
+
+    try:
+        await db_execute(_stamp_first_sync)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "poll_allocator_positions: failed to stamp first_sync_success_at "
+            "for allocator %s: %s",
+            allocator_id, exc,
+        )
+
     logger.info(
         "poll_allocator_positions: persisted %d rows for allocator %s "
         "(spot=%d, derivative=%d, status=%s)",
