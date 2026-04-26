@@ -152,9 +152,13 @@ export const POST = withAuth(
     try {
       await stampOutcomeMarker(admin, user.id);
     } catch (err) {
+      // Phase 11 review fix IN-05: log err.stack ?? err.message so a
+      // future ts/lint regression (e.g. an undefined.method typo inside
+      // stampOutcomeMarker) surfaces in the warn output rather than
+      // being swallowed by the broad catch + message-only render.
       console.warn(
         "[match-decisions/holding] first_outcome_at stamp failed:",
-        err instanceof Error ? err.message : err,
+        err instanceof Error ? (err.stack ?? err.message) : err,
       );
     }
 
