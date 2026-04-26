@@ -63,11 +63,14 @@ function makeAdmin(opts: {
   return { admin, calls: { updateUserById, getUserById } };
 }
 
-function makeUser(metadata: Record<string, unknown> = {}) {
+function makeUser(metadata: Record<string, unknown> = {}, created_at = "2026-04-01T08:00:00.000Z") {
   return {
     id: "00000000-0000-0000-0000-000000000aaa",
     email: "lp@example.com",
     user_metadata: metadata,
+    // Phase 11 WR-02: maybeEmitFirstBridgeSurfaced derives a deterministic
+    // stamped_at from user.created_at when the marker is absent.
+    created_at,
   };
 }
 
@@ -378,6 +381,57 @@ describe("maybeEmitFirstBridgeSurfaced", () => {
     );
     expect(meta.first_bridge_surfaced_emitted_at).toEqual(
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    );
+  });
+
+  it("Phase 11 WR-02: stamped_at falls back to user.created_at (deterministic) when marker is absent", async () => {
+    // Two parallel readers of the same auth.users row observe an
+    // identical user.created_at. Previously we used `new Date()` as the
+    // fallback, which produced a different value on each call and
+    // defeated PostHog's content-hash dedupe under burst load (e.g.
+    // prefetch + user navigation hitting /allocations concurrently).
+    // Now both racing calls compute the same `stamped_at` from
+    // user.created_at and the property bag matches.
+    const user = makeUser({}, "2026-03-15T09:30:00.000Z");
+    const { admin, calls } = makeAdmin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 7);
+
+    // PostHog payload uses user.created_at (deterministic across parallel
+    // callers).
+    expect(trackMock).toHaveBeenCalledWith(
+      "first_bridge_surfaced",
+      user.id,
+      expect.objectContaining({
+        stamped_at: "2026-03-15T09:30:00.000Z",
+      }),
+    );
+    // Persisted marker on auth.users.raw_user_meta_data uses the SAME
+    // deterministic value so subsequent re-reads match the property bag.
+    const meta = calls.updateUserById.mock.calls[0][1].user_metadata;
+    expect(meta.first_bridge_surfaced_at).toBe("2026-03-15T09:30:00.000Z");
+  });
+
+  it("Phase 11 WR-02: prefers persisted first_bridge_surfaced_at when present (post-stamp parity)", async () => {
+    // After the first call writes the stamp, future readers (which all
+    // no-op via the *_emitted_at sentinel anyway) should still see a
+    // matching property bag if the no-op path were ever bypassed. This
+    // also covers the legitimate case where a future reset of just the
+    // *_emitted_at sentinel needs to re-emit with the same stamped_at.
+    const user = makeUser(
+      { first_bridge_surfaced_at: "2026-04-10T12:00:00.000Z" },
+      "2026-03-15T09:30:00.000Z",
+    );
+    const { admin } = makeAdmin();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 7);
+    expect(trackMock).toHaveBeenCalledWith(
+      "first_bridge_surfaced",
+      user.id,
+      expect.objectContaining({
+        // The persisted marker wins over user.created_at.
+        stamped_at: "2026-04-10T12:00:00.000Z",
+      }),
     );
   });
 

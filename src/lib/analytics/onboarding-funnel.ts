@@ -195,6 +195,35 @@ export async function stampOutcomeMarker(
  * is computed at render time. The `*_at` stamp written here is for audit
  * symmetry with the other markers.
  *
+ * Phase 11 review fix WR-02 — deterministic `stamped_at` mitigation:
+ *   The four passive markers (signup / first_api_key_added /
+ *   first_sync_success / first_outcome_recorded) use their
+ *   source-side `${marker}_at` value as `stamped_at` — the source side
+ *   wrote it once, so two parallel readers observe an identical
+ *   property bag and PostHog content-hash dedupe holds. Bridge is
+ *   different: the source side and reader side are the same helper, so
+ *   there is no pre-existing `${marker}_at` to read on the first call.
+ *   Previously we used `new Date().toISOString()` as the fallback —
+ *   that produced a different value on each parallel call, defeating
+ *   PostHog dedupe.
+ *
+ *   The deterministic mitigation: when the marker is absent, derive
+ *   `stamped_at` from `user.created_at` (a stable, immutable property
+ *   on the auth.users row that is identical for every concurrent
+ *   reader of the same user). Two parallel calls now compute the same
+ *   `stamped_at`, the property bag matches, PostHog dedupe holds. The
+ *   value is a coarse proxy (the user's signup time, not the bridge-
+ *   surface time), but the funnel only needs (user, event) ordering —
+ *   the absolute timestamp is informational. The persistent
+ *   `${marker}_at` written below uses the same deterministic value so
+ *   subsequent calls (post-stamp) read it back unchanged.
+ *
+ *   The proper fix is a SECURITY DEFINER RPC mirroring
+ *   `stamp_first_sync_success` (migration 084) that does
+ *   `INSERT … ON CONFLICT DO NOTHING` and returns the persisted stamp.
+ *   That requires a new migration and is deferred to a follow-up phase
+ *   (see 11-REVIEW-FIX.md).
+ *
  * Returns: `true` if the event was fired this call, `false` otherwise.
  */
 export async function maybeEmitFirstBridgeSurfaced(
@@ -206,8 +235,17 @@ export async function maybeEmitFirstBridgeSurfaced(
   const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
   if (meta.first_bridge_surfaced_emitted_at) return false;
 
+  // Deterministic fallback: user.created_at is stable across concurrent
+  // readers of the same auth.users row, so two parallel /allocations
+  // requests for the same user observe identical `stamped_at` and
+  // PostHog content-hash dedupe collapses the duplicate event. The
+  // existing-marker path (post-stamp re-reads) preserves the same
+  // value, so the value is monotonic: deterministic-fallback on first
+  // call, persisted-marker on subsequent calls (which are all no-ops
+  // anyway via the *_emitted_at sentinel above, but the property bag
+  // would still match).
   const stampedAt =
-    (meta.first_bridge_surfaced_at as string | undefined) ?? new Date().toISOString();
+    (meta.first_bridge_surfaced_at as string | undefined) ?? user.created_at;
 
   await trackUsageEventServer("first_bridge_surfaced", user.id, {
     funnel_step: FUNNEL_STEP.first_bridge_surfaced,
