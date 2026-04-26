@@ -252,3 +252,183 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     expect(codeOnly).toMatch(/sendBridgeIntro\s*\(/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 10 Plan 05 Task 3 — "Add to scenario" CTA extension cases.
+//
+// The existing 10 cases above pin the Phase 09.1 / D-16 send-intro flow
+// verbatim. The cases below verify the additive onAddToScenario contract
+// without breaking any of those invariants:
+//
+//   - T_AS1 → no second CTA when prop omitted (backward-compat)
+//   - T_AS2 → second CTA appears alongside "Send intro" when prop provided
+//   - T_AS3 → click fires callback with (holdingScopeRef, candidate) args
+//   - T_AS4 → click also fires onClose (drawer closes per UI-SPEC contract)
+//   - T_AS5 → click does NOT fire sendBridgeIntro (client-only action)
+//   - T_AS6 → existing send-intro flow still works (regression guard)
+//   - T_AS7 — both buttons accessible (type=button, accent style)
+// ---------------------------------------------------------------------------
+describe("BridgeDrawer — Phase 10 Plan 05 / Task 3 'Add to scenario' CTA", () => {
+  beforeEach(() => {
+    mockSendBridgeIntro.mockReset();
+    mockSendBridgeIntro.mockResolvedValue({
+      ok: true,
+      match_decision_id: "decision-123",
+    });
+  });
+
+  it("T_AS1 — onAddToScenario NOT provided → no 'Add to scenario' CTA renders (backward-compat)", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    // Confirm stage rendered.
+    expect(screen.getByText("Confirm intro")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Send intro/ })).toBeInTheDocument();
+    // No second CTA.
+    expect(
+      screen.queryByRole("button", { name: /Add to scenario/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("bridge-add-to-scenario")).not.toBeInTheDocument();
+  });
+
+  it("T_AS2 — onAddToScenario provided → confirm stage renders BOTH 'Send intro' AND 'Add to scenario'", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    expect(screen.getByRole("button", { name: /Send intro/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Add to scenario/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("bridge-add-to-scenario")).toBeInTheDocument();
+  });
+
+  it("T_AS3 — click 'Add to scenario' → onAddToScenario fires once with (holdingScopeRef, candidate)", () => {
+    const onAddToScenario = vi.fn();
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={onAddToScenario}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
+
+    expect(onAddToScenario).toHaveBeenCalledTimes(1);
+    expect(onAddToScenario).toHaveBeenCalledWith(
+      "holding:binance:BTC/USDT:spot",
+      {
+        id: "strat-a",
+        name: "Momentum Alpha",
+        markets: ["binance"],
+        strategy_types: [],
+      },
+    );
+  });
+
+  it("T_AS4 — click 'Add to scenario' → onClose called once (drawer closes per UI-SPEC)", () => {
+    const onClose = vi.fn();
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("T_AS5 — click 'Add to scenario' → sendBridgeIntro NOT called (client-only action)", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByTestId("bridge-add-to-scenario"));
+
+    expect(mockSendBridgeIntro).not.toHaveBeenCalled();
+  });
+
+  it("T_AS6 — existing 'Send intro' wiring unchanged when onAddToScenario also provided (regression guard for Phase 09 D-16)", async () => {
+    const onClose = vi.fn();
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={onClose}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockSendBridgeIntro).toHaveBeenCalledTimes(1);
+    expect(mockSendBridgeIntro).toHaveBeenCalledWith({
+      holdingRef: "holding:binance:BTC/USDT:spot",
+      topCandidateStrategyId: "strat-a",
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("T_AS7 — both buttons have type='button' and accent styling classes", () => {
+    render(
+      <BridgeDrawer
+        isOpen
+        onClose={vi.fn()}
+        flaggedHoldings={[FLAGGED_A]}
+        matchDecisionsByHoldingRef={{}}
+        onAddToScenario={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      screen.getByTestId("bridge-candidate-holding:binance:BTC/USDT:spot"),
+    );
+    const sendBtn = screen.getByRole("button", { name: /Send intro/ });
+    const addBtn = screen.getByTestId("bridge-add-to-scenario");
+
+    expect(sendBtn).toHaveAttribute("type", "button");
+    expect(addBtn).toHaveAttribute("type", "button");
+    expect(sendBtn.className).toMatch(/bg-accent/);
+    expect(addBtn.className).toMatch(/bg-accent/);
+  });
+});
