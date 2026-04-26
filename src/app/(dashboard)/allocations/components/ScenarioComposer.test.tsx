@@ -95,6 +95,16 @@ vi.mock("./BridgeDrawer", () => ({
   ),
 }));
 
+// Plan 07 — composer imports ScenarioCommitDrawer to wire onCommitRequested
+// to its open handler. Mocked here so the composer's wire-in is the
+// unit-under-test rather than the drawer internals.
+vi.mock("./ScenarioCommitDrawer", () => ({
+  ScenarioCommitDrawer: vi.fn(
+    ({ isOpen }: { isOpen: boolean }) =>
+      isOpen ? <div data-testid="commit-drawer-mock" /> : null,
+  ),
+}));
+
 // Mock ScenarioFlaggedHoldingsList — it's embedded in the Bridge inline card
 // section; we don't want the table internals running in this test.
 vi.mock("../ScenarioFlaggedHoldingsList", () => ({
@@ -122,6 +132,7 @@ import DrawdownChart from "../widgets/performance/DrawdownChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
 import { BridgeDrawer } from "./BridgeDrawer";
+import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 
@@ -1129,5 +1140,44 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(metadataLookup[ADDED_ID].disclosure_tier).toBe("institutional");
     expect(metadataLookup[ADDED_ID].cagr).toBe(0.22);
     expect(metadataLookup[ADDED_ID].sharpe).toBe(1.55);
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C21 — Plan 07 wire-in: Click Commit footer button → ScenarioCommitDrawer
+  //         opens with the diffs prop.
+  // -------------------------------------------------------------------------
+  it("T_C21 (Plan 07) Click Commit → ScenarioCommitDrawer opens with diffs prop", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    // Toggle BTC off → at least one diff exists
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: /Toggle BTC on\/off in scenario/i,
+      }),
+    );
+    // Drawer not yet open
+    expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
+    // Click commit
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    // Drawer opens with isOpen=true
+    expect(screen.getByTestId("commit-drawer-mock")).toBeInTheDocument();
+    // The diffs prop carries the voluntary_remove for BTC
+    const drawerProps = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    expect(drawerProps).toBeDefined();
+    expect(drawerProps?.isOpen).toBe(true);
+    expect(Array.isArray(drawerProps?.diffs)).toBe(true);
+    expect(
+      drawerProps?.diffs.some(
+        (d) =>
+          d.kind === "voluntary_remove" &&
+          d.holding_ref === REF_BTC,
+      ),
+    ).toBe(true);
   });
 });
