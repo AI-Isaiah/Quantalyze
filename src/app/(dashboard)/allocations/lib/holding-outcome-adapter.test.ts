@@ -7,7 +7,11 @@ import {
   toAllocatedFormProps,
   toRejectedFormProps,
   deriveEligibleForOutcome,
+  toVoluntaryRemoveDecision,
+  toVoluntaryAddDecision,
   type FlaggedHolding,
+  type VoluntaryRemoveDecisionShape,
+  type VoluntaryAddDecisionShape,
 } from "./holding-outcome-adapter";
 import { FLAG_COMPOSITE_THRESHOLD } from "./flag-threshold";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
@@ -103,5 +107,81 @@ describe("FLAG_COMPOSITE_THRESHOLD parity (finding f5)", () => {
     const match = pySrc.match(/^FLAG_COMPOSITE_THRESHOLD\s*(?::\s*int\s*)?=\s*(\d+)/m);
     expect(match).not.toBeNull();
     expect(Number(match![1])).toBe(FLAG_COMPOSITE_THRESHOLD);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 10 Plan 01 / Task 3 — voluntary kind synthetic shapes (D-10 + D-11)
+// ---------------------------------------------------------------------------
+
+describe("toVoluntaryRemoveDecision (D-10)", () => {
+  it("T_VR1 returns the synthetic voluntary_remove shape with original_holding_ref + null strategy ids", () => {
+    const result: VoluntaryRemoveDecisionShape = toVoluntaryRemoveDecision({
+      venue: "binance",
+      symbol: "BTC",
+      holding_type: "spot",
+    });
+    expect(result).toEqual({
+      kind: "voluntary_remove",
+      original_holding_ref: "holding:binance:BTC:spot",
+      suggested_strategy_id: null,
+      original_strategy_id: null,
+    });
+  });
+
+  it("T_VR2 uses buildHoldingRef internally — different venue/symbol/type composes correctly", () => {
+    const result = toVoluntaryRemoveDecision({
+      venue: "okx",
+      symbol: "ETH",
+      holding_type: "derivative",
+    });
+    expect(result.original_holding_ref).toBe("holding:okx:ETH:derivative");
+    expect(result.original_holding_ref).toBe(
+      buildHoldingRef({ venue: "okx", symbol: "ETH", holding_type: "derivative" }),
+    );
+  });
+});
+
+describe("toVoluntaryAddDecision (D-11)", () => {
+  it("T_VA1 returns the synthetic voluntary_add shape with suggested_strategy_id + null original_*", () => {
+    const result: VoluntaryAddDecisionShape = toVoluntaryAddDecision(
+      "00000000-0000-0000-0000-000000000001",
+    );
+    expect(result).toEqual({
+      kind: "voluntary_add",
+      original_holding_ref: null,
+      original_strategy_id: null,
+      suggested_strategy_id: "00000000-0000-0000-0000-000000000001",
+    });
+  });
+});
+
+describe("backward-compatibility regression (T_BC1) — existing exports unchanged", () => {
+  it("buildHoldingRef + the four pre-Phase-10 adapter functions still behave identically", () => {
+    // buildHoldingRef
+    expect(buildHoldingRef(SAMPLE)).toBe("holding:binance:BTC:spot");
+    // toBridgeOutcomeBannerProps
+    const banner = toBridgeOutcomeBannerProps(SAMPLE, {
+      onAllocatedClick: vi.fn(),
+      onRejectedClick: vi.fn(),
+      onDismiss: vi.fn(),
+    });
+    expect(banner.strategyId).toBe("11111111-2222-3333-4444-555555555555");
+    // toAllocatedFormProps
+    const allocProps = toAllocatedFormProps(SAMPLE, {
+      onRecorded: vi.fn(),
+      onCancel: vi.fn(),
+      maxWeight: 0.25,
+    });
+    expect(allocProps.maxWeight).toBe(0.25);
+    // toRejectedFormProps
+    const rejProps = toRejectedFormProps(SAMPLE, {
+      onRecorded: vi.fn(),
+      onCancel: vi.fn(),
+    });
+    expect(rejProps.strategyId).toBe("11111111-2222-3333-4444-555555555555");
+    // deriveEligibleForOutcome
+    const elig = deriveEligibleForOutcome(SAMPLE, {}, {});
+    expect(elig).toEqual({ eligible: false, existingOutcome: null });
   });
 });
