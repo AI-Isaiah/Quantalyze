@@ -193,6 +193,11 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     equity: [{ date: "2026-01-01", value: 1.0 }],
     drawdown: [{ date: "2026-01-01", value: 0 }],
   },
+  // Phase 11 / 11-05 — onboarding visibility predicate inputs.
+  // ALLOCATOR_ID has at least one connected key in this fixture (the
+  // composer assumes synced holdings), so the banner+card never render.
+  apiKeysCount: 1,
+  mandateIsSet: false,
 };
 
 function setSearchParams(query: string): void {

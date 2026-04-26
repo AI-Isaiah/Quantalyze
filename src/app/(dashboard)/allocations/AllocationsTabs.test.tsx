@@ -133,6 +133,9 @@ const STUB_PROPS: MyAllocationDashboardPayload = {
     equity: [],
     drawdown: [],
   },
+  // Phase 11 / 11-05 — onboarding visibility predicate inputs.
+  apiKeysCount: 0,
+  mandateIsSet: false,
 };
 
 function setSearchParams(query: string): void {

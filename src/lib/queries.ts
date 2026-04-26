@@ -744,6 +744,65 @@ export interface MyAllocationDashboardPayload {
     equity: DailyPoint[]; // wealth-form (NOT cumulative-return) — Pitfall 1 already converted
     drawdown: DailyPoint[]; // pre-derived via deriveSnapshotDrawdowns()
   };
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 11 / 11-05 (onboarding & security readiness — D-02 + D-04)
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Phase 11 / D-02 — server-side count of api_keys rows for this user
+   * (RLS-scoped). Source of truth for the OnboardingBanner (S1) and
+   * MandateQuickSetCard (S2) visibility predicate. NOT cached client-side
+   * (D-02 LOCKED forbids localStorage). Re-evaluated on every page load.
+   *
+   * `0` triggers the empty-state surfaces; `>= 1` hides them permanently.
+   */
+  apiKeysCount: number;
+  /**
+   * Phase 11 / D-04 + ONBOARD-02 — true when the user has saved any
+   * mandate field (max_weight or preferred_strategy_types). Used by
+   * the MandateQuickSetCard (S2) visibility predicate to hide the
+   * card once the user has explicitly saved a mandate.
+   *
+   * Derivation (matches UI-SPEC §Interaction Contract):
+   *   mandate !== null
+   *   && (mandate.max_weight !== null
+   *       || (mandate.preferred_strategy_types?.length ?? 0) > 0)
+   *
+   * NOTE on BLOCK-2 reconciliation: A user types "15" into the empty
+   * input and clicks Save → max_weight=0.15 → mandateIsSet flips to
+   * true on next page load. Phase 02 D-09 LOCKED forbids SILENT default
+   * save (input pre-filled with 15 then submit-on-mount); BLOCK-2
+   * resolution: input is empty on first render so saving without a
+   * typed value is impossible (Save button disabled while empty).
+   *
+   * Pure-function derivation lives in `deriveMandateIsSet` below so the
+   * W-02 4-case truth table is unit-testable without spinning up the full
+   * getMyAllocationDashboard fetch.
+   */
+  mandateIsSet: boolean;
+}
+
+/**
+ * Phase 11 / W-02 — Pure helper for deriving `mandateIsSet` from an
+ * AllocatorPreferences row (or null). Exported so the unit test in
+ * src/lib/queries.mandateIsSet.test.ts can exercise the 4-case truth
+ * table without spinning up the full getMyAllocationDashboard fetch.
+ *
+ * Truth table:
+ *   1. mandate row missing (null)                                       → false
+ *   2. mandate row exists, both fields null/empty                        → false
+ *   3. mandate row exists, max_weight set (any non-null number)          → true
+ *   4. mandate row exists, preferred_strategy_types non-empty            → true
+ *
+ * NOTE: max_weight === 0 is treated as "set" (a saved zero is a valid
+ * persisted value; only `null` means "unset").
+ */
+export function deriveMandateIsSet(
+  mandate: AllocatorPreferences | null,
+): boolean {
+  if (mandate === null) return false;
+  if (mandate.max_weight !== null && mandate.max_weight !== undefined) return true;
+  if ((mandate.preferred_strategy_types?.length ?? 0) > 0) return true;
+  return false;
 }
 
 /**
@@ -1103,6 +1162,17 @@ export const getMyAllocationDashboard = cache(
       // pre-migration-011. Consumed by the V2 MandateSnapshot widget via
       // lib/mandate-gates.ts.
       mandate,
+      // Phase 11 / D-02 — server-side COUNT of api_keys rows for the
+      // visibility predicate of OnboardingBanner (S1) and
+      // MandateQuickSetCard (S2). RLS-scoped via the user-scoped client
+      // (api_keys has an owner-self-SELECT policy). NOT cached client-side
+      // (D-02 LOCKED forbids localStorage). Note: a separate `apiKeys`
+      // array fetch already runs above to project the full per-key columns
+      // — we keep the count query as a distinct head-only round-trip so
+      // (a) it's a single integer over the wire even when a user has many
+      // keys, and (b) the count number remains correct under RLS even if
+      // future projection-column changes alter the array length.
+      apiKeysCountRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -1136,7 +1206,20 @@ export const getMyAllocationDashboard = cache(
         .eq("allocator_id", userId)
         .not("original_holding_ref", "is", null),
       getOwnPreferences(supabase, userId),
+      supabase
+        .from("api_keys")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId),
     ]);
+
+    // Phase 11 / D-02 — server-side COUNT result (head:true returns no rows;
+    // the `count` field is the authoritative integer). PostgREST can return
+    // null for `count` on transport error — coalesce to 0 so downstream
+    // visibility predicates (apiKeysCount === 0) treat unknowable as
+    // "show the onboarding nudge", which is a safer default than hiding it.
+    const apiKeysCount = apiKeysCountRes.count ?? 0;
+    // Phase 11 / D-04 — derive once via the pure helper (W-02 unit-tested).
+    const mandateIsSet = deriveMandateIsSet(mandate);
 
     const equitySnapshots = (phase07EquityRes.data ??
       []) as MyAllocationDashboardPayload["equitySnapshots"];
@@ -1275,6 +1358,9 @@ export const getMyAllocationDashboard = cache(
           phase07.holdingsSummary,
           holdingReturnsByScopeRef,
         ),
+        // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
+        apiKeysCount,
+        mandateIsSet,
         ...phase07,
       };
     }
@@ -1507,6 +1593,9 @@ export const getMyAllocationDashboard = cache(
         phase07.holdingsSummary,
         holdingReturnsByScopeRef,
       ),
+      // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
+      apiKeysCount,
+      mandateIsSet,
       ...phase07,
     };
   },

@@ -270,6 +270,11 @@ function makePayload(
         { date: "2026-01-02", value: 0 },
       ],
     },
+    // Phase 11 / 11-05 — onboarding visibility predicate inputs. The
+    // composer fixture assumes a connected allocator (synced holdings),
+    // so apiKeysCount is non-zero (banner+card never render here).
+    apiKeysCount: 1,
+    mandateIsSet: false,
     ...overrides,
   };
 }
