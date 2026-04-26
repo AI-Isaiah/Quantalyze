@@ -196,8 +196,9 @@ Plans:
   3. Every allocator-facing widget renders correctly in loading, empty, partial, error, and success states — no ghost-town screens.
   4. PostHog records the onboarding funnel events `signup` → `first_api_key_added` → `first_sync_success` → `first_bridge_surfaced` → `first_outcome_recorded` for every new allocator cohort.
   5. The full Playwright E2E (signup → API key add → Performance populated → Scenario toggle+add → commit → outcome recorded) runs green in CI on every PR.
-  6. **Cron consolidation (added 2026-04-26 after Vercel Pro upgrade):** Railway analytics-service workers + any shim cron routes are migrated to Vercel-native crons. Pro tier removes the prior 2-cron limit that forced the dual-path architecture (Railway + shim). Deferred-items "Dual cron path" entry resolves on completion.
 **Plans:** 4 plans
+
+> **Open decision (2026-04-26 — deferred):** Vercel Pro upgrade lifted the prior 2-cron limit, so the Railway-vs-native cron architecture is no longer forced by the limit. User wants to defer this decision — Railway crons may still be the right continuation. Do NOT bake this into Phase 11 planning until decided.
 
 Plans:
 - [ ] 06-01-PLAN.md — Migration 066 + schema push + audit taxonomy sync + query-layer column projection
