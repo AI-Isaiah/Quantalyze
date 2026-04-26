@@ -369,7 +369,49 @@ describe("useScenarioState", () => {
     );
   });
 
-  it("T_USE12_auth_change_stale_new_allocator — two allocators in same browser do NOT collide; B's stale fingerprint surfaces fingerprintMismatch on auth-change to B (M1)", () => {
+  it("T_USE12 — two allocators in same browser do NOT collide (cross-tenant isolation via per-allocator scoped key)", () => {
+    // Allocator A persists their own draft.
+    const fpA = computeHoldingsFingerprint(HOLDINGS_2);
+    const draftA: ScenarioDraft = {
+      ...defaultDraftFromHoldings(HOLDINGS_2, fpA),
+      // Mutate so we can identify it on read-back.
+      addedStrategies: [STRAT_A],
+    };
+    store.set(scenarioStorageKey(ALLOCATOR_A), JSON.stringify(draftA));
+
+    // Allocator B persists a DIFFERENT draft at THEIR own scoped key.
+    const fpB = computeHoldingsFingerprint(HOLDINGS_B);
+    const draftB: ScenarioDraft = {
+      ...defaultDraftFromHoldings(HOLDINGS_B, fpB),
+      addedStrategies: [STRAT_B_FIXTURE],
+    };
+    store.set(scenarioStorageKey(ALLOCATOR_B), JSON.stringify(draftB));
+
+    // Mounting as A reads A's draft, NOT B's.
+    const { result: resultA, unmount: unmountA } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+    expect(
+      resultA.current.draft.addedStrategies.map((s) => s.id),
+    ).toContain(STRAT_A.id);
+    expect(
+      resultA.current.draft.addedStrategies.map((s) => s.id),
+    ).not.toContain(STRAT_B_FIXTURE.id);
+    unmountA();
+
+    // Mounting as B reads B's draft, NOT A's.
+    const { result: resultB } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_B, allocatorId: ALLOCATOR_B }),
+    );
+    expect(
+      resultB.current.draft.addedStrategies.map((s) => s.id),
+    ).toContain(STRAT_B_FIXTURE.id);
+    expect(
+      resultB.current.draft.addedStrategies.map((s) => s.id),
+    ).not.toContain(STRAT_A.id);
+  });
+
+  it("T_USE12_auth_change_stale_new_allocator — B's stale fingerprint surfaces fingerprintMismatch on auth-change to B (M1)", () => {
     // Allocator A persists a default draft (matching fingerprint).
     const fpA = computeHoldingsFingerprint(HOLDINGS_2);
     const draftA: ScenarioDraft = {
