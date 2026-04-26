@@ -42,7 +42,7 @@ export type { AllocatorMandateForFit } from "../lib/mandate-fit";
  */
 export interface StrategyBrowseRow {
   id: string;
-  alias: string;
+  name: string;
   codename: string | null;
   markets: string[];
   strategy_types: string[];
@@ -211,9 +211,9 @@ export function StrategyBrowseDrawer({
   const q = search.trim().toLowerCase();
   const filtered = strategies.filter((s) => {
     if (q) {
-      const aliasMatch = s.alias.toLowerCase().includes(q);
+      const nameMatch = s.name.toLowerCase().includes(q);
       const codenameMatch = (s.codename ?? "").toLowerCase().includes(q);
-      if (!aliasMatch && !codenameMatch) return false;
+      if (!nameMatch && !codenameMatch) return false;
     }
     if (
       activeMarkets.size > 0 &&
@@ -233,7 +233,7 @@ export function StrategyBrowseDrawer({
   function handleAdd(s: StrategyBrowseRow) {
     onAdd({
       id: s.id,
-      name: s.alias,
+      name: s.name,
       markets: s.markets,
       strategy_types: s.strategy_types,
     });
@@ -330,7 +330,7 @@ export function StrategyBrowseDrawer({
 
         <input
           type="search"
-          placeholder="Search by alias or codename"
+          placeholder="Search by name or codename"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="mt-4 w-full rounded-md border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
@@ -432,7 +432,7 @@ export function StrategyBrowseDrawer({
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-sm font-medium text-text-primary">
-                        {s.alias}
+                        {s.name}
                       </div>
                       <div className="mt-1 text-xs text-text-muted">
                         {s.codename ?? ""}

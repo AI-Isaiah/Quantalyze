@@ -6,9 +6,9 @@ import { NextRequest } from "next/server";
  *
  * Coverage matrix:
  *   T1 — 401 when no authenticated user
- *   T2 — 200 + JSON body shape (id, alias, codename, markets, strategy_types)
+ *   T2 — 200 + JSON body shape (id, name, codename, markets, strategy_types)
  *   T3 — only status='published' rows are returned (route filters via .eq)
- *   T4 — alphabetical order by alias is honored from the upstream query
+ *   T4 — alphabetical order by name is honored from the upstream query
  *   T5 — empty list returns 200 with strategies: []
  *   T6 — rate limit: 6th call returns 429 + Retry-After header
  *   T7 — null/undefined markets / strategy_types collapse to [] (W2 defense)
@@ -24,13 +24,14 @@ const STATE = vi.hoisted(() => ({
     email: "alloc@test.sec",
   } as { id: string; email: string } | null,
   // Holds the rows returned by the supabase chain. The mock asserts the
-  // .eq("status", "published") filter and the .order("alias", asc) call.
+  // .eq("status", "published") filter and the .order("name", asc) call.
   strategyRows: [] as Array<Record<string, unknown>>,
   observedFilters: {
     status: null as string | null,
     orderColumn: null as string | null,
     orderAsc: null as boolean | null,
     limit: null as number | null,
+    selectCols: null as string | null,
   },
   checkLimitResult: { success: true, retryAfter: 0 } as {
     success: boolean;
@@ -55,7 +56,10 @@ vi.mock("@/lib/supabase/server", () => ({
       // observable side effect for assertion, then returns `this` so the
       // next chain link works.
       const builder = {
-        select: (_cols: string) => builder,
+        select: (cols: string) => {
+          STATE.observedFilters.selectCols = cols;
+          return builder;
+        },
         eq: (col: string, val: string) => {
           if (col === "status") STATE.observedFilters.status = val;
           return builder;
@@ -113,6 +117,7 @@ beforeEach(() => {
     orderColumn: null,
     orderAsc: null,
     limit: null,
+    selectCols: null,
   };
   STATE.checkLimitResult = { success: true, retryAfter: 0 };
   STATE.rateLimitKey = null;
@@ -136,7 +141,7 @@ describe("GET /api/strategies/browse", () => {
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
-        alias: "Alpha Quant",
+        name: "Alpha Quant",
         codename: "AQ",
         markets: ["crypto"],
         strategy_types: ["mean-reversion"],
@@ -150,7 +155,7 @@ describe("GET /api/strategies/browse", () => {
     expect(body.strategies).toHaveLength(1);
     expect(body.strategies[0]).toMatchObject({
       id: "11111111-1111-4111-8111-111111111111",
-      alias: "Alpha Quant",
+      name: "Alpha Quant",
       codename: "AQ",
       markets: ["crypto"],
       strategy_types: ["mean-reversion"],
@@ -161,7 +166,7 @@ describe("GET /api/strategies/browse", () => {
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
-        alias: "A",
+        name: "A",
         codename: null,
         markets: [],
         strategy_types: [],
@@ -173,18 +178,18 @@ describe("GET /api/strategies/browse", () => {
     expect(STATE.observedFilters.status).toBe("published");
   });
 
-  it("T4 — orders by alias ascending (alphabetical) — UI doesn't re-sort", async () => {
+  it("T4 — orders by name ascending (alphabetical) — UI doesn't re-sort", async () => {
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
-        alias: "Alpha",
+        name: "Alpha",
         codename: null,
         markets: [],
         strategy_types: [],
       },
       {
         id: "22222222-2222-4222-8222-222222222222",
-        alias: "Bravo",
+        name: "Bravo",
         codename: null,
         markets: [],
         strategy_types: [],
@@ -193,10 +198,10 @@ describe("GET /api/strategies/browse", () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
-    expect(STATE.observedFilters.orderColumn).toBe("alias");
+    expect(STATE.observedFilters.orderColumn).toBe("name");
     expect(STATE.observedFilters.orderAsc).toBe(true);
     const body = await res.json();
-    expect(body.strategies.map((s: { alias: string }) => s.alias)).toEqual([
+    expect(body.strategies.map((s: { name: string }) => s.name)).toEqual([
       "Alpha",
       "Bravo",
     ]);
@@ -229,7 +234,7 @@ describe("GET /api/strategies/browse", () => {
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
-        alias: "Edge",
+        name: "Edge",
         codename: null,
         markets: null,
         strategy_types: undefined,
@@ -243,10 +248,29 @@ describe("GET /api/strategies/browse", () => {
     expect(body.strategies[0].strategy_types).toEqual([]);
   });
 
+  it("T9 (regression) — selects strategies.name, not strategies.alias (alias lives on portfolio_strategies)", async () => {
+    // Regression for: GET /api/strategies/browse 500
+    //   "column strategies.alias does not exist"
+    // Found by /qa on 2026-04-26 against live dev DB. Drawer showed
+    // "Couldn't load strategies — close and reopen the drawer."
+    // Root cause: route selected `alias` from `strategies`, but `alias`
+    // lives on `portfolio_strategies` (per-allocator override, migration
+    // 025). The strategies catalog uses `name` (initial schema) +
+    // `codename` (migration 014).
+    STATE.strategyRows = [];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const cols = STATE.observedFilters.selectCols ?? "";
+    expect(cols).toContain("name");
+    expect(cols).not.toContain("alias");
+    expect(STATE.observedFilters.orderColumn).toBe("name");
+  });
+
   it("T8 (M10) — LIMIT 200 cap: 250 published strategies → response has 200", async () => {
     STATE.strategyRows = Array.from({ length: 250 }, (_, i) => ({
       id: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`,
-      alias: `Strategy ${String(i).padStart(3, "0")}`,
+      name: `Strategy ${String(i).padStart(3, "0")}`,
       codename: null,
       markets: ["crypto"],
       strategy_types: ["systematic"],

@@ -7,7 +7,7 @@ import { fireEvent, render, screen, act } from "@testing-library/react";
  * Drawer pattern (backdrop click + Esc + isOpen=false render-null) is copied
  * verbatim from BridgeDrawer.test.tsx. Drawer-specific cases cover:
  *   - lazy fetch on isOpen → setStrategies → 5 row cards
- *   - search input alias-substring filter (case-insensitive)
+ *   - search input name-substring filter (case-insensitive)
  *   - markets filter pills (multi-select)
  *   - strategy_types filter pills (multi-select)
  *   - mandate-fit pill chip copy per tier
@@ -27,35 +27,35 @@ import {
 const FIVE_STRATS: StrategyBrowseRow[] = [
   {
     id: "s-momentum-1",
-    alias: "Momentum Alpha",
+    name: "Momentum Alpha",
     codename: "MOM-A",
     markets: ["binance"],
     strategy_types: ["momentum"],
   },
   {
     id: "s-mean-rev-1",
-    alias: "Mean Reversion Beta",
+    name: "Mean Reversion Beta",
     codename: "MR-B",
     markets: ["okx"],
     strategy_types: ["mean_reversion"],
   },
   {
     id: "s-mom-okx",
-    alias: "Momentum OKX",
+    name: "Momentum OKX",
     codename: "MOM-OKX",
     markets: ["okx"],
     strategy_types: ["momentum"],
   },
   {
     id: "s-arb-1",
-    alias: "Arbitrage Gamma",
+    name: "Arbitrage Gamma",
     codename: null,
     markets: ["binance", "okx"],
     strategy_types: ["arbitrage"],
   },
   {
     id: "s-trend-1",
-    alias: "Trend Delta",
+    name: "Trend Delta",
     codename: "TR-D",
     markets: ["coinbase"],
     strategy_types: ["trend_following"],
@@ -156,14 +156,14 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     renderDrawer();
     await flush();
     for (const s of FIVE_STRATS) {
-      expect(screen.getByText(s.alias)).toBeInTheDocument();
+      expect(screen.getByText(s.name)).toBeInTheDocument();
     }
   });
 
-  it("T5 — search input filters by alias substring (case-insensitive)", async () => {
+  it("T5 — search input filters by name substring (case-insensitive)", async () => {
     renderDrawer();
     await flush();
-    const search = screen.getByPlaceholderText("Search by alias or codename");
+    const search = screen.getByPlaceholderText("Search by name or codename");
     fireEvent.change(search, { target: { value: "moment" } });
 
     expect(screen.getByText("Momentum Alpha")).toBeInTheDocument();
@@ -215,7 +215,7 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
 
     // After untoggle: all 5 visible again.
     for (const s of FIVE_STRATS) {
-      expect(screen.getByText(s.alias)).toBeInTheDocument();
+      expect(screen.getByText(s.name)).toBeInTheDocument();
     }
   });
 
@@ -300,7 +300,7 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     renderDrawer();
     await flush();
     // Search for an impossible substring.
-    const search = screen.getByPlaceholderText("Search by alias or codename");
+    const search = screen.getByPlaceholderText("Search by name or codename");
     fireEvent.change(search, { target: { value: "zzzz-no-match-zzzz" } });
 
     expect(

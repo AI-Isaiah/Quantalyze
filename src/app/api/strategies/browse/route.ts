@@ -34,7 +34,7 @@ export const runtime = "nodejs";
 
 export interface BrowseStrategyRow {
   id: string;
-  alias: string;
+  name: string;
   codename: string | null;
   markets: string[];
   strategy_types: string[];
@@ -68,9 +68,9 @@ export const GET = withAuth(
     // published strategies has no need to bypass RLS.
     const { data, error } = await supabase
       .from("strategies")
-      .select("id, alias, codename, markets, strategy_types")
+      .select("id, name, codename, markets, strategy_types")
       .eq("status", "published")
-      .order("alias", { ascending: true })
+      .order("name", { ascending: true })
       .limit(STRATEGY_BROWSE_LIMIT);
 
     if (error) {
@@ -85,14 +85,14 @@ export const GET = withAuth(
     const strategies: BrowseStrategyRow[] = (data ?? []).map((row) => {
       const r = row as {
         id: string;
-        alias: string;
+        name: string;
         codename: string | null;
         markets: unknown;
         strategy_types: unknown;
       };
       return {
         id: r.id,
-        alias: r.alias,
+        name: r.name,
         codename: r.codename ?? null,
         markets: Array.isArray(r.markets) ? (r.markets as string[]) : [],
         strategy_types: Array.isArray(r.strategy_types)
