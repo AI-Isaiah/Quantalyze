@@ -1173,6 +1173,14 @@ export const getMyAllocationDashboard = cache(
       // keys, and (b) the count number remains correct under RLS even if
       // future projection-column changes alter the array length.
       apiKeysCountRes,
+      // G-1 fix — hoisted to Step 1 so the outcomes payload is identical in
+      // both the !portfolio (fresh allocator) branch and the portfolio
+      // branch. Uses admin client because match_decisions has no allocator-
+      // self-SELECT RLS policy (the nested join below relies on admin). The
+      // .eq("allocator_id", userId) is the ownership gate (kept inline so a
+      // reviewer can't accidentally drop it). .limit(200) caps the result
+      // set at the 200 most-recent outcomes per allocator (Voice-D5).
+      outcomesFullRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -1210,7 +1218,46 @@ export const getMyAllocationDashboard = cache(
         .from("api_keys")
         .select("id", { count: "exact", head: true })
         .eq("user_id", userId),
+      admin
+        .from("bridge_outcomes")
+        .select(
+          "id, strategy_id, match_decision_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, replacement_strategy:strategies!bridge_outcomes_strategy_id_fkey(id, name), match_decision:match_decisions!bridge_outcomes_match_decision_id_fkey(original_strategy:strategies!match_decisions_original_strategy_id_fkey(id, name))",
+        )
+        .eq("allocator_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(200),
     ]);
+
+    // G-1 fix — normalize outcomes once, use in both !portfolio and
+    // portfolio branches. Supabase returns embedded strategies as object
+    // OR array depending on join inference, so normalize both the direct
+    // (replacement_strategy) and nested (match_decision.original_strategy)
+    // embeds. Phase 5 D-15 (revised).
+    type EmbeddedStrategy = { id: string; name: string };
+    type RawRow = Record<string, unknown>;
+    const normalizeEmbed = (v: unknown): EmbeddedStrategy | null => {
+      if (v == null) return null;
+      if (Array.isArray(v)) return (v[0] as EmbeddedStrategy | undefined) ?? null;
+      return v as EmbeddedStrategy;
+    };
+    const outcomes: OutcomeRow[] = ((outcomesFullRes.data ?? []) as RawRow[]).map(
+      (row) => {
+        const replRaw = row.replacement_strategy;
+        const mdRaw = row.match_decision;
+        const mdObj = Array.isArray(mdRaw)
+          ? ((mdRaw[0] as RawRow | undefined) ?? null)
+          : (mdRaw as RawRow | null);
+        const origInner = mdObj
+          ? normalizeEmbed((mdObj as RawRow).original_strategy)
+          : null;
+        return {
+          ...(row as unknown as BridgeOutcome),
+          match_decision_id: (row.match_decision_id as string | null) ?? null,
+          replacement_strategy: normalizeEmbed(replRaw),
+          match_decision: origInner ? { original_strategy: origInner } : null,
+        } satisfies OutcomeRow;
+      },
+    );
 
     // Phase 11 / D-02 — server-side COUNT result (head:true returns no rows;
     // the `count` field is the authoritative integer). PostgREST can return
@@ -1348,7 +1395,7 @@ export const getMyAllocationDashboard = cache(
         strategies: [],
         apiKeys,
         alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
-        outcomes: [] as OutcomeRow[],
+        outcomes,
         flaggedHoldings,
         matchDecisionsByHoldingRef,
         mandate,
@@ -1387,7 +1434,6 @@ export const getMyAllocationDashboard = cache(
       sentAsIntroRes,
       existingOutcomesRes,
       activeDismissalsRes,
-      outcomesFullRes,
     ] = await Promise.all([
       admin
         .from("portfolio_analytics")
@@ -1454,22 +1500,9 @@ export const getMyAllocationDashboard = cache(
         .select("strategy_id, expires_at")
         .eq("allocator_id", userId)
         .gt("expires_at", nowIso),
-      // Phase 5 D-15 (revised): full outcome history with nested
-      // match_decisions.original_strategy join. Admin client required for
-      // the nested match_decisions read — no allocator-self-SELECT RLS
-      // policy on that table. The .eq("allocator_id", userId) is the
-      // ownership gate (Voice-D4 regression-asserted by TC outcomes-05); keep
-      // it inline with the query so a reviewer cannot accidentally drop it
-      // (same pattern as lines 683-687 above). .limit(200) caps result set
-      // at 200 most-recent outcomes (Voice-D5).
-      admin
-        .from("bridge_outcomes")
-        .select(
-          "id, strategy_id, match_decision_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, replacement_strategy:strategies!bridge_outcomes_strategy_id_fkey(id, name), match_decision:match_decisions!bridge_outcomes_match_decision_id_fkey(original_strategy:strategies!match_decisions_original_strategy_id_fkey(id, name))"
-        )
-        .eq("allocator_id", userId)
-        .order("created_at", { ascending: false })
-        .limit(200),
+      // G-1 fix: full outcome history (Phase 5 D-15) is now fetched in
+      // Step 1's Promise.all so the !portfolio branch sees the same
+      // payload. See `outcomesFullRes` and the `outcomes` derivation above.
     ]);
 
     // Normalize the strategies join: Supabase returns the embedded
@@ -1551,38 +1584,14 @@ export const getMyAllocationDashboard = cache(
       alertCounts.total++;
     }
 
-    // Phase 5 D-15 (revised): marshal fan-out into top-level outcomes[].
-    // Supabase returns embedded strategies as object or array; normalize both
-    // the direct embed (replacement_strategy) and the nested embed
-    // (match_decision.original_strategy).
-    type EmbeddedStrategy = { id: string; name: string };
-    type RawRow = Record<string, unknown>;
-    const normalizeEmbed = (v: unknown): EmbeddedStrategy | null => {
-      if (v == null) return null;
-      if (Array.isArray(v)) return (v[0] as EmbeddedStrategy | undefined) ?? null;
-      return v as EmbeddedStrategy;
-    };
-    const outcomes: OutcomeRow[] = ((outcomesFullRes.data ?? []) as RawRow[]).map((row) => {
-      const replRaw = row.replacement_strategy;
-      const mdRaw = row.match_decision;
-      const mdObj = Array.isArray(mdRaw)
-        ? ((mdRaw[0] as RawRow | undefined) ?? null)
-        : (mdRaw as RawRow | null);
-      const origInner = mdObj ? normalizeEmbed((mdObj as RawRow).original_strategy) : null;
-      return {
-        ...(row as unknown as BridgeOutcome),
-        match_decision_id: (row.match_decision_id as string | null) ?? null,
-        replacement_strategy: normalizeEmbed(replRaw),
-        match_decision: origInner ? { original_strategy: origInner } : null,
-      } satisfies OutcomeRow;
-    });
-
     return {
       portfolio,
       analytics: (analyticsRes.data ?? null) as PortfolioAnalytics | null,
       strategies,
       apiKeys,
       alertCount: alertCounts,
+      // G-1 fix: `outcomes` is hoisted to Step 1 above so the !portfolio
+      // branch returns the same payload shape (Phase 5 D-15).
       outcomes,
       flaggedHoldings,
       matchDecisionsByHoldingRef,
