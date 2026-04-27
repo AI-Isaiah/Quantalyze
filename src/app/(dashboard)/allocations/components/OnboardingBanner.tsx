@@ -64,7 +64,7 @@ export function OnboardingBanner() {
         </div>
         <Link
           href="/profile?tab=exchanges"
-          className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
+          className="inline-flex items-center rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
         >
           Connect Exchange →
         </Link>
