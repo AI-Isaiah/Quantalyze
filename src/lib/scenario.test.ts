@@ -145,6 +145,72 @@ describe("computeScenario — edge cases", () => {
     expect(metrics.effective_end).toBe(dates[4]);
   });
 
+  it("[REGRESSION PIN: catastrophic-day guard] returns null metrics when any single day has return ≤ -100% (cumulative wealth flips sign)", () => {
+    // Reported as Phase 10 ISSUE-001 — demo allocator with thin OKX
+    // history (3 months) + a stablecoin holding showed -79,017% YTD TWR
+    // and -10,976% Max DD in the Scenario tab. Root cause: at least one
+    // day in `daily_returns` had a value ≤ -1 (impossible for real
+    // long-only positions; signals data-quality issue — bad return
+    // units, mis-stamped returns_series, or stablecoin price feed
+    // glitch). Once cumulative wealth flips sign, twr/cagr/sharpe/maxDD
+    // become mathematically meaningless. The guard returns null KPIs so
+    // KpiStrip renders honest em-dashes instead of astronomical garbage.
+    const dates = buildDates("2024-01-02", 50);
+    // Day 5 has a -1.05 return (more than -100%) — clearly bad data.
+    const dailyReturns: DailyPoint[] = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? -1.05 : 0.001,
+    }));
+    const strategy: StrategyForBuilder = {
+      ...constantReturnStrategy("a", dates, 0),
+      daily_returns: dailyReturns,
+    };
+    const cache = buildDateMapCache([strategy]);
+    const metrics = computeScenario([strategy], defaultState([strategy]), cache);
+
+    expect(metrics.n).toBe(50);
+    // All KPIs nulled out by the guard — KpiStrip will render em-dash.
+    expect(metrics.twr).toBeNull();
+    expect(metrics.cagr).toBeNull();
+    expect(metrics.volatility).toBeNull();
+    expect(metrics.sharpe).toBeNull();
+    expect(metrics.sortino).toBeNull();
+    expect(metrics.max_drawdown).toBeNull();
+    expect(metrics.max_dd_days).toBeNull();
+    expect(metrics.correlation_matrix).toBeNull();
+    expect(metrics.avg_pairwise_correlation).toBeNull();
+    // Equity curve also suppressed (plotting bad data misleads more
+    // than empty state).
+    expect(metrics.equity_curve).toEqual([]);
+    // effective_start/end still populated so downstream UX can render
+    // a "data quality issue" message keyed to the real date range.
+    expect(metrics.effective_start).toBe(dates[0]);
+    expect(metrics.effective_end).toBe(dates[49]);
+  });
+
+  it("[REGRESSION PIN: catastrophic-day guard] does NOT trigger for normal market crashes (-50% single day)", () => {
+    // Sanity check: a -50% single day is bad but plausible (Black
+    // Monday, COVID crash, etc.). Cumulative stays positive, metrics
+    // should compute normally.
+    const dates = buildDates("2024-01-02", 50);
+    const dailyReturns: DailyPoint[] = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? -0.5 : 0.001,
+    }));
+    const strategy: StrategyForBuilder = {
+      ...constantReturnStrategy("a", dates, 0),
+      daily_returns: dailyReturns,
+    };
+    const cache = buildDateMapCache([strategy]);
+    const metrics = computeScenario([strategy], defaultState([strategy]), cache);
+
+    expect(metrics.n).toBe(50);
+    expect(metrics.twr).not.toBeNull();
+    expect(metrics.twr).toBeLessThan(0); // ends negative after the -50% day
+    expect(metrics.twr).toBeGreaterThan(-1); // but cumulative wealth stays positive
+    expect(metrics.equity_curve.length).toBeGreaterThan(0);
+  });
+
   it("single-strategy identity: composite TWR matches (1+r)^n for a constant-return strategy", () => {
     // 252 business days of a constant +0.1% daily return.
     const dates = buildDates("2024-01-02", 252);

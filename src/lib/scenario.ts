@@ -203,6 +203,43 @@ export function computeScenario(
     c *= 1 + portDaily[i];
     cumulative[i] = c;
   }
+
+  // Bug-guard: cumulative wealth must stay strictly positive. If any
+  // single day's portfolio return ≤ -1 (catastrophic single-day loss
+  // exceeding 100%, which is impossible for real long-only positions
+  // and signals a data-quality issue — bad return units, mis-stamped
+  // returns_series, or stablecoin price feed glitch), the wealth chain
+  // flips sign and downstream metrics (twr = wealth - 1, max_dd via
+  // wealth/peak - 1, sharpe via mean/std) all become mathematically
+  // meaningless. Return null KPIs so the UI renders honest em-dashes
+  // instead of astronomical garbage like -79,017% TWR. The equity_curve
+  // is also suppressed because plotting nonsensical values misleads
+  // more than empty state. Holds the existing data-quality contract:
+  // see Phase 07 returns-series sanity (D-09 warm-up gate) and Phase 12
+  // (METRICS-02 cross-runtime parity test) which will codify this gate
+  // server-side.
+  const minCumulative = cumulative.reduce(
+    (m, v) => (v < m ? v : m),
+    Infinity,
+  );
+  if (minCumulative <= 0) {
+    return {
+      n,
+      twr: null,
+      cagr: null,
+      volatility: null,
+      sharpe: null,
+      sortino: null,
+      max_drawdown: null,
+      max_dd_days: null,
+      correlation_matrix: null,
+      avg_pairwise_correlation: null,
+      equity_curve: [],
+      effective_start: commonDates[0],
+      effective_end: commonDates[n - 1],
+    };
+  }
+
   const twr = cumulative[n - 1] - 1;
   const years = n / 252;
   const cagr = years > 0 ? Math.pow(1 + twr, 1 / years) - 1 : null;
