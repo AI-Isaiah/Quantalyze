@@ -219,7 +219,7 @@ export function ScenarioFlaggedHoldingsList({
 
             return (
               <Fragment key={ref}>
-                <tr className="border-b border-border transition-colors hover:bg-[#FAFBFC]">
+                <tr className="border-b border-border transition-colors hover:bg-surface-subtle">
                   <td className="py-3 pr-4">
                     <button
                       type="button"
