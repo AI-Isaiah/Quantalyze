@@ -6,6 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.16.0.0] - 2026-04-27
+
+**v0.16.0.0 milestone open — Phase 11 Onboarding & Security Readiness.** A
+real LP's first 10 minutes are friction-free and credible. Every allocator-
+facing widget renders correctly in all five states (loading / empty / partial
+/ error / success). The end-to-end Playwright acceptance test runs in CI
+(always-on banner smoke today, full funnel one-variable-away).
+
+Phase 11 was spun out of v0.15.0.0 mid-sprint as its own minor-version
+release because the onboarding/security work landed independently while
+v0.15.x had already been shipping incrementally on `main`.
+
+### Added
+
+- **OnboardingBanner (S1)** — Connect Exchange nudge above `/allocations`
+  tabs, gated server-side on `apiKeysCount === 0`, sessionStorage dismiss
+  with re-surface until first key connects.
+- **MandateQuickSetCard (S2)** — empty input + "Suggested: 15%" helper +
+  Save-disabled-until-typed; Phase 02 D-09 LOCKED honored (no silent default
+  save).
+- **`/security` page surfaces** — SOC-2 status banner (S4a), audit-log link
+  to `/profile?tab=security` (S4c), WithdrawalWarningStrip on every wizard
+  step (S5), WizardIpAllowlistHint persistent (S7), AuditLogSubsection with
+  Download CSV (last 90 days) on the profile security tab (S6).
+- **GET /api/me/audit-log/export route** — RFC 4180 + WR-01 formula injection
+  neutralization, RLS isolation test, 36KB CSV with JSON metadata properly
+  quoted.
+- **WidgetState 5-mode primitive** — loading/empty/partial/error/success
+  states; wired into all 7 DEFAULT_LAYOUT widgets behind `widget_state_v2`
+  feature flag (default OFF until per-state contracts land for the long-tail
+  32 widgets).
+- **PostHog onboarding funnel** — 5 single-fire events (`signup` →
+  `first_api_key_added` → `first_sync_success` → `first_bridge_surfaced` →
+  `first_outcome_recorded`) via `auth.users.raw_user_meta_data` markers.
+- **Migration 084** — `first_api_key_added_at` trigger on `api_keys` AFTER
+  INSERT + `stamp_first_sync_success(p_user_id UUID)` SECURITY DEFINER RPC
+  for Python worker. Self-verifying DO block at install time.
+- **Migration 085** — `stamp_first_bridge_surfaced(p_user_id UUID)` SECURITY
+  DEFINER RPC retiring the WR-02 race window via atomic Postgres-level
+  stamping. Replaces the deterministic-fallback mitigation.
+- **Playwright E2E** — `e2e/onboarding-funnel.spec.ts` (full happy path with
+  5-marker assertion, BLOCK-3 gated on `vars.E2E_TEST_DB_CONFIGURED`) +
+  `e2e/onboarding-banner-smoke.spec.ts` (RISK-2 always-on, fork-PR safe).
+
+### Changed
+
+- VERSION: 0.15.13.0 → 0.16.0.0 (major minor bump for milestone open).
+- ROADMAP.md collapses v0.15.0.0 (Phases 06–10 + 09.1) to one-liner pointing
+  at `milestones/v0.15.0.0-ROADMAP.md` archive.
+- v0.15 phase directories (06, 07, 08, 09, 09.1, 10) archived to
+  `milestones/v0.15.0.0-phases/`.
+
+### Notes on Phase 11 deferred items
+
+- **WR-02** retired in flight via migration 085 + helper refactor (commit
+  `841da8a`); legacy `*_emitted_at` sentinel preserved as transition guard.
+- **BLOCK-3 GitHub secrets activation** — user-action item; CI gate uses
+  `vars.E2E_TEST_DB_CONFIGURED == 'true'` so dormant state is intentional
+  and safe.
+- **PostHog dashboard ingest verification** — observable only post-merge in
+  production with real fresh-allocator traffic.
+- **S4b inline egress IPs** — deferred pending static-IP infrastructure
+  provisioning; email path preserved as canonical IP-disclosure mechanism.
+- **IN-02 WidgetState partial pill `bg-warning/5` contrast** — design-token
+  decision needs explicit user/design approval; deferred.
+
 ## [0.15.13.0] - 2026-04-26
 
 **Dashboard parity PR4 — final cosmetic polish.** Closes the four remaining
