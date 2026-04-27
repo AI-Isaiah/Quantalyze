@@ -152,7 +152,7 @@ function MandateGateLine({ row }: { row: GateRow }) {
         alignItems: "center",
         padding: "10px 20px",
         borderBottom: "1px solid var(--border)",
-        gap: 10,
+        gap: "var(--space-grid-gap)",
       }}
     >
       <span

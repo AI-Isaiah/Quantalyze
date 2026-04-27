@@ -275,7 +275,7 @@ export function CustomRangePicker({
             fixed). DateInput is a flex-column label/input pair; flex-end
             on this row aligns the bottom of the input with the bottom of
             the sibling text elements. */}
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: "var(--space-grid-gap)" }}>
           <DateInput
             label="Start"
             value={startIso}

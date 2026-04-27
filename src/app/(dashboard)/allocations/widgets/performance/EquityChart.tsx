@@ -1192,7 +1192,7 @@ export default function EquityChartWidget({ data }: WidgetProps) {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          gap: 10,
+          gap: "var(--space-grid-gap)",
           flexWrap: "wrap",
         }}
       >

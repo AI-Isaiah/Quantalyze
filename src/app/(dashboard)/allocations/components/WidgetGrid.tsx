@@ -50,8 +50,8 @@ export function WidgetGrid({ tiles, onResize, onRemove, onMove, renderWidget }: 
       style={{
         display: "grid",
         gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-        gap: 10,
-        marginTop: 10,
+        gap: "var(--space-grid-gap)",
+        marginTop: "var(--space-grid-gap)",
       }}
     >
       {tiles.map(({ k, w }) => (
@@ -135,6 +135,13 @@ function WidgetCell({
     const handleEl = e.currentTarget as HTMLDivElement;
     const gridEl = gridRef.current;
     const gridWidth = gridEl?.getBoundingClientRect().width ?? 0;
+    // MUST stay in sync with `--space-grid-gap` in src/app/globals.css.
+    // Kept as a numeric literal (rather than reading
+    // getComputedStyle(...).getPropertyValue('--space-grid-gap')) because
+    // CSS computed-style reads have SSR/hydration edge cases and the
+    // pointer-resize handler runs on every move event — a string parse
+    // per move would be wasteful. If --space-grid-gap changes in
+    // globals.css, update this literal in lockstep.
     const gap = 10;
     // Column width in pixels: (gridWidth - 3*gap) / 4
     const colWidth = gridWidth > 0 ? (gridWidth - 3 * gap) / 4 : 240;

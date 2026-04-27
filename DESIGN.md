@@ -61,6 +61,21 @@
 - **Section gaps:** 24-32px between content sections
 - **Table row height:** ~44px (touch-target compliant)
 
+### Spacing tokens (CSS custom properties)
+- **`--space-grid-gap` (10px):** Designer-bundle-origin grid gap. Used by
+  `WidgetGrid` (the allocator-dashboard 4-col grid) + the Bridge family
+  (`BridgeWidget`, `BridgeDrawer`) and a handful of widget legend rows
+  (`CustomRangePicker`, `EquityChart` card header, `MandateSnapshotWidget`,
+  `AllocationByStyleWidget`). **NOT a member of the 4/8/12/16/24 ladder
+  above** — it is the verbatim port from `Allocator Dashboard.html` /
+  `designer-bundle/project/src/widget-grid.jsx`. Snapping to the nearest
+  ladder value (12px) would shift the 4-col grid by 6px cumulative and
+  risk regressing the responsive breakpoints at 980px / 640px (see
+  `.planning/phases/09.1-allocator-dashboard-ui-refresh-implement-designer-provided-a/09.1-VERIFICATION.md`
+  line 110). Formalized as a token 2026-04-27 to retire UI-FLAG-04 — the
+  visual value stays at 10px, but the value now lives in exactly one place
+  (`globals.css`).
+
 ## Layout
 - **Approach:** Grid-disciplined — strict columns, predictable alignment
 - **Grid:** 12 columns, responsive
@@ -118,3 +133,4 @@ Reference: FactSet quarterly factsheet pages.
 | 2026-04-06 | Geist Mono over JetBrains Mono | Geist Mono designed for UI, not code editors. Sharper at small sizes. Better tabular-nums. |
 | 2026-04-09 | Data density > card density + Meeting hero rule | Portfolio demo hero (v0.2.0.0) inverted `/demo` from a 9-card mosaic to a 3-block editorial layout (Verdict / Evidence / Action) after cross-model design review. Codified both the general "data density" principle and the specific "meeting hero" exception so the page never drifts back into stacked cards. |
 | 2026-04-11 | Added `warning` amber #D97706 as a 4th semantic color | Sprint 2 Task 2.9 compute queue admin UI needs a color for `failed_retry` state that is neither red (permanent failure) nor green (success). Palette relaxed from "1 accent + neutrals" to "1 accent + 3 semantic (positive/negative/warning) + neutrals". Warning is reserved for transient states that will recover on their own. Contrast verified ~4.6:1 on white (AA pass). |
+| 2026-04-27 | Formalized `--space-grid-gap: 10px` as a documented spacing token | Phase 09.1 UI-FLAG-04: WidgetGrid + Bridge + 3 widget legend rows hardcoded `gap: 10` in 5 inline-style sites. 10px falls outside the 4/8/12/16/24 ladder. Snapping to 12px would shift the 4-col grid by 6px cumulative across cells and risk regressing the 980px / 640px responsive breakpoints baked into WidgetGrid's inline `<style>` block. Promoted the value to a documented designer-bundle-origin token rather than altering the visual. The pointer-resize math in WidgetGrid keeps a numeric literal with a sync comment (CSS computed-style reads have SSR/hydration edge cases). |

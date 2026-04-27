@@ -148,7 +148,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  gap: 10,
+                  gap: "var(--space-grid-gap)",
                   padding: "6px 0",
                   borderBottom: "1px solid var(--border)",
                 }}

@@ -59,6 +59,19 @@
   /* --- Spacing --- */
   --spacing-sidebar: 260px;
 
+  /* Designer-bundle-origin grid gap (10px). Ported verbatim from
+     `Allocator Dashboard.html` / `designer-bundle/project/src/widget-grid.jsx`.
+     Consumed by WidgetGrid + Bridge inline styles + a small number of
+     widget legend rows (CustomRangePicker, EquityChart card header,
+     MandateSnapshotWidget row, AllocationByStyleWidget legend).
+     NOT a member of the DESIGN.md 4/8/12/16/24 spacing ladder — snapping
+     to 12px would shift the 4-col grid by 6px cumulative and risk
+     regressing the responsive breakpoints at 980px / 640px (see
+     .planning/phases/09.1-.../09.1-VERIFICATION.md line 110).
+     Formalized here so the value lives in one place. Retires UI-FLAG-04
+     (2026-04-27). */
+  --space-grid-gap: 10px;
+
   /* --- Shadows --- */
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
