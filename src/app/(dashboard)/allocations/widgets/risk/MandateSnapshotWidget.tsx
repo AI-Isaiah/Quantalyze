@@ -8,6 +8,8 @@ import {
   deriveMandateGates,
   type GateRow,
 } from "../../lib/mandate-gates";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 /**
  * Phase 09.1 PR1 (dashboard parity) — V2 Overview MandateSnapshot widget.
@@ -46,7 +48,16 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
   const { passing, total } = countPassingGates(gates);
   const hasMandate = payload.mandate != null;
 
-  return (
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
+  // The widget's empty branch is a sub-copy swap inside the existing
+  // card chrome ("No mandate set yet" vs "Auto-saved · N/M gates pass"
+  // — see hasMandate ternary below). The 5 gate rows render verbatim
+  // in either case (em-dashed when no data) — there's no separate
+  // render path. mode="success" passthrough proves the primitive is
+  // consumed in production while preserving byte-identical visual
+  // output.
+  const v2 = isWidgetStateV2Enabled();
+  const card = (
     <div
       style={{
         background: "var(--surface)",
@@ -117,6 +128,11 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
       </div>
     </div>
   );
+
+  if (v2) {
+    return <WidgetState mode="success">{card}</WidgetState>;
+  }
+  return card;
 }
 
 function MandateGateLine({ row }: { row: GateRow }) {
