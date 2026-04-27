@@ -3,6 +3,8 @@
 import { useMemo } from "react";
 import type { WidgetProps } from "../../lib/types";
 import { STRATEGY_PALETTE } from "@/lib/utils";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 /**
  * PR1 QA — Allocation by style widget.
@@ -67,7 +69,15 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
       ? `${entries.length} ${entries.length === 1 ? "style" : "styles"} · ${cashPct.toFixed(1)}% cash`
       : `${entries.length} ${entries.length === 1 ? "style" : "styles"} · fully deployed`;
 
-  return (
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
+  // The widget already renders a card with header chrome that surfaces
+  // "No active allocations" sub-copy when entries is empty (line 107
+  // ternary), so the empty branch is a presentational sub-copy swap
+  // rather than a separate render path. mode="success" passthrough
+  // proves the primitive is consumed in production while preserving
+  // byte-identical visual output.
+  const v2 = isWidgetStateV2Enabled();
+  const card = (
     <div
       role="region"
       aria-label="Allocation by style"
@@ -171,4 +181,9 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
       ) : null}
     </div>
   );
+
+  if (v2) {
+    return <WidgetState mode="success">{card}</WidgetState>;
+  }
+  return card;
 }
