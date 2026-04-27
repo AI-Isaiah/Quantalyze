@@ -411,7 +411,7 @@ async def dispatch_tick(worker_id: str) -> None:
 **Concrete skeleton** (planner expands; pattern follows `032_compute_jobs_queue.sql` self-verifying DO style):
 
 ```sql
--- Migration 084: compute_jobs.priority enum + partial index
+-- Migration 086: compute_jobs.priority enum + partial index
 -- Phase 12 / METRICS-16: priority-aware queue dispatch for backfill throttle
 --
 -- Why this migration exists
@@ -485,16 +485,16 @@ DO $$
 BEGIN
   IF NOT EXISTS(SELECT 1 FROM information_schema.columns
     WHERE table_name = 'compute_jobs' AND column_name = 'priority') THEN
-    RAISE EXCEPTION 'Migration 084: priority column missing';
+    RAISE EXCEPTION 'Migration 086: priority column missing';
   END IF;
   IF NOT EXISTS(SELECT 1 FROM pg_class WHERE relname = 'idx_compute_jobs_priority_pending') THEN
-    RAISE EXCEPTION 'Migration 084: partial index missing';
+    RAISE EXCEPTION 'Migration 086: partial index missing';
   END IF;
   IF NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
     WHERE n.nspname = 'public' AND p.proname = 'claim_compute_jobs_with_priority') THEN
-    RAISE EXCEPTION 'Migration 084: claim_compute_jobs_with_priority RPC missing';
+    RAISE EXCEPTION 'Migration 086: claim_compute_jobs_with_priority RPC missing';
   END IF;
-  RAISE NOTICE 'Migration 084: priority enum + partial index + claim RPC installed.';
+  RAISE NOTICE 'Migration 086: priority enum + partial index + claim RPC installed.';
 END $$;
 
 COMMIT;
@@ -505,7 +505,7 @@ COMMIT;
 ### 6b. `supabase/migrations/085_strategy_analytics_series.sql` (METRICS-17)
 
 ```sql
--- Migration 085: strategy_analytics_series sibling table + fetch_strategy_lazy_metrics RPC
+-- Migration 087: strategy_analytics_series sibling table + fetch_strategy_lazy_metrics RPC
 -- Phase 12 / METRICS-17: heavy-series storage to avoid 1MB JSONB TOAST ceiling.
 
 BEGIN;
@@ -590,10 +590,10 @@ DO $$
 BEGIN
   IF NOT EXISTS(SELECT 1 FROM information_schema.tables
     WHERE table_name = 'strategy_analytics_series') THEN
-    RAISE EXCEPTION 'Migration 085: strategy_analytics_series table missing';
+    RAISE EXCEPTION 'Migration 087: strategy_analytics_series table missing';
   END IF;
   -- ... etc per 032 verification style ...
-  RAISE NOTICE 'Migration 085: strategy_analytics_series + fetch_strategy_lazy_metrics RPC installed.';
+  RAISE NOTICE 'Migration 087: strategy_analytics_series + fetch_strategy_lazy_metrics RPC installed.';
 END $$;
 
 COMMIT;
@@ -757,8 +757,8 @@ export function assertMetricParity(
 | METRICS-13 | Cross-runtime parity: golden 252d expected JSON byte-identical (scalars) + 1e-9 (series) | parity | `pytest analytics-service/tests/test_metrics_parity.py -x && npm test -- src/__tests__/metrics-parity.test.ts` | ❌ Wave A0 (RED first) |
 | METRICS-14 | Throttle keeps `compute_analytics` queue depth ≤ 50 for >10min during rollout; backfill ≤ 5/min when normal/high pending | integration + load | `pytest analytics-service/tests/test_job_worker.py::test_priority_throttle -x` + manual queue-depth probe during deploy | ❌ Wave A0 |
 | METRICS-15 | `getStrategyDetail()` path-extraction p95 < 50ms (above-the-fold scalars); RPC p95 < 200ms (panels 4–7) | latency probe | `npm test -- src/__tests__/metrics-parity.test.ts` (latency assertions) + manual prod probe | ❌ Wave A0 |
-| METRICS-16 | Migration 084 applies; `compute_jobs.priority` exists with CHECK; partial index present; `claim_compute_jobs_with_priority` RPC SECURITY DEFINER | migration | `psql -f supabase/migrations/084_*.sql` + DO-block self-verify | ❌ Wave A0 |
-| METRICS-17 | Migration 085 applies; `strategy_analytics_series` table + RLS deny-all + `fetch_strategy_lazy_metrics` RPC; `pg_column_size` p99.9 probe < 800kB post-backfill | migration + size assertion | `psql -f supabase/migrations/085_*.sql` + `psql -f analytics-service/scripts/analyze_metrics_size.sql` | ❌ Wave A0 |
+| METRICS-16 | Migration 086 applies; `compute_jobs.priority` exists with CHECK; partial index present; `claim_compute_jobs_with_priority` RPC SECURITY DEFINER | migration | `psql -f supabase/migrations/086_*.sql` + DO-block self-verify | ❌ Wave A0 |
+| METRICS-17 | Migration 087 applies; `strategy_analytics_series` table + RLS deny-all + `fetch_strategy_lazy_metrics` RPC; `pg_column_size` p99.9 probe < 800kB post-backfill | migration + size assertion | `psql -f supabase/migrations/087_*.sql` + `psql -f analytics-service/scripts/analyze_metrics_size.sql` | ❌ Wave A0 |
 
 ### Sampling Rate
 
@@ -887,7 +887,7 @@ export function assertMetricParity(
 
 ### 9.5 `compute_jobs.priority` default for legacy rows (MEDIUM)
 
-**Issue:** Migration 084 adds `priority TEXT NOT NULL DEFAULT 'normal'`. Existing rows (if any pending at deploy time) get `'normal'`. Backfill script (`phase12_backfill_enqueue.py`) explicitly enqueues with `priority='low'`. This is correct but worth checking: are any pending `compute_analytics` jobs at deploy time *backfill* jobs or *user-initiated*? If indistinguishable, treating them as `normal` is the safe default.
+**Issue:** Migration 086 adds `priority TEXT NOT NULL DEFAULT 'normal'`. Existing rows (if any pending at deploy time) get `'normal'`. Backfill script (`phase12_backfill_enqueue.py`) explicitly enqueues with `priority='low'`. This is correct but worth checking: are any pending `compute_analytics` jobs at deploy time *backfill* jobs or *user-initiated*? If indistinguishable, treating them as `normal` is the safe default.
 
 **Recommendation:** Run `SELECT count(*) FROM compute_jobs WHERE status IN ('pending','running')` immediately before deploy. If 0, no concern. If non-zero, pause sync_trades cron during the migration window (~5 min).
 
