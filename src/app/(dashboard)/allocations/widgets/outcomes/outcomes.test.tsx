@@ -393,12 +393,16 @@ describe("OutcomesWidget — Timeline (inline TimelineTable + TimelineRow)", () 
     ).toBeInTheDocument();
   });
 
-  it("Strategy name links to /strategies/[id] for both original and replacement columns (resolved from nested match_decision.original_strategy join)", () => {
+  it("Strategy name links to /strategy/[id] (singular — allocator-view route) for both original and replacement columns (resolved from nested match_decision.original_strategy join)", () => {
+    // Regression: UAT-AUDIT-2026-04-27 — links previously pointed at
+    // /strategies/[id] (plural) which only registers /strategies/[id]/edit
+    // for strategy-managers. Allocators got 404 on click. Allocator-view
+    // route is /strategy/[id] (singular) per src/app/strategy/[id]/page.tsx.
     renderWidget([makeOutcome({ id: "o1" })]);
     const origLink = screen.getByRole("link", { name: "Legacy Equity LP" });
     const replLink = screen.getByRole("link", { name: "Crypto Momentum LP" });
-    expect(origLink.getAttribute("href")).toBe("/strategies/s-orig");
-    expect(replLink.getAttribute("href")).toBe("/strategies/s-repl");
+    expect(origLink.getAttribute("href")).toBe("/strategy/s-orig");
+    expect(replLink.getAttribute("href")).toBe("/strategy/s-repl");
   });
 
   it("Best Delta cell renders em-dash '\u2014' on rejected rows", () => {

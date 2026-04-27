@@ -69,7 +69,7 @@ export function AliasEditor({
     return (
       <div className="flex items-center gap-2 min-w-0">
         <Link
-          href={`/strategies/${row.strategy.id}`}
+          href={`/strategy/${row.strategy.id}`}
           className="font-medium text-text-primary hover:text-accent transition-colors truncate"
           title={canonical}
         >

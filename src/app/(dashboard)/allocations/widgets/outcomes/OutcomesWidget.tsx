@@ -586,7 +586,7 @@ function TimelineRow({
           <div className="flex items-center gap-2.5">
             {originalStrategy ? (
               <a
-                href={`/strategies/${originalStrategy.id}`}
+                href={`/strategy/${originalStrategy.id}`}
                 onClick={(e) => e.stopPropagation()}
                 className="text-[12px] hover:underline"
                 style={{ color: "var(--color-text-muted)" }}
@@ -610,7 +610,7 @@ function TimelineRow({
             </span>
             {replacementStrategy ? (
               <a
-                href={`/strategies/${replacementStrategy.id}`}
+                href={`/strategy/${replacementStrategy.id}`}
                 onClick={(e) => e.stopPropagation()}
                 className="text-[13px] font-medium hover:underline"
                 style={{ color: "var(--color-text-primary)" }}
