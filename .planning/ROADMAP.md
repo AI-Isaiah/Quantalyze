@@ -22,18 +22,26 @@ See `milestones/v0.14.0.0-ROADMAP.md` for full phase details, success criteria, 
 
 </details>
 
-### 🚧 v0.15.0.0 Sprint 9: Demo-to-Production (Phases 06–11)
+### 🚧 v0.15.0.0 Sprint 9: Demo-to-Production (Phases 06–10 + 09.1)
 
 **Milestone goal:** Every surface an allocator touches works end-to-end with real data. A brand-new institutional LP can sign up, connect a read-only exchange API key, see Performance populate, and use a Scenario tab to run what-if analyses that commit through the Bridge outcome-recording flow. No seed fallback anywhere.
 
 **Success gate (single E2E):** fresh signup → connect API key → Performance tab populates → open Scenario tab → toggle a holding off → add a Bridge-recommended strategy → commit scenario → outcome recorded — within 10 minutes.
 
 - [x] **Phase 06: Allocator API Ingestion** — new `allocator_holdings` table, `poll_allocator_positions` compute-job kind, real CCXT worker path, sync orchestration (completed 2026-04-21)
-- [x] **Phase 07: Demo-Mode Purge** — rewire dashboard off seed UUIDs, tabbed `/allocations` (Performance + Scenario), single Connect Exchange CTA empty state, stop new-user seeding
-- [x] **Phase 08: Connection Management and Notes** — `/connections` list/resync/revoke/delete, multi-scope `user_notes` surface (portfolio / holding / bridge_outcome / strategy)
+- [x] **Phase 07: Demo-Mode Purge** — rewire dashboard off seed UUIDs, tabbed `/allocations` (Performance + Scenario), single Connect Exchange CTA empty state, stop new-user seeding (completed 2026-04-20)
+- [x] **Phase 08: Connection Management and Notes** — `/connections` list/resync/revoke/delete, multi-scope `user_notes` surface (portfolio / holding / bridge_outcome / strategy) (completed 2026-04-21)
 - [x] **Phase 09: Bridge Live Against Real Holdings** — `match_engine` reads from `allocator_holdings`, live Bridge summary strip on Performance, outcome recording wired against real rows (completed 2026-04-21)
-- [ ] **Phase 10: Scenario Builder and What-If** — Scenario tab on `/allocations`, toggle/add/browse composition, projected KPI deltas vs live baseline, commit-through-Bridge flow
-- [ ] **Phase 11: Onboarding and Security Readiness** — Connect Exchange nudge, mandate quick-set, `/security` audit, full state matrix, PostHog onboarding funnel, Playwright E2E in CI
+- [x] **Phase 09.1: Allocator Dashboard UI refresh** — designer-provided Allocator Dashboard.html reference: 4-col snap-grid, 6-tab structure, restyled KpiStrip + SVG EquityChart + HoldingsTable 3-tab row-expand, Bridge hero widget + 2-stage drawer, widget picker (completed 2026-04-24, shipping incrementally on `main` via v0.15.x release tags)
+- [x] **Phase 10: Scenario Builder and What-If** — Scenario tab on `/allocations`, toggle/add/browse composition, projected KPI deltas vs live baseline, commit-through-Bridge flow (completed 2026-04-26)
+
+### 🚧 v0.16.0.0 Onboarding & Security Readiness (Phase 11)
+
+**Milestone goal:** A real LP's first 10 minutes are friction-free and credible, every allocator-facing widget renders correctly in all five states (loading / empty / partial / error / success), and the end-to-end acceptance test runs in CI.
+
+Phase 11 was split out from v0.15.0.0 mid-sprint into its own minor-version release because the onboarding/security work landed independently and v0.15.x had already been shipping incrementally.
+
+- [x] **Phase 11: Onboarding and Security Readiness** — Connect Exchange nudge (S1 OnboardingBanner) + mandate quick-set (S2 MandateQuickSetCard), `/security` audit (S4a SOC-2 banner + S4c audit-log line + S5 wizard withdrawal warning + S6 /profile audit-log subsection + S7 wizard IP allowlist hint), 5-state widget matrix (WidgetState primitive wired into all 7 DEFAULT_LAYOUT widgets behind `widget_state_v2` flag), PostHog onboarding funnel (5 events end-to-end with single-fire markers), Playwright E2E in CI (always-on banner smoke + gated full funnel) — completed 2026-04-26
 
 ## Phase Details
 
@@ -208,11 +216,11 @@ Plans:
 - Wave 3: 11-07 (e2e/onboarding-funnel.spec.ts + seed/cleanup helpers + ci.yml gated step — DEPENDS ON 11-01..06 + checkpoint:human-verify for GitHub secrets)
 
 Plans:
-- [ ] 11-01-PLAN.md — Migration 084 first_api_key_added trigger + stamp_first_sync_success RPC + [BLOCKING] schema push + live-DB regression — requirements ONBOARD-05
-- [ ] 11-02-PLAN.md — GET /api/me/audit-log/export route + audit-log-csv.ts serializer + RFC 4180 escape + RLS isolation test — requirements ONBOARD-03
+- [x] 11-01-PLAN.md — Migration 084 first_api_key_added trigger + stamp_first_sync_success RPC + [BLOCKING] schema push + live-DB regression — requirements ONBOARD-05
+- [x] 11-02-PLAN.md — GET /api/me/audit-log/export route + audit-log-csv.ts serializer + RFC 4180 escape + RLS isolation test — requirements ONBOARD-03
 - [x] 11-03-PLAN.md — onboarding-funnel.ts maybeEmit* helpers + 5-event UsageEvent extension + /allocations page.tsx readers + Python worker RPC call + outcome-marker stamps in scenario-commit/match-decisions — requirements ONBOARD-05
-- [ ] 11-04-PLAN.md — WidgetState 5-mode primitive (loading/empty/partial/error/success) + EmptyState non-duplication meta-test + 7 DEFAULT_LAYOUT widget × 5 state Vitest fixtures — requirements ONBOARD-04
-- [ ] 11-05-PLAN.md — queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render — requirements ONBOARD-01, ONBOARD-02
+- [x] 11-04-PLAN.md — WidgetState 5-mode primitive (loading/empty/partial/error/success) + EmptyState non-duplication meta-test + 7 DEFAULT_LAYOUT widget × 5 state Vitest fixtures + UI-BLOCK-01 wiring into all 7 widgets behind widget_state_v2 flag — requirements ONBOARD-04
+- [x] 11-05-PLAN.md — queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render — requirements ONBOARD-01, ONBOARD-02
 - [x] 11-06-PLAN.md — /security S4a SOC-2 banner + S4c audit-log link + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — requirements ONBOARD-03 (S4b inline egress IPs deferred — no static analytics-service IPs today; existing email-path body preserved)
 - [x] 11-07-PLAN.md — e2e/onboarding-funnel.spec.ts (full happy-path + 5-marker assertion via auth.users.raw_user_meta_data) + e2e/onboarding-banner-smoke.spec.ts (RISK-2 always-on, fork-PR safe) + seed/cleanup helpers (strict TEST_SUPABASE_* env-var assertions) + ci.yml mods (BLOCK-3 gated step on `vars.E2E_TEST_DB_CONFIGURED == 'true'`; smoke spec wired into existing 4-spec always-on line) — requirements ONBOARD-06 (Task 3 user-side test-DB setup deferred; gated step dormant until user adds 3 secrets + 1 variable post-merge)
 **UI hint**: yes
@@ -326,8 +334,9 @@ Plans:
 | 07. Demo-Mode Purge | v0.15.0.0 | 6/6 | Complete | 2026-04-20 |
 | 08. Connection Management and Notes | v0.15.0.0 | 5/5 | Complete    | 2026-04-21 |
 | 09. Bridge Live Against Real Holdings | v0.15.0.0 | 4/4 | Complete    | 2026-04-21 |
-| 10. Scenario Builder and What-If | v0.15.0.0 | 0/? | Not started | — |
-| 11. Onboarding and Security Readiness | v0.16.0.0 | 0/7 | Planned | — |
+| 09.1. Allocator Dashboard UI refresh | v0.15.0.0 | 11/11 | Complete | 2026-04-24 |
+| 10. Scenario Builder and What-If | v0.15.0.0 | 8/8 | Complete | 2026-04-26 |
+| 11. Onboarding and Security Readiness | v0.16.0.0 | 7/7 | Complete | 2026-04-26 |
 | 12. Backend Metric Contracts | v0.17.0.0 | 0/? | Not started | — |
 | 13. Discovery v2 Polish | v0.17.0.0 | 0/? | Not started | — |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 0/? | Not started | — |
