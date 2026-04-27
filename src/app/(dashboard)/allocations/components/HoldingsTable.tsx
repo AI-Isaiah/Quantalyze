@@ -47,13 +47,13 @@ import { HoldingDetail } from "./HoldingDetail";
 // ─────────────────────────────────────────────────────────── shared utilities
 
 const AMBER_CHIP_STYLE: CSSProperties = {
-  // 09.1-REVIEW IN-01: text uses the DESIGN.md `--color-warning` token
-  // (#D97706, added 2026-04-11). The chip's surface (#FEF3C7) and border
-  // (#FDE68A) are intentional Bridge-family tints that DESIGN.md does
-  // not yet declare; left as literals pending design-system extension.
+  // 09.1-REVIEW IN-01 (text) + 09.1-UI-REVIEW UI-FLAG-01 (surface + border):
+  // text uses --color-warning (#D97706, added 2026-04-11); the chip's
+  // surface and border now route through the warning-bg / warning-border
+  // tokens declared in globals.css + DESIGN.md (Phase 09.1 UI-FLAG-01).
   color: "var(--color-warning)",
-  backgroundColor: "#FEF3C7",
-  border: "1px solid #FDE68A",
+  backgroundColor: "var(--color-warning-bg)",
+  border: "1px solid var(--color-warning-border)",
 };
 
 function formatQuantity(n: number): string {

@@ -184,15 +184,14 @@ describe("HoldingsTable — revoked-key strikethrough + amber chip + toggle (08-
       />,
     );
     const chip = screen.getByText("Key revoked");
-    // Phase 09.1 IN-01: text color now references the DESIGN.md
-    // `--color-warning` token instead of the hard-coded #D97706 hex.
+    // Phase 09.1 IN-01 (text) + UI-FLAG-01 (surface + border): chip routes
+    // through the warning-family tokens declared in globals.css + DESIGN.md.
     // jsdom does NOT resolve var() — it preserves the literal — so the
-    // assertion checks for the var() reference. Background and border
-    // remain Bridge-family literals (FEF3C7 / FDE68A) pending a
-    // design-system extension; jsdom serialises hex backgrounds to rgb().
+    // assertion checks for the var() references for all three properties.
     const style = chip.getAttribute("style") ?? "";
     expect(style).toContain("var(--color-warning)");
-    expect(style).toContain("rgb(254, 243, 199)");
+    expect(style).toContain("var(--color-warning-bg)");
+    expect(style).toContain("var(--color-warning-border)");
   });
 });
 
