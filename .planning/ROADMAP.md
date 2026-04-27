@@ -4,7 +4,7 @@
 
 - ✅ **v0.14.0.0 Sprint 8: Bridge V2** — Phases 1–5 (shipped 2026-04-19) → [archive](milestones/v0.14.0.0-ROADMAP.md)
 - ✅ **v0.15.0.0 Sprint 9: Demo-to-Production** — Phases 06–10 + 09.1 (shipped 2026-04-27) → [archive](milestones/v0.15.0.0-ROADMAP.md)
-- 🚧 **v0.16.0.0 Phase 11: Onboarding & Security Readiness** — finalizing on `main`
+- ✅ **v0.16.0.0 Phase 11: Onboarding & Security Readiness** — Phase 11 (shipped 2026-04-27) → [archive](milestones/v0.16.0.0-MILESTONE-AUDIT.md)
 - 🚧 **v0.17.0.0 Sprint 12: KPI Parity and Discovery v2** — Phases 12–14 (planning 2026-04-26; Phase 14 split into 14a + 14b post cross-AI review)
 
 ## Phases
@@ -36,45 +36,16 @@ See `milestones/v0.15.0.0-ROADMAP.md` for full phase details, success criteria, 
 
 </details>
 
-### 🚧 v0.16.0.0 Onboarding & Security Readiness (Phase 11)
+<details>
+<summary>✅ v0.16.0.0 Phase 11: Onboarding & Security Readiness — SHIPPED 2026-04-27</summary>
 
-**Milestone goal:** A real LP's first 10 minutes are friction-free and credible, every allocator-facing widget renders correctly in all five states (loading / empty / partial / error / success), and the end-to-end acceptance test runs in CI.
+- [x] Phase 11: Onboarding and Security Readiness (7/7 plans) — completed 2026-04-26
 
-Phase 11 was split out from v0.15.0.0 mid-sprint into its own minor-version release because the onboarding/security work landed independently and v0.15.x had already been shipping incrementally.
+See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success criteria, and decisions (audit: PASSED, 6/6 ONBOARD-XX requirements).
 
-- [x] **Phase 11: Onboarding and Security Readiness** — Connect Exchange nudge (S1 OnboardingBanner) + mandate quick-set (S2 MandateQuickSetCard), `/security` audit (S4a SOC-2 banner + S4c audit-log line + S5 wizard withdrawal warning + S6 /profile audit-log subsection + S7 wizard IP allowlist hint), 5-state widget matrix (WidgetState primitive wired into all 7 DEFAULT_LAYOUT widgets behind `widget_state_v2` flag), PostHog onboarding funnel (5 events end-to-end with single-fire markers), Playwright E2E in CI (always-on banner smoke + gated full funnel) — completed 2026-04-26
+</details>
 
 ## Phase Details
-
-### Phase 11: Onboarding and Security Readiness
-**Goal:** A real LP's first 10 minutes are friction-free and credible, every allocator-facing widget renders correctly in all five states (loading / empty / partial / error / success), and the end-to-end acceptance test runs in CI.
-**Depends on:** Phase 10 (E2E covers the full signup → API key → Performance → Scenario → commit → outcome flow).
-**Requirements:** ONBOARD-01, ONBOARD-02, ONBOARD-03, ONBOARD-04, ONBOARD-05, ONBOARD-06
-**Success Criteria** (what must be TRUE):
-  1. A brand-new allocator's first authenticated `/allocations` visit proactively nudges the Connect Exchange flow (dismissable but re-surfaced until the first key connects) and pre-populates a mandate quick-set with sensible defaults.
-  2. The `/security` page surfaces SOC-2 status, key-encryption details, IP allowlisting option, audit-log export link, and a withdrawal-permission warning on every API-key add step — reflecting existing truth, not new attestations.
-  3. Every allocator-facing widget renders correctly in loading, empty, partial, error, and success states — no ghost-town screens.
-  4. PostHog records the onboarding funnel events `signup` → `first_api_key_added` → `first_sync_success` → `first_bridge_surfaced` → `first_outcome_recorded` for every new allocator cohort.
-  5. The full Playwright E2E (signup → API key add → Performance populated → Scenario toggle+add → commit → outcome recorded) runs green in CI on every PR.
-**Plans:** 7 plans
-
-> **Open decision (2026-04-26 — deferred):** Vercel Pro upgrade lifted the prior 2-cron limit, so the Railway-vs-native cron architecture is no longer forced by the limit. User wants to defer this decision — Railway crons may still be the right continuation. Do NOT bake this into Phase 11 planning until decided.
-
-**Wave structure:**
-- Wave 1: 11-01 (migration 084 first_api_key_added trigger + stamp_first_sync_success RPC + [BLOCKING] supabase db push + live-DB regression) ‖ 11-02 (audit-log-csv.ts serializer + GET /api/me/audit-log/export route + tests + @audit-skip pragma) ‖ 11-04 (WidgetState 5-mode primitive + EmptyState non-duplication meta-test + 7-widget × 5-state matrix fixtures) ‖ 11-05 (queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render hookup) — parallel, zero file overlap
-- Wave 2: 11-03 (onboarding-funnel.ts maybeEmit* helpers + 5-event types extension + /allocations page.tsx readers + Python worker stamp_first_sync_success RPC call + scenario-commit + match-decisions/holding outcome-marker stamps — DEPENDS ON 11-01 trigger+RPC) ‖ 11-06 (S4 /security surgical edits + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — DEPENDS ON 11-02 export route)
-- Wave 3: 11-07 (e2e/onboarding-funnel.spec.ts + seed/cleanup helpers + ci.yml gated step — DEPENDS ON 11-01..06 + checkpoint:human-verify for GitHub secrets)
-
-Plans:
-- [x] 11-01-PLAN.md — Migration 084 first_api_key_added trigger + stamp_first_sync_success RPC + [BLOCKING] schema push + live-DB regression — requirements ONBOARD-05
-- [x] 11-02-PLAN.md — GET /api/me/audit-log/export route + audit-log-csv.ts serializer + RFC 4180 escape + RLS isolation test — requirements ONBOARD-03
-- [x] 11-03-PLAN.md — onboarding-funnel.ts maybeEmit* helpers + 5-event UsageEvent extension + /allocations page.tsx readers + Python worker RPC call + outcome-marker stamps in scenario-commit/match-decisions — requirements ONBOARD-05
-- [x] 11-04-PLAN.md — WidgetState 5-mode primitive (loading/empty/partial/error/success) + EmptyState non-duplication meta-test + 7 DEFAULT_LAYOUT widget × 5 state Vitest fixtures + UI-BLOCK-01 wiring into all 7 widgets behind widget_state_v2 flag — requirements ONBOARD-04
-- [x] 11-05-PLAN.md — queries.ts apiKeysCount + mandateIsSet + S1 OnboardingBanner + S2 MandateQuickSetCard + AllocationsTabs render — requirements ONBOARD-01, ONBOARD-02
-- [x] 11-06-PLAN.md — /security S4a SOC-2 banner + S4c audit-log link + S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint + S6 AuditLogSubsection + ProfileTabs Security tab — requirements ONBOARD-03 (S4b inline egress IPs deferred — no static analytics-service IPs today; existing email-path body preserved)
-- [x] 11-07-PLAN.md — e2e/onboarding-funnel.spec.ts (full happy-path + 5-marker assertion via auth.users.raw_user_meta_data) + e2e/onboarding-banner-smoke.spec.ts (RISK-2 always-on, fork-PR safe) + seed/cleanup helpers (strict TEST_SUPABASE_* env-var assertions) + ci.yml mods (BLOCK-3 gated step on `vars.E2E_TEST_DB_CONFIGURED == 'true'`; smoke spec wired into existing 4-spec always-on line) — requirements ONBOARD-06 (Task 3 user-side test-DB setup deferred; gated step dormant until user adds 3 secrets + 1 variable post-merge)
-**UI hint**: yes
-**Complexity:** Medium — polish work is fragmented across widgets; CI wire-up for Playwright is a known-unknown (4 of 21 specs currently run).
 
 ### 🚧 v0.17.0.0 Sprint 12: KPI Parity and Discovery v2 (Phases 12, 13, 14a, 14b)
 
