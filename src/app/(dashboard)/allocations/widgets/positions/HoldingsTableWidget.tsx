@@ -32,6 +32,8 @@ import {
 } from "../../lib/holdings-adapter";
 import { buildHoldingRef } from "../../lib/holding-outcome-adapter";
 import { HoldingsTable } from "../../components/HoldingsTable";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 export function HoldingsTableWidget({ data }: WidgetProps) {
   const payload = (data ?? {}) as Partial<MyAllocationDashboardPayload>;
@@ -146,13 +148,26 @@ export function HoldingsTableWidget({ data }: WidgetProps) {
     ],
   );
 
-  return (
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
+  // HoldingsTableWidget is a thin adapter; <HoldingsTable> owns its own
+  // empty branch ("No holdings to display.") so the wrapper has no
+  // discrete state branches to convert. Per the UI-BLOCK-01 contract we
+  // forward the existing render through <WidgetState mode="success">
+  // when the flag is ON to prove the primitive is consumed in
+  // production. mode="success" is bare children (no Card chrome) so
+  // visual output is byte-identical.
+  const v2 = isWidgetStateV2Enabled();
+  const table = (
     <HoldingsTable
       rows={rows}
       revokedStatusByHoldingId={revokedStatusByHoldingId}
       flaggedHoldingsByRef={flaggedHoldingsByRef}
     />
   );
+  if (v2) {
+    return <WidgetState mode="success">{table}</WidgetState>;
+  }
+  return table;
 }
 
 export default HoldingsTableWidget;
