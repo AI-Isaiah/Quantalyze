@@ -5,6 +5,8 @@ import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -1159,7 +1161,16 @@ export default function EquityChartWidget({ data }: WidgetProps) {
     setPickerOpen(false);
   };
 
-  return (
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
+  // EquityChartWidget delegates its empty branch ("Equity data warming
+  // up") to the inner <EquityChart> component so the card title +
+  // period toggle + sync stamp survive even when data is empty. Per
+  // the UI-BLOCK-01 contract we forward the existing render through
+  // <WidgetState mode="success"> when the flag is ON to prove the
+  // primitive is consumed in production. The internal empty state
+  // render is owned by <EquityChart> and not duplicated here.
+  const v2 = isWidgetStateV2Enabled();
+  const card = (
     <div
       role="region"
       aria-label="Equity curve"
@@ -1322,6 +1333,11 @@ export default function EquityChartWidget({ data }: WidgetProps) {
       </div>
     </div>
   );
+
+  if (v2) {
+    return <WidgetState mode="success">{card}</WidgetState>;
+  }
+  return card;
 }
 
 function HeaderLegendSwatch({
