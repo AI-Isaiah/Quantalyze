@@ -15,7 +15,7 @@ Index, R² vs BTC, Time-in-Market), and a log-returns series — written into
 already-declared `metrics_json` JSONB column for medium scalars + a new
 `strategy_analytics_series` sibling table for heavy series, with cross-runtime
 parity-tested correctness, throttled backfill via `compute_jobs.priority` enum
-(migration 084), and JSONB row-size discipline (p99.9 < 800kB).
+(migration 086), and JSONB row-size discipline (p99.9 < 800kB).
 
 **Out of scope** (deferred to other phases or v0.17.1):
 - UI rendering of any of these metrics (Phase 14a/14b)
@@ -68,7 +68,7 @@ parity-tested correctness, throttled backfill via `compute_jobs.priority` enum
 
 - **D-05:** **Priority enum on `compute_jobs`** = `low` / `normal` / `high`.
   Backfill = `low`, `sync_trades` = `normal`, manual force-recompute = `high`.
-  Migration `084_compute_jobs_priority.sql` adds the enum column +
+  Migration `086_compute_jobs_priority.sql` adds the enum column +
   partial index `WHERE priority IN ('normal','high')` so live jobs jump the
   backfill queue.
 
@@ -82,7 +82,7 @@ parity-tested correctness, throttled backfill via `compute_jobs.priority` enum
   remaining heavy keys (`daily_returns_grid`, `rolling_*`) from `metrics_json` to
   the sibling table via one-shot `UPDATE`. STATE.md log entry on trigger. Env
   override `SKIP_KILL_SWITCH=1` for staged rollout. Triggers atomically in same
-  deploy script run as migrations 084/085.
+  deploy script run as migrations 086/087.
 
 - **D-08:** **Existing-strategy migration on Phase 12 deploy** = eager
   re-enqueue **all published strategies** (~20) as `priority=low` immediately on
@@ -241,8 +241,8 @@ parity-tested correctness, throttled backfill via `compute_jobs.priority` enum
   declared (Phase 13 audit, not Phase 12).
 - `supabase/migrations/024_user_favorites.sql:29-105` — watchlist table
   (Phase 13 reference, not Phase 12).
-- New migrations to ship in Phase 12: **`084_compute_jobs_priority.sql`** (METRICS-16,
-  D-05) — adds `priority` enum column + partial index. **`085_strategy_analytics_series.sql`**
+- New migrations to ship in Phase 12: **`086_compute_jobs_priority.sql`** (METRICS-16,
+  D-05) — adds `priority` enum column + partial index. **`087_strategy_analytics_series.sql`**
   (METRICS-17, D-02) — sibling table.
 
 ### Cross-Runtime Parity (Phase 12 deliverable)
