@@ -18,6 +18,8 @@ import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 // Phase 08 Plan 04 Task 2 — "Your note" section inside ExpandedPanel
 // (MANAGE-05 bridge_outcome scope).
 import { BridgeOutcomeNoteSection } from "@/components/notes/BridgeOutcomeNoteSection";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 /**
  * Phase 5 Outcomes Dashboard widget — SINGLE-FILE per Voice-D1 (2026-04-19).
@@ -767,8 +769,43 @@ export default function OutcomesWidget({ data }: WidgetProps) {
     [outcomes],
   );
 
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
+  // OutcomesWidget has 4 real branches (error / loading / empty /
+  // populated). Per the UI-BLOCK-01 contract we wire as many of those
+  // as the primitive can faithfully express:
+  //   - error    → <WidgetState mode="error" onRetry=window.location.reload>
+  //                Reuses the existing 'Could not load outcomes' copy and
+  //                preserves the reload-on-retry behavior of the legacy
+  //                'Try again' button.
+  //   - success  → <WidgetState mode="success">{populated card}</WidgetState>
+  //                Bare children, no chrome — visual passthrough.
+  //   - loading  → SKIPPED. The existing 3-cell + 5-row LoadingState skeleton
+  //                is materially more informative than the primitive's
+  //                generic 2-line skeleton; replacing would degrade UX.
+  //   - empty    → SKIPPED. The existing empty state mounts WidgetHeader
+  //                ('Bridge outcomes' h3 + 'Feedback loop' badge) above
+  //                the empty body; the primitive's centered Card cannot
+  //                surface the header above it without manufacturing new
+  //                wrapper structure. Preserved verbatim.
+  // Documented in commit message; flag-gated so production renders are
+  // unaffected when the flag is off.
+  const v2 = isWidgetStateV2Enabled();
+
   // Error
   if (hasError) {
+    if (v2) {
+      return (
+        <WidgetState
+          mode="error"
+          error={{
+            message: "Could not load outcomes",
+            onRetry: () => {
+              if (typeof window !== "undefined") window.location.reload();
+            },
+          }}
+        />
+      );
+    }
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">
         <span
@@ -835,7 +872,7 @@ export default function OutcomesWidget({ data }: WidgetProps) {
   }
 
   // Populated
-  return (
+  const populated = (
     <div className="flex h-full flex-col">
       <WidgetHeader pendingCount={kpis.pendingCount} />
       <KpiStrip kpis={kpis} outcomes={outcomes} />
@@ -905,4 +942,9 @@ export default function OutcomesWidget({ data }: WidgetProps) {
       {outcomes.length === 200 && <TruncationFooter />}
     </div>
   );
+
+  if (v2) {
+    return <WidgetState mode="success">{populated}</WidgetState>;
+  }
+  return populated;
 }
