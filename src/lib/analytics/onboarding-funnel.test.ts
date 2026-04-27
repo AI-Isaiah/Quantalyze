@@ -46,10 +46,20 @@ type AdminAuthAdmin = {
   getUserById: ReturnType<typeof vi.fn>;
 };
 
+type AdminCalls = AdminAuthAdmin & { rpc: ReturnType<typeof vi.fn> };
+
 function makeAdmin(opts: {
   updateError?: { message: string } | null;
   getUserResult?: { user: { id: string; user_metadata: Record<string, unknown> } | null; error: { message: string } | null };
-} = {}): { admin: { auth: { admin: AdminAuthAdmin } }; calls: AdminAuthAdmin } {
+  /**
+   * Phase 11 WR-02 — migration 085 added `stamp_first_bridge_surfaced` RPC.
+   * Default mock: stamped=true with a deterministic stamped_at so the
+   * "fires once" path works without per-test wiring. Override per-test
+   * via `rpcResult` to simulate the no-op (already-stamped) or PGRST202
+   * (function-missing) paths.
+   */
+  rpcResult?: { data: unknown; error: { code?: string; message: string } | null };
+} = {}): { admin: { auth: { admin: AdminAuthAdmin }; rpc: ReturnType<typeof vi.fn> }; calls: AdminCalls } {
   const updateUserById = vi.fn().mockResolvedValue({
     error: opts.updateError ?? null,
   });
@@ -57,10 +67,17 @@ function makeAdmin(opts: {
     data: opts.getUserResult ?? { user: null, error: null },
     error: opts.getUserResult?.error ?? null,
   });
+  const rpc = vi.fn().mockResolvedValue(
+    opts.rpcResult ?? {
+      data: { stamped: true, stamped_at: "2026-04-27T12:00:00.000Z" },
+      error: null,
+    },
+  );
   const admin = {
     auth: { admin: { updateUserById, getUserById } },
+    rpc,
   };
-  return { admin, calls: { updateUserById, getUserById } };
+  return { admin, calls: { updateUserById, getUserById, rpc } };
 }
 
 function makeUser(metadata: Record<string, unknown> = {}, created_at = "2026-04-01T08:00:00.000Z") {
@@ -357,48 +374,85 @@ describe("maybeEmitFirstBridgeSurfaced", () => {
     const fired = await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 0);
     expect(fired).toBe(false);
     expect(trackMock).not.toHaveBeenCalled();
+    expect(calls.rpc).not.toHaveBeenCalled();
     expect(calls.updateUserById).not.toHaveBeenCalled();
   });
 
-  it("fires + stamps both *_at and *_emitted_at on first surface", async () => {
+  it("fires once via stamp_first_bridge_surfaced RPC on first surface", async () => {
+    // Migration 085 — stamp_first_bridge_surfaced returns
+    // {stamped: true, stamped_at: <iso8601>} on the first call per user.
+    // The helper emits PostHog with that stamped_at and does NOT call
+    // updateUserById (the RPC handles the persistent stamp atomically).
     const user = makeUser({});
-    const { admin, calls } = makeAdmin();
+    const { admin, calls } = makeAdmin({
+      rpcResult: {
+        data: { stamped: true, stamped_at: "2026-04-27T12:34:56.789Z" },
+        error: null,
+      },
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fired = await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 3);
     expect(fired).toBe(true);
+
+    expect(calls.rpc).toHaveBeenCalledTimes(1);
+    expect(calls.rpc).toHaveBeenCalledWith("stamp_first_bridge_surfaced", {
+      p_user_id: user.id,
+    });
     expect(trackMock).toHaveBeenCalledWith(
       "first_bridge_surfaced",
       user.id,
       expect.objectContaining({
         funnel_step: 4,
         funnel_event_name: "first_bridge_surfaced",
+        stamped_at: "2026-04-27T12:34:56.789Z",
       }),
     );
-    expect(calls.updateUserById).toHaveBeenCalledTimes(1);
-    const meta = calls.updateUserById.mock.calls[0][1].user_metadata;
-    expect(meta.first_bridge_surfaced_at).toEqual(
-      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-    );
-    expect(meta.first_bridge_surfaced_emitted_at).toEqual(
-      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-    );
+
+    // Atomic path: the RPC owns the persistent stamp. The helper must
+    // NOT call updateUserById on the happy path.
+    expect(calls.updateUserById).not.toHaveBeenCalled();
   });
 
-  it("Phase 11 WR-02: stamped_at falls back to user.created_at (deterministic) when marker is absent", async () => {
-    // Two parallel readers of the same auth.users row observe an
-    // identical user.created_at. Previously we used `new Date()` as the
-    // fallback, which produced a different value on each call and
-    // defeated PostHog's content-hash dedupe under burst load (e.g.
-    // prefetch + user navigation hitting /allocations concurrently).
-    // Now both racing calls compute the same `stamped_at` from
-    // user.created_at and the property bag matches.
-    const user = makeUser({}, "2026-03-15T09:30:00.000Z");
-    const { admin, calls } = makeAdmin();
+  it("no-ops when RPC returns stamped=false (concurrent caller already stamped)", async () => {
+    // The race scenario: two parallel /allocations requests. Caller A
+    // wins SELECT...FOR UPDATE and gets stamped=true. Caller B observes
+    // stamped=false and the existing stamped_at. Caller B must no-op
+    // (no PostHog emission, no metadata write).
+    const user = makeUser({});
+    const { admin, calls } = makeAdmin({
+      rpcResult: {
+        data: { stamped: false, stamped_at: "2026-04-27T12:34:56.789Z" },
+        error: null,
+      },
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 7);
+    const fired = await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 3);
+    expect(fired).toBe(false);
+    expect(calls.rpc).toHaveBeenCalledTimes(1);
+    expect(trackMock).not.toHaveBeenCalled();
+    expect(calls.updateUserById).not.toHaveBeenCalled();
+  });
 
-    // PostHog payload uses user.created_at (deterministic across parallel
-    // callers).
+  it("RPC missing (PGRST202) → falls back to read-meta legacy path", async () => {
+    // Graceful degradation for the deploy window before migration 085
+    // is universally applied. PGRST202 = PostgREST "function does not
+    // exist in schema cache". The helper falls back to the legacy
+    // read-meta path (deterministic stamped_at via user.created_at,
+    // updateUserById writes both *_at and *_emitted_at).
+    const user = makeUser({}, "2026-03-15T09:30:00.000Z");
+    const { admin, calls } = makeAdmin({
+      rpcResult: {
+        data: null,
+        error: { code: "PGRST202", message: "function does not exist" },
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fired = await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 3);
+    expect(fired).toBe(true);
+
+    expect(calls.rpc).toHaveBeenCalledTimes(1);
+    // Legacy path: PostHog uses user.created_at as the deterministic
+    // stamped_at (mitigation for WR-02 race in pre-085 environments).
     expect(trackMock).toHaveBeenCalledWith(
       "first_bridge_surfaced",
       user.id,
@@ -406,36 +460,43 @@ describe("maybeEmitFirstBridgeSurfaced", () => {
         stamped_at: "2026-03-15T09:30:00.000Z",
       }),
     );
-    // Persisted marker on auth.users.raw_user_meta_data uses the SAME
-    // deterministic value so subsequent re-reads match the property bag.
-    const meta = calls.updateUserById.mock.calls[0][1].user_metadata;
-    expect(meta.first_bridge_surfaced_at).toBe("2026-03-15T09:30:00.000Z");
+    // Legacy path: updateUserById persists both markers.
+    expect(calls.updateUserById).toHaveBeenCalledTimes(1);
+    const persistedMeta = calls.updateUserById.mock.calls[0][1].user_metadata;
+    expect(persistedMeta.first_bridge_surfaced_at).toBe("2026-03-15T09:30:00.000Z");
+    expect(persistedMeta.first_bridge_surfaced_emitted_at).toEqual(
+      expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    );
   });
 
-  it("Phase 11 WR-02: prefers persisted first_bridge_surfaced_at when present (post-stamp parity)", async () => {
-    // After the first call writes the stamp, future readers (which all
-    // no-op via the *_emitted_at sentinel anyway) should still see a
-    // matching property bag if the no-op path were ever bypassed. This
-    // also covers the legitimate case where a future reset of just the
-    // *_emitted_at sentinel needs to re-emit with the same stamped_at.
-    const user = makeUser(
-      { first_bridge_surfaced_at: "2026-04-10T12:00:00.000Z" },
-      "2026-03-15T09:30:00.000Z",
-    );
-    const { admin } = makeAdmin();
+  it("RPC errors with non-PGRST202 code → logs warn + falls back to legacy path", async () => {
+    // Defensive: any RPC error (network, permission, etc.) shouldn't
+    // crash the host /allocations request. The helper logs a warn and
+    // falls back so the funnel still fires (at the cost of the WR-02
+    // race window briefly reopening — acceptable for an edge case).
+    const user = makeUser({}, "2026-03-15T09:30:00.000Z");
+    const { admin, calls } = makeAdmin({
+      rpcResult: {
+        data: null,
+        error: { code: "42501", message: "permission denied" },
+      },
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 7);
-    expect(trackMock).toHaveBeenCalledWith(
-      "first_bridge_surfaced",
-      user.id,
-      expect.objectContaining({
-        // The persisted marker wins over user.created_at.
-        stamped_at: "2026-04-10T12:00:00.000Z",
-      }),
-    );
+    const fired = await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 3);
+    expect(fired).toBe(true);
+
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0][0]).toContain("stamp_first_bridge_surfaced");
+    // Falls back to legacy path which calls updateUserById.
+    expect(calls.updateUserById).toHaveBeenCalledTimes(1);
   });
 
-  it("is a no-op when first_bridge_surfaced_emitted_at is already set (single-fire)", async () => {
+  it("is a no-op when first_bridge_surfaced_emitted_at is already set (legacy-sentinel transition)", async () => {
+    // Dual-sentinel transition: users whose metadata was stamped under
+    // the legacy mitigation have `first_bridge_surfaced_emitted_at` set.
+    // The helper honours this sentinel so we don't re-fire for every
+    // existing allocator on the first /allocations request after
+    // migration 085 ships.
     const user = makeUser({
       first_bridge_surfaced_at: "2026-04-26T10:00:00.000Z",
       first_bridge_surfaced_emitted_at: "2026-04-26T10:00:01.000Z",
@@ -444,6 +505,7 @@ describe("maybeEmitFirstBridgeSurfaced", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fired = await maybeEmitFirstBridgeSurfaced(admin as any, user as any, 5);
     expect(fired).toBe(false);
+    expect(calls.rpc).not.toHaveBeenCalled();
     expect(trackMock).not.toHaveBeenCalled();
     expect(calls.updateUserById).not.toHaveBeenCalled();
   });

@@ -187,42 +187,20 @@ export async function stampOutcomeMarker(
 /**
  * Fire `first_bridge_surfaced` the first time `flaggedHoldings.length > 0`
  * for a user. Reader is called by `/allocations` page.tsx on every render;
- * this helper performs both stamp + emit atomically (within at-least-once
- * semantics — same single-fire sentinel pattern as the other helpers).
+ * this helper performs both stamp + emit atomically.
  *
  * The source side and reader side ARE the same — there is no upstream
  * marker writer for "bridge first surfaced", since flagged-holdings count
  * is computed at render time. The `*_at` stamp written here is for audit
  * symmetry with the other markers.
  *
- * Phase 11 review fix WR-02 — deterministic `stamped_at` mitigation:
- *   The four passive markers (signup / first_api_key_added /
- *   first_sync_success / first_outcome_recorded) use their
- *   source-side `${marker}_at` value as `stamped_at` — the source side
- *   wrote it once, so two parallel readers observe an identical
- *   property bag and PostHog content-hash dedupe holds. Bridge is
- *   different: the source side and reader side are the same helper, so
- *   there is no pre-existing `${marker}_at` to read on the first call.
- *   Previously we used `new Date().toISOString()` as the fallback —
- *   that produced a different value on each parallel call, defeating
- *   PostHog dedupe.
- *
- *   The deterministic mitigation: when the marker is absent, derive
- *   `stamped_at` from `user.created_at` (a stable, immutable property
- *   on the auth.users row that is identical for every concurrent
- *   reader of the same user). Two parallel calls now compute the same
- *   `stamped_at`, the property bag matches, PostHog dedupe holds. The
- *   value is a coarse proxy (the user's signup time, not the bridge-
- *   surface time), but the funnel only needs (user, event) ordering —
- *   the absolute timestamp is informational. The persistent
- *   `${marker}_at` written below uses the same deterministic value so
- *   subsequent calls (post-stamp) read it back unchanged.
- *
- *   The proper fix is a SECURITY DEFINER RPC mirroring
- *   `stamp_first_sync_success` (migration 084) that does
- *   `INSERT … ON CONFLICT DO NOTHING` and returns the persisted stamp.
- *   That requires a new migration and is deferred to a follow-up phase
- *   (see 11-REVIEW-FIX.md).
+ * WR-02 retired by migration 085 RPC — see
+ * `supabase/migrations/085_stamp_first_bridge_surfaced.sql`. The previous
+ * deterministic-stamp-via-`user.created_at` mitigation (which leaned on
+ * PostHog content-hash dedupe to collapse races) is replaced by an
+ * atomic `SELECT ... FOR UPDATE` + idempotent stamp at the Postgres
+ * level. The RPC returns `{stamped: true|false, stamped_at: <iso8601>}`
+ * — only the call that actually wrote the marker emits PostHog.
  *
  * Returns: `true` if the event was fired this call, `false` otherwise.
  */
@@ -233,17 +211,72 @@ export async function maybeEmitFirstBridgeSurfaced(
 ): Promise<boolean> {
   if (flaggedCount <= 0) return false;
   const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+
+  // Dual-sentinel transition: the legacy mitigation wrote
+  // `first_bridge_surfaced_emitted_at` as a separate read-side sentinel
+  // (because the WR-02 race made `*_at` non-atomic). With migration 085
+  // the `*_at` stamp is now the canonical atomic marker. We still honour
+  // the legacy sentinel for users whose metadata was stamped before the
+  // RPC rolled out — otherwise we'd re-fire `first_bridge_surfaced` for
+  // every existing allocator on their next /allocations request.
   if (meta.first_bridge_surfaced_emitted_at) return false;
 
-  // Deterministic fallback: user.created_at is stable across concurrent
-  // readers of the same auth.users row, so two parallel /allocations
-  // requests for the same user observe identical `stamped_at` and
-  // PostHog content-hash dedupe collapses the duplicate event. The
-  // existing-marker path (post-stamp re-reads) preserves the same
-  // value, so the value is monotonic: deterministic-fallback on first
-  // call, persisted-marker on subsequent calls (which are all no-ops
-  // anyway via the *_emitted_at sentinel above, but the property bag
-  // would still match).
+  // Atomic path — call the RPC first. The function uses
+  // SELECT...FOR UPDATE + idempotent INSERT semantics so two concurrent
+  // /allocations requests serialize: only the winner returns
+  // `{stamped: true, ...}`, the loser returns `{stamped: false,
+  // stamped_at: <existing>}` and we no-op.
+  const rpc = await admin.rpc("stamp_first_bridge_surfaced", {
+    p_user_id: user.id,
+  });
+
+  // Graceful degradation: PGRST202 is PostgREST's "function does not
+  // exist in schema cache" code, which happens during the deploy window
+  // before migration 085 is applied. Fall back to the legacy read-meta
+  // path so users on a stale schema still get their funnel event (with
+  // the deterministic `user.created_at` mitigation that retired the
+  // worst of WR-02). Once migration 085 is universally applied this
+  // branch becomes dead code and can be removed.
+  if (rpc.error) {
+    if (rpc.error.code === "PGRST202") {
+      return emitFirstBridgeSurfacedLegacy(admin, user, meta);
+    }
+    console.warn(
+      "[onboarding-funnel] stamp_first_bridge_surfaced RPC error — falling back:",
+      rpc.error.message,
+    );
+    return emitFirstBridgeSurfacedLegacy(admin, user, meta);
+  }
+
+  const data = rpc.data as { stamped: boolean; stamped_at: string | null } | null;
+  if (!data || !data.stamped) {
+    // Another concurrent caller won the race and stamped the marker;
+    // they emit, we no-op.
+    return false;
+  }
+
+  await trackUsageEventServer("first_bridge_surfaced", user.id, {
+    funnel_step: FUNNEL_STEP.first_bridge_surfaced,
+    funnel_event_name: "first_bridge_surfaced",
+    cohort_week_iso: (meta.cohort_week_iso as string | undefined) ?? null,
+    stamped_at: data.stamped_at,
+  });
+  return true;
+}
+
+/**
+ * Legacy read-meta path — kept ONLY for the deploy window before
+ * migration 085 lands. The deterministic `user.created_at` fallback
+ * collapses most race duplicates via PostHog content-hash dedupe; with
+ * migration 085 the RPC handles single-fire atomically and this path
+ * is unreachable. Remove this helper once the migration is universally
+ * applied across all environments.
+ */
+async function emitFirstBridgeSurfacedLegacy(
+  admin: SupabaseClient,
+  user: User,
+  meta: Record<string, unknown>,
+): Promise<boolean> {
   const stampedAt =
     (meta.first_bridge_surfaced_at as string | undefined) ?? user.created_at;
 
@@ -263,7 +296,7 @@ export async function maybeEmitFirstBridgeSurfaced(
   });
   if (error) {
     console.warn(
-      "[onboarding-funnel] first_bridge_surfaced stamp failed:",
+      "[onboarding-funnel] first_bridge_surfaced stamp failed (legacy path):",
       error.message,
     );
   }
