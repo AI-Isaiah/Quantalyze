@@ -84,7 +84,7 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
           <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>Mandate</h3>
           <div
             style={{
-              fontSize: 11.5,
+              fontSize: 12,
               color: "var(--text-muted)",
               marginTop: 2,
             }}
@@ -96,7 +96,8 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
         </div>
         {/* Ghost-button link — matches prototype primitives.jsx Button
             variant="ghost" size="sm": transparent bg, text-secondary,
-            transparent border, height 28, fontSize 12.5, padding 0 10. */}
+            transparent border, height 28, fontSize 13 (was 12.5 designer
+            port; snapped to ladder per Phase 09.1 UI-FLAG-02), padding 0 10. */}
         <Link
           href="/profile?tab=mandate"
           style={{
@@ -105,7 +106,7 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
             justifyContent: "center",
             height: 28,
             padding: "0 10px",
-            fontSize: 12.5,
+            fontSize: 13,
             fontWeight: 500,
             borderRadius: "var(--radius-md)",
             color: "var(--text-secondary)",
@@ -164,10 +165,10 @@ function MandateGateLine({ row }: { row: GateRow }) {
           flexShrink: 0,
         }}
       />
-      <span style={{ flex: 1, fontSize: 12.5 }}>{row.label}</span>
+      <span style={{ flex: 1, fontSize: 13 }}>{row.label}</span>
       <span
         className="font-mono tnum"
-        style={{ fontSize: 11.5, color: "var(--text-muted)" }}
+        style={{ fontSize: 12, color: "var(--text-muted)" }}
       >
         {row.gate}
       </span>
@@ -178,7 +179,7 @@ function MandateGateLine({ row }: { row: GateRow }) {
       <span
         className="font-mono tnum"
         style={{
-          fontSize: 12.5,
+          fontSize: 13,
           color: currentColor,
           fontWeight: 500,
           minWidth: 56,

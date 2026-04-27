@@ -1221,7 +1221,7 @@ export default function EquityChartWidget({ data }: WidgetProps) {
               display: "flex",
               alignItems: "center",
               gap: 12,
-              fontSize: 11.5,
+              fontSize: 12,
               fontFamily: "var(--font-sans)",
               color: "var(--color-text-secondary)",
             }}

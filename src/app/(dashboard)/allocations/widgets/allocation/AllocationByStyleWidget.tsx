@@ -107,7 +107,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
         </h3>
         <div
           style={{
-            fontSize: 11.5,
+            fontSize: 12,
             color: "var(--text-muted)",
             marginTop: 2,
           }}
@@ -163,10 +163,10 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
                     flexShrink: 0,
                   }}
                 />
-                <span style={{ flex: 1, fontSize: 12.5 }}>{tag}</span>
+                <span style={{ flex: 1, fontSize: 13 }}>{tag}</span>
                 <span
                   style={{
-                    fontSize: 12.5,
+                    fontSize: 13,
                     color: "var(--text-secondary)",
                     fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
                     fontVariantNumeric: "tabular-nums",

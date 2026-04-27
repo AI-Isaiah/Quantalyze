@@ -209,10 +209,10 @@ describe("OutcomesWidget", () => {
 // ===========================================================================
 
 describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
-  it("className presence check: labels render in 10.5px uppercase tracking-wider (Phase 09.1 Plan 10 designer KPIStripCell)", () => {
+  it("className presence check: labels render in 11px uppercase tracking-wider (Phase 09.1 UI-FLAG-02 — was 10.5 designer port; snapped to ladder)", () => {
     renderWidget([makeOutcome({ id: "o1" })]);
     const label = screen.getByText("Total outcomes");
-    expect(label.className).toContain("text-[10.5px]");
+    expect(label.className).toContain("text-[11px]");
     expect(label.className).toContain("uppercase");
     expect(label.className).toContain("tracking-wider");
   });

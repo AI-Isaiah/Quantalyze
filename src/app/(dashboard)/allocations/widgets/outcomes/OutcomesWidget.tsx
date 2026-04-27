@@ -172,7 +172,7 @@ function WidgetHeader({ pendingCount }: { pendingCount: number }) {
           </span>
         </h3>
         <div
-          className="mt-0.5 text-[11.5px]"
+          className="mt-0.5 text-[12px]"
           style={{ color: "var(--color-text-muted)" }}
         >
           Realized delta from Bridge-driven reallocations
@@ -276,7 +276,7 @@ function KpiCell({
       }}
     >
       <div
-        className="text-[10.5px] font-semibold uppercase tracking-wider"
+        className="text-[11px] font-semibold uppercase tracking-wider"
         style={{ color: "var(--color-text-muted)" }}
       >
         {label}
@@ -881,43 +881,43 @@ export default function OutcomesWidget({ data }: WidgetProps) {
           <thead>
             <tr>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 Reallocation
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 Size
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 Recorded
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 30d"}
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 90d"}
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider whitespace-nowrap"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider whitespace-nowrap"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {"Δ 180d"}
               </th>
               <th
-                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[10.5px] font-semibold uppercase tracking-wider"
+                className="border-b border-[var(--color-border)] px-4 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider"
                 style={{ color: "var(--color-text-muted)", width: 48 }}
                 aria-hidden="true"
               />

@@ -140,7 +140,7 @@ export function KpiStripWidget({ data }: WidgetProps) {
               <div
                 className="font-mono"
                 style={{
-                  fontSize: 10.5,
+                  fontSize: 11,
                   color: "var(--text-muted)",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
