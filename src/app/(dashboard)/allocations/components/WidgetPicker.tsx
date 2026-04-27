@@ -41,6 +41,12 @@ export function WidgetPicker({ isOpen, onClose, anchorRef, activeKeys, onPick }:
   // Outside-click dismiss (matches designer widget-grid.jsx:243-249).
   // Anchor-aware: clicks on the trigger button don't immediately re-close
   // the popover that the same click just opened.
+  //
+  // IN-05: standardized to `mousedown` to match CustomRangePicker +
+  // Tweaks + WidgetChrome outside-click idiom. mousedown fires before
+  // click, so the popover dismisses before the click reaches the
+  // underlying element — the common popover idiom. See WidgetChrome.tsx
+  // and CustomRangePicker.tsx for siblings that follow the same pattern.
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: MouseEvent) => {
@@ -50,14 +56,14 @@ export function WidgetPicker({ isOpen, onClose, anchorRef, activeKeys, onPick }:
       if (anchorRef.current?.contains(target)) return;
       onClose();
     };
-    // Defer one tick so the same click that opened the popover doesn't
+    // Defer one tick so the same mousedown that opened the popover doesn't
     // immediately close it (designer uses setTimeout 0 for the same reason).
     const timer = window.setTimeout(() => {
-      document.addEventListener("click", handler);
+      document.addEventListener("mousedown", handler);
     }, 0);
     return () => {
       window.clearTimeout(timer);
-      document.removeEventListener("click", handler);
+      document.removeEventListener("mousedown", handler);
     };
   }, [isOpen, onClose, anchorRef]);
 

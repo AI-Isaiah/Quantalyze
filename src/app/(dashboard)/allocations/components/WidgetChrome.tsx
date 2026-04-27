@@ -142,14 +142,20 @@ export function WidgetChrome({ k, w, onResize, onRemove, onMove }: Props) {
 
   // Outside-click dismiss for the overflow menu (matches AddWidgetModal:29-62
   // dismissal idiom, scoped to the menu ref instead of focus-trapping).
+  //
+  // IN-05: standardized to `mousedown` to match CustomRangePicker +
+  // Tweaks + WidgetPicker outside-click idiom. mousedown fires before
+  // click, so the menu dismisses before the click reaches the underlying
+  // element — the common popover idiom. See WidgetPicker.tsx and
+  // CustomRangePicker.tsx for siblings that follow the same pattern.
   useEffect(() => {
     if (!menuOpen) return;
     const handler = (e: MouseEvent) => {
       if (menuRef.current?.contains(e.target as Node)) return;
       setMenuOpen(false);
     };
-    document.addEventListener("click", handler);
-    return () => document.removeEventListener("click", handler);
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
   }, [menuOpen]);
 
   return (
