@@ -268,8 +268,14 @@ export function CustomRangePicker({
           minWidth: 520,
         }}
       >
-        {/* input row */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {/* Input row — Phase 09.1 UI-FLAG-03: align-items: flex-end so the
+            arrow + day-count text naturally sit at the baseline of the
+            input, replacing magic-number `paddingTop: 14` overrides that
+            broke at >110% zoom (the inputs grew taller while 14px stayed
+            fixed). DateInput is a flex-column label/input pair; flex-end
+            on this row aligns the bottom of the input with the bottom of
+            the sibling text elements. */}
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 10 }}>
           <DateInput
             label="Start"
             value={startIso}
@@ -286,7 +292,7 @@ export function CustomRangePicker({
           />
           <div
             aria-hidden
-            style={{ color: "var(--color-text-muted)", paddingTop: 14 }}
+            style={{ color: "var(--color-text-muted)", paddingBottom: 6 }}
           >
             →
           </div>
@@ -303,7 +309,7 @@ export function CustomRangePicker({
           <div
             style={{
               marginLeft: "auto",
-              paddingTop: 14,
+              paddingBottom: 6,
               fontFamily: "var(--font-mono)",
               fontSize: 11,
               color: "var(--color-text-muted)",
