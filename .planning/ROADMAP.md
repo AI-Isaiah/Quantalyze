@@ -77,7 +77,17 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   3c. Lazy-fetch RPC for panels 4–7 series (`fetch_strategy_lazy_metrics(strategy_id, panel_id)`) p95 < 200ms.
   4. Live `sync_trades` jobs do not queue behind backfill on Phase 12 deploy: migration `086_compute_jobs_priority.sql` ships the `priority` enum (`low`/`normal`/`high`) with partial index, the throttled enqueuer in `job_worker.py` reads priority and caps backfill jobs at 5/min when both backfill and sync jobs are queued, and a dashboard probe confirms `compute_analytics` queue depth never exceeds 50 for >10 min during the rollout window.
   5. The Phase 12-internal `is_maker` audit on `raw_fills` (Binance / OKX / Bybit handlers — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit, documented as N/A in TODOS.md before plan-phase begins) returns a documented boolean per exchange; if any of the three handlers lacks the flag, METRICS-10 + KPI-17 are descoped to v0.17.1 with a TODOS.md entry, and the parity test does not regress.
-**Plans:** TBD
+**Plans:** 10 plans
+- [ ] 12-01-PLAN.md — is_maker audit + D-15 branch decision (Wave 1)
+- [ ] 12-02-PLAN.md — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push)
+- [ ] 12-03-PLAN.md — Rolling Sortino/Vol/Greeks + log returns helpers in metrics.py (Wave 3, TDD)
+- [ ] 12-04-PLAN.md — Daily returns grid + exposure series persistence + turnover series + 10 qstats scalars (Wave 3, TDD)
+- [ ] 12-05-PLAN.md — 5 derived trade metrics + volume aggregator + audit-gated Trade Mix (Wave 3, TDD)
+- [ ] 12-06-PLAN.md — MetricsResult dataclass + sibling-table loop upsert in run_strategy_analytics (Wave 4)
+- [ ] 12-07-PLAN.md — Switch dispatch_tick to claim_compute_jobs_with_priority (Wave 5, TDD)
+- [ ] 12-08-PLAN.md — fetchStrategyLazyMetrics RPC consumer in queries.ts (Wave 5)
+- [ ] 12-09-PLAN.md — regen_golden + 3 fixtures + Python + TS parity tests (Wave 6, TDD)
+- [ ] 12-10-PLAN.md — analyze_metrics_size + kill-switch + backfill enqueue + deploy orchestrator (Wave 7)
 **Complexity:** High — pure additive math but ships against a 1MB TOAST ceiling, requires throttled backfill orchestration via priority-enum migration, mounts a sibling-table for heavy series, and mounts a cross-runtime byte-identical contract.
 
 ### Phase 13: Discovery v2 Polish
@@ -158,7 +168,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 | 09.1. Allocator Dashboard UI refresh | v0.15.0.0 | 11/11 | Complete | 2026-04-24 |
 | 10. Scenario Builder and What-If | v0.15.0.0 | 8/8 | Complete | 2026-04-26 |
 | 11. Onboarding and Security Readiness | v0.16.0.0 | 7/7 | Complete | 2026-04-26 |
-| 12. Backend Metric Contracts | v0.17.0.0 | 0/? | Not started | — |
+| 12. Backend Metric Contracts | v0.17.0.0 | 0/10 | Not started | — |
 | 13. Discovery v2 Polish | v0.17.0.0 | 0/? | Not started | — |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 0/? | Not started | — |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 0/? | Not started | — |
