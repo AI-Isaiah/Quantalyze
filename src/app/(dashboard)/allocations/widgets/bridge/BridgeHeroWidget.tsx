@@ -18,6 +18,8 @@ import type { WidgetProps } from "../../lib/types";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { BridgeWidget } from "../../components/BridgeWidget";
 import { useTweakValue } from "../../context/TweaksContext";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 export default function BridgeHeroWidget({ data }: WidgetProps) {
   // PR3 (HANDOFF G5) — read bridgeVariant from TweaksContext so the
@@ -29,7 +31,20 @@ export default function BridgeHeroWidget({ data }: WidgetProps) {
     data && typeof data === "object" && (data as { __error?: unknown }).__error,
   );
 
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the
+  // isWidgetStateV2Enabled feature flag. When OFF (default), keep the
+  // original error chrome verbatim. When ON, route the error branch
+  // through <WidgetState mode="error"> to expose the role="alert" /
+  // aria-live="polite" semantics from the shared primitive. Reuses the
+  // existing "Bridge unavailable" copy — no new strings.
+  const v2 = isWidgetStateV2Enabled();
+
   if (hasError) {
+    if (v2) {
+      return (
+        <WidgetState mode="error" error={{ message: "Bridge unavailable" }} />
+      );
+    }
     return (
       <div className="flex h-full items-center justify-center rounded-lg border border-border bg-surface p-4 text-sm text-text-muted">
         Bridge unavailable
