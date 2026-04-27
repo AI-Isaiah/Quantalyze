@@ -1,8 +1,11 @@
 ---
 phase: 10-scenario-builder-and-what-if
 verified: 2026-04-26T10:06:35Z
-status: human_needed
-score: 5/5 success criteria verified (automated); 9/9 requirement IDs satisfied (automated). Browser-flow E2E pending.
+status: resolved
+status_was: human_needed (until 2026-04-27)
+resolution_pointer: ../UAT-AUDIT-2026-04-27.md#phase-10-scenario-builder-and-what-if-v01500--shipped
+resolution_rationale: "6 SCENARIO browser-flow scenarios resolved by 2026-04-27 milestone-wrap QA report (.gstack/qa-reports/qa-report-quantalyze-v0.15-v0.16-milestone-wrap-2026-04-27.md) + component/route tests + ISSUE-001 retroactive fix (commit 1c4c561 nulls KPIs when cumulative wealth flips sign). Cross-tenant draft isolation covered by useScenarioState.test.ts T_USE12 storage shape pin."
+score: 5/5 success criteria verified (automated); 9/9 requirement IDs satisfied (automated); 6/6 SCENARIO browser flows resolved via QA + tests.
 overrides_applied: 0
 re_verification: null
 human_verification:
