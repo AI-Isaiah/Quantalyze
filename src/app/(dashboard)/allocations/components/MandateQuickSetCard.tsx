@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import { STRATEGY_TYPES } from "@/lib/constants";
 import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
 
@@ -147,11 +148,10 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
 
       {/*
         Field 1 — max_weight (BLOCK-2: empty by default with placeholder
-        suggestion; Save disabled until user types). The input shape mirrors
-        the project Input primitive's chrome (min-h-[44px], rounded-lg, etc.)
-        but is rendered inline so we can append the "%" suffix without
-        bloating the primitive's API. Suffix is a sibling label — visual
-        only; the input is the labelled control via htmlFor.
+        suggestion; Save disabled until user types). Composes the project
+        <Input> primitive (UI-FLAG-02 fix) so future Input chrome changes
+        propagate. Suffix "%" is a sibling label — visual only; the input
+        is the labelled control via htmlFor.
       */}
       <div className="mb-4">
         <label
@@ -161,7 +161,7 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
           Maximum weight per holding
         </label>
         <div className="flex items-center gap-2">
-          <input
+          <Input
             id="mqs-max-weight"
             type="number"
             min={0}
@@ -170,7 +170,7 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
             value={maxWeightPct}
             placeholder="e.g. 15"
             onChange={(e) => setMaxWeightPct(e.target.value)}
-            className="min-h-[44px] flex-1 rounded-lg border border-border bg-surface px-3 py-2.5 text-sm text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20"
+            wrapperClassName="flex-1"
           />
           <span aria-hidden="true" className="text-sm text-text-muted">
             %
