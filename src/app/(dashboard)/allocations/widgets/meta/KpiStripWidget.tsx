@@ -3,6 +3,8 @@
 import type { WidgetProps } from "../../lib/types";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { PortfolioAnalytics } from "@/lib/types";
+import { WidgetState } from "../../components/WidgetState";
+import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 
 /**
  * Phase 09.1 PR1 (dashboard parity) — V2 Overview KPI strip.
@@ -49,7 +51,19 @@ export function KpiStripWidget({ data }: WidgetProps) {
   const payload = (data ?? {}) as Partial<MyAllocationDashboardPayload>;
   const cells = buildCells(payload);
 
-  return (
+  // Phase 11 / UI-BLOCK-01 — wire WidgetState v2 behind the feature flag.
+  // KpiStripWidget has NO explicit state branches today (it always renders
+  // 5 cells with em-dashes for missing values, which is its way of
+  // expressing the empty/warmup state). Per the UI-BLOCK-01 contract we
+  // do NOT manufacture a new state branch; we only forward the existing
+  // success render through <WidgetState mode="success"> when the flag is
+  // ON. This proves the primitive is consumed in production while
+  // preserving byte-identical visual output (mode="success" is bare
+  // children, no Card chrome). When the flag is OFF (default), the strip
+  // renders verbatim — production behavior is unchanged.
+  const v2 = isWidgetStateV2Enabled();
+
+  const strip = (
     <div
       style={{
         background: "var(--surface)",
@@ -156,6 +170,11 @@ export function KpiStripWidget({ data }: WidgetProps) {
       `}</style>
     </div>
   );
+
+  if (v2) {
+    return <WidgetState mode="success">{strip}</WidgetState>;
+  }
+  return strip;
 }
 
 // ---------------------------------------------------------------------------
