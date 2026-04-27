@@ -218,7 +218,10 @@ export function BridgeDrawer({
             {/* Mandate gates failed card — designer screenshot 13.51.27 */}
             <div
               className="rounded-md border p-3"
-              style={{ borderColor: "#FED7AA", background: "#FFFBF4" }}
+              style={{
+                borderColor: "var(--color-bridge-border-100)",
+                background: "var(--color-bridge-bg-50)",
+              }}
             >
               <div
                 className="text-xs"

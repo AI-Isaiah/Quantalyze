@@ -111,8 +111,9 @@ export function BridgeWidget({
         data-testid="bridge-empty-state"
         className="rounded-lg border p-6"
         style={{
-          borderColor: "#FED7AA",
-          background: "linear-gradient(135deg, #FFF7ED 0%, #FFFAF3 100%)",
+          borderColor: "var(--color-bridge-border-100)",
+          background:
+            "linear-gradient(135deg, var(--color-bridge-bg-100) 0%, var(--color-bridge-bg-50) 100%)",
         }}
       >
         <div
@@ -199,7 +200,10 @@ export function BridgeWidget({
           role="region"
           aria-label="Bridge recommendations"
           className="rounded-lg border p-4"
-          style={{ borderColor: "#FED7AA", background: "#FFF7ED" }}
+          style={{
+            borderColor: "var(--color-bridge-border-100)",
+            background: "var(--color-bridge-bg-100)",
+          }}
         >
           <div
             className="text-xs uppercase"
@@ -236,8 +240,9 @@ export function BridgeWidget({
         aria-label="Bridge recommendations"
         className="rounded-lg border p-6"
         style={{
-          borderColor: "#FED7AA",
-          background: "linear-gradient(135deg, #FFF7ED 0%, #FFFAF3 100%)",
+          borderColor: "var(--color-bridge-border-100)",
+          background:
+            "linear-gradient(135deg, var(--color-bridge-bg-100) 0%, var(--color-bridge-bg-50) 100%)",
         }}
       >
         <div

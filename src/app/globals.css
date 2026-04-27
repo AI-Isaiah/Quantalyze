@@ -25,6 +25,20 @@
   --color-surface-subtle: #FBFCFD;
   --color-track: #F1F5F9;
 
+  /* Bridge surface family (cream/peach tints used by BridgeWidget,
+     BridgeDrawer, BridgeHeroWidget and ScenarioFlaggedHoldingsList).
+     The Bridge surface is an exception to the white card default —
+     it carries the cream identity established in the designer bundle
+     (`Allocator Dashboard.html` + designer-bundle/.../bridge.jsx). */
+  --color-bridge-bg-50: #FFFAF3;
+  --color-bridge-bg-100: #FFF7ED;
+  --color-bridge-border-100: #FED7AA;
+
+  /* Warning amber chip family (used by HoldingsTable revoked-key
+     indicator; lighter shades of --color-warning #D97706). */
+  --color-warning-bg: #FEF3C7;
+  --color-warning-border: #FDE68A;
+
   /* Badge colors */
   --color-badge-directional: #1B6B5A;
   --color-badge-bidirectional: #6366F1;

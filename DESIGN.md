@@ -43,6 +43,8 @@
 - **Positive:** #16A34A — gains, verified status, success
 - **Negative:** #DC2626 — losses, errors, permanent failures
 - **Warning:** #D97706 — transient retry states, non-critical warnings (added 2026-04-11)
+- **Warning bg / border:** #FEF3C7 / #FDE68A — light amber chip surface + border for warning-tier badges (e.g. HoldingsTable revoked-key indicator). Pairs with `--color-warning` on text. Added 2026-04-26 (Phase 09.1 UI-FLAG-01).
+- **Bridge bg-50 / bg-100 / border:** #FFFAF3 / #FFF7ED / #FED7AA — cream/peach surface family for the Bridge identity (BridgeWidget, BridgeDrawer, BridgeHeroWidget). Exception to the white-card default; carries the designer-bundle cream visual signature. Added 2026-04-26 (Phase 09.1 UI-FLAG-01).
 - **Border:** #E2E8F0 — subtle dividers
 - **Border focus:** #1B6B5A — accent color for focused inputs
 - **Surface subtle:** #FBFCFD — near-white tint for nested panels (expanded rows, secondary surfaces) where surface-on-surface needs separation without a border
