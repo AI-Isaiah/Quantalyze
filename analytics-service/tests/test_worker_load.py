@@ -2,12 +2,18 @@
 dispatch_tick repeatedly, verify drain completes with no jobs left in
 'running' state.
 
-Uses a mocked Supabase client that simulates claim_compute_jobs returning
-batches of 5 and dispatch returning DONE for each. Verifies:
+Uses a mocked Supabase client that simulates
+claim_compute_jobs_with_priority returning batches of 5 and dispatch
+returning DONE for each. Verifies:
   - All 100 jobs get dispatched
   - mark_compute_job_done called 100 times
   - No mark_compute_job_failed calls
   - No jobs stuck in 'running' (all moved to done)
+
+Phase 12 / Plan 12-07: dispatch_tick now claims via the priority-aware RPC
+(claim_compute_jobs_with_priority); the legacy claim_compute_jobs RPC is no
+longer reached from the dispatch path. The mock dispatcher matches the new
+RPC name.
 """
 from __future__ import annotations
 
@@ -40,8 +46,11 @@ class TestWorkerLoadDrain:
 
         def _rpc_side_effect(name: str, params: dict):
             chain = MagicMock()
-            if name == "claim_compute_jobs":
-                # Return next batch (up to batch_size) from pending
+            if name == "claim_compute_jobs_with_priority":
+                # Return next batch (up to batch_size) from pending.
+                # Phase 12 / Plan 12-07: dispatch_tick swapped to the
+                # priority-aware claim RPC (migration 086). Legacy
+                # claim_compute_jobs name is no longer reached.
                 batch = pending[:batch_size]
                 del pending[:batch_size]
                 chain.execute.return_value = MagicMock(data=batch)
