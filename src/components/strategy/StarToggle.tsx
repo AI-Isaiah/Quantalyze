@@ -27,7 +27,7 @@
  * lucide-react / @heroicons / react-icons dependency.
  */
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 interface StarToggleProps {
   strategyId: string;
@@ -46,6 +46,25 @@ export function StarToggle({
 }: StarToggleProps) {
   const [isPending, startTransition] = useTransition();
   const [showRetryHint, setShowRetryHint] = useState(false);
+
+  // Phase 13 / REVIEW.md MEDIUM-3 — unmount cleanup. The 600ms retry gap +
+  // the 4-second retry-hint setTimeout can both fire after the component
+  // unmounts (e.g., user navigates away mid-flight). Track mount state via
+  // a ref and guard post-retry side effects; clear the 4-second timer in
+  // the cleanup so it cannot fire on an unmounted instance.
+  const isMountedRef = useRef(true);
+  const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (hintTimeoutRef.current !== null) {
+        clearTimeout(hintTimeoutRef.current);
+        hintTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // 44×44 in dense table rows; 32×32 on card top-right corner per
   // UI-SPEC Spacing Scale "touch-target floor".
@@ -90,9 +109,22 @@ export function StarToggle({
       // re-reading `starred` from the props closure; that keeps the
       // revert intent stable even if the parent has re-rendered with a
       // new `starred` value during the transition.
+      //
+      // Mount guard: skip every post-retry side effect if the component
+      // has unmounted between the initial click and now (avoids React
+      // "state update on unmounted component" warnings + leaked timers).
+      if (!isMountedRef.current) return;
       onToggle(strategyId, !nextStarred);
       setShowRetryHint(true);
-      setTimeout(() => setShowRetryHint(false), 4000);
+      // Clear any prior pending hint timer before scheduling a new one.
+      if (hintTimeoutRef.current !== null) {
+        clearTimeout(hintTimeoutRef.current);
+      }
+      hintTimeoutRef.current = setTimeout(() => {
+        if (!isMountedRef.current) return;
+        setShowRetryHint(false);
+        hintTimeoutRef.current = null;
+      }, 4000);
     });
   };
 

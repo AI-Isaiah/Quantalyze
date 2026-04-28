@@ -205,6 +205,41 @@ describe("StarToggle", () => {
     });
   });
 
+  it("does not call onToggle (revert) after unmount when both fetch attempts fail (REVIEW.md MEDIUM-3)", async () => {
+    // REVIEW.md MEDIUM-3 — unmount cleanup. Both fetch attempts return failure,
+    // but the component is unmounted between the click and the retry chain
+    // completing. The post-retry revert (`onToggle` call #2) and the
+    // showRetryHint state update must be skipped because the mount guard
+    // short-circuits when isMountedRef.current === false.
+    const onToggle = vi.fn();
+    fetchMock.mockResolvedValue({ ok: false, status: 500 });
+
+    const { unmount } = render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    // Optimistic flip fired synchronously.
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenNthCalledWith(1, STRATEGY_ID, true);
+
+    // Unmount immediately, while the retry chain is still in flight.
+    unmount();
+
+    // Wait long enough for the 600ms retry gap + both fetches to settle.
+    // After the chain completes, the revert path must NOT have called
+    // onToggle a second time because isMountedRef.current === false.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 800));
+    });
+
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
   it("reverts the optimistic flip and shows the retry hint when both fetch attempts fail", async () => {
     const onToggle = vi.fn();
     fetchMock.mockResolvedValue({ ok: false, status: 500 });
