@@ -900,39 +900,28 @@ test("login-as-A then login-as-B leaves no A-keyed prefs in B's session", async 
 
 **If this table is empty:** All claims in this research were verified or cited — no user confirmation needed.
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All 6 questions resolved during plan-phase. Resolution sources cited inline.
 
 1. **DISCO-03 RLS semantics — does `is_public=true` only gate name visibility, not strategy visibility?**
-   - What we know: Existing `strategies_org_read` policy (migration `026:95-100`) requires org membership to see `organization_id IS NOT NULL` strategies. `is_public` does NOT change this.
-   - What's unclear: The user's intent. Two interpretations:
-     - **(A) Name-leak gate only** — dropdown lists `is_public=true` orgs the allocator can already see strategies for; otherwise dropdown empty. (Matches DESIGN.md DIFF "default-false avoids leaking private/stealth fund names".)
-     - **(B) Strategy-visibility gate** — Phase 13 also relaxes `strategies_org_read` so that `organizations.is_public=true` acts like `organization_id IS NULL` for read purposes. Larger blast radius; not in CONTEXT.md.
-   - Recommendation: Ask the user before plan-phase. Default to (A); if (B), Phase 13's migration also needs an RLS DROP/CREATE for `strategies_org_read`.
+   - **RESOLVED: Moot.** DISCO-03 audit returned `count = 0` on 2026-04-28; DISCO-03 (and the conditional `organizations.is_public` migration) are deferred to v0.18 per TODOS.md `## DISCO-03 Audit` section. RLS interpretation does not need to be locked in Phase 13. When audit re-runs at v0.18 planning, default to (A) name-leak gate per recommendation below.
+   - Original branches: (A) name-leak gate only, dropdown lists `is_public=true` orgs the allocator can already see strategies for. (B) strategy-visibility gate — also relax `strategies_org_read`. Recommendation was (A); deferral makes it moot for now.
 
 2. **Audit count = 0 fallback — does the dropdown ship as a hidden button, or is the entire Customize section omitted?**
-   - What we know: UI-SPEC State Matrix says "Filter-by-team section: audit count == 0 → section not rendered". This is the accepted answer.
-   - What's unclear: Whether the section header tag itself (`Filter by team`) should appear as a placeholder. UI-SPEC says no.
-   - Recommendation: Lock to "fully omitted from DOM if audit==0" and document in plan.
+   - **RESOLVED: Section fully omitted from DOM.** UI-SPEC State Matrix locks "Filter-by-team section: audit count == 0 → section not rendered". TODOS.md confirms the section is fully absent in Phase 13. No tasks generated for DISCO-03 anywhere in plans 13-01..05.
 
 3. **Watchlist PUT rate limiter — `userActionLimiter` (5/min) vs `mandateAutoSaveLimiter` (30/min)?**
-   - What we know: `userActionLimiter` = 5/min sensitive ops; `mandateAutoSaveLimiter` = 30/min realistic burst.
-   - What's unclear: Star-clicking is a fast-fire action — a power-allocator might star 10-20 strategies in 30 seconds.
-   - Recommendation: Use `mandateAutoSaveLimiter` (30/min). Document in plan.
+   - **RESOLVED: `mandateAutoSaveLimiter` (30/min).** Documented in TODOS.md `## Open questions for planner` Q1 and locked into plan 13-01 route handler implementation. Reason: star-clicking is a legitimate fast-fire action; 5/min would block normal browse-and-watchlist sessions.
 
-4. **`created_by` column does NOT exist on `strategies`** — CONTEXT.md says "query for strategies whose `created_by` matches the seed-admin auth uid". The actual column is `user_id` (per `strategies` schema in `database.types.ts` and the seeders).
-   - What we know: Seeders write `user_id` (not `created_by`) when inserting strategies. Verified at `scripts/seed-demo-data.ts:STRATEGY_PROFILES` and `STRATEGY_UUIDS`.
-   - What's unclear: Whether CONTEXT.md's "created_by" was a typo or refers to a different column elsewhere.
-   - Recommendation: Use the **hard-coded UUID list** from `STRATEGY_UUIDS` as the canonical source — avoids an indirect query. Document in plan as "data-only migration ships 6 seed UUIDs literally; query path discarded as fragile".
+4. **`created_by` column does NOT exist on `strategies`** — CONTEXT.md says "query for strategies whose `created_by` matches the seed-admin auth uid". The actual column is `user_id`.
+   - **RESOLVED: Hard-coded UUID list.** Plan 13-05 ships `090_seed_is_example_backfill.sql` with all 8 UUIDs from `scripts/seed-demo-data.ts:STRATEGY_UUIDS` literally in the WHERE clause. No indirect query. Documented in TODOS.md `## Seed UUIDs (resolved 2026-04-28 from research)` section.
 
 5. **Logout route — what's the actual URL? `/logout` or a POST endpoint?**
-   - What we know: The cross-account isolation spec needs a clean log-out step. I did not find a `logout/page.tsx` route in the brief read.
-   - What's unclear: Whether the project ships a `/logout` page or relies on a button-triggered server action.
-   - Recommendation: Planner verifies and uses the actual logout flow (likely a click on the user-menu Logout button inside the dashboard).
+   - **RESOLVED: User-menu sign-out button.** Plan 13-02 Task 1 step 8 (cross-account isolation Playwright spec) clicks the user-menu Logout button inside the dashboard rather than navigating to a `/logout` URL. Confirmed in TODOS.md `## Open questions for planner` Q3.
 
 6. **`useOptimistic` vs `useTransition` for the star toggle?**
-   - What we know: The codebase uses `useTransition` already (`AllocatorExchangeManager.tsx:31`). React 19's `useOptimistic` is also available.
-   - What's unclear: Whether the planner prefers consistency (`useTransition`) or modern idiom (`useOptimistic`).
-   - Recommendation: Use `useTransition` + local mirror — matches the codebase pattern and the State Matrix's "icon swapped immediately, button disabled for 200ms".
+   - **RESOLVED: `useTransition` + local mirror.** Plan 13-01 StarToggle implementation uses `useTransition` to match `AllocatorExchangeManager.tsx:31` codebase precedent. State Matrix's "icon swapped immediately, button disabled for 200ms" is satisfied by the local-mirror + `isPending` pattern. Documented in TODOS.md `## Open questions for planner` Q2.
 
 ## Environment Availability
 
