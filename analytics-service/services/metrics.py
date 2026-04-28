@@ -2,6 +2,7 @@ import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
+from dataclasses import dataclass, field
 from typing import Any
 
 from .transforms import downsample_series, cap_data_points
@@ -13,6 +14,56 @@ from .transforms import downsample_series, cap_data_points
 # by the `test_rolling_sortino_converges_to_scalar_at_full_window` test, which
 # asserts the rolling helper at window == period agrees with the scalar to within 0.05.
 MAR: float = 0.0
+
+
+@dataclass
+class MetricsResult:
+    """Phase 12 / METRICS-11/12: split storage between strategy_analytics.metrics_json
+    (light scalars + above-the-fold series) and strategy_analytics_series sibling table
+    (heavy series keyed by kind). See D-01 / D-02 for split rules.
+
+    Attributes
+    ----------
+    metrics_json: top-level dict spread into the strategy_analytics table upsert.
+        Contains all existing qstats scalars + 10 new qstats scalars (merged into
+        its inner "metrics_json" JSONB sub-dict) + above-the-fold series
+        (returns_series, drawdown_series, sparklines, monthly_returns,
+        rolling_metrics, return_quantiles).
+    sibling_kinds: dict keyed by sibling-table `kind`. analytics_runner upserts
+        each kind into strategy_analytics_series via the
+        `upsert_strategy_analytics_series_batch` SECURITY DEFINER RPC (M-Grok-1
+        atomic batch). 12 kinds total — 10 produced here in compute_all_metrics
+        (daily_returns_grid, rolling_sortino_3m/6m/12m, rolling_volatility_3m/6m/12m,
+        rolling_alpha, rolling_beta, log_returns_series); the runner adds 2 more
+        (exposure_series, turnover_series) since they need position_snapshots data.
+
+    `__getitem__` proxies to `metrics_json` for backward compat with existing
+    test sites that subscripted the old bare-dict return shape (test_metrics.py,
+    test_accuracy.py). New consumers should use attribute access directly.
+    """
+
+    metrics_json: dict[str, Any] = field(default_factory=dict)
+    sibling_kinds: dict[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> Any:
+        # Backward-compat shim: old callers expected a bare dict; proxy
+        # subscript access to metrics_json so legacy tests still work.
+        return self.metrics_json[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.metrics_json
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.metrics_json.get(key, default)
+
+    def items(self):
+        return self.metrics_json.items()
+
+    def keys(self):
+        return self.metrics_json.keys()
+
+    def values(self):
+        return self.metrics_json.values()
 
 
 def _safe_float(value: Any) -> float | None:
@@ -46,8 +97,28 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None = None) -> dict[str, Any]:
-    """Compute all analytics from a daily returns series."""
+def compute_all_metrics(
+    returns: pd.Series,
+    benchmark_returns: pd.Series | None = None,
+) -> "MetricsResult":
+    """Compute all analytics from a daily returns series.
+
+    Phase 12: returns a `MetricsResult` dataclass (NOT a bare dict) split per D-01/D-02:
+
+    - `result.metrics_json`: spread into the `strategy_analytics` table upsert.
+      Carries all existing qstats scalars (top-level cumulative_return, cagr, sharpe, ...)
+      + 10 new qstats scalars (merged into the inner `metrics_json` JSONB sub-dict
+      via `compute_qstats_scalars`).
+    - `result.sibling_kinds`: dict {kind: payload} for the 10 sibling kinds emitted
+      from this function (daily_returns_grid, rolling_sortino_3m/6m/12m,
+      rolling_volatility_3m/6m/12m, rolling_alpha, rolling_beta, log_returns_series).
+      analytics_runner appends 2 more (exposure_series, turnover_series) before the
+      atomic batch upsert via `upsert_strategy_analytics_series_batch` RPC.
+
+    Backward-compat: `MetricsResult.__getitem__` proxies to `.metrics_json` so
+    legacy `result["sharpe"]` access still works for tests that have not yet
+    been migrated to attribute access.
+    """
     if len(returns) < 2:
         raise ValueError("Insufficient trade history. At least 2 trading days required.")
 
@@ -292,9 +363,18 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
         except Exception:
             pass
 
+    # METRICS-11: 10 new qstats scalars merged into the inner metrics_json
+    # JSONB sub-dict (D-01 storage split — these are scalars, they live in
+    # the metrics_json JSONB column on strategy_analytics, NOT new top-level
+    # columns). Wired here in Phase 12 Plan 06; the helper itself shipped in
+    # Plan 12-04. compute_qstats_scalars uses try/except per scalar so a
+    # single qs failure can't take down the whole metrics computation.
+    qstats_scalars = compute_qstats_scalars(returns, benchmark_returns)
+    metrics_json.update(qstats_scalars)
+
     # All individual metrics already passed through _safe_float().
     # sanitize_metrics() is a final guardrail for nested structures (metrics_json, rolling, quantiles).
-    return sanitize_metrics({
+    sanitized = sanitize_metrics({
         "cumulative_return": total_return,
         "cagr": cagr,
         "volatility": volatility,
@@ -313,6 +393,27 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
         "rolling_metrics": rolling,
         "return_quantiles": quantiles,
     })
+
+    # METRICS-04, METRICS-05, METRICS-06, METRICS-12: sibling-kind payloads.
+    # 10 kinds emitted here (the 2 missing — exposure_series, turnover_series —
+    # are added by analytics_runner since they require position_snapshots data).
+    # Heavy-series storage per D-02 — these go to strategy_analytics_series via
+    # the atomic batch RPC (M-Grok-1) at the runner level, NOT into metrics_json.
+    has_benchmark = benchmark_returns is not None and len(benchmark_returns) > 0
+    sibling_kinds: dict[str, Any] = {
+        "daily_returns_grid": _daily_returns_grid_from_series(returns),
+        "rolling_sortino_3m": _rolling_sortino(returns, 63),
+        "rolling_sortino_6m": _rolling_sortino(returns, 126),
+        "rolling_sortino_12m": _rolling_sortino(returns, 252),
+        "rolling_volatility_3m": _rolling_volatility(returns, 63),
+        "rolling_volatility_6m": _rolling_volatility(returns, 126),
+        "rolling_volatility_12m": _rolling_volatility(returns, 252),
+        "rolling_alpha": _rolling_alpha(returns, benchmark_returns, 90) if has_benchmark else [],
+        "rolling_beta": _rolling_beta(returns, benchmark_returns, 90) if has_benchmark else [],
+        "log_returns_series": _log_returns_series(returns),
+    }
+
+    return MetricsResult(metrics_json=sanitized, sibling_kinds=sibling_kinds)
 
 
 def compute_risk_of_ruin(
