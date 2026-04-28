@@ -2940,6 +2940,10 @@ export type Database = {
         Args: { p_roles: string[] }
         Returns: boolean
       }
+      cutover_strategy_metrics_keys: {
+        Args: { p_kinds: Json; p_strategy_id: string }
+        Returns: undefined
+      }
       defer_compute_job: {
         Args: { p_defer_seconds: number; p_job_id: string; p_reason?: string }
         Returns: string
