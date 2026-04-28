@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections import defaultdict
 
 from fastapi import HTTPException
@@ -46,6 +47,100 @@ from services.metrics import compute_all_metrics
 from services.transforms import trades_to_daily_returns
 
 logger = logging.getLogger("quantalyze.analytics.runner")
+
+
+async def _load_position_time_series(
+    strategy_id: str,
+    supabase,
+    account_balance: float | None,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, float]]:
+    """H-A1: derive (positions_by_date, prices_by_date, nav_by_date) from
+    `position_snapshots`.
+
+    `position_snapshots.mark_price` is the SINGLE canonical price source per
+    migration 034 — every snapshot row carries BOTH `size_usd` AND `mark_price`,
+    so one query produces the position grid AND the price grid. The codebase
+    has NO `historical_prices` table (verified pre-execution per H-A1 — the
+    phantom table from REVIEWS does not exist).
+
+    Outputs feed `compute_turnover_series(positions_by_date, prices_by_date,
+    nav_by_date)` (Plan 12-04) — empty inputs return [] gracefully so a
+    snapshot-less strategy degrades to an empty turnover series rather than
+    a runtime error.
+
+    Args:
+        strategy_id: UUID string of the strategy.
+        supabase: PostgREST client (service-role).
+        account_balance: optional USD account balance from `api_keys`. When
+            present, NAV per date = account_balance + cumulative_realized_pnl.
+            When None, falls back to gross-exposure proxy
+            (sum(abs(positions[d].values()))) — turnover formula
+            `Σ(|Δposition × price|) / nav` is self-consistent under any
+            non-zero monotonic NAV proxy.
+
+    Returns:
+        positions_by_date: { 'YYYY-MM-DD': { symbol: signed_size_usd } }
+        prices_by_date:    { 'YYYY-MM-DD': { symbol: mark_price } }
+        nav_by_date:       { 'YYYY-MM-DD': nav_usd }
+
+    Empty dicts on missing snapshots — caller treats as graceful degradation.
+    """
+    def _fetch_snapshots():
+        return (
+            supabase.table("position_snapshots")
+            .select("snapshot_date, symbol, side, size_usd, mark_price")
+            .eq("strategy_id", strategy_id)
+            .order("snapshot_date")
+            .execute()
+        )
+
+    snaps_result = await db_execute(_fetch_snapshots)
+    snapshots = (snaps_result.data if snaps_result else None) or []
+    if not snapshots:
+        return {}, {}, {}
+
+    positions_by_date: dict[str, dict[str, float]] = {}
+    prices_by_date: dict[str, dict[str, float]] = {}
+
+    for snap in snapshots:
+        d = snap.get("snapshot_date")
+        sym = snap.get("symbol")
+        side = (snap.get("side") or "").lower()
+        size_raw = snap.get("size_usd")
+        mark_raw = snap.get("mark_price")
+        if not d or not sym:
+            continue
+        try:
+            size_usd = float(size_raw) if size_raw is not None else 0.0
+        except (TypeError, ValueError):
+            size_usd = 0.0
+        # Skip flat or zero-size rows (per migration 034 comment they're
+        # usually not stored, but defensive).
+        if side == "flat" or size_usd == 0.0:
+            continue
+        signed = size_usd if side == "long" else -size_usd
+        positions_by_date.setdefault(d, {})[sym] = signed
+        if mark_raw is not None:
+            try:
+                prices_by_date.setdefault(d, {})[sym] = float(mark_raw)
+            except (TypeError, ValueError):
+                # Don't poison prices_by_date with NaN/non-numeric marks.
+                pass
+
+    # Build nav_by_date. With account_balance present, NAV is a constant
+    # (account-level scaling); turnover formula divides by NAV, so a
+    # constant non-zero NAV produces a self-consistent series. Without
+    # account_balance, use sum(abs(positions)) as a NAV proxy (gross
+    # exposure) — also self-consistent for the turnover ratio.
+    nav_by_date: dict[str, float] = {}
+    if account_balance is not None and account_balance > 0:
+        for d in positions_by_date:
+            nav_by_date[d] = float(account_balance)
+    else:
+        for d, pos_map in positions_by_date.items():
+            nav_by_date[d] = sum(abs(v) for v in pos_map.values())
+
+    return positions_by_date, prices_by_date, nav_by_date
 
 
 def _compute_volume_metrics(fills: list[dict]) -> dict:
@@ -424,18 +519,136 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             benchmark_rets = None
             benchmark_stale = True
 
-        # Compute all metrics
-        metrics = compute_all_metrics(returns, benchmark_rets)
+        # B-01 (path b): hoist position reconstruction BEFORE compute_all_metrics
+        # so derived metrics see avg_winning_trade / avg_losing_trade /
+        # winners_count / losers_count / realized_pnl_per_trade. Wrapped in a
+        # local try so position-side failures do NOT block the qstats half;
+        # they degrade gracefully via data_quality_flags.position_metrics_failed.
+        from services.position_reconstruction import (
+            reconstruct_positions,
+            compute_exposure_metrics,
+            compute_turnover_series,
+        )
 
-        # Build data quality flags
+        trade_metrics_from_positions: dict = {}
+        exposure_metrics: dict = {}
+        positions_by_date: dict[str, dict[str, float]] = {}
+        prices_by_date: dict[str, dict[str, float]] = {}
+        nav_by_date: dict[str, float] = {}
+        position_metrics_error: str | None = None
+        try:
+            trade_metrics_from_positions = (
+                await reconstruct_positions(strategy_id, supabase) or {}
+            )
+            exposure_metrics = (
+                await compute_exposure_metrics(strategy_id, supabase) or {}
+            )
+            # H-A1: position_snapshots is the canonical source for
+            # positions+prices+NAV (no historical_prices table exists per
+            # migration 034). One query produces both grids; turnover
+            # formula consumes them.
+            (
+                positions_by_date,
+                prices_by_date,
+                nav_by_date,
+            ) = await _load_position_time_series(
+                strategy_id, supabase, account_balance
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Position reconstruction failed for %s: %s", strategy_id, str(exc)
+            )
+            position_metrics_error = str(exc)[:200]
+
+        # B-01: fetch fills once, feed both volume helpers + trade_mix.
+        # `cost` is needed by _compute_volume_metrics; `notional_usd`,
+        # `is_maker`, `holding_period_hours`, `filled_at`, `side` are needed by
+        # _compute_volume_aggregator + _compute_trade_mix (per migration 039
+        # column shape). Selecting columns explicitly to keep payload bounded.
+        fills_data: list[dict] = []
+        try:
+            fills_result = await db_execute(
+                lambda: supabase.table("trades")
+                .select(
+                    "side, cost, is_maker, notional_usd, "
+                    "holding_period_hours, filled_at, created_at"
+                )
+                .eq("strategy_id", strategy_id)
+                .eq("is_fill", True)
+                .execute()
+            )
+            fills_data = fills_result.data if fills_result else []
+            fills_data = fills_data or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Fills fetch failed for %s: %s", strategy_id, str(exc)
+            )
+            fills_data = []
+
+        # B-01 path (b) merge: volume_metrics + volume_aggregator + derived +
+        # trade_mix all flow into the trade_metrics JSONB before the upsert.
+        volume_metrics = _compute_volume_metrics(fills_data) if fills_data else {}
+        volume_aggregator = (
+            _compute_volume_aggregator(fills_data) if fills_data else {}
+        )
+        derived = _compute_derived_trade_metrics(
+            volume_metrics, trade_metrics_from_positions
+        )
+        # M-01: TRADE_MIX_HAS_MAKER_TAKER comes from CI / .env.test; deploy
+        # script (Plan 12-10) writes it. False today (D-15 audit fail);
+        # 4-bucket reachable via flag flip in v0.17.1.
+        has_maker_taker = (
+            os.getenv("TRADE_MIX_HAS_MAKER_TAKER", "false").lower() == "true"
+        )
+        trade_mix = _compute_trade_mix(fills_data, has_maker_taker=has_maker_taker)
+
+        merged_trade_metrics = {
+            **(trade_metrics_from_positions or {}),
+            **volume_metrics,
+            **volume_aggregator,
+            **derived,
+            "trade_mix": trade_mix,
+        }
+
+        # H-A1: turnover_series from position_snapshots-derived grids.
+        turnover_series = compute_turnover_series(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+
+        # METRICS-11/12: compute_all_metrics returns MetricsResult dataclass.
+        metrics_result = compute_all_metrics(returns, benchmark_rets)
+
+        # H-A1: pop exposure_series from exposure_metrics (so it lands in the
+        # sibling table, not in the strategy_analytics.exposure_metrics column).
+        # exposure_metrics may be {} when position reconstruction failed —
+        # `.pop(key, default)` is the safe accessor.
+        exposure_series_payload = (
+            exposure_metrics.pop("exposure_series", None)
+            if isinstance(exposure_metrics, dict)
+            else None
+        )
+        if exposure_series_payload:
+            metrics_result.sibling_kinds["exposure_series"] = (
+                exposure_series_payload
+            )
+        if turnover_series:
+            metrics_result.sibling_kinds["turnover_series"] = turnover_series
+
+        # Build data quality flags (combine benchmark + position-side failures).
         data_quality_flags: dict | None = None
         if benchmark_stale or benchmark_rets is None:
             data_quality_flags = {
                 "benchmark_unavailable": True,
                 "benchmark_note": "Benchmark data unavailable. Alpha, beta, and correlation not computed.",
             }
+        if position_metrics_error is not None:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["position_metrics_failed"] = True
+            data_quality_flags["position_metrics_error"] = position_metrics_error
 
-        # Store results
+        # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
+        # AND attaches the merged trade_metrics + volume_aggregator + exposure
+        # aggregates (without exposure_series, which moved to sibling_kinds).
         await db_execute(
             lambda: supabase.table("strategy_analytics").upsert(
                 {
@@ -443,73 +656,57 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     "computation_status": "complete",
                     "computation_error": None,
                     "data_quality_flags": data_quality_flags,
-                    **metrics,
+                    **metrics_result.metrics_json,
+                    "trade_metrics": merged_trade_metrics,
+                    "volume_metrics": volume_aggregator,
+                    "exposure_metrics": exposure_metrics,
                 },
                 on_conflict="strategy_id",
             ).execute()
         )
 
-        # --- Sprint 4: Position reconstruction + fill metrics (graceful degradation) ---
-        try:
-            from services.position_reconstruction import (
-                reconstruct_positions,
-                compute_exposure_metrics,
-            )
-
-            trade_metrics = await reconstruct_positions(strategy_id, supabase)
-            exposure_metrics = await compute_exposure_metrics(strategy_id, supabase)
-
-            # Compute volume metrics from fills
-            fills_result = await db_execute(
-                lambda: supabase.table("trades")
-                .select("side, cost")
-                .eq("strategy_id", strategy_id)
-                .eq("is_fill", True)
-                .execute()
-            )
-            volume_metrics = (
-                _compute_volume_metrics(fills_result.data)
-                if fills_result.data
-                else None
-            )
-
-            # Upsert fill metrics
-            fill_update: dict = {"strategy_id": strategy_id}
-            if trade_metrics:
-                fill_update["trade_metrics"] = trade_metrics
-            if volume_metrics:
-                fill_update["volume_metrics"] = volume_metrics
-            if exposure_metrics:
-                fill_update["exposure_metrics"] = exposure_metrics
-
-            if len(fill_update) > 1:  # more than just strategy_id
-                await db_execute(
-                    lambda: supabase.table("strategy_analytics")
-                    .upsert(fill_update, on_conflict="strategy_id")
-                    .execute()
-                )
-        except Exception as e:
-            logger.warning(
-                "Position reconstruction failed for %s: %s", strategy_id, str(e)
-            )
-            # Set data quality flag but don't fail the overall job
+        # M-Grok-1: atomic batch sibling-table upsert via SECURITY DEFINER RPC.
+        # Replaces the legacy per-kind ON CONFLICT loop (no surrounding
+        # transaction; partial failure could leave the strategy in an
+        # inconsistent state). The RPC's implicit transaction makes the whole
+        # batch atomic. See migration 087 / Plan 12-02.
+        if metrics_result.sibling_kinds:
             try:
-                existing = data_quality_flags or {}
-                existing["position_metrics_failed"] = True
-                existing["position_metrics_error"] = str(e)[:200]
                 await db_execute(
-                    lambda: supabase.table("strategy_analytics")
-                    .upsert(
+                    lambda: supabase.rpc(
+                        "upsert_strategy_analytics_series_batch",
                         {
-                            "strategy_id": strategy_id,
-                            "data_quality_flags": existing,
+                            "p_strategy_id": strategy_id,
+                            "p_kinds": metrics_result.sibling_kinds,
                         },
-                        on_conflict="strategy_id",
-                    )
-                    .execute()
+                    ).execute()
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # Sibling-table failure is non-fatal — the above-the-fold
+                # scalars in strategy_analytics are still valid; only panels
+                # 4–7 (lazy-fetched) lose their series. Flag and continue.
+                logger.warning(
+                    "Sibling-table batch upsert failed for %s: %s",
+                    strategy_id,
+                    str(exc),
+                )
+                try:
+                    existing = data_quality_flags or {}
+                    existing["sibling_kinds_failed"] = True
+                    existing["sibling_kinds_error"] = str(exc)[:200]
+                    await db_execute(
+                        lambda: supabase.table("strategy_analytics")
+                        .upsert(
+                            {
+                                "strategy_id": strategy_id,
+                                "data_quality_flags": existing,
+                            },
+                            on_conflict="strategy_id",
+                        )
+                        .execute()
+                    )
+                except Exception:
+                    pass
 
         return {"status": "complete", "strategy_id": strategy_id}
 

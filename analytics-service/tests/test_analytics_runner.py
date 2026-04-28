@@ -11,6 +11,16 @@ Sprint 4 regression and graceful degradation tests:
    raising an exception should NOT fail the overall analytics run. The
    runner should complete with computation_status="complete" and set
    data_quality_flags.position_metrics_failed=true.
+
+Phase 12 Plan 06 additions:
+
+3. test_run_strategy_analytics_writes_sibling_kinds — B-01 + H-A1 +
+   M-Grok-1: per-kind data lands in strategy_analytics_series via the
+   atomic batch upsert RPC.
+
+4. test_run_strategy_analytics_derived_metrics_present — B-01: the merged
+   trade_metrics JSONB has the 6 derived keys (expectancy, R:R, weighted
+   R:R, SQN, profit_factor_long, profit_factor_short) + trade_mix.
 """
 from __future__ import annotations
 
@@ -20,6 +30,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import numpy as np
 import pytest
+
+from services.metrics import MetricsResult
 
 
 # ---------------------------------------------------------------------------
@@ -146,26 +158,31 @@ class TestIsFillFilterRegression:
         async def _mock_db_execute(fn):
             return await asyncio.to_thread(fn)
 
-        # Mock compute_all_metrics to avoid pulling in quantstats
-        mock_metrics = {
-            "cumulative_return": 0.1,
-            "cagr": 0.12,
-            "volatility": 0.2,
-            "sharpe": 1.5,
-            "sortino": 2.0,
-            "calmar": 1.0,
-            "max_drawdown": -0.05,
-            "max_drawdown_duration_days": 5,
-            "six_month_return": 0.06,
-            "sparkline_returns": [],
-            "sparkline_drawdown": [],
-            "metrics_json": {},
-            "returns_series": [],
-            "drawdown_series": [],
-            "monthly_returns": {},
-            "rolling_metrics": {},
-            "return_quantiles": {},
-        }
+        # Phase 12 Plan 06: compute_all_metrics now returns MetricsResult dataclass.
+        # The mock mirrors that contract — metrics_json carries the top-level
+        # dict that gets spread into the strategy_analytics upsert.
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.1,
+                "cagr": 0.12,
+                "volatility": 0.2,
+                "sharpe": 1.5,
+                "sortino": 2.0,
+                "calmar": 1.0,
+                "max_drawdown": -0.05,
+                "max_drawdown_duration_days": 5,
+                "six_month_return": 0.06,
+                "sparkline_returns": [],
+                "sparkline_drawdown": [],
+                "metrics_json": {},
+                "returns_series": [],
+                "drawdown_series": [],
+                "monthly_returns": {},
+                "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
 
         with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
              patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
@@ -280,16 +297,20 @@ class TestGracefulDegradation:
         async def _mock_db_execute(fn):
             return await asyncio.to_thread(fn)
 
-        mock_metrics = {
-            "cumulative_return": 0.1, "cagr": 0.12, "volatility": 0.2,
-            "sharpe": 1.5, "sortino": 2.0, "calmar": 1.0,
-            "max_drawdown": -0.05, "max_drawdown_duration_days": 5,
-            "six_month_return": 0.06, "sparkline_returns": [],
-            "sparkline_drawdown": [], "metrics_json": {},
-            "returns_series": [], "drawdown_series": [],
-            "monthly_returns": {}, "rolling_metrics": {},
-            "return_quantiles": {},
-        }
+        # Phase 12 Plan 06: MetricsResult dataclass return contract.
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.1, "cagr": 0.12, "volatility": 0.2,
+                "sharpe": 1.5, "sortino": 2.0, "calmar": 1.0,
+                "max_drawdown": -0.05, "max_drawdown_duration_days": 5,
+                "six_month_return": 0.06, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
 
         np.random.seed(42)
         dates = pd.bdate_range("2024-01-01", periods=10)
@@ -639,3 +660,351 @@ def test_trade_mix_avg_holding_period_computed(sample_fills):
     assert abs(result["long"]["avg_holding_period_hours"] - 23.0 / 4) < 1e-6
     # Short fills: holding_period [2, 3] → mean = 5/2 = 2.5
     assert abs(result["short"]["avg_holding_period_hours"] - 2.5) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 Plan 06 / METRICS-15 / METRICS-17 — runner integration smoke tests
+# ---------------------------------------------------------------------------
+# These verify the full B-01 + H-A1 + M-Grok-1 wiring inside
+# run_strategy_analytics:
+#   - merged trade_metrics JSONB carries the 6 derived keys + trade_mix
+#   - sibling-table writes go through the atomic batch RPC
+#     `upsert_strategy_analytics_series_batch` (NOT a per-kind loop)
+#   - exposure_series + turnover_series populate when position_snapshots
+#     are present
+# Mocking pattern mirrors the existing `test_is_fill_filter_regression` /
+# `test_graceful_degradation_position_failure` tests above.
+
+
+def _build_runner_mock_supabase(
+    *,
+    daily_pnl_rows: list[dict],
+    fills_rows: list[dict],
+    snapshot_rows: list[dict],
+    rpc_calls: list[dict],
+    sa_upsert_calls: list[dict],
+):
+    """Shared MagicMock factory for the Plan 06 smoke tests.
+
+    Captures:
+      - rpc_calls: every supabase.rpc(name, params) invocation
+      - sa_upsert_calls: every strategy_analytics.upsert(data) invocation
+    """
+    mock = MagicMock()
+
+    def _table(name):
+        t = MagicMock()
+        if name == "strategies":
+            chain = MagicMock()
+            chain.execute.return_value = MagicMock(
+                data={
+                    "id": "strat-test",
+                    "user_id": "user-1",
+                    "api_key_id": "key-1",
+                }
+            )
+            single = MagicMock(return_value=chain)
+            eq = MagicMock()
+            eq.single = single
+            eq.execute = chain.execute
+            sel = MagicMock()
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        elif name == "strategy_analytics":
+            def _upsert(data, on_conflict=None):
+                sa_upsert_calls.append(data)
+                r = MagicMock()
+                r.execute.return_value = MagicMock(data=[])
+                return r
+            t.upsert = _upsert
+        elif name == "trades":
+            sel = MagicMock()
+            eq_strat = MagicMock()
+
+            def _neq(field, value):
+                # is_fill != True → daily PnL rows for the qstats path
+                r = MagicMock()
+                order = MagicMock()
+                order.execute.return_value = MagicMock(data=daily_pnl_rows)
+                r.order.return_value = order
+                return r
+
+            def _eq_fill(field, value):
+                # is_fill = True → raw fills for B-01 path b
+                r = MagicMock()
+                r.execute.return_value = MagicMock(data=fills_rows)
+                return r
+
+            eq_strat.neq = _neq
+            eq_strat.eq = _eq_fill
+            sel.eq.return_value = eq_strat
+            t.select.return_value = sel
+        elif name == "api_keys":
+            sel = MagicMock()
+            eq = MagicMock()
+            single = MagicMock()
+            single.execute.return_value = MagicMock(
+                data={"account_balance_usdt": 10000}
+            )
+            eq.single.return_value = single
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        elif name == "position_snapshots":
+            # H-A1: position_snapshots is BOTH the position grid AND the
+            # price grid source — _load_position_time_series consumes it.
+            sel = MagicMock()
+            eq = MagicMock()
+            order = MagicMock()
+            order.execute.return_value = MagicMock(data=snapshot_rows)
+            eq.order = MagicMock(return_value=order)
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        return t
+
+    mock.table = _table
+
+    def _rpc(name, params):
+        rpc_calls.append({"name": name, "params": params})
+        r = MagicMock()
+        r.execute.return_value = MagicMock(data=None)
+        return r
+
+    mock.rpc = _rpc
+    return mock
+
+
+def _sample_position_snapshot_rows() -> list[dict]:
+    """Two days of snapshots for a single symbol — enough to make
+    compute_turnover_series produce a non-empty series."""
+    return [
+        {
+            "snapshot_date": "2024-01-15",
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "size_usd": "10000",
+            "mark_price": "65000",
+        },
+        {
+            "snapshot_date": "2024-01-16",
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "size_usd": "12000",
+            "mark_price": "66000",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_strategy_analytics_writes_sibling_kinds() -> None:
+    """B-01 + H-A1 + M-Grok-1: sibling kinds land via the atomic batch RPC.
+
+    Asserts:
+      - supabase.rpc("upsert_strategy_analytics_series_batch", ...) called
+      - payload contains expected sibling kinds (10 from metrics.py + 2 from runner)
+      - exposure_series + turnover_series present when position_snapshots non-empty
+    """
+    from services.analytics_runner import run_strategy_analytics
+
+    daily_rows = [
+        {
+            "id": f"trade-{i}",
+            "strategy_id": "strat-test",
+            "symbol": "PORTFOLIO",
+            "side": "buy" if i % 2 == 0 else "sell",
+            "price": 100 + i,
+            "quantity": 1,
+            "fee": 0,
+            "timestamp": f"2024-01-{i+1:02d}T00:00:00+00:00",
+            "is_fill": False,
+        }
+        for i in range(120)  # ≥90 days so rolling helpers populate
+    ]
+    rpc_calls: list[dict] = []
+    sa_upsert_calls: list[dict] = []
+    snap_rows = _sample_position_snapshot_rows()
+
+    mock_supabase = _build_runner_mock_supabase(
+        daily_pnl_rows=daily_rows,
+        fills_rows=[],
+        snapshot_rows=snap_rows,
+        rpc_calls=rpc_calls,
+        sa_upsert_calls=sa_upsert_calls,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    np.random.seed(7)
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    mock_returns = pd.Series(np.random.normal(0.001, 0.01, 120), index=dates)
+
+    bench_dates = pd.bdate_range("2024-01-01", periods=120)
+    mock_benchmark = pd.Series(
+        np.random.normal(0.0005, 0.015, 120), index=bench_dates, name="BTC"
+    )
+
+    # Make compute_exposure_metrics return a real exposure_series so it
+    # gets piped into sibling_kinds. Mirror the Plan 12-04 contract:
+    # {mean/std/max gross/net + exposure_series}.
+    fake_exposure = {
+        "mean_gross_exposure": 11000.0,
+        "std_gross_exposure": 1414.21,
+        "max_gross_exposure": 12000.0,
+        "mean_net_exposure": 11000.0,
+        "std_net_exposure": 1414.21,
+        "max_net_exposure": 12000.0,
+        "exposure_series": [
+            {"date": "2024-01-15", "gross": 10000.0, "net": 10000.0},
+            {"date": "2024-01-16", "gross": 12000.0, "net": 12000.0},
+        ],
+    }
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(mock_benchmark, False))), \
+         patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
+         patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value=fake_exposure)):
+        result = await run_strategy_analytics("strat-test")
+
+    assert result["status"] == "complete"
+
+    # M-Grok-1: assert the atomic batch RPC was called.
+    batch_calls = [
+        c for c in rpc_calls
+        if c["name"] == "upsert_strategy_analytics_series_batch"
+    ]
+    assert len(batch_calls) == 1, (
+        f"Expected exactly one batch RPC call, got {len(batch_calls)}: "
+        f"{[c['name'] for c in rpc_calls]}"
+    )
+    params = batch_calls[0]["params"]
+    assert params["p_strategy_id"] == "strat-test"
+    kinds_payload = params["p_kinds"]
+
+    # Required sibling kinds always populated:
+    assert "daily_returns_grid" in kinds_payload
+    assert "rolling_sortino_3m" in kinds_payload
+    assert "log_returns_series" in kinds_payload
+
+    # H-A1: exposure_series + turnover_series populated from real
+    # position_snapshots-derived data (NOT silently skipped).
+    assert "exposure_series" in kinds_payload, (
+        "H-A1 violated: exposure_series missing from sibling_kinds"
+    )
+    assert "turnover_series" in kinds_payload, (
+        "H-A1 violated: turnover_series missing from sibling_kinds"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_strategy_analytics_derived_metrics_present() -> None:
+    """B-01: trade_metrics JSONB has the 6 derived keys + trade_mix after
+    run_strategy_analytics merges fill-side + position-side dicts."""
+    from services.analytics_runner import run_strategy_analytics
+
+    daily_rows = [
+        {
+            "id": f"trade-{i}",
+            "strategy_id": "strat-test",
+            "symbol": "PORTFOLIO",
+            "side": "buy" if i % 2 == 0 else "sell",
+            "price": 100 + i,
+            "quantity": 1,
+            "fee": 0,
+            "timestamp": f"2024-01-{i+1:02d}T00:00:00+00:00",
+            "is_fill": False,
+        }
+        for i in range(15)
+    ]
+    fills_rows = [
+        {
+            "side": "long",
+            "cost": 100.0,
+            "is_maker": True,
+            "notional_usd": 1000.0,
+            "holding_period_hours": 4.0,
+            "filled_at": "2024-01-15T10:00:00+00:00",
+        },
+        {
+            "side": "short",
+            "cost": 80.0,
+            "is_maker": False,
+            "notional_usd": 800.0,
+            "holding_period_hours": 2.0,
+            "filled_at": "2024-01-15T14:00:00+00:00",
+        },
+    ]
+    rpc_calls: list[dict] = []
+    sa_upsert_calls: list[dict] = []
+
+    mock_supabase = _build_runner_mock_supabase(
+        daily_pnl_rows=daily_rows,
+        fills_rows=fills_rows,
+        snapshot_rows=[],
+        rpc_calls=rpc_calls,
+        sa_upsert_calls=sa_upsert_calls,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    np.random.seed(11)
+    dates = pd.bdate_range("2024-01-01", periods=15)
+    mock_returns = pd.Series(np.random.normal(0.001, 0.01, 15), index=dates)
+
+    # Position-side dict that exercises ALL 6 derived metrics — winners,
+    # losers, both sides represented in realized_pnl_per_trade.
+    fake_position_metrics = {
+        "total_positions": 6,
+        "open_positions": 0,
+        "closed_positions": 6,
+        "win_rate": 0.5,
+        "avg_roi": 0.0,
+        "avg_duration_days": 1.0,
+        "long_count": 3,
+        "short_count": 3,
+        "best_trade_roi": 0.20,
+        "worst_trade_roi": -0.10,
+        "avg_winning_trade": 0.10,
+        "avg_losing_trade": -0.05,
+        "winners_count": 3,
+        "losers_count": 3,
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 100.0},
+            {"side": "long", "realized_pnl": -50.0},
+            {"side": "short", "realized_pnl": 200.0},
+            {"side": "short", "realized_pnl": -75.0},
+            {"side": "long", "realized_pnl": 25.0},
+            {"side": "short", "realized_pnl": -10.0},
+        ],
+    }
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
+         patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value=fake_position_metrics)), \
+         patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
+        result = await run_strategy_analytics("strat-test")
+
+    assert result["status"] == "complete"
+
+    # Find the strategy_analytics upsert that carries trade_metrics
+    # (the success-path upsert; the initial computing-status upsert has no
+    # trade_metrics key).
+    tm_upserts = [u for u in sa_upsert_calls if "trade_metrics" in u]
+    assert tm_upserts, (
+        f"Expected at least one upsert with trade_metrics. "
+        f"All upserts: {sa_upsert_calls}"
+    )
+    tm = tm_upserts[-1]["trade_metrics"]
+
+    # B-01 / METRICS-07 / METRICS-08 / H-F:
+    assert "expectancy" in tm
+    assert "risk_reward_ratio" in tm
+    assert "weighted_risk_reward_ratio" in tm  # H-F
+    assert "sqn" in tm
+    assert "profit_factor_long" in tm
+    assert "profit_factor_short" in tm
+    assert "trade_mix" in tm
