@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Sparkline } from "@/components/charts/Sparkline";
@@ -18,8 +18,13 @@ import { SyncBadge } from "./SyncBadge";
 import { StarToggle } from "./StarToggle";
 import { WatchlistTabs } from "./WatchlistTabs";
 import { EmptyWatchlist } from "./EmptyWatchlist";
+import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { formatPercent, formatNumber, formatCurrency, metricColor } from "@/lib/utils";
+import {
+  useDiscoveryPrefs,
+  type DiscoveryViewPreferences,
+} from "@/lib/discovery-prefs";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
@@ -139,6 +144,49 @@ export function StrategyTable({
       else next.delete(strategyId);
       return next;
     });
+  }, []);
+
+  // Phase 13 / DISCO-02 — Customize drawer + per-user prefs.
+  // useDiscoveryPrefs(undefined, slug) safely no-ops on the persistence
+  // path when no userId is present (locked by Plan 13-02 Task 1 case 12),
+  // so /browse callers without a userId can render this hook without
+  // ever writing to localStorage.
+  const { prefs, setPrefs, hydrated: prefsHydrated } = useDiscoveryPrefs(
+    userId,
+    categorySlug,
+  );
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [draftPrefs, setDraftPrefs] = useState<DiscoveryViewPreferences>(prefs);
+
+  // Once prefs hydrate from localStorage, mirror them into the legacy
+  // viewMode / sortKey / sortDir / showExamples state so the existing UI
+  // logic (filter pipeline, paging, view-toggle button) continues to read
+  // from the same state slots. The mirror runs in a single post-hydration
+  // re-render — there is no SSR mismatch because both initial values
+  // (table / sharpe-desc / showExamples=true) are deterministic.
+  useEffect(() => {
+    if (!prefsHydrated) return;
+    setViewMode(prefs.view);
+    setSortKey(prefs.sort.key);
+    setSortDir(prefs.sort.dir);
+    setTableSortKey(prefs.sort.key);
+    setTableSortDir(prefs.sort.dir);
+    setShowExamples(!prefs.hide_examples);
+    setDraftPrefs(prefs);
+  }, [prefsHydrated, prefs]);
+
+  const handleOpenCustomize = useCallback(() => {
+    setDraftPrefs(prefs);
+    setCustomizeOpen(true);
+  }, [prefs]);
+
+  const handleSavePrefs = useCallback(() => {
+    setPrefs(draftPrefs);
+    setCustomizeOpen(false);
+  }, [draftPrefs, setPrefs]);
+
+  const handleCloseCustomize = useCallback(() => {
+    setCustomizeOpen(false);
   }, []);
 
   function handleColumnSort(key: TableSortKey) {
@@ -308,6 +356,9 @@ export function StrategyTable({
             />
           ) : undefined
         }
+        onOpenCustomize={
+          userId !== undefined ? handleOpenCustomize : undefined
+        }
       />
 
       <div id="strategy-list" role="tabpanel">
@@ -470,6 +521,20 @@ export function StrategyTable({
           </div>
         )}
       </div>
+
+      {/* Phase 13 / DISCO-02 — CustomizeDrawer is owned here so the parent
+          (the discovery page) doesn't have to thread props through; only
+          rendered when the allocator is signed in (userId present). */}
+      {userId !== undefined && (
+        <CustomizeDrawer
+          open={customizeOpen}
+          onClose={handleCloseCustomize}
+          draft={draftPrefs}
+          setDraft={setDraftPrefs}
+          persisted={prefs}
+          onSave={handleSavePrefs}
+        />
+      )}
     </div>
   );
 }
