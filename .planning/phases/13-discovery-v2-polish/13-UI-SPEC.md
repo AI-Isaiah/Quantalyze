@@ -1,11 +1,13 @@
 ---
 phase: 13
 slug: discovery-v2-polish
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-04-28
 revised: 2026-04-28 (rev 1 — checker fixes: CTA copy, weight count, visual hierarchy)
+reviewed_at: 2026-04-28
+verdict: 6/6 PASS
 ---
 
 # Phase 13 — UI Design Contract
