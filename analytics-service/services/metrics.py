@@ -7,6 +7,14 @@ from typing import Any
 from .transforms import downsample_series, cap_data_points
 
 
+# Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
+# Single source of truth: `qs.stats.sortino(returns)` (which uses MAR=0 by default)
+# AND `_rolling_sortino` MUST share this constant. Cross-runtime parity is gated
+# by the `test_rolling_sortino_converges_to_scalar_at_full_window` test, which
+# asserts the rolling helper at window == period agrees with the scalar to within 0.05.
+MAR: float = 0.0
+
+
 def _safe_float(value: Any) -> float | None:
     """Convert to float, returning None for NaN/Inf values."""
     try:
@@ -378,6 +386,87 @@ def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
     roll_mean = returns.rolling(window).mean()
     roll_std = returns.rolling(window).std()
     return _finalize_rolling((roll_mean / roll_std) * np.sqrt(252))
+
+
+def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[dict[str, Any]]:
+    """Compute rolling annualized Sortino using downside RMS (MAR-floored).
+
+    Pitfall 11 single source of truth: this MUST mirror `qs.stats.sortino`'s
+    downside formula so the cross-runtime parity test holds at window == period.
+    qs.stats.sortino uses:
+        downside = sqrt(sum(x^2 for x in returns if x < MAR) / len(returns))
+        sortino = mean(returns) / downside * sqrt(252)
+    Re-implementing this on a rolling window:
+        neg_sq[t]   = x[t]^2 if x[t] < MAR else 0
+        roll_dstd   = sqrt(neg_sq.rolling(window).sum() / window)
+        roll_mean   = returns.rolling(window).mean()
+        sortino[t]  = roll_mean[t] / roll_dstd[t] * sqrt(252)
+
+    NOTE: pandas `.rolling().std()` (which `_rolling_sharpe` uses for Sharpe)
+    is NOT used here — it subtracts the rolling mean and divides by (N-1), which
+    diverges from qs.stats.sortino's RMS formula. Mirroring the QS math is the
+    cross-runtime contract; mirroring the _rolling_sharpe SHAPE (window guard,
+    _finalize_rolling) is the file convention. Both are honored.
+
+    Mirrors _rolling_sharpe at metrics.py for shape; mirrors qs.stats.sortino
+    for math.
+    """
+    if len(returns) < window:
+        return []
+    neg_sq = (returns.where(returns < mar, 0.0)) ** 2
+    roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
+    roll_mean = returns.rolling(window).mean()
+    # _finalize_rolling scrubs NaN/Inf so the consumer never sees them.
+    return _finalize_rolling((roll_mean / roll_dstd) * np.sqrt(252))
+
+
+def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+    """Annualized rolling volatility = std * sqrt(252).
+
+    Mirrors `qs.stats.volatility` (which is `returns.std() * sqrt(252)`) on a
+    rolling window. Mirrors _rolling_sharpe at metrics.py for shape.
+    """
+    if len(returns) < window:
+        return []
+    return _finalize_rolling(returns.rolling(window).std() * np.sqrt(252))
+
+
+def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+    """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
+
+    Window default 90d trading per UC#6 BTC-only scope. qs.stats.rolling_greeks
+    returns a DataFrame with columns ["beta", "alpha"]; we project the alpha
+    column and finalize.
+    """
+    if benchmark is None or len(returns) < window:
+        return []
+    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
+    if "alpha" not in greeks:
+        return []
+    return _finalize_rolling(greeks["alpha"])
+
+
+def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+    """Rolling beta vs benchmark via qs.stats.rolling_greeks."""
+    if benchmark is None or len(returns) < window:
+        return []
+    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
+    if "beta" not in greeks:
+        return []
+    return _finalize_rolling(greeks["beta"])
+
+
+def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
+    """Log returns series = np.log1p(returns).
+
+    Same length as input (no window dropoff). Used by EquityCurve "Log Returns"
+    toggle (METRICS-12). Routed through _finalize_rolling for NaN/Inf scrubbing
+    + cap_data_points consistency with the other series helpers.
+    """
+    if len(returns) == 0:
+        return []
+    log_rets = np.log1p(returns)
+    return _finalize_rolling(pd.Series(log_rets, index=returns.index))
 
 
 def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[dict[str, Any]]:
