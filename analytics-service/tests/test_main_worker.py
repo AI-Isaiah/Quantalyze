@@ -380,3 +380,80 @@ class TestShutdown:
         assert loop_task.done(), "dispatch_loop did not exit within timeout"
         # Clean up for next test
         SHUTDOWN.clear()
+
+
+# ---------------------------------------------------------------------------
+# Migration 090 — partition-key dedupe contract
+# ---------------------------------------------------------------------------
+
+class TestClaimDedupe:
+    """Migration 090 (claim_dedupe_partition_keys) added partition-key
+    deduplication inside `claim_compute_jobs_with_priority`. When two
+    eligible rows share `(kind, allocator_id)` (or any other partition
+    column covered by a partial unique inflight index), the SQL function
+    returns at most one of them per call, so the batch UPDATE cannot
+    23505 on those indices.
+
+    From the worker's perspective this is invisible — claim just returns
+    fewer rows than the queue depth. These tests capture that contract:
+    when the SQL dedupes, dispatch_tick still processes the survivor
+    cleanly and does not assume `len(jobs) == p_batch_size`. The actual
+    SQL regression is gated by the migration's structural DO block (see
+    supabase/migrations/090_claim_dedupe_partition_keys.sql) plus the
+    one-shot live test recorded in the v0.17.0.2 deploy report.
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_batch_from_dedupe_dispatches_survivor(self) -> None:
+        """When claim returns 1 row (the dedupe winner) instead of 2 rows
+        sharing a partition, dispatch must still be called for the
+        survivor and mark_done must fire exactly once."""
+        survivor = {
+            "id": "rescore-survivor",
+            "kind": "rescore_allocator",
+            "allocator_id": "alloc-shared",
+        }
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[survivor])
+        mark_chain = MagicMock()
+        mark_chain.execute.return_value = MagicMock(data=None)
+
+        def _rpc_side_effect(name: str, params: dict):
+            if name == "claim_compute_jobs_with_priority":
+                return claim_chain
+            return mark_chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ) as mock_dispatch:
+            await dispatch_tick("worker-dedupe-test")
+
+        mock_dispatch.assert_awaited_once()
+        rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert rpc_names.count("claim_compute_jobs_with_priority") == 1
+        assert rpc_names.count("mark_compute_job_done") == 1
+        assert rpc_names.count("mark_compute_job_failed") == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_claim_after_dedupe_no_dispatch(self) -> None:
+        """If dedupe + concurrent locks reduce the batch to zero rows
+        (worker A locks the partition winner, worker B's claim returns
+        empty), dispatch_tick must early-exit cleanly with no mark_*
+        calls."""
+        mock_supabase = MagicMock()
+        claim_chain = MagicMock()
+        claim_chain.execute.return_value = MagicMock(data=[])
+        mock_supabase.rpc.return_value = claim_chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()) as mock_dispatch:
+            await dispatch_tick("worker-dedupe-empty")
+
+        mock_dispatch.assert_not_awaited()
+        rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert rpc_names == ["claim_compute_jobs_with_priority"]

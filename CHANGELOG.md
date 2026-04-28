@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.0.2] - 2026-04-28
+
+**Queue claim batch dedupe — both claim RPCs now dedupe candidates by partition key before the batch UPDATE.** Migration 089 widened the claim filter to include `failed_retry` rows. That uncovered a latent bug: when two `failed_retry` rows shared a partition key (e.g. `(kind, allocator_id)`), the single-statement batch UPDATE inside `claim_compute_jobs_with_priority` tried to move both to `running` in the same transaction, violating the partial unique index `compute_jobs_one_inflight_per_kind_allocator` and rolling back the entire claim with 23505. The worker's `dispatch_loop` then spun on the same error every 30s, draining nothing.
+
+The hot-cleanup on 2026-04-28 17:18 UTC manually transitioned 6 legacy stuck rows (4 poll_allocator_positions + 2 rescore_allocator) directly to `failed_final` to unstick the worker. After that, the 15 Phase 12 `compute_analytics` rows drained instantly via the new HTTPException 4xx classifier shipped in 0.17.0.1. This release is the durable fix for the underlying RPC bug — without it, ANY future pair of failed_retry rows sharing a partition would re-trigger the spin.
+
+### Fixed
+
+- **Migration 090**: replaces both `claim_compute_jobs` (legacy) and `claim_compute_jobs_with_priority` (Phase 12) with partition-key dedupe inside a CTE. Each candidate row gets four `row_number() OVER (PARTITION BY kind, <partition_id>)` ranks (one per partition column: portfolio_id, strategy_id, allocator_id, api_key_id). Only rows that are rank 1 for every column they have set survive into the batch. Rows where a partition column is NULL skip that column's rank check (NULL is excluded from the corresponding partial unique index, so it cannot collide there). `FOR UPDATE SKIP LOCKED` is preserved on the outer SELECT so the atomic concurrency primitive is unchanged. Two concurrent workers see the same dedupe winners (the inner CTE is deterministic) and SKIP LOCKED partitions the locked subset.
+- **Tie-break inside each partition**: priority precedence (high > normal > low) for `claim_compute_jobs_with_priority`, then `next_attempt_at` ascending. Legacy non-priority `claim_compute_jobs` ties only on `next_attempt_at`. Throttle behavior from migration 086 preserved verbatim — the `v_high_pending` probe still excludes priority='low' when normal/high pending exists.
+- **Self-verifying DO block**: structural assertions verify both RPCs have H-B `SET search_path = public, pg_temp`, both bodies contain `row_number() OVER`, and both bodies contain all four `PARTITION BY kind, <partition_id>` window definitions. A live regression test (insert two failed_retry rows for the same `(kind, allocator_id)`, claim, savepoint-rollback, assert ≤ 1 row claimed and no 23505) was run as a one-shot during deploy — it could not be embedded in the migration because partition-column foreign keys to `auth.users`, `strategies`, `api_keys`, `portfolios` make it impossible to fabricate test rows without polluting production tables. See deploy report `.gstack/deploy-reports/2026-04-28-pr82-deploy.md` and the 0.17.0.2 deploy report.
+
+### Tests
+
+- New `analytics-service/tests/test_main_worker.py::TestClaimDedupe` (2 cases) capturing the worker-side contract: when the SQL dedupe drops a row, `dispatch_tick` still processes the survivor cleanly and never assumes `len(jobs) == p_batch_size`.
+
 ## [0.17.0.1] - 2026-04-28
 
 **Queue retry mechanic fix — failed_retry rows are now claimable when their backoff has elapsed.** The compute_jobs queue had a documented retry mechanic (`mark_compute_job_failed` writes `status='failed_retry'` with backoff schedule) but no code path actually transitioned `failed_retry → pending` when `next_attempt_at` arrived. Both `claim_compute_jobs` (migration 032) and `claim_compute_jobs_with_priority` (migration 086) filtered `WHERE status = 'pending'`, so failed_retry rows sat in the queue forever. Production state on 2026-04-28 had 21 stuck jobs across 3 kinds (oldest 9 days dead).
