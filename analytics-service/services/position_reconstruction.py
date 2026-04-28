@@ -88,6 +88,12 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
     # Compute trade_metrics
     closed = [p for p in all_positions if p.get("status") == "closed"]
     winners = [p for p in closed if (p.get("roi") or 0) > 0]
+    # Phase 12 Plan 05 (B-01 path b): segment closed by ROI sign so the
+    # downstream `_compute_derived_trade_metrics(volume_metrics, trade_metrics)`
+    # in `analytics_runner.py` can produce expectancy / R:R / weighted R:R / SQN /
+    # profit_factor_long / profit_factor_short. Plan 12-06 wires both into the
+    # orchestrator.
+    losers = [p for p in closed if (p.get("roi") or 0) <= 0]
 
     total = len(all_positions)
     closed_count = len(closed)
@@ -110,6 +116,27 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
     best_roi = max(rois) if rois else 0.0
     worst_roi = min(rois) if rois else 0.0
 
+    # Phase 12 Plan 05 / B-01 path (b) extension — these 5 keys feed
+    # `_compute_derived_trade_metrics` in `analytics_runner.py`. Strictly
+    # additive: every legacy key above is preserved unchanged.
+    avg_winning_trade = (
+        sum((p.get("roi") or 0) for p in winners) / len(winners)
+        if winners
+        else 0.0
+    )
+    avg_losing_trade = (
+        sum((p.get("roi") or 0) for p in losers) / len(losers)
+        if losers
+        else 0.0
+    )
+    realized_pnl_per_trade = [
+        {
+            "side": p.get("side"),
+            "realized_pnl": float(p.get("realized_pnl") or 0.0),
+        }
+        for p in closed
+    ]
+
     return {
         "total_positions": total,
         "open_positions": open_count,
@@ -121,6 +148,12 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
         "short_count": short_count,
         "best_trade_roi": round(best_roi, 6),
         "worst_trade_roi": round(worst_roi, 6),
+        # Phase 12 Plan 05 / B-01 path (b): derived-metric inputs
+        "avg_winning_trade": round(avg_winning_trade, 6),
+        "avg_losing_trade": round(avg_losing_trade, 6),
+        "winners_count": len(winners),
+        "losers_count": len(losers),
+        "realized_pnl_per_trade": realized_pnl_per_trade,
     }
 
 

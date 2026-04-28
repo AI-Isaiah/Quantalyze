@@ -35,6 +35,8 @@ the UI surface reflects the queue, not the individual handler.
 from __future__ import annotations
 
 import logging
+import math
+from collections import defaultdict
 
 from fastapi import HTTPException
 
@@ -75,6 +77,125 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
         "total_fills": len(fills),
         "total_volume_usd": round(total_cost, 2),
     }
+
+
+def _compute_derived_trade_metrics(
+    volume_metrics: dict,
+    trade_metrics_from_positions: dict,
+) -> dict:
+    """B-01 path (b): compute the 6 derived trade metrics from BOTH the
+    volume-side dict (`_compute_volume_metrics(fills)` output) AND the
+    position-side dict (`reconstruct_positions(strategy_id, supabase)` output).
+
+    Returns a dict with keys:
+      expectancy, risk_reward_ratio, weighted_risk_reward_ratio, sqn,
+      profit_factor_long, profit_factor_short.
+
+    Why a separate function (not extension of _compute_volume_metrics):
+      - `_compute_volume_metrics` only sees raw fills (`select side, cost`); it
+        has no access to win_rate / avg_winning_trade / avg_losing_trade /
+        per-trade realized PnL.
+      - `reconstruct_positions` produces all of those at the position level
+        (Plan 12-05 extends it with avg_winning_trade / avg_losing_trade /
+        winners_count / losers_count / realized_pnl_per_trade).
+      - Per B-01 from 12-REVIEWS.md, mixing fill-level and position-level math
+        inside the same function silently defaults all derived metrics to None.
+
+    Formula (Weighted R:R per H-F / METRICS-07):
+      Σ(win_size × win_count) / Σ(loss_size × loss_count)
+    Implemented as (avg_winning_trade × winners_count) / (|avg_losing_trade| × losers_count).
+    Documented here as the canonical Phase 12 formula; if quantstats reference
+    defines a different canonical form, update this docstring + regen golden
+    fixture.
+
+    Threat T-12-05-03 mitigation: every divisor is guarded with `> 0`; pure
+    zero-loss / zero-divisor cases yield None (rendered downstream as "—") to
+    avoid +Infinity propagating into JSONB and breaking the parity gate.
+    """
+    # `volume_metrics` is currently only consumed for plumbing/compatibility
+    # — kept in the signature so Plan 12-06 orchestrator wiring matches the
+    # B-01 path-(b) contract literally.
+    _ = volume_metrics
+
+    # Position-side primitives (B-01 path (b) extended reconstruct_positions output)
+    win_rate = float(trade_metrics_from_positions.get("win_rate") or 0.0)
+    avg_win = float(trade_metrics_from_positions.get("avg_winning_trade") or 0.0)
+    avg_loss = float(trade_metrics_from_positions.get("avg_losing_trade") or 0.0)
+    winners_count = int(trade_metrics_from_positions.get("winners_count") or 0)
+    losers_count = int(trade_metrics_from_positions.get("losers_count") or 0)
+    per_trade = trade_metrics_from_positions.get("realized_pnl_per_trade") or []
+
+    out: dict = {
+        "expectancy": None,
+        "risk_reward_ratio": None,
+        "weighted_risk_reward_ratio": None,
+        "sqn": None,
+        "profit_factor_long": None,
+        "profit_factor_short": None,
+    }
+
+    # Expectancy: only meaningful when at least one of avg_win / avg_loss is
+    # non-zero. All-zero position book → keep expectancy=None per the empty
+    # test's contract.
+    if avg_win or avg_loss:
+        out["expectancy"] = win_rate * avg_win - (1 - win_rate) * abs(avg_loss)
+
+    # Risk:Reward Ratio
+    if avg_loss != 0:
+        out["risk_reward_ratio"] = avg_win / abs(avg_loss)
+
+    # H-F / METRICS-07: Weighted R:R = (avg_win × winners_count) /
+    # (|avg_loss| × losers_count). Guards against zero divisor (no losers, or
+    # zero |avg_loss|).
+    num = avg_win * winners_count
+    den = abs(avg_loss) * losers_count
+    if den > 0:
+        out["weighted_risk_reward_ratio"] = num / den
+
+    # METRICS-08: SQN over per-trade R-multiples (R = realized_pnl / risk_unit).
+    # risk_unit derived from |avg_loss| (the canonical Van Tharp denominator).
+    risk_unit = abs(avg_loss) if avg_loss else 0.0
+    if risk_unit > 0 and per_trade:
+        r_multiples = [
+            (t.get("realized_pnl") or 0.0) / risk_unit
+            for t in per_trade
+            if t.get("realized_pnl") is not None
+        ]
+        if len(r_multiples) >= 2:
+            mean_r = sum(r_multiples) / len(r_multiples)
+            var_r = sum((r - mean_r) ** 2 for r in r_multiples) / (
+                len(r_multiples) - 1
+            )
+            std_r = math.sqrt(var_r) if var_r > 0 else 0.0
+            if std_r > 0:
+                out["sqn"] = (mean_r / std_r) * math.sqrt(
+                    min(len(r_multiples), 100)
+                )
+
+    # Profit Factor segmented by side — uses position-side realized_pnl_per_trade
+    long_pnls = [
+        float(t.get("realized_pnl") or 0.0)
+        for t in per_trade
+        if t.get("side") == "long"
+    ]
+    short_pnls = [
+        float(t.get("realized_pnl") or 0.0)
+        for t in per_trade
+        if t.get("side") == "short"
+    ]
+
+    def _profit_factor(pnls: list[float]) -> float | None:
+        gp = sum(p for p in pnls if p > 0)
+        gl = abs(sum(p for p in pnls if p < 0))
+        if gl == 0:
+            # Avoid +Infinity; downstream renders as "—" (T-12-05-03).
+            return None
+        return gp / gl
+
+    out["profit_factor_long"] = _profit_factor(long_pnls)
+    out["profit_factor_short"] = _profit_factor(short_pnls)
+
+    return out
 
 
 async def run_strategy_analytics(strategy_id: str) -> dict:
