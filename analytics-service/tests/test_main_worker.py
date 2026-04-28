@@ -74,13 +74,16 @@ class TestDispatchTick:
         mock_supabase.rpc.return_value = claim_chain
 
         # After the first claim call, switch rpc to return mark_chain for
-        # subsequent calls (mark_done / mark_failed).
+        # subsequent calls (mark_done / mark_failed). Phase 12 / METRICS-14:
+        # claim path now goes through claim_compute_jobs_with_priority
+        # (migration 086) — the legacy claim_compute_jobs name no longer
+        # appears in main_worker.py's call site.
         call_count = 0
 
         def _rpc_side_effect(name: str, params: dict):
             nonlocal call_count
             call_count += 1
-            if name == "claim_compute_jobs":
+            if name == "claim_compute_jobs_with_priority":
                 return claim_chain
             return mark_chain
 
@@ -96,7 +99,7 @@ class TestDispatchTick:
         # Should have: 1 claim call + 3 mark_done calls = 4 total RPC calls
         rpc_calls = mock_supabase.rpc.call_args_list
         rpc_names = [c.args[0] for c in rpc_calls]
-        assert rpc_names.count("claim_compute_jobs") == 1
+        assert rpc_names.count("claim_compute_jobs_with_priority") == 1
         assert rpc_names.count("mark_compute_job_done") == 3
         assert "mark_compute_job_failed" not in rpc_names
 
@@ -111,7 +114,7 @@ class TestDispatchTick:
         chain.execute.return_value = MagicMock(data=None)
 
         def _rpc_side_effect(name: str, params: dict):
-            if name == "claim_compute_jobs":
+            if name == "claim_compute_jobs_with_priority":
                 claim = MagicMock()
                 claim.execute.return_value = MagicMock(data=jobs)
                 return claim
@@ -145,7 +148,7 @@ class TestDispatchTick:
 
         def _rpc_side_effect(name: str, params: dict):
             chain = MagicMock()
-            if name == "claim_compute_jobs":
+            if name == "claim_compute_jobs_with_priority":
                 chain.execute.return_value = MagicMock(data=jobs)
             else:
                 chain.execute.return_value = MagicMock(data=None)
