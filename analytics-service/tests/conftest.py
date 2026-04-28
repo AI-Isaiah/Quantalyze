@@ -107,3 +107,26 @@ def api_key_row_factory():
         row.update(overrides)
         return row
     return _make
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 / METRICS-13 — golden_252d cross-runtime parity fixtures
+# ---------------------------------------------------------------------------
+# Read the deterministic 252-day input parquet + the committed expected JSON
+# (regenerated via `python -m tests.fixtures.regen_golden` from analytics-service/).
+# See .planning/phases/12-backend-metric-contracts/12-09-PLAN.md for the contract.
+
+@pytest.fixture
+def golden_252d_input() -> dict:
+    """Read the deterministic 252-day input fixture (returns + benchmark)."""
+    df = pd.read_parquet(FIXTURES_DIR / "golden_252d_input.parquet")
+    return {
+        "returns": df["returns"],
+        "benchmark": df["benchmark"],
+    }
+
+
+@pytest.fixture
+def golden_252d_expected() -> dict:
+    """Read the committed expected metrics output (metrics_json + sibling kinds)."""
+    return json.loads((FIXTURES_DIR / "golden_252d_expected.json").read_text())
