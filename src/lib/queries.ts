@@ -1682,3 +1682,32 @@ export const getMyAllocationDashboard = cache(
     };
   },
 );
+
+/**
+ * Phase 13 / Plan 13-01 / DISCO-01 — getMyWatchlist
+ *
+ * Reads the authenticated user's full watchlist (`user_favorites` rows) and
+ * returns a Set<strategy_id> for O(1) lookup at the row-render layer. Used by
+ * StrategyTable's leading-column StarToggle to decide filled vs. outline icon
+ * state on initial server render (matches starred state on first paint).
+ *
+ * - Schema: migration 024 ships `user_favorites (user_id, strategy_id)` PK,
+ *   RLS enforces `auth.uid() = user_id`.
+ * - On error or empty data: returns empty Set (read path is non-fatal — a
+ *   transient DB error must not break /discovery render).
+ *
+ * Cross-link: `getMyWatchlist` complements the toggle handler at
+ * `src/app/api/watchlist/[strategyId]/route.ts`. Together they implement the
+ * full DISCO-01 contract.
+ */
+export async function getMyWatchlist(userId: string): Promise<Set<string>> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("user_favorites")
+    .select("strategy_id")
+    .eq("user_id", userId);
+  if (error || !data) {
+    return new Set<string>();
+  }
+  return new Set(data.map((row) => row.strategy_id as string));
+}
