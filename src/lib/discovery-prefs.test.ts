@@ -19,7 +19,7 @@
  *      uid:string|undefined hook signature contract.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 
 import {
@@ -34,27 +34,43 @@ const SLUG = "crypto-sma";
 const UID_A = "uid-A";
 const UID_B = "uid-B";
 
-let storage: Record<string, string>;
-let getItemSpy: ReturnType<typeof vi.spyOn>;
-let setItemSpy: ReturnType<typeof vi.spyOn>;
+// Map-backed localStorage mock matching the project idiom
+// (src/app/(dashboard)/allocations/lib/scenario-state.localStorage.test.ts).
+const store = new Map<string, string>();
 
-beforeEach(() => {
-  storage = {};
-  getItemSpy = vi
-    .spyOn(window.localStorage, "getItem")
-    .mockImplementation((k: string) => (k in storage ? storage[k] : null));
-  setItemSpy = vi
-    .spyOn(window.localStorage, "setItem")
-    .mockImplementation((k: string, v: string) => {
-      storage[k] = v;
-    });
-  vi.spyOn(window.localStorage, "removeItem").mockImplementation((k: string) => {
-    delete storage[k];
-  });
+const localStorageMock = {
+  getItem: vi.fn((key: string) => store.get(key) ?? null),
+  setItem: vi.fn((key: string, value: string) => {
+    store.set(key, value);
+  }),
+  removeItem: vi.fn((key: string) => {
+    store.delete(key);
+  }),
+  clear: vi.fn(() => {
+    store.clear();
+  }),
+  get length() {
+    return store.size;
+  },
+  key: vi.fn(() => null),
+};
+
+vi.stubGlobal("localStorage", localStorageMock);
+// `safeRead` accesses `window.localStorage` (not the bare global) to keep
+// the SSR guard tight. jsdom defines window.localStorage as a property
+// descriptor, so a direct assignment via Object.defineProperty is the
+// reliable way to stub it for tests.
+Object.defineProperty(window, "localStorage", {
+  value: localStorageMock,
+  writable: true,
+  configurable: true,
 });
 
-afterEach(() => {
-  vi.restoreAllMocks();
+const setItemSpy = localStorageMock.setItem;
+
+beforeEach(() => {
+  store.clear();
+  vi.clearAllMocks();
 });
 
 describe("discovery-prefs: DEFAULTS", () => {
@@ -100,7 +116,7 @@ describe("discovery-prefs: safeRead", () => {
   });
 
   it("merges partial JSON: stored {view:'grid'} fills the rest from DEFAULTS", () => {
-    storage[keyFor(UID_A, SLUG)] = JSON.stringify({ view: "grid" });
+    store.set(keyFor(UID_A, SLUG), JSON.stringify({ view: "grid" }));
     expect(safeRead(UID_A, SLUG)).toEqual({
       view: "grid",
       sort: { key: "sharpe", dir: "desc" },
@@ -109,7 +125,7 @@ describe("discovery-prefs: safeRead", () => {
   });
 
   it("returns DEFAULTS on JSON.parse error (corrupted entry)", () => {
-    storage[keyFor(UID_A, SLUG)] = "not-json{";
+    store.set(keyFor(UID_A, SLUG), "not-json{");
     expect(safeRead(UID_A, SLUG)).toEqual(DEFAULTS);
   });
 });
@@ -124,11 +140,14 @@ describe("discovery-prefs: useDiscoveryPrefs", () => {
   });
 
   it("hydrates prefs from localStorage when an entry exists", async () => {
-    storage[keyFor(UID_A, SLUG)] = JSON.stringify({
-      view: "grid",
-      sort: { key: "cagr", dir: "asc" },
-      hide_examples: false,
-    });
+    store.set(
+      keyFor(UID_A, SLUG),
+      JSON.stringify({
+        view: "grid",
+        sort: { key: "cagr", dir: "asc" },
+        hide_examples: false,
+      }),
+    );
     const { result } = renderHook(() => useDiscoveryPrefs(UID_A, SLUG));
     await waitFor(() => {
       expect(result.current.hydrated).toBe(true);
