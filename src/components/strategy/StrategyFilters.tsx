@@ -351,7 +351,7 @@ export function StrategyFilters({
         </label>
 
         {/* Sort by */}
-        <div className="flex items-center gap-1.5 ml-auto">
+        <div className="flex items-center gap-1.5">
           <span className="text-xs text-text-muted">Sort:</span>
           <select
             value={sortKey}
