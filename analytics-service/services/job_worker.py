@@ -21,6 +21,8 @@ decision:
   ccxt.AuthenticationError | PermissionDenied | BadRequest -> permanent
   cryptography.fernet.InvalidToken -> permanent (sanitized message)
   asyncio.TimeoutError -> transient (wait_for expiry)
+  fastapi.HTTPException 4xx (except 408, 429) -> permanent
+  fastapi.HTTPException 408, 429 -> transient
   everything else -> unknown (retried by default)
 
 Circuit breaker: before creating the exchange in sync_trades and
@@ -44,6 +46,7 @@ from enum import Enum
 
 import ccxt
 from cryptography.fernet import InvalidToken
+from fastapi import HTTPException
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -181,6 +184,18 @@ def classify_exception(exc: Exception) -> tuple[str, str]:
     # signal.
     if isinstance(exc, ccxt.BaseError):
         return ("unknown", str(exc)[:500])
+
+    # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
+    # trade history" and similar pre-condition failures that no amount of
+    # retry will fix (the input data is permanently absent). 408 (timeout)
+    # and 429 (rate limit) are the two 4xx codes that DO benefit from retry.
+    # 5xx is left unclassified (falls through to unknown → retried).
+    if isinstance(exc, HTTPException):
+        status = exc.status_code
+        if status in (408, 429):
+            return ("transient", f"{status}: {str(exc.detail)[:480]}")
+        if 400 <= status < 500:
+            return ("permanent", f"{status}: {str(exc.detail)[:480]}")
 
     # Everything else (RuntimeError, ValueError, KeyError, ...).
     return ("unknown", str(exc)[:500])

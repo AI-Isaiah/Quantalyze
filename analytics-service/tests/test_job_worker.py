@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import ccxt
 import pytest
 from cryptography.fernet import InvalidToken
+from fastapi import HTTPException
 
 from services.job_worker import (
     DispatchOutcome,
@@ -118,6 +119,48 @@ class TestClassifyException:
         unknown — the CCXT hierarchy has many leaf types we don't explicitly
         handle (ExchangeError, InvalidOrder, etc.)."""
         exc = ccxt.BaseError("exchange returned something weird")
+        kind, msg = classify_exception(exc)
+        assert kind == "unknown"
+
+    def test_http_exception_400_is_permanent(self) -> None:
+        """HTTPException with 4xx status (except 408/429) is permanent.
+        analytics_runner raises 400 for "Insufficient trade history" — no
+        amount of retry produces missing trade data, so go straight to
+        failed_final instead of pollluting the retry queue."""
+        exc = HTTPException(status_code=400, detail="Insufficient trade history")
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "400" in msg
+        assert "Insufficient trade history" in msg
+
+    def test_http_exception_404_is_permanent(self) -> None:
+        exc = HTTPException(status_code=404, detail="Strategy not found")
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+        assert "404" in msg
+
+    def test_http_exception_422_is_permanent(self) -> None:
+        exc = HTTPException(status_code=422, detail="Validation failed: missing field")
+        kind, msg = classify_exception(exc)
+        assert kind == "permanent"
+
+    def test_http_exception_408_is_transient(self) -> None:
+        """408 Request Timeout is the one 4xx code that benefits from retry."""
+        exc = HTTPException(status_code=408, detail="upstream timed out")
+        kind, msg = classify_exception(exc)
+        assert kind == "transient"
+        assert "408" in msg
+
+    def test_http_exception_429_is_transient(self) -> None:
+        """429 Too Many Requests — backoff and retry."""
+        exc = HTTPException(status_code=429, detail="rate limited")
+        kind, msg = classify_exception(exc)
+        assert kind == "transient"
+        assert "429" in msg
+
+    def test_http_exception_500_is_unknown_retry(self) -> None:
+        """5xx falls through to the unknown branch — retried by default."""
+        exc = HTTPException(status_code=500, detail="upstream crashed")
         kind, msg = classify_exception(exc)
         assert kind == "unknown"
 
