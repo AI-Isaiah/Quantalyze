@@ -13,7 +13,7 @@
  *   - open=false → returns null
  *   - open=true → role="dialog" + aria-modal=true, ESC closes,
  *     backdrop click closes, body scroll locked
- *   - Save disabled until JSON.stringify(draft) !== JSON.stringify(persisted)
+ *   - Save disabled until any of (view, hide_examples, sort.key, sort.dir) differs
  *   - Reset replaces draft with DEFAULTS but does NOT close
  *   - Save click delegates to parent's onSave (commits to localStorage
  *     via useDiscoveryPrefs.setPrefs and closes the drawer)
@@ -88,7 +88,14 @@ export function CustomizeDrawer({
 
   if (!open) return null;
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(persisted);
+  // Explicit field-by-field equality — refactor-safe vs. JSON.stringify
+  // (which silently breaks on key-order drift, and also walks any future
+  // unrelated fields added to DiscoveryViewPreferences).
+  const dirty =
+    draft.view !== persisted.view ||
+    draft.hide_examples !== persisted.hide_examples ||
+    draft.sort.key !== persisted.sort.key ||
+    draft.sort.dir !== persisted.sort.dir;
 
   return (
     <div
