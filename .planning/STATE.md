@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-last_updated: "2026-04-28T12:28:42.000Z"
+last_updated: "2026-04-28T12:40:19.819Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 10
-  completed_plans: 3
-  percent: 30
+  completed_plans: 4
+  percent: 40
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: `.planning/PROJECT.md` (updated 2026-04-26 at v0.17.0.0 milestone start)
 
 ## Current Position
 
-Phase: 12 (backend-metric-contracts) — EXECUTING
-Plan: 4 of 10
-Status: Ready to execute
+Phase: 12 (backend-metric-contracts) — EXECUTING (parallel waves)
+Plan: 5 of 10 (next sequential; 12-07 shipped out-of-order in Wave 3)
+Status: Ready to execute. Plans 12-04, 12-05, 12-06 in flight in parallel waves; 12-07 (METRICS-14 priority-aware claim throttle) shipped sequentially on `main` ahead of them — its only dependency was 12-02 (migration 086), already complete.
 Last activity: 2026-04-28
 
 ## Milestone Summary (v0.17.0.0)
@@ -131,6 +131,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 12 Plan 01: TRADE_MIX_HAS_MAKER_TAKER = false (2-bucket fallback) — production trades table empty, D-15 ≥99% gate fails for all 3 exchanges; defer maker/taker dimension to v0.17.1
 - Phase 12 Plan 02: migrations 086 (compute_jobs.priority + claim RPC) + 087 (strategy_analytics_series + fetch RPC + atomic batch upsert RPC) shipped to remote with H-B search_path=public,pg_temp hardening on all 3 SECURITY DEFINER RPCs; D-16 frozen TS contract locked in src/lib/types.ts (TradeMetrics +7 derived fields per H-F including weighted_risk_reward_ratio, TradeMixBuckets all-optional union covering 4-bucket and 2-bucket variants, StrategyAnalyticsSeriesKind union with EXACTLY 12 D-01 kinds — equity_series_1y omitted per H-D)
 - Phase 12 Plan 03: MAR=0.0 module constant + 5 rolling-series helpers (Sortino, Volatility, Alpha, Beta, Log returns) added to analytics-service/services/metrics.py mirroring `_rolling_sharpe`'s shape; `_rolling_sortino` uses qs.stats.sortino's exact RMS downside formula (NOT pandas .rolling().std() — that diverges by ~0.17 even at window==period); Pitfall 11 cross-runtime parity verified at diff=1.11e-16 on a 90-day fixture with window==period. Helpers NOT yet wired into compute_all_metrics — that lands in Plan 12-06. Plan-as-drafted Sortino code sketch and golden_returns × window=252 cross-check both deviated; corrected with Rule 1 fixes documented in 12-03 SUMMARY (recommend gsd-plan-checker erratum on RESEARCH.md §5a Sortino snippet using pandas .rolling().std() inconsistent with Pitfall 11's QS RMS contract).
+- Phase 12 Plan 07: METRICS-14 priority-aware claim throttle wired in dispatch_tick — analytics-service/main_worker.py now calls claim_compute_jobs_with_priority (migration 086) instead of legacy claim_compute_jobs. Per RESEARCH.md §5d correction, throttle lives in claim path (not dispatch); migration 086 RPC's CASE-ordered ORDER BY + skip-low-when-high-pending guard delivers D-06's 5 backfill/min cap atomically (5 jobs/tick × ~12 ticks/min × low-deferral). FOR UPDATE SKIP LOCKED preserves disjoint result sets across replicas. Phase 12 SC#4 met: live sync_trades will not queue behind backfill on Phase 12 deploy. 11 unit tests passing including test_dispatch_tick_calls_priority_rpc + test_dispatch_tick_priority_rpc_param_shape (asserts new RPC name + parameter shape). Three pre-existing TestDispatchTick side-effect dispatchers updated as Rule 3 fix to recognise the new name.
 
 ### Roadmap drafted (2026-04-26)
 
@@ -161,7 +162,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-28T12:28:42.000Z
-Next resume target: Phase 12 Plan 04 — daily_returns_grid + exposure/turnover series + 10 qstats scalars (Wave 4). Execute via `/gsd-execute-phase 12` (continuing) — current plan 4 of 10. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
+Last session: 2026-04-28T12:40:19.814Z
+Stopped at: Completed 12-07-PLAN.md (METRICS-14 priority-aware claim throttle in dispatch_tick) — sequential run on main tree, Wave 3 of 8. Plans 12-04, 12-05, 12-06 still in flight in parallel waves.
+Next resume target: Phase 12 Plans 04, 05, 06, 08, 09, 10 (six plans remain). Execute via `/gsd-execute-phase 12` (continuing). Plan 12-08 (METRICS-14 throttled enqueuer) is now unblocked since 12-07 wired the priority-aware claim path. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
