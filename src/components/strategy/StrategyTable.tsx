@@ -162,9 +162,14 @@ export function StrategyTable({
   // Once prefs hydrate from localStorage, mirror them into the legacy
   // viewMode / sortKey / sortDir / showExamples state so the existing UI
   // logic (filter pipeline, paging, view-toggle button) continues to read
-  // from the same state slots. The mirror runs in a single post-hydration
-  // re-render — there is no SSR mismatch because both initial values
-  // (table / sharpe-desc / showExamples=true) are deterministic.
+  // from the same state slots. The mirror runs EXACTLY ONCE on hydration —
+  // gating on `prefsHydrated` only (not `prefs`) prevents a post-Save
+  // `setPrefs(draftPrefs)` re-render from clobbering subsequent user-driven
+  // column-sort or view-toggle changes that haven't been persisted yet.
+  // Draft seeding for the drawer is handled separately by `handleOpenCustomize`.
+  // There is no SSR mismatch because both initial values (table / sharpe-desc
+  // / showExamples=true) are deterministic.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mirror runs once on hydration; including `prefs` would re-clobber legacy state on every save.
   useEffect(() => {
     if (!prefsHydrated) return;
     setViewMode(prefs.view);
@@ -173,8 +178,7 @@ export function StrategyTable({
     setTableSortKey(prefs.sort.key);
     setTableSortDir(prefs.sort.dir);
     setShowExamples(!prefs.hide_examples);
-    setDraftPrefs(prefs);
-  }, [prefsHydrated, prefs]);
+  }, [prefsHydrated]);
 
   const handleOpenCustomize = useCallback(() => {
     setDraftPrefs(prefs);
