@@ -26,6 +26,10 @@ const recorders = vi.hoisted(() => {
     adminFromCalls: [] as string[], // admin-client calls
     strategyData: null as unknown,
     managerRowData: null as unknown,
+    // RPC recorder for fetchStrategyLazyMetrics tests (Plan 12-08 / METRICS-15).
+    // Each call records (rpcName, args); each test seeds a single response.
+    rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+    rpcResponse: { data: null as unknown, error: null as unknown },
   };
 });
 
@@ -51,6 +55,12 @@ vi.mock("@/lib/supabase/server", () => ({
         table === "strategies" ? recorders.strategyData : recorders.managerRowData,
       );
     },
+    // .rpc() recorder for fetchStrategyLazyMetrics (Plan 12-08 / METRICS-15).
+    // Existing disclosure-tier tests don't touch this path; they keep working.
+    rpc: (name: string, args: Record<string, unknown>) => {
+      recorders.rpcCalls.push({ name, args });
+      return Promise.resolve(recorders.rpcResponse);
+    },
   }),
 }));
 
@@ -65,7 +75,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-import { getStrategyDetail, getPublicStrategyDetail } from "./queries";
+import { getStrategyDetail, getPublicStrategyDetail, fetchStrategyLazyMetrics } from "./queries";
 
 const baseStrategy = {
   id: "strat_123",
@@ -90,6 +100,8 @@ beforeEach(() => {
   recorders.adminFromCalls = [];
   recorders.strategyData = null;
   recorders.managerRowData = null;
+  recorders.rpcCalls = [];
+  recorders.rpcResponse = { data: null, error: null };
 });
 
 describe("getStrategyDetail — disclosure tier redaction", () => {
@@ -189,5 +201,59 @@ describe("getPublicStrategyDetail — disclosure tier redaction", () => {
     });
     expect(recorders.adminFromCalls).toContain("profiles");
     expect(recorders.fromCalls).not.toContain("profiles");
+  });
+});
+
+/**
+ * Plan 12-08 / METRICS-15 (consumer half): fetchStrategyLazyMetrics RPC consumer
+ * tests. Phase 12 ships only the consumer + type union; Phase 14b actually calls
+ * it from panels 4–7. Tests cover:
+ *   1. Correct RPC name + arg shape (p_strategy_id / p_panel_id) — guards against
+ *      drift from the SQL signature in migration 087.
+ *   2. Pass-through of populated payload on success.
+ *   3. Empty-object fallback on RPC error (T-12-08-01: never reveal strategy
+ *      existence via the error path; UI sees the same shape as a private miss).
+ *   4. Empty-object fallback on null data (defensive — supabase clients can
+ *      return { data: null, error: null } for an empty visibility result).
+ */
+describe("fetchStrategyLazyMetrics — RPC consumer (Plan 12-08 / METRICS-15)", () => {
+  it("calls the fetch_strategy_lazy_metrics RPC with the correct args", async () => {
+    recorders.rpcResponse = { data: {}, error: null };
+    await fetchStrategyLazyMetrics(
+      "00000000-0000-0000-0000-000000000001",
+      "rolling",
+    );
+    expect(recorders.rpcCalls).toHaveLength(1);
+    expect(recorders.rpcCalls[0]).toEqual({
+      name: "fetch_strategy_lazy_metrics",
+      args: {
+        p_strategy_id: "00000000-0000-0000-0000-000000000001",
+        p_panel_id: "rolling",
+      },
+    });
+  });
+
+  it("returns the data field on success", async () => {
+    const payload = {
+      rolling_sortino_3m: [{ date: "2026-01-01", value: 1.5 }],
+    };
+    recorders.rpcResponse = { data: payload, error: null };
+    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(result).toEqual(payload);
+  });
+
+  it("returns empty object on RPC error", async () => {
+    recorders.rpcResponse = {
+      data: null,
+      error: { message: "boom", code: "PGRST000" },
+    };
+    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(result).toEqual({});
+  });
+
+  it("returns empty object on null data with no error", async () => {
+    recorders.rpcResponse = { data: null, error: null };
+    const result = await fetchStrategyLazyMetrics("strategy-id", "overview");
+    expect(result).toEqual({});
   });
 });
