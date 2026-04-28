@@ -416,3 +416,69 @@ def test_log_returns_series_values(golden_returns):
     # _finalize_rolling rounds to 4 decimals
     for point, exp in zip(result, expected):
         assert abs(point["value"] - round(float(exp), 4)) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 / Plan 04 — METRICS-04, METRICS-11 — RED tests
+# ---------------------------------------------------------------------------
+# Daily returns grid (flat per-day list, sibling-table kind 'daily_returns_grid')
+# + 10 new qstats scalars (Recovery Factor through Time-in-Market) computed via
+# qs.stats.{name}(returns) one-liners with try/except fail-soft to None.
+# Mirrors `_monthly_returns_grid_from_series` template at metrics.py:351 (D-03)
+# and the existing try/except pattern at metrics.py:97-138.
+
+from services.metrics import (
+    _daily_returns_grid_from_series,
+    compute_qstats_scalars,
+)
+
+
+def test_daily_returns_grid_full_length(golden_returns):
+    """METRICS-04: flat per-day list with date+value (D-03 storage shape)."""
+    grid = _daily_returns_grid_from_series(golden_returns)
+    assert isinstance(grid, list)
+    assert len(grid) == len(golden_returns)
+    for point in grid:
+        assert "date" in point and "value" in point
+        # Date format YYYY-MM-DD
+        assert len(point["date"]) == 10 and point["date"][4] == "-"
+
+
+def test_daily_returns_grid_round_to_6_decimals(golden_returns):
+    """METRICS-04: values rounded to 6 decimals (matches monthly grid template)."""
+    grid = _daily_returns_grid_from_series(golden_returns)
+    for point in grid:
+        assert isinstance(point["value"], float)
+        # Within 6-decimal precision
+        assert abs(point["value"] - round(point["value"], 6)) < 1e-9
+
+
+def test_daily_returns_grid_empty_input(empty_returns):
+    """METRICS-04: empty input returns empty list (graceful)."""
+    assert _daily_returns_grid_from_series(empty_returns) == []
+
+
+def test_qstats_scalars_complete_set(golden_returns, benchmark_returns):
+    """METRICS-11: all 10 new scalars present (None if computation fails)."""
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    expected_keys = {
+        "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
+        "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
+        "serenity_index", "r_squared", "time_in_market",
+    }
+    assert set(result.keys()) == expected_keys
+    for key, val in result.items():
+        assert val is None or isinstance(val, (int, float))
+
+
+def test_qstats_scalars_handle_missing_benchmark(golden_returns):
+    """METRICS-11: r_squared returns None when benchmark missing (graceful)."""
+    result = compute_qstats_scalars(golden_returns, None)
+    assert result["r_squared"] is None
+    # Non-benchmark scalars still computed (tolerate qs failures via try/except)
+    expected_keys = {
+        "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
+        "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
+        "serenity_index", "r_squared", "time_in_market",
+    }
+    assert set(result.keys()) == expected_keys
