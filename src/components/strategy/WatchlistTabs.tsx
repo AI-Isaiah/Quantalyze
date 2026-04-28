@@ -30,15 +30,24 @@ export function WatchlistTabs({ scope, onScopeChange, count }: WatchlistTabsProp
   const allRef = useRef<HTMLButtonElement>(null);
   const watchRef = useRef<HTMLButtonElement>(null);
 
+  // Automatic-activation tablist pattern (WAI-ARIA APG): ArrowLeft/ArrowRight
+  // BOTH move focus AND change scope. Edge cases:
+  //   - ArrowLeft from "All" is a no-op (no swap, no scope change)
+  //   - ArrowRight from "watchlist" is a no-op (no wrap-around)
   const handleKey = (
     e: React.KeyboardEvent<HTMLButtonElement>,
     target: "all" | "watchlist",
   ) => {
-    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-      e.preventDefault();
-      const next = target === "all" ? "watchlist" : "all";
-      (next === "all" ? allRef : watchRef).current?.focus();
-    }
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+
+    // No-op edge cases
+    if (target === "all" && e.key === "ArrowLeft") return;
+    if (target === "watchlist" && e.key === "ArrowRight") return;
+
+    e.preventDefault();
+    const next: "all" | "watchlist" = target === "all" ? "watchlist" : "all";
+    (next === "all" ? allRef : watchRef).current?.focus();
+    onScopeChange(next);
   };
 
   return (

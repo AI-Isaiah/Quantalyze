@@ -61,22 +61,46 @@ describe("WatchlistTabs", () => {
     expect(badge).toBeNull();
   });
 
-  it("ArrowRight on focused All tab moves focus to My Watchlist", () => {
-    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} />);
+  it("ArrowRight on focused All tab moves focus to My Watchlist AND activates the scope (automatic activation)", () => {
+    const onScopeChange = vi.fn();
+    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     allTab.focus();
     fireEvent.keyDown(allTab, { key: "ArrowRight" });
     expect(document.activeElement).toBe(watchTab);
+    expect(onScopeChange).toHaveBeenCalledWith("watchlist");
   });
 
-  it("ArrowLeft on focused My Watchlist tab moves focus to All", () => {
-    render(<WatchlistTabs scope="watchlist" onScopeChange={() => {}} count={0} />);
+  it("ArrowLeft on focused My Watchlist tab moves focus to All AND activates the scope (automatic activation)", () => {
+    const onScopeChange = vi.fn();
+    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     watchTab.focus();
     fireEvent.keyDown(watchTab, { key: "ArrowLeft" });
     expect(document.activeElement).toBe(allTab);
+    expect(onScopeChange).toHaveBeenCalledWith("all");
+  });
+
+  it("ArrowLeft on focused All tab is a no-op (no focus change, no scope change)", () => {
+    const onScopeChange = vi.fn();
+    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    allTab.focus();
+    fireEvent.keyDown(allTab, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(allTab);
+    expect(onScopeChange).not.toHaveBeenCalled();
+  });
+
+  it("ArrowRight on focused My Watchlist tab is a no-op (no wrap-around, no scope change)", () => {
+    const onScopeChange = vi.fn();
+    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} />);
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    watchTab.focus();
+    fireEvent.keyDown(watchTab, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(watchTab);
+    expect(onScopeChange).not.toHaveBeenCalled();
   });
 
   it("clicking My Watchlist calls onScopeChange('watchlist')", () => {
