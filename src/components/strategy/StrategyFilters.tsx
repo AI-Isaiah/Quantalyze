@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, type ReactNode } from "react";
 import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -89,6 +89,15 @@ interface StrategyFiltersProps {
   onViewModeChange: (mode: ViewMode) => void;
   advancedFilters: AdvancedFilters;
   onAdvancedFiltersChange: (filters: AdvancedFilters) => void;
+  /**
+   * Phase 13 / Plan 13-01 / DISCO-01 — optional slot rendered between the
+   * search input and the Hide-examples checkbox per UI-SPEC Layout Contract
+   * (filter row order: search → All Filters → leadingSlot → Hide-examples →
+   * Sort → Customize → ViewToggle). Used by StrategyTable to inject
+   * <WatchlistTabs> when a userId is present; non-Discovery callers (e.g.
+   * /browse) leave it undefined and the row renders unchanged.
+   */
+  leadingSlot?: ReactNode;
 }
 
 // --- Sort options ---
@@ -271,6 +280,7 @@ export function StrategyFilters({
   onViewModeChange,
   advancedFilters,
   onAdvancedFiltersChange,
+  leadingSlot,
 }: StrategyFiltersProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [customizeOpen, setCustomizeOpen] = useState(false);
@@ -321,6 +331,10 @@ export function StrategyFilters({
             </span>
           )}
         </Button>
+
+        {/* Phase 13 / DISCO-01 — leading slot (renders <WatchlistTabs> when
+            StrategyTable receives a userId; undefined for /browse callers). */}
+        {leadingSlot}
 
         {/* Hide examples toggle */}
         <label className="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">

@@ -3,7 +3,11 @@ import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { getRealPortfolio, getStrategiesByCategory } from "@/lib/queries";
+import {
+  getRealPortfolio,
+  getStrategiesByCategory,
+  getMyWatchlist,
+} from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 
@@ -20,13 +24,17 @@ export default async function DiscoveryPage({
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
   const meta = cat ?? { name: slug, slug, description: "" };
 
-  // Fetch the user's single real portfolio in parallel with strategies so
-  // the StrategyTable can wire the "Simulate Impact" row-action against
-  // a concrete portfolio. Null is a valid state — the button then renders
-  // disabled with an explanatory tooltip.
-  const [strategies, portfolio] = await Promise.all([
+  // Fetch strategies, the user's single real portfolio, and the user's
+  // watched-set in parallel. Phase 13 / DISCO-01 widens this fan-out from
+  // 2 → 3 reads — getMyWatchlist is RLS-scoped to auth.uid() and returns
+  // an empty Set on transient DB error (read path is non-fatal). The
+  // resulting Set hydrates StrategyTable's leading-column StarToggle
+  // state on first paint, so the persisted watchlist is visible without
+  // a flash-of-unstarred between SSR and client hydration.
+  const [strategies, portfolio, watchedSet] = await Promise.all([
     getStrategiesByCategory(slug),
     getRealPortfolio(user.id),
+    getMyWatchlist(user.id),
   ]);
 
   return (
@@ -45,6 +53,8 @@ export default async function DiscoveryPage({
         strategies={strategies}
         categorySlug={slug}
         portfolioId={portfolio?.id ?? null}
+        userId={user.id}
+        initialWatchedSet={watchedSet}
       />
     </>
   );

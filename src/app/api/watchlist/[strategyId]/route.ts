@@ -76,6 +76,10 @@ export async function PUT(
     // ON CONFLICT DO NOTHING via onConflict + ignoreDuplicates. The
     // PRIMARY KEY (user_id, strategy_id) on user_favorites guarantees
     // a duplicate add is silently absorbed.
+    // @audit-skip: T-13-01-05 (accept) — watchlist toggle is an allocator
+    // self-action with no security/commercial impact; mirrors the
+    // src/app/api/preferences/route.ts pattern of NOT auditing self-action
+    // mutations. See 13-01-PLAN.md <threat_model>.
     const { error } = await supabase
       .from("user_favorites")
       .upsert(
@@ -91,6 +95,7 @@ export async function PUT(
     // top of the table-level RLS prevents a malicious caller from constructing
     // a request that deletes someone else's favorites even if RLS were
     // misconfigured.
+    // @audit-skip: T-13-01-05 (accept) — see add-branch comment above.
     const { error } = await supabase
       .from("user_favorites")
       .delete()
