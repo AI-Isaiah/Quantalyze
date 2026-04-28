@@ -535,7 +535,12 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         positions_by_date: dict[str, dict[str, float]] = {}
         prices_by_date: dict[str, dict[str, float]] = {}
         nav_by_date: dict[str, float] = {}
-        position_metrics_error: str | None = None
+        # WR-03: split into two failure surfaces so operators can distinguish
+        # "FIFO matching from raw fills failed" (positions table writes blocked)
+        # from "snapshot read for turnover/exposure_series failed" (raw_fills
+        # FIFO is fine, but exposure/turnover series can't be derived).
+        position_reconstruction_error: str | None = None
+        position_snapshots_error: str | None = None
         try:
             trade_metrics_from_positions = (
                 await reconstruct_positions(strategy_id, supabase) or {}
@@ -543,10 +548,19 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             exposure_metrics = (
                 await compute_exposure_metrics(strategy_id, supabase) or {}
             )
-            # H-A1: position_snapshots is the canonical source for
-            # positions+prices+NAV (no historical_prices table exists per
-            # migration 034). One query produces both grids; turnover
-            # formula consumes them.
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Position reconstruction failed for %s: %s", strategy_id, str(exc)
+            )
+            position_reconstruction_error = str(exc)[:200]
+
+        # H-A1: position_snapshots is the canonical source for
+        # positions+prices+NAV (no historical_prices table exists per
+        # migration 034). One query produces both grids; turnover
+        # formula consumes them. WR-03: separate try so a snapshot RLS
+        # regression does not get misclassified as a FIFO reconstruction
+        # failure (and vice versa).
+        try:
             (
                 positions_by_date,
                 prices_by_date,
@@ -556,9 +570,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Position reconstruction failed for %s: %s", strategy_id, str(exc)
+                "Position snapshots load failed for %s: %s", strategy_id, str(exc)
             )
-            position_metrics_error = str(exc)[:200]
+            position_snapshots_error = str(exc)[:200]
 
         # B-01: fetch fills once, feed both volume helpers + trade_mix.
         # `cost` is needed by _compute_volume_metrics; `notional_usd`,
@@ -641,10 +655,43 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 "benchmark_unavailable": True,
                 "benchmark_note": "Benchmark data unavailable. Alpha, beta, and correlation not computed.",
             }
-        if position_metrics_error is not None:
+        # WR-03: emit distinct keys per failure surface, keep legacy
+        # `position_metrics_failed` / `position_metrics_error` aggregate set
+        # for backward compatibility with the admin compute-jobs page,
+        # PositionsTab/VolumeExposureTab consumers, and existing tests.
+        if (
+            position_reconstruction_error is not None
+            or position_snapshots_error is not None
+        ):
             data_quality_flags = data_quality_flags or {}
+            # Distinct, surface-specific flags (new — operators read these
+            # to differentiate "FIFO from fills failed" vs
+            # "snapshot grids unavailable").
+            if position_reconstruction_error is not None:
+                data_quality_flags["position_reconstruction_failed"] = True
+                data_quality_flags["position_reconstruction_error"] = (
+                    position_reconstruction_error
+                )
+            if position_snapshots_error is not None:
+                data_quality_flags["position_snapshots_unavailable"] = True
+                data_quality_flags["position_snapshots_error"] = (
+                    position_snapshots_error
+                )
+            # Legacy aggregate (preserved): UI/admin consumers read this as
+            # a single "anything position-side failed" boolean. The error
+            # string concatenates surface labels so the legacy reader still
+            # gets unambiguous diagnostic context.
             data_quality_flags["position_metrics_failed"] = True
-            data_quality_flags["position_metrics_error"] = position_metrics_error
+            legacy_parts: list[str] = []
+            if position_reconstruction_error is not None:
+                legacy_parts.append(
+                    f"reconstruction: {position_reconstruction_error}"
+                )
+            if position_snapshots_error is not None:
+                legacy_parts.append(
+                    f"snapshots: {position_snapshots_error}"
+                )
+            data_quality_flags["position_metrics_error"] = "; ".join(legacy_parts)
 
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure
