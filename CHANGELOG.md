@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.0.1] - 2026-04-28
+
+**Queue retry mechanic fix — failed_retry rows are now claimable when their backoff has elapsed.** The compute_jobs queue had a documented retry mechanic (`mark_compute_job_failed` writes `status='failed_retry'` with backoff schedule) but no code path actually transitioned `failed_retry → pending` when `next_attempt_at` arrived. Both `claim_compute_jobs` (migration 032) and `claim_compute_jobs_with_priority` (migration 086) filtered `WHERE status = 'pending'`, so failed_retry rows sat in the queue forever. Production state on 2026-04-28 had 21 stuck jobs across 3 kinds (oldest 9 days dead).
+
+This is a pre-Phase-12 latent bug. Phase 12's migration 086 inherited the same filter from migration 032. Migration 038 line 106 documented the INTENT ("failed_retry is non-terminal because the worker will pick it up again") but the implementation never caught up.
+
+### Fixed
+
+- **Migration 089**: replaces both `claim_compute_jobs` and `claim_compute_jobs_with_priority` with widened filter `WHERE status IN ('pending', 'failed_retry') AND next_attempt_at <= now()`. Existing `FOR UPDATE SKIP LOCKED` concurrency primitive handles the new state correctly. The 086 throttle probe also reads `failed_retry` so a normal/high failed_retry row correctly throttles low-priority work. The 086 partial index `idx_compute_jobs_priority_pending` is dropped + recreated with the widened predicate so the throttle probe stays index-only. Self-verifying DO block asserts the function bodies and index predicate.
+- **H-B tightening**: legacy `claim_compute_jobs` migrated from `SET search_path = public, pg_catalog` to `SET search_path = public, pg_temp`, matching Phase 12's H-B convention. pg_catalog is implicitly searched first by Postgres regardless, so unqualified `now()` etc. still resolve correctly.
+- **Error classifier in `analytics-service/services/job_worker.py`**: FastAPI `HTTPException` with 4xx status (except 408 Request Timeout and 429 Too Many Requests, which are transient) now classifies as `permanent`. Previously these fell through to the catch-all `unknown` branch and got retried. The trigger was Phase 12's compute_analytics handler raising `HTTPException(400, "Insufficient trade history")` — no amount of retry produces missing trade data, so these now go straight to `failed_final` instead of polluting the retry queue. 5xx still classifies as `unknown` (retried by default).
+- **One-shot recovery**: 15 stuck Phase 12 compute_analytics jobs kicked back to `pending` so the worker can drain them. Older legacy stuck jobs (poll_allocator_positions, rescore_allocator) blocked by `compute_jobs_one_inflight_per_kind_api_key` unique constraint; need separate cleanup.
+
+### Tests
+
+- 6 new HTTPException classifier tests in `analytics-service/tests/test_job_worker.py`: 400/404/422 → permanent; 408/429 → transient; 500 → unknown. All 17 classifier tests pass.
+
 ## [0.17.0.0] - 2026-04-28
 
 **v0.17.0.0 milestone — Sprint 12: KPI Parity and Discovery v2 — Phase 12 (Backend Metric Contracts) shipped.** `metrics.py` now produces every scalar and series the v0.17 7-panel UI needs: rolling Sortino/Volatility/Greeks at 3M/6M/12M, daily-returns grid, exposure & turnover series, full trade-table aggregations including Weighted R:R, 10 missing qstats scalars, and log-returns series. Heavy time-series payloads land in a new `strategy_analytics_series` sibling table to dodge the 1MB JSONB TOAST decompression ceiling on `strategy_analytics.metrics_json`. Cross-runtime parity is gated by a deterministic 252-day golden fixture (Python = math source, TypeScript = schema gate). Backfill is throttled via a priority enum on `compute_jobs` so live `sync_trades` never queues behind compute-analytics.
