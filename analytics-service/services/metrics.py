@@ -2,9 +2,68 @@ import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
+from dataclasses import dataclass, field
 from typing import Any
 
 from .transforms import downsample_series, cap_data_points
+
+
+# Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
+# Single source of truth: `qs.stats.sortino(returns)` (which uses MAR=0 by default)
+# AND `_rolling_sortino` MUST share this constant. Cross-runtime parity is gated
+# by the `test_rolling_sortino_converges_to_scalar_at_full_window` test, which
+# asserts the rolling helper at window == period agrees with the scalar to within 0.05.
+MAR: float = 0.0
+
+
+@dataclass
+class MetricsResult:
+    """Phase 12 / METRICS-11/12: split storage between strategy_analytics.metrics_json
+    (light scalars + above-the-fold series) and strategy_analytics_series sibling table
+    (heavy series keyed by kind). See D-01 / D-02 for split rules.
+
+    Attributes
+    ----------
+    metrics_json: top-level dict spread into the strategy_analytics table upsert.
+        Contains all existing qstats scalars + 10 new qstats scalars (merged into
+        its inner "metrics_json" JSONB sub-dict) + above-the-fold series
+        (returns_series, drawdown_series, sparklines, monthly_returns,
+        rolling_metrics, return_quantiles).
+    sibling_kinds: dict keyed by sibling-table `kind`. analytics_runner upserts
+        each kind into strategy_analytics_series via the
+        `upsert_strategy_analytics_series_batch` SECURITY DEFINER RPC (M-Grok-1
+        atomic batch). 12 kinds total — 10 produced here in compute_all_metrics
+        (daily_returns_grid, rolling_sortino_3m/6m/12m, rolling_volatility_3m/6m/12m,
+        rolling_alpha, rolling_beta, log_returns_series); the runner adds 2 more
+        (exposure_series, turnover_series) since they need position_snapshots data.
+
+    `__getitem__` proxies to `metrics_json` for backward compat with existing
+    test sites that subscripted the old bare-dict return shape (test_metrics.py,
+    test_accuracy.py). New consumers should use attribute access directly.
+    """
+
+    metrics_json: dict[str, Any] = field(default_factory=dict)
+    sibling_kinds: dict[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> Any:
+        # Backward-compat shim: old callers expected a bare dict; proxy
+        # subscript access to metrics_json so legacy tests still work.
+        return self.metrics_json[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.metrics_json
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.metrics_json.get(key, default)
+
+    def items(self):
+        return self.metrics_json.items()
+
+    def keys(self):
+        return self.metrics_json.keys()
+
+    def values(self):
+        return self.metrics_json.values()
 
 
 def _safe_float(value: Any) -> float | None:
@@ -38,8 +97,28 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None = None) -> dict[str, Any]:
-    """Compute all analytics from a daily returns series."""
+def compute_all_metrics(
+    returns: pd.Series,
+    benchmark_returns: pd.Series | None = None,
+) -> "MetricsResult":
+    """Compute all analytics from a daily returns series.
+
+    Phase 12: returns a `MetricsResult` dataclass (NOT a bare dict) split per D-01/D-02:
+
+    - `result.metrics_json`: spread into the `strategy_analytics` table upsert.
+      Carries all existing qstats scalars (top-level cumulative_return, cagr, sharpe, ...)
+      + 10 new qstats scalars (merged into the inner `metrics_json` JSONB sub-dict
+      via `compute_qstats_scalars`).
+    - `result.sibling_kinds`: dict {kind: payload} for the 10 sibling kinds emitted
+      from this function (daily_returns_grid, rolling_sortino_3m/6m/12m,
+      rolling_volatility_3m/6m/12m, rolling_alpha, rolling_beta, log_returns_series).
+      analytics_runner appends 2 more (exposure_series, turnover_series) before the
+      atomic batch upsert via `upsert_strategy_analytics_series_batch` RPC.
+
+    Backward-compat: `MetricsResult.__getitem__` proxies to `.metrics_json` so
+    legacy `result["sharpe"]` access still works for tests that have not yet
+    been migrated to attribute access.
+    """
     if len(returns) < 2:
         raise ValueError("Insufficient trade history. At least 2 trading days required.")
 
@@ -284,9 +363,18 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
         except Exception:
             pass
 
+    # METRICS-11: 10 new qstats scalars merged into the inner metrics_json
+    # JSONB sub-dict (D-01 storage split — these are scalars, they live in
+    # the metrics_json JSONB column on strategy_analytics, NOT new top-level
+    # columns). Wired here in Phase 12 Plan 06; the helper itself shipped in
+    # Plan 12-04. compute_qstats_scalars uses try/except per scalar so a
+    # single qs failure can't take down the whole metrics computation.
+    qstats_scalars = compute_qstats_scalars(returns, benchmark_returns)
+    metrics_json.update(qstats_scalars)
+
     # All individual metrics already passed through _safe_float().
     # sanitize_metrics() is a final guardrail for nested structures (metrics_json, rolling, quantiles).
-    return sanitize_metrics({
+    sanitized = sanitize_metrics({
         "cumulative_return": total_return,
         "cagr": cagr,
         "volatility": volatility,
@@ -305,6 +393,27 @@ def compute_all_metrics(returns: pd.Series, benchmark_returns: pd.Series | None 
         "rolling_metrics": rolling,
         "return_quantiles": quantiles,
     })
+
+    # METRICS-04, METRICS-05, METRICS-06, METRICS-12: sibling-kind payloads.
+    # 10 kinds emitted here (the 2 missing — exposure_series, turnover_series —
+    # are added by analytics_runner since they require position_snapshots data).
+    # Heavy-series storage per D-02 — these go to strategy_analytics_series via
+    # the atomic batch RPC (M-Grok-1) at the runner level, NOT into metrics_json.
+    has_benchmark = benchmark_returns is not None and len(benchmark_returns) > 0
+    sibling_kinds: dict[str, Any] = {
+        "daily_returns_grid": _daily_returns_grid_from_series(returns),
+        "rolling_sortino_3m": _rolling_sortino(returns, 63),
+        "rolling_sortino_6m": _rolling_sortino(returns, 126),
+        "rolling_sortino_12m": _rolling_sortino(returns, 252),
+        "rolling_volatility_3m": _rolling_volatility(returns, 63),
+        "rolling_volatility_6m": _rolling_volatility(returns, 126),
+        "rolling_volatility_12m": _rolling_volatility(returns, 252),
+        "rolling_alpha": _rolling_alpha(returns, benchmark_returns, 90) if has_benchmark else [],
+        "rolling_beta": _rolling_beta(returns, benchmark_returns, 90) if has_benchmark else [],
+        "log_returns_series": _log_returns_series(returns),
+    }
+
+    return MetricsResult(metrics_json=sanitized, sibling_kinds=sibling_kinds)
 
 
 def compute_risk_of_ruin(
@@ -361,6 +470,102 @@ def _monthly_returns_grid_from_series(monthly: pd.Series) -> dict[str, dict[str,
     return grid
 
 
+def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
+    """Flat per-day return list. Sibling-table kind = 'daily_returns_grid'.
+
+    Output shape: [{date: 'YYYY-MM-DD', value: float}, …].
+    Heat-map renderer (Phase 14b) reshapes into 12-month × N-year grid client-side.
+    Matches the per-date shape of every other series kind (exposure_series,
+    turnover_series, rolling_*).
+
+    Mirrors `_monthly_returns_grid_from_series` template above (D-03 storage
+    decision: flat list serializes smaller and matches per-date shape of every
+    other series kind per RESEARCH.md §5b).
+    """
+    if len(returns) == 0:
+        return []
+    return [
+        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
+        for d, v in returns.items()
+    ]
+
+
+def compute_qstats_scalars(
+    returns: pd.Series,
+    benchmark: pd.Series | None,
+) -> dict[str, float | None]:
+    """METRICS-11: Compute the 10 new qstats scalars.
+
+    Each scalar is wrapped in try/except so a single qs failure doesn't take
+    down the whole metrics computation (mirrors existing pattern at
+    metrics.py:97-138). All keys are always present in the output dict; the
+    value is None when the underlying computation fails or input is missing
+    (e.g., r_squared without benchmark).
+
+    Output keys (D-01 sibling-table contract):
+        recovery_factor, ulcer_index, upi (ulcer_performance_index),
+        kelly_criterion, probabilistic_sharpe_ratio (qs.stats.probabilistic_ratio),
+        common_sense_ratio, cpc_index, serenity_index, r_squared (vs benchmark),
+        time_in_market (qstats name = `exposure`, output key per CONTEXT.md).
+    """
+    result: dict[str, float | None] = {
+        "recovery_factor": None,
+        "ulcer_index": None,
+        "upi": None,
+        "kelly_criterion": None,
+        "probabilistic_sharpe_ratio": None,
+        "common_sense_ratio": None,
+        "cpc_index": None,
+        "serenity_index": None,
+        "r_squared": None,
+        "time_in_market": None,
+    }
+
+    try:
+        result["recovery_factor"] = _safe_float(qs.stats.recovery_factor(returns))
+    except Exception:
+        pass
+    try:
+        result["ulcer_index"] = _safe_float(qs.stats.ulcer_index(returns))
+    except Exception:
+        pass
+    try:
+        result["upi"] = _safe_float(qs.stats.ulcer_performance_index(returns))
+    except Exception:
+        pass
+    try:
+        result["kelly_criterion"] = _safe_float(qs.stats.kelly_criterion(returns))
+    except Exception:
+        pass
+    try:
+        result["probabilistic_sharpe_ratio"] = _safe_float(qs.stats.probabilistic_ratio(returns))
+    except Exception:
+        pass
+    try:
+        result["common_sense_ratio"] = _safe_float(qs.stats.common_sense_ratio(returns))
+    except Exception:
+        pass
+    try:
+        result["cpc_index"] = _safe_float(qs.stats.cpc_index(returns))
+    except Exception:
+        pass
+    try:
+        result["serenity_index"] = _safe_float(qs.stats.serenity_index(returns))
+    except Exception:
+        pass
+    try:
+        if benchmark is not None and len(benchmark) > 0:
+            result["r_squared"] = _safe_float(qs.stats.r_squared(returns, benchmark))
+    except Exception:
+        pass
+    try:
+        result["time_in_market"] = _safe_float(qs.stats.exposure(returns))
+    except Exception:
+        pass
+
+    return result
+
+
 def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
     """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size."""
     cleaned = series.dropna().replace([np.inf, -np.inf], np.nan).dropna()
@@ -378,6 +583,87 @@ def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
     roll_mean = returns.rolling(window).mean()
     roll_std = returns.rolling(window).std()
     return _finalize_rolling((roll_mean / roll_std) * np.sqrt(252))
+
+
+def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[dict[str, Any]]:
+    """Compute rolling annualized Sortino using downside RMS (MAR-floored).
+
+    Pitfall 11 single source of truth: this MUST mirror `qs.stats.sortino`'s
+    downside formula so the cross-runtime parity test holds at window == period.
+    qs.stats.sortino uses:
+        downside = sqrt(sum(x^2 for x in returns if x < MAR) / len(returns))
+        sortino = mean(returns) / downside * sqrt(252)
+    Re-implementing this on a rolling window:
+        neg_sq[t]   = x[t]^2 if x[t] < MAR else 0
+        roll_dstd   = sqrt(neg_sq.rolling(window).sum() / window)
+        roll_mean   = returns.rolling(window).mean()
+        sortino[t]  = roll_mean[t] / roll_dstd[t] * sqrt(252)
+
+    NOTE: pandas `.rolling().std()` (which `_rolling_sharpe` uses for Sharpe)
+    is NOT used here — it subtracts the rolling mean and divides by (N-1), which
+    diverges from qs.stats.sortino's RMS formula. Mirroring the QS math is the
+    cross-runtime contract; mirroring the _rolling_sharpe SHAPE (window guard,
+    _finalize_rolling) is the file convention. Both are honored.
+
+    Mirrors _rolling_sharpe at metrics.py for shape; mirrors qs.stats.sortino
+    for math.
+    """
+    if len(returns) < window:
+        return []
+    neg_sq = (returns.where(returns < mar, 0.0)) ** 2
+    roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
+    roll_mean = returns.rolling(window).mean()
+    # _finalize_rolling scrubs NaN/Inf so the consumer never sees them.
+    return _finalize_rolling((roll_mean / roll_dstd) * np.sqrt(252))
+
+
+def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+    """Annualized rolling volatility = std * sqrt(252).
+
+    Mirrors `qs.stats.volatility` (which is `returns.std() * sqrt(252)`) on a
+    rolling window. Mirrors _rolling_sharpe at metrics.py for shape.
+    """
+    if len(returns) < window:
+        return []
+    return _finalize_rolling(returns.rolling(window).std() * np.sqrt(252))
+
+
+def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+    """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
+
+    Window default 90d trading per UC#6 BTC-only scope. qs.stats.rolling_greeks
+    returns a DataFrame with columns ["beta", "alpha"]; we project the alpha
+    column and finalize.
+    """
+    if benchmark is None or len(returns) < window:
+        return []
+    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
+    if "alpha" not in greeks:
+        return []
+    return _finalize_rolling(greeks["alpha"])
+
+
+def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+    """Rolling beta vs benchmark via qs.stats.rolling_greeks."""
+    if benchmark is None or len(returns) < window:
+        return []
+    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
+    if "beta" not in greeks:
+        return []
+    return _finalize_rolling(greeks["beta"])
+
+
+def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
+    """Log returns series = np.log1p(returns).
+
+    Same length as input (no window dropoff). Used by EquityCurve "Log Returns"
+    toggle (METRICS-12). Routed through _finalize_rolling for NaN/Inf scrubbing
+    + cap_data_points consistency with the other series helpers.
+    """
+    if len(returns) == 0:
+        return []
+    log_rets = np.log1p(returns)
+    return _finalize_rolling(pd.Series(log_rets, index=returns.index))
 
 
 def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[dict[str, Any]]:

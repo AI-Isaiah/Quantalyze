@@ -110,7 +110,7 @@ export interface StrategyAnalytics {
   daily_returns: Record<string, Record<string, number>> | null;
   rolling_metrics: Record<string, { date: string; value: number }[]> | null;
   return_quantiles: Record<string, number[]> | null;
-  trade_metrics: Record<string, unknown> | null;
+  trade_metrics: TradeMetrics | null;
   volume_metrics: VolumeMetrics | null;
   exposure_metrics: ExposureMetrics | null;
   data_quality_flags: Record<string, unknown> | null;
@@ -145,7 +145,71 @@ export interface TradeMetrics {
   short_count: number;
   best_trade_roi: number;
   worst_trade_roi: number;
+  // Phase 12 / D-13 derived trade metrics (7 metrics per METRICS-07)
+  expectancy: number | null;
+  risk_reward_ratio: number | null;
+  weighted_risk_reward_ratio: number | null;  // H-F / METRICS-07: weighted by win/loss size and count
+  sqn: number | null;
+  profit_factor_long: number | null;
+  profit_factor_short: number | null;
+  // Phase 12 / D-14 trade mix breakdown (4-bucket if D-15 audit passes; 2-bucket fallback)
+  trade_mix?: TradeMixBuckets;
 }
+
+/**
+ * Phase 12 / D-14: Single bucket in trade_mix breakdown.
+ * Each bucket counts trades partitioned by side × maker/taker.
+ */
+export interface TradeMixBucket {
+  count: number;
+  total_notional: number;
+  avg_holding_period_hours: number;
+}
+
+/**
+ * Phase 12 / D-14: Trade mix breakdown.
+ * - 4-bucket variant ships if D-15 is_maker audit ≥ 99% on all 3 exchanges (long_maker, long_taker, short_maker, short_taker).
+ * - 2-bucket fallback ships otherwise (long, short only).
+ * - Phase 14b reads via `Strategy.trade_metrics?.trade_mix?.long_maker?.count` etc.
+ * - FROZEN per D-16: adding keys mid-Phase-14b requires a Phase 12 amendment.
+ */
+export interface TradeMixBuckets {
+  long?: TradeMixBucket;
+  short?: TradeMixBucket;
+  long_maker?: TradeMixBucket;
+  long_taker?: TradeMixBucket;
+  short_maker?: TradeMixBucket;
+  short_taker?: TradeMixBucket;
+}
+
+/**
+ * Phase 12 / METRICS-17: One row in strategy_analytics_series sibling table.
+ * Heavy series payloads keyed by (strategy_id, kind).
+ * Read via fetch_strategy_lazy_metrics(strategy_id, panel_id) RPC.
+ *
+ * H-D: This union has exactly the 12 D-01 sibling kinds. `equity_series_1y`
+ * lives in `metrics_json` (above-the-fold series), NOT in the sibling table.
+ */
+export type StrategyAnalyticsSeriesKind =
+  | "daily_returns_grid"
+  | "rolling_sortino_3m" | "rolling_sortino_6m" | "rolling_sortino_12m"
+  | "rolling_volatility_3m" | "rolling_volatility_6m" | "rolling_volatility_12m"
+  | "rolling_alpha" | "rolling_beta"
+  | "exposure_series" | "turnover_series" | "log_returns_series";
+
+export interface StrategyAnalyticsSeriesRow {
+  strategy_id: string;
+  kind: StrategyAnalyticsSeriesKind;
+  payload: Record<string, unknown>;
+  computed_at: string;
+}
+
+/**
+ * Phase 12 / D-04: Lazy-fetch RPC return shape.
+ * Maps panel_id → {kind: payload}. Empty object when strategy is not visible
+ * to the caller or no kinds match the panel mapping.
+ */
+export type LazyMetricsPayload = Record<StrategyAnalyticsSeriesKind, unknown> | Record<string, never>;
 
 export interface Position {
   id: string;

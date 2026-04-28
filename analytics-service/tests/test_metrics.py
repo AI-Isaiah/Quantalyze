@@ -304,3 +304,181 @@ class TestComputeAllMetrics:
         assert len(result) > 0
         for entry in result:
             assert abs(entry["value"] - 1.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 / Plan 03 — METRICS-01..03, METRICS-12 — RED tests
+# ---------------------------------------------------------------------------
+# Module-level MAR constant + 5 rolling helpers (Sortino, Volatility, Alpha,
+# Beta, Log returns). Mirrors `_rolling_sharpe` template at metrics.py:374.
+# Pitfall 11 cross-runtime consistency: `qs.stats.sortino` and `_rolling_sortino`
+# share the SAME `MAR = 0.0` source of truth.
+
+from services.metrics import (
+    MAR,
+    _rolling_sortino,
+    _rolling_volatility,
+    _rolling_alpha,
+    _rolling_beta,
+    _log_returns_series,
+)
+
+
+def test_mar_constant_is_zero():
+    """Pitfall 11: MAR = 0.0 module-level constant for cross-runtime Sortino consistency."""
+    assert MAR == 0.0
+    assert isinstance(MAR, float)
+
+
+def test_rolling_sortino_short_circuit_on_insufficient_data(empty_returns):
+    """METRICS-01: short returns when len(returns) < window — mirrors _rolling_sharpe."""
+    assert _rolling_sortino(empty_returns, 63) == []
+
+
+def test_rolling_sortino_full_window(golden_returns):
+    """METRICS-01: full window produces finalized list."""
+    assert len(golden_returns) == 500  # conftest fixture is 500 days
+    result = _rolling_sortino(golden_returns, 63)
+    assert isinstance(result, list)
+    assert len(result) > 0
+    for point in result:
+        assert "date" in point
+        assert "value" in point
+
+
+def test_rolling_sortino_converges_to_scalar_at_full_window():
+    """Pitfall 11 cross-check: window == period must converge to qs.stats.sortino().
+
+    Per RESEARCH.md §11 mitigation (PITFALLS.md:142-146):
+    > "Pytest cross-check: assert abs(metrics["sortino"] - rolling_sortino_3m[-1])
+    > < 0.05 on a 90-day fixture (last rolling window converges to scalar over the
+    > full period when window == period)."
+
+    Cross-check requires the rolling helper to use the SAME math as qs.stats.sortino:
+    downside RMS = sqrt(sum(x^2 where x<MAR else 0) / N), NOT pandas .std() over a
+    zero-floored series. Both formulas annualize via sqrt(252).
+    """
+    import quantstats as qs
+    np.random.seed(11)
+    dates = pd.bdate_range("2024-01-01", periods=90)
+    returns = pd.Series(np.random.normal(0.0005, 0.015, 90), index=dates, name="returns")
+
+    scalar = qs.stats.sortino(returns)
+    rolling_90 = _rolling_sortino(returns, 90)
+    assert len(rolling_90) >= 1
+    assert abs(rolling_90[-1]["value"] - scalar) < 0.05
+
+
+def test_rolling_volatility_annualized(golden_returns):
+    """METRICS-02: annualized = std * sqrt(252)."""
+    result = _rolling_volatility(golden_returns, 63)
+    assert isinstance(result, list)
+    assert len(result) > 0
+    # Independent computation
+    expected = (golden_returns.rolling(63).std() * np.sqrt(252)).dropna().iloc[-1]
+    # _finalize_rolling rounds to 4 decimals
+    assert abs(result[-1]["value"] - round(float(expected), 4)) < 1e-4
+
+
+def test_rolling_volatility_short_circuit(empty_returns):
+    """METRICS-02: short returns when insufficient data."""
+    assert _rolling_volatility(empty_returns, 63) == []
+
+
+def test_rolling_alpha_returns_finalized_list(golden_returns, benchmark_returns):
+    """METRICS-03: rolling alpha vs BTC benchmark returns finalized list."""
+    result = _rolling_alpha(golden_returns, benchmark_returns, 90)
+    assert isinstance(result, list)
+    assert len(result) > 0
+    for point in result:
+        assert "date" in point
+        assert "value" in point
+
+
+def test_rolling_beta_returns_finalized_list(golden_returns, benchmark_returns):
+    """METRICS-03: rolling beta vs BTC benchmark returns finalized list."""
+    result = _rolling_beta(golden_returns, benchmark_returns, 90)
+    assert isinstance(result, list)
+    assert len(result) > 0
+
+
+def test_log_returns_series_full_length(golden_returns):
+    """METRICS-12: log_returns has same length as input (no window dropoff)."""
+    result = _log_returns_series(golden_returns)
+    assert isinstance(result, list)
+    assert len(result) == len(golden_returns)
+
+
+def test_log_returns_series_values(golden_returns):
+    """METRICS-12: values match np.log1p(returns)."""
+    expected = np.log1p(golden_returns)
+    result = _log_returns_series(golden_returns)
+    # _finalize_rolling rounds to 4 decimals
+    for point, exp in zip(result, expected):
+        assert abs(point["value"] - round(float(exp), 4)) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 / Plan 04 — METRICS-04, METRICS-11 — RED tests
+# ---------------------------------------------------------------------------
+# Daily returns grid (flat per-day list, sibling-table kind 'daily_returns_grid')
+# + 10 new qstats scalars (Recovery Factor through Time-in-Market) computed via
+# qs.stats.{name}(returns) one-liners with try/except fail-soft to None.
+# Mirrors `_monthly_returns_grid_from_series` template at metrics.py:351 (D-03)
+# and the existing try/except pattern at metrics.py:97-138.
+
+from services.metrics import (
+    _daily_returns_grid_from_series,
+    compute_qstats_scalars,
+)
+
+
+def test_daily_returns_grid_full_length(golden_returns):
+    """METRICS-04: flat per-day list with date+value (D-03 storage shape)."""
+    grid = _daily_returns_grid_from_series(golden_returns)
+    assert isinstance(grid, list)
+    assert len(grid) == len(golden_returns)
+    for point in grid:
+        assert "date" in point and "value" in point
+        # Date format YYYY-MM-DD
+        assert len(point["date"]) == 10 and point["date"][4] == "-"
+
+
+def test_daily_returns_grid_round_to_6_decimals(golden_returns):
+    """METRICS-04: values rounded to 6 decimals (matches monthly grid template)."""
+    grid = _daily_returns_grid_from_series(golden_returns)
+    for point in grid:
+        assert isinstance(point["value"], float)
+        # Within 6-decimal precision
+        assert abs(point["value"] - round(point["value"], 6)) < 1e-9
+
+
+def test_daily_returns_grid_empty_input(empty_returns):
+    """METRICS-04: empty input returns empty list (graceful)."""
+    assert _daily_returns_grid_from_series(empty_returns) == []
+
+
+def test_qstats_scalars_complete_set(golden_returns, benchmark_returns):
+    """METRICS-11: all 10 new scalars present (None if computation fails)."""
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    expected_keys = {
+        "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
+        "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
+        "serenity_index", "r_squared", "time_in_market",
+    }
+    assert set(result.keys()) == expected_keys
+    for key, val in result.items():
+        assert val is None or isinstance(val, (int, float))
+
+
+def test_qstats_scalars_handle_missing_benchmark(golden_returns):
+    """METRICS-11: r_squared returns None when benchmark missing (graceful)."""
+    result = compute_qstats_scalars(golden_returns, None)
+    assert result["r_squared"] is None
+    # Non-benchmark scalars still computed (tolerate qs failures via try/except)
+    expected_keys = {
+        "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
+        "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
+        "serenity_index", "r_squared", "time_in_market",
+    }
+    assert set(result.keys()) == expected_keys

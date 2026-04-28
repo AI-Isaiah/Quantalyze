@@ -60,8 +60,8 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 
 **Net session estimate:** ~8.0 sessions (Phase 12: 4.0, Phase 13: 0.5, Phase 14a: 2.0, Phase 14b: 1.5).
 
-- [ ] **Phase 12: Backend Metric Contracts** — `metrics.py` extensions (rolling Sortino/Vol/Greeks series, daily_returns_grid, exposure_series, turnover_series, 7 derived trade metrics, SQN, volume aggregator, Trade Mix maker/taker (audit-gated, Binance/OKX/Bybit only — Deribit excluded), 10 new scalars, log_returns_series, cross-runtime parity tests, throttled backfill via `compute_jobs.priority` enum (METRICS-16, migration 084), heavy-series sibling table `strategy_analytics_series` (METRICS-17, migration 085), JSONB path-extraction)
-- [ ] **Phase 13: Discovery v2 Polish** — Watchlist UI on `user_favorites`, per-user-keyed localStorage Customize prefs, filter-by-team (audit-gated; conditional migration 086 `organizations.is_public`), single-accent sparkline rule, `is_example=true` data backfill on seed strategies
+- [x] **Phase 12: Backend Metric Contracts** — `metrics.py` extensions (rolling Sortino/Vol/Greeks series, daily_returns_grid, exposure_series, turnover_series, 7 derived trade metrics, SQN, volume aggregator, Trade Mix maker/taker (audit-gated, Binance/OKX/Bybit only — Deribit excluded), 10 new scalars, log_returns_series, cross-runtime parity tests, throttled backfill via `compute_jobs.priority` enum (METRICS-16, migration 086), heavy-series sibling table `strategy_analytics_series` (METRICS-17, migration 087), JSONB path-extraction)
+- [ ] **Phase 13: Discovery v2 Polish** — Watchlist UI on `user_favorites`, per-user-keyed localStorage Customize prefs, filter-by-team (audit-gated; conditional migration 088 `organizations.is_public`), single-accent sparkline rule, `is_example=true` data backfill on seed strategies
 - [ ] **Phase 14a: Single-Strategy v2 — Eager Panels + Identity** — `/strategy/[id]/v2` route + flag, 7-panel scrollable shell with placeholders for panels 4–7 (IntersectionObserver scaffold), eager bodies for Panels 1–3 (Overview / Headline+Equity / Drawdown), DESIGN.md identity audit, A11Y-01 chart-axis contrast token, partial-data states for panels 1–3, `@nivo/boxplot` cleanup
 - [ ] **Phase 14b: Single-Strategy v2 — Lazy Panels + Trade & Exposure** — bodies for Panels 4–7 (Returns Distribution / Rolling / Trades / Exposure+Greeks), DailyHeatmap SVG/Canvas fallback, Trade Mix maker/taker (audit-gated close-out), partial-data states for panels 4–7, axe-core CI on full route, keyboard navigation across the full 7-panel scroll, automated chart-snapshot parity (Playwright pixel-diff ±2%)
 
@@ -75,9 +75,19 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   3a. `pg_column_size(metrics_json)` p99.9 across all published strategies post-backfill < 800kB; CI runs `analyze_metrics_size.sql` weekly; if p99.9 ≥ 800kB at any strategy, kill-switch triggers (emergency cutover migrates remaining heavy keys from `metrics_json` to `strategy_analytics_series` sibling table — automated via Phase 12 deploy script).
   3b. `getStrategyDetail()` Postgres path-extraction (`metrics_json -> '<key>'`) p95 latency for above-the-fold scalars (CAGR / Sharpe / Sortino / Max DD / Vol / equity_series_1y) < 50ms.
   3c. Lazy-fetch RPC for panels 4–7 series (`fetch_strategy_lazy_metrics(strategy_id, panel_id)`) p95 < 200ms.
-  4. Live `sync_trades` jobs do not queue behind backfill on Phase 12 deploy: migration `084_compute_jobs_priority.sql` ships the `priority` enum (`low`/`normal`/`high`) with partial index, the throttled enqueuer in `job_worker.py` reads priority and caps backfill jobs at 5/min when both backfill and sync jobs are queued, and a dashboard probe confirms `compute_analytics` queue depth never exceeds 50 for >10 min during the rollout window.
+  4. Live `sync_trades` jobs do not queue behind backfill on Phase 12 deploy: migration `086_compute_jobs_priority.sql` ships the `priority` enum (`low`/`normal`/`high`) with partial index, the throttled enqueuer in `job_worker.py` reads priority and caps backfill jobs at 5/min when both backfill and sync jobs are queued, and a dashboard probe confirms `compute_analytics` queue depth never exceeds 50 for >10 min during the rollout window.
   5. The Phase 12-internal `is_maker` audit on `raw_fills` (Binance / OKX / Bybit handlers — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit, documented as N/A in TODOS.md before plan-phase begins) returns a documented boolean per exchange; if any of the three handlers lacks the flag, METRICS-10 + KPI-17 are descoped to v0.17.1 with a TODOS.md entry, and the parity test does not regress.
-**Plans:** TBD
+**Plans:** 10 plans
+- [x] 12-01-PLAN.md — is_maker audit + D-15 branch decision (Wave 1) — completed 2026-04-28 (TRADE_MIX_HAS_MAKER_TAKER=false, 2-bucket fallback)
+- [x] 12-02-PLAN.md — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push) — completed 2026-04-28 (D-16 frozen contract locked; H-B search_path hardening on all RPCs; H-D equity_series_1y omitted from sibling-kind union; H-F weighted_risk_reward_ratio in TradeMetrics)
+- [ ] 12-03-PLAN.md — Rolling Sortino/Vol/Greeks + log returns helpers in metrics.py (Wave 3, TDD)
+- [ ] 12-04-PLAN.md — Daily returns grid + exposure series persistence + turnover series + 10 qstats scalars (Wave 3, TDD)
+- [ ] 12-05-PLAN.md — 5 derived trade metrics + volume aggregator + audit-gated Trade Mix (Wave 3, TDD)
+- [ ] 12-06-PLAN.md — MetricsResult dataclass + sibling-table loop upsert in run_strategy_analytics (Wave 4)
+- [ ] 12-07-PLAN.md — Switch dispatch_tick to claim_compute_jobs_with_priority (Wave 5, TDD)
+- [ ] 12-08-PLAN.md — fetchStrategyLazyMetrics RPC consumer in queries.ts (Wave 5)
+- [ ] 12-09-PLAN.md — regen_golden + 3 fixtures + Python + TS parity tests (Wave 6, TDD)
+- [ ] 12-10-PLAN.md — analyze_metrics_size + kill-switch + backfill enqueue + deploy orchestrator (Wave 7)
 **Complexity:** High — pure additive math but ships against a 1MB TOAST ceiling, requires throttled backfill orchestration via priority-enum migration, mounts a sibling-table for heavy series, and mounts a cross-runtime byte-identical contract.
 
 ### Phase 13: Discovery v2 Polish
@@ -88,7 +98,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   1. An allocator can star any strategy from any row or card on `/discovery/[slug]`; "My Watchlist" sub-tab appears alongside "All" with a count badge, the star toggle is idempotent under rapid double-click (PUT `/api/watchlist/[strategyId]`), and reload preserves the watched set on `user_favorites`.
   2. Customize prefs (Default view / Default sort / Hide examples) persist in `localStorage["discovery_view_preferences:{auth.uid}:{slug}"]` keyed by user; a Playwright spec proves login-as-A-then-login-as-B leaves no A-keys in B's localStorage.
   3. Sparklines on every Discovery row + card render with a single accent color across the trace — `#1B6B5A` when final value > 0, `#DC2626` when final value < 0, `#94A3B8` when zero — and a visual snapshot regression catches any future split-color reintroduction.
-  4. The Phase 13-internal `organization_id` population audit (single SQL: `SELECT COUNT(*) FROM strategies WHERE organization_id IS NOT NULL AND status='published'`) is documented in TODOS.md; if the count is 0, DISCO-03 (filter-by-team UI) is explicitly deferred to v0.18 with a TODOS entry; if non-zero, migration `086_organizations_is_public.sql` ships (adds `is_public BOOLEAN DEFAULT false`), the dropdown reads only `WHERE is_public = true` (default-false avoids leaking private/stealth fund names; managers opt-in via `/strategies/team` settings deferred to v0.18; managers can be flipped to public manually via admin during v0.17 if needed), and surfaces only orgs whose strategies are visible to the allocator.
+  4. The Phase 13-internal `organization_id` population audit (single SQL: `SELECT COUNT(*) FROM strategies WHERE organization_id IS NOT NULL AND status='published'`) is documented in TODOS.md; if the count is 0, DISCO-03 (filter-by-team UI) is explicitly deferred to v0.18 with a TODOS entry; if non-zero, migration `088_organizations_is_public.sql` ships (adds `is_public BOOLEAN DEFAULT false`), the dropdown reads only `WHERE is_public = true` (default-false avoids leaking private/stealth fund names; managers opt-in via `/strategies/team` settings deferred to v0.18; managers can be flipped to public manually via admin during v0.17 if needed), and surfaces only orgs whose strategies are visible to the allocator.
   5. Seed-fixture strategies have `is_example=true` after a data-only `UPDATE strategies SET is_example=true WHERE id IN (<seed UUIDs>)` migration and the Customize default is "Hide examples = ON" — a fresh allocator's first Discovery visit shows zero example strategies.
 **Plans:** TBD
 **UI hint**: yes
@@ -158,7 +168,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 | 09.1. Allocator Dashboard UI refresh | v0.15.0.0 | 11/11 | Complete | 2026-04-24 |
 | 10. Scenario Builder and What-If | v0.15.0.0 | 8/8 | Complete | 2026-04-26 |
 | 11. Onboarding and Security Readiness | v0.16.0.0 | 7/7 | Complete | 2026-04-26 |
-| 12. Backend Metric Contracts | v0.17.0.0 | 0/? | Not started | — |
+| 12. Backend Metric Contracts | v0.17.0.0 | 10/10 | Complete | 2026-04-28 |
 | 13. Discovery v2 Polish | v0.17.0.0 | 0/? | Not started | — |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 0/? | Not started | — |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 0/? | Not started | — |

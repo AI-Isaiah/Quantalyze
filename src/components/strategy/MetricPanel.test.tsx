@@ -115,7 +115,25 @@ describe("MetricPanel", () => {
         alpha: 0.05,
         beta: 0.8,
       },
-      trade_metrics: { total_trades: 150, win_rate: 0.55 },
+      trade_metrics: {
+        total_positions: 150,
+        open_positions: 0,
+        closed_positions: 150,
+        win_rate: 0.55,
+        avg_roi: 0.0,
+        avg_duration_days: 0,
+        long_count: 0,
+        short_count: 0,
+        best_trade_roi: 0.0,
+        worst_trade_roi: 0.0,
+        expectancy: null,
+        risk_reward_ratio: null,
+        weighted_risk_reward_ratio: null,
+        sqn: null,
+        profit_factor_long: null,
+        profit_factor_short: null,
+        trade_mix: undefined,
+      },
     });
     const { container } = render(<MetricPanel analytics={fullAnalytics} />);
     // Should render without throwing

@@ -74,13 +74,16 @@ class TestDispatchTick:
         mock_supabase.rpc.return_value = claim_chain
 
         # After the first claim call, switch rpc to return mark_chain for
-        # subsequent calls (mark_done / mark_failed).
+        # subsequent calls (mark_done / mark_failed). Phase 12 / METRICS-14:
+        # claim path now goes through claim_compute_jobs_with_priority
+        # (migration 086) — the legacy claim_compute_jobs name no longer
+        # appears in main_worker.py's call site.
         call_count = 0
 
         def _rpc_side_effect(name: str, params: dict):
             nonlocal call_count
             call_count += 1
-            if name == "claim_compute_jobs":
+            if name == "claim_compute_jobs_with_priority":
                 return claim_chain
             return mark_chain
 
@@ -96,7 +99,7 @@ class TestDispatchTick:
         # Should have: 1 claim call + 3 mark_done calls = 4 total RPC calls
         rpc_calls = mock_supabase.rpc.call_args_list
         rpc_names = [c.args[0] for c in rpc_calls]
-        assert rpc_names.count("claim_compute_jobs") == 1
+        assert rpc_names.count("claim_compute_jobs_with_priority") == 1
         assert rpc_names.count("mark_compute_job_done") == 3
         assert "mark_compute_job_failed" not in rpc_names
 
@@ -111,7 +114,7 @@ class TestDispatchTick:
         chain.execute.return_value = MagicMock(data=None)
 
         def _rpc_side_effect(name: str, params: dict):
-            if name == "claim_compute_jobs":
+            if name == "claim_compute_jobs_with_priority":
                 claim = MagicMock()
                 claim.execute.return_value = MagicMock(data=jobs)
                 return claim
@@ -145,7 +148,7 @@ class TestDispatchTick:
 
         def _rpc_side_effect(name: str, params: dict):
             chain = MagicMock()
-            if name == "claim_compute_jobs":
+            if name == "claim_compute_jobs_with_priority":
                 chain.execute.return_value = MagicMock(data=jobs)
             else:
                 chain.execute.return_value = MagicMock(data=None)
@@ -218,6 +221,60 @@ class TestDispatchTick:
 
         after = main_worker_healthz.LAST_TICK_AT
         assert after > before
+
+    # METRICS-14 / Plan 12-07: priority-aware claim path. The throttle MUST
+    # live in the claim path (dispatch_tick), not in dispatch() — by the time
+    # dispatch runs, the row is already claimed. Phase 12 SC#4: live
+    # sync_trades jobs do not queue behind backfill on Phase 12 deploy.
+    # See migration 086 for the RPC contract; see 12-RESEARCH.md §5d for
+    # the throttle-location correction.
+    @pytest.mark.asyncio
+    async def test_dispatch_tick_calls_priority_rpc(self) -> None:
+        """METRICS-14: dispatch_tick uses claim_compute_jobs_with_priority
+        (migration 086) and NOT the legacy claim_compute_jobs RPC."""
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=[])
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            await dispatch_tick("worker-test-priority")
+
+        called_rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs_with_priority" in called_rpc_names, (
+            f"Expected claim_compute_jobs_with_priority to be called; "
+            f"got: {called_rpc_names}"
+        )
+        assert "claim_compute_jobs" not in called_rpc_names, (
+            f"Legacy claim_compute_jobs RPC must NOT be called after the "
+            f"Phase 12 / METRICS-14 swap; got: {called_rpc_names}"
+        )
+
+    # METRICS-14: confirm the new RPC is called with the same parameter
+    # shape as the legacy one. Migration 086 keeps the signature
+    # (p_batch_size INTEGER, p_worker_id TEXT) — a wrong shape would cause
+    # a PostgREST error at runtime even though the RPC name is correct.
+    @pytest.mark.asyncio
+    async def test_dispatch_tick_priority_rpc_param_shape(self) -> None:
+        """The priority-aware RPC is called with batch_size=5 and the
+        worker_id passed through."""
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=[])
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            await dispatch_tick("worker-test-shape")
+
+        priority_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "claim_compute_jobs_with_priority"
+        ]
+        assert len(priority_calls) == 1
+        params = priority_calls[0].args[1]
+        assert params == {"p_batch_size": 5, "p_worker_id": "worker-test-shape"}
 
 
 # ---------------------------------------------------------------------------

@@ -3,9 +3,12 @@
 Runs 3 interleaved asyncio loops on Railway (CMD override: python -m main_worker):
 
   1. **Dispatch loop** (every 30s) — claims pending jobs via
-     claim_compute_jobs(batch=5, worker_id) and dispatches to per-kind
-     handlers in services.job_worker. Results (DONE/FAILED/DEFERRED) are
-     routed back to the corresponding mark_* RPC.
+     claim_compute_jobs_with_priority(batch=5, worker_id) and dispatches
+     to per-kind handlers in services.job_worker. Results
+     (DONE/FAILED/DEFERRED) are routed back to the corresponding mark_*
+     RPC. The priority-aware RPC (migration 086) prefers normal/high
+     priority jobs and throttles low-priority backfill when live work is
+     queued — see Phase 12 / METRICS-14.
 
   2. **Watchdog loop** (every 60s) — calls reset_stalled_compute_jobs with
      per-kind thresholds so long-running compute_analytics (20 min ceiling)
@@ -95,9 +98,20 @@ async def dispatch_tick(worker_id: str) -> None:
     """
     supabase = get_supabase()
 
+    # Phase 12 / METRICS-14 / D-06: priority-aware claim with backfill
+    # throttle. Migration 086's claim_compute_jobs_with_priority RPC
+    # atomically prefers normal/high jobs and excludes priority='low' rows
+    # this tick whenever any normal/high pending row exists. The 5-jobs-
+    # per-tick × ~12 ticks/min × low-deferral combination delivers D-06's
+    # 5 backfill jobs/min cap without any Python-side rate limiter — the
+    # throttle lives in the SQL claim path (per 12-RESEARCH.md §5d
+    # correction: by the time dispatch() runs, the row is already claimed).
+    # Same atomic concurrency primitive (FOR UPDATE SKIP LOCKED) as the
+    # legacy claim_compute_jobs (migration 032), so two replicas claiming
+    # in parallel still get disjoint result sets.
     def _claim():
         return supabase.rpc(
-            "claim_compute_jobs",
+            "claim_compute_jobs_with_priority",
             {"p_batch_size": 5, "p_worker_id": worker_id},
         ).execute()
 

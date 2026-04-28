@@ -33,6 +33,11 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# Phase 12 / M-01: phase12_deploy.py writes TRADE_MIX_HAS_MAKER_TAKER here for CI
+# parity tests to source. Listed explicitly so grep -E "^\.env\.test$" matches the
+# Phase 12 Plan 12-10 acceptance contract (the .env* glob above already covers it).
+.env.test
+
 # vercel
 .vercel
 
