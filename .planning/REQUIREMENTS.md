@@ -63,7 +63,7 @@
 - [ ] **METRICS-07**: 7 derived trade metrics added — Expectancy, R:R, Weighted R:R, Long PF, Short PF + side-segmented Trade Main aggregator
 - [ ] **METRICS-08**: SQN function added (Van Tharp `mean(R)/std(R) × sqrt(min(N,100))`)
 - [ ] **METRICS-09**: Volume aggregator over `raw_fills` — gross volume, mean trade size, mean daily turnover, mean monthly turnover
-- [ ] **METRICS-10**: Trade Mix maker/taker aggregator over `raw_fills` — gated on `is_maker` flag audit on Binance / OKX / Bybit (Deribit excluded — `fetch_raw_trades` does not dispatch there); KPI-17 dependency
+- [ ] **METRICS-10**: Trade Mix maker/taker aggregator over `raw_fills` — gated on `is_maker` flag audit on Binance / OKX / Bybit (Deribit excluded — `fetch_raw_trades` does not dispatch there); KPI-17 dependency. Audit resolved 2026-04-28 (Plan 12-01): TRADE_MIX_HAS_MAKER_TAKER=false → ship 2-bucket long/short fallback; maker/taker dimension deferred to v0.17.1. Implementation lands in Plan 12-05.
 - [ ] **METRICS-11**: New scalar metrics added — Recovery Factor, Ulcer Index, Ulcer Performance Index (UPI), Kelly Criterion, Probabilistic Sharpe Ratio, Common Sense Ratio, CPC Index, Serenity Index, R² (vs BTC), Time-in-Market (qstats `exposure` scalar). 10 new scalars; each is `qs.stats.{name}(returns)` one-liner
 - [ ] **METRICS-12**: `log_returns_series` added (powers EquityCurve "Log Returns" toggle in KPI-04)
 - [ ] **METRICS-13**: Cross-runtime parity tests — pytest fixtures + Vitest equivalents on a golden 252-day fixture; assert byte-identical JSON between Python `metrics.py` output and JS-side parser
@@ -173,7 +173,7 @@ Coverage: **53 / 53** v0.17.0.0 requirements mapped (filled by gsd-roadmapper 20
 | METRICS-07 | METRICS | Phase 12 | Pending |
 | METRICS-08 | METRICS | Phase 12 | Pending |
 | METRICS-09 | METRICS | Phase 12 | Pending |
-| METRICS-10 | METRICS | Phase 12 | Pending (gated on is_maker audit Binance/OKX/Bybit; Deribit excluded) |
+| METRICS-10 | METRICS | Phase 12 | Audit resolved 2026-04-28 (Plan 12-01): TRADE_MIX_HAS_MAKER_TAKER=false → 2-bucket long/short fallback; impl in Plan 12-05 |
 | METRICS-11 | METRICS | Phase 12 | Pending |
 | METRICS-12 | METRICS | Phase 12 | Pending |
 | METRICS-13 | METRICS | Phase 12 | Pending |

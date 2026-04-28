@@ -2,14 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
-status: completed
-last_updated: "2026-04-27T09:02:28.690Z"
-last_activity: 2026-04-26 — gsd-roadmapper applied 6 convergent fixes from cross-AI review (Phase 14 split into 14a + 14b, is_maker audit rescoped to 3 exchanges, METRICS-16/17 promoted to hard deliverables, success criteria tightened with automated checks, organizations.is_public conditional gate added for DISCO-03)
+status: executing
+last_updated: "2026-04-28T11:59:33.238Z"
+last_activity: 2026-04-28
 progress:
   total_phases: 4
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 10
+  completed_plans: 1
+  percent: 10
 ---
 
 # Project State
@@ -19,15 +20,15 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-26 at v0.17.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (roadmap revised post cross-AI review, ready for phase planning)
+**Current focus:** Phase 12 — backend-metric-contracts
 **Concurrent on `main`:** v0.16.0.0 Phase 11 (Onboarding + Security Readiness) executing in parallel — independent surface area, not a blocker.
 
 ## Current Position
 
-Phase: Phase 12 — Backend Metric Contracts (METRICS-01..17)
-Plan: —
-Status: Roadmap complete (4-phase structure post cross-AI review); awaiting `/gsd-plan-phase 12` (or `/gsd-plan-phase 13` to start Discovery v2 in parallel)
-Last activity: 2026-04-26 — gsd-roadmapper applied 6 convergent fixes from cross-AI review (Phase 14 split into 14a + 14b, is_maker audit rescoped to 3 exchanges, METRICS-16/17 promoted to hard deliverables, success criteria tightened with automated checks, organizations.is_public conditional gate added for DISCO-03)
+Phase: 12 (backend-metric-contracts) — EXECUTING
+Plan: 2 of 10
+Status: Ready to execute
+Last activity: 2026-04-28
 
 ## Milestone Summary (v0.17.0.0)
 
@@ -127,6 +128,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - v0.16.0.0 (Phase 11 — Onboarding & Security Readiness) executing on `main` in parallel to v0.17 planning. Not a blocker — v0.17 changes are confined to `/discovery/[slug]` + `/strategy/[id]` + `analytics-service/services/metrics.py`, no overlap with Phase 11 surface area.
 - Phase 11 Plan 03 (PostHog onboarding funnel wiring) completed on main 2026-04-26 — 5 events firing end-to-end with single-fire markers + at-least-once dedup
 - Phase 11 Plan 06 complete — S4a SOC-2 banner + S4c audit-log link on /security; S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint persist across all 4 wizard steps; S6 AuditLogSubsection on /profile?tab=security consuming GET /api/me/audit-log/export. S4b inline egress-IP block deferred per user direction (no static analytics-service IPs today; existing email-path body preserved). 35 new tests, 0 regressions, typecheck + lint + build green.
+- Phase 12 Plan 01: TRADE_MIX_HAS_MAKER_TAKER = false (2-bucket fallback) — production trades table empty, D-15 ≥99% gate fails for all 3 exchanges; defer maker/taker dimension to v0.17.1
 
 ### Roadmap drafted (2026-04-26)
 
@@ -157,7 +159,7 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: --stopped-at
-Next resume target: `/gsd-plan-phase 12` (or `/gsd-plan-phase 13` to start Discovery v2 in parallel — Phase 12 is the dependency for Phase 14a → Phase 14b)
+Last session: 2026-04-28T11:59:29.862Z
+Next resume target: Phase 12 Plan 02 — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push). Execute via `/gsd-execute-phase 12` (continuing) — current plan 2 of 10. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)

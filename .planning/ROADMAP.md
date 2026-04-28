@@ -78,7 +78,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   4. Live `sync_trades` jobs do not queue behind backfill on Phase 12 deploy: migration `086_compute_jobs_priority.sql` ships the `priority` enum (`low`/`normal`/`high`) with partial index, the throttled enqueuer in `job_worker.py` reads priority and caps backfill jobs at 5/min when both backfill and sync jobs are queued, and a dashboard probe confirms `compute_analytics` queue depth never exceeds 50 for >10 min during the rollout window.
   5. The Phase 12-internal `is_maker` audit on `raw_fills` (Binance / OKX / Bybit handlers — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit, documented as N/A in TODOS.md before plan-phase begins) returns a documented boolean per exchange; if any of the three handlers lacks the flag, METRICS-10 + KPI-17 are descoped to v0.17.1 with a TODOS.md entry, and the parity test does not regress.
 **Plans:** 10 plans
-- [ ] 12-01-PLAN.md — is_maker audit + D-15 branch decision (Wave 1)
+- [x] 12-01-PLAN.md — is_maker audit + D-15 branch decision (Wave 1) — completed 2026-04-28 (TRADE_MIX_HAS_MAKER_TAKER=false, 2-bucket fallback)
 - [ ] 12-02-PLAN.md — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push)
 - [ ] 12-03-PLAN.md — Rolling Sortino/Vol/Greeks + log returns helpers in metrics.py (Wave 3, TDD)
 - [ ] 12-04-PLAN.md — Daily returns grid + exposure series persistence + turnover series + 10 qstats scalars (Wave 3, TDD)
