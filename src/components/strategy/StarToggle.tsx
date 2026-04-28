@@ -8,8 +8,15 @@
  * leading-column / card-corner icon flips immediately. The actual PUT
  * to /api/watchlist/[strategyId] is fired inside useTransition; if it
  * fails, we retry once after 600ms (per UI-SPEC State Matrix), and on
- * the second failure call onToggle again with the ORIGINAL starred
- * value to revert the visual flip and surface an inline retry hint.
+ * the second failure revert the visual flip (back to !nextStarred —
+ * the value before this click) and surface an inline retry hint.
+ *
+ * Rapid-double-click safety has two layers:
+ *   1) The button is `disabled` while `isPending` is true — React
+ *      blocks subsequent click events for the duration of the transition.
+ *   2) Server-side idempotency in PUT /api/watchlist/[strategyId]
+ *      (ON CONFLICT DO NOTHING for add, DELETE for remove) makes any
+ *      duplicate that does slip through a no-op.
  *
  * Pattern source: useTransition optimistic mirror per RESEARCH.md
  * Pattern 5 + Open Q #2 in TODOS.md (codebase-consistent with
@@ -77,9 +84,13 @@ export function StarToggle({
       const okRetry = await attempt(action);
       if (okRetry) return;
 
-      // Both attempts failed — revert optimistic flip and surface the
-      // 4-second retry hint.
-      onToggle(strategyId, starred);
+      // Both attempts failed — revert the optimistic flip and surface
+      // the 4-second retry hint. We revert to !nextStarred (the
+      // pre-click value at the moment this handler ran) rather than
+      // re-reading `starred` from the props closure; that keeps the
+      // revert intent stable even if the parent has re-rendered with a
+      // new `starred` value during the transition.
+      onToggle(strategyId, !nextStarred);
       setShowRetryHint(true);
       setTimeout(() => setShowRetryHint(false), 4000);
     });

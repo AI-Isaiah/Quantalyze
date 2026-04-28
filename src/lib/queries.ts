@@ -1707,6 +1707,12 @@ export async function getMyWatchlist(userId: string): Promise<Set<string>> {
     .select("strategy_id")
     .eq("user_id", userId);
   if (error || !data) {
+    if (error) {
+      console.error(
+        "[queries.getMyWatchlist] supabase error:",
+        error.message ?? error,
+      );
+    }
     return new Set<string>();
   }
   return new Set(data.map((row) => row.strategy_id as string));
