@@ -30,9 +30,16 @@ description = "Known test fixtures and placeholder env samples"
 #   verify the scrubber redacts JWT-shaped strings. Not a real token.
 # - package-lock.json: integrity hashes trip gitleaks generic
 #   high-entropy detection; this is well-known noise to ignore.
+# - .planning/: gstack planning artifacts (plan markdowns, summaries,
+#   review reports). Pure prose with technical terms ("mid-Phase-14b",
+#   migration filenames, RPC names) that the generic-api-key entropy
+#   detector mistakes for secrets. These files ship documentation, not
+#   credentials. The directory is force-added per the project's planning
+#   workflow.
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)package-lock\.json$''',
+  '''(^|/)\.planning/''',
 ]
