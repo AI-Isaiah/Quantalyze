@@ -369,6 +369,102 @@ def _monthly_returns_grid_from_series(monthly: pd.Series) -> dict[str, dict[str,
     return grid
 
 
+def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
+    """Flat per-day return list. Sibling-table kind = 'daily_returns_grid'.
+
+    Output shape: [{date: 'YYYY-MM-DD', value: float}, …].
+    Heat-map renderer (Phase 14b) reshapes into 12-month × N-year grid client-side.
+    Matches the per-date shape of every other series kind (exposure_series,
+    turnover_series, rolling_*).
+
+    Mirrors `_monthly_returns_grid_from_series` template above (D-03 storage
+    decision: flat list serializes smaller and matches per-date shape of every
+    other series kind per RESEARCH.md §5b).
+    """
+    if len(returns) == 0:
+        return []
+    return [
+        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
+        for d, v in returns.items()
+    ]
+
+
+def compute_qstats_scalars(
+    returns: pd.Series,
+    benchmark: pd.Series | None,
+) -> dict[str, float | None]:
+    """METRICS-11: Compute the 10 new qstats scalars.
+
+    Each scalar is wrapped in try/except so a single qs failure doesn't take
+    down the whole metrics computation (mirrors existing pattern at
+    metrics.py:97-138). All keys are always present in the output dict; the
+    value is None when the underlying computation fails or input is missing
+    (e.g., r_squared without benchmark).
+
+    Output keys (D-01 sibling-table contract):
+        recovery_factor, ulcer_index, upi (ulcer_performance_index),
+        kelly_criterion, probabilistic_sharpe_ratio (qs.stats.probabilistic_ratio),
+        common_sense_ratio, cpc_index, serenity_index, r_squared (vs benchmark),
+        time_in_market (qstats name = `exposure`, output key per CONTEXT.md).
+    """
+    result: dict[str, float | None] = {
+        "recovery_factor": None,
+        "ulcer_index": None,
+        "upi": None,
+        "kelly_criterion": None,
+        "probabilistic_sharpe_ratio": None,
+        "common_sense_ratio": None,
+        "cpc_index": None,
+        "serenity_index": None,
+        "r_squared": None,
+        "time_in_market": None,
+    }
+
+    try:
+        result["recovery_factor"] = _safe_float(qs.stats.recovery_factor(returns))
+    except Exception:
+        pass
+    try:
+        result["ulcer_index"] = _safe_float(qs.stats.ulcer_index(returns))
+    except Exception:
+        pass
+    try:
+        result["upi"] = _safe_float(qs.stats.ulcer_performance_index(returns))
+    except Exception:
+        pass
+    try:
+        result["kelly_criterion"] = _safe_float(qs.stats.kelly_criterion(returns))
+    except Exception:
+        pass
+    try:
+        result["probabilistic_sharpe_ratio"] = _safe_float(qs.stats.probabilistic_ratio(returns))
+    except Exception:
+        pass
+    try:
+        result["common_sense_ratio"] = _safe_float(qs.stats.common_sense_ratio(returns))
+    except Exception:
+        pass
+    try:
+        result["cpc_index"] = _safe_float(qs.stats.cpc_index(returns))
+    except Exception:
+        pass
+    try:
+        result["serenity_index"] = _safe_float(qs.stats.serenity_index(returns))
+    except Exception:
+        pass
+    try:
+        if benchmark is not None and len(benchmark) > 0:
+            result["r_squared"] = _safe_float(qs.stats.r_squared(returns, benchmark))
+    except Exception:
+        pass
+    try:
+        result["time_in_market"] = _safe_float(qs.stats.exposure(returns))
+    except Exception:
+        pass
+
+    return result
+
+
 def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
     """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size."""
     cleaned = series.dropna().replace([np.inf, -np.inf], np.nan).dropna()
