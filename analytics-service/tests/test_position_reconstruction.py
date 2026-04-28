@@ -315,3 +315,150 @@ import asyncio
 async def _run_sync(fn):
     """Run a synchronous function in a thread, matching db_execute's contract."""
     return await asyncio.to_thread(fn)
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 / Plan 04 — METRICS-05, METRICS-06 — RED tests
+# ---------------------------------------------------------------------------
+# METRICS-05: compute_exposure_metrics persists per-date exposure_series
+#             alongside aggregates (refactor lines 461-487 — was discarded).
+# METRICS-06: compute_turnover_series with explicit Pitfall #19 docstring
+#             contract (turnover = abs(Δposition × price) / nav).
+
+from services.position_reconstruction import (
+    compute_exposure_metrics,
+    compute_turnover_series,
+)
+
+
+def _make_exposure_snapshots_mock(snapshots: list[dict]) -> MagicMock:
+    """Mock supabase whose position_snapshots select chain returns `snapshots`.
+
+    Mirrors _make_snapshots_mock in test_position_reconstruction_edges.py.
+    """
+    mock = MagicMock()
+    mock_table = MagicMock()
+    m_sel = MagicMock()
+    m_eq = MagicMock()
+    m_order = MagicMock()
+    m_order.execute.return_value = MagicMock(data=snapshots)
+    m_eq.order.return_value = m_order
+    m_sel.eq.return_value = m_eq
+    mock_table.select.return_value = m_sel
+    mock.table.return_value = mock_table
+    return mock
+
+
+@pytest.mark.asyncio
+async def test_exposure_metrics_includes_series() -> None:
+    """METRICS-05: per-date exposure arrays now persist as exposure_series
+    alongside aggregates (was previously discarded after aggregation)."""
+    snaps = [
+        {"snapshot_date": "2024-01-01", "side": "long", "size_usd": 500.0},
+        {"snapshot_date": "2024-01-01", "side": "short", "size_usd": 300.0},
+        {"snapshot_date": "2024-01-02", "side": "long", "size_usd": 600.0},
+        {"snapshot_date": "2024-01-02", "side": "short", "size_usd": 400.0},
+    ]
+    mock = _make_exposure_snapshots_mock(snaps)
+    with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+        result = await compute_exposure_metrics("strat-1", mock)
+    # Existing aggregates still present (no caller breakage)
+    assert "mean_gross_exposure" in result
+    assert "max_gross_exposure" in result
+    # NEW: exposure_series with per-date entries
+    assert "exposure_series" in result
+    assert isinstance(result["exposure_series"], list)
+    assert len(result["exposure_series"]) == 2
+    for point in result["exposure_series"]:
+        assert "date" in point
+        assert "gross" in point
+        assert "net" in point
+    # Day 1: gross 800, net +200. Day 2: gross 1000, net +200.
+    by_date = {p["date"]: p for p in result["exposure_series"]}
+    assert by_date["2024-01-01"]["gross"] == 800.0
+    assert by_date["2024-01-01"]["net"] == 200.0
+    assert by_date["2024-01-02"]["gross"] == 1000.0
+    assert by_date["2024-01-02"]["net"] == 200.0
+
+
+@pytest.mark.asyncio
+async def test_exposure_metrics_empty_when_no_snapshots() -> None:
+    """METRICS-05: empty input still returns empty dict (no exposure_series key)."""
+    mock = _make_exposure_snapshots_mock([])
+    with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+        result = await compute_exposure_metrics("strat-1", mock)
+    assert result == {}
+
+
+def test_turnover_series_contract() -> None:
+    """METRICS-06 / Pitfall 19: turnover = abs(Δposition × price) / NAV per docstring contract."""
+    # Synthetic: position changes by 1.0 unit, price=100, nav=10000 → turnover = 0.01
+    positions_by_date = {
+        "2025-01-01": {"BTC": 0.0},
+        "2025-01-02": {"BTC": 1.0},
+        "2025-01-03": {"BTC": 1.0},
+    }
+    prices_by_date = {
+        "2025-01-01": {"BTC": 100.0},
+        "2025-01-02": {"BTC": 100.0},
+        "2025-01-03": {"BTC": 100.0},
+    }
+    nav_by_date = {
+        "2025-01-01": 10000.0,
+        "2025-01-02": 10000.0,
+        "2025-01-03": 10000.0,
+    }
+    series = compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
+    assert isinstance(series, list)
+    days = {p["date"]: p["turnover"] for p in series}
+    # Day 1: no prior position → turnover = 0
+    assert abs(days.get("2025-01-01", 999.0) - 0.0) < 1e-9
+    # Day 2: Δ = 1.0, price = 100, nav = 10000 → 0.01
+    assert "2025-01-02" in days
+    assert abs(days["2025-01-02"] - 0.01) < 1e-9
+    # Day 3: Δ = 0 → turnover = 0
+    assert abs(days.get("2025-01-03", 0.0) - 0.0) < 1e-9
+
+
+def test_turnover_series_empty_input() -> None:
+    """METRICS-06: empty input returns empty list (graceful)."""
+    assert compute_turnover_series({}, {}, {}) == []
+
+
+def test_turnover_series_zero_nav_short_circuit() -> None:
+    """METRICS-06 / T-12-04-02 mitigation: zero or negative NAV → turnover=0."""
+    positions_by_date = {
+        "2025-01-01": {"BTC": 0.0},
+        "2025-01-02": {"BTC": 1.0},
+    }
+    prices_by_date = {
+        "2025-01-01": {"BTC": 100.0},
+        "2025-01-02": {"BTC": 100.0},
+    }
+    nav_by_date = {
+        "2025-01-01": 10000.0,
+        "2025-01-02": 0.0,  # zero NAV → must short-circuit, not raise ZeroDivisionError
+    }
+    series = compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
+    days = {p["date"]: p["turnover"] for p in series}
+    assert days["2025-01-02"] == 0.0
+
+
+def test_turnover_series_multi_symbol() -> None:
+    """METRICS-06: turnover sums abs(Δ × price) across all symbols, divided by NAV."""
+    positions_by_date = {
+        "2025-01-01": {"BTC": 0.0, "ETH": 0.0},
+        "2025-01-02": {"BTC": 1.0, "ETH": 5.0},
+    }
+    prices_by_date = {
+        "2025-01-01": {"BTC": 100.0, "ETH": 50.0},
+        "2025-01-02": {"BTC": 100.0, "ETH": 50.0},
+    }
+    nav_by_date = {
+        "2025-01-01": 10000.0,
+        "2025-01-02": 10000.0,
+    }
+    series = compute_turnover_series(positions_by_date, prices_by_date, nav_by_date)
+    days = {p["date"]: p["turnover"] for p in series}
+    # Δ_BTC × P_BTC + Δ_ETH × P_ETH = 1*100 + 5*50 = 350; nav=10000 → 0.035
+    assert abs(days["2025-01-02"] - 0.035) < 1e-9
