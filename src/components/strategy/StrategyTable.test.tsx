@@ -260,3 +260,87 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(screen.getByText("Gamma Pioneer")).toBeDefined();
   });
 });
+
+// --- DISCO-04 sparkline color rule -----------------------------------------
+//
+// Synthetic-fixture component tests covering the three branches of the
+// final-value-sign rule (final>0, final<0, final==0). The seed data on
+// /discovery/crypto-sma trends positive across all 8 strategies, so these
+// fixtures exist specifically to exercise the negative + zero render paths
+// in component-level DOM assertions. The Playwright spec at
+// e2e/discovery-sparkline-regression.spec.ts covers the live-DOM split-color
+// invariant on top of these.
+//
+// Helper: locate the returns sparkline cell (2nd-to-last sparkline cell) vs
+// the drawdown sparkline cell (last). The table renders 11 columns when
+// userId is undefined (no leading star); columns are: Strategy, Return %,
+// CAGR, Sharpe, MaxDD, Volatility, 6Month, AUM, Return spark, Underwater
+// spark, Actions. The Return spark is index 8, Underwater spark is index 9.
+
+const RETURNS_SPARK_TD_INDEX = 8; // 0-indexed when userId is undefined
+const DRAWDOWN_SPARK_TD_INDEX = 9;
+
+function getStrokeOnSparklineCell(
+  rowIndex: number,
+  cellIndex: number,
+): string | null {
+  const rows = document.querySelectorAll("table tbody tr");
+  const row = rows[rowIndex];
+  if (!row) return null;
+  const cells = row.querySelectorAll("td");
+  const cell = cells[cellIndex];
+  if (!cell) return null;
+  // Sparkline renders a stroked <path> for the trace. Locate the first
+  // path[stroke] under this cell.
+  const path = cell.querySelector("path[stroke]");
+  return path?.getAttribute("stroke") ?? null;
+}
+
+describe("StrategyTable — DISCO-04 sparkline color rule (returns column only)", () => {
+  it("renders the returns sparkline with var(--color-accent) when final > 0", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.sparkline_returns = [0, 0.05, 0.1];
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+      "var(--color-accent)",
+    );
+  });
+
+  it("renders the returns sparkline with var(--color-negative) when final < 0", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.sparkline_returns = [0, -0.02, -0.05];
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+      "var(--color-negative)",
+    );
+  });
+
+  it("renders the returns sparkline with var(--color-chart-benchmark) when final === 0", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.sparkline_returns = [0.01, -0.01, 0];
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+      "var(--color-chart-benchmark)",
+    );
+  });
+
+  it("does NOT change the drawdown sparkline color (always var(--color-negative)) — Pitfall 7 invariant", () => {
+    // Even when sparkline_returns ends positive (which would tint the
+    // returns sparkline accent-green), the drawdown sparkline cell at
+    // line ~464 of StrategyTable.tsx must still render with the static
+    // var(--color-negative) prop. This proves the new sign-driven rule
+    // does NOT bleed into the drawdown call site.
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.sparkline_returns = [0, 0.05, 0.1]; // ends positive → accent
+    fixture.analytics.sparkline_drawdown = [0, -0.1, -0.2, -0.05, 0];
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+    // Returns sparkline → accent (sign-driven)
+    expect(getStrokeOnSparklineCell(0, RETURNS_SPARK_TD_INDEX)).toBe(
+      "var(--color-accent)",
+    );
+    // Drawdown sparkline → static var(--color-negative)
+    expect(getStrokeOnSparklineCell(0, DRAWDOWN_SPARK_TD_INDEX)).toBe(
+      "var(--color-negative)",
+    );
+  });
+});
