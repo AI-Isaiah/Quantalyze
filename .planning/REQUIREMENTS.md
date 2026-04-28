@@ -57,14 +57,14 @@
 - [x] **METRICS-01**: `_rolling_sortino(returns, window, mar=MAR)` added to `metrics.py` (line 391); module-level `MAR: float = 0.0` constant (line 15) per Pitfall 11; mirrors `_rolling_sharpe` shape AND `qs.stats.sortino` exact RMS downside math; cross-runtime parity verified at diff=1.11e-16 at window==period==90 (Plan 12-03)
 - [x] **METRICS-02**: `_rolling_volatility(returns, window)` added (line 423); annualized via `std * sqrt(252)`; mirrors `qs.stats.volatility` on a rolling window (Plan 12-03)
 - [x] **METRICS-03**: `_rolling_alpha` + `_rolling_beta` added (lines 434, 449); wrap `qs.stats.rolling_greeks` (BTC benchmark, window=90 default per UC#6); project alpha/beta column from returned DataFrame (Plan 12-03)
-- [ ] **METRICS-04**: `daily_returns_grid(returns)` writes to already-declared `strategy_analytics.daily_returns` JSONB column (migration 001:92); shape `[{date, value}, …]` or 2D matrix per design choice
-- [ ] **METRICS-05**: `compute_exposure_metrics()` refactored to persist per-date gross/net exposure arrays alongside existing aggregates (Pitfall — `position_reconstruction.py:435` currently discards per-date arrays after extracting mean/std/max)
-- [ ] **METRICS-06**: `turnover_series(daily abs(Δposition × price) / NAV)` added; depends on Sprint 3 position reconstruction NAV alignment; explicit docstring on rolling-window vs daily-window contract
+- [x] **METRICS-04**: `_daily_returns_grid_from_series(returns)` shipped in metrics.py (line 372); flat per-day list `[{date, value}, …]` mirroring `_monthly_returns_grid_from_series` template at metrics.py:351; rounds to 6 decimals; D-03 sibling-table storage shape (Plan 12-04)
+- [x] **METRICS-05**: `compute_exposure_metrics()` refactored to persist `exposure_series: [{date, gross, net}]` alongside existing 6 aggregate keys (per-date arrays at lines 461-487 previously discarded); no caller breakage in analytics_runner.py (Plan 12-04)
+- [x] **METRICS-06**: `compute_turnover_series(positions, prices, nav)` shipped in position_reconstruction.py with explicit Pitfall #19 docstring contract (`turnover = sum_over_symbols(abs(delta * price)) / nav`); T-12-04-02 mitigation via `if nav <= 0: turnover = 0.0` short-circuit (Plan 12-04)
 - [ ] **METRICS-07**: 7 derived trade metrics added — Expectancy, R:R, Weighted R:R, Long PF, Short PF + side-segmented Trade Main aggregator
 - [ ] **METRICS-08**: SQN function added (Van Tharp `mean(R)/std(R) × sqrt(min(N,100))`)
 - [ ] **METRICS-09**: Volume aggregator over `raw_fills` — gross volume, mean trade size, mean daily turnover, mean monthly turnover
 - [ ] **METRICS-10**: Trade Mix maker/taker aggregator over `raw_fills` — gated on `is_maker` flag audit on Binance / OKX / Bybit (Deribit excluded — `fetch_raw_trades` does not dispatch there); KPI-17 dependency. Audit resolved 2026-04-28 (Plan 12-01): TRADE_MIX_HAS_MAKER_TAKER=false → ship 2-bucket long/short fallback; maker/taker dimension deferred to v0.17.1. Implementation lands in Plan 12-05.
-- [ ] **METRICS-11**: New scalar metrics added — Recovery Factor, Ulcer Index, Ulcer Performance Index (UPI), Kelly Criterion, Probabilistic Sharpe Ratio, Common Sense Ratio, CPC Index, Serenity Index, R² (vs BTC), Time-in-Market (qstats `exposure` scalar). 10 new scalars; each is `qs.stats.{name}(returns)` one-liner
+- [x] **METRICS-11**: `compute_qstats_scalars(returns, benchmark)` shipped in metrics.py with all 10 new scalars (recovery_factor, ulcer_index, upi, kelly_criterion, probabilistic_sharpe_ratio, common_sense_ratio, cpc_index, serenity_index, r_squared vs benchmark, time_in_market); each in try/except routed through `_safe_float` (mirrors metrics.py:97-138 pattern); fail-soft to None on qs failure or missing benchmark (Plan 12-04)
 - [x] **METRICS-12**: `_log_returns_series(returns)` added (line 459); `np.log1p(returns)` routed through `_finalize_rolling`; same length as input (no window dropoff); powers EquityCurve "Log Returns" toggle in KPI-04 (Plan 12-03)
 - [ ] **METRICS-13**: Cross-runtime parity tests — pytest fixtures + Vitest equivalents on a golden 252-day fixture; assert byte-identical JSON between Python `metrics.py` output and JS-side parser
 - [x] **METRICS-14**: Throttled backfill strategy on Phase 12 deploy — reads METRICS-16 priority enum on `compute_jobs` (backfill=`low`, sync=`normal`); 5 jobs/min cap; live `sync_trades` cannot queue behind backfill (Pitfall 3 / Pitfall 10 mitigation). Throttled enqueuer in `job_worker.py` reads priority and caps backfill jobs at 5/min when both backfill and sync jobs are queued. _Plan 12-07 (✅ 2026-04-28) wired dispatch_tick to claim_compute_jobs_with_priority (migration 086). Plan 12-08 will mark backfill jobs as priority='low' so the claim path defers them when sync_trades is queued._
@@ -167,14 +167,14 @@ Coverage: **53 / 53** v0.17.0.0 requirements mapped (filled by gsd-roadmapper 20
 | METRICS-01 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): MAR + `_rolling_sortino` shipped in metrics.py; QS-mirror RMS downside formula; Pitfall 11 parity diff=1.11e-16 at window==period |
 | METRICS-02 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_rolling_volatility` shipped in metrics.py; std × sqrt(252) |
 | METRICS-03 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_rolling_alpha` + `_rolling_beta` shipped in metrics.py; wrap qs.stats.rolling_greeks(window=90) |
-| METRICS-04 | METRICS | Phase 12 | Pending |
-| METRICS-05 | METRICS | Phase 12 | Pending |
-| METRICS-06 | METRICS | Phase 12 | Pending |
+| METRICS-04 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-04): `_daily_returns_grid_from_series` shipped in metrics.py; D-03 flat per-day shape mirroring monthly grid template |
+| METRICS-05 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-04): `compute_exposure_metrics` refactored to also emit `exposure_series: [{date, gross, net}]` alongside existing aggregates; no caller breakage |
+| METRICS-06 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-04): `compute_turnover_series` shipped with explicit Pitfall #19 docstring + T-12-04-02 zero-NAV short-circuit |
 | METRICS-07 | METRICS | Phase 12 | TS contract locked 2026-04-28 (Plan 12-02): TradeMetrics has 7 derived fields (expectancy, risk_reward_ratio, weighted_risk_reward_ratio per H-F, sqn, profit_factor_long, profit_factor_short) frozen per D-16; impl in Plan 12-05 |
 | METRICS-08 | METRICS | Phase 12 | Pending |
 | METRICS-09 | METRICS | Phase 12 | Pending |
 | METRICS-10 | METRICS | Phase 12 | Audit resolved 2026-04-28 (Plan 12-01): TRADE_MIX_HAS_MAKER_TAKER=false → 2-bucket long/short fallback; impl in Plan 12-05 |
-| METRICS-11 | METRICS | Phase 12 | Pending |
+| METRICS-11 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-04): `compute_qstats_scalars` shipped with all 10 scalars (recovery_factor, ulcer_index, upi, kelly_criterion, probabilistic_sharpe_ratio, common_sense_ratio, cpc_index, serenity_index, r_squared, time_in_market); per-call try/except routed through `_safe_float` |
 | METRICS-12 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_log_returns_series` shipped in metrics.py; np.log1p via _finalize_rolling; full-length output |
 | METRICS-13 | METRICS | Phase 12 | Pending |
 | METRICS-14 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-07): dispatch_tick now calls claim_compute_jobs_with_priority (migration 086); throttle lives in claim path per RESEARCH.md §5d; Phase 12 SC#4 met. |

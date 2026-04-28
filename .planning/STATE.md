@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-last_updated: "2026-04-28T12:50:05Z"
+last_updated: "2026-04-28T13:02:32Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 10
-  completed_plans: 5
-  percent: 50
+  completed_plans: 6
+  percent: 60
 ---
 
 # Project State
@@ -26,8 +26,8 @@ See: `.planning/PROJECT.md` (updated 2026-04-26 at v0.17.0.0 milestone start)
 ## Current Position
 
 Phase: 12 (backend-metric-contracts) — EXECUTING (parallel waves)
-Plan: 5 of 10 complete (12-01, 12-02, 12-03, 12-07, 12-08; remaining: 12-04, 12-05, 12-06, 12-09, 12-10)
-Status: Ready to execute. Plans 12-04, 12-05, 12-06 in flight in parallel waves; 12-07 + 12-08 shipped sequentially on `main` ahead of them. 12-08 ships the TS-side fetchStrategyLazyMetrics consumer that Phase 14b will call from panels 4–7 — its only dependency was 12-02 (migration 087 + LazyMetricsPayload type), already complete.
+Plan: 6 of 10 complete (12-01, 12-02, 12-03, 12-04, 12-07, 12-08; remaining: 12-05, 12-06, 12-09, 12-10)
+Status: Plan 12-04 just shipped on `main` (sequential): METRICS-04, METRICS-05, METRICS-06, METRICS-11 — daily_returns_grid + 10 qstats scalars in metrics.py; exposure_series persistence + compute_turnover_series in position_reconstruction.py. Plans 12-05 and 12-06 still in flight in parallel waves; 12-09 (sibling parity test) is unblocked once 12-06 wires the helpers into the orchestrator.
 Last activity: 2026-04-28
 
 ## Milestone Summary (v0.17.0.0)
@@ -133,6 +133,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 12 Plan 03: MAR=0.0 module constant + 5 rolling-series helpers (Sortino, Volatility, Alpha, Beta, Log returns) added to analytics-service/services/metrics.py mirroring `_rolling_sharpe`'s shape; `_rolling_sortino` uses qs.stats.sortino's exact RMS downside formula (NOT pandas .rolling().std() — that diverges by ~0.17 even at window==period); Pitfall 11 cross-runtime parity verified at diff=1.11e-16 on a 90-day fixture with window==period. Helpers NOT yet wired into compute_all_metrics — that lands in Plan 12-06. Plan-as-drafted Sortino code sketch and golden_returns × window=252 cross-check both deviated; corrected with Rule 1 fixes documented in 12-03 SUMMARY (recommend gsd-plan-checker erratum on RESEARCH.md §5a Sortino snippet using pandas .rolling().std() inconsistent with Pitfall 11's QS RMS contract).
 - Phase 12 Plan 07: METRICS-14 priority-aware claim throttle wired in dispatch_tick — analytics-service/main_worker.py now calls claim_compute_jobs_with_priority (migration 086) instead of legacy claim_compute_jobs. Per RESEARCH.md §5d correction, throttle lives in claim path (not dispatch); migration 086 RPC's CASE-ordered ORDER BY + skip-low-when-high-pending guard delivers D-06's 5 backfill/min cap atomically (5 jobs/tick × ~12 ticks/min × low-deferral). FOR UPDATE SKIP LOCKED preserves disjoint result sets across replicas. Phase 12 SC#4 met: live sync_trades will not queue behind backfill on Phase 12 deploy. 11 unit tests passing including test_dispatch_tick_calls_priority_rpc + test_dispatch_tick_priority_rpc_param_shape (asserts new RPC name + parameter shape). Three pre-existing TestDispatchTick side-effect dispatchers updated as Rule 3 fix to recognise the new name.
 - Phase 12 Plan 08: METRICS-15 (consumer half) — fetchStrategyLazyMetrics(strategyId, panelId): Promise<LazyMetricsPayload> shipped in src/lib/queries.ts as the TS-side consumer for migration 087's fetch_strategy_lazy_metrics SECURITY DEFINER RPC. LazyMetricsPanelId type union (7 panels) matches the SQL CASE in migration 087:163-176. T-12-08-01 mitigation: error logged via console.error with structured metadata + return {} so caller cannot distinguish private-strategy from transient error. TDD RED→GREEN: 4 new tests in queries.test.ts (arg shape, success pass-through, error fallback, null-data fallback) — all 9 tests in the file pass; npm run build exits 0. METRICS-15 path-extraction half (replacing select *, strategy_analytics(*) in getStrategyDetail) remains Phase 14a's job — REQUIREMENTS.md checkbox stays unchecked until that ships.
+- Phase 12 Plan 04: METRICS-04 + METRICS-05 + METRICS-06 + METRICS-11 — `_daily_returns_grid_from_series` (D-03 flat per-day shape mirroring `_monthly_returns_grid_from_series` template) + `compute_qstats_scalars` (10 try/except scalars routed through `_safe_float`: recovery_factor, ulcer_index, upi, kelly_criterion, probabilistic_sharpe_ratio, common_sense_ratio, cpc_index, serenity_index, r_squared, time_in_market) added to metrics.py; `compute_exposure_metrics` refactored to also emit `exposure_series: [{date, gross, net}]` alongside existing 6 aggregate keys (per-date arrays at lines 461-487 previously discarded; now persist for sibling-table); `compute_turnover_series` shipped with explicit Pitfall #19 docstring (`turnover = sum_over_symbols(abs(delta * price)) / nav`) + T-12-04-02 mitigation (`if nav <= 0: turnover = 0.0` short-circuit). 11 new tests pass (RED→GREEN); 88 tests pass across position_reconstruction + metrics + analytics_runner; full analytics-service suite 570 pass / 1 pre-existing test_drain_100_jobs failure (out of scope, logged in deferred-items.md). Helpers NOT yet wired into compute_all_metrics — that lands in Plan 12-06. 3 deviations auto-fixed: Rule 3 test-fixture adaptation to existing mock pattern (plan referenced fixtures not in conftest), Rule 2 `_safe_float` for qstats consistency, Rule 2 `len(benchmark) > 0` defensive guard for r_squared.
 
 ### Roadmap drafted (2026-04-26)
 
@@ -163,8 +164,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-28T12:50:05Z
-Stopped at: Completed 12-08-PLAN.md (METRICS-15 consumer half — fetchStrategyLazyMetrics RPC consumer + LazyMetricsPanelId type union shipped in src/lib/queries.ts) — sequential run on main tree, Wave 3 of 8. Plans 12-04, 12-05, 12-06 still in flight in parallel waves.
-Next resume target: Phase 12 Plans 04, 05, 06, 09, 10 (five plans remain). Execute via `/gsd-execute-phase 12` (continuing). Plan 12-09 (sibling-table 12-kind parity test) is now unblocked since 12-02's frozen TS contract is in place. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
+Last session: 2026-04-28T13:02:32Z
+Stopped at: Completed 12-04-PLAN.md (METRICS-04 + METRICS-05 + METRICS-06 + METRICS-11 — daily_returns_grid + 10 qstats scalars in metrics.py; exposure_series persistence + compute_turnover_series in position_reconstruction.py) — sequential run on main tree, Wave 4 of 8. Plans 12-05, 12-06 still in flight in parallel waves.
+Next resume target: Phase 12 Plans 05, 06, 09, 10 (four plans remain). Execute via `/gsd-execute-phase 12` (continuing). Plan 12-06 will wire all helpers from 12-03 + 12-04 into `compute_all_metrics` orchestrator (sibling-kind path); Plan 12-09 (sibling-table 12-kind parity test) is unblocked once 12-06 ships. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
