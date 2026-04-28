@@ -198,6 +198,124 @@ def _compute_derived_trade_metrics(
     return out
 
 
+def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
+    """METRICS-09: aggregate volume metrics over fills (raw_fills WHERE is_fill=true).
+
+    Returns:
+      gross_volume_usd     — sum of |notional_usd| over every fill
+      mean_trade_size_usd  — gross_volume / N
+      daily_turnover_usd   — mean of per-day notional totals (group by date prefix)
+      monthly_turnover_usd — mean of per-month notional totals (group by YYYY-MM prefix)
+
+    Pure function: groups by `filled_at` (or `created_at` fallback) date prefix.
+    Skips fills with malformed/missing timestamps for daily/monthly bucketing
+    but keeps them in gross_volume + mean_trade_size aggregates.
+    """
+    if not fills:
+        return {
+            "gross_volume_usd": 0.0,
+            "mean_trade_size_usd": 0.0,
+            "daily_turnover_usd": 0.0,
+            "monthly_turnover_usd": 0.0,
+        }
+
+    notionals = [abs(float(f.get("notional_usd", 0.0) or 0.0)) for f in fills]
+    gross_volume = sum(notionals)
+    mean_size = gross_volume / len(notionals) if notionals else 0.0
+
+    # Daily / monthly turnover — group by date / month prefix, then mean
+    daily: dict[str, float] = defaultdict(float)
+    monthly: dict[str, float] = defaultdict(float)
+    for f in fills:
+        ts = f.get("filled_at") or f.get("created_at") or ""
+        if not ts or len(ts) < 10:
+            continue
+        day = ts[:10]
+        month = ts[:7]
+        notional = abs(float(f.get("notional_usd", 0.0) or 0.0))
+        daily[day] += notional
+        monthly[month] += notional
+    daily_avg = sum(daily.values()) / len(daily) if daily else 0.0
+    monthly_avg = sum(monthly.values()) / len(monthly) if monthly else 0.0
+
+    return {
+        "gross_volume_usd": gross_volume,
+        "mean_trade_size_usd": mean_size,
+        "daily_turnover_usd": daily_avg,
+        "monthly_turnover_usd": monthly_avg,
+    }
+
+
+def _compute_trade_mix(
+    fills: list[dict], has_maker_taker: bool
+) -> dict[str, dict[str, float]]:
+    """METRICS-10: Trade Mix breakdown by side × maker/taker.
+
+    D-14 / D-15: bucket count branches off the is_maker audit outcome.
+      - has_maker_taker=True  → 4 buckets (long_maker, long_taker, short_maker, short_taker)
+      - has_maker_taker=False → 2 buckets fallback (long, short)
+
+    Each bucket: {count, total_notional, avg_holding_period_hours}.
+
+    T-12-05-04: in 4-bucket mode, fills with `is_maker` missing/None are
+    skipped (cannot bucket without the flag). The audit gate (Plan 12-01)
+    only sets `has_maker_taker=True` when ≥99% of fills carry the flag, so
+    skipped fills represent a known small fraction.
+
+    Plan 12-06 reads `TRADE_MIX_HAS_MAKER_TAKER` from env (set by the deploy
+    script per M-01) to decide which mode to call this in.
+    """
+
+    def _empty_bucket() -> dict[str, float]:
+        return {
+            "count": 0,
+            "total_notional": 0.0,
+            "avg_holding_period_hours": 0.0,
+        }
+
+    if has_maker_taker:
+        buckets: dict[str, dict[str, float]] = {
+            "long_maker": _empty_bucket(),
+            "long_taker": _empty_bucket(),
+            "short_maker": _empty_bucket(),
+            "short_taker": _empty_bucket(),
+        }
+    else:
+        buckets = {
+            "long": _empty_bucket(),
+            "short": _empty_bucket(),
+        }
+
+    holding_sums: dict[str, float] = {k: 0.0 for k in buckets}
+    for f in fills:
+        side = f.get("side")
+        if side not in ("long", "short"):
+            continue
+        notional = abs(float(f.get("notional_usd", 0.0) or 0.0))
+        holding = float(f.get("holding_period_hours") or 0.0)
+
+        if has_maker_taker:
+            is_maker = f.get("is_maker")
+            if is_maker is None:
+                # T-12-05-04: skip — can't bucket without the flag
+                continue
+            maker_key = "maker" if is_maker else "taker"
+            bucket_key = f"{side}_{maker_key}"
+        else:
+            bucket_key = side
+
+        buckets[bucket_key]["count"] += 1
+        buckets[bucket_key]["total_notional"] += notional
+        holding_sums[bucket_key] += holding
+
+    # Finalize avg holding period
+    for k, b in buckets.items():
+        if b["count"] > 0:
+            b["avg_holding_period_hours"] = holding_sums[k] / b["count"]
+
+    return buckets
+
+
 async def run_strategy_analytics(strategy_id: str) -> dict:
     """Run the full analytics pipeline for a single strategy.
 
