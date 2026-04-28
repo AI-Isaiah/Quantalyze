@@ -60,7 +60,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 
 **Net session estimate:** ~8.0 sessions (Phase 12: 4.0, Phase 13: 0.5, Phase 14a: 2.0, Phase 14b: 1.5).
 
-- [ ] **Phase 12: Backend Metric Contracts** — `metrics.py` extensions (rolling Sortino/Vol/Greeks series, daily_returns_grid, exposure_series, turnover_series, 7 derived trade metrics, SQN, volume aggregator, Trade Mix maker/taker (audit-gated, Binance/OKX/Bybit only — Deribit excluded), 10 new scalars, log_returns_series, cross-runtime parity tests, throttled backfill via `compute_jobs.priority` enum (METRICS-16, migration 086), heavy-series sibling table `strategy_analytics_series` (METRICS-17, migration 087), JSONB path-extraction)
+- [x] **Phase 12: Backend Metric Contracts** — `metrics.py` extensions (rolling Sortino/Vol/Greeks series, daily_returns_grid, exposure_series, turnover_series, 7 derived trade metrics, SQN, volume aggregator, Trade Mix maker/taker (audit-gated, Binance/OKX/Bybit only — Deribit excluded), 10 new scalars, log_returns_series, cross-runtime parity tests, throttled backfill via `compute_jobs.priority` enum (METRICS-16, migration 086), heavy-series sibling table `strategy_analytics_series` (METRICS-17, migration 087), JSONB path-extraction)
 - [ ] **Phase 13: Discovery v2 Polish** — Watchlist UI on `user_favorites`, per-user-keyed localStorage Customize prefs, filter-by-team (audit-gated; conditional migration 088 `organizations.is_public`), single-accent sparkline rule, `is_example=true` data backfill on seed strategies
 - [ ] **Phase 14a: Single-Strategy v2 — Eager Panels + Identity** — `/strategy/[id]/v2` route + flag, 7-panel scrollable shell with placeholders for panels 4–7 (IntersectionObserver scaffold), eager bodies for Panels 1–3 (Overview / Headline+Equity / Drawdown), DESIGN.md identity audit, A11Y-01 chart-axis contrast token, partial-data states for panels 1–3, `@nivo/boxplot` cleanup
 - [ ] **Phase 14b: Single-Strategy v2 — Lazy Panels + Trade & Exposure** — bodies for Panels 4–7 (Returns Distribution / Rolling / Trades / Exposure+Greeks), DailyHeatmap SVG/Canvas fallback, Trade Mix maker/taker (audit-gated close-out), partial-data states for panels 4–7, axe-core CI on full route, keyboard navigation across the full 7-panel scroll, automated chart-snapshot parity (Playwright pixel-diff ±2%)
@@ -168,7 +168,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 | 09.1. Allocator Dashboard UI refresh | v0.15.0.0 | 11/11 | Complete | 2026-04-24 |
 | 10. Scenario Builder and What-If | v0.15.0.0 | 8/8 | Complete | 2026-04-26 |
 | 11. Onboarding and Security Readiness | v0.16.0.0 | 7/7 | Complete | 2026-04-26 |
-| 12. Backend Metric Contracts | v0.17.0.0 | 9/10 | In progress | — |
+| 12. Backend Metric Contracts | v0.17.0.0 | 10/10 | Complete | 2026-04-28 |
 | 13. Discovery v2 Polish | v0.17.0.0 | 0/? | Not started | — |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 0/? | Not started | — |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 0/? | Not started | — |
