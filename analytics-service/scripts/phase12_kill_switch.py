@@ -126,6 +126,16 @@ async def cutover_strategy(strategy_id: str) -> int:
     T-12-10-01 mitigation: failure of one strategy's cutover does not affect
     subsequent strategies (each call is independent). Re-running this function
     is a no-op for strategies that already had their heavy keys moved.
+
+    WR-04 (rollback-on-failure guard): the two write steps above are NOT a
+    single Postgres transaction (they're separate round-trips). If step 2
+    succeeds and step 3 fails, the row would land in a state where BOTH
+    sibling-table rows AND metrics_json carry the heavy keys — subsequent
+    reads would double-count. The smaller fix path applied here: if step 3
+    fails, immediately delete the just-inserted sibling rows and re-raise
+    so the caller (and operator) sees the failure instead of silent
+    double-state. Long-term fix is to extend the M-Grok-1 RPC to do BOTH
+    writes in one function body — tracked as a follow-up migration.
     """
     supabase = get_supabase()
 
@@ -162,14 +172,45 @@ async def cutover_strategy(strategy_id: str) -> int:
     )
 
     # Strip heavy keys from metrics_json and persist.
+    # WR-04: wrap step 2 in try/except so a failure here triggers rollback
+    # of the sibling-table inserts from step 1. Without this guard, partial
+    # failure would leave both surfaces carrying the heavy keys
+    # (double-counted reads downstream).
     for kind in sibling_payload:
         del m[kind]
-    await db_execute(
-        lambda: supabase.table("strategy_analytics")
-        .update({"metrics_json": m})
-        .eq("strategy_id", strategy_id)
-        .execute()
-    )
+    inserted_kinds = list(sibling_payload.keys())
+    try:
+        await db_execute(
+            lambda: supabase.table("strategy_analytics")
+            .update({"metrics_json": m})
+            .eq("strategy_id", strategy_id)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Roll back the just-inserted sibling rows to keep the per-strategy
+        # state consistent (either both surfaces carry the keys, or neither
+        # does — never both). Best-effort: if the rollback itself fails we
+        # still raise the original error so the operator knows to inspect.
+        print(
+            f"phase12_kill_switch: metrics_json strip failed for {strategy_id} — "
+            f"rolling back sibling inserts for kinds {inserted_kinds}: {exc}"
+        )
+        try:
+            await db_execute(
+                lambda: supabase.table("strategy_analytics_series")
+                .delete()
+                .eq("strategy_id", strategy_id)
+                .in_("kind", inserted_kinds)
+                .execute()
+            )
+        except Exception as rollback_exc:  # noqa: BLE001
+            print(
+                f"phase12_kill_switch: ROLLBACK FAILED for {strategy_id} — "
+                f"strategy may be in inconsistent state (sibling rows present "
+                f"AND metrics_json keys present). Manual cleanup required: "
+                f"{rollback_exc}"
+            )
+        raise
 
     return len(sibling_payload)
 
