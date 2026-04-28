@@ -12,17 +12,18 @@ WHERE organization_id IS NOT NULL AND status='published';
 **Result:** `audit_count = 0`
 
 **Decision (per CONTEXT.md locked decision and ROADMAP success criterion 4):**
-- Migration `089_organizations_is_public.sql` is **NOT shipped** in Phase 13.
+- The conditional `organizations.is_public` migration (originally penciled as `088_*`, then shifted) is **NOT shipped** in Phase 13.
 - DISCO-03 (filter-by-team UI) is **DEFERRED to v0.18**.
 - Phase 13 in-scope reduces to DISCO-01, DISCO-02, DISCO-04, DISCO-05 (4 of 5 REQs).
 
-**Re-evaluation trigger:** Re-run the audit query at the start of v0.18 milestone planning. If `audit_count > 0` at that time, ship migration 089 + filter UI as a v0.18 phase deliverable. Pitfall 18 mitigation (privacy gate via `is_public BOOLEAN DEFAULT false`) remains the locked design — only the *timing* moves.
+**Re-evaluation trigger:** Re-run the audit query at the start of v0.18 milestone planning. If `audit_count > 0` at that time, ship the `organizations.is_public` migration + filter UI as a v0.18 phase deliverable using the next-free migration number at that time. Pitfall 18 mitigation (privacy gate via `is_public BOOLEAN DEFAULT false`) remains the locked design — only the *timing* moves.
 
-## Migration numbering (resolved 2026-04-28)
+## Migration numbering (resolved 2026-04-28; updated post-rebase)
 
-- Highest migration shipped on `main` (post-PR-#81): `088_cutover_strategy_metrics_keys.sql` (Phase 12 WR-04).
-- Phase 13 deferred its only conditional migration (089) per audit-count=0 above.
-- No new migration files in Phase 13 except a possible data-only DML migration for DISCO-05 (`is_example=true` seed backfill) — sequence number assigned at plan-phase time relative to migration board state.
+- Highest migration shipped on `main` after rebase: `089_claim_failed_retry.sql` (PR #82, queue fix — landed mid-Phase-13 planning).
+- Earlier intent (CONTEXT.md): the `organizations.is_public` migration would have been `088_*`. Phase 12 took 088 (`088_cutover_strategy_metrics_keys.sql`), pushing the conditional migration to 089. PR #82 then took 089 (`089_claim_failed_retry.sql`).
+- **Phase 13 deferred its only conditional migration** (would have been at the next-free number) per audit-count=0 above.
+- The DISCO-05 data-only DML migration (the only new migration Phase 13 actually ships) takes the next-free number = **`090_seed_is_example_backfill.sql`**. Plan 13-05 references this filename throughout.
 
 ## Seed UUIDs (resolved 2026-04-28 from research)
 

@@ -48,9 +48,11 @@ created: 2026-04-28
 | TBD-06 | 13-04 | 0 | DISCO-04 | — | Sparkline final-value-sign rule applied at the two `sparkline_returns` call sites | Vitest + RTL | `npm test -- "Sparkline call site"` | ❌ — Wave 0 creates `StrategyTable.test.tsx` | pending |
 | TBD-07 | 13-04 | 1 | DISCO-04 | — | No SVG path in `/discovery/[slug]` mixes `#16A34A` and `#DC2626` strokes | Playwright | `npm run test:e2e -- --grep "sparkline single-accent"` | ❌ — Wave 0 creates `e2e/discovery-sparkline-regression.spec.ts` | pending |
 | TBD-08 | 13-05 | 1 | DISCO-05 | — | Fresh allocator's first Discovery visit shows zero example strategies | Playwright | `npm run test:e2e -- --grep "fresh allocator hides examples"` | ❌ — Wave 0 creates `e2e/discovery-hide-examples-default.spec.ts` | pending |
-| TBD-09 | 13-05 | 1 | DISCO-05 | — | After data backfill, all 6 seed UUIDs have `is_example=true` | SQL probe | manual / scripted at deploy time | manual | pending |
+| TBD-09 | 13-05 | 1 | DISCO-05 | — | After data backfill, all 8 seed UUIDs have `is_example=true` | SQL probe | manual / scripted at deploy time | manual | pending |
 
-> **DISCO-03 closed (deferred):** Audit returned `count = 0` on 2026-04-28; migration 089 + filter UI deferred to v0.18 per CONTEXT.md success criterion 4. No tasks generated.
+> **DISCO-03 closed (deferred):** Audit returned `count = 0` on 2026-04-28; the `organizations.is_public` migration + filter UI deferred to v0.18 per CONTEXT.md success criterion 4. No tasks generated.
+
+> **Migration number for DISCO-05 backfill:** `090_seed_is_example_backfill.sql` — main now has `089_claim_failed_retry.sql` from PR #82. Plan 13-05 references 090 throughout.
 
 ---
 
