@@ -13,7 +13,7 @@
 - **D-02:** Sibling table schema = `strategy_analytics_series (strategy_id UUID FK ON DELETE CASCADE, kind TEXT, payload JSONB, computed_at TIMESTAMPTZ, PRIMARY KEY (strategy_id, kind))`. Single JSONB `payload` column per `kind`.
 - **D-03:** `kind` field naming = snake_case 1:1 with the metrics_json key name.
 - **D-04:** Lazy-fetch RPC = `fetch_strategy_lazy_metrics(strategy_id UUID, panel_id TEXT) RETURNS JSONB`. `panel_id` enum: `overview`, `equity`, `drawdown`, `returns_dist`, `rolling`, `trades`, `exposure`. RPC LATERAL joins sibling table; returns `{kind: payload}` map for that panel.
-- **D-05:** Priority enum on `compute_jobs` = `low` / `normal` / `high`. Backfill = `low`, `sync_trades` = `normal`, manual force-recompute = `high`. Migration `084_compute_jobs_priority.sql` adds the enum column + partial index `WHERE priority IN ('normal','high')`.
+- **D-05:** Priority enum on `compute_jobs` = `low` / `normal` / `high`. Backfill = `low`, `sync_trades` = `normal`, manual force-recompute = `high`. Migration `086_compute_jobs_priority.sql` adds the enum column + partial index `WHERE priority IN ('normal','high')`.
 - **D-06:** Throttle policy = global cap of 5 backfill jobs/min across all workers when ANY `normal`/`high` job is queued; unthrottled when queue is idle of higher priorities. Implemented via `SELECT … FOR UPDATE SKIP LOCKED` guard in `analytics-service/services/job_worker.py` enqueuer.
 - **D-07:** >800kB p99.9 kill-switch UX = Phase 12 deploy script runs `analyze_metrics_size.sql` post-deploy; if p99.9 ≥ 800kB it auto-migrates remaining heavy keys (`daily_returns_grid`, `rolling_*`) from `metrics_json` to the sibling table via one-shot `UPDATE`. STATE.md log entry on trigger. Env override `SKIP_KILL_SWITCH=1` for staged rollout.
 - **D-08:** Existing-strategy migration on Phase 12 deploy = eager re-enqueue **all published strategies** (~20) as `priority=low` immediately on deploy. Throttle (D-06) caps at 5/min so `sync_trades` never queues behind. No `metrics_json_version` column needed.
@@ -65,8 +65,8 @@
 | METRICS-13 | Cross-runtime parity tests | New: `test_metrics_parity.py` + `metrics-parity.test.ts` against golden 252d fixture |
 | METRICS-14 | Throttled backfill via priority enum + 5/min cap | Depends on METRICS-16 migration; throttle guard at `job_worker.py:1434-1460` |
 | METRICS-15 | `getStrategyDetail()` reads scalars via path-extraction; heavy series via LATERAL join (sibling table) | Depends on METRICS-17; `src/lib/queries.ts:274-299` is the consumer |
-| METRICS-16 | Migration `084_compute_jobs_priority.sql` — priority enum + partial index | Pattern: `032_compute_jobs_queue.sql` (full self-verifying DO block style) |
-| METRICS-17 | Migration `085_strategy_analytics_series.sql` — sibling table + RLS | Per D-02 schema; mirror `024_user_favorites.sql` RLS shape |
+| METRICS-16 | Migration `086_compute_jobs_priority.sql` — priority enum + partial index | Pattern: `032_compute_jobs_queue.sql` (full self-verifying DO block style) |
+| METRICS-17 | Migration `087_strategy_analytics_series.sql` — sibling table + RLS | Per D-02 schema; mirror `024_user_favorites.sql` RLS shape |
 
 </phase_requirements>
 
@@ -99,8 +99,8 @@ Phase 12 extends `analytics-service/services/metrics.py` so it produces **every 
 | Trade-table aggregations (Expectancy, SQN, PF L/S) | analytics-service (Python) | — | Aggregator over `trades` rows in `_compute_volume_metrics` (`analytics_runner.py:49`) |
 | Trade Mix 2×2 maker/taker breakdown | analytics-service (Python) | DB (`trades.is_maker`) | Audit-gated; SQL aggregate over `raw_fills` filtered by `is_fill=true` |
 | 10 new qstats scalars | analytics-service (Python) | — | Each is `qs.stats.{name}(returns)` one-liner |
-| Sibling-table persistence | DB (Postgres) | analytics-service (Python writer) | New schema `085_strategy_analytics_series.sql`; upsert from `analytics_runner.py` |
-| Priority-aware queue dispatch | DB (Postgres) | analytics-service (Python worker) | `084_compute_jobs_priority.sql` adds enum + index; `job_worker.py:1434-1460` throttle reads it |
+| Sibling-table persistence | DB (Postgres) | analytics-service (Python writer) | New schema `087_strategy_analytics_series.sql`; upsert from `analytics_runner.py` |
+| Priority-aware queue dispatch | DB (Postgres) | analytics-service (Python worker) | `086_compute_jobs_priority.sql` adds enum + index; `job_worker.py:1434-1460` throttle reads it |
 | Throttle guard (5/min cap) | analytics-service (Python) | DB (`SELECT … FOR UPDATE SKIP LOCKED`) | Implemented in dispatcher; backfill rate limit when `normal`/`high` queued |
 | Lazy-fetch RPC for panels 4–7 | DB (Postgres SECURITY DEFINER) | TS consumer (Phase 14b) | `fetch_strategy_lazy_metrics(strategy_id, panel_id)` LATERAL join |
 | Path-extraction for above-the-fold scalars | TS consumer (`getStrategyDetail` at `queries.ts:274`) | DB (`metrics_json -> 'key'`) | Phase 14a consumer; Phase 12 ships the shape, not the consumer |
@@ -116,8 +116,8 @@ The work decomposes into seven sequential waves. Each wave can ship as one or mo
 ### Wave A — Audit & schema foundation (must land first)
 
 1. **Task 1: `is_maker` coverage audit (D-15).** Run the audit SQL on Binance/OKX/Bybit (Deribit excluded — `exchange.py:325-334` confirms). Document Deribit "N/A by design" in TODOS.md. Outcome branches D-15: all-three ≥ 99% → ship 4-bucket Trade Mix; any-one < 99% → descope to long/short-only (2 buckets). The branch is recorded in PLAN.md before any code lands.
-2. **Migration `084_compute_jobs_priority.sql` (METRICS-16).** Adds `priority TEXT CHECK (priority IN ('low','normal','high')) NOT NULL DEFAULT 'normal'` to `compute_jobs`. Adds partial index `idx_compute_jobs_priority_high WHERE priority IN ('normal','high') AND status = 'pending'` so live jobs jump the queue. Self-verifying DO block matching `032_compute_jobs_queue.sql` style.
-3. **Migration `085_strategy_analytics_series.sql` (METRICS-17).** Creates the sibling table per D-02. `RLS ENABLE`, deny-all for non-service-role, mirroring `compute_jobs_deny_all` at `032:233-237` (this is operational data; allocator-side reads go through the lazy-fetch RPC). FK ON DELETE CASCADE so archived strategies cleanly remove their series.
+2. **Migration `086_compute_jobs_priority.sql` (METRICS-16).** Adds `priority TEXT CHECK (priority IN ('low','normal','high')) NOT NULL DEFAULT 'normal'` to `compute_jobs`. Adds partial index `idx_compute_jobs_priority_high WHERE priority IN ('normal','high') AND status = 'pending'` so live jobs jump the queue. Self-verifying DO block matching `032_compute_jobs_queue.sql` style.
+3. **Migration `087_strategy_analytics_series.sql` (METRICS-17).** Creates the sibling table per D-02. `RLS ENABLE`, deny-all for non-service-role, mirroring `compute_jobs_deny_all` at `032:233-237` (this is operational data; allocator-side reads go through the lazy-fetch RPC). FK ON DELETE CASCADE so archived strategies cleanly remove their series.
 
 ### Wave B — `metrics.py` core extensions
 
@@ -147,7 +147,7 @@ The work decomposes into seven sequential waves. Each wave can ship as one or mo
 
 14. **Extend `compute_all_metrics()` return shape (`metrics.py:289-307`).** Currently returns one fat dict. Refactor to return `(metrics_json_dict, sibling_kinds_dict)` tuple. Sibling kinds dict: `{kind_name: payload, …}` for the 12 D-01 kinds. The current `metrics_json` keeps growing only with the 10 new scalars + above-the-fold series.
 15. **Extend `analytics_runner.run_strategy_analytics()` upsert (`analytics_runner.py:200-211`).** After the existing `strategy_analytics` upsert, loop over the sibling-kinds dict and emit one `INSERT … ON CONFLICT (strategy_id, kind) DO UPDATE SET payload = EXCLUDED.payload, computed_at = now()` per kind into `strategy_analytics_series`. Atomic per-kind; the loop is inside the same transaction as the main upsert if the supabase-py client supports it (it does via `db_execute` lambda batching).
-16. **`fetch_strategy_lazy_metrics(strategy_id UUID, panel_id TEXT)` RPC (D-04).** New SQL function, SECURITY DEFINER, in a Phase 12 migration footer or `085_strategy_analytics_series.sql`. Body: `CASE panel_id WHEN 'returns_dist' THEN jsonb_build_object('daily_returns_grid', (SELECT payload FROM strategy_analytics_series WHERE strategy_id = $1 AND kind = 'daily_returns_grid')) WHEN 'rolling' THEN …` etc. LATERAL join is one alternative; `jsonb_object_agg` over a kinds-by-panel mapping table is another. Performance test against p95 < 200ms decides (planner's discretion per CONTEXT.md).
+16. **`fetch_strategy_lazy_metrics(strategy_id UUID, panel_id TEXT)` RPC (D-04).** New SQL function, SECURITY DEFINER, in a Phase 12 migration footer or `087_strategy_analytics_series.sql`. Body: `CASE panel_id WHEN 'returns_dist' THEN jsonb_build_object('daily_returns_grid', (SELECT payload FROM strategy_analytics_series WHERE strategy_id = $1 AND kind = 'daily_returns_grid')) WHEN 'rolling' THEN …` etc. LATERAL join is one alternative; `jsonb_object_agg` over a kinds-by-panel mapping table is another. Performance test against p95 < 200ms decides (planner's discretion per CONTEXT.md).
 17. **Panel-id → kind mapping table (in RPC SQL, not a real table).** `overview` → no series; `equity` → `equity_series_1y` + `log_returns_series`; `drawdown` → no series (already in `metrics_json.drawdown_episodes`); `returns_dist` → `daily_returns_grid`; `rolling` → 7 rolling kinds (3M/6M/12M Sortino + Vol + alpha + beta); `trades` → no series; `exposure` → `exposure_series` + `turnover_series`.
 
 ### Wave F — Throttle, kill-switch, backfill orchestration
@@ -187,8 +187,8 @@ The work decomposes into seven sequential waves. Each wave can ship as one or mo
 | `analytics-service/tests/test_position_reconstruction.py` | Extend | self | Test exposure_series + turnover_series persistence |
 | `analytics-service/tests/test_analytics_runner.py` | Extend | self | Test sibling-table upsert + new derived trade metrics |
 | `analytics-service/tests/test_job_worker.py` | Extend | self | Test throttle guard + priority dispatch |
-| `supabase/migrations/084_compute_jobs_priority.sql` | NEW | `032_compute_jobs_queue.sql` (queue creation, full self-verifying DO block) | Priority enum + partial index per D-05 |
-| `supabase/migrations/085_strategy_analytics_series.sql` | NEW | `024_user_favorites.sql` (RLS shape) + `032:106-151` (table + DO block style) | Sibling table per D-02 + `fetch_strategy_lazy_metrics` RPC per D-04 |
+| `supabase/migrations/086_compute_jobs_priority.sql` | NEW | `032_compute_jobs_queue.sql` (queue creation, full self-verifying DO block) | Priority enum + partial index per D-05 |
+| `supabase/migrations/087_strategy_analytics_series.sql` | NEW | `024_user_favorites.sql` (RLS shape) + `032:106-151` (table + DO block style) | Sibling table per D-02 + `fetch_strategy_lazy_metrics` RPC per D-04 |
 | `src/lib/types.ts` | Extend (lines 137-148 — `TradeMetrics` interface) | self | D-16 frozen TS contract |
 | `src/__tests__/metrics-parity.test.ts` | NEW | none — first TS-side parity check | TS-side parity gate (scope clarification needed — see Risk Register) |
 | `src/__tests__/types-frozen-contract.test.ts` | NEW (optional) | none | Compile-time gate that `TradeMetrics` keys never silently drop |
@@ -368,7 +368,7 @@ async def dispatch(job: dict) -> DispatchResult:
 
 **Option (a) — DB-side priority claim (recommended):**
 ```sql
--- New RPC in 084_compute_jobs_priority.sql
+-- New RPC in 086_compute_jobs_priority.sql
 CREATE OR REPLACE FUNCTION claim_compute_jobs_with_priority(
     p_batch_size INTEGER, p_worker_id TEXT
 ) RETURNS SETOF compute_jobs AS $$
@@ -406,7 +406,7 @@ async def dispatch_tick(worker_id: str) -> None:
 
 ## 6. Migration Deliverables
 
-### 6a. `supabase/migrations/084_compute_jobs_priority.sql` (METRICS-16)
+### 6a. `supabase/migrations/086_compute_jobs_priority.sql` (METRICS-16)
 
 **Concrete skeleton** (planner expands; pattern follows `032_compute_jobs_queue.sql` self-verifying DO style):
 
@@ -430,7 +430,7 @@ ALTER TABLE compute_jobs
     CHECK (priority IN ('low', 'normal', 'high'));
 
 COMMENT ON COLUMN compute_jobs.priority IS
-  'Dispatch priority. low = post-deploy backfill (throttled to 5/min when normal/high are pending). normal = live sync_trades + first-class compute_analytics. high = manual force-recompute. Read by claim_compute_jobs_with_priority(). See migration 084.';
+  'Dispatch priority. low = post-deploy backfill (throttled to 5/min when normal/high are pending). normal = live sync_trades + first-class compute_analytics. high = manual force-recompute. Read by claim_compute_jobs_with_priority(). See migration 086.';
 
 -- Partial index: live (normal/high) jobs claim path. Skipping low rows
 -- means SKIP LOCKED scans far fewer rows during throttled windows.
@@ -444,7 +444,7 @@ CREATE OR REPLACE FUNCTION claim_compute_jobs_with_priority(
     p_batch_size INTEGER, p_worker_id TEXT
 ) RETURNS SETOF compute_jobs
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path = public, pg_temp
 AS $$
 DECLARE v_high_pending INTEGER;
 BEGIN
@@ -502,7 +502,7 @@ COMMIT;
 
 **Note on numbering collision:** Codebase has shipped `084_first_api_key_added_trigger.sql` and `085_stamp_first_bridge_surfaced.sql` already (verified via `ls supabase/migrations/`). **Phase 12 must use `086_compute_jobs_priority.sql` and `087_strategy_analytics_series.sql`**, OR rename per a renumbering policy. CONTEXT.md and ROADMAP.md both call it 084/085 — this is a planning-doc artifact. **Resolve before plan-phase locks numbering.** See Risk Register §9.1.
 
-### 6b. `supabase/migrations/085_strategy_analytics_series.sql` (METRICS-17)
+### 6b. `supabase/migrations/087_strategy_analytics_series.sql` (METRICS-17)
 
 ```sql
 -- Migration 087: strategy_analytics_series sibling table + fetch_strategy_lazy_metrics RPC
@@ -519,7 +519,7 @@ CREATE TABLE IF NOT EXISTS strategy_analytics_series (
 );
 
 COMMENT ON TABLE strategy_analytics_series IS
-  'Sibling table to strategy_analytics for heavy time-series payloads. One row per (strategy_id, kind). Kinds: daily_returns_grid, rolling_sortino_3m/6m/12m, rolling_volatility_3m/6m/12m, rolling_alpha, rolling_beta, exposure_series, turnover_series, log_returns_series. Avoids the 1MB TOAST decompression ceiling on strategy_analytics.metrics_json. See migration 085.';
+  'Sibling table to strategy_analytics for heavy time-series payloads. One row per (strategy_id, kind). Kinds: daily_returns_grid, rolling_sortino_3m/6m/12m, rolling_volatility_3m/6m/12m, rolling_alpha, rolling_beta, exposure_series, turnover_series, log_returns_series. Avoids the 1MB TOAST decompression ceiling on strategy_analytics.metrics_json. See migration 087.';
 
 CREATE INDEX IF NOT EXISTS idx_strategy_analytics_series_payload_present
   ON strategy_analytics_series (strategy_id, kind)
@@ -537,7 +537,7 @@ CREATE OR REPLACE FUNCTION fetch_strategy_lazy_metrics(
     p_strategy_id UUID, p_panel_id TEXT
 ) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path = public, pg_temp
 STABLE
 AS $$
 DECLARE
@@ -852,7 +852,7 @@ export function assertMetricParity(
 
 ### 9.1 Migration numbering collision (HIGH — must resolve before plan-phase locks)
 
-**Issue:** Codebase has shipped `084_first_api_key_added_trigger.sql` and `085_stamp_first_bridge_surfaced.sql` (verified via `ls supabase/migrations/`). CONTEXT.md, ROADMAP.md, REQUIREMENTS.md, and STATE.md all refer to Phase 12's migrations as `084_compute_jobs_priority.sql` and `085_strategy_analytics_series.sql`.
+**Issue:** Codebase has shipped `084_first_api_key_added_trigger.sql` and `085_stamp_first_bridge_surfaced.sql` (verified via `ls supabase/migrations/`). CONTEXT.md, ROADMAP.md, REQUIREMENTS.md, and STATE.md all refer to Phase 12's migrations as `086_compute_jobs_priority.sql` and `087_strategy_analytics_series.sql`.
 
 **Impact:** Cannot apply the planned migrations as-numbered without a rename. Either every reference doc gets updated to 086/087 OR the existing 084/085 get renumbered (high blast radius, breaks deploy history).
 
