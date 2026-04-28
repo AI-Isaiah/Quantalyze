@@ -26,6 +26,7 @@ import type {
   AllocationEvent,
   DisclosureTier,
   ManagerIdentity,
+  LazyMetricsPayload,
 } from "./types";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 
@@ -296,6 +297,78 @@ export async function getStrategyDetail(strategyId: string): Promise<{
     manager,
     disclosureTier,
   };
+}
+
+/**
+ * Phase 12 / Plan 12-08 / METRICS-15 / D-04: Panel IDs accepted by the
+ * `fetch_strategy_lazy_metrics` RPC. MUST stay in sync with the SQL `CASE`
+ * statement in `supabase/migrations/087_strategy_analytics_series.sql`. Adding
+ * a new panel here without a matching SQL CASE branch results in the RPC
+ * silently returning `{}` (defense-in-depth: see threat T-12-08-02).
+ *
+ * Panel → kinds mapping (per migration 087):
+ *   - overview     → []                              (scalars only, no series)
+ *   - equity       → [log_returns_series]           (equity_series_1y stays in metrics_json per H-D)
+ *   - drawdown     → []                              (scalars only)
+ *   - returns_dist → [daily_returns_grid]
+ *   - rolling      → [rolling_sortino_3m/6m/12m, rolling_volatility_3m/6m/12m, rolling_alpha, rolling_beta]
+ *   - trades       → []                              (scalars only)
+ *   - exposure     → [exposure_series, turnover_series]
+ */
+export type LazyMetricsPanelId =
+  | "overview"
+  | "equity"
+  | "drawdown"
+  | "returns_dist"
+  | "rolling"
+  | "trades"
+  | "exposure";
+
+/**
+ * Phase 12 / Plan 12-08 / METRICS-15 / D-04: Lazy-fetch heavy series for
+ * panels 4–7 of the Single-Strategy v2 page. Wraps the
+ * `fetch_strategy_lazy_metrics(p_strategy_id, p_panel_id)` SECURITY DEFINER
+ * RPC shipped in migration 087.
+ *
+ * Returns a `{kind: payload}` map where `kind` is a value of
+ * `StrategyAnalyticsSeriesKind` applicable to the requested panel. Returns
+ * an empty object `{}` when:
+ *   - The panel has no series (overview / drawdown / trades — scalars only)
+ *   - The strategy is not visible to the caller (private + not the owner;
+ *     RPC returns `{}` rather than an error to avoid leaking existence —
+ *     T-12-08-01)
+ *   - The strategy has no series rows yet (compute_analytics not run)
+ *   - The RPC call fails for any reason (defensive fallback; T-12-08-01)
+ *
+ * Phase 12 ships only the consumer + type union. Phase 14b actually invokes
+ * this from each lazy panel's `useEffect` once the panel mounts via the
+ * IntersectionObserver scaffold (KPI-22). Memoization (React Query / SWR /
+ * useEffect deps) is the consumer's responsibility — see threat T-12-08-04.
+ */
+export async function fetchStrategyLazyMetrics(
+  strategyId: string,
+  panelId: LazyMetricsPanelId,
+): Promise<LazyMetricsPayload> {
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("fetch_strategy_lazy_metrics", {
+    p_strategy_id: strategyId,
+    p_panel_id: panelId,
+  });
+
+  if (error) {
+    // T-12-08-01: log for developer observability but never propagate the
+    // error to UI. Returning `{}` matches the visibility-miss path so a
+    // caller cannot distinguish "private strategy" from "transient error".
+    console.error("fetchStrategyLazyMetrics RPC error:", {
+      strategyId,
+      panelId,
+      code: error.code,
+      message: error.message,
+    });
+    return {} as LazyMetricsPayload;
+  }
+
+  return (data ?? {}) as LazyMetricsPayload;
 }
 
 export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
