@@ -465,3 +465,177 @@ def test_derived_trade_metrics_handles_empty_positions():
     assert result["sqn"] is None
     assert result["profit_factor_long"] is None
     assert result["profit_factor_short"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 Plan 05 / METRICS-09 — volume aggregator over raw fills
+# Phase 12 Plan 05 / METRICS-10 — Trade Mix (audit-gated 4-bucket vs 2-bucket)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sample_fills() -> list[dict]:
+    """Fills shaped per `raw_fills WHERE is_fill=true` for METRICS-09 input.
+
+    Each fill has side, notional_usd, holding_period_hours, filled_at — the
+    fields the volume aggregator + trade mix consume. Spans 3 distinct days
+    in 2 distinct months so daily/monthly turnover have non-trivial denominators.
+    """
+    return [
+        # Day 1 — 2024-01-15
+        {"side": "long", "notional_usd": 1000.0, "holding_period_hours": 4.0,
+         "filled_at": "2024-01-15T10:00:00+00:00"},
+        {"side": "long", "notional_usd": 500.0, "holding_period_hours": 6.0,
+         "filled_at": "2024-01-15T14:00:00+00:00"},
+        {"side": "short", "notional_usd": 800.0, "holding_period_hours": 2.0,
+         "filled_at": "2024-01-15T18:00:00+00:00"},
+        # Day 2 — 2024-01-16
+        {"side": "long", "notional_usd": 1200.0, "holding_period_hours": 8.0,
+         "filled_at": "2024-01-16T11:00:00+00:00"},
+        {"side": "short", "notional_usd": 600.0, "holding_period_hours": 3.0,
+         "filled_at": "2024-01-16T15:00:00+00:00"},
+        # Day 3 — 2024-02-05 (different month for monthly aggregation)
+        {"side": "long", "notional_usd": 900.0, "holding_period_hours": 5.0,
+         "filled_at": "2024-02-05T09:00:00+00:00"},
+    ]
+
+
+@pytest.fixture
+def sample_fills_with_maker_taker(sample_fills) -> list[dict]:
+    """Same fills as `sample_fills` but with `is_maker` flag populated.
+
+    Used for the 4-bucket Trade Mix happy-path (TRADE_MIX_HAS_MAKER_TAKER=true).
+    Mix of maker / taker so each of the 4 buckets gets non-zero counts.
+    """
+    pattern = [True, False, True, False, True, False]
+    enriched: list[dict] = []
+    for fill, is_maker in zip(sample_fills, pattern):
+        enriched.append({**fill, "is_maker": is_maker})
+    return enriched
+
+
+def test_volume_aggregator_includes_required_keys(sample_fills):
+    """METRICS-09: aggregator returns gross_volume_usd, mean_trade_size_usd,
+    daily_turnover_usd, monthly_turnover_usd."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    result = _compute_volume_aggregator(sample_fills)
+    for key in [
+        "gross_volume_usd",
+        "mean_trade_size_usd",
+        "daily_turnover_usd",
+        "monthly_turnover_usd",
+    ]:
+        assert key in result
+
+
+def test_volume_aggregator_empty_fills():
+    """METRICS-09: empty fills → every aggregate returns 0.0."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    result = _compute_volume_aggregator([])
+    assert result["gross_volume_usd"] == 0.0
+    assert result["mean_trade_size_usd"] == 0.0
+    assert result["daily_turnover_usd"] == 0.0
+    assert result["monthly_turnover_usd"] == 0.0
+
+
+def test_volume_aggregator_computes_correct_values(sample_fills):
+    """METRICS-09: gross_volume = sum(notional); mean = gross/N; daily =
+    mean per-day total; monthly = mean per-month total."""
+    from services.analytics_runner import _compute_volume_aggregator
+
+    result = _compute_volume_aggregator(sample_fills)
+    # gross = 1000 + 500 + 800 + 1200 + 600 + 900 = 5000
+    assert abs(result["gross_volume_usd"] - 5000.0) < 1e-6
+    # mean trade = 5000 / 6 ≈ 833.33
+    assert abs(result["mean_trade_size_usd"] - 5000.0 / 6) < 1e-6
+    # 3 distinct days: 2300 (1/15) + 1800 (1/16) + 900 (2/5) = 5000; mean = 5000/3
+    assert abs(result["daily_turnover_usd"] - 5000.0 / 3) < 1e-6
+    # 2 distinct months: 4100 (jan) + 900 (feb) = 5000; mean = 5000/2
+    assert abs(result["monthly_turnover_usd"] - 5000.0 / 2) < 1e-6
+
+
+def test_trade_mix_4_bucket(sample_fills_with_maker_taker):
+    """METRICS-10: 4-bucket Trade Mix when audit passes (D-15 OK)."""
+    from services.analytics_runner import _compute_trade_mix
+
+    result = _compute_trade_mix(
+        sample_fills_with_maker_taker, has_maker_taker=True
+    )
+    assert set(result.keys()) == {
+        "long_maker", "long_taker", "short_maker", "short_taker"
+    }
+    for bucket_key in ["long_maker", "long_taker", "short_maker", "short_taker"]:
+        bucket = result[bucket_key]
+        assert "count" in bucket
+        assert "total_notional" in bucket
+        assert "avg_holding_period_hours" in bucket
+
+
+def test_trade_mix_2_bucket_fallback(sample_fills):
+    """METRICS-10: 2-bucket fallback when audit fails (TRADE_MIX_HAS_MAKER_TAKER=false)."""
+    from services.analytics_runner import _compute_trade_mix
+
+    result = _compute_trade_mix(sample_fills, has_maker_taker=False)
+    assert set(result.keys()) == {"long", "short"}
+    for bucket_key in ["long", "short"]:
+        bucket = result[bucket_key]
+        assert "count" in bucket
+        assert "total_notional" in bucket
+        assert "avg_holding_period_hours" in bucket
+    # Long: 4 fills → count=4, notional=1000+500+1200+900=3600
+    # Short: 2 fills → count=2, notional=800+600=1400
+    assert result["long"]["count"] == 4
+    assert abs(result["long"]["total_notional"] - 3600.0) < 1e-6
+    assert result["short"]["count"] == 2
+    assert abs(result["short"]["total_notional"] - 1400.0) < 1e-6
+
+
+def test_trade_mix_empty_fills():
+    """METRICS-10: empty fills → every bucket carries count=0, total_notional=0.0."""
+    from services.analytics_runner import _compute_trade_mix
+
+    result_4 = _compute_trade_mix([], has_maker_taker=True)
+    assert set(result_4.keys()) == {
+        "long_maker", "long_taker", "short_maker", "short_taker"
+    }
+    assert result_4["long_maker"]["count"] == 0
+    assert result_4["long_maker"]["total_notional"] == 0.0
+    assert result_4["long_maker"]["avg_holding_period_hours"] == 0.0
+
+    result_2 = _compute_trade_mix([], has_maker_taker=False)
+    assert set(result_2.keys()) == {"long", "short"}
+    assert result_2["long"]["count"] == 0
+    assert result_2["short"]["count"] == 0
+
+
+def test_trade_mix_4_bucket_skips_fills_missing_is_maker():
+    """METRICS-10 / T-12-05-04: in 4-bucket mode, fills with is_maker=None
+    are skipped (cannot bucket into maker/taker without the flag)."""
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "long", "is_maker": True, "notional_usd": 1000.0,
+         "holding_period_hours": 4.0},
+        # is_maker missing — must be skipped
+        {"side": "long", "notional_usd": 500.0, "holding_period_hours": 2.0},
+        {"side": "short", "is_maker": False, "notional_usd": 800.0,
+         "holding_period_hours": 3.0},
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=True)
+    assert result["long_maker"]["count"] == 1
+    assert result["long_taker"]["count"] == 0  # the missing-flag fill is dropped
+    assert result["short_taker"]["count"] == 1
+    assert result["short_maker"]["count"] == 0
+
+
+def test_trade_mix_avg_holding_period_computed(sample_fills):
+    """METRICS-10: avg_holding_period_hours = sum(holding_period) / count per bucket."""
+    from services.analytics_runner import _compute_trade_mix
+
+    result = _compute_trade_mix(sample_fills, has_maker_taker=False)
+    # Long fills: holding_period [4, 6, 8, 5] → mean = 23/4 = 5.75
+    assert abs(result["long"]["avg_holding_period_hours"] - 23.0 / 4) < 1e-6
+    # Short fills: holding_period [2, 3] → mean = 5/2 = 2.5
+    assert abs(result["short"]["avg_holding_period_hours"] - 2.5) < 1e-6
