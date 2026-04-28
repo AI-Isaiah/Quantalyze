@@ -15,6 +15,7 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 from services.db import db_execute
 
@@ -435,7 +436,14 @@ def _match_positions_fifo(
 async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     """Compute exposure metrics from position_snapshots.
 
-    Returns dict with mean/std/max gross and net exposure.
+    Returns dict with mean/std/max gross and net exposure (existing aggregates,
+    preserved for backward compatibility) AND a per-date `exposure_series`
+    field.
+
+    METRICS-05 refactor: previously the per-date arrays at lines 461-476 were
+    aggregated into mean/std/max and then discarded. Now they also persist
+    as `exposure_series: [{date, gross, net}]` for sibling-table writes
+    (D-01 sibling kind = `exposure_series`).
     """
 
     def _fetch_snapshots():
@@ -460,6 +468,9 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
 
     gross_exposures: list[float] = []
     net_exposures: list[float] = []
+    # METRICS-05: per-date exposure points for sibling-table persistence.
+    # Uses iteration over the same loop that previously discarded the data.
+    exposure_series_records: list[dict[str, Any]] = []
 
     for date_key, date_snaps in by_date.items():
         gross = 0.0
@@ -474,6 +485,11 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
                 net += abs(size_usd)
         gross_exposures.append(gross)
         net_exposures.append(net)
+        exposure_series_records.append({
+            "date": str(date_key),
+            "gross": round(gross, 2),
+            "net": round(net, 2),
+        })
 
     if not gross_exposures:
         return {}
@@ -493,4 +509,53 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         "mean_net_exposure": round(mean_net, 2),
         "std_net_exposure": round(std_net, 2),
         "max_net_exposure": round(max_net, 2),
+        "exposure_series": exposure_series_records,
     }
+
+
+def compute_turnover_series(
+    positions_by_date: dict[str, dict[str, float]],
+    prices_by_date: dict[str, dict[str, float]],
+    nav_by_date: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Compute daily turnover series.
+
+    Pitfall #19 mitigation: contract is documented inline.
+
+    Definition: daily_turnover = sum_over_symbols(abs(delta * price)) / nav
+                where delta = position_today - position_yesterday.
+
+    Args:
+        positions_by_date: { 'YYYY-MM-DD': { symbol: position_size }, ... }
+        prices_by_date:    { 'YYYY-MM-DD': { symbol: close_price }, ... }
+        nav_by_date:       { 'YYYY-MM-DD': nav_usd, ... }
+
+    Returns:
+        [{date: 'YYYY-MM-DD', turnover: float}, ...] sorted by date asc.
+        Empty list when positions_by_date is empty.
+
+    Threat model T-12-04-02: nav <= 0 short-circuits to turnover=0.0
+    rather than raising ZeroDivisionError on a stray zero/negative NAV row.
+    """
+    if not positions_by_date:
+        return []
+    dates = sorted(positions_by_date.keys())
+    series: list[dict[str, Any]] = []
+    prev_positions: dict[str, float] = {}
+    for date in dates:
+        positions = positions_by_date.get(date, {})
+        prices = prices_by_date.get(date, {})
+        nav = nav_by_date.get(date, 0.0)
+        if nav <= 0:
+            series.append({"date": date, "turnover": 0.0})
+            prev_positions = positions
+            continue
+        total_change_usd = 0.0
+        symbols = set(positions.keys()) | set(prev_positions.keys())
+        for sym in symbols:
+            delta = positions.get(sym, 0.0) - prev_positions.get(sym, 0.0)
+            price = prices.get(sym, 0.0)
+            total_change_usd += abs(delta * price)
+        series.append({"date": date, "turnover": round(total_change_usd / nav, 6)})
+        prev_positions = positions
+    return series
