@@ -323,3 +323,145 @@ class TestGracefulDegradation:
         ), f"Expected position_metrics_failed=true in upsert calls, got: {upsert_calls}"
 
 
+# ---------------------------------------------------------------------------
+# Phase 12 Plan 05 / METRICS-07 + METRICS-08 — derived trade metrics (B-01 path b)
+# ---------------------------------------------------------------------------
+
+
+def _sample_inputs():
+    """Builds (volume_metrics, trade_metrics_from_positions) shaped per B-01 path (b).
+
+    The position-side dict mirrors the extended `reconstruct_positions` return
+    shape (Plan 12-05 Task 1 adds avg_winning_trade / avg_losing_trade /
+    winners_count / losers_count / realized_pnl_per_trade alongside the
+    existing legacy keys).
+    """
+    volume_metrics = {
+        "buy_volume_pct": 0.55,
+        "sell_volume_pct": 0.45,
+        "long_volume_pct": 0.55,
+        "short_volume_pct": 0.45,
+        "total_fills": 250,
+        "total_volume_usd": 250000.0,
+    }
+    trade_metrics_from_positions = {
+        "total_positions": 50,
+        "open_positions": 0,
+        "closed_positions": 50,
+        "win_rate": 0.6,
+        "avg_roi": 0.025,
+        "avg_duration_days": 4.0,
+        "long_count": 28,
+        "short_count": 22,
+        "best_trade_roi": 0.40,
+        "worst_trade_roi": -0.18,
+        # Phase 12 extension (Plan 12-05 adds these to reconstruct_positions):
+        "avg_winning_trade": 0.05,    # avg ROI of winners
+        "avg_losing_trade": -0.025,   # avg ROI of losers (signed, negative)
+        "winners_count": 30,
+        "losers_count": 20,
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 100.0},
+            {"side": "long", "realized_pnl": -50.0},
+            {"side": "short", "realized_pnl": 200.0},
+            {"side": "short", "realized_pnl": -75.0},
+            {"side": "long", "realized_pnl": 25.0},
+            {"side": "short", "realized_pnl": -10.0},
+        ] * 10,  # 60 closed positions; representative
+    }
+    return volume_metrics, trade_metrics_from_positions
+
+
+def test_derived_trade_metrics_expectancy():
+    """METRICS-07: expectancy = (win_rate × avg_win) - ((1-win_rate) × |avg_loss|)."""
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v, t = _sample_inputs()
+    result = _compute_derived_trade_metrics(v, t)
+    assert "expectancy" in result
+    wr = t["win_rate"]
+    avg_w = t["avg_winning_trade"]
+    avg_l = t["avg_losing_trade"]
+    expected = wr * avg_w - (1 - wr) * abs(avg_l)
+    assert abs(result["expectancy"] - expected) < 1e-6
+
+
+def test_derived_trade_metrics_risk_reward_ratio():
+    """METRICS-07: R:R = avg_win / |avg_loss|."""
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v, t = _sample_inputs()
+    result = _compute_derived_trade_metrics(v, t)
+    assert "risk_reward_ratio" in result
+    avg_w = t["avg_winning_trade"]
+    avg_l = t["avg_losing_trade"]
+    assert abs(result["risk_reward_ratio"] - avg_w / abs(avg_l)) < 1e-6
+
+
+def test_derived_trade_metrics_weighted_risk_reward_ratio():
+    """METRICS-07 (H-F): Weighted R:R = Σ(win_size × win_count) / Σ(loss_size × loss_count).
+
+    Implemented as (avg_winning_trade × winners_count) / (|avg_losing_trade| × losers_count).
+    """
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v, t = _sample_inputs()
+    result = _compute_derived_trade_metrics(v, t)
+    assert "weighted_risk_reward_ratio" in result
+    num = t["avg_winning_trade"] * t["winners_count"]
+    den = abs(t["avg_losing_trade"]) * t["losers_count"]
+    if den == 0:
+        assert result["weighted_risk_reward_ratio"] is None
+    else:
+        assert abs(result["weighted_risk_reward_ratio"] - num / den) < 1e-6
+
+
+def test_derived_trade_metrics_sqn():
+    """METRICS-08: SQN = (mean(R)/std(R)) × sqrt(min(N,100)) over closed positions."""
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v, t = _sample_inputs()
+    result = _compute_derived_trade_metrics(v, t)
+    assert "sqn" in result
+    assert result["sqn"] is None or isinstance(result["sqn"], float)
+
+
+def test_derived_trade_metrics_profit_factor_segmented():
+    """METRICS-07: separate PF for long and short via realized_pnl_per_trade."""
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v, t = _sample_inputs()
+    result = _compute_derived_trade_metrics(v, t)
+    assert "profit_factor_long" in result
+    assert "profit_factor_short" in result
+    for key in ["profit_factor_long", "profit_factor_short"]:
+        assert result[key] is None or isinstance(result[key], (int, float))
+
+
+def test_derived_trade_metrics_handles_empty_positions():
+    """B-01 path (b): every metric returns None when position-side dict is empty/zero."""
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v = {
+        "buy_volume_pct": 0.0,
+        "sell_volume_pct": 0.0,
+        "long_volume_pct": 0.0,
+        "short_volume_pct": 0.0,
+        "total_fills": 0,
+        "total_volume_usd": 0.0,
+    }
+    t_empty = {
+        "win_rate": 0.0,
+        "avg_winning_trade": 0.0,
+        "avg_losing_trade": 0.0,
+        "winners_count": 0,
+        "losers_count": 0,
+        "realized_pnl_per_trade": [],
+    }
+    result = _compute_derived_trade_metrics(v, t_empty)
+    assert result["expectancy"] is None
+    assert result["risk_reward_ratio"] is None
+    assert result["weighted_risk_reward_ratio"] is None
+    assert result["sqn"] is None
+    assert result["profit_factor_long"] is None
+    assert result["profit_factor_short"] is None
