@@ -4,6 +4,7 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Sparkline } from "@/components/charts/Sparkline";
+import { sparklineColor } from "@/lib/sparkline-color";
 import {
   StrategyFilters,
   EMPTY_ADVANCED_FILTERS,
@@ -458,7 +459,10 @@ export function StrategyTable({
                       {formatCurrency(s.aum)}
                     </td>
                     <td className="px-4 py-3">
-                      <Sparkline data={s.analytics.sparkline_returns ?? []} />
+                      <Sparkline
+                        data={s.analytics.sparkline_returns ?? []}
+                        color={sparklineColor(s.analytics.sparkline_returns ?? [])}
+                      />
                     </td>
                     <td className="px-4 py-3">
                       <Sparkline

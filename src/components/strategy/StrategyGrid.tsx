@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
+import { sparklineColor } from "@/lib/sparkline-color";
 import { SyncBadge } from "./SyncBadge";
 import { HealthScore } from "./HealthScore";
 import { StarToggle } from "./StarToggle";
@@ -108,6 +109,7 @@ export function StrategyGrid({
               <div className="mb-3 max-[375px]:mb-2">
                 <Sparkline
                   data={s.analytics.sparkline_returns ?? []}
+                  color={sparklineColor(s.analytics.sparkline_returns ?? [])}
                   width={240}
                   height={40}
                   className="w-full"
