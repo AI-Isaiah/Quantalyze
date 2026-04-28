@@ -20,10 +20,10 @@ WHERE organization_id IS NOT NULL AND status='published';
 
 ## Migration numbering (resolved 2026-04-28; updated post-rebase)
 
-- Highest migration shipped on `main` after rebase: `089_claim_failed_retry.sql` (PR #82, queue fix — landed mid-Phase-13 planning).
-- Earlier intent (CONTEXT.md): the `organizations.is_public` migration would have been `088_*`. Phase 12 took 088 (`088_cutover_strategy_metrics_keys.sql`), pushing the conditional migration to 089. PR #82 then took 089 (`089_claim_failed_retry.sql`).
+- Highest migration shipped on `main` after second rebase (2026-04-28 evening): `090_claim_dedupe_partition_keys.sql` (PR #83, queue fix — landed mid-Phase-13 planning, after the first rebase).
+- Earlier intent (CONTEXT.md): the `organizations.is_public` migration would have been `088_*`. Phase 12 took 088 (`088_cutover_strategy_metrics_keys.sql`), pushing the conditional migration to 089. PR #82 then took 089 (`089_claim_failed_retry.sql`); PR #83 then took 090 (`090_claim_dedupe_partition_keys.sql`).
 - **Phase 13 deferred its only conditional migration** (would have been at the next-free number) per audit-count=0 above.
-- The DISCO-05 data-only DML migration (the only new migration Phase 13 actually ships) takes the next-free number = **`090_seed_is_example_backfill.sql`**. Plan 13-05 references this filename throughout.
+- The DISCO-05 data-only DML migration (the only new migration Phase 13 actually ships) takes the next-free number = **`091_seed_is_example_backfill.sql`**. Plan 13-05 references this filename throughout.
 
 ## Seed UUIDs (resolved 2026-04-28 from research)
 
@@ -36,7 +36,7 @@ WHERE organization_id IS NOT NULL AND status='published';
 1. **Watchlist PUT rate limiter:** `mandateAutoSaveLimiter` (30/min) recommended over `userActionLimiter` (5/min) — star toggling can legitimately exceed 5/min during browsing.
 2. **Optimistic UI primitive:** `useTransition` + local mirror (codebase consistency with `AllocatorExchangeManager.tsx`) over React 19 `useOptimistic` (not yet adopted in-tree).
 3. **Logout route URL** for the cross-account Playwright spec — needs verification by planner (likely user-menu sign-out button, not a `/logout` page).
-4. **Playwright cross-account spec** — confirm test-user env vars (`E2E_USER_A_EMAIL` / `_PASSWORD` / `E2E_USER_B_EMAIL` / `_PASSWORD` or similar) are wired into Playwright CI; if not, descope DISCO-02 cross-account spec to manual UAT.
+4. **Playwright cross-account spec** — RESOLVED 2026-04-28 (post-rebase plan-checker pass): `grep -rn "E2E_USER" e2e/ playwright.config.ts` returns zero hits — those env vars are NOT wired. Plan 13-02 Task 3 already encodes the correct fallback path: seed two test users via `seedTestAllocator()` from `e2e/helpers/seed-test-project.ts:60`. That fallback is now the **active** path; do not block on env-var wiring.
 
 ## DISCO-03 closed (deferred)
 

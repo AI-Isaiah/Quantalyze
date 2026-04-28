@@ -286,7 +286,7 @@ src/
 
 supabase/migrations/
 ├── 089_organizations_is_public.sql           # CONDITIONAL — only if audit > 0 (NOT 088 — see Pitfall #1)
-└── 090_seed_is_example_backfill.sql          # data-only UPDATE … WHERE id IN (<seed UUIDs>)
+└── 091_seed_is_example_backfill.sql          # data-only UPDATE … WHERE id IN (<seed UUIDs>)
 
 e2e/   (NOT tests/e2e/ — see Pitfall #3)
 ├── discovery-sparkline-regression.spec.ts    # NEW — DOM walks, asserts no #16A34A + #DC2626 mix
@@ -915,7 +915,7 @@ test("login-as-A then login-as-B leaves no A-keyed prefs in B's session", async 
    - **RESOLVED: `mandateAutoSaveLimiter` (30/min).** Documented in TODOS.md `## Open questions for planner` Q1 and locked into plan 13-01 route handler implementation. Reason: star-clicking is a legitimate fast-fire action; 5/min would block normal browse-and-watchlist sessions.
 
 4. **`created_by` column does NOT exist on `strategies`** — CONTEXT.md says "query for strategies whose `created_by` matches the seed-admin auth uid". The actual column is `user_id`.
-   - **RESOLVED: Hard-coded UUID list.** Plan 13-05 ships `090_seed_is_example_backfill.sql` with all 8 UUIDs from `scripts/seed-demo-data.ts:STRATEGY_UUIDS` literally in the WHERE clause. No indirect query. Documented in TODOS.md `## Seed UUIDs (resolved 2026-04-28 from research)` section.
+   - **RESOLVED: Hard-coded UUID list.** Plan 13-05 ships `091_seed_is_example_backfill.sql` with all 8 UUIDs from `scripts/seed-demo-data.ts:STRATEGY_UUIDS` literally in the WHERE clause. No indirect query. Documented in TODOS.md `## Seed UUIDs (resolved 2026-04-28 from research)` section.
 
 5. **Logout route — what's the actual URL? `/logout` or a POST endpoint?**
    - **RESOLVED: User-menu sign-out button.** Plan 13-02 Task 1 step 8 (cross-account isolation Playwright spec) clicks the user-menu Logout button inside the dashboard rather than navigating to a `/logout` URL. Confirmed in TODOS.md `## Open questions for planner` Q3.

@@ -52,7 +52,7 @@ created: 2026-04-28
 
 > **DISCO-03 closed (deferred):** Audit returned `count = 0` on 2026-04-28; the `organizations.is_public` migration + filter UI deferred to v0.18 per CONTEXT.md success criterion 4. No tasks generated.
 
-> **Migration number for DISCO-05 backfill:** `090_seed_is_example_backfill.sql` — main now has `089_claim_failed_retry.sql` from PR #82. Plan 13-05 references 090 throughout.
+> **Migration number for DISCO-05 backfill:** `091_seed_is_example_backfill.sql` — main now has `089_claim_failed_retry.sql` from PR #82 and `090_claim_dedupe_partition_keys.sql` from PR #83. Plan 13-05 references 091 throughout.
 
 ---
 
