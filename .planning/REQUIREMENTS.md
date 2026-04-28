@@ -54,9 +54,9 @@
 
 ### METRICS — Backend metric contracts (Phase 12)
 
-- [ ] **METRICS-01**: `_rolling_sortino_series(returns, windows=[63,126,252])` added to `metrics.py`; module-level `MAR = 0.0` constant; mirrors existing `_rolling_sharpe` pattern at `metrics.py:374`
-- [ ] **METRICS-02**: `_rolling_volatility_series(returns, windows=[63,126,252])` added; vectorized pandas window
-- [ ] **METRICS-03**: `_rolling_alpha_series` + `_rolling_beta_series` added; mirrors `qs.stats.rolling_greeks` (BTC benchmark only per UC#6)
+- [x] **METRICS-01**: `_rolling_sortino(returns, window, mar=MAR)` added to `metrics.py` (line 391); module-level `MAR: float = 0.0` constant (line 15) per Pitfall 11; mirrors `_rolling_sharpe` shape AND `qs.stats.sortino` exact RMS downside math; cross-runtime parity verified at diff=1.11e-16 at window==period==90 (Plan 12-03)
+- [x] **METRICS-02**: `_rolling_volatility(returns, window)` added (line 423); annualized via `std * sqrt(252)`; mirrors `qs.stats.volatility` on a rolling window (Plan 12-03)
+- [x] **METRICS-03**: `_rolling_alpha` + `_rolling_beta` added (lines 434, 449); wrap `qs.stats.rolling_greeks` (BTC benchmark, window=90 default per UC#6); project alpha/beta column from returned DataFrame (Plan 12-03)
 - [ ] **METRICS-04**: `daily_returns_grid(returns)` writes to already-declared `strategy_analytics.daily_returns` JSONB column (migration 001:92); shape `[{date, value}, …]` or 2D matrix per design choice
 - [ ] **METRICS-05**: `compute_exposure_metrics()` refactored to persist per-date gross/net exposure arrays alongside existing aggregates (Pitfall — `position_reconstruction.py:435` currently discards per-date arrays after extracting mean/std/max)
 - [ ] **METRICS-06**: `turnover_series(daily abs(Δposition × price) / NAV)` added; depends on Sprint 3 position reconstruction NAV alignment; explicit docstring on rolling-window vs daily-window contract
@@ -65,7 +65,7 @@
 - [ ] **METRICS-09**: Volume aggregator over `raw_fills` — gross volume, mean trade size, mean daily turnover, mean monthly turnover
 - [ ] **METRICS-10**: Trade Mix maker/taker aggregator over `raw_fills` — gated on `is_maker` flag audit on Binance / OKX / Bybit (Deribit excluded — `fetch_raw_trades` does not dispatch there); KPI-17 dependency. Audit resolved 2026-04-28 (Plan 12-01): TRADE_MIX_HAS_MAKER_TAKER=false → ship 2-bucket long/short fallback; maker/taker dimension deferred to v0.17.1. Implementation lands in Plan 12-05.
 - [ ] **METRICS-11**: New scalar metrics added — Recovery Factor, Ulcer Index, Ulcer Performance Index (UPI), Kelly Criterion, Probabilistic Sharpe Ratio, Common Sense Ratio, CPC Index, Serenity Index, R² (vs BTC), Time-in-Market (qstats `exposure` scalar). 10 new scalars; each is `qs.stats.{name}(returns)` one-liner
-- [ ] **METRICS-12**: `log_returns_series` added (powers EquityCurve "Log Returns" toggle in KPI-04)
+- [x] **METRICS-12**: `_log_returns_series(returns)` added (line 459); `np.log1p(returns)` routed through `_finalize_rolling`; same length as input (no window dropoff); powers EquityCurve "Log Returns" toggle in KPI-04 (Plan 12-03)
 - [ ] **METRICS-13**: Cross-runtime parity tests — pytest fixtures + Vitest equivalents on a golden 252-day fixture; assert byte-identical JSON between Python `metrics.py` output and JS-side parser
 - [ ] **METRICS-14**: Throttled backfill strategy on Phase 12 deploy — reads METRICS-16 priority enum on `compute_jobs` (backfill=`low`, sync=`normal`); 5 jobs/min cap; live `sync_trades` cannot queue behind backfill (Pitfall 3 / Pitfall 10 mitigation). Throttled enqueuer in `job_worker.py` reads priority and caps backfill jobs at 5/min when both backfill and sync jobs are queued. _Implementation lands in Plan 12-07; Plan 12-02 ships the priority-aware claim RPC it depends on._
 - [ ] **METRICS-15**: `getStrategyDetail()` reads scalars from `metrics_json -> 'key'` path-extraction; reads heavy series from `strategy_analytics_series` sibling table via LATERAL join (METRICS-17). Eager-fetch above-the-fold panels 1–3 scalars; lazy-fetch panels 4–7 series via `fetch_strategy_lazy_metrics(strategy_id, panel_id)` RPC (Pitfall 2 / Pitfall 5 mitigation against 1MB JSONB TOAST threshold). _Implementation lands in Plan 12-08; Plan 12-02 ships the lazy-fetch RPC it consumes._
@@ -164,9 +164,9 @@ Coverage: **53 / 53** v0.17.0.0 requirements mapped (filled by gsd-roadmapper 20
 | KPI-22 | KPI | Phase 14a | Pending (shell + IntersectionObserver scaffold; bodies for panels 4–7 in 14b) |
 | KPI-23a | KPI | Phase 14a | Pending (panels 1–3 partial-data) |
 | KPI-23b | KPI | Phase 14b | Pending (panels 4–7 partial-data) |
-| METRICS-01 | METRICS | Phase 12 | Pending |
-| METRICS-02 | METRICS | Phase 12 | Pending |
-| METRICS-03 | METRICS | Phase 12 | Pending |
+| METRICS-01 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): MAR + `_rolling_sortino` shipped in metrics.py; QS-mirror RMS downside formula; Pitfall 11 parity diff=1.11e-16 at window==period |
+| METRICS-02 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_rolling_volatility` shipped in metrics.py; std × sqrt(252) |
+| METRICS-03 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_rolling_alpha` + `_rolling_beta` shipped in metrics.py; wrap qs.stats.rolling_greeks(window=90) |
 | METRICS-04 | METRICS | Phase 12 | Pending |
 | METRICS-05 | METRICS | Phase 12 | Pending |
 | METRICS-06 | METRICS | Phase 12 | Pending |
@@ -175,7 +175,7 @@ Coverage: **53 / 53** v0.17.0.0 requirements mapped (filled by gsd-roadmapper 20
 | METRICS-09 | METRICS | Phase 12 | Pending |
 | METRICS-10 | METRICS | Phase 12 | Audit resolved 2026-04-28 (Plan 12-01): TRADE_MIX_HAS_MAKER_TAKER=false → 2-bucket long/short fallback; impl in Plan 12-05 |
 | METRICS-11 | METRICS | Phase 12 | Pending |
-| METRICS-12 | METRICS | Phase 12 | Pending |
+| METRICS-12 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_log_returns_series` shipped in metrics.py; np.log1p via _finalize_rolling; full-length output |
 | METRICS-13 | METRICS | Phase 12 | Pending |
 | METRICS-14 | METRICS | Phase 12 | Pending (depends on METRICS-16) |
 | METRICS-15 | METRICS | Phase 12 | Pending (depends on METRICS-17) |

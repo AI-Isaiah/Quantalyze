@@ -168,7 +168,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 | 09.1. Allocator Dashboard UI refresh | v0.15.0.0 | 11/11 | Complete | 2026-04-24 |
 | 10. Scenario Builder and What-If | v0.15.0.0 | 8/8 | Complete | 2026-04-26 |
 | 11. Onboarding and Security Readiness | v0.16.0.0 | 7/7 | Complete | 2026-04-26 |
-| 12. Backend Metric Contracts | v0.17.0.0 | 2/10 | In progress | — |
+| 12. Backend Metric Contracts | v0.17.0.0 | 3/10 | In progress | — |
 | 13. Discovery v2 Polish | v0.17.0.0 | 0/? | Not started | — |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 0/? | Not started | — |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 0/? | Not started | — |
