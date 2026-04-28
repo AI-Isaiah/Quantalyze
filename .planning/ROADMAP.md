@@ -79,7 +79,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   5. The Phase 12-internal `is_maker` audit on `raw_fills` (Binance / OKX / Bybit handlers — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit, documented as N/A in TODOS.md before plan-phase begins) returns a documented boolean per exchange; if any of the three handlers lacks the flag, METRICS-10 + KPI-17 are descoped to v0.17.1 with a TODOS.md entry, and the parity test does not regress.
 **Plans:** 10 plans
 - [x] 12-01-PLAN.md — is_maker audit + D-15 branch decision (Wave 1) — completed 2026-04-28 (TRADE_MIX_HAS_MAKER_TAKER=false, 2-bucket fallback)
-- [ ] 12-02-PLAN.md — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push)
+- [x] 12-02-PLAN.md — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push) — completed 2026-04-28 (D-16 frozen contract locked; H-B search_path hardening on all RPCs; H-D equity_series_1y omitted from sibling-kind union; H-F weighted_risk_reward_ratio in TradeMetrics)
 - [ ] 12-03-PLAN.md — Rolling Sortino/Vol/Greeks + log returns helpers in metrics.py (Wave 3, TDD)
 - [ ] 12-04-PLAN.md — Daily returns grid + exposure series persistence + turnover series + 10 qstats scalars (Wave 3, TDD)
 - [ ] 12-05-PLAN.md — 5 derived trade metrics + volume aggregator + audit-gated Trade Mix (Wave 3, TDD)
@@ -168,7 +168,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 | 09.1. Allocator Dashboard UI refresh | v0.15.0.0 | 11/11 | Complete | 2026-04-24 |
 | 10. Scenario Builder and What-If | v0.15.0.0 | 8/8 | Complete | 2026-04-26 |
 | 11. Onboarding and Security Readiness | v0.16.0.0 | 7/7 | Complete | 2026-04-26 |
-| 12. Backend Metric Contracts | v0.17.0.0 | 0/10 | Not started | — |
+| 12. Backend Metric Contracts | v0.17.0.0 | 2/10 | In progress | — |
 | 13. Discovery v2 Polish | v0.17.0.0 | 0/? | Not started | — |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 0/? | Not started | — |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 0/? | Not started | — |

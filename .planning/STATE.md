@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-last_updated: "2026-04-28T11:59:33.238Z"
+last_updated: "2026-04-28T12:17:42.822Z"
 last_activity: 2026-04-28
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 10
-  completed_plans: 1
-  percent: 10
+  completed_plans: 2
+  percent: 20
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: `.planning/PROJECT.md` (updated 2026-04-26 at v0.17.0.0 milestone start)
 ## Current Position
 
 Phase: 12 (backend-metric-contracts) — EXECUTING
-Plan: 2 of 10
+Plan: 3 of 10
 Status: Ready to execute
 Last activity: 2026-04-28
 
@@ -129,6 +129,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 11 Plan 03 (PostHog onboarding funnel wiring) completed on main 2026-04-26 — 5 events firing end-to-end with single-fire markers + at-least-once dedup
 - Phase 11 Plan 06 complete — S4a SOC-2 banner + S4c audit-log link on /security; S5 WithdrawalWarningStrip + S7 WizardIpAllowlistHint persist across all 4 wizard steps; S6 AuditLogSubsection on /profile?tab=security consuming GET /api/me/audit-log/export. S4b inline egress-IP block deferred per user direction (no static analytics-service IPs today; existing email-path body preserved). 35 new tests, 0 regressions, typecheck + lint + build green.
 - Phase 12 Plan 01: TRADE_MIX_HAS_MAKER_TAKER = false (2-bucket fallback) — production trades table empty, D-15 ≥99% gate fails for all 3 exchanges; defer maker/taker dimension to v0.17.1
+- Phase 12 Plan 02: migrations 086 (compute_jobs.priority + claim RPC) + 087 (strategy_analytics_series + fetch RPC + atomic batch upsert RPC) shipped to remote with H-B search_path=public,pg_temp hardening on all 3 SECURITY DEFINER RPCs; D-16 frozen TS contract locked in src/lib/types.ts (TradeMetrics +7 derived fields per H-F including weighted_risk_reward_ratio, TradeMixBuckets all-optional union covering 4-bucket and 2-bucket variants, StrategyAnalyticsSeriesKind union with EXACTLY 12 D-01 kinds — equity_series_1y omitted per H-D)
 
 ### Roadmap drafted (2026-04-26)
 
@@ -159,7 +160,7 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-28T11:59:29.862Z
-Next resume target: Phase 12 Plan 02 — Migrations 086 + 087 + types regen + frozen TS contracts (Wave 2, BLOCKING schema push). Execute via `/gsd-execute-phase 12` (continuing) — current plan 2 of 10. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
+Last session: 2026-04-28T12:17:42.816Z
+Next resume target: Phase 12 Plan 03 — Rolling Sortino/Vol/Greeks + log returns helpers in metrics.py (Wave 3, TDD). Execute via `/gsd-execute-phase 12` (continuing) — current plan 3 of 10. (Phase 13 can run in parallel if a separate session is desired; it does not depend on Phase 12.)
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
