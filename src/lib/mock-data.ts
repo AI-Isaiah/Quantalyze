@@ -220,6 +220,14 @@ export function generateDetailAnalytics(strategyId: string): StrategyAnalytics {
       short_count: Math.floor(randomBetween(200, 5000)),
       best_trade_roi: randomBetween(0.05, 0.5),
       worst_trade_roi: randomBetween(-0.5, -0.05),
+      // Phase 12 / D-13 derived trade metrics — mock values within plausible ranges.
+      // Real values arrive from analytics-service/services/metrics.py once Wave D ships.
+      expectancy: randomBetween(-0.01, 0.02),
+      risk_reward_ratio: randomBetween(0.5, 3.0),
+      weighted_risk_reward_ratio: randomBetween(0.5, 3.0),
+      sqn: randomBetween(0.5, 5.0),
+      profit_factor_long: randomBetween(0.8, 2.5),
+      profit_factor_short: randomBetween(0.8, 2.5),
     },
     volume_metrics: null,
     exposure_metrics: null,
