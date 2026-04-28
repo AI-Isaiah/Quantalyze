@@ -41,3 +41,53 @@ WHERE organization_id IS NOT NULL AND status='published';
 ## DISCO-03 closed (deferred)
 
 Audit returned 0; no further action in Phase 13 for DISCO-03.
+
+## DISCO-05 backfill (Plan 13-05) — pre-push audit 2026-04-28
+
+- Migration: `supabase/migrations/091_seed_is_example_backfill.sql` (committed `7976ea3`)
+- Push outcome: **NOT APPLIED — operator gate raised**
+- Pre-push audit count: **0** (`SELECT COUNT(*) FROM strategies WHERE id IN (<8 seed UUIDs>) AND is_example=true`)
+- Pre-push seed-UUID presence: **0 of 8** (`SELECT COUNT(*) FROM strategies WHERE id IN (<8 seed UUIDs>)` — no is_example filter)
+
+### Why push was not run in this session
+
+`supabase db push --linked --dry-run` reports two distinct integrity issues that the executor cannot resolve without an explicit operator decision (Rule 4 — architectural change):
+
+1. **Local-side drift (11 unapplied migrations):** local migrations `078, 079, 083, 084, 085, 086, 087, 088, 089, 090, 091` are not present in the remote `schema_migrations` table. Pushing 091 would attempt to apply all 11 in one batch — none of the others are in Plan 13-05 scope, and several (e.g., 086/087 priority queue + analytics-series) carry their own deploy concerns that belong to Phases 11/12 owners.
+
+2. **Remote-side drift (8 timestamp-format migrations):** the remote table has 8 entries the local tree has never seen — `20260424012820, 20260424031238, 20260426193121, 20260428120836, 20260428120919, 20260428142831, 20260428155809, 20260428190907`. The CLI refuses to push until these are either pulled into local (`supabase db pull`) or marked reverted (`supabase migration repair --status reverted <timestamps...>`). Both options mutate state outside Plan 13-05 scope.
+
+3. **Mechanical no-op:** even if push succeeded, the audit count would remain `0` because **no seed UUIDs exist in production** (`seed_uuid_count = 0`). The seeder has not been run against the remote DB. Migration 091 is correct, idempotent, and reusable — but it has nothing to backfill until a future `supabase db reset` + reseed cycle.
+
+### What the operator should do
+
+Pick one path (in priority order):
+
+**Path A — defer Plan 13-05 push to a coordinated migration sweep.** Track 091 alongside 078/079/083–090 in a single deploy ticket; resolve the 8 timestamp-drift entries via `supabase migration repair` after auditing what they were; then run `supabase db push` once for the full batch. This is the safest option and matches the actual deploy cadence (Phase 12 + 13 are still a chain that hasn't fully reached production).
+
+**Path B — push only 091, surgically.** Run `supabase db push --include-all` with explicit migration-repair statements for the 8 timestamp entries (only safe if the operator can verify each one corresponds to an out-of-band hotfix that should be marked applied). Mechanically a no-op against current production data (seed_uuid_count=0).
+
+**Path C — accept the no-op state.** Plan 13-05's e2e contract (Task 3) is exercised against a fresh seed run (`npm run seed` or test harness), not against production. The migration's value is locked in the file and will apply automatically on the next `supabase db reset`. Mark Plan 13-05 done; defer remote application to the same sweep that ships 078–090.
+
+### What runs after the push (whenever it happens)
+
+```sql
+-- Verification query (option A: supabase db query --linked)
+SELECT COUNT(*) AS audit_count
+FROM strategies
+WHERE id IN (
+  'cccccccc-0001-4000-8000-000000000001',
+  'cccccccc-0001-4000-8000-000000000002',
+  'cccccccc-0001-4000-8000-000000000003',
+  'cccccccc-0001-4000-8000-000000000004',
+  'cccccccc-0001-4000-8000-000000000005',
+  'cccccccc-0001-4000-8000-000000000006',
+  'cccccccc-0001-4000-8000-000000000007',
+  'cccccccc-0001-4000-8000-000000000008'
+)
+AND is_example = true;
+```
+
+Pass criterion: `audit_count = 8` if production has been reseeded; `audit_count = 0` if production has not been reseeded yet (still acceptable — migration is a no-op against an empty seed set, the file is correct).
+
+Re-record this section with `applied — count=N` once a push happens.
