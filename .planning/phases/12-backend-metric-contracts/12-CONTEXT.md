@@ -340,6 +340,18 @@ parity-tested correctness, throttled backfill via `compute_jobs.priority` enum
   Discovery). This phase blocks Phase 14a/14b.
 - **Scoping:** This session runs Phase 12 only — pause before Phase 13. Branch:
   `feature/v0.17-sprint-12`.
+- **M-01 propagation path (TRADE_MIX_HAS_MAKER_TAKER):**
+  Source-of-truth: `.planning/phases/12-backend-metric-contracts/TODOS.md`
+  (Plan 12-01 Task 1 writes the literal line `TRADE_MIX_HAS_MAKER_TAKER = true|false`
+  based on the is_maker coverage audit on the production Supabase project).
+  Propagation: `analytics-service/scripts/phase12_deploy.py` reads TODOS.md via
+  the regex `TRADE_MIX_HAS_MAKER_TAKER\s*=\s*(true|false)` → writes `.env.test`
+  (gitignored) at the repo root → CI sources `.env.test` before running parity
+  tests (`pytest analytics-service/tests/test_metrics_parity.py` and
+  `vitest run src/__tests__/metrics-parity.test.ts`). Without this propagation,
+  CI defaults to env-absent and all readers fall back to the 2-bucket Trade Mix
+  path regardless of the audit outcome → the 4-bucket path is never tested even
+  when the audit passes the ≥99% threshold.
 
 </specifics>
 

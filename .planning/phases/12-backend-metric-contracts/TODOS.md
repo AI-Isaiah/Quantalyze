@@ -89,3 +89,28 @@ TRADE_MIX_HAS_MAKER_TAKER to `true`, regenerate `golden_252d_expected.json`, and
 
 - [ ] Migration numbering reconciled: 086 + 087 (NOT 084/085 — those are taken by shipped
       Phase 11 work)
+
+## Phase 12 SC#4 — queue-depth probe (Plan 12-10 Task 2)
+
+Phase 12 SC#4: total `compute_analytics` pending count must never exceed 50 for >10 min
+during the post-deploy backfill window. Plan 12-10 Task 2 records the probe data here.
+
+**How to run** (every 60s for ~12 min after `python -m scripts.phase12_deploy` exits 0):
+```bash
+cd /Users/helios-mammut/claude-projects/quantalyze
+export SUPABASE_ACCESS_TOKEN="${SUPABASE_ACCESS_TOKEN:?Set this from local env}"
+supabase db remote query "SELECT priority, status, count(*) FROM compute_jobs WHERE kind='compute_analytics' AND status='pending' GROUP BY priority, status ORDER BY priority;"
+```
+
+**Probe results** (filled in at deploy time, recorded here for the SC#4 audit trail):
+
+| t+min | priority | status  | count |
+|-------|----------|---------|-------|
+| 0     | _pending — record after `phase12_deploy.py` ships and is run against the live DB_ |       |       |
+
+**Pass/fail summary:** _pending — record after the 12-min window closes._
+
+If max `count` ≤ 50 across the window, SC#4 passes and the throttle
+(`claim_compute_jobs_with_priority` RPC + dispatch_tick) is paced correctly. If any
+60s tick records `count > 50`, escalate (check claim RPC throttle logic + worker logs)
+and do NOT mark the plan complete.
