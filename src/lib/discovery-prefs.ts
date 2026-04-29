@@ -101,8 +101,14 @@ export function useDiscoveryPrefs(uid: string | undefined, slug: string) {
     try {
       const payload: StoredPrefs = { ...prefs, version: CURRENT_VERSION };
       window.localStorage.setItem(keyFor(uid, slug), JSON.stringify(payload));
-    } catch {
-      // Safari private mode / quota — non-fatal.
+    } catch (err) {
+      // Safari private mode / quota — non-fatal, but log for observability so
+      // a flood of failures surfaces in the browser console (Sentry-deferral
+      // pattern: console-only telemetry until a structured sink lands).
+      console.error(
+        "[discovery-prefs] localStorage write failed:",
+        (err as Error)?.message ?? err,
+      );
     }
   }, [prefs, hydrated, uid, slug]);
 

@@ -98,7 +98,12 @@ export const POST = withAdminAuth(async (body, admin) => {
         if (profile?.email) {
           notifyManagerApproved(profile.email, sd.name, id as string);
         }
-      }).catch(() => {});
+      }).catch((err) =>
+        console.error(
+          "[admin/strategy-review] manager-approval notify failed:",
+          err?.message ?? err,
+        ),
+      );
     }
   }
 
