@@ -17,13 +17,31 @@ interface TradeAndPositionPanelProps {
   trade_metrics: (TradeMetrics & Record<string, unknown>) | null;
 }
 
-/** Compact USD formatter — $1,234,567 → "$1.2M". */
-const COMPACT_USD = new Intl.NumberFormat("en-US", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-  style: "currency",
-  currency: "USD",
-});
+/**
+ * Deterministic compact USD formatter — avoids Intl.NumberFormat compact-notation
+ * ICU divergence across Node versions (Node 20 ICU 73 renders $320.0K; Node 25 renders $320K).
+ * Produces: $12.5M, $6.4K, $320K, $9.7M etc. — trailing `.0` is always suppressed.
+ */
+function fmtUsdCompactDeterministic(v: number): string {
+  const abs = Math.abs(v);
+  let scaled: number;
+  let suffix: string;
+  if (abs >= 1_000_000_000) {
+    scaled = v / 1_000_000_000;
+    suffix = "B";
+  } else if (abs >= 1_000_000) {
+    scaled = v / 1_000_000;
+    suffix = "M";
+  } else if (abs >= 1_000) {
+    scaled = v / 1_000;
+    suffix = "K";
+  } else {
+    return `$${v.toFixed(0)}`;
+  }
+  // Round to 1 decimal; strip trailing ".0".
+  const str = scaled.toFixed(1).replace(/\.0$/, "");
+  return `$${str}${suffix}`;
+}
 
 function fmtNum(v: number | null | undefined, digits = 2): string | null {
   if (v == null || !Number.isFinite(v)) return null;
@@ -37,7 +55,7 @@ function fmtPct(v: number | null | undefined): string | null {
 
 function fmtUsdCompact(v: number | null | undefined): string | null {
   if (v == null || !Number.isFinite(v)) return null;
-  return COMPACT_USD.format(v);
+  return fmtUsdCompactDeterministic(v);
 }
 
 function fmtCount(v: number | null | undefined): string | null {
