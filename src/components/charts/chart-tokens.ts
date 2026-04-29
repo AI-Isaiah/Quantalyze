@@ -14,6 +14,11 @@ export const CHART_AXIS_TICK = "#64748B";
 export const CHART_FONT_MONO = "var(--font-mono), monospace";
 export const CHART_REFERENCE_DASH = "3 3";
 
+/** Diverging positive/negative color tokens — mirror --color-positive / --color-negative in globals.css. */
+export const CHART_POSITIVE = "#16A34A"; // = --color-positive
+export const CHART_NEGATIVE = "#DC2626"; // = --color-negative
+export const CHART_NEUTRAL = "#FFFFFF"; // neutral / zero cell
+
 /** Shared Recharts Tooltip contentStyle — identical across all Sprint 3 widgets. */
 export const CHART_TOOLTIP_STYLE = {
   fontSize: 12,
