@@ -83,10 +83,22 @@ function makeGetReq(params: Record<string, string> = {}) {
   return new NextRequest(url.toString(), { method: "GET" });
 }
 
-function makePatchReq(body: Record<string, unknown>) {
+function makePatchReq(
+  body: Record<string, unknown>,
+  opts: { origin?: string | null } = {},
+) {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  // Default to a same-origin localhost header so the CSRF guard
+  // (assertSameOrigin) passes. Tests that exercise the guard explicitly
+  // pass `origin: null` to omit the header.
+  const origin = "origin" in opts ? opts.origin : "http://localhost:3000";
+  if (origin) headers["origin"] = origin;
+
   return new NextRequest("http://localhost:3000/api/notes", {
     method: "PATCH",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -627,5 +639,24 @@ describe("PATCH /api/notes — ownership + validation", () => {
     );
 
     expect(res.status).toBe(401);
+  });
+
+  it("returns 403 when PATCH is sent without an Origin or Referer header (CSRF guard)", async () => {
+    // The CSRF guard runs BEFORE auth, so this fails with 403 even though
+    // the test user is authenticated. Mirrors the assertSameOrigin contract
+    // used by every other mutating route in src/app/api/.
+    const { PATCH } = await import("./route");
+    const res = await PATCH(
+      makePatchReq(
+        {
+          scope_kind: "portfolio",
+          scope_ref: PORTFOLIO_ID,
+          content: "x",
+        },
+        { origin: null },
+      ),
+    );
+
+    expect(res.status).toBe(403);
   });
 });

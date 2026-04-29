@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { createClient } from "@/lib/supabase/server";
+import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEvent } from "@/lib/audit";
 import {
   checkScopeOwnership,
@@ -103,6 +104,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
+  // CSRF defense — every other mutating route in src/app/api/ uses this guard.
+  // Pattern source: src/app/api/watchlist/[strategyId]/route.ts.
+  const csrfError = assertSameOrigin(request);
+  if (csrfError) return csrfError;
+
   const supabase = await createClient();
   const {
     data: { user },
