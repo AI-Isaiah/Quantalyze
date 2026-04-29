@@ -8,11 +8,28 @@ interface EquityCurveProps {
   data: { date: string; value: number }[];
   benchmarkSeries?: { date: string; value: number }[] | null;
   height?: number;
+  /**
+   * Phase 14a UI-SPEC §6 — when `true`, EquityCurve does NOT render its
+   * own per-component BTC checkbox header. The Single-Strategy v2 Panel 2
+   * lifts the BTC overlay control to the panel level so a single checkbox
+   * governs both the Cumulative and Underwater sub-charts. Pass
+   * `benchmarkSeries={null}` from the panel to suppress the overlay; the
+   * effect under the hood will simply skip adding the benchmark series.
+   *
+   * Default: `false` — preserves the existing v1 behavior (internal
+   * checkbox visible whenever a benchmark series is provided).
+   */
+  hideBenchmarkToggle?: boolean;
 }
 
 const PRICE_FORMATTER = (v: number) => `${((v - 1) * 100).toFixed(1)}%`;
 
-export function EquityCurve({ data, benchmarkSeries, height = 350 }: EquityCurveProps) {
+export function EquityCurve({
+  data,
+  benchmarkSeries,
+  height = 350,
+  hideBenchmarkToggle = false,
+}: EquityCurveProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const bmSeriesRef = useRef<ISeriesApi<SeriesType> | null>(null);
@@ -101,7 +118,7 @@ export function EquityCurve({ data, benchmarkSeries, height = 350 }: EquityCurve
 
   return (
     <div>
-      {hasBenchmark && (
+      {hasBenchmark && !hideBenchmarkToggle && (
         <div className="flex items-center gap-2 px-4 pt-3 pb-1">
           <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none">
             <input
