@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: Completed 14a-02-PLAN.md
-last_updated: "2026-04-29T10:09:53.669Z"
+stopped_at: Completed 14a-03-PLAN.md
+last_updated: "2026-04-29T10:20:52.313Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 20
-  completed_plans: 16
-  percent: 80
+  completed_plans: 17
+  percent: 85
 ---
 
 # Project State
@@ -143,6 +143,8 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Pitfall 8 honored: getStrategyDetailV2 returns null for missing scalars; never falls back to EMPTY_ANALYTICS
 - strategy.ui_v2 flag default = OFF in Phase 14a; flips to ON in 14b once lazy panel bodies ship
 - Map-backed localStorage stub adopted for strategy-ui-v2-flag.test.ts (matches widget-state-flag.test.ts idiom)
+- Phase 14a-03 — substituted bg-surface for bg-card (project token canonicalization; bg-card is undefined in globals.css)
+- Phase 14a-03 — added hideBenchmarkToggle prop to EquityCurve (UI-SPEC §6 path A; v1 default preserved)
 
 ### Roadmap drafted (2026-04-26)
 
@@ -173,8 +175,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T10:09:53.361Z
-Stopped at: Completed 14a-02-PLAN.md
+Last session: 2026-04-29T10:20:43.859Z
+Stopped at: Completed 14a-03-PLAN.md
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
