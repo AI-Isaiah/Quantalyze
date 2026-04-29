@@ -31,9 +31,14 @@ const WINDOW_TO_SUFFIX: Record<WindowId, "3m" | "6m" | "12m"> = {
  * Sharpe sub-section only renders the gated sub-banner if BOTH primary and
  * fallback are absent.
  *
- * 6M maps to sharpe_90d as the closest-available approximation; downstream
- * tooltips / labels still say "6M" because UI-SPEC §3.2 locks the toggle copy.
- * The 180d window is a v0.17.1+ backend item if/when prioritized.
+ * Window → primary mapping (each toggle picks the nearest persisted window):
+ *   3M  → sharpe_30d  (exact-match: metrics.py:145 emits sharpe_30d directly)
+ *   6M  → sharpe_90d  (closest-available — 180d not persisted; UI-SPEC §3.2 locks toggle copy)
+ *   12M → sharpe_365d (exact-match)
+ *
+ * Grok F3 (v0.17.1) — prior to this fix, BOTH 3M and 6M used sharpe_90d as
+ * primary, rendering bit-identical charts for the two toggles. The 180d
+ * window is a v0.17.1+ backend item if/when prioritized.
  */
 const SHARPE_KEY_BY_WINDOW: Record<
   WindowId,
@@ -42,7 +47,7 @@ const SHARPE_KEY_BY_WINDOW: Record<
     fallback: "sharpe_30d" | "sharpe_90d" | "sharpe_365d";
   }
 > = {
-  "3M": { primary: "sharpe_90d", fallback: "sharpe_30d" },
+  "3M": { primary: "sharpe_30d", fallback: "sharpe_90d" },
   "6M": { primary: "sharpe_90d", fallback: "sharpe_365d" },
   "12M": { primary: "sharpe_365d", fallback: "sharpe_90d" },
 };
