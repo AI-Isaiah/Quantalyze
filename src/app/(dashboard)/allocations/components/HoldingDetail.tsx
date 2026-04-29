@@ -26,7 +26,7 @@ import { NoteRender } from "@/components/notes/NoteRender";
 import { NoteSaveStatus } from "@/components/notes/NoteSaveStatus";
 import { useNoteAutoSave } from "@/components/notes/useNoteAutoSave";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
-import { formatPercent } from "@/lib/utils";
+import { formatNumber, formatPercent } from "@/lib/utils";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import { OutcomeForm } from "./OutcomeForm";
 
@@ -39,14 +39,6 @@ export type HoldingDetailProps = {
   onRecorded?: (outcomeId: string) => void;
   onClose?: () => void;
 };
-
-function formatNumber(n: number | null, digits = 2): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toLocaleString("en-US", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
-}
 
 function formatUsd(n: number | null): string {
   if (n == null || !Number.isFinite(n)) return "—";

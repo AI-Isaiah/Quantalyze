@@ -59,7 +59,12 @@ export const POST = withAdminAuth(async (body, admin) => {
       if (allocator?.email && strategy?.name) {
         notifyAllocatorIntroStatus(allocator.email, strategy.name, status as string);
       }
-    }).catch(() => {});
+    }).catch((err) =>
+      console.error(
+        "[admin/intro-request] allocator-status notify failed:",
+        err?.message ?? err,
+      ),
+    );
   }
 
   return NextResponse.json({ success: true });

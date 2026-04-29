@@ -1,5 +1,21 @@
 @AGENTS.md
 
+## Test Coverage
+
+The TypeScript test suite tracks coverage via `@vitest/coverage-v8`. Run
+`npm run test:coverage` to produce a v8 report (text + HTML + JSON
+summary in `coverage/`).
+
+- **Minimum**: 60% lines / functions / branches / statements. Configured
+  as a Vitest threshold in `vitest.config.ts` so the local run fails the
+  reporter if a regression dips below the floor.
+- **Target**: 80%, matching the `--cov-fail-under=80` gate the
+  `analytics-service/` Python suite already enforces.
+
+Coverage is currently measurement-only — it is NOT a blocking CI gate.
+Promoting it to a gate is a separate decision tracked in the long-tail
+tech-debt backlog.
+
 ## Design System
 Always read DESIGN.md before making any visual or UI decisions.
 All font choices, colors, spacing, and aesthetic direction are defined there.

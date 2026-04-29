@@ -25,7 +25,7 @@ function getNumberFormatter(decimals: number) {
 }
 
 export function formatNumber(value: number | null | undefined, decimals = 2): string {
-  if (value == null) return "—";
+  if (value == null || !Number.isFinite(value)) return "—";
   return getNumberFormatter(decimals).format(value);
 }
 

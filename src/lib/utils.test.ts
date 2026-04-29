@@ -58,6 +58,13 @@ describe("formatNumber", () => {
   it("returns dash for null", () => {
     expect(formatNumber(null)).toBe("—");
   });
+  it("returns dash for NaN and Infinity (non-finite values)", () => {
+    // Sharpe / Sortino / Calmar can be Infinity for a no-volatility series
+    // and NaN for a degenerate one — callers expect "—", not "NaN" or "∞".
+    expect(formatNumber(Number.NaN)).toBe("—");
+    expect(formatNumber(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(formatNumber(Number.NEGATIVE_INFINITY)).toBe("—");
+  });
 });
 
 describe("formatCurrency", () => {

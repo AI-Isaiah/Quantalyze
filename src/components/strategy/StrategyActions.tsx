@@ -42,7 +42,12 @@ export function StrategyActions({ strategyId, status, hasApiKey, hasData }: Stra
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ strategy_id: strategyId }),
-    }).catch(() => {});
+    }).catch((err) =>
+      console.error(
+        "[StrategyActions] founder-submission notify failed:",
+        err?.message ?? err,
+      ),
+    );
   }
 
   if (status === "draft") {

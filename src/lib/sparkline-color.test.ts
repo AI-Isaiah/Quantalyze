@@ -13,7 +13,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { sparklineColor } from "./sparkline-color";
+import {
+  SPARKLINE_TONE_COLOR,
+  sparklineColor,
+  sparklineTone,
+} from "./sparkline-color";
 
 describe("sparklineColor", () => {
   it("returns var(--color-accent) when final value > 0", () => {
@@ -45,5 +49,50 @@ describe("sparklineColor", () => {
     expect(sparklineColor([0.5, -0.3, 0.1])).toBe("var(--color-accent)");
     // Path goes positive → positive → negative, ends negative → negative.
     expect(sparklineColor([0.5, 0.3, -0.1])).toBe("var(--color-negative)");
+  });
+});
+
+describe("sparklineTone", () => {
+  it("classifies a positive-trending series", () => {
+    expect(sparklineTone([0, 0.05, 0.1])).toBe("positive");
+  });
+
+  it("classifies a negative-trending series", () => {
+    expect(sparklineTone([0, -0.02, -0.05])).toBe("negative");
+  });
+
+  it("classifies a flat-finish series as neutral", () => {
+    expect(sparklineTone([0.01, -0.01, 0])).toBe("neutral");
+  });
+
+  it("classifies an empty input as neutral", () => {
+    expect(sparklineTone([])).toBe("neutral");
+  });
+});
+
+describe("SPARKLINE_TONE_COLOR", () => {
+  it("exposes the canonical token-string mapping", () => {
+    // The Record covers exactly the three tone members and routes through
+    // the design tokens — token-swaps in DESIGN.md propagate to every
+    // sparkline stroke without any code change.
+    expect(SPARKLINE_TONE_COLOR.positive).toBe("var(--color-accent)");
+    expect(SPARKLINE_TONE_COLOR.negative).toBe("var(--color-negative)");
+    expect(SPARKLINE_TONE_COLOR.neutral).toBe(
+      "var(--color-chart-benchmark)",
+    );
+  });
+
+  it("sparklineColor delegates to SPARKLINE_TONE_COLOR via sparklineTone", () => {
+    // Round-trip: the wrapper composes the two pieces. Asserting this lets
+    // us catch a future drift where one is updated and the other isn't.
+    expect(sparklineColor([0.1])).toBe(
+      SPARKLINE_TONE_COLOR[sparklineTone([0.1])],
+    );
+    expect(sparklineColor([-0.1])).toBe(
+      SPARKLINE_TONE_COLOR[sparklineTone([-0.1])],
+    );
+    expect(sparklineColor([0])).toBe(
+      SPARKLINE_TONE_COLOR[sparklineTone([0])],
+    );
   });
 });
