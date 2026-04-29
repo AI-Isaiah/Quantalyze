@@ -1,19 +1,19 @@
 "use client";
 
 /**
- * Phase 08 Plan 03 — NoteSaveStatus.
+ * NoteSaveStatus.
  *
  * Aria-live status line shared across all 4 note scopes. Cloned from
- * MandateSaveStatus verbatim with copy swaps per UI-SPEC §7:
+ * MandateSaveStatus with copy swaps:
  *
  *   - "Mandate saved" → "Note saved" (2s flash; reuses `.mandate-saved-flash`
  *     CSS keyframe + the same checkmark SVG + `bg-accent/10 text-accent` chip).
- *   - "Not saved yet" (idle + no timestamp) → empty (no noise — UI-SPEC §7).
+ *   - "Not saved yet" (idle + no timestamp) → empty (no noise).
  *   - New "Save failed — retry" state (error branch) — MandateSaveStatus uses
  *     per-field fieldErrors for this; notes are single-content-per-hook.
  *
  * formatRelativeTime is reused directly from ../mandate/formatRelativeTime —
- * no duplication (UI-SPEC §7 assumption).
+ * no duplication.
  */
 
 import { useEffect, useState } from "react";
@@ -79,7 +79,7 @@ export function NoteSaveStatus({
       {saveState === "error" && (
         <span className="text-negative">Save failed — retry</span>
       )}
-      {/* idle + no lastSavedAt renders nothing per UI-SPEC §7 */}
+      {/* idle + no lastSavedAt renders nothing */}
     </div>
   );
 }

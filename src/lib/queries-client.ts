@@ -19,7 +19,7 @@ export type LazyMetricsPanelId =
   | "exposure";
 
 /**
- * Phase 14b — Client-side mirror of `fetchStrategyLazyMetrics` (defined in
+ * Client-side mirror of `fetchStrategyLazyMetrics` (defined in
  * `src/lib/queries.ts`). Identical RPC contract; only the supabase factory
  * differs:
  *
@@ -29,17 +29,17 @@ export type LazyMetricsPanelId =
  * - This file → `createClient()` from `@/lib/supabase/client` (browser
  *   `createBrowserClient`, anon-key authenticated, no server-only barrier).
  *
- * The split is required because Phase 14b lazy panels are Client Components
- * (`"use client"`) that mount via `useLazyPanelMetrics` / IntersectionObserver
- * — the original `fetchStrategyLazyMetrics` cannot be statically imported
- * into a client module graph without tripping Turbopack's `next/headers` /
- * `server-only` chain (Plan 14b-01 Rule 3 deviation).
+ * The split is required because the lazy panels are Client Components
+ * (`"use client"`) that mount via `useLazyPanelMetrics` /
+ * IntersectionObserver — the server-only `fetchStrategyLazyMetrics`
+ * cannot be statically imported into a client module graph without
+ * tripping Turbopack's `next/headers` / `server-only` chain.
  *
- * RLS gates the same way: the `fetch_strategy_lazy_metrics` SECURITY DEFINER
- * RPC enforces strategy visibility internally (migration 087); the browser
- * client passes the user's anon JWT and the RPC returns `{}` for invisible
- * strategies — same T-12-08-01 silent-fallback behaviour as the server-side
- * function.
+ * RLS gates the same way: the `fetch_strategy_lazy_metrics` SECURITY
+ * DEFINER RPC enforces strategy visibility internally (migration 087);
+ * the browser client passes the user's anon JWT and the RPC returns `{}`
+ * for invisible strategies — same silent-fallback behaviour as the
+ * server-side function.
  */
 export async function fetchStrategyLazyMetricsClient(
   strategyId: string,

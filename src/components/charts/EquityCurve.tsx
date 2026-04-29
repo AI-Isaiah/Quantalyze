@@ -17,12 +17,12 @@ interface EquityCurveProps {
   benchmarkSeries?: { date: string; value: number }[] | null;
   height?: number;
   /**
-   * Phase 14a UI-SPEC §6 — when `true`, EquityCurve does NOT render its
-   * own per-component BTC checkbox header. The Single-Strategy v2 Panel 2
-   * lifts the BTC overlay control to the panel level so a single checkbox
-   * governs both the Cumulative and Underwater sub-charts. Pass
-   * `benchmarkSeries={null}` from the panel to suppress the overlay; the
-   * effect under the hood will simply skip adding the benchmark series.
+   * When `true`, EquityCurve does NOT render its own per-component BTC
+   * checkbox header. The Single-Strategy v2 equity panel lifts the BTC
+   * overlay control to the panel level so a single checkbox governs both
+   * the Cumulative and Underwater sub-charts. Pass `benchmarkSeries={null}`
+   * from the panel to suppress the overlay; the effect under the hood
+   * will simply skip adding the benchmark series.
    *
    * Default: `false` — preserves the existing v1 behavior (internal
    * checkbox visible whenever a benchmark series is provided).
@@ -53,7 +53,7 @@ export function EquityCurve({
         background: { color: CHART_SURFACE },
         textColor: CHART_AXIS_TICK,
         fontFamily: CHART_FONT_MONO,
-        fontSize: 12,   // matches CHART_TICK_STYLE 12px caption tier (UI-SPEC §2)
+        fontSize: 12,   // matches CHART_TICK_STYLE 12px caption tier
       },
       grid: {
         vertLines: { color: CHART_TRACK },

@@ -7,8 +7,8 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { Button } from "@/components/ui/Button";
 import { formatPercent, formatNumber, metricColor } from "@/lib/utils";
-// Phase 08 Plan 04 Task 3 — user-gated private note card on the factsheet
-// between the sparkline card and CTA card (UI-SPEC §4d, MANAGE-05).
+// User-gated private note card on the factsheet, rendered between the
+// sparkline card and the CTA card.
 import { createClient } from "@/lib/supabase/server";
 import { StrategyNoteCard } from "@/components/notes/StrategyNoteCard";
 
@@ -84,14 +84,14 @@ export default async function PublicStrategyPage({
 
   const { strategy, analytics } = result;
 
-  // Phase 08 Plan 04 Task 3 / MANAGE-05 — user-gated server-side fetch
-  // of the current viewer's private note for this strategy. Unauthenticated
-  // visitors skip rendering the StrategyNoteCard entirely (strategy pages
-  // are publicly viewable; notes are authenticated-only).
+  // User-gated server-side fetch of the current viewer's private note for
+  // this strategy. Unauthenticated visitors skip rendering the
+  // StrategyNoteCard entirely (strategy pages are publicly viewable; notes
+  // are authenticated-only).
   //
-  // Ownership predicate per Research Finding #3: strategies.status =
-  // 'published'. Any authenticated allocator can annotate any published
-  // strategy; RLS on user_notes enforces per-user privacy of the content.
+  // Ownership predicate: strategies.status = 'published'. Any
+  // authenticated allocator can annotate any published strategy; RLS on
+  // user_notes enforces per-user privacy of the content.
   const supabase = await createClient();
   const {
     data: { user },
@@ -185,9 +185,9 @@ export default async function PublicStrategyPage({
           </div>
         )}
 
-        {/* Phase 08 Plan 04 Task 3 / MANAGE-05 — private strategy note.
-            User-gated: only authenticated viewers see the card (strategy
-            pages are publicly viewable; notes are per-allocator private). */}
+        {/* Private strategy note. User-gated: only authenticated viewers
+            see the card (strategy pages are publicly viewable; notes are
+            per-allocator private). */}
         {user && (
           <StrategyNoteCard
             strategyId={strategy.id}

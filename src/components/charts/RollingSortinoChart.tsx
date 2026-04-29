@@ -13,7 +13,7 @@ interface RollingSortinoChartProps {
 }
 
 /**
- * Phase 14b-03 / KPI-10 — Rolling Sortino chart.
+ * Rolling Sortino chart.
  *
  * Single-line Recharts wrapper. Identical structure to
  * RollingVolatilityChart but Y-axis renders as a unitless ratio

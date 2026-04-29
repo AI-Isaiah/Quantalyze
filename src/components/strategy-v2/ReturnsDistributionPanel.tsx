@@ -23,7 +23,7 @@ interface Panel4LazyPayload {
 }
 
 /**
- * Phase 14b / KPI-06 + KPI-23b — Panel 4 Returns Distribution.
+ * Panel 4 Returns Distribution.
  *
  * Lazy-fetches `daily_returns_grid` via `useLazyPanelMetrics<Panel4LazyPayload>("panel4")`
  * (migration 087 sibling-table contract) on first viewport intersection.
@@ -35,18 +35,16 @@ interface Panel4LazyPayload {
  *   4. ReturnQuantiles (eager — `return_quantiles`)
  *   5. YearlyReturns  (eager — `monthly_returns`; <365d sub-banner)
  *
- * Partial-data thresholds (UI-SPEC §4.3):
+ * Partial-data thresholds:
  *   - Panel-level: history_days < 30 → PartialDataBanner replaces all 5 sub-charts
  *   - Sub-DailyHeatmap: empty `daily_returns_grid` → SubBanner replaces just that section
  *   - Sub-YearlyReturns: history_days < 365 → SubBanner replaces just that section
  *
- * Grok W-01 mitigation: the `data` prop passed to the memoized DailyHeatmap
- * is wrapped with `useMemo` whose dependency is `data?.daily_returns_grid`
- * from the hook payload — NOT a fresh array literal each render. Stabilizing
- * here keeps the 5y / 1825-cell paint budget under <300ms (UI-SPEC §3.5
- * perf budget) across status transitions (idle → loading → ready).
- *
- * NOT yet mounted in StrategyV2Shell — that wiring lands in 14b-06.
+ * Memoization: the `data` prop passed to the memoized DailyHeatmap is wrapped
+ * with `useMemo` whose dependency is `data?.daily_returns_grid` from the
+ * hook payload — NOT a fresh array literal each render. Stabilizing here
+ * keeps the 5y / 1825-cell paint budget under <300ms across status
+ * transitions (idle → loading → ready).
  */
 export function ReturnsDistributionPanel(props: ReturnsDistributionPanelProps) {
   const { ref, data, status } = useLazyPanelMetrics<Panel4LazyPayload>("panel4", {
@@ -54,12 +52,12 @@ export function ReturnsDistributionPanel(props: ReturnsDistributionPanelProps) {
     strategyId: props.strategyId,
   });
 
-  // Grok W-01: stabilize the data-prop reference passed to the memoized
-  // DailyHeatmap. Without this, parent re-renders during status transitions
-  // (idle → loading → ready) create fresh array references on each render —
-  // which would defeat React.memo's shallow compare and re-trigger the
-  // Canvas paint useEffect. The empty-array fallback lets the >0-length
-  // gate below render the sub-banner cleanly.
+  // Stabilize the data-prop reference passed to the memoized DailyHeatmap.
+  // Without this, parent re-renders during status transitions (idle →
+  // loading → ready) create fresh array references on each render — which
+  // would defeat React.memo's shallow compare and re-trigger the Canvas
+  // paint useEffect. The empty-array fallback lets the >0-length gate
+  // below render the sub-banner cleanly.
   const dailyReturnsData = useMemo(
     () => data?.daily_returns_grid ?? [],
     [data?.daily_returns_grid],

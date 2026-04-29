@@ -4,12 +4,12 @@ interface PartialDataBannerProps {
 }
 
 /**
- * Phase 14a / KPI-23a — shared partial-data banner for Panels 1–3.
+ * Shared partial-data banner for Panels 1–3.
  *
- * Server component (no `"use client"`). Renders inside the body region of a
- * panel card when the strategy's `history_days` falls below the panel's
- * threshold (see UI-SPEC §4). The panel heading + outer card chrome remain
- * unchanged — the banner replaces only the body region.
+ * Server component (no `"use client"`). Renders inside the body region of
+ * a panel card when the strategy's `history_days` falls below the panel's
+ * threshold. The panel heading + outer card chrome remain unchanged —
+ * the banner replaces only the body region.
  */
 export function PartialDataBanner({ heading, body }: PartialDataBannerProps) {
   return (

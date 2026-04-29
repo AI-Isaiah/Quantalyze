@@ -214,10 +214,7 @@ export function computeScenario(
   // meaningless. Return null KPIs so the UI renders honest em-dashes
   // instead of astronomical garbage like -79,017% TWR. The equity_curve
   // is also suppressed because plotting nonsensical values misleads
-  // more than empty state. Holds the existing data-quality contract:
-  // see Phase 07 returns-series sanity (D-09 warm-up gate) and Phase 12
-  // (METRICS-02 cross-runtime parity test) which will codify this gate
-  // server-side.
+  // more than empty state.
   const minCumulative = cumulative.reduce(
     (m, v) => (v < m ? v : m),
     Infinity,

@@ -25,11 +25,11 @@ interface RollingAlphaBetaChartProps {
 }
 
 /**
- * Phase 14b-03 / KPI-11 — Rolling Alpha & Beta chart.
+ * Rolling Alpha & Beta chart.
  *
  * Two-line Recharts wrapper: alpha solid CHART_ACCENT (1.5px), beta
  * dashed CHART_TEXT_MUTED (1px) with strokeDasharray=CHART_REFERENCE_DASH.
- * Legend at top with lowercase Greek-letter labels per UI-SPEC §10.4.
+ * Legend at top with lowercase Greek-letter labels.
  *
  * The two source series may not align by date (the lazy payload carries
  * `rolling_alpha` and `rolling_beta` independently). We merge by date key

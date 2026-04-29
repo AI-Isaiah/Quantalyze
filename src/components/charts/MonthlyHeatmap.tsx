@@ -14,12 +14,12 @@ interface CellStyle {
 }
 
 /**
- * Phase 14b / KPI-06 — DESIGN-01 identity audit:
+ * MonthlyHeatmap diverging color cells.
  *
- * Replaces Tailwind `bg-emerald-*` / `bg-red-*` palette with explicit hex
- * colors per UI-SPEC §5. Positive scale anchored at #16A34A (DESIGN.md
- * positive token); negative scale anchored at #DC2626 (DESIGN.md negative
- * token). Opacity steps replace Tailwind 50/200/400/600 numeric scale.
+ * Uses explicit hex colors instead of Tailwind palette indices. Positive
+ * scale anchored at #16A34A (DESIGN.md positive token); negative scale
+ * anchored at #DC2626 (DESIGN.md negative token). Opacity steps replace
+ * the Tailwind 50/200/400/600 numeric scale.
  */
 function cellStyle(value: number): CellStyle {
   if (value > 0.10) return { backgroundColor: "#16A34A", opacity: 1.0, color: "#FFFFFF" };

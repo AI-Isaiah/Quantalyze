@@ -5,33 +5,31 @@ import { WarningBanner } from "@/components/ui/WarningBanner";
 import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
 
 /**
- * Phase 11 / 11-05 / S1 / ONBOARD-01 — Onboarding banner.
+ * Onboarding banner.
  *
- * Visibility predicate (UI-SPEC §Interaction Contract — gated by parent):
+ * Visibility predicate (gated by parent):
  *   visible = (apiKeysCount === 0)
  *           && !sessionStorage["allocations.onboarding_banner_dismissed"]
  *
- * SSR safety + CLS guard (RESEARCH Pitfall 6 + 8):
+ * SSR safety + CLS guard:
  *   Server renders the banner unconditionally when apiKeysCount===0.
  *   Client useEffect reads sessionStorage post-mount and may HIDE
  *   the banner (state update — no layout shift on initial paint).
  *
- * Composition (UI-SPEC AC #14):
- *   <WarningBanner className="border-l-4 border-warning bg-warning/5">
- *   No new wrapper component.
+ * Composition: <WarningBanner className="border-l-4 border-warning
+ * bg-warning/5">. No new wrapper component.
  *
- * Copy: VERBATIM from UI-SPEC §S1. Do not rephrase. The byte-identical
- * "Connect Exchange →" string appears in EmptyState.tsx — Plan 04 already
- * permits this file in the Connect-Exchange copy allowlist.
+ * Copy: locked. Do not rephrase. The byte-identical "Connect Exchange →"
+ * string also appears in EmptyState.tsx.
  */
 
 const STORAGE_KEY = "allocations.onboarding_banner_dismissed";
 
 export function OnboardingBanner() {
-  // Phase 11 review fix IN-01: useSessionStorageBoolean consolidates the
-  // SSR-safe "render-then-hide-after-mount" pattern (RESEARCH Pitfall 6)
-  // and the dismiss-flag write. First paint renders the banner; the
-  // post-mount effect inside the hook may flip dismissed=true.
+  // useSessionStorageBoolean consolidates the SSR-safe
+  // "render-then-hide-after-mount" pattern and the dismiss-flag write.
+  // First paint renders the banner; the post-mount effect inside the hook
+  // may flip dismissed=true.
   const [dismissed, setDismissed] = useSessionStorageBoolean(STORAGE_KEY);
 
   const handleDismiss = () => setDismissed(true);
@@ -43,13 +41,13 @@ export function OnboardingBanner() {
       <div className="flex items-center gap-4">
         <div className="flex-1">
           {/*
-            Phase 11 review fix WR-03: this heading was previously <h3>, but
-            the page outline on /allocations is <h1>My Allocation</h1> at
-            the AllocationsTabs section heading and nothing at h2 yet. The
-            banner is the FIRST top-level subsection on the page, so h2 is
-            the correct level. h1 → h3 was a WCAG 1.3.1 skip (screen-reader
-            heading-navigation gap). Peer subsection headings on the same
-            page (MandateQuickSetCard, AuditLogSubsection) already use <h2>.
+            This heading is <h2>: the page outline on /allocations is
+            <h1>My Allocation</h1> at the AllocationsTabs section heading
+            and nothing at h2 yet. The banner is the FIRST top-level
+            subsection on the page, so h2 is the correct level — h1 → h3
+            would be a WCAG 1.3.1 skip (screen-reader heading-navigation
+            gap). Peer subsection headings on the same page
+            (MandateQuickSetCard, AuditLogSubsection) already use <h2>.
           */}
           <h2
             id="onboarding-banner-heading"

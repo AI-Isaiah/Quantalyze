@@ -12,15 +12,15 @@ import {
 } from "./chart-tokens";
 
 /**
- * Phase 14b / KPI-07 — DailyHeatmap dual SVG/Canvas renderer.
+ * DailyHeatmap dual SVG/Canvas renderer.
  *
  * SVG branch (≤365 cells): one <rect> per day with the 9-step diverging color
  * scale anchored at 0. SVG <title> child carries the screen-reader narration.
  *
  * Canvas branch (>365 cells): single <canvas> with a year-row × day-of-year
- * column grid (Grok B-02 fix — 2px-wide cells fit the 730px canvas width
- * exactly). An offscreen <table> mirror provides screen-reader access since
- * <canvas> contents are opaque to AT.
+ * column grid using 2px-wide cells that fit the 730px canvas width exactly.
+ * An offscreen <table> mirror provides screen-reader access since <canvas>
+ * contents are opaque to AT.
  *
  * Performance budget: <300ms first paint on a 5y fixture (1825 cells),
  * measured via `performance.measure('panel-4-paint', 'panel-4-mount-start',
@@ -55,7 +55,7 @@ const MONTHS = [
   "Dec",
 ];
 
-/** 9-step diverging color scale anchored at 0 — UI-SPEC §3.5. */
+/** 9-step diverging color scale anchored at 0. */
 function cellFill(v: number): { fill: string; opacity: number } {
   if (v >= 0.1) return { fill: CHART_POSITIVE, opacity: 1 };
   if (v >= 0.05) return { fill: CHART_POSITIVE, opacity: 0.7 };
@@ -109,10 +109,10 @@ function groupByYear(data: DailyHeatmapDataPoint[]): YearRow[] {
  * SVG branch geometry — mirrors the Canvas branch: year-row × day-of-year
  * column layout, 2px-wide cells, 365 columns.
  *
- * CR-01 fix: the original layout used `cols = Math.min(12, cellCount)` (a
- * monthly intent) which clipped raw daily data starting from day 13. The SVG
- * branch now uses dayOfYear()-based x-positions identical to the Canvas
- * branch, so all 365 possible positions fit within the viewBox.
+ * Uses dayOfYear()-based x-positions identical to the Canvas branch, so
+ * all 365 possible positions fit within the viewBox. (Earlier prototype
+ * versions used `cols = Math.min(12, cellCount)` — a monthly-grid intent
+ * that clipped raw daily data starting from day 13.)
  */
 const SVG_DOY_CELL_W = 2; // 365 * 2 = 730px — matches Canvas CANVAS_WIDTH
 const SVG_CELL_H = 16;
@@ -165,7 +165,7 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
             </text>
             {row.days.map((d) => {
               const { fill, opacity } = cellFill(d.value);
-              // Use day-of-year for x — consistent with Canvas branch (CR-01 fix).
+              // Use day-of-year for x — consistent with Canvas branch.
               const x = SVG_LEFT_GUTTER + dayOfYear(d.date) * SVG_DOY_CELL_W;
               const y = SVG_TOP_GUTTER + rowIdx * SVG_CELL_H;
               return (
@@ -198,12 +198,12 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
   );
 });
 
-/* Canvas branch — Grok B-02 geometry (row=year, col=day-of-year, 2px cells) */
+/* Canvas branch geometry: row=year, col=day-of-year, 2px cells. */
 const CELL_W = 2;
 const CELL_H = 80;
 const CANVAS_WIDTH = 730; // = 365 * 2
-// WR-01: canvas height is computed dynamically from year count at render time
-// so strategies with 6+ years of data are not silently clipped.
+// Canvas height is computed dynamically from year count at render time so
+// strategies with 6+ years of data are not silently clipped.
 
 const CanvasRenderer = memo(function CanvasRenderer({
   data,
@@ -213,16 +213,15 @@ const CanvasRenderer = memo(function CanvasRenderer({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const rowsByYear = useMemo(() => groupByYear(data), [data]);
-  // SR-1 (v0.17.1): O(1) year-index lookup. Replaces an O(n × y) indexOf
-  // inside the per-cell paint loop (1825 × 5 ≈ 9k string comparisons on a
-  // 5-year strategy). Folded directly off rowsByYear — the prior dedicated
-  // `yearOrder` memo was a dead intermediate after the SR-1 refactor.
+  // O(1) year-index lookup folded directly off rowsByYear. Replaces an
+  // O(n × y) indexOf inside the per-cell paint loop (1825 × 5 ≈ 9k string
+  // comparisons on a 5-year strategy).
   const yearIndex = useMemo(
     () => new Map(rowsByYear.map((r, i) => [r.year, i] as const)),
     [rowsByYear],
   );
 
-  // WR-01: dynamic height — grows with the actual number of distinct years.
+  // Dynamic height — grows with the actual number of distinct years.
   const canvasHeight = Math.max(CELL_H, rowsByYear.length * CELL_H);
 
   useEffect(() => {
@@ -234,10 +233,9 @@ const CanvasRenderer = memo(function CanvasRenderer({
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (ctx) {
-        // SR-2 (v0.17.1): isolate per-cell globalAlpha mutations so the final
-        // cell's alpha does not leak into any subsequent draw on this context.
-        // Canvas is currently dedicated to the heatmap, but the save/restore
-        // pair removes a latent hazard at near-zero cost (one pair per paint).
+        // Isolate per-cell globalAlpha mutations so the final cell's alpha
+        // does not leak into any subsequent draw on this context — defensive
+        // against future shared-canvas use; near-zero cost per paint.
         ctx.save();
         // Clear before paint — the canvas auto-clears when width/height attrs
         // change, but `canvasHeight` only changes on year-count change. When
@@ -271,7 +269,7 @@ const CanvasRenderer = memo(function CanvasRenderer({
       }
     };
 
-    // F5: gate first paint on document.fonts.ready ONLY when fonts are
+    // Gate first paint on document.fonts.ready ONLY when fonts are
     // currently loading. The surrounding panel typography (Geist Mono
     // labels, year axis text) drives the canvas container's flow size on
     // cold loads — painting before fonts settle can race a layout reflow
@@ -330,11 +328,11 @@ const CanvasRenderer = memo(function CanvasRenderer({
  * - data.length ≤ SVG_THRESHOLD_CELLS (365) → SVG renderer
  * - data.length > SVG_THRESHOLD_CELLS → Canvas renderer + offscreen <table>
  *
- * Phase 14b-02 / Grok W-01: the public symbol `DailyHeatmap` is the
- * memoized version of `DailyHeatmapInner`. React.memo's default shallow
- * compare on the `data` prop is the contract; consumers (notably
- * `ReturnsDistributionPanel`) MUST stabilize the data prop reference via
- * `useMemo` so panel-level status transitions don't re-paint the Canvas.
+ * The public symbol `DailyHeatmap` is the memoized version of
+ * `DailyHeatmapInner`. React.memo's default shallow compare on the `data`
+ * prop is the contract — consumers (notably `ReturnsDistributionPanel`)
+ * MUST stabilize the `data` prop via `useMemo` so panel-level status
+ * transitions don't trigger an unnecessary Canvas repaint.
  */
 function DailyHeatmapInner({ data }: DailyHeatmapProps) {
   if (data.length === 0) return <div data-empty="true" />;

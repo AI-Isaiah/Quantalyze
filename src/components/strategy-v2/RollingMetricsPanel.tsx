@@ -24,21 +24,19 @@ const WINDOW_TO_SUFFIX: Record<WindowId, "3m" | "6m" | "12m"> = {
 };
 
 /**
- * Per-window primary + fallback Sharpe keys (Grok B-01 — Phase 12 metrics.py
- * persists ONLY the 30d / 90d / 365d windows; the conceptual 180d window is
- * NOT shipped in v0.17.0). For each toggle, try the primary key first; fall
- * back to the documented secondary if the primary is absent. The Rolling
- * Sharpe sub-section only renders the gated sub-banner if BOTH primary and
- * fallback are absent.
+ * Per-window primary + fallback Sharpe keys. metrics.py persists ONLY the
+ * 30d / 90d / 365d windows; the conceptual 180d window is NOT shipped. For
+ * each toggle, try the primary key first; fall back to the documented
+ * secondary if the primary is absent. The Rolling Sharpe sub-section only
+ * renders the gated sub-banner if BOTH primary and fallback are absent.
  *
  * Window → primary mapping (each toggle picks the nearest persisted window):
  *   3M  → sharpe_30d  (exact-match: metrics.py:145 emits sharpe_30d directly)
- *   6M  → sharpe_90d  (closest-available — 180d not persisted; UI-SPEC §3.2 locks toggle copy)
+ *   6M  → sharpe_90d  (closest-available — 180d not persisted)
  *   12M → sharpe_365d (exact-match)
  *
- * Grok F3 (v0.17.1) — prior to this fix, BOTH 3M and 6M used sharpe_90d as
- * primary, rendering bit-identical charts for the two toggles. The 180d
- * window is a v0.17.1+ backend item if/when prioritized.
+ * Without distinct primary keys, BOTH 3M and 6M would render bit-identical
+ * charts. The 180d window remains a future backend item.
  */
 const SHARPE_KEY_BY_WINDOW: Record<
   WindowId,
@@ -73,18 +71,15 @@ interface Panel5LazyPayload {
 }
 
 /**
- * Phase 14b-03 / KPI-08..11 + KPI-23b (Panel 5) — Rolling metrics.
+ * Rolling metrics panel.
  *
  * Single shared 3M/6M/12M segmented-control window toggle drives 4 stacked
- * sub-charts: Rolling Sharpe (existing RollingMetrics reused with closest-
- * available persisted window key per Grok B-01), Rolling Volatility (NEW),
- * Rolling Sortino (NEW), Rolling Alpha & Beta (NEW). Per-window partial-data
- * sub-banners disable rendering of the chart body when history_days <
- * threshold for that window. Lazy-fetches Panel-5 series via the Wave-1
- * useLazyPanelMetrics hook; eager Sharpe series are passed in as props from
+ * sub-charts: Rolling Sharpe (RollingMetrics reused with closest-available
+ * persisted window key), Rolling Volatility, Rolling Sortino, Rolling Alpha
+ * & Beta. Per-window partial-data sub-banners disable rendering of the chart
+ * body when history_days < threshold for that window. Lazy-fetches series
+ * via useLazyPanelMetrics; eager Sharpe series are passed in as props from
  * getStrategyDetailV2's analytics.rolling_metrics blob.
- *
- * NOT yet mounted in StrategyV2Shell — wiring lands in 14b-06.
  */
 export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
   const { ref, data, status } = useLazyPanelMetrics<Panel5LazyPayload>("panel5", {
@@ -103,7 +98,7 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
   const sharpeKeyAbsent = Object.keys(sharpeForWindow).length === 0;
   const sharpeGated = windowGated || sharpeKeyAbsent;
 
-  // WR-03: distinguish "not enough history" from "history is fine but key is absent".
+  // Distinguish "not enough history" from "history is fine but key is absent".
   // The latter occurs when analytics recompute is pending or a legacy row was never
   // backfilled — showing "need ≥N days" for a 500-day strategy is factually wrong.
   const sharpeGatedBody = windowGated
@@ -214,11 +209,11 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
 }
 
 /**
- * Grok B-01 — Pick the closest-available persisted Sharpe key for the
- * selected toggle window. Phase 12 metrics.py emits {sharpe_30d, sharpe_90d,
- * sharpe_365d} ONLY (verified at metrics.py:145-147). Returns an empty
- * object iff NONE of the 3 known keys is populated, in which case the
- * caller renders the gated sub-banner.
+ * Pick the closest-available persisted Sharpe key for the selected toggle
+ * window. metrics.py emits {sharpe_30d, sharpe_90d, sharpe_365d} ONLY
+ * (verified at metrics.py:145-147). Returns an empty object iff NONE of the
+ * 3 known keys is populated, in which case the caller renders the gated
+ * sub-banner.
  *
  * The returned shape is `{ sharpe_30d|sharpe_90d|sharpe_365d: series }` so
  * downstream <RollingMetrics> resolves the line stroke via STROKE_BY_KEY.

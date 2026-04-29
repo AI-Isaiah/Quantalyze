@@ -1,13 +1,13 @@
 "use client";
 
 /**
- * Phase 10 Plan 06a — Sticky bottom bar for the Scenario tab body.
+ * Sticky bottom bar for the Scenario tab body.
  *
  * Renders inside the tab content area (NOT viewport — `position: sticky`
  * keeps it bound to the tabpanel; switching tabs hides it via the tabpanel
- * `hidden` attr). 56px tall per UI-SPEC §Spacing.
+ * `hidden` attr). 56px tall.
  *
- * Contract per CONTEXT D-12 + UI-SPEC §Interaction Contracts (Sticky footer):
+ * Contract:
  *   - Left: live diff count chip — "{N} changes" / "1 change" / "No changes yet"
  *   - Center: compact delta summary — top 3 non-muted deltas joined by " · "
  *     (Geist Mono / font-mono); falls back to "No material change yet."
@@ -15,10 +15,10 @@
  *   - Right: ghost Reset (hover-destructive) + accent Commit (disabled when
  *     diff_count = 0).
  *
- * Pure display primitive — no internal state, no fetch, no localStorage.
- * The composer (Plan 06b) owns scenario state and passes diff/delta props
- * down; clicking Reset / Commit fires the upstream callback (the composer
- * decides whether to open a confirmation modal vs. the commit drawer).
+ * Pure display primitive — no internal state, no fetch, no localStorage. The
+ * composer owns scenario state and passes diff/delta props down; clicking
+ * Reset / Commit fires the upstream callback (the composer decides whether
+ * to open a confirmation modal vs. the commit drawer).
  */
 
 import type { CSSProperties } from "react";
@@ -29,9 +29,9 @@ export interface ScenarioFooterDeltaItem {
   /** Pre-formatted, sign-prefixed value, e.g. "+0.3" or "−4%". */
   value: string;
   /**
-   * Direction-aware tier (per CONTEXT D-16). The composer maps each KPI's
-   * raw delta against its improvement direction (up-good vs down-good) and
-   * the noise-floor threshold:
+   * Direction-aware tier. The composer maps each KPI's raw delta against
+   * its improvement direction (up-good vs down-good) and the noise-floor
+   * threshold:
    *   - "positive" → improvement (e.g. Sharpe up, MaxDD down)
    *   - "negative" → regression  (e.g. Sharpe down, MaxDD up)
    *   - "muted"    → |Δ| < noise floor (no material change)
@@ -71,7 +71,7 @@ export function ScenarioFooter({
   const hasDiffs = diffCount > 0;
   const significant = deltaSummary.filter((d) => d.tier !== "muted");
 
-  // Diff-count chip copy — verb-less verb+noun pair per UI-SPEC §Copywriting.
+  // Diff-count chip copy — verb-less verb+noun pair.
   const countLabel =
     diffCount === 0
       ? "No changes yet"

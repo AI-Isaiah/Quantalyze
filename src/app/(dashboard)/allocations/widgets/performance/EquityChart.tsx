@@ -661,12 +661,12 @@ export function EquityChart({
           )}
         </div>
 
-        {/* Phase 10 / 10-04 D-14. Visibility toggle for the scenario
-            overlay. Renders ONLY when scenarioSeries is supplied and
-            non-empty so existing call sites are unaffected. UI-SPEC:
-            small inline pill radiogroup, monospace tabular-nums, accent
-            on selected. Sits between the period toggle and the sync
-            stamp so the chart header reads left-to-right:
+        {/* Visibility toggle for the scenario overlay. Renders ONLY when
+            scenarioSeries is supplied and non-empty so existing call sites
+            are unaffected. Small inline pill radiogroup, monospace
+            tabular-nums, accent on selected. Sits between the period
+            toggle and the sync stamp so the chart header reads
+            left-to-right:
               [period toggle]  [series visibility]  [sync stamp]
         */}
         {hasScenario && (
@@ -850,12 +850,11 @@ export function EquityChart({
             />
           )}
 
-          {/* Holding overlays (already period-normalized above). Phase 10
-              / 10-04: the scenario overlay rides through this same loop
-              with id="scenario" — filter it out when the visibility
-              toggle is on "live", and render it with a thicker 1.5px
-              stroke (UI-SPEC) so it reads as the projection peer of the
-              live baseline. */}
+          {/* Holding overlays (already period-normalized above). The
+              scenario overlay rides through this same loop with
+              id="scenario" — filter it out when the visibility toggle is
+              on "live", and render it with a thicker 1.5px stroke so it
+              reads as the projection peer of the live baseline. */}
           {overlaySeries
             .filter((o) =>
               o.id === "scenario" ? visibilityMode !== "live" : true,

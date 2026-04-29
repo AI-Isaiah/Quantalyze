@@ -21,7 +21,7 @@ class ResizeObserverStub {
 (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver =
   ResizeObserverStub as unknown as typeof ResizeObserver;
 
-// jsdom does not implement IntersectionObserver. Phase 14a's
+// jsdom does not implement IntersectionObserver. The
 // `useLazyPanelMetrics` hook (and related component tests) instantiate one
 // in the ref-callback path, which throws under vitest+jsdom without a
 // stub. Mirror the ResizeObserver pattern above so all component tests

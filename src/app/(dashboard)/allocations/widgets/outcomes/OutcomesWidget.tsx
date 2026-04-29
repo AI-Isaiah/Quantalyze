@@ -465,10 +465,9 @@ function ExpandedPanel({
         })}
       </div>
 
-      {/* Phase 08 Plan 04 Task 2 — "Your note" section below the 3-column
-          delta grid (UI-SPEC §4c). Uses the shared Plan 03 primitives via
-          BridgeOutcomeNoteSection. scope_kind=bridge_outcome;
-          scope_ref=outcome.id (UUID). */}
+      {/* "Your note" section below the 3-column delta grid. Uses the
+          shared note primitives via BridgeOutcomeNoteSection.
+          scope_kind=bridge_outcome; scope_ref=outcome.id (UUID). */}
       <hr className="my-3 border-[var(--color-border)]" />
       <p
         className="mb-2 text-xs font-semibold uppercase tracking-wider"

@@ -57,11 +57,10 @@ interface StrategyTableProps {
    */
   portfolioId?: string | null;
   /**
-   * Phase 13 / Plan 13-01 / DISCO-01 — when present (allocator on
-   * /discovery), the table renders the WatchlistTabs scope switch in the
-   * filter row, a leading star column on each row, and gates the empty
+   * When present (signed-in allocator on /discovery), the table renders the
+   * WatchlistTabs scope switch, a leading star column, and gates the
    * <EmptyWatchlist> state on `scope === "watchlist" && watchedSet.size === 0`.
-   * Undefined on /browse (public, unauth) — table renders unchanged.
+   * Undefined on /browse — table renders unchanged.
    */
   userId?: string;
   initialWatchedSet?: Set<string>;
@@ -129,13 +128,10 @@ export function StrategyTable({
   // Capture wall-clock time at mount for the track-record filter (stable across renders)
   const [mountedAtMs] = useState(() => Date.now());
 
-  // Phase 13 / DISCO-01 — Watchlist scope + watched-set state. Hydrated on
-  // first render from the server-rendered initialWatchedSet so the leading
-  // star column reflects the persisted state without a flash. The watched
-  // set mutates optimistically in onToggleStar (mirrors StarToggle's
-  // optimistic flip → useTransition PUT pattern); a server failure inside
-  // StarToggle calls onToggleStar a second time with the original value to
-  // revert this state in lock-step.
+  // Watchlist scope + watched-set. Hydrated from the SSR initialWatchedSet
+  // so the leading star column reflects persisted state without a flash.
+  // onToggleStar applies an optimistic flip; StarToggle reverts via the
+  // same callback on a server failure, keeping this state in lock-step.
   const [scope, setScope] = useState<"all" | "watchlist">("all");
   const [watchedSet, setWatchedSet] = useState<Set<string>>(
     () => initialWatchedSet ?? new Set<string>(),
@@ -150,11 +146,8 @@ export function StrategyTable({
     });
   }, []);
 
-  // Phase 13 / DISCO-02 — Customize drawer + per-user prefs.
-  // useDiscoveryPrefs(undefined, slug) safely no-ops on the persistence
-  // path when no userId is present (locked by Plan 13-02 Task 1 case 12),
-  // so /browse callers without a userId can render this hook without
-  // ever writing to localStorage.
+  // useDiscoveryPrefs(undefined, slug) is a safe no-op on the persistence
+  // path — /browse callers (no userId) never write to localStorage.
   const { prefs, setPrefs, hydrated: prefsHydrated } = useDiscoveryPrefs(
     userId,
     categorySlug,
@@ -228,12 +221,9 @@ export function StrategyTable({
   const filtered = useMemo(() => {
     let result = strategies.filter((s) => s.status === "published");
 
-    // Phase 13 / DISCO-01 — Watchlist scope is the FIRST narrowing pass.
-    // When scope === "watchlist" we restrict the candidate set to currently
-    // starred strategies before any other filter runs, so the rest of the
-    // pipeline (search, advanced filters, sort, paging) sees a small
-    // pre-narrowed list — avoids paginating across all strategies and then
-    // discovering the visible page is empty.
+    // Watchlist scope narrows FIRST — restricting to starred strategies
+    // before search/advanced/sort/paging avoids paginating across all
+    // strategies only to discover the visible page is empty.
     if (scope === "watchlist") {
       result = result.filter((s) => watchedSet.has(s.id));
     }
@@ -331,10 +321,9 @@ export function StrategyTable({
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Phase 13 / DISCO-01 — column count for the "no rows" placeholder. The
-  // existing table has 11 cells per row (8 sort columns + Return spark +
-  // Underwater spark + Actions). When userId is present, we add a leading
-  // 12th cell for the star toggle.
+  // Column count for the "no rows" placeholder: 11 cells (8 sort columns +
+  // Return spark + Underwater spark + Actions); +1 leading star column when
+  // userId is present.
   const showStarColumn = userId !== undefined;
   const emptyRowColSpan = showStarColumn ? 12 : 11;
 
@@ -546,9 +535,8 @@ export function StrategyTable({
         )}
       </div>
 
-      {/* Phase 13 / DISCO-02 — CustomizeDrawer is owned here so the parent
-          (the discovery page) doesn't have to thread props through; only
-          rendered when the allocator is signed in (userId present). */}
+      {/* Drawer is owned here so the page doesn't thread props through;
+          only rendered when signed in. */}
       {userId !== undefined && (
         <CustomizeDrawer
           open={customizeOpen}

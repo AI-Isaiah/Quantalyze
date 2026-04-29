@@ -18,7 +18,7 @@
  * Lazy fetch contract: drawer fetches /api/strategies/browse ONCE on open
  * (Plan 03's route). Filters and search apply client-side — zero round-trip
  * per filter change. Drawer stays open after add (multi-add session per
- * UI-SPEC Interaction Contracts "Browse-add"); row dims to "Added ✓" then
+ * "Browse-add" interaction contract); row dims to "Added ✓" then
  * permanently dims at opacity 0.6.
  *
  * onAdd callback delivers an AddedStrategy-shaped object — the structural
@@ -293,7 +293,7 @@ export function StrategyBrowseDrawer({
           animation: "bd-fade 160ms ease",
         }}
       />
-      {/* Drawer panel — 620px wide (DESIGN.md / UI-SPEC §Container widths) */}
+      {/* Drawer panel — 620px wide (matches DESIGN.md container widths). */}
       <div
         ref={drawerRef}
         role="dialog"

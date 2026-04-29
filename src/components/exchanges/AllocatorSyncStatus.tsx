@@ -3,55 +3,54 @@
 import React from "react";
 
 /**
- * Phase 06 Plan 04 Task 1 — Allocator-facing sync-status pill + helper line.
+ * Allocator-facing sync-status pill + helper line.
  *
- * Co-located sub-component for AllocatorExchangeManager rows. Renders a
- * 7-state inline status pill plus a 12px muted helper line per UI-SPEC D-08.
+ * Renders a 7-state inline status pill plus a 12px muted helper line.
  *
- * Copy table is LOCKED VERBATIM from CONTEXT.md D-08 — do NOT reword. Unit
- * tests assert character-for-character fidelity including the U+2026 ellipsis
- * in "Syncing…" and the U+2014 em-dash in "Rate limited — retry in Ns" /
+ * Copy table is LOCKED VERBATIM — do NOT reword. Unit tests assert
+ * character-for-character fidelity including the U+2026 ellipsis in
+ * "Syncing…" and the U+2014 em-dash in "Rate limited — retry in Ns" /
  * "Queued — exchange cooldown, retry in Ns".
  *
- * Special helper-text surfaces (outside the D-08 base table):
- *   - f8 (rate-limit contagion): when syncStatus='syncing' AND
+ * Special helper-text surfaces:
+ *   - rate-limit contagion: when syncStatus='syncing' AND
  *     queuedNextAttemptAt is ≥30s in the future, the helper line reads
  *     "Queued — exchange cooldown, retry in {N}s". This surfaces the
- *     per-exchange circuit-breaker queue state (from Plan 03 route's
+ *     per-exchange circuit-breaker queue state (from the route's
  *     already_inflight response) so the allocator sees "queued" instead
  *     of a mystery-stuck "Syncing…" pill when strategy-side 429s are in
  *     flight on the same exchange.
- *   - f4 (first-run failure): when helperOverride is a non-empty string,
+ *   - first-run failure: when helperOverride is a non-empty string,
  *     it takes precedence over all computed helper text. The manager's
  *     handleAddKey sets this to "Sync request failed — click Sync now to
  *     retry" when the awaited first-run POST returns non-2xx, so the row
  *     surfaces the error instead of leaving a stuck "Syncing…" pill.
  *
- * aria-live contract mirrors MandateSaveStatus (Phase 2): only the helper
- * line carries `role="status" aria-live="polite"`. The pill itself has no
- * aria-live so neutral idle→syncing→complete transitions produce zero SR
- * chatter (helper line is empty for neutral states).
+ * aria-live contract: only the helper line carries
+ * `role="status" aria-live="polite"`. The pill itself has no aria-live so
+ * neutral idle→syncing→complete transitions produce zero SR chatter
+ * (helper line is empty for neutral states).
  */
 export interface AllocatorSyncStatusProps {
   /** One of: idle | syncing | complete | complete_with_warnings | rate_limited | revoked | error. Unknown / null / 'computing' fall back to 'idle'. */
   syncStatus: string | null;
-  /** DB value of api_keys.sync_error (sanitized ≤500 chars server-side per D-07). */
+  /** DB value of api_keys.sync_error (sanitized ≤500 chars server-side). */
   syncError: string | null;
-  /** DB value of api_keys.last_sync_at; interpolated into "Synced {relative time ago}" for the `complete` state (D-08). */
+  /** DB value of api_keys.last_sync_at; interpolated into "Synced {relative time ago}" for the `complete` state. */
   lastSyncAt: string | null;
   /** Exchange name (lower-case, e.g. "binance") for the rate_limited helper "{title-case} cooldown remaining". */
   exchange: string;
   /** Integer seconds until retry for the rate_limited pill. Floor to 0 if elapsed. Omit to render 0s. */
   retryAtSeconds?: number;
   /**
-   * f8: ISO timestamp of the queued job's next_attempt_at. When
+   * ISO timestamp of the queued job's next_attempt_at. When
    * syncStatus === 'syncing' AND this timestamp is ≥30s in the future the
    * helper line reads "Queued — exchange cooldown, retry in {N}s" (U+2014).
    * Surfaces per-exchange circuit-breaker contagion from strategy-side 429s.
    */
   queuedNextAttemptAt?: string | null;
   /**
-   * f4: explicit helper-line override. When present AND non-empty, takes
+   * Explicit helper-line override. When present AND non-empty, takes
    * precedence over every computed helper text. Used by the manager's
    * handleAddKey/handleSync failure paths to render
    * "Sync request failed — click Sync now to retry" via the aria-live line.
@@ -59,10 +58,10 @@ export interface AllocatorSyncStatusProps {
   helperOverride?: string | null;
 }
 
-// D-08 LOCKED pill colour map — VERBATIM from UI-SPEC. Do NOT deviate.
+// LOCKED pill colour map — do NOT deviate.
 // `idle`/`syncing`/`complete` are neutral; `complete_with_warnings`/
 // `rate_limited` are amber; `revoked`/`error` are red. No positive colour is
-// used in Phase 06 — the UI-SPEC explicitly reserves positive for future.
+// used here — positive is reserved for future status states.
 const PILL_STYLES: Record<string, { bg: string; text: string }> = {
   idle: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
   syncing: { bg: "bg-[#F1F5F9]", text: "text-text-secondary" },
@@ -73,13 +72,13 @@ const PILL_STYLES: Record<string, { bg: string; text: string }> = {
   error: { bg: "bg-negative/10", text: "text-negative" },
 };
 
-// D-08 LOCKED helper copy — VERBATIM. Note the terminating period.
+// LOCKED helper copy — note the terminating period.
 const REVOKED_HELPER = "Re-add a read-only key from your exchange.";
 
 const ELLIPSIS = "\u2026"; // U+2026 — NOT three dots.
 const EM_DASH = "\u2014"; // U+2014 — NOT a hyphen-minus.
 
-// f8 threshold: only surface the Queued helper when the breaker cooldown is
+// Queued threshold: only surface the Queued helper when the breaker cooldown is
 // ≥30s out. Under 30s is treated as a "pending/starting" state where the
 // pill alone is sufficient (helper line silent — no SR chatter).
 const QUEUED_THRESHOLD_SECONDS = 30;
@@ -170,9 +169,9 @@ export function AllocatorSyncStatus({
   queuedNextAttemptAt,
   helperOverride,
 }: AllocatorSyncStatusProps) {
-  // Forward-compat fallback: unknown / null / 'computing' → neutral idle pill
-  // per UI-SPEC. The 066 migration adds `revoked` + `rate_limited`; the
-  // allocator worker never sets `computing` (that's strategy-side only).
+  // Forward-compat fallback: unknown / null / 'computing' → neutral idle pill.
+  // The 066 migration adds `revoked` + `rate_limited`; the allocator worker
+  // never sets `computing` (that's strategy-side only).
   const rawKey = syncStatus ?? "idle";
   const normalized = (rawKey in PILL_STYLES
     ? rawKey
@@ -230,9 +229,9 @@ export function AllocatorSyncStatus({
   }
 
   // Helper text resolution order:
-  //   1. helperOverride (f4) — explicit manager-side override wins over all.
-  //   2. status-specific computed text per UI-SPEC D-08 table.
-  //   3. f8 Queued surface when syncing + queuedNextAttemptAt >= 30s out.
+  //   1. helperOverride — explicit manager-side override wins over all.
+  //   2. status-specific computed text per the locked copy table.
+  //   3. Queued surface when syncing + queuedNextAttemptAt >= 30s out.
   //   4. neutral empty string — aria-live stays silent.
   let helperText = "";
   if (

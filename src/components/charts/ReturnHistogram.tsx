@@ -15,20 +15,19 @@ interface ReturnHistogramProps {
    * Optional benchmark return series. When provided (with ≥ 10 points), a
    * second translucent grey overlay bar series is rendered alongside the
    * strategy bars, sharing the same min/max/binWidth scaling so the bins
-   * align. UI-SPEC §3.1.
+   * align.
    */
   benchmarkReturns?: { date: string; value: number }[];
   bins?: number;
 }
 
 /**
- * Phase 14b / KPI-06 — Return Histogram for Panel 4.
+ * Return Histogram for the Returns Distribution panel.
  *
- * DESIGN-01 identity audit (14b-02):
- *   - Positive bars: #16A34A (replaced legacy emerald-600)
- *   - Axis ticks: spread CHART_TICK_STYLE (was inline { fontSize, fill } literals)
- *   - Tooltip border: CHART_BORDER token (was literal "#E2E8F0")
- *   - Optional benchmarkReturns overlay: CHART_TEXT_MUTED at 0.4 opacity
+ * Identity tokens: positive bars use CHART_POSITIVE / negative use
+ * CHART_NEGATIVE; axis ticks spread CHART_TICK_STYLE; tooltip border uses
+ * the CHART_BORDER token; the optional benchmarkReturns overlay renders
+ * at CHART_TEXT_MUTED with 0.4 opacity.
  */
 export function ReturnHistogram({ returns, benchmarkReturns, bins = 20 }: ReturnHistogramProps) {
   if (!returns || returns.length < 10) return null;

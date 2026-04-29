@@ -8,7 +8,7 @@
  * scenarioSeries, DrawdownChart scenarioDailyPoints, StrategyBrowseDrawer,
  * BridgeDrawer onAddToScenario, ScenarioFlaggedHoldingsList).
  *
- * Sections (top→bottom per UI-SPEC §Component Inventory):
+ * Sections (top→bottom):
  *   1. Header — "Scenario" + subtitle
  *   2. Fingerprint-mismatch banner (when stored fingerprint != current)
  *   3. KpiStrip in mode="scenario" with scenarioMetrics + liveMetrics

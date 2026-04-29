@@ -1,6 +1,5 @@
 /**
- * Phase 2 — pure relative-time formatter for the MandateSaveStatus region.
- * See 02-UI-SPEC.md Copywriting Contract:
+ * Pure relative-time formatter for the MandateSaveStatus region.
  *   - null              → "Not saved yet" (first-visit sentinel)
  *   - < 60s             → "just now"
  *   - 60s - 59min       → "{n} min ago"

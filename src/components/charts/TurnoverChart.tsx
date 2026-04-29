@@ -20,11 +20,11 @@ interface TurnoverChartProps {
 }
 
 /**
- * Phase 14b-05 / KPI-19 — Turnover chart.
+ * Turnover chart.
  *
  * Single-line Recharts LineChart, height 200, CHART_ACCENT 1.5px stroke.
  * Y-axis renders percent with 1 decimal (`value` is the dimensionless
- * ratio `Σ|Δposition × price| / NAV` per Phase 12 METRICS-19).
+ * ratio `Σ|Δposition × price| / NAV`).
  *
  * Returns null on empty data — caller renders the empty-state banner.
  */

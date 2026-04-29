@@ -59,15 +59,10 @@ export const EMPTY_ADVANCED_FILTERS: AdvancedFilters = {
   calmar: { from: "", to: "" },
 };
 
-// Phase 13 / Plan 13-02 / DISCO-02 — the legacy `CustomizeSettings` type +
-// `DEFAULT_CUSTOMIZE` constant are removed. The new source of truth for
-// per-allocator Customize prefs is `DEFAULTS` in `src/lib/discovery-prefs.ts`,
-// and the values are persisted via `useDiscoveryPrefs(uid, slug)` from the
-// same module. The legacy `hideExamples: false` default carried a DISCO-05
-// bug (fresh allocators should NOT see example strategies); the new
-// `hide_examples: true` default in discovery-prefs.ts is the fix. Verified
-// before deletion via `grep -rn DEFAULT_CUSTOMIZE\|CustomizeSettings src/`
-// — zero non-test importers.
+// Customize prefs source of truth is `DEFAULTS` in
+// `src/lib/discovery-prefs.ts`, persisted per-allocator via
+// `useDiscoveryPrefs(uid, slug)`. Default `hide_examples: true` so a
+// fresh allocator doesn't land on example strategies.
 
 // --- Props ---
 
@@ -85,20 +80,15 @@ interface StrategyFiltersProps {
   advancedFilters: AdvancedFilters;
   onAdvancedFiltersChange: (filters: AdvancedFilters) => void;
   /**
-   * Phase 13 / Plan 13-01 / DISCO-01 — optional slot rendered between the
-   * search input and the Hide-examples checkbox per UI-SPEC Layout Contract
-   * (filter row order: search → All Filters → leadingSlot → Hide-examples →
-   * Sort → Customize → ViewToggle). Used by StrategyTable to inject
-   * <WatchlistTabs> when a userId is present; non-Discovery callers (e.g.
-   * /browse) leave it undefined and the row renders unchanged.
+   * Optional slot between the search input and the Hide-examples checkbox.
+   * StrategyTable injects WatchlistTabs when a userId is present;
+   * non-discovery callers (e.g. /browse) leave it undefined.
    */
   leadingSlot?: ReactNode;
   /**
-   * Phase 13 / Plan 13-02 / DISCO-02 — opens the parent's CustomizeDrawer.
-   * When provided, the filter row renders the SettingsCogButton (icon-only,
-   * 36×36) at the right end of the row, replacing the legacy "Customize"
-   * text Button + Modal pattern. When undefined, the cog button is hidden
-   * (e.g., /browse callers without a userId).
+   * When provided, renders the SettingsCogButton at the right end of the
+   * row to open the parent's CustomizeDrawer. Undefined hides the button
+   * (e.g. /browse callers without a userId).
    */
   onOpenCustomize?: () => void;
 }
@@ -335,8 +325,6 @@ export function StrategyFilters({
           )}
         </Button>
 
-        {/* Phase 13 / DISCO-01 — leading slot (renders <WatchlistTabs> when
-            StrategyTable receives a userId; undefined for /browse callers). */}
         {leadingSlot}
 
         {/* Hide examples toggle */}
@@ -377,11 +365,6 @@ export function StrategyFilters({
           </select>
         </div>
 
-        {/* Phase 13 / DISCO-02 — Customize cog (icon-only, 36×36).
-            Replaces the legacy "Customize" text Button + Modal at this
-            position. Parent (StrategyTable) owns the drawer state and
-            passes `onOpenCustomize`; when undefined (e.g., /browse),
-            the cog is hidden. */}
         {onOpenCustomize && (
           <button
             type="button"
@@ -590,20 +573,12 @@ export function StrategyFilters({
         </div>
       )}
 
-      {/* Phase 13 / DISCO-02 — the legacy CustomizeModal that lived here
-          has been removed. The new <CustomizeDrawer> is owned by the
-          parent StrategyTable, which calls `onOpenCustomize` on cog click
-          and renders the drawer alongside the table/grid. See
-          src/components/strategy/CustomizeDrawer.tsx and
-          src/lib/discovery-prefs.ts. */}
     </>
   );
 }
 
-// --- Settings-cog icon (DISCO-02 — replaces the legacy "Customize" text
-// Button in the filter row). Inline 16×16 SVG matching the project's
-// no-icon-library convention (StrategyFilters.tsx already declares two
-// other inline SVGs for the view toggle). ---
+// Inline 16×16 SVG (no icon library — matches the inline view-toggle
+// icons already in this file).
 
 function SettingsCogIcon() {
   return (

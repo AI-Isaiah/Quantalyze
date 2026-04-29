@@ -15,9 +15,9 @@ function fmtList(values: string[] | null | undefined): string {
 
 function fmtNumber(value: number | null): string {
   if (value === null || value === undefined) return EM_DASH;
-  // MA-6: pin to en-US so SSR (which inherits the Node default locale) and
-  // the client (which uses the user's browser locale) emit identical text.
-  // A non-US client locale would otherwise hydrate with mismatched group
+  // Pin to en-US so SSR (which inherits the Node default locale) and the
+  // client (which uses the user's browser locale) emit identical text. A
+  // non-US client locale would otherwise hydrate with mismatched group
   // separators and trigger React's hydration warning.
   return value.toLocaleString("en-US");
 }
@@ -28,12 +28,12 @@ function fmtString(value: string | null): string {
 }
 
 /**
- * Phase 14a / KPI-02 — Panel 1 Overview row.
+ * Panel 1 Overview row.
  *
  * Server component. 6-cell horizontal grid (Supported exchanges / Types /
- * Subtypes / Markets / Leverage / Avg DTO) per UI-SPEC §4 + §7. Falls to
- * 3×2 below 980px. Empty cells render em-dash. When `history_days < 1`,
- * the body region is replaced by a partial-data banner per KPI-23a.
+ * Subtypes / Markets / Leverage / Avg DTO). Falls to 3×2 below 980px. Empty
+ * cells render em-dash. When `history_days < 1`, the body region is
+ * replaced by a partial-data banner.
  */
 export function OverviewPanel({ panel1, history_days }: OverviewPanelProps) {
   const showBanner = history_days < 1;

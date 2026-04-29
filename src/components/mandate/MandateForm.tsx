@@ -27,7 +27,7 @@ type Exchange = (typeof EXCHANGES)[number];
 type Liquidity = "high" | "medium" | "low";
 
 /**
- * Phase 2 — MandateForm root client component.
+ * MandateForm root client component.
  *
  * Single Card with:
  *   - Basics (always visible): max_weight slider, preferred_strategy_types chips,
@@ -36,8 +36,8 @@ type Liquidity = "high" | "medium" | "low";
  *     max_drawdown_tolerance slider, liquidity_preference segmented radio,
  *     style_exclusions chips.
  *
- * Auto-save per UI-SPEC trigger matrix — no submit button, no form element.
- * MandateSaveStatus renders the aria-live polite region (D-16 shape).
+ * Auto-save on every commit — no submit button, no form element.
+ * MandateSaveStatus renders the aria-live polite region.
  */
 export function MandateForm({ initial }: Props) {
   const initialLastSaved = initial?.mandate_edited_at

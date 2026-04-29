@@ -12,25 +12,24 @@ interface DrawdownPanelProps {
 }
 
 /**
- * Phase 14a / KPI-05 — Panel 3 Drawdown analysis.
+ * Panel 3 Drawdown analysis.
  *
  * Client component. Both child charts (DrawdownChart, WorstDrawdowns) are
  * Recharts-backed and require the client runtime; marking this panel
  * "use client" mirrors the existing strategy-v2 panel boundary so the
  * Recharts subtree mounts in a single hydration pass instead of straddling
- * a server/client seam (MA-7).
+ * a server/client seam.
  *
- * Renders a full-width DrawdownChart + Worst-5 Drawdowns table per
- * UI-SPEC §4. When `history_days < 30`, the chart body is replaced by a
- * partial-data banner. The Worst-5 table reuses its existing empty-state
- * copy ("No meaningful drawdowns…") rather than gating on history_days —
- * preserves the established v1 behavior.
+ * Renders a full-width DrawdownChart + Worst-5 Drawdowns table. When
+ * `history_days < 30`, the chart body is replaced by a partial-data banner.
+ * The Worst-5 table reuses its existing empty-state copy ("No meaningful
+ * drawdowns…") rather than gating on history_days — preserves the
+ * established v1 behavior.
  *
- * `WorstDrawdowns` expects a full `StrategyAnalytics` shape but only
- * reads `metrics_json.drawdown_episodes` and `drawdown_series`. We
- * synthesize a minimal analytics adapter from `panel3` to reuse the
- * existing component without forking it (CONTEXT.md §code_context:
- * "no v2 fork").
+ * `WorstDrawdowns` expects a full `StrategyAnalytics` shape but only reads
+ * `metrics_json.drawdown_episodes` and `drawdown_series`. We synthesize a
+ * minimal analytics adapter from `panel3` to reuse the existing component
+ * without forking it.
  */
 export function DrawdownPanel({ panel3, history_days }: DrawdownPanelProps) {
   const showChartBanner = history_days < 30;
