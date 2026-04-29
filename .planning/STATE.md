@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: Completed 14a-04-PLAN.md
-last_updated: "2026-04-29T10:27:39.300Z"
+stopped_at: Completed 14a-05-PLAN.md
+last_updated: "2026-04-29T10:39:05.312Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 20
-  completed_plans: 18
-  percent: 90
+  completed_plans: 19
+  percent: 95
 ---
 
 # Project State
@@ -148,6 +148,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 14a-04 — Used Next.js 16.2 unstable_retry() in error.tsx per RESEARCH Pitfall 3; typecheck + build exit 0; no fallback to reset() needed
 - Phase 14a-04 — Substituted bg-card -> bg-surface + inline shadow -> shadow-card in error.tsx (Rule 1 fix; --color-card undefined in globals.css; matches 14a-03 canonicalization)
 - Phase 14a-04 — error.tsx derives v1 fallback href via usePathname().endsWith('/v2') strip per Assumption A6 (error.tsx receives no params prop)
+- Plan 14a-05 (Wave 3): test-suite gating shipped — IntersectionObserver stub now global; chart-contrast / type-scale / panel-count Vitest tests + partial-data Playwright spec authored (4 tests listed; helper extension deferred to 14b)
 
 ### Roadmap drafted (2026-04-26)
 
@@ -178,8 +179,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T10:27:26.989Z
-Stopped at: Completed 14a-04-PLAN.md
+Last session: 2026-04-29T10:39:03.207Z
+Stopped at: Completed 14a-05-PLAN.md
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)

@@ -88,7 +88,8 @@
 
 ### A11Y — Accessibility verification (Phase 14a + Phase 14b)
 
-- [ ] **A11Y-01**: All chart axis text uses `CHART_AXIS_TICK = #64748B` (4.85:1 contrast on white, passes WCAG AA); never `#718096` (3.94:1, fails AA) or `#94A3B8` (2.85:1, fails AA — reserved for benchmark strokes only); `tests/a11y/chart-contrast.test.ts` gates future palette swaps. **Phase 14a** (covers panels 1–3 + identity baseline).
+- [x] **A11Y-01
+**: All chart axis text uses `CHART_AXIS_TICK = #64748B` (4.85:1 contrast on white, passes WCAG AA); never `#718096` (3.94:1, fails AA) or `#94A3B8` (2.85:1, fails AA — reserved for benchmark strokes only); `tests/a11y/chart-contrast.test.ts` gates future palette swaps. **Phase 14a** (covers panels 1–3 + identity baseline).
 - [ ] **A11Y-02**: axe-core integration tests added for `/discovery/[slug]` + `/strategy/[id]/v2`; tests must pass in CI on every PR. **Phase 14b** (covers all 7 panels once 14b lands the bodies).
 - [ ] **A11Y-03**: Keyboard navigation verified on Customize drawer, Watchlist tab toggle, 7-panel scroll, and EquityCurve segmented control; focus order documented in DX. **Phase 14b** (covers full 7-panel scroll).
 
