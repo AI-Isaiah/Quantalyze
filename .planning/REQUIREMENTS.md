@@ -41,7 +41,8 @@
 
 #### Phase 14b — Lazy panels + Trade & Exposure
 
-- [ ] **KPI-06**: Panel 4 — Returns Distribution: MonthlyHeatmap + DailyHeatmap + ReturnHistogram (with benchmark overlay) + ReturnQuantiles boxplot + YearlyReturns bar; layout-only for 4 of 5 components
+- [x] **KPI-06
+**: Panel 4 — Returns Distribution: MonthlyHeatmap + DailyHeatmap + ReturnHistogram (with benchmark overlay) + ReturnQuantiles boxplot + YearlyReturns bar; layout-only for 4 of 5 components
 - [x] **KPI-07
 **: Panel 4 — DailyHeatmap (12mo × N years grid); SVG renderer for ≤365 cells, Canvas API single-draw fallback above 365 (Pitfall 4 mitigation); IntersectionObserver-deferred paint to keep TTI under budget
 - [ ] **KPI-08**: Panel 5 — Rolling Sharpe with 3M / 6M / 12M toggle + BTC benchmark overlay; existing 30/90/365-day windows relabeled in UI
@@ -58,7 +59,8 @@
 - [ ] **KPI-19**: Panel 7 — Turnover series (daily `abs(Δposition × price) / NAV`); depends on Sprint 3 position reconstruction NAV alignment
 - [ ] **KPI-20**: Panel 7 — Correlation with BTC (single-series rolling 90d + scalar value); rendered as "Correlation with BTC" not "Correlation matrix" (multi-benchmark ETH/SOL deferred per UC#6)
 - [ ] **KPI-21**: Panel 7 — Benchmark Greeks panel: alpha / beta / IR / treynor (existing scalars from `metrics.py:255-267`)
-- [ ] **KPI-23b**: Per-panel partial-data state for panels 4–7 — strategies with <30/<90/<365 days of history show "Awaiting more data (need ≥X days)" copy on the affected panel/sub-panel; never crash; per-panel matrix documented in PR template (Pitfall 17 mitigation, panels 4–7 only).
+- [x] **KPI-23b
+**: Per-panel partial-data state for panels 4–7 — strategies with <30/<90/<365 days of history show "Awaiting more data (need ≥X days)" copy on the affected panel/sub-panel; never crash; per-panel matrix documented in PR template (Pitfall 17 mitigation, panels 4–7 only).
 
 ### METRICS — Backend metric contracts (Phase 12)
 
