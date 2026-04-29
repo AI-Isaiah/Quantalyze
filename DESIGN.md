@@ -88,7 +88,7 @@
 - **Easing:** enter(ease-out) exit(ease-in) move(ease-in-out)
 - **Duration:** micro(50ms) short(150ms) medium(250ms) long(400ms)
 - **Hover states:** 150ms ease-out (buttons, links, table rows)
-- **Page transitions:** 250ms (tab switches, panel open/close)
+- **Page transitions:** 250ms (tab switches, panel open/close). When using Tailwind utilities, use `duration-300` — `duration-250` is not a valid Tailwind v4 token and silently drops the animation. For raw CSS / inline-style animations, keep 250ms.
 - **No decorative animation.** No bouncing, no spinning logos, no scroll-triggered effects.
 
 ## Component Patterns
