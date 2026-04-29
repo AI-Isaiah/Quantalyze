@@ -55,6 +55,9 @@ function installCanvasMock() {
     // exercise the real CanvasRenderingContext2D in the browser/Playwright.
     save() {},
     restore() {},
+    // clearRect mock — SR-2 follow-up (review fix): paint loop clears stale
+    // pixels before redrawing so subsetted data doesn't leave ghost cells.
+    clearRect(_x: number, _y: number, _w: number, _h: number) {},
   };
   HTMLCanvasElement.prototype.getContext = vi.fn(() => fakeCtx) as never;
 }

@@ -235,6 +235,11 @@ const CanvasRenderer = memo(function CanvasRenderer({
       // Canvas is currently dedicated to the heatmap, but the save/restore
       // pair removes a latent hazard at near-zero cost (one pair per paint).
       ctx.save();
+      // Clear before paint — the canvas auto-clears when width/height attrs
+      // change, but `canvasHeight` only changes on year-count change. When
+      // `data` shrinks within the same year set (e.g., a refetch returns a
+      // subset), stale pixels from the prior paint would otherwise remain.
+      ctx.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
       for (const point of data) {
         const yr = point.date.slice(0, 4);
         const yearIdx = yearIndex.get(yr);

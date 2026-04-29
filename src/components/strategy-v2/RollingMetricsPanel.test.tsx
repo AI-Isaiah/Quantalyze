@@ -459,7 +459,9 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
 
     expect(threeMKeys).toEqual(["sharpe_30d"]);
     expect(sixMKeys).toEqual(["sharpe_90d"]);
-    expect(threeMSeries).not.toBe(sixMSeries);
+    // The two .toBe lines below are stronger than a .not.toBe identity check —
+    // they pin each series to its expected fixture reference, which implicitly
+    // proves 3M ≠ 6M for any non-trivial fixture.
     expect(threeMSeries).toBe(ROLLING_METRICS_FULL.sharpe_30d);
     expect(sixMSeries).toBe(ROLLING_METRICS_FULL.sharpe_90d);
   });

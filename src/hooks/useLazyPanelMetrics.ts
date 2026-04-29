@@ -142,20 +142,22 @@ export function useLazyPanelMetrics<T = unknown>(
           // is reachable from a Client Component graph (Plan 14b-01 Rule 3
           // deviation — see SUMMARY.md).
           const strategyId = currentOpts.strategyId;
+          // F2 — keep the .then/.catch guards in lockstep. Mounted + same
+          // strategyId at resolve time. See the mountedRef block at the top
+          // of the hook for the cross-instance reuse rationale.
+          const isStillRelevant = () =>
+            mountedRef.current && optsRef.current.strategyId === strategyId;
           import("@/lib/queries-client")
             .then(({ fetchStrategyLazyMetricsClient }) =>
               fetchStrategyLazyMetricsClient(strategyId, PANEL_TO_ID[panelId]),
             )
             .then((payload) => {
-              // F2 — drop stale payloads after unmount or strategyId change.
-              if (!mountedRef.current) return;
-              if (optsRef.current.strategyId !== strategyId) return;
+              if (!isStillRelevant()) return;
               setData(payload as T);
               setStatus("ready");
             })
             .catch((err: unknown) => {
-              if (!mountedRef.current) return;
-              if (optsRef.current.strategyId !== strategyId) return;
+              if (!isStillRelevant()) return;
               const message = err instanceof Error ? err.message : String(err);
               console.error("useLazyPanelMetrics fetch failed", {
                 panelId,
