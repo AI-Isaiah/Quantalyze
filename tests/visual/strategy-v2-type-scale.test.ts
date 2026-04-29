@@ -28,6 +28,23 @@ const FORBIDDEN_WEIGHTS = [
   /\bfont-bold\b/,
 ];
 
+/**
+ * Phase 14b-07 / UI-SPEC §12.2 — extend the v2-scoped type-scale lint to
+ * the 6 NEW chart files added in Phase 14b. The chart components must
+ * honor the same 4-size / 2-weight contract as the strategy-v2 panels
+ * since they're rendered inside the v2 layout. Listed explicitly to avoid
+ * regressing legacy v1 chart components (some of which were authored
+ * before the lint contract existed).
+ */
+const PHASE_14B_CHART_FILES = [
+  "src/components/charts/DailyHeatmap.tsx",
+  "src/components/charts/NetGrossExposureChart.tsx",
+  "src/components/charts/TurnoverChart.tsx",
+  "src/components/charts/RollingVolatilityChart.tsx",
+  "src/components/charts/RollingSortinoChart.tsx",
+  "src/components/charts/RollingAlphaBetaChart.tsx",
+].map((p) => resolve(process.cwd(), p));
+
 function listTsxFiles(dir: string): string[] {
   const out: string[] = [];
   const stack = [dir];
@@ -69,6 +86,30 @@ describe("strategy-v2 type-scale lint (DESIGN-02)", () => {
     expect(files.length).toBeGreaterThan(0);
     const violations: { file: string; pattern: string }[] = [];
     for (const file of files) {
+      const content = readFileSync(file, "utf-8");
+      for (const re of FORBIDDEN_WEIGHTS) {
+        if (re.test(content)) violations.push({ file, pattern: re.source });
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("zero forbidden size classes in Phase 14b chart files (UI-SPEC §12.2)", () => {
+    expect(PHASE_14B_CHART_FILES.length).toBe(6);
+    const violations: { file: string; pattern: string }[] = [];
+    for (const file of PHASE_14B_CHART_FILES) {
+      const content = readFileSync(file, "utf-8");
+      for (const re of FORBIDDEN_SIZES) {
+        if (re.test(content)) violations.push({ file, pattern: re.source });
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("zero forbidden weight classes in Phase 14b chart files (UI-SPEC §12.2)", () => {
+    expect(PHASE_14B_CHART_FILES.length).toBe(6);
+    const violations: { file: string; pattern: string }[] = [];
+    for (const file of PHASE_14B_CHART_FILES) {
       const content = readFileSync(file, "utf-8");
       for (const re of FORBIDDEN_WEIGHTS) {
         if (re.test(content)) violations.push({ file, pattern: re.source });

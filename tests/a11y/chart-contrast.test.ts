@@ -42,6 +42,24 @@ const CHART_AXIS_TICK = "#64748B";
 const FORBIDDEN_TEXT_FILLS = ["#94A3B8", "#718096"];
 const V2_DIR = resolve(process.cwd(), "src/components/strategy-v2");
 
+/**
+ * Phase 14b-07 / UI-SPEC §12.2 — scan the 6 NEW chart files added in
+ * Phase 14b for the same forbidden text-fill regression. These files are
+ * NOT under src/components/strategy-v2/, so the V2_DIR walker doesn't
+ * catch them. We list them explicitly rather than blanket-globbing
+ * src/components/charts/** to avoid sweeping legacy v1 chart components
+ * (some of which legitimately use #94A3B8 as a benchmark stroke — the
+ * forbidden pattern is text-FILL on text/legend nodes, not stroke).
+ */
+const PHASE_14B_CHART_FILES = [
+  "src/components/charts/DailyHeatmap.tsx",
+  "src/components/charts/NetGrossExposureChart.tsx",
+  "src/components/charts/TurnoverChart.tsx",
+  "src/components/charts/RollingVolatilityChart.tsx",
+  "src/components/charts/RollingSortinoChart.tsx",
+  "src/components/charts/RollingAlphaBetaChart.tsx",
+].map((p) => resolve(process.cwd(), p));
+
 function listTsxFiles(dir: string): string[] {
   const out: string[] = [];
   const stack = [dir];
@@ -77,6 +95,21 @@ describe("chart-axis contrast (A11Y-01)", () => {
       const content = readFileSync(file, "utf-8");
       for (const forbidden of FORBIDDEN_TEXT_FILLS) {
         // Match: fill: "#94A3B8" / fill: "#718096" / fill:"..." with optional spacing
+        const pattern = new RegExp(`fill\\s*:\\s*["']${forbidden}["']`, "gi");
+        if (pattern.test(content)) {
+          violations.push({ file, pattern: `fill: "${forbidden}"` });
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("zero forbidden text-fill colors in Phase 14b chart files (UI-SPEC §12.2)", () => {
+    expect(PHASE_14B_CHART_FILES.length).toBe(6);
+    const violations: { file: string; pattern: string }[] = [];
+    for (const file of PHASE_14B_CHART_FILES) {
+      const content = readFileSync(file, "utf-8");
+      for (const forbidden of FORBIDDEN_TEXT_FILLS) {
         const pattern = new RegExp(`fill\\s*:\\s*["']${forbidden}["']`, "gi");
         if (pattern.test(content)) {
           violations.push({ file, pattern: `fill: "${forbidden}"` });
