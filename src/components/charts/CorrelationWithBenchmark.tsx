@@ -148,7 +148,10 @@ function cumulativeToDailyMap(
 }
 
 interface CorrelationWithBenchmarkProps {
-  analytics: StrategyAnalytics;
+  /** WR-02: narrowed to the two keys actually consumed by resolveBenchmarkCorrelation
+   * (line 58 signature). Using Pick<> instead of the full StrategyAnalytics prevents
+   * future required-field additions from hiding type errors behind a cast. */
+  analytics: Pick<StrategyAnalytics, "returns_series" | "metrics_json">;
 }
 
 export function CorrelationWithBenchmark({

@@ -132,7 +132,7 @@ export function ExposureAndGreeksPanel({
 
           <SubSection title="Correlation with BTC">
             <CorrelationWithBenchmark
-              analytics={correlation_analytics as never}
+              analytics={correlation_analytics}
             />
           </SubSection>
 
