@@ -15,7 +15,11 @@ function fmtList(values: string[] | null | undefined): string {
 
 function fmtNumber(value: number | null): string {
   if (value === null || value === undefined) return EM_DASH;
-  return value.toLocaleString();
+  // MA-6: pin to en-US so SSR (which inherits the Node default locale) and
+  // the client (which uses the user's browser locale) emit identical text.
+  // A non-US client locale would otherwise hydrate with mismatched group
+  // separators and trigger React's hydration warning.
+  return value.toLocaleString("en-US");
 }
 
 function fmtString(value: string | null): string {
