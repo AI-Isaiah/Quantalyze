@@ -161,7 +161,7 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
-      - name: Run onboarding-funnel spec (BLOCK-3 gated on vars.E2E_TEST_DB_CONFIGURED)
+      - name: Run seed-gated specs (MA-8 / BLOCK-3 gated on vars.E2E_TEST_DB_CONFIGURED)
         if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
         run: |
           # Phase 11 review fix WR-04: defense-in-depth port-bind guard.
@@ -185,7 +185,22 @@ jobs:
             fi
             sleep 1
           done
-          npx playwright test e2e/onboarding-funnel.spec.ts --timeout 60000
+          # MA-8: every seed-gated spec runs together so wiring the
+          # E2E_TEST_DB_CONFIGURED variable surfaces all of them at once.
+          # Each spec self-skips when HAS_SEED_ENV is false; with the
+          # variable set the gate above resolves to true → seeded run.
+          # Adding/removing a seed-gated spec? Update both this list and
+          # the e2e/<spec>.spec.ts HAS_SEED_ENV constant.
+          npx playwright test \
+            e2e/onboarding-funnel.spec.ts \
+            e2e/discovery-axe.spec.ts \
+            e2e/discovery-hide-examples-default.spec.ts \
+            e2e/discovery-prefs-isolation.spec.ts \
+            e2e/strategy-v2-partial-data.spec.ts \
+            e2e/strategy-v2-chart-parity.spec.ts \
+            e2e/strategy-v2-keyboard.spec.ts \
+            e2e/strategy-v2-axe.spec.ts \
+            --timeout 60000
           # Same kill+wait pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
           kill $SERVER_PID 2>/dev/null || true
