@@ -1,7 +1,7 @@
 "use client";
 
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell } from "recharts";
-import { CHART_BORDER, CHART_TICK_STYLE } from "./chart-tokens";
+import { CHART_BORDER, CHART_NEGATIVE, CHART_POSITIVE, CHART_TICK_STYLE } from "./chart-tokens";
 
 interface YearlyReturnsProps {
   monthlyReturns: Record<string, Record<string, number>>;
@@ -46,7 +46,7 @@ export function YearlyReturns({ monthlyReturns }: YearlyReturnsProps) {
         />
         <Bar dataKey="value" radius={[4, 4, 0, 0]} barSize={40}>
           {yearly.map((entry, i) => (
-            <Cell key={i} fill={entry.value >= 0 ? "#16A34A" : "#DC2626"} />
+            <Cell key={i} fill={entry.value >= 0 ? CHART_POSITIVE : CHART_NEGATIVE} />
           ))}
         </Bar>
       </BarChart>

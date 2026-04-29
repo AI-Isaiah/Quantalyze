@@ -9,6 +9,12 @@ export const CHART_ACCENT = "#1B6B5A";
 export const CHART_TEXT_SECONDARY = "#4A5568";
 export const CHART_TEXT_MUTED = "#94A3B8";
 export const CHART_BORDER = "#E2E8F0";
+// Chart canvas background — mirrors --color-surface in globals.css.
+export const CHART_SURFACE = "#FFFFFF";
+// Gridline / track color — mirrors --color-track in globals.css. Used for
+// lightweight-charts grid lines (vertLines / horzLines) and any other
+// hairline neutral rail where it must read as separation, not a border.
+export const CHART_TRACK = "#F1F5F9";
 // Slightly darker slate than CHART_TEXT_MUTED, used specifically for Recharts axis ticks.
 export const CHART_AXIS_TICK = "#64748B";
 export const CHART_FONT_MONO = "var(--font-mono), monospace";

@@ -2,7 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, type SeriesType } from "lightweight-charts";
-import { CHART_ACCENT, CHART_FONT_MONO, CHART_TEXT_MUTED } from "./chart-tokens";
+import {
+  CHART_ACCENT,
+  CHART_AXIS_TICK,
+  CHART_BORDER,
+  CHART_FONT_MONO,
+  CHART_SURFACE,
+  CHART_TEXT_MUTED,
+  CHART_TRACK,
+} from "./chart-tokens";
 
 interface EquityCurveProps {
   data: { date: string; value: number }[];
@@ -42,17 +50,17 @@ export function EquityCurve({
     const chart = createChart(containerRef.current, {
       height,
       layout: {
-        background: { color: "#FFFFFF" },
-        textColor: "#64748B",
+        background: { color: CHART_SURFACE },
+        textColor: CHART_AXIS_TICK,
         fontFamily: CHART_FONT_MONO,
         fontSize: 12,   // matches CHART_TICK_STYLE 12px caption tier (UI-SPEC §2)
       },
       grid: {
-        vertLines: { color: "#F1F5F9" },
-        horzLines: { color: "#F1F5F9" },
+        vertLines: { color: CHART_TRACK },
+        horzLines: { color: CHART_TRACK },
       },
-      rightPriceScale: { borderColor: "#E2E8F0" },
-      timeScale: { borderColor: "#E2E8F0" },
+      rightPriceScale: { borderColor: CHART_BORDER },
+      timeScale: { borderColor: CHART_BORDER },
       crosshair: {
         vertLine: { labelBackgroundColor: CHART_ACCENT },
         horzLine: { labelBackgroundColor: CHART_ACCENT },
