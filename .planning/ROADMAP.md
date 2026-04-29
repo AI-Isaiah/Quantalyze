@@ -100,9 +100,13 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   3. Sparklines on every Discovery row + card render with a single accent color across the trace — `#1B6B5A` when final value > 0, `#DC2626` when final value < 0, `#94A3B8` when zero — and a visual snapshot regression catches any future split-color reintroduction.
   4. The Phase 13-internal `organization_id` population audit (single SQL: `SELECT COUNT(*) FROM strategies WHERE organization_id IS NOT NULL AND status='published'`) is documented in TODOS.md; if the count is 0, DISCO-03 (filter-by-team UI) is explicitly deferred to v0.18 with a TODOS entry; if non-zero, migration `088_organizations_is_public.sql` ships (adds `is_public BOOLEAN DEFAULT false`), the dropdown reads only `WHERE is_public = true` (default-false avoids leaking private/stealth fund names; managers opt-in via `/strategies/team` settings deferred to v0.18; managers can be flipped to public manually via admin during v0.17 if needed), and surfaces only orgs whose strategies are visible to the allocator.
   5. Seed-fixture strategies have `is_example=true` after a data-only `UPDATE strategies SET is_example=true WHERE id IN (<seed UUIDs>)` migration and the Customize default is "Hide examples = ON" — a fresh allocator's first Discovery visit shows zero example strategies.
-**Plans:** TBD
+**Plans:** 4 plans (DISCO-03 deferred to v0.18 — see TODOS.md, audit returned count=0 on 2026-04-28)
+- [ ] 13-01-PLAN.md — DISCO-01 Watchlist (StarToggle + WatchlistTabs + PUT /api/watchlist + getMyWatchlist + StrategyTable/Grid extensions + e2e/discovery-watchlist.spec.ts) (Wave 1)
+- [ ] 13-02-PLAN.md — DISCO-02 Customize prefs (useDiscoveryPrefs hook + CustomizeDrawer right-edge slide-out + StrategyFilters cog swap + cross-account isolation Playwright) (Wave 2)
+- [ ] 13-04-PLAN.md — DISCO-04 Sparkline single-accent rule (sparklineColor helper at the two call sites + visual regression Playwright) (Wave 3)
+- [ ] 13-05-PLAN.md — DISCO-05 is_example backfill (data-only migration 089 + supabase db push gate + fresh-allocator E2E) (Wave 4)
 **UI hint**: yes
-**Complexity:** Low — schema is fully shipped (no DDL except conditional 086 privacy gate), `CustomizeModal` and view-mode toggle exist; real work is Watchlist UI wire-up + localStorage scoping + audit gate.
+**Complexity:** Low — schema is fully shipped (no DDL beyond a single data-only DML at migration 089), `CustomizeModal` and view-mode toggle exist; real work is Watchlist UI wire-up + localStorage scoping + sparkline-color call-site rule.
 
 ### Phase 14a: Single-Strategy v2 — Eager Panels + Identity
 **Goal:** `/strategy/[id]/v2` (and flag-default-on at `/discovery/[slug]/[strategyId]`) ships the 7-panel scrollable shell + eager bodies for Panels 1–3 (Overview / Headline+Equity / Drawdown) in DESIGN.md identity, with placeholders for panels 4–7 lazy-mounted via IntersectionObserver but bodies deferred to Phase 14b. Identity baseline (chart contrast tokens, tabular-nums style, `@nivo/boxplot` removed) lands here so Phase 14b inherits a clean foundation.

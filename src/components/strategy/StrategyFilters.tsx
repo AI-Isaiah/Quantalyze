@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, type ReactNode } from "react";
 import { STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import { Button } from "@/components/ui/Button";
-import { Modal } from "@/components/ui/Modal";
 
 // --- Types ---
 
@@ -60,19 +59,15 @@ export const EMPTY_ADVANCED_FILTERS: AdvancedFilters = {
   calmar: { from: "", to: "" },
 };
 
-export interface CustomizeSettings {
-  defaultView: ViewMode;
-  defaultSortKey: SortKey;
-  defaultSortDir: SortDir;
-  hideExamples: boolean;
-}
-
-export const DEFAULT_CUSTOMIZE: CustomizeSettings = {
-  defaultView: "table",
-  defaultSortKey: "sharpe",
-  defaultSortDir: "desc",
-  hideExamples: false,
-};
+// Phase 13 / Plan 13-02 / DISCO-02 — the legacy `CustomizeSettings` type +
+// `DEFAULT_CUSTOMIZE` constant are removed. The new source of truth for
+// per-allocator Customize prefs is `DEFAULTS` in `src/lib/discovery-prefs.ts`,
+// and the values are persisted via `useDiscoveryPrefs(uid, slug)` from the
+// same module. The legacy `hideExamples: false` default carried a DISCO-05
+// bug (fresh allocators should NOT see example strategies); the new
+// `hide_examples: true` default in discovery-prefs.ts is the fix. Verified
+// before deletion via `grep -rn DEFAULT_CUSTOMIZE\|CustomizeSettings src/`
+// — zero non-test importers.
 
 // --- Props ---
 
@@ -89,6 +84,23 @@ interface StrategyFiltersProps {
   onViewModeChange: (mode: ViewMode) => void;
   advancedFilters: AdvancedFilters;
   onAdvancedFiltersChange: (filters: AdvancedFilters) => void;
+  /**
+   * Phase 13 / Plan 13-01 / DISCO-01 — optional slot rendered between the
+   * search input and the Hide-examples checkbox per UI-SPEC Layout Contract
+   * (filter row order: search → All Filters → leadingSlot → Hide-examples →
+   * Sort → Customize → ViewToggle). Used by StrategyTable to inject
+   * <WatchlistTabs> when a userId is present; non-Discovery callers (e.g.
+   * /browse) leave it undefined and the row renders unchanged.
+   */
+  leadingSlot?: ReactNode;
+  /**
+   * Phase 13 / Plan 13-02 / DISCO-02 — opens the parent's CustomizeDrawer.
+   * When provided, the filter row renders the SettingsCogButton (icon-only,
+   * 36×36) at the right end of the row, replacing the legacy "Customize"
+   * text Button + Modal pattern. When undefined, the cog button is hidden
+   * (e.g., /browse callers without a userId).
+   */
+  onOpenCustomize?: () => void;
 }
 
 // --- Sort options ---
@@ -271,9 +283,10 @@ export function StrategyFilters({
   onViewModeChange,
   advancedFilters,
   onAdvancedFiltersChange,
+  leadingSlot,
+  onOpenCustomize,
 }: StrategyFiltersProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [customizeOpen, setCustomizeOpen] = useState(false);
   const [draft, setDraft] = useState<AdvancedFilters>(advancedFilters);
 
   const openFilters = useCallback(() => {
@@ -316,11 +329,15 @@ export function StrategyFilters({
         >
           All Filters
           {activeCount > 0 && (
-            <span className="ml-1.5 inline-flex items-center justify-center rounded-full bg-accent text-white text-[10px] font-bold w-4.5 h-4.5 min-w-[18px] px-1">
+            <span className="ml-1.5 inline-flex items-center justify-center rounded-full bg-accent text-white text-[11px] font-semibold w-4.5 h-4.5 min-w-[18px] px-1">
               {activeCount}
             </span>
           )}
         </Button>
+
+        {/* Phase 13 / DISCO-01 — leading slot (renders <WatchlistTabs> when
+            StrategyTable receives a userId; undefined for /browse callers). */}
+        {leadingSlot}
 
         {/* Hide examples toggle */}
         <label className="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
@@ -334,7 +351,7 @@ export function StrategyFilters({
         </label>
 
         {/* Sort by */}
-        <div className="flex items-center gap-1.5 ml-auto">
+        <div className="flex items-center gap-1.5">
           <span className="text-xs text-text-muted">Sort:</span>
           <select
             value={sortKey}
@@ -360,10 +377,22 @@ export function StrategyFilters({
           </select>
         </div>
 
-        {/* Customize button */}
-        <Button variant="ghost" size="sm" onClick={() => setCustomizeOpen(true)}>
-          Customize
-        </Button>
+        {/* Phase 13 / DISCO-02 — Customize cog (icon-only, 36×36).
+            Replaces the legacy "Customize" text Button + Modal at this
+            position. Parent (StrategyTable) owns the drawer state and
+            passes `onOpenCustomize`; when undefined (e.g., /browse),
+            the cog is hidden. */}
+        {onOpenCustomize && (
+          <button
+            type="button"
+            onClick={onOpenCustomize}
+            aria-label="Customize discovery view"
+            aria-haspopup="dialog"
+            className="h-9 w-9 inline-flex items-center justify-center rounded border border-border bg-surface text-text-secondary hover:bg-page hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <SettingsCogIcon />
+          </button>
+        )}
 
         {/* View toggle */}
         <div className="flex items-center gap-1 border border-border rounded-lg p-0.5">
@@ -561,124 +590,41 @@ export function StrategyFilters({
         </div>
       )}
 
-      {/* Customize modal */}
-      <CustomizeModal
-        open={customizeOpen}
-        onClose={() => setCustomizeOpen(false)}
-        viewMode={viewMode}
-        onViewModeChange={onViewModeChange}
-        sortKey={sortKey}
-        onSortKeyChange={onSortKeyChange}
-        sortDir={sortDir}
-        onSortDirChange={onSortDirChange}
-        showExamples={showExamples}
-        onToggleExamples={onToggleExamples}
-      />
+      {/* Phase 13 / DISCO-02 — the legacy CustomizeModal that lived here
+          has been removed. The new <CustomizeDrawer> is owned by the
+          parent StrategyTable, which calls `onOpenCustomize` on cog click
+          and renders the drawer alongside the table/grid. See
+          src/components/strategy/CustomizeDrawer.tsx and
+          src/lib/discovery-prefs.ts. */}
     </>
   );
 }
 
-// --- Customize modal ---
+// --- Settings-cog icon (DISCO-02 — replaces the legacy "Customize" text
+// Button in the filter row). Inline 16×16 SVG matching the project's
+// no-icon-library convention (StrategyFilters.tsx already declares two
+// other inline SVGs for the view toggle). ---
 
-function CustomizeModal({
-  open,
-  onClose,
-  viewMode,
-  onViewModeChange,
-  sortKey,
-  onSortKeyChange,
-  sortDir,
-  onSortDirChange,
-  showExamples,
-  onToggleExamples,
-}: {
-  open: boolean;
-  onClose: () => void;
-  viewMode: ViewMode;
-  onViewModeChange: (mode: ViewMode) => void;
-  sortKey: SortKey;
-  onSortKeyChange: (key: SortKey) => void;
-  sortDir: SortDir;
-  onSortDirChange: (dir: SortDir) => void;
-  showExamples: boolean;
-  onToggleExamples: () => void;
-}) {
+function SettingsCogIcon() {
   return (
-    <Modal open={open} onClose={onClose} title="Customize View">
-      <div className="space-y-5">
-        {/* Default view */}
-        <div>
-          <p className="text-sm font-medium text-text-primary mb-2">Default view</p>
-          <div className="flex gap-2">
-            <button
-              onClick={() => onViewModeChange("table")}
-              className={`px-4 py-2 text-sm rounded-lg border transition-colors ${
-                viewMode === "table"
-                  ? "border-accent bg-accent/10 text-accent"
-                  : "border-border bg-surface text-text-secondary hover:border-border-focus"
-              }`}
-            >
-              Table
-            </button>
-            <button
-              onClick={() => onViewModeChange("grid")}
-              className={`px-4 py-2 text-sm rounded-lg border transition-colors ${
-                viewMode === "grid"
-                  ? "border-accent bg-accent/10 text-accent"
-                  : "border-border bg-surface text-text-secondary hover:border-border-focus"
-              }`}
-            >
-              Grid
-            </button>
-          </div>
-        </div>
-
-        {/* Default sorting */}
-        <div>
-          <p className="text-sm font-medium text-text-primary mb-2">Default sorting</p>
-          <div className="flex gap-2">
-            <select
-              value={sortKey}
-              onChange={(e) => onSortKeyChange(e.target.value as SortKey)}
-              className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary flex-1"
-            >
-              {SORT_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <select
-              value={sortDir}
-              onChange={(e) => onSortDirChange(e.target.value as SortDir)}
-              className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary flex-1"
-            >
-              {SORT_DIR_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Hide examples */}
-        <label className="flex items-center gap-2 text-sm text-text-secondary cursor-pointer">
-          <input
-            type="checkbox"
-            checked={!showExamples}
-            onChange={onToggleExamples}
-            className="rounded accent-accent"
-          />
-          Hide examples
-        </label>
-
-        <div className="pt-2">
-          <Button variant="primary" onClick={onClose} className="w-full">
-            Done
-          </Button>
-        </div>
-      </div>
-    </Modal>
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+      />
+      <path
+        d="M13.4 9a5.4 5.4 0 00-.04-2l1.34-1.05-1.5-2.6-1.6.55a5.4 5.4 0 00-1.74-1l-.24-1.7h-3l-.24 1.7a5.4 5.4 0 00-1.74 1l-1.6-.55-1.5 2.6L2.64 7a5.4 5.4 0 00-.04 2 5.4 5.4 0 00.04 2L1.3 12.05l1.5 2.6 1.6-.55a5.4 5.4 0 001.74 1l.24 1.7h3l.24-1.7a5.4 5.4 0 001.74-1l1.6.55 1.5-2.6L13.36 11a5.4 5.4 0 00.04-2z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }

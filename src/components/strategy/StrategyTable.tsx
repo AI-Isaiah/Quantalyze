@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Sparkline } from "@/components/charts/Sparkline";
+import { sparklineColor } from "@/lib/sparkline-color";
 import {
   StrategyFilters,
   EMPTY_ADVANCED_FILTERS,
@@ -15,8 +16,16 @@ import {
 } from "./StrategyFilters";
 import { StrategyGrid } from "./StrategyGrid";
 import { SyncBadge } from "./SyncBadge";
+import { StarToggle } from "./StarToggle";
+import { WatchlistTabs } from "./WatchlistTabs";
+import { EmptyWatchlist } from "./EmptyWatchlist";
+import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { formatPercent, formatNumber, formatCurrency, metricColor } from "@/lib/utils";
+import {
+  useDiscoveryPrefs,
+  type DiscoveryViewPreferences,
+} from "@/lib/discovery-prefs";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
@@ -47,6 +56,15 @@ interface StrategyTableProps {
    * explanatory tooltip.
    */
   portfolioId?: string | null;
+  /**
+   * Phase 13 / Plan 13-01 / DISCO-01 — when present (allocator on
+   * /discovery), the table renders the WatchlistTabs scope switch in the
+   * filter row, a leading star column on each row, and gates the empty
+   * <EmptyWatchlist> state on `scope === "watchlist" && watchedSet.size === 0`.
+   * Undefined on /browse (public, unauth) — table renders unchanged.
+   */
+  userId?: string;
+  initialWatchedSet?: Set<string>;
 }
 
 // --- Range filter helper ---
@@ -85,7 +103,14 @@ function getSortValue(s: StrategyWithAnalytics, key: TableSortKey): number | str
   }
 }
 
-export function StrategyTable({ strategies, categorySlug, basePath = "/discovery", portfolioId = null }: StrategyTableProps) {
+export function StrategyTable({
+  strategies,
+  categorySlug,
+  basePath = "/discovery",
+  portfolioId = null,
+  userId,
+  initialWatchedSet,
+}: StrategyTableProps) {
   const [search, setSearch] = useState("");
   const [showExamples, setShowExamples] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("sharpe");
@@ -100,6 +125,74 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
 
   // Capture wall-clock time at mount for the track-record filter (stable across renders)
   const [mountedAtMs] = useState(() => Date.now());
+
+  // Phase 13 / DISCO-01 — Watchlist scope + watched-set state. Hydrated on
+  // first render from the server-rendered initialWatchedSet so the leading
+  // star column reflects the persisted state without a flash. The watched
+  // set mutates optimistically in onToggleStar (mirrors StarToggle's
+  // optimistic flip → useTransition PUT pattern); a server failure inside
+  // StarToggle calls onToggleStar a second time with the original value to
+  // revert this state in lock-step.
+  const [scope, setScope] = useState<"all" | "watchlist">("all");
+  const [watchedSet, setWatchedSet] = useState<Set<string>>(
+    () => initialWatchedSet ?? new Set<string>(),
+  );
+
+  const onToggleStar = useCallback((strategyId: string, nextStarred: boolean) => {
+    setWatchedSet((prev) => {
+      const next = new Set(prev);
+      if (nextStarred) next.add(strategyId);
+      else next.delete(strategyId);
+      return next;
+    });
+  }, []);
+
+  // Phase 13 / DISCO-02 — Customize drawer + per-user prefs.
+  // useDiscoveryPrefs(undefined, slug) safely no-ops on the persistence
+  // path when no userId is present (locked by Plan 13-02 Task 1 case 12),
+  // so /browse callers without a userId can render this hook without
+  // ever writing to localStorage.
+  const { prefs, setPrefs, hydrated: prefsHydrated } = useDiscoveryPrefs(
+    userId,
+    categorySlug,
+  );
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [draftPrefs, setDraftPrefs] = useState<DiscoveryViewPreferences>(prefs);
+
+  // Once prefs hydrate from localStorage, mirror them into the legacy
+  // viewMode / sortKey / sortDir / showExamples state so the existing UI
+  // logic (filter pipeline, paging, view-toggle button) continues to read
+  // from the same state slots. The mirror runs EXACTLY ONCE on hydration —
+  // gating on `prefsHydrated` only (not `prefs`) prevents a post-Save
+  // `setPrefs(draftPrefs)` re-render from clobbering subsequent user-driven
+  // column-sort or view-toggle changes that haven't been persisted yet.
+  // Draft seeding for the drawer is handled separately by `handleOpenCustomize`.
+  // There is no SSR mismatch because both initial values (table / sharpe-desc
+  // / showExamples=true) are deterministic.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- mirror runs once on hydration; including `prefs` would re-clobber legacy state on every save.
+  useEffect(() => {
+    if (!prefsHydrated) return;
+    setViewMode(prefs.view);
+    setSortKey(prefs.sort.key);
+    setSortDir(prefs.sort.dir);
+    setTableSortKey(prefs.sort.key);
+    setTableSortDir(prefs.sort.dir);
+    setShowExamples(!prefs.hide_examples);
+  }, [prefsHydrated]);
+
+  const handleOpenCustomize = useCallback(() => {
+    setDraftPrefs(prefs);
+    setCustomizeOpen(true);
+  }, [prefs]);
+
+  const handleSavePrefs = useCallback(() => {
+    setPrefs(draftPrefs);
+    setCustomizeOpen(false);
+  }, [draftPrefs, setPrefs]);
+
+  const handleCloseCustomize = useCallback(() => {
+    setCustomizeOpen(false);
+  }, []);
 
   function handleColumnSort(key: TableSortKey) {
     if (tableSortKey === key) {
@@ -126,6 +219,16 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
 
   const filtered = useMemo(() => {
     let result = strategies.filter((s) => s.status === "published");
+
+    // Phase 13 / DISCO-01 — Watchlist scope is the FIRST narrowing pass.
+    // When scope === "watchlist" we restrict the candidate set to currently
+    // starred strategies before any other filter runs, so the rest of the
+    // pipeline (search, advanced filters, sort, paging) sees a small
+    // pre-narrowed list — avoids paginating across all strategies and then
+    // discovering the visible page is empty.
+    if (scope === "watchlist") {
+      result = result.filter((s) => watchedSet.has(s.id));
+    }
 
     if (!showExamples) {
       result = result.filter((s) => !s.is_example);
@@ -215,10 +318,24 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
     });
 
     return result;
-  }, [strategies, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, viewMode, mountedAtMs]);
+  }, [strategies, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, viewMode, mountedAtMs, scope, watchedSet]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Phase 13 / DISCO-01 — column count for the "no rows" placeholder. The
+  // existing table has 11 cells per row (8 sort columns + Return spark +
+  // Underwater spark + Actions). When userId is present, we add a leading
+  // 12th cell for the star toggle.
+  const showStarColumn = userId !== undefined;
+  const emptyRowColSpan = showStarColumn ? 12 : 11;
+
+  // Phase 13 / DISCO-01 \u2014 empty-watchlist sentinel. When the user is on the
+  // My Watchlist scope and has zero stars, replace the entire table/grid
+  // with the directional <EmptyWatchlist> empty-state. The wrapper still
+  // carries id="strategy-list" + role="tabpanel" so the WatchlistTabs
+  // aria-controls relationship resolves cleanly.
+  const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
   return (
     <div>
@@ -235,137 +352,196 @@ export function StrategyTable({ strategies, categorySlug, basePath = "/discovery
         onViewModeChange={setViewMode}
         advancedFilters={advancedFilters}
         onAdvancedFiltersChange={(f) => { setAdvancedFilters(f); setPage(0); }}
+        leadingSlot={
+          userId !== undefined ? (
+            <WatchlistTabs
+              scope={scope}
+              onScopeChange={(s) => { setScope(s); setPage(0); }}
+              count={watchedSet.size}
+            />
+          ) : undefined
+        }
+        onOpenCustomize={
+          userId !== undefined ? handleOpenCustomize : undefined
+        }
       />
 
-      {viewMode === "table" ? (
-        <div className="overflow-x-auto rounded-xl border border-border bg-surface">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                {COLUMNS.map((col) => (
-                  <th
-                    key={col.key}
-                    onClick={() => handleColumnSort(col.key)}
-                    className={`px-4 py-3 font-medium text-text-muted cursor-pointer hover:text-text-primary transition-colors select-none ${col.align === "right" ? "text-right" : "text-left"}`}
-                  >
-                    {col.label}
-                    {tableSortKey === col.key && (
-                      <span className="ml-1">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
-                    )}
-                  </th>
-                ))}
-                <th className="px-4 py-3 text-left font-medium text-text-muted">Return</th>
-                <th className="px-4 py-3 text-left font-medium text-text-muted">Underwater</th>
-                <th className="px-4 py-3 text-right font-medium text-text-muted">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {paged.map((s) => (
-                <tr
-                  key={s.id}
-                  className="border-b border-border last:border-0 hover:bg-page/50 transition-colors"
-                >
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1.5">
-                      <Link
-                        href={`${basePath}/${categorySlug}/${s.id}`}
-                        className="font-medium text-text-primary hover:text-accent transition-colors"
-                      >
-                        {s.name}
-                      </Link>
-                      {s.api_key_id && (
-                        <span title="Verified via exchange API" className="text-accent">
-                          <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
-                            <path d="M8 0a8 8 0 110 16A8 8 0 018 0zm3.78 5.22a.75.75 0 00-1.06 0L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25a.75.75 0 000-1.06z" />
-                          </svg>
-                        </span>
+      <div id="strategy-list" role="tabpanel">
+        {showEmptyWatchlist ? (
+          <EmptyWatchlist />
+        ) : viewMode === "table" ? (
+          <div className="overflow-x-auto rounded-xl border border-border bg-surface">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  {showStarColumn && (
+                    <th
+                      scope="col"
+                      className="px-2 py-3 w-11 text-left font-medium text-text-muted"
+                    >
+                      <span className="sr-only">Watchlist</span>
+                    </th>
+                  )}
+                  {COLUMNS.map((col) => (
+                    <th
+                      key={col.key}
+                      onClick={() => handleColumnSort(col.key)}
+                      className={`px-4 py-3 font-medium text-text-muted cursor-pointer hover:text-text-primary transition-colors select-none ${col.align === "right" ? "text-right" : "text-left"}`}
+                    >
+                      {col.label}
+                      {tableSortKey === col.key && (
+                        <span className="ml-1">{tableSortDir === "asc" ? "\u2191" : "\u2193"}</span>
                       )}
-                    </div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <div className="flex gap-1">
-                        {s.strategy_types.map((t) => (
-                          <Badge key={t} label={t} />
-                        ))}
+                    </th>
+                  ))}
+                  <th className="px-4 py-3 text-left font-medium text-text-muted">Return</th>
+                  <th className="px-4 py-3 text-left font-medium text-text-muted">Underwater</th>
+                  <th className="px-4 py-3 text-right font-medium text-text-muted">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paged.map((s) => (
+                  <tr
+                    key={s.id}
+                    className="border-b border-border last:border-0 hover:bg-page/50 transition-colors"
+                  >
+                    {showStarColumn && (
+                      <td className="px-2 py-3 w-11 align-middle">
+                        <StarToggle
+                          strategyId={s.id}
+                          name={s.name}
+                          starred={watchedSet.has(s.id)}
+                          onToggle={onToggleStar}
+                          size="table"
+                        />
+                      </td>
+                    )}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Link
+                          href={`${basePath}/${categorySlug}/${s.id}`}
+                          className="font-medium text-text-primary hover:text-accent transition-colors"
+                        >
+                          {s.name}
+                        </Link>
+                        {s.api_key_id && (
+                          <span title="Verified via exchange API" className="text-accent">
+                            <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor">
+                              <path d="M8 0a8 8 0 110 16A8 8 0 018 0zm3.78 5.22a.75.75 0 00-1.06 0L7 8.94 5.28 7.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.06 0l4.25-4.25a.75.75 0 000-1.06z" />
+                            </svg>
+                          </span>
+                        )}
                       </div>
-                      <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
-                    </div>
-                  </td>
-                  <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.cumulative_return)}`}>
-                    {formatPercent(s.analytics.cumulative_return)}
-                  </td>
-                  <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.cagr)}`}>
-                    {formatPercent(s.analytics.cagr)}
-                  </td>
-                  <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.sharpe)}`}>
-                    {formatNumber(s.analytics.sharpe)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-metric text-negative">
-                    {formatPercent(s.analytics.max_drawdown)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-metric text-text-secondary">
-                    {formatPercent(s.analytics.volatility)}
-                  </td>
-                  <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.six_month_return)}`}>
-                    {formatPercent(s.analytics.six_month_return)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-metric text-text-secondary">
-                    {formatCurrency(s.aum)}
-                  </td>
-                  <td className="px-4 py-3">
-                    <Sparkline data={s.analytics.sparkline_returns ?? []} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <Sparkline
-                      data={s.analytics.sparkline_drawdown ?? []}
-                      color="var(--color-negative)"
-                      fill
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <SimulateImpactButton
-                      candidateStrategyId={s.id}
-                      candidateName={s.name}
-                      portfolioId={portfolioId}
-                    />
-                  </td>
-                </tr>
-              ))}
-              {paged.length === 0 && (
-                <tr>
-                  <td colSpan={11} className="px-4 py-8 text-center text-text-muted">
-                    No strategies match your filters.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <StrategyGrid strategies={paged} categorySlug={categorySlug} basePath={basePath} />
-      )}
-
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between mt-4 text-sm text-text-muted">
-          <span>
-            Showing {page * PAGE_SIZE + 1}&ndash;{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setPage(page - 1)}
-              disabled={page === 0}
-              className="px-3 py-1 rounded border border-border bg-surface text-text-secondary disabled:opacity-40"
-            >
-              Previous
-            </button>
-            <button
-              onClick={() => setPage(page + 1)}
-              disabled={page >= totalPages - 1}
-              className="px-3 py-1 rounded border border-border bg-surface text-text-secondary disabled:opacity-40"
-            >
-              Next
-            </button>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex gap-1">
+                          {s.strategy_types.map((t) => (
+                            <Badge key={t} label={t} />
+                          ))}
+                        </div>
+                        <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
+                      </div>
+                    </td>
+                    <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.cumulative_return)}`}>
+                      {formatPercent(s.analytics.cumulative_return)}
+                    </td>
+                    <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.cagr)}`}>
+                      {formatPercent(s.analytics.cagr)}
+                    </td>
+                    <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.sharpe)}`}>
+                      {formatNumber(s.analytics.sharpe)}
+                    </td>
+                    <td className="px-4 py-3 text-right font-metric text-negative">
+                      {formatPercent(s.analytics.max_drawdown)}
+                    </td>
+                    <td className="px-4 py-3 text-right font-metric text-text-secondary">
+                      {formatPercent(s.analytics.volatility)}
+                    </td>
+                    <td className={`px-4 py-3 text-right font-metric ${metricColor(s.analytics.six_month_return)}`}>
+                      {formatPercent(s.analytics.six_month_return)}
+                    </td>
+                    <td className="px-4 py-3 text-right font-metric text-text-secondary">
+                      {formatCurrency(s.aum)}
+                    </td>
+                    <td className="px-4 py-3">
+                      <Sparkline
+                        data={s.analytics.sparkline_returns ?? []}
+                        color={sparklineColor(s.analytics.sparkline_returns ?? [])}
+                      />
+                    </td>
+                    <td className="px-4 py-3">
+                      <Sparkline
+                        data={s.analytics.sparkline_drawdown ?? []}
+                        color="var(--color-negative)"
+                        fill
+                      />
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <SimulateImpactButton
+                        candidateStrategyId={s.id}
+                        candidateName={s.name}
+                        portfolioId={portfolioId}
+                      />
+                    </td>
+                  </tr>
+                ))}
+                {paged.length === 0 && (
+                  <tr>
+                    <td colSpan={emptyRowColSpan} className="px-4 py-8 text-center text-text-muted">
+                      No strategies match your filters.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
-        </div>
+        ) : (
+          <StrategyGrid
+            strategies={paged}
+            categorySlug={categorySlug}
+            basePath={basePath}
+            userId={userId}
+            watchedSet={watchedSet}
+            onToggleStar={onToggleStar}
+          />
+        )}
+
+        {!showEmptyWatchlist && totalPages > 1 && (
+          <div className="flex items-center justify-between mt-4 text-sm text-text-muted">
+            <span>
+              Showing {page * PAGE_SIZE + 1}&ndash;{Math.min((page + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPage(page - 1)}
+                disabled={page === 0}
+                className="px-3 py-1 rounded border border-border bg-surface text-text-secondary disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <button
+                onClick={() => setPage(page + 1)}
+                disabled={page >= totalPages - 1}
+                className="px-3 py-1 rounded border border-border bg-surface text-text-secondary disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Phase 13 / DISCO-02 — CustomizeDrawer is owned here so the parent
+          (the discovery page) doesn't have to thread props through; only
+          rendered when the allocator is signed in (userId present). */}
+      {userId !== undefined && (
+        <CustomizeDrawer
+          open={customizeOpen}
+          onClose={handleCloseCustomize}
+          draft={draftPrefs}
+          setDraft={setDraftPrefs}
+          persisted={prefs}
+          onSave={handleSavePrefs}
+        />
       )}
     </div>
   );

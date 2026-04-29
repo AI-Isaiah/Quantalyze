@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.0] - 2026-04-28
+
+**Phase 13 — Discovery v2 Polish.** Allocators now have full IA parity with Quants.Space on `/discovery/[slug]`: a Watchlist sub-tab they can star strategies into, a Customize drawer to set their own default view/sort/visibility, single-accent sparklines (DESIGN.md DIFF-05), and "Hide examples" on by default so a fresh allocator's first visit shows only real funds.
+
+DISCO-03 (filter-by-team) deferred to v0.18 per pre-shipment audit (`organization_id` population count = 0). Migration 091 (seed `is_example=true` backfill) is committed but its remote `supabase db push` is operator-gated alongside 11 unapplied local migrations and 8 remote timestamp-format drift entries — see `.planning/phases/13-discovery-v2-polish/TODOS.md` for the Path A/B/C operator decision. The migration is mechanically a no-op against current production data (seed UUID count = 0); seeders run against fresh test DBs are already covered by Plan 13-02's `hide_examples=true` default.
+
+### Added
+
+- **DISCO-01 Watchlist:** new `PUT /api/watchlist/[strategyId]` route with strict `{ action: "add" | "remove" }` body, `assertSameOrigin` CSRF guard, `mandateAutoSaveLimiter` (30/min, key `watchlist:{user.id}`), idempotent `upsert (ON CONFLICT DO NOTHING)` for add and `delete().eq("user_id", user.id).eq("strategy_id", id)` for remove. Reads `getMyWatchlist(user.id): Promise<Set<string>>` server-side from `user_favorites` (migration 024 RLS). New components: `<StarToggle>` (44×44 table / 32×32 card touch targets, useTransition optimistic UI with retry-once-on-failure + unmount cleanup), `<WatchlistTabs>` (WAI-ARIA tablist with auto-activation on arrow-key focus move + count badge), `<EmptyWatchlist>` (two-line copy when scope=watchlist + watchedSet.size===0). `StrategyTable` extended with `userId?` + `initialWatchedSet?` props; discovery page does 3-way `Promise.all`.
+- **DISCO-02 Customize prefs:** `useDiscoveryPrefs(uid: string | undefined, slug: string)` hook persisted at `localStorage.discovery_view_preferences:{auth.uid}:{slug}` with defaults `view: "table"`, `sort: { key: "sharpe", dir: "desc" }`, `hide_examples: true`. Right-edge slide-out `<CustomizeDrawer>` matches DESIGN.md modal style with explicit field-by-field dirty check on Save. Cog button at right end of `StrategyFilters` row; `leadingSlot` prop introduced for the watchlist tabs left of search. Cross-account isolation Playwright spec ships with `seedTestAllocator()` fallback (env-var path inactive — TODOS Q4 RESOLVED).
+- **DISCO-04 Sparkline single-accent:** new `sparklineColor(returns: number[]): string` helper at `src/lib/sparkline-color.ts` enforces DIFF-05 — `var(--color-positive)` when final value > 0, `var(--color-negative)` when < 0, `var(--color-neutral)` when == 0 or empty. Wired at the two `sparkline_returns` call sites in `StrategyTable` and `StrategyGrid`; drawdown sparkline stays static red per design exception. Component-level synthetic-fixture tests cover all three branches; Playwright regression spec asserts no SVG path mixes positive + negative strokes AND that the negative-color render path is exercised on live drawdown data.
+- **DISCO-05 seed `is_example` backfill:** new `supabase/migrations/091_seed_is_example_backfill.sql` (data-only DML — no DDL, no `ON CONFLICT`) flips `is_example=true` on the 8 canonical seed UUIDs from `scripts/seed-demo-data.ts:STRATEGY_UUIDS`. Idempotent UPDATE + post-update `DO $$` probe with `RAISE NOTICE` for deploy-log evidence. Fresh-allocator e2e spec proves first `/discovery/[slug]` visit shows zero example strategies.
+
+### Changed
+
+- `src/components/strategy/StrategyFilters.tsx` reads in spec-mandated order (search → All Filters → leadingSlot → Hide-examples → Sort → Customize cog → ViewToggle) — dropped the Sort group's `ml-auto` that was creating an unintended gap.
+- `src/components/strategy/StrategyTable.tsx` mirror effect runs exactly once on `prefsHydrated`, so post-Save re-renders no longer clobber transient legacy column-sort or view-toggle state.
+- `src/components/strategy/StarToggle.tsx` JSDoc + retry chain reflect actual semantics (server idempotency + `disabled={isPending}` cover rapid double-clicks; no fictional 200ms debounce). Revert path uses `!nextStarred` (stable closure) and skips post-retry side effects on unmounted components.
+- `src/lib/queries.ts:getMyWatchlist` logs supabase errors before returning empty Set so production regressions become observable.
+
+### Tests
+
+- 5 new test files for DISCO-01 (route handler, queries, StarToggle, WatchlistTabs, EmptyWatchlist) and 3 new files for DISCO-02 (discovery-prefs, CustomizeDrawer, isolation e2e); StrategyTable + StrategyGrid get DISCO-04 component cases. Vitest baseline 2329 → 2372 (+43 net new). Four Phase-13 Playwright specs ship listable; live execution deferred until CI gets a dev-server harness.
+
 ## [0.17.0.2] - 2026-04-28
 
 **Queue claim batch dedupe — both claim RPCs now dedupe candidates by partition key before the batch UPDATE.** Migration 089 widened the claim filter to include `failed_retry` rows. That uncovered a latent bug: when two `failed_retry` rows shared a partition key (e.g. `(kind, allocator_id)`), the single-statement batch UPDATE inside `claim_compute_jobs_with_priority` tried to move both to `running` in the same transaction, violating the partial unique index `compute_jobs_one_inflight_per_kind_allocator` and rolling back the entire claim with 23505. The worker's `dispatch_loop` then spun on the same error every 30s, draining nothing.
