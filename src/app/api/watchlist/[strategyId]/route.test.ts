@@ -125,7 +125,6 @@ describe("PUT /api/watchlist/[strategyId]", () => {
   });
 
   it("returns 403 when assertSameOrigin returns a NextResponse (CSRF mismatch)", async () => {
-    // @ts-expect-error — mock returns the typed-as-null union for tests
     recorders.csrfReturn = new (await import("next/server")).NextResponse(
       JSON.stringify({ error: "Origin not allowed" }),
       { status: 403 },
