@@ -3,22 +3,27 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Hobby-plan guardrail for vercel.json.
+ * Cron-quota guardrail for vercel.json.
  *
- * Vercel's Hobby plan caps cron jobs at 2 and has historically required
- * daily-only schedules. Every time the project has breached either limit,
- * production deployments have silently stopped — the redirect
- * vercel.link/... → /docs/cron-jobs/usage-and-pricing arrives before any
- * build is created, so the only visible symptom is "Vercel check failed"
- * on the PR. See docs/runbooks/vercel-cron-upgrade.md for the full story
- * and the path back to a single-scheduler setup on Vercel Pro.
+ * Project upgraded to Vercel Pro (2026-04-29) — Hobby's hard cap of 2
+ * crons no longer applies. Pro allows up to 40 cron jobs per project
+ * and removes the daily-only schedule restriction.
  *
- * This test fails the build if someone adds a third cron or a sub-daily
- * schedule while still on Hobby. Delete the body (or flip MAX_CRONS) once
- * the project upgrades.
+ * The test stays in place at a softer bound (10) so an accidental
+ * runaway addition still surfaces in CI rather than silently inflating
+ * the deployment surface. The daily-or-less-frequent check stays as a
+ * self-imposed discipline — every cron we add today is OK at daily
+ * cadence; loosen if a future need is genuinely sub-daily.
+ *
+ * Original Hobby-era story (kept for context): production deployments
+ * silently stopped twice when we breached Hobby limits — the redirect
+ * vercel.link/... → /docs/cron-jobs/usage-and-pricing arrived before
+ * any build was created, so the only symptom was "Vercel check failed"
+ * on the PR. See docs/runbooks/vercel-cron-upgrade.md for the full
+ * story and the Pro-migration playbook.
  */
 
-const MAX_CRONS_ON_HOBBY = 2;
+const MAX_CRONS_ALLOWED = 10;
 
 type CronEntry = { path: string; schedule: string };
 
@@ -40,10 +45,10 @@ function isDailyOrLessFrequent(schedule: string): boolean {
   return true;
 }
 
-describe("vercel.json cron quota (Hobby plan)", () => {
-  it(`has at most ${MAX_CRONS_ON_HOBBY} cron jobs`, () => {
+describe("vercel.json cron quota (Pro plan, soft bound)", () => {
+  it(`has at most ${MAX_CRONS_ALLOWED} cron jobs`, () => {
     const crons = loadCrons();
-    expect(crons.length).toBeLessThanOrEqual(MAX_CRONS_ON_HOBBY);
+    expect(crons.length).toBeLessThanOrEqual(MAX_CRONS_ALLOWED);
   });
 
   it("every schedule is daily or less frequent", () => {
