@@ -6,6 +6,9 @@ import {
   CHART_AXIS_TICK,
   CHART_TEXT_MUTED,
   CHART_FONT_MONO,
+  CHART_POSITIVE,
+  CHART_NEGATIVE,
+  CHART_NEUTRAL,
 } from "./chart-tokens";
 
 /**
@@ -54,15 +57,15 @@ const MONTHS = [
 
 /** 9-step diverging color scale anchored at 0 — UI-SPEC §3.5. */
 function cellFill(v: number): { fill: string; opacity: number } {
-  if (v >= 0.1) return { fill: "#16A34A", opacity: 1 };
-  if (v >= 0.05) return { fill: "#16A34A", opacity: 0.7 };
-  if (v >= 0.02) return { fill: "#16A34A", opacity: 0.4 };
-  if (v > 0) return { fill: "#16A34A", opacity: 0.15 };
-  if (v === 0) return { fill: "#FFFFFF", opacity: 1 };
-  if (v > -0.02) return { fill: "#DC2626", opacity: 0.15 };
-  if (v > -0.05) return { fill: "#DC2626", opacity: 0.4 };
-  if (v > -0.1) return { fill: "#DC2626", opacity: 0.7 };
-  return { fill: "#DC2626", opacity: 1 };
+  if (v >= 0.1) return { fill: CHART_POSITIVE, opacity: 1 };
+  if (v >= 0.05) return { fill: CHART_POSITIVE, opacity: 0.7 };
+  if (v >= 0.02) return { fill: CHART_POSITIVE, opacity: 0.4 };
+  if (v > 0) return { fill: CHART_POSITIVE, opacity: 0.15 };
+  if (v === 0) return { fill: CHART_NEUTRAL, opacity: 1 };
+  if (v > -0.02) return { fill: CHART_NEGATIVE, opacity: 0.15 };
+  if (v > -0.05) return { fill: CHART_NEGATIVE, opacity: 0.4 };
+  if (v > -0.1) return { fill: CHART_NEGATIVE, opacity: 0.7 };
+  return { fill: CHART_NEGATIVE, opacity: 1 };
 }
 
 function isLeapYear(y: number): boolean {
@@ -101,22 +104,28 @@ function groupByYear(data: DailyHeatmapDataPoint[]): YearRow[] {
     .map((yr) => ({ year: yr, days: map.get(yr)! }));
 }
 
-const SVG_CELL_W = 24;
+/**
+ * SVG branch geometry — mirrors the Canvas branch: year-row × day-of-year
+ * column layout, 2px-wide cells, 365 columns.
+ *
+ * CR-01 fix: the original layout used `cols = Math.min(12, cellCount)` (a
+ * monthly intent) which clipped raw daily data starting from day 13. The SVG
+ * branch now uses dayOfYear()-based x-positions identical to the Canvas
+ * branch, so all 365 possible positions fit within the viewBox.
+ */
+const SVG_DOY_CELL_W = 2; // 365 * 2 = 730px — matches Canvas CANVAS_WIDTH
 const SVG_CELL_H = 16;
 const SVG_LEFT_GUTTER = 56; // room for the year label
 const SVG_TOP_GUTTER = 24; // room for the month label
 
+/** Month-label x-positions for the day-of-year layout (approximate mid-month). */
+const MONTH_DOY_START = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+
 const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapDataPoint[] }) {
   const rows = useMemo(() => groupByYear(data), [data]);
 
-  const cellCount = data.length;
-  // Width: at most 12 cells across (one per month). For ≤365 cells the layout
-  // is 12 columns × N year-rows where each cell is one calendar day in that
-  // month (Phase 14b chooses to show day-1-of-month as a representative — the
-  // SVG branch is small enough that we render one rect per data point and let
-  // the consumer pre-aggregate). Concretely we lay them out as 12 cols max.
-  const cols = Math.min(12, Math.max(1, cellCount));
-  const width = SVG_LEFT_GUTTER + cols * SVG_CELL_W;
+  // Width spans all 365 day-of-year columns at 2px each (+ left gutter).
+  const width = SVG_LEFT_GUTTER + 365 * SVG_DOY_CELL_W;
   const height = SVG_TOP_GUTTER + rows.length * SVG_CELL_H + 8;
 
   return (
@@ -127,16 +136,16 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
         width="100%"
         viewBox={`0 0 ${width} ${height}`}
       >
-        {/* X-axis month labels — DM Sans (no fontFamily attr) */}
-        {MONTHS.slice(0, cols).map((m, i) => (
+        {/* X-axis month labels — positioned at each month's day-of-year start */}
+        {MONTHS.map((m, i) => (
           <text
             key={m}
             data-axis="month"
-            x={SVG_LEFT_GUTTER + i * SVG_CELL_W + SVG_CELL_W / 2}
+            x={SVG_LEFT_GUTTER + MONTH_DOY_START[i] * SVG_DOY_CELL_W}
             y={SVG_TOP_GUTTER - 8}
-            fontSize={12}
+            fontSize={10}
             fill={CHART_TEXT_MUTED}
-            textAnchor="middle"
+            textAnchor="start"
           >
             {m}
           </text>
@@ -156,9 +165,10 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
             >
               {row.year}
             </text>
-            {row.days.map((d, colIdx) => {
+            {row.days.map((d) => {
               const { fill, opacity } = cellFill(d.value);
-              const x = SVG_LEFT_GUTTER + colIdx * SVG_CELL_W;
+              // Use day-of-year for x — consistent with Canvas branch (CR-01 fix).
+              const x = SVG_LEFT_GUTTER + dayOfYear(d.date) * SVG_DOY_CELL_W;
               const y = SVG_TOP_GUTTER + rowIdx * SVG_CELL_H;
               return (
                 <rect
@@ -166,12 +176,12 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
                   data-cell={d.date}
                   x={x}
                   y={y}
-                  width={SVG_CELL_W}
+                  width={SVG_DOY_CELL_W}
                   height={SVG_CELL_H}
                   fill={fill}
                   fillOpacity={opacity}
                   stroke={CHART_BORDER}
-                  strokeWidth={1}
+                  strokeWidth={0.5}
                 >
                   <title>{`${d.date}: ${(d.value * 100).toFixed(2)}%`}</title>
                 </rect>
@@ -194,7 +204,8 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
 const CELL_W = 2;
 const CELL_H = 80;
 const CANVAS_WIDTH = 730; // = 365 * 2
-const CANVAS_HEIGHT = 400; // = 5 * 80
+// WR-01: canvas height is computed dynamically from year count at render time
+// so strategies with 6+ years of data are not silently clipped.
 
 const CanvasRenderer = memo(function CanvasRenderer({
   data,
@@ -205,6 +216,9 @@ const CanvasRenderer = memo(function CanvasRenderer({
 
   const rowsByYear = useMemo(() => groupByYear(data), [data]);
   const yearOrder = useMemo(() => rowsByYear.map((r) => r.year), [rowsByYear]);
+
+  // WR-01: dynamic height — grows with the actual number of distinct years.
+  const canvasHeight = Math.max(CELL_H, rowsByYear.length * CELL_H);
 
   useEffect(() => {
     performance.mark("panel-4-mount-start");
@@ -238,11 +252,11 @@ const CanvasRenderer = memo(function CanvasRenderer({
   }, [data, yearOrder]);
 
   return (
-    <div className="relative w-full" style={{ minHeight: 360 }}>
+    <div className="relative w-full" style={{ minHeight: Math.max(360, rowsByYear.length * CELL_H) }}>
       <canvas
         ref={canvasRef}
-        width={730}
-        height={400}
+        width={CANVAS_WIDTH}
+        height={canvasHeight}
         role="presentation"
         aria-hidden="true"
         className="w-full"
