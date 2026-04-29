@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: Completed 14b-02-PLAN.md
-last_updated: "2026-04-29T13:15:24.422Z"
+stopped_at: Completed 14b-03-PLAN.md
+last_updated: "2026-04-29T13:27:15.380Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 28
-  completed_plans: 22
-  percent: 79
+  completed_plans: 23
+  percent: 82
 ---
 
 # Project State
@@ -153,6 +153,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 14b-01: Created src/lib/queries-client.ts (Rule 3 deviation) — original fetchStrategyLazyMetrics in queries.ts is server-only via the supabase/server → next/headers chain, cannot be imported into client component graph; new client-safe mirror uses @/lib/supabase/client and the hook dynamically imports it. Plan 14b-06 HeadlineMetricsPanel direct call to fetchStrategyLazyMetrics(strategyId, 'equity') likely needs the same client mirror.
 - Phase 14b-01: DailyHeatmap Canvas geometry — row=year × col=day-of-year × 2px-wide × 80px-tall cells; canvas 730×400 (=365*2 wide, 5*80 tall) per Grok B-02; previous 4px draft would overflow by 2x. Day-of-year derived from MONTH_OFFSETS + leap-year +1 for March-onward, clamped to [0,364].
 - Phase 14b-02: shipped Panel 4 ReturnsDistributionPanel wrapper + DESIGN-01 audit on 4 reused chart components (#0D9488 → CHART_ACCENT, #059669 → #16A34A, bg-emerald/red palette → explicit hex on MonthlyHeatmap); applied Grok W-01 mitigation by renaming DailyHeatmap inner to DailyHeatmapInner + exporting memo(DailyHeatmapInner) per grep contract, paired with useMemo-stabilized data prop in consumer; ReturnsDistributionPanel NOT yet mounted in StrategyV2Shell (that wiring lands in 14b-06); MonthlyReturnsBar.tsx legacy #059669 deferred to v1 chart sweep (logged in phase deferred-items.md)
+- Phase 14b-03: SHARPE_KEY_BY_WINDOW table (Grok B-01) maps 6M→sharpe_90d (closest-available; sharpe_180d not persisted in metrics.py:145-147), 3M→sharpe_90d (fb sharpe_30d), 12M→sharpe_365d (fb sharpe_90d). Rolling Alpha+Beta NOT window-segmented (matches lazy-payload shape from migration 087). Rule 3 deviation: switched test stack from @testing-library/user-event (not installed) to fireEvent. Rule 1 deviation: rephrased panel doc-comments + test-file Test 14 to avoid the literal sharpe_180d token, satisfying the strict grep guard.
 
 ### Roadmap drafted (2026-04-26)
 
@@ -183,8 +184,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T13:15:24.415Z
-Stopped at: Completed 14b-02-PLAN.md
+Last session: 2026-04-29T13:27:15.374Z
+Stopped at: Completed 14b-03-PLAN.md
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
