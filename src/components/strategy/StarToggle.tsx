@@ -10,6 +10,23 @@ interface StarToggleProps {
   size?: "table" | "card";
 }
 
+type FailureReason = "auth" | "rate" | "network" | "server";
+
+type AttemptResult =
+  | { ok: true }
+  | { ok: false; status: number | null; retryAfterMs?: number };
+
+const FAILURE_MESSAGES: Record<FailureReason, string> = {
+  auth: "Sign in again to update watchlist",
+  rate: "Try again shortly",
+  network: "Couldn't reach the server",
+  server: "Couldn't update watchlist — retry?",
+};
+
+const HINT_DISMISS_MS = 4000;
+const DEFAULT_RETRY_DELAY_MS = 600;
+const MAX_RETRY_DELAY_MS = 30_000;
+
 export function StarToggle({
   strategyId,
   name,
@@ -18,7 +35,7 @@ export function StarToggle({
   size = "table",
 }: StarToggleProps) {
   const [isPending, startTransition] = useTransition();
-  const [showRetryHint, setShowRetryHint] = useState(false);
+  const [failureReason, setFailureReason] = useState<FailureReason | null>(null);
 
   const isMountedRef = useRef(true);
   const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -39,45 +56,81 @@ export function StarToggle({
       ? "min-w-11 min-h-11 inline-flex items-center justify-center"
       : "w-8 h-8 inline-flex items-center justify-center";
 
-  async function attempt(action: "add" | "remove"): Promise<boolean> {
+  async function attempt(action: "add" | "remove"): Promise<AttemptResult> {
+    let res: Response;
     try {
-      const res = await fetch(`/api/watchlist/${strategyId}`, {
+      res = await fetch(`/api/watchlist/${strategyId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
-      return res.ok;
     } catch {
-      return false;
+      return { ok: false, status: null };
     }
+    if (res.ok) return { ok: true };
+    let retryAfterMs: number | undefined;
+    const ra = res.headers?.get?.("Retry-After");
+    if (ra) {
+      const sec = Number(ra);
+      if (Number.isFinite(sec) && sec >= 0) {
+        retryAfterMs = Math.min(sec * 1000, MAX_RETRY_DELAY_MS);
+      }
+    }
+    return { ok: false, status: res.status, retryAfterMs };
+  }
+
+  function reasonFor(status: number | null): FailureReason {
+    if (status === 401 || status === 403) return "auth";
+    if (status === 429) return "rate";
+    if (status === null) return "network";
+    return "server";
+  }
+
+  function scheduleHintDismiss() {
+    if (hintTimeoutRef.current !== null) {
+      clearTimeout(hintTimeoutRef.current);
+    }
+    hintTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+      setFailureReason(null);
+      hintTimeoutRef.current = null;
+    }, HINT_DISMISS_MS);
   }
 
   const handleClick = () => {
-    const nextStarred = !starred;
-    // Optimistic flip — visible BEFORE the network round-trip.
+    const originalStarred = starred;
+    const nextStarred = !originalStarred;
     onToggle(strategyId, nextStarred);
-    setShowRetryHint(false);
+    setFailureReason(null);
 
     startTransition(async () => {
       const action = nextStarred ? "add" : "remove";
-      const ok = await attempt(action);
-      if (ok) return;
 
-      await new Promise((r) => setTimeout(r, 600));
-      const okRetry = await attempt(action);
-      if (okRetry) return;
-
-      if (!isMountedRef.current) return;
-      onToggle(strategyId, !nextStarred);
-      setShowRetryHint(true);
-      if (hintTimeoutRef.current !== null) {
-        clearTimeout(hintTimeoutRef.current);
-      }
-      hintTimeoutRef.current = setTimeout(() => {
+      const recordFailure = (reason: FailureReason, status: number | null) => {
         if (!isMountedRef.current) return;
-        setShowRetryHint(false);
-        hintTimeoutRef.current = null;
-      }, 4000);
+        onToggle(strategyId, originalStarred);
+        setFailureReason(reason);
+        scheduleHintDismiss();
+        console.error(
+          `[StarToggle] watchlist ${action} failed (status=${status ?? "network"}, reason=${reason})`,
+        );
+      };
+
+      const first = await attempt(action);
+      if (first.ok) return;
+
+      // Auth failures do not benefit from a quick retry — surface immediately.
+      if (first.status === 401 || first.status === 403) {
+        recordFailure("auth", first.status);
+        return;
+      }
+
+      const delay = first.retryAfterMs ?? DEFAULT_RETRY_DELAY_MS;
+      await new Promise((r) => setTimeout(r, delay));
+      const second = await attempt(action);
+      if (second.ok) return;
+
+      recordFailure(reasonFor(second.status), second.status);
     });
   };
 
@@ -86,21 +139,27 @@ export function StarToggle({
     : `Add ${name} to watchlist`;
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={isPending}
-      aria-label={ariaLabel}
-      aria-pressed={starred}
-      className={`${hitClass} rounded transition-colors hover:bg-page focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60`}
-    >
-      {starred ? <StarFilledIcon /> : <StarOutlineIcon />}
-      {showRetryHint && (
-        <span className="sr-only">
-          Couldn&apos;t update watchlist. Retry?
+    <span className="relative inline-flex items-center">
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={isPending}
+        aria-label={ariaLabel}
+        aria-pressed={starred}
+        className={`${hitClass} rounded transition-colors hover:bg-page focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60`}
+      >
+        {starred ? <StarFilledIcon /> : <StarOutlineIcon />}
+      </button>
+      {failureReason && (
+        <span
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none absolute left-full top-1/2 ml-1.5 -translate-y-1/2 whitespace-nowrap rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-text-muted shadow-sm"
+        >
+          {FAILURE_MESSAGES[failureReason]}
         </span>
       )}
-    </button>
+    </span>
   );
 }
 
