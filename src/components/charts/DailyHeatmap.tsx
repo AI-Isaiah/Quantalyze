@@ -143,8 +143,8 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
             data-axis="month"
             x={SVG_LEFT_GUTTER + MONTH_DOY_START[i] * SVG_DOY_CELL_W}
             y={SVG_TOP_GUTTER - 8}
-            fontSize={10}
-            fill={CHART_TEXT_MUTED}
+            fontSize={12}
+            fill={CHART_AXIS_TICK}
             textAnchor="start"
           >
             {m}
