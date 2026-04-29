@@ -241,6 +241,8 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
   });
 
   it("Test 7: Sharpe gated when ALL 3 keys absent — null rolling_metrics renders sub-banner not chart", () => {
+    // WR-03: history_days=365 meets the window threshold, so the banner must say
+    // "not yet computed" rather than the misleading "need ≥N days" copy.
     mockHookReturn = { ref: () => {}, data: PANEL5_LAZY_FULL, status: "ready" };
     const { container, queryByTestId } = render(
       <RollingMetricsPanel
@@ -251,7 +253,11 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
       />,
     );
     expect(queryByTestId("rolling-metrics")).toBeNull();
-    expect(container.textContent).toContain("Awaiting more data");
+    expect(container.textContent).toContain(
+      "Rolling Sharpe series not yet computed for this strategy.",
+    );
+    // Must NOT show the history-shortage copy for a strategy with 365 days.
+    expect(container.textContent).not.toContain("Awaiting more data — need");
   });
 
   it("Test 7b: Sharpe gated when rolling_metrics={} (empty object)", () => {
