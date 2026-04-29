@@ -201,6 +201,7 @@ export function HeadlineMetricsPanel({
                 return { date: d.date, value: d.value / runningMax - 1 };
               })
             }
+            benchmarkSeries={effectiveBenchmark}
           />
         )}
       </div>
