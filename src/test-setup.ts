@@ -20,3 +20,24 @@ class ResizeObserverStub {
 }
 (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver =
   ResizeObserverStub as unknown as typeof ResizeObserver;
+
+// jsdom does not implement IntersectionObserver. Phase 14a's
+// `useLazyPanelMetrics` hook (and related component tests) instantiate one
+// in the ref-callback path, which throws under vitest+jsdom without a
+// stub. Mirror the ResizeObserver pattern above so all component tests
+// inherit a no-op observer. Tests that need real intersect behavior can
+// override per-test.
+class IntersectionObserverStub {
+  constructor(_cb: IntersectionObserverCallback, _opts?: IntersectionObserverInit) {}
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+  readonly root = null;
+  readonly rootMargin = "";
+  readonly thresholds: ReadonlyArray<number> = [];
+}
+(globalThis as { IntersectionObserver?: typeof IntersectionObserver }).IntersectionObserver =
+  IntersectionObserverStub as unknown as typeof IntersectionObserver;
