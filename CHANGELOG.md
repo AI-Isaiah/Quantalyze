@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.3] - 2026-04-29
+
+**Milestone-audit clean-up — analytics path-extraction, cron GC, locale safety, chart-token consolidation.** Eight audit findings landed in one pass: `getStrategyDetailV2` stops fetching the full analytics blob per request, `OverviewPanel` is locale-stable across SSR/client, `DrawdownPanel` runs on a single hydration pass, every Sprint-3 chart sources its hex from `chart-tokens`, the Daily Heatmap canvas no longer races font load on cold renders, and abandoned wizard drafts have a weekly auto-cleanup cron now that the project is on Vercel Pro.
+
+### Added
+
+- **MA-5 — `/api/cron/cleanup-wizard-drafts` weekly GC cron.** Sundays 02:00 UTC sweeps `strategies` rows where `source='wizard' AND status='draft' AND created_at < 30d ago`. ON DELETE CASCADE handles strategy_analytics + trades; orphaned api_keys are best-effort revoked when no other strategy still references them — mirrors the user-driven `/api/strategies/draft/[id]` DELETE handler. Bearer `${CRON_SECRET}` auth, timing-safe. `@audit-skip` pragmas on both delete sites — cron GC has no user attribution; user-initiated deletes still emit audit events.
+- **`CHART_SURFACE` (#FFFFFF) and `CHART_TRACK` (#F1F5F9) tokens** in `chart-tokens.ts` — mirror `--color-surface` / `--color-track` in globals.css. Used by EquityCurve's lightweight-charts background, gridlines, and price-scale borders so a future palette change lives in exactly one file.
+
+### Fixed
+
+- **MA-1 / METRICS-15 — `getStrategyDetailV2` path-extraction.** Replaced wildcard `select("*, strategy_analytics (*)")` with explicit column lists (9 strategy fields, 14 analytics fields). The route now only ships the columns the seven panels actually consume; `metrics_json` stays as a single blob fetch since PostgREST cannot project JSONB sub-trees without an RPC. Bandwidth win the SC#3b p95<50ms contract was waiting on.
+- **MA-6 — `OverviewPanel.fmtNumber` locale-pinned to en-US.** Bare `value.toLocaleString()` inherited the Node default locale on SSR but the user's browser locale on the client; non-US users hit React's hydration warning on every panel render. `value.toLocaleString("en-US")` makes the output deterministic across the SSR/client boundary.
+- **MA-7 — `DrawdownPanel` marked `"use client"`.** Both child charts (`DrawdownChart`, `WorstDrawdowns`) are Recharts-backed and require the client runtime. Marking the panel itself client-only mounts the whole subtree in a single hydration pass instead of straddling a server/client seam.
+- **F5 — `DailyHeatmap` canvas paint gated on `document.fonts.ready` when `status='loading'`.** Surrounding panel typography (Geist Mono labels, year axis text) drives the canvas container's flow size on cold loads — painting before fonts settle races a layout reflow and leaves cells visibly misaligned for one frame. Synchronous fast path when fonts are already loaded (typical post-hydration + jsdom test environment) keeps every existing canvas test green; Test 19 covers the `loading → ready` gate with a controlled FontFaceSet stub.
+- **LD-D1/D2/D3 — chart token consolidation.** `MonthlyReturnsBar` axis ticks now spread `CHART_TICK_STYLE` (was inline `fontSize: 10/11`); `EquityCurve` background / grid / price-scale borders read from `CHART_SURFACE` / `CHART_AXIS_TICK` / `CHART_TRACK` / `CHART_BORDER` (was 6 hardcoded hex literals); `YearlyReturns` cell colors source `CHART_POSITIVE` / `CHART_NEGATIVE` (was inline `#16A34A` / `#DC2626`). All three charts now match the v2 caption-tier contract (12px Geist Mono tabular-nums at #64748B on white, 4.85:1 WCAG AA).
+
+### Changed
+
+- **`vercel.json` cron count 2 → 3** — wizard-draft cleanup added now that the project is on Vercel Pro. `MAX_CRONS` test guardrail loosened from Hobby's hard cap of 2 to a soft bound of 10 (catches runaway additions without blocking legitimate growth). Daily-or-less-frequent check kept — no current need for sub-daily, even on Pro. Original Hobby-era story preserved in `docs/runbooks/vercel-cron-upgrade.md`.
+
+### Internal
+
+- **MA-4 confirmed already enforced** by migration `032_compute_jobs_queue.sql:233-237` (`compute_jobs_deny_all USING (false) WITH CHECK (false)`). No later migration weakens it; the audit finding ("`USING (true)` — wide-open") referred to an unrelated `compute_job_kinds` reference table where wide-open SELECT is intentional (small read-only kinds registry). No code change.
+
+### Tests
+
+- 2608 → 2609 (+1 new). Test 19 (F5): installs a controlled `FontFaceSet` stub with `status='loading'`, asserts zero `fillRect` / `save` / `clearRect` calls until `release()` resolves the ready promise, then asserts the full 1825-cell paint completes (one save / one restore / one clearRect / 1825 fillRects). All 262 test files green, 0 typecheck errors.
+
 ## [0.17.1.2] - 2026-04-29
 
 **v0.17.1 review-fix cluster — strategy-v2 panel correctness + canvas hygiene + flag-key versioning + adversarial-pass hardening.** Eight commits implementing the F2/F3/F4/SR-1/SR-2 findings from the prior Grok 4.20 adversarial + ship review on v0.17.1, plus two follow-up commits closing the gaps a fresh adversarial pass surfaced (.catch race regression coverage, A→B→A flip defense, localStorage value normalization). Allocators see correct 3M rolling Sharpe (no longer the 6M series), cross-strategy nav no longer leaks stale panel data, the daily-heatmap canvas no longer shows ghost cells on data refetch, and v0.17.1 v1-route removal won't trap legacy opt-out users on a 404.
