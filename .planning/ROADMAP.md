@@ -143,7 +143,7 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
 - [ ] 14b-02-PLAN.md — Panel 4 ReturnsDistributionPanel wrapper + DESIGN-01 audit on 4 existing chart components (Wave 2)
 - [ ] 14b-03-PLAN.md — Panel 5 RollingMetricsPanel + 3 new rolling sub-charts (Volatility / Sortino / AlphaBeta) + shared 3M/6M/12M window toggle (Wave 2)
 - [ ] 14b-04-PLAN.md — Panel 6 TradeAndPositionPanel + TradeMixSubPanel (2-bucket only) + MetricCell primitive (Wave 2)
-- [ ] 14b-05-PLAN.md — Panel 7 ExposureAndGreeksPanel + NetGrossExposureChart + TurnoverChart + BenchmarkGreeksTable (Wave 2)
+- [x] 14b-05-PLAN.md — Panel 7 ExposureAndGreeksPanel + NetGrossExposureChart + TurnoverChart + BenchmarkGreeksTable (Wave 2)
 - [ ] 14b-06-PLAN.md — StrategyV2Detail extension + StrategyV2Shell wiring + Panel 2 segmented control unlock (Rolling Sharpe + Log returns) (Wave 3)
 - [ ] 14b-07-PLAN.md — @axe-core/playwright install + 4 new Playwright specs (axe x2 / keyboard / chart-parity) + skip-link mechanism + partial-data spec extension (Wave 4)
 - [ ] 14b-08-PLAN.md — strategy.ui_v2 flag flip OFF→ON + PR template Pitfall 17 partial-data matrix + DESIGN.md decisions log entry (Wave 4 — milestone-final commit)

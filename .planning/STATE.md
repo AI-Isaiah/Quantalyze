@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: Completed 14b-04-PLAN.md (Wave 2 — Panel 6)
-last_updated: "2026-04-29T13:38:35.464Z"
+stopped_at: Completed 14b-05-PLAN.md (Wave 2 — Panel 7)
+last_updated: "2026-04-29T13:49:18.699Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 28
-  completed_plans: 24
-  percent: 86
+  completed_plans: 25
+  percent: 89
 ---
 
 # Project State
@@ -157,6 +157,12 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - 14b-04: Grok B-04 — Panel 6 uses fetchOnIntersect=false; lazy fetch never fires for panel6 (no sibling rows per migration 087). Eager rows render unconditionally from props.trade_metrics; lazy lifecycle hiccup cannot mask valid data.
 - 14b-04: KPI-17 ships 2-bucket only. mode='4-bucket' branch in TradeMixSubPanel renders fallback message; reserved for v0.17.1 flip after is_maker ingestion fix in Binance/OKX/Bybit handlers.
 - 14b-04: Volume aggregator extras (gross_volume_usd / mean_trade_size_usd / daily_turnover_usd / monthly_turnover_usd / payoff_ratio / profit_factor / winners_count / losers_count) read defensively from trade_metrics JSONB blob via Record<string, unknown> indexing.
+- Phase 14b-05: Grok B-03 verified — migration 087 supports both 'exposure' (line 174) and 'equity' (line 165) panel-id branches; Plan 14b-05 fetches panel7→exposure only via the hook's PANEL_TO_ID map. Plan 14b-06 will exercise the 'equity' branch for Panel 2 Log Returns via a direct fetchStrategyLazyMetrics call.
+- Phase 14b-05: NetGrossExposureChart uses Recharts ComposedChart (first project use) overlaying a filled gross Area at fillOpacity 0.2 + solid net Line at 1.5px on shared CHART_ACCENT, with reference line at y=0 in CHART_TEXT_MUTED dashed. Y-axis percent with 0 decimals.
+- Phase 14b-05: TurnoverChart Y-axis percent with 1 decimal (turnover values smaller than exposure; finer precision warranted). 0.21 → '21.0%' is the asserted format.
+- Phase 14b-05: BenchmarkGreeksTable label casing per UI-SPEC §10.4 — alpha/beta lowercase Greek; IR uppercase acronym; Treynor title-case proper noun. Tested case-sensitively.
+- Phase 14b-05: IR cell never receives negative styling — IR sign-conventions vary by benchmark (some invert when underlying returns are negative). Alpha/beta/Treynor get text-negative when value < 0.
+- Phase 14b-05: CorrelationWithBenchmark reused unmodified via narrow analytics-subset cast (`as never` at call site). Forking would have duplicated 100+ lines of 90d rolling-correlation math + cumulative→daily conversion for zero benefit. Pattern matches existing v1 PerformanceReport.tsx idiom.
 
 ### Roadmap drafted (2026-04-26)
 
@@ -187,8 +193,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T13:38:21.247Z
-Stopped at: Completed 14b-04-PLAN.md (Wave 2 — Panel 6)
+Last session: 2026-04-29T13:48:58.307Z
+Stopped at: Completed 14b-05-PLAN.md (Wave 2 — Panel 7)
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)

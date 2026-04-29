@@ -65,10 +65,14 @@
 **: Panel 6 — Volume metrics row: gross volume, mean trade size, mean daily turnover, mean monthly turnover (aggregator over `raw_fills`)
 - [x] **KPI-17
 **: Panel 6 — Trade Mix maker/taker breakdown: long-entry maker/taker, short-entry maker/taker — **gated on Phase 12 `is_maker` flag audit on `raw_fills` across exchange handlers (Binance / OKX / Bybit — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit)**; if absent on any of the three, descope to v0.17.1 and document in TODOS
-- [ ] **KPI-18**: Panel 7 — Net + Gross Exposure series (intraday → daily); persists per-date arrays from `position_reconstruction.compute_exposure_metrics()`
-- [ ] **KPI-19**: Panel 7 — Turnover series (daily `abs(Δposition × price) / NAV`); depends on Sprint 3 position reconstruction NAV alignment
-- [ ] **KPI-20**: Panel 7 — Correlation with BTC (single-series rolling 90d + scalar value); rendered as "Correlation with BTC" not "Correlation matrix" (multi-benchmark ETH/SOL deferred per UC#6)
-- [ ] **KPI-21**: Panel 7 — Benchmark Greeks panel: alpha / beta / IR / treynor (existing scalars from `metrics.py:255-267`)
+- [x] **KPI-18
+**: Panel 7 — Net + Gross Exposure series (intraday → daily); persists per-date arrays from `position_reconstruction.compute_exposure_metrics()`
+- [x] **KPI-19
+**: Panel 7 — Turnover series (daily `abs(Δposition × price) / NAV`); depends on Sprint 3 position reconstruction NAV alignment
+- [x] **KPI-20
+**: Panel 7 — Correlation with BTC (single-series rolling 90d + scalar value); rendered as "Correlation with BTC" not "Correlation matrix" (multi-benchmark ETH/SOL deferred per UC#6)
+- [x] **KPI-21
+**: Panel 7 — Benchmark Greeks panel: alpha / beta / IR / treynor (existing scalars from `metrics.py:255-267`)
 - [x] **KPI-23b
 **: Per-panel partial-data state for panels 4–7 — strategies with <30/<90/<365 days of history show "Awaiting more data (need ≥X days)" copy on the affected panel/sub-panel; never crash; per-panel matrix documented in PR template (Pitfall 17 mitigation, panels 4–7 only).
 
