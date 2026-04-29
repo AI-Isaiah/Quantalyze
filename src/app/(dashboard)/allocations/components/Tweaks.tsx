@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
-import { useTweaks, type TweakState } from "../context/TweaksContext";
+import { useTweaks } from "../context/TweaksContext";
 
 /**
  * PR3 (HANDOFF G5) — Tweaks panel

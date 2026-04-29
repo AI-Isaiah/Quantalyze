@@ -18,7 +18,6 @@ import { OnboardingBanner } from "./OnboardingBanner";
 // next/link → plain <a> (matches App-Router test convention; we don't need
 // the prefetcher to drive these UI assertions).
 vi.mock("next/link", () => ({
-  // eslint-disable-next-line react/display-name
   default: ({
     href,
     children,

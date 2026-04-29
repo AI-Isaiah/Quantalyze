@@ -131,7 +131,6 @@ import { EquityChart } from "../widgets/performance/EquityChart";
 import DrawdownChart from "../widgets/performance/DrawdownChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
-import { BridgeDrawer } from "./BridgeDrawer";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 import { buildStrategyForBuilderSet } from "../lib/scenario-adapter";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";

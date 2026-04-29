@@ -442,7 +442,6 @@ export function KpiStrip({
         // Resolve scenario primary + delta for this cell when the gate
         // is open AND the cell has a metricKey (AUM has none → falls
         // back to the live path).
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const scenVal: number | null =
           scenarioActive && metricKey
             ? // ComputedMetrics is a plain record of nullable numbers — index

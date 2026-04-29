@@ -93,7 +93,6 @@ const STRAT_B_FIXTURE: AddedStrategy = {
 
 const REF_BTC = "holding:binance:BTC:spot";
 const REF_ETH = "holding:binance:ETH:spot";
-const REF_SOL = "holding:binance:SOL:spot";
 
 // ---------------------------------------------------------------------------
 // useScenarioState — hook contract tests
