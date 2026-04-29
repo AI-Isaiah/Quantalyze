@@ -53,12 +53,18 @@
 **: Panel 5 — Rolling Sortino series with 3M / 6M / 12M toggle (NEW backend metric)
 - [x] **KPI-11
 **: Panel 5 — Rolling alpha / Rolling beta (rolling greeks) toggle (NEW backend metric)
-- [ ] **KPI-12**: Panel 6 — Trade Main row: total / long / short / wins / losses / win rate (extends existing `trade_count` with side segmentation)
-- [ ] **KPI-13**: Panel 6 — Position Main row: open / closed / long / short / win rate / avg duration (surfaces `position_reconstruction.py` aggregates)
-- [ ] **KPI-14**: Panel 6 — Risk/Reward row: R:R, Weighted R:R, Profit Factor, Payoff Ratio, Long PF, Short PF, Expectancy `E = (W × Avg Win) − (L × Avg Loss)` (1-line derivations + 2 new aggregators)
-- [ ] **KPI-15**: Panel 6 — SQN (Van Tharp System Quality Number) `sqn = (mean(R)/std(R)) × sqrt(min(N,100))`
-- [ ] **KPI-16**: Panel 6 — Volume metrics row: gross volume, mean trade size, mean daily turnover, mean monthly turnover (aggregator over `raw_fills`)
-- [ ] **KPI-17**: Panel 6 — Trade Mix maker/taker breakdown: long-entry maker/taker, short-entry maker/taker — **gated on Phase 12 `is_maker` flag audit on `raw_fills` across exchange handlers (Binance / OKX / Bybit — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit)**; if absent on any of the three, descope to v0.17.1 and document in TODOS
+- [x] **KPI-12
+**: Panel 6 — Trade Main row: total / long / short / wins / losses / win rate (extends existing `trade_count` with side segmentation)
+- [x] **KPI-13
+**: Panel 6 — Position Main row: open / closed / long / short / win rate / avg duration (surfaces `position_reconstruction.py` aggregates)
+- [x] **KPI-14
+**: Panel 6 — Risk/Reward row: R:R, Weighted R:R, Profit Factor, Payoff Ratio, Long PF, Short PF, Expectancy `E = (W × Avg Win) − (L × Avg Loss)` (1-line derivations + 2 new aggregators)
+- [x] **KPI-15
+**: Panel 6 — SQN (Van Tharp System Quality Number) `sqn = (mean(R)/std(R)) × sqrt(min(N,100))`
+- [x] **KPI-16
+**: Panel 6 — Volume metrics row: gross volume, mean trade size, mean daily turnover, mean monthly turnover (aggregator over `raw_fills`)
+- [x] **KPI-17
+**: Panel 6 — Trade Mix maker/taker breakdown: long-entry maker/taker, short-entry maker/taker — **gated on Phase 12 `is_maker` flag audit on `raw_fills` across exchange handlers (Binance / OKX / Bybit — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit)**; if absent on any of the three, descope to v0.17.1 and document in TODOS
 - [ ] **KPI-18**: Panel 7 — Net + Gross Exposure series (intraday → daily); persists per-date arrays from `position_reconstruction.compute_exposure_metrics()`
 - [ ] **KPI-19**: Panel 7 — Turnover series (daily `abs(Δposition × price) / NAV`); depends on Sprint 3 position reconstruction NAV alignment
 - [ ] **KPI-20**: Panel 7 — Correlation with BTC (single-series rolling 90d + scalar value); rendered as "Correlation with BTC" not "Correlation matrix" (multi-benchmark ETH/SOL deferred per UC#6)
