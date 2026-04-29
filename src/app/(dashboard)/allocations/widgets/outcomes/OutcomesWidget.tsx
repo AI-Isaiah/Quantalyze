@@ -9,11 +9,6 @@ import type {
 } from "@/lib/queries";
 import { formatPercent } from "@/lib/utils";
 import { computeOutcomeKPIs, type OutcomeKPIs } from "@/lib/outcomes-kpi";
-import {
-  deriveOutcomeLabel,
-  deriveOutcomeStatusPill,
-  type OutcomeStatusPill,
-} from "@/lib/bridge-outcome-label";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
 // Phase 08 Plan 04 Task 2 — "Your note" section inside ExpandedPanel
 // (MANAGE-05 bridge_outcome scope).
@@ -31,8 +26,8 @@ import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
  *   - Row-expand: 3 window cards (30d/90d/180d) with progress bars
  *   - Note section (Phase 08 MANAGE-05 BridgeOutcomeNoteSection) preserved
  *
- * computeOutcomeKPIs / deriveOutcomeLabel / deriveOutcomeStatusPill /
- * BridgeOutcomeNoteSection are preserved verbatim (do not regress Phase 5/8).
+ * computeOutcomeKPIs and BridgeOutcomeNoteSection are preserved verbatim
+ * (do not regress Phase 5/8).
  */
 
 // ---------------------------------------------------------------- types
@@ -73,16 +68,6 @@ function toneColor(
   return "var(--color-text-muted)";
 }
 
-function pillStyle(
-  p: OutcomeStatusPill,
-): { color: string; backgroundColor: string } {
-  if (p.state === "allocated-win")
-    return { color: "#16A34A", backgroundColor: "rgba(22,163,74,0.10)" };
-  if (p.state === "allocated-loss")
-    return { color: "#DC2626", backgroundColor: "rgba(220,38,38,0.08)" };
-  return { color: "#718096", backgroundColor: "rgba(148,163,184,0.10)" };
-}
-
 function addDaysISO(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
@@ -97,13 +82,6 @@ function formatDate(iso: string): string {
     year: "numeric",
     timeZone: "UTC",
   });
-}
-
-function formatUsdCompact(value: number | null): string {
-  if (value == null) return "—";
-  if (Math.abs(value) >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(value) >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
-  return `$${value.toFixed(0)}`;
 }
 
 function sliceToWindow(
@@ -506,8 +484,6 @@ function ExpandedPanel({
 /**
  * Phase 09.1 Plan 10 — Designer table row (outcomes.jsx:79-132).
  * Columns: From → To / Size / Recorded / Δ30 / Δ90 / Δ180 / caret.
- * Preserves deriveOutcomeStatusPill + deriveOutcomeLabel for accessibility
- * tooltips and screen-reader semantics.
  */
 function TimelineRow({
   outcome,
@@ -515,17 +491,13 @@ function TimelineRow({
   isExpanded,
   onToggle,
   curvesCache,
-  today,
 }: {
   outcome: OutcomeRow;
   colSpan: number;
   isExpanded: boolean;
   onToggle: (id: string) => void;
   curvesCache: React.MutableRefObject<Map<string, CurveData>>;
-  today?: string;
 }) {
-  const pill = useMemo(() => deriveOutcomeStatusPill(outcome), [outcome]);
-
   const dateIso =
     outcome.kind === "allocated" && outcome.allocated_at
       ? outcome.allocated_at

@@ -437,7 +437,6 @@ export function EquityChart({
   // to 3 labels (+0% / -0.5% / -1.0%).
   const yTicks: number[] = (() => {
     const MIN_TICKS = 5;
-    const spanPct = (yMax - yMin) * 100;
     const niceMultipliers = [1, 2, 2.5, 5];
     const candidates: number[] = [];
     for (let p = -3; p <= 3; p++) {

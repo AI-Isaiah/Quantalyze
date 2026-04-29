@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.1] - 2026-04-29
+
+**Phase 13 polish — accessibility hardening + lint cleanup.** Discovery v2's Customize drawer now properly traps keyboard focus while open, returns focus to the cog button on close, and animates in over 300ms (UI-SPEC contract that shipped silently broken in 0.17.1.0). The watchlist tablist gets Home/End keys per WAI-ARIA, unique tab IDs via `useId()` so multiple StrategyTables on a page can't collide, and the right-side filter affordances finally anchor right. Pre-existing lint debt across allocator dashboard files cleaned up in the same pass.
+
+### Fixed
+
+- **A11y — `CustomizeDrawer` focus management.** Tab is trapped inside the drawer while open (cycles between first and last focusable, plus catches Tab fired before initial focus has landed and pulls it back inside). Heading auto-focuses on open and shows a visible focus ring (was suppressed by `focus-visible:outline-none`). On close, focus returns to the previously-focused element only if it's still connected to the DOM — guards against the cog button unmounting mid-session. WCAG 2.4.3 / 2.1.2 compliance now matches the explicit UI-SPEC accessibility contract.
+- **A11y — `<div role="tabpanel">` `aria-labelledby` wired up.** Tab buttons get DOM ids from `useId()` (`${idBase}-tab-all` / `${idBase}-tab-watchlist`); the panel's `aria-labelledby` resolves to whichever tab is active. `aria-controls` on the tabs points at the panel's matching dynamic id. Two StrategyTables on one page no longer share IDs.
+- **A11y — `WatchlistTabs` Home / End keys.** `Home` jumps focus to the All tab and activates it; `End` does the same for My Watchlist. Existing ArrowLeft / ArrowRight automatic-activation behavior unchanged.
+- **`StrategyFilters` Sort group anchors right via `ml-auto`.** Cog + view toggle now drift to the right edge per UI-SPEC layout contract (search → filters → leadingSlot → Hide-examples → Sort → Customize cog → ViewToggle).
+- **`CustomizeDrawer` slide-in animation.** Drawer translates from `translate-x-full → translate-x-0` over 300ms with backdrop fade `opacity-0 → opacity-100`; both wrapped in `motion-reduce:transition-none`. (`duration-250` is not a valid Tailwind v4 default token — would have silently dropped the animation; `duration-300` is the closest valid scale step.)
+- **`StrategyFilters` All-Filters chip uses valid Tailwind sizing.** `w-4.5 h-4.5` (silently dropped — no such token) replaced with `min-w-[18px] h-[18px]` matching `WatchlistTabs`'s count badge pattern.
+- **Settings cog uses `rounded-md` to match Button neighbors** (was `rounded` 4px next to 6px Button, visible jar in the row).
+
+### Changed
+
+- **Preamble JSDocs trimmed across 6 Phase-13 files** (~130 lines of institutional storytelling removed). One-line file headers per project "no over-commenting" convention. Behavior unchanged.
+- **`OutcomesWidget` JSDocs synced** with the lint-cleanup deletion of `deriveOutcomeLabel` + `deriveOutcomeStatusPill` references — the file-level "preserved verbatim" list and the `TimelineRow` JSDoc no longer claim helpers that were removed.
+
+### Internal
+
+- **Pre-existing lint debt cleanup.** 15 mechanical warnings cleared across `OutcomesWidget`, `KpiStrip`, `BridgeDrawer`, `Tweaks`, `EquityChart`, `AllocationsTabs`, `ScenarioComposer.test`, `OnboardingBanner.test`, `AllocationsTabs.onboarding.test`, `useScenarioState.test`, `scenario-commit-batch-tx.test`. Removed 6 unused imports, 2 dead local functions (`pillStyle`, `formatUsdCompact`), 3 dead local constants (`REF_SOL`, `spanPct`, `pill` memo), 4 stale `eslint-disable` directives, and the dead `today` prop in `TimelineRow`. `TAB_KEYS` runtime array converted to a string-literal type union (was assigned but only used in `(typeof TAB_KEYS)[number]`). The 15 remaining `react-hooks/exhaustive-deps` warnings on useMemo dep-array logical expressions are deferred (touch unrelated subsystems, risky refactors).
+
+### Tests
+
+- 2372 → 2381 (+9 new a11y tests). New CustomizeDrawer tests cover initial-focus to heading, return-focus to opener on close, Tab cycling from last-to-first focusable, Shift+Tab from heading to last, and Tab-while-focus-outside pulled back inside. New WatchlistTabs tests cover Home/End keys, dynamic `idBase`-derived tab DOM ids, and `aria-controls` resolving to `panelId`. All 250 test files green, 0 typecheck errors, 0 ESLint errors on touched files.
+
 ## [0.17.1.0] - 2026-04-28
 
 **Phase 13 — Discovery v2 Polish.** Allocators now have full IA parity with Quants.Space on `/discovery/[slug]`: a Watchlist sub-tab they can star strategies into, a Customize drawer to set their own default view/sort/visibility, single-accent sparklines (DESIGN.md DIFF-05), and "Hide examples" on by default so a fresh allocator's first visit shows only real funds.

@@ -171,4 +171,83 @@ describe("CustomizeDrawer", () => {
     fireEvent.click(saveBtn);
     expect(onSave).toHaveBeenCalledTimes(1);
   });
+
+  it("focuses the heading when opened (initial focus)", () => {
+    renderDrawer({ open: true });
+    const heading = document.getElementById("customize-heading");
+    expect(heading).not.toBeNull();
+    expect(document.activeElement).toBe(heading);
+  });
+
+  it("restores focus to the previously-focused element on close", () => {
+    const opener = document.createElement("button");
+    opener.textContent = "Opener";
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+    const { rerender } = render(
+      <CustomizeDrawer
+        open
+        onClose={() => {}}
+        draft={{ ...DEFAULTS }}
+        setDraft={() => {}}
+        persisted={{ ...DEFAULTS }}
+        onSave={() => {}}
+      />,
+    );
+    rerender(
+      <CustomizeDrawer
+        open={false}
+        onClose={() => {}}
+        draft={{ ...DEFAULTS }}
+        setDraft={() => {}}
+        persisted={{ ...DEFAULTS }}
+        onSave={() => {}}
+      />,
+    );
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it("Tab from the last focusable cycles back to the first (focus trap)", () => {
+    const { container } = renderDrawer({ open: true });
+    const focusables = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    expect(focusables.length).toBeGreaterThan(1);
+    const last = focusables[focusables.length - 1];
+    last.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(focusables[0]);
+  });
+
+  it("Shift+Tab from heading cycles to the last focusable (focus trap, shift direction)", () => {
+    const { container } = renderDrawer({ open: true });
+    const heading = document.getElementById("customize-heading")!;
+    const focusables = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    heading.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(focusables[focusables.length - 1]);
+  });
+
+  it("Tab fired while focus is outside the drawer pulls it back inside", () => {
+    const stray = document.createElement("button");
+    stray.textContent = "Outside";
+    document.body.appendChild(stray);
+    const { container } = renderDrawer({ open: true });
+    stray.focus();
+    expect(document.activeElement).toBe(stray);
+    fireEvent.keyDown(document, { key: "Tab" });
+    const firstFocusable = container.querySelector<HTMLElement>(
+      'button:not([disabled])',
+    );
+    expect(document.activeElement).toBe(firstFocusable);
+    stray.remove();
+  });
 });

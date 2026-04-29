@@ -93,12 +93,10 @@ export function BridgeDrawer({
   // Reset transient state when the drawer closes.
   useEffect(() => {
     if (isOpen) return;
-    /* eslint-disable react-hooks/set-state-in-effect */
     setStage("browse");
     setSelectedRef(null);
     setError(null);
     setSubmitting(false);
-    /* eslint-enable react-hooks/set-state-in-effect */
   }, [isOpen]);
 
   // Esc-to-close handler — only attached while the drawer is open.

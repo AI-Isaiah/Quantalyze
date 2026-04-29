@@ -41,7 +41,6 @@ import {
   HAS_LIVE_DB,
   HAS_INTROSPECTION,
   createLiveAdminClient,
-  createTestUser,
   runIntrospectionSql,
   advertiseLiveDbSkipReason,
   LIVE_DB_URL,

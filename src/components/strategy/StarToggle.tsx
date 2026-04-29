@@ -1,32 +1,5 @@
 "use client";
 
-/**
- * Phase 13 / Plan 13-01 / DISCO-01 — Watchlist star toggle.
- *
- * Polymorphic icon-button (size="table" → 44×44 hit area; size="card" →
- * 32×32). Optimistic UI: onToggle fires synchronously on click so the
- * leading-column / card-corner icon flips immediately. The actual PUT
- * to /api/watchlist/[strategyId] is fired inside useTransition; if it
- * fails, we retry once after 600ms (per UI-SPEC State Matrix), and on
- * the second failure revert the visual flip (back to !nextStarred —
- * the value before this click) and surface an inline retry hint.
- *
- * Rapid-double-click safety has two layers:
- *   1) The button is `disabled` while `isPending` is true — React
- *      blocks subsequent click events for the duration of the transition.
- *   2) Server-side idempotency in PUT /api/watchlist/[strategyId]
- *      (ON CONFLICT DO NOTHING for add, DELETE for remove) makes any
- *      duplicate that does slip through a no-op.
- *
- * Pattern source: useTransition optimistic mirror per RESEARCH.md
- * Pattern 5 + Open Q #2 in TODOS.md (codebase-consistent with
- * AllocatorExchangeManager.tsx; React 19 useOptimistic not yet adopted
- * in-tree).
- *
- * Icons are inline SVG to match the project convention — no
- * lucide-react / @heroicons / react-icons dependency.
- */
-
 import { useEffect, useRef, useState, useTransition } from "react";
 
 interface StarToggleProps {
@@ -47,11 +20,6 @@ export function StarToggle({
   const [isPending, startTransition] = useTransition();
   const [showRetryHint, setShowRetryHint] = useState(false);
 
-  // Phase 13 / REVIEW.md MEDIUM-3 — unmount cleanup. The 600ms retry gap +
-  // the 4-second retry-hint setTimeout can both fire after the component
-  // unmounts (e.g., user navigates away mid-flight). Track mount state via
-  // a ref and guard post-retry side effects; clear the 4-second timer in
-  // the cleanup so it cannot fire on an unmounted instance.
   const isMountedRef = useRef(true);
   const hintTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -66,8 +34,6 @@ export function StarToggle({
     };
   }, []);
 
-  // 44×44 in dense table rows; 32×32 on card top-right corner per
-  // UI-SPEC Spacing Scale "touch-target floor".
   const hitClass =
     size === "table"
       ? "min-w-11 min-h-11 inline-flex items-center justify-center"
@@ -97,26 +63,13 @@ export function StarToggle({
       const ok = await attempt(action);
       if (ok) return;
 
-      // Single retry after 600ms (UI-SPEC State Matrix "Server error
-      // retry-1").
       await new Promise((r) => setTimeout(r, 600));
       const okRetry = await attempt(action);
       if (okRetry) return;
 
-      // Both attempts failed — revert the optimistic flip and surface
-      // the 4-second retry hint. We revert to !nextStarred (the
-      // pre-click value at the moment this handler ran) rather than
-      // re-reading `starred` from the props closure; that keeps the
-      // revert intent stable even if the parent has re-rendered with a
-      // new `starred` value during the transition.
-      //
-      // Mount guard: skip every post-retry side effect if the component
-      // has unmounted between the initial click and now (avoids React
-      // "state update on unmounted component" warnings + leaked timers).
       if (!isMountedRef.current) return;
       onToggle(strategyId, !nextStarred);
       setShowRetryHint(true);
-      // Clear any prior pending hint timer before scheduling a new one.
       if (hintTimeoutRef.current !== null) {
         clearTimeout(hintTimeoutRef.current);
       }

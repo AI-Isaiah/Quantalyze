@@ -1,34 +1,6 @@
 "use client";
 
-/**
- * Phase 13 / Plan 13-02 / DISCO-02 — CustomizeDrawer.
- *
- * Right-edge slide-out drawer that edits the allocator's per-category
- * Default view / Default sort / Hide examples preferences. Mirrors the
- * existing All-Filters slide-out at `StrategyFilters.tsx:411-575` for
- * visual consistency, but is bespoke (no `<Modal>` primitive — UI-SPEC
- * mandates an edge drawer).
- *
- * State machine (from 13-UI-SPEC.md State Matrix):
- *   - open=false → returns null
- *   - open=true → role="dialog" + aria-modal=true, ESC closes,
- *     backdrop click closes, body scroll locked
- *   - Save disabled until any of (view, hide_examples, sort.key, sort.dir) differs
- *   - Reset replaces draft with DEFAULTS but does NOT close
- *   - Save click delegates to parent's onSave (commits to localStorage
- *     via useDiscoveryPrefs.setPrefs and closes the drawer)
- *
- * Copywriting contract (UI-SPEC):
- *   - heading: "Customize"
- *   - description: "Set your default view, sort, and visibility on this
- *     category. Saved per device."
- *   - primary CTA visible text + aria-label both = "Save preferences"
- *     (WCAG 2.5.3 — Label in Name)
- *   - secondary action: "Reset to defaults"
- *   - close-X aria-label: "Close customize panel"
- */
-
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { DEFAULTS, type DiscoveryViewPreferences } from "@/lib/discovery-prefs";
@@ -58,6 +30,9 @@ const SORT_DIR_OPTIONS: { value: SortDir; label: string }[] = [
   { value: "asc", label: "Low to High" },
 ];
 
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function CustomizeDrawer({
   open,
   onClose,
@@ -66,6 +41,11 @@ export function CustomizeDrawer({
   persisted,
   onSave,
 }: CustomizeDrawerProps) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const [entered, setEntered] = useState(false);
+
   // ESC closes
   useEffect(() => {
     if (!open) return;
@@ -86,11 +66,66 @@ export function CustomizeDrawer({
     };
   }, [open]);
 
+  // Initial focus + return-focus on close. Capture the active element
+  // before moving focus into the drawer, restore it on cleanup so a
+  // keyboard user lands back on the cog button that opened it.
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocusedRef.current =
+      (document.activeElement as HTMLElement | null) ?? null;
+    headingRef.current?.focus();
+    return () => {
+      const prev = previouslyFocusedRef.current;
+      if (prev?.isConnected) prev.focus?.();
+    };
+  }, [open]);
+
+  // Tab focus trap — cycles between first and last focusable. Also catches
+  // any Tab fired before initial focus has landed and pulls it back inside.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const drawer = drawerRef.current;
+      if (!drawer) return;
+      const focusables = drawer.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (active && !drawer.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+        return;
+      }
+      if (e.shiftKey) {
+        if (active === first || active === headingRef.current) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open]);
+
+  // Slide-in: paint at translate-x-full on first render after open=true,
+  // then rAF to translate-x-0 so the transition fires.
+  useEffect(() => {
+    if (!open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setEntered(false);
+      return;
+    }
+    const id = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(id);
+  }, [open]);
+
   if (!open) return null;
 
-  // Explicit field-by-field equality — refactor-safe vs. JSON.stringify
-  // (which silently breaks on key-order drift, and also walks any future
-  // unrelated fields added to DiscoveryViewPreferences).
   const dirty =
     draft.view !== persisted.view ||
     draft.hide_examples !== persisted.hide_examples ||
@@ -99,21 +134,30 @@ export function CustomizeDrawer({
 
   return (
     <div
+      ref={drawerRef}
       className="fixed inset-0 z-50 flex justify-end"
       role="dialog"
       aria-modal="true"
       aria-labelledby="customize-heading"
     >
       <div
-        className="absolute inset-0 bg-black/40"
+        className={`absolute inset-0 bg-black/40 transition-opacity duration-300 ease-out motion-reduce:transition-none ${
+          entered ? "opacity-100" : "opacity-0"
+        }`}
         onClick={onClose}
         aria-hidden="true"
       />
-      <aside className="relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto">
+      <aside
+        className={`relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto transition-transform duration-300 ease-out motion-reduce:transition-none ${
+          entered ? "translate-x-0" : "translate-x-full"
+        }`}
+      >
         <header className="sticky top-0 bg-surface border-b border-border px-6 py-4 flex items-center justify-between">
           <h2
+            ref={headingRef}
             id="customize-heading"
-            className="text-lg font-semibold text-text-primary"
+            tabIndex={-1}
+            className="text-lg font-semibold text-text-primary rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             Customize
           </h2>
@@ -139,7 +183,6 @@ export function CustomizeDrawer({
             Set your default view, sort, and visibility on this category. Saved per device.
           </p>
 
-          {/* Default view */}
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-3">
               Default view
@@ -170,7 +213,6 @@ export function CustomizeDrawer({
             </div>
           </section>
 
-          {/* Default sort */}
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-3">
               Default sort
@@ -213,7 +255,6 @@ export function CustomizeDrawer({
             </div>
           </section>
 
-          {/* Hide examples toggle */}
           <section>
             <label className="flex items-center gap-3 cursor-pointer">
               <input
@@ -222,7 +263,7 @@ export function CustomizeDrawer({
                 onChange={(e) =>
                   setDraft({ ...draft, hide_examples: e.target.checked })
                 }
-                className="h-4 w-4 rounded border-border text-accent focus-visible:ring-accent"
+                className="h-4 w-4 rounded border-border accent-accent focus-visible:ring-accent"
               />
               <span className="text-sm text-text-secondary">
                 Hide example strategies

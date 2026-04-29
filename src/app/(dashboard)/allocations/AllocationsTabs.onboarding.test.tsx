@@ -65,7 +65,6 @@ vi.mock("./components/ScenarioComposer", () => ({
 
 // next/link → plain <a> for the OnboardingBanner CTA
 vi.mock("next/link", () => ({
-  // eslint-disable-next-line react/display-name
   default: ({
     href,
     children,

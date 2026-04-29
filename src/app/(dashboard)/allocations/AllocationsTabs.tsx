@@ -175,8 +175,7 @@ const PERFORMANCE_POLL_INTERVAL_MS = 30_000;
  * <Suspense fallback={<div />}>.
  */
 
-const TAB_KEYS = ["overview", "holdings", "outcomes", "mandate", "risk", "scenario"] as const;
-type TabKey = (typeof TAB_KEYS)[number];
+type TabKey = "overview" | "holdings" | "outcomes" | "mandate" | "risk" | "scenario";
 
 // PR3 (dashboard parity) — the truth design's tab strip is 5 tabs (no
 // Scenario). Scenario remains routable via ?tab=scenario so the
