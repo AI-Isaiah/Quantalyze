@@ -80,12 +80,38 @@ export function useLazyPanelMetrics<T = unknown>(
   const optsRef = useRef(opts);
   optsRef.current = opts;
 
+  // F2 (v0.17.1): mount guard for the fetch race. The IntersectionObserver
+  // unobserve-on-first-fire prevents repeat fetches, but in-flight promises
+  // still resolve after unmount or after a route reconciliation reuses this
+  // hook instance for a different strategyId (StrategyV2Shell renders panels
+  // without a key={strategyId}, so /strategy/abc/v2 → /strategy/xyz/v2 keeps
+  // the same hook instance with new props). Without this guard, abc's late
+  // payload would call setData on the instance now bound to xyz.
+  const mountedRef = useRef(true);
+
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       observerRef.current?.disconnect();
       observerRef.current = null;
     };
   }, []);
+
+  // Adversarial fix (v0.17.1 follow-up): monotonic version counter. Bare
+  // strategyId-equality misses the A→B→A flip race — when the user
+  // navigates back to the original strategyId before the first fetch
+  // resolves, the captured strategyId again matches optsRef.current and
+  // the stale payload would clobber state. Bumping versionRef on every
+  // strategyId change and gating .then/.catch on a version match catches
+  // this. With panel keying (the F2 follow-up commits) the same hook
+  // instance shouldn't see strategyId churn in production, but this is
+  // defense-in-depth for any future panel that forgets the key prop.
+  // Cross-model adversarial review (Claude conf 7 + Grok 4.20 P1).
+  const versionRef = useRef(0);
+  useEffect(() => {
+    versionRef.current += 1;
+  }, [opts.strategyId]);
 
   // useCallback gives the ref a stable identity across renders — prevents
   // IntersectionObserver disconnect/reconnect on every parent re-render.
@@ -131,15 +157,28 @@ export function useLazyPanelMetrics<T = unknown>(
           // is reachable from a Client Component graph (Plan 14b-01 Rule 3
           // deviation — see SUMMARY.md).
           const strategyId = currentOpts.strategyId;
+          // F2 + adversarial follow-up — keep the .then/.catch guards in
+          // lockstep. The version match (versionRef bumps on every strategyId
+          // change via the useEffect above) is strictly stronger than the
+          // bare strategyId equality the original F2 fix used: it catches
+          // both the cross-strategy reuse race AND the A→B→A flip race
+          // where the user cycles back to the original strategyId before
+          // the first fetch resolves. The strategyId capture is retained
+          // for the structured-log payload in the .catch branch.
+          const requestVersion = versionRef.current;
+          const isStillRelevant = () =>
+            mountedRef.current && versionRef.current === requestVersion;
           import("@/lib/queries-client")
             .then(({ fetchStrategyLazyMetricsClient }) =>
               fetchStrategyLazyMetricsClient(strategyId, PANEL_TO_ID[panelId]),
             )
             .then((payload) => {
+              if (!isStillRelevant()) return;
               setData(payload as T);
               setStatus("ready");
             })
             .catch((err: unknown) => {
+              if (!isStillRelevant()) return;
               const message = err instanceof Error ? err.message : String(err);
               console.error("useLazyPanelMetrics fetch failed", {
                 panelId,

@@ -1,3 +1,5 @@
+"use client";
+
 import type { StrategyV2Detail } from "@/lib/queries";
 import type { StrategyAnalytics } from "@/lib/types";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
@@ -12,11 +14,17 @@ interface DrawdownPanelProps {
 /**
  * Phase 14a / KPI-05 — Panel 3 Drawdown analysis.
  *
- * Server component. Full-width DrawdownChart (Recharts) + Worst-5
- * Drawdowns table per UI-SPEC §4. When `history_days < 30`, the chart
- * body is replaced by a partial-data banner. The Worst-5 table reuses
- * its existing empty-state copy ("No meaningful drawdowns…") rather
- * than gating on history_days — preserves the established v1 behavior.
+ * Client component. Both child charts (DrawdownChart, WorstDrawdowns) are
+ * Recharts-backed and require the client runtime; marking this panel
+ * "use client" mirrors the existing strategy-v2 panel boundary so the
+ * Recharts subtree mounts in a single hydration pass instead of straddling
+ * a server/client seam (MA-7).
+ *
+ * Renders a full-width DrawdownChart + Worst-5 Drawdowns table per
+ * UI-SPEC §4. When `history_days < 30`, the chart body is replaced by a
+ * partial-data banner. The Worst-5 table reuses its existing empty-state
+ * copy ("No meaningful drawdowns…") rather than gating on history_days —
+ * preserves the established v1 behavior.
  *
  * `WorstDrawdowns` expects a full `StrategyAnalytics` shape but only
  * reads `metrics_json.drawdown_episodes` and `drawdown_series`. We

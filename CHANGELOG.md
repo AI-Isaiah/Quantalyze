@@ -6,6 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.4] - 2026-04-29
+
+**Audit follow-up — test gaps closed + CI seed-gate widened.** Three deferred audit items addressed: SR-3 adds component coverage for the v2 route's error boundary plus a `notFound()` contract test; SR-4 fills three uncovered branches in `useLazyPanelMetrics` (`ref(null)` early-return, SSR fallback when `IntersectionObserver` is undefined, non-intersecting entry skipped); MA-8 extends the BLOCK-3 CI gate so all 8 seed-dependent Playwright specs run together as soon as `E2E_TEST_DB_CONFIGURED` is set on the repo. MA-2 (v1 → v2 cutover) and MA-3 (4-bucket Trade Mix flip) intentionally not done — both need product input (MA-2) or upstream `is_maker` ingestion (MA-3) before scaffolding adds value.
+
+### Added
+
+- **SR-3 — `/strategy/[id]/v2/error.tsx` component test (5 cases).** Heading + body copy + CTAs render; Reload button invokes `unstable_retry()`; v1-fallback `Link` strips the trailing `/v2` from `usePathname()`; pathname `null` falls back to `/`; `console.error` fires with the thrown error on mount. Each test verified to fail when the corresponding line is reverted.
+- **SR-3 — `/strategy/[id]/v2/page.tsx` notFound contract test (2 cases).** `getStrategyDetailV2` returning null invokes `notFound()` and short-circuits the render; a populated result does NOT call `notFound()` and forwards `detail` through to `<StrategyV2Shell>`. Mocks the data fetcher + shell + `next/navigation.notFound` so the server-component contract is exercised without the full Next.js runtime (mirrors the existing v1 page.test.tsx convention — async server components are awkward to mount in jsdom).
+- **SR-4 — three new `useLazyPanelMetrics` tests** filling uncovered branches: `ref(null)` early-return (React detach + fast-refresh path), `IntersectionObserver=undefined` SSR fallback (status flips to ready immediately, no observer created, no fetch fired), non-intersecting entry per-entry filter (status stays idle, target stays observed). 14 → 17 tests.
+
+### Changed
+
+- **MA-8 — CI BLOCK-3 gate now covers all 8 seed-dependent specs** (was 1: `onboarding-funnel`). When `vars.E2E_TEST_DB_CONFIGURED == 'true'`, the workflow now runs `discovery-axe`, `discovery-hide-examples-default`, `discovery-prefs-isolation`, `strategy-v2-partial-data`, `strategy-v2-chart-parity`, `strategy-v2-keyboard`, `strategy-v2-axe`, and `onboarding-funnel` together. Each spec's HAS_SEED_ENV constant continues to self-skip when the env isn't set, so fork PRs and unconfigured forks still pass cleanly. Step renamed `Run onboarding-funnel spec (...)` → `Run seed-gated specs (MA-8 / ...)`.
+
+### Internal
+
+- **MA-2 (v1 → v2 cutover) deferred — needs product direction.** v1 (`/strategy/[id]`) and v2 (`/strategy/[id]/v2`) serve different audiences: v1 is the public marketing factsheet (calls `getPublicStrategyDetail`, includes `StrategyNoteCard` for authenticated viewers and a sign-up CTA for unauthenticated visitors); v2 is the allocator detail surface (calls `getStrategyDetailV2`, returns null for unpublished strategies, no public-marketing affordances). The flag `isStrategyUiV2Enabled` is currently dead code — no consumer wires it. A clean cutover is a feature port (notes + CTA into the v2 shell) plus an audience redesign, not a code-level fix. Surfaced for v0.17.2 planning.
+- **MA-3 (4-bucket Trade Mix flip) deferred — blocked on upstream data.** The `TRADE_MIX_HAS_MAKER_TAKER` flag and `TradeMixSubPanel`'s `mode='4-bucket'` prop already exist as scaffolding, but the 4-bucket render branch is intentionally a fallback message until `analytics-service/services/exchange.py` populates `is_maker` for Binance/OKX/Bybit (D-15 audit ≥ 99% required). Implementing the flip without data would render four empty buckets — worse than the 2-bucket status quo.
+- **MA-9 / MA-10 (DISCO-05 migration push + Phase 12 SC#4 sign-off) — operator actions, not code.** Documented for the next operator-pass sweep.
+
+### Tests
+
+- 2609 → 2619 (+10 new). 5 error.test.tsx cases + 2 page.test.tsx cases (SR-3) + 3 useLazyPanelMetrics gap cases (SR-4). 264 test files green, 0 typecheck errors.
+
+## [0.17.1.3] - 2026-04-29
+
+**Milestone-audit clean-up — analytics path-extraction, cron GC, locale safety, chart-token consolidation.** Eight audit findings landed in one pass: `getStrategyDetailV2` stops fetching the full analytics blob per request, `OverviewPanel` is locale-stable across SSR/client, `DrawdownPanel` runs on a single hydration pass, every Sprint-3 chart sources its hex from `chart-tokens`, the Daily Heatmap canvas no longer races font load on cold renders, and abandoned wizard drafts have a weekly auto-cleanup cron now that the project is on Vercel Pro.
+
+### Added
+
+- **MA-5 — `/api/cron/cleanup-wizard-drafts` weekly GC cron.** Sundays 02:00 UTC sweeps `strategies` rows where `source='wizard' AND status='draft' AND created_at < 30d ago`. ON DELETE CASCADE handles strategy_analytics + trades; orphaned api_keys are best-effort revoked when no other strategy still references them — mirrors the user-driven `/api/strategies/draft/[id]` DELETE handler. Bearer `${CRON_SECRET}` auth, timing-safe. `@audit-skip` pragmas on both delete sites — cron GC has no user attribution; user-initiated deletes still emit audit events.
+- **`CHART_SURFACE` (#FFFFFF) and `CHART_TRACK` (#F1F5F9) tokens** in `chart-tokens.ts` — mirror `--color-surface` / `--color-track` in globals.css. Used by EquityCurve's lightweight-charts background, gridlines, and price-scale borders so a future palette change lives in exactly one file.
+
+### Fixed
+
+- **MA-1 / METRICS-15 — `getStrategyDetailV2` path-extraction.** Replaced wildcard `select("*, strategy_analytics (*)")` with explicit column lists (9 strategy fields, 14 analytics fields). The route now only ships the columns the seven panels actually consume; `metrics_json` stays as a single blob fetch since PostgREST cannot project JSONB sub-trees without an RPC. Bandwidth win the SC#3b p95<50ms contract was waiting on.
+- **MA-6 — `OverviewPanel.fmtNumber` locale-pinned to en-US.** Bare `value.toLocaleString()` inherited the Node default locale on SSR but the user's browser locale on the client; non-US users hit React's hydration warning on every panel render. `value.toLocaleString("en-US")` makes the output deterministic across the SSR/client boundary.
+- **MA-7 — `DrawdownPanel` marked `"use client"`.** Both child charts (`DrawdownChart`, `WorstDrawdowns`) are Recharts-backed and require the client runtime. Marking the panel itself client-only mounts the whole subtree in a single hydration pass instead of straddling a server/client seam.
+- **F5 — `DailyHeatmap` canvas paint gated on `document.fonts.ready` when `status='loading'`.** Surrounding panel typography (Geist Mono labels, year axis text) drives the canvas container's flow size on cold loads — painting before fonts settle races a layout reflow and leaves cells visibly misaligned for one frame. Synchronous fast path when fonts are already loaded (typical post-hydration + jsdom test environment) keeps every existing canvas test green; Test 19 covers the `loading → ready` gate with a controlled FontFaceSet stub.
+- **LD-D1/D2/D3 — chart token consolidation.** `MonthlyReturnsBar` axis ticks now spread `CHART_TICK_STYLE` (was inline `fontSize: 10/11`); `EquityCurve` background / grid / price-scale borders read from `CHART_SURFACE` / `CHART_AXIS_TICK` / `CHART_TRACK` / `CHART_BORDER` (was 6 hardcoded hex literals); `YearlyReturns` cell colors source `CHART_POSITIVE` / `CHART_NEGATIVE` (was inline `#16A34A` / `#DC2626`). All three charts now match the v2 caption-tier contract (12px Geist Mono tabular-nums at #64748B on white, 4.85:1 WCAG AA).
+
+### Changed
+
+- **`vercel.json` cron count 2 → 3** — wizard-draft cleanup added now that the project is on Vercel Pro. `MAX_CRONS` test guardrail loosened from Hobby's hard cap of 2 to a soft bound of 10 (catches runaway additions without blocking legitimate growth). Daily-or-less-frequent check kept — no current need for sub-daily, even on Pro. Original Hobby-era story preserved in `docs/runbooks/vercel-cron-upgrade.md`.
+
+### Internal
+
+- **MA-4 confirmed already enforced** by migration `032_compute_jobs_queue.sql:233-237` (`compute_jobs_deny_all USING (false) WITH CHECK (false)`). No later migration weakens it; the audit finding ("`USING (true)` — wide-open") referred to an unrelated `compute_job_kinds` reference table where wide-open SELECT is intentional (small read-only kinds registry). No code change.
+
+### Tests
+
+- 2608 → 2609 (+1 new). Test 19 (F5): installs a controlled `FontFaceSet` stub with `status='loading'`, asserts zero `fillRect` / `save` / `clearRect` calls until `release()` resolves the ready promise, then asserts the full 1825-cell paint completes (one save / one restore / one clearRect / 1825 fillRects). All 262 test files green, 0 typecheck errors.
+
+## [0.17.1.2] - 2026-04-29
+
+**v0.17.1 review-fix cluster — strategy-v2 panel correctness + canvas hygiene + flag-key versioning + adversarial-pass hardening.** Eight commits implementing the F2/F3/F4/SR-1/SR-2 findings from the prior Grok 4.20 adversarial + ship review on v0.17.1, plus two follow-up commits closing the gaps a fresh adversarial pass surfaced (.catch race regression coverage, A→B→A flip defense, localStorage value normalization). Allocators see correct 3M rolling Sharpe (no longer the 6M series), cross-strategy nav no longer leaks stale panel data, the daily-heatmap canvas no longer shows ghost cells on data refetch, and v0.17.1 v1-route removal won't trap legacy opt-out users on a 404.
+
+### Fixed
+
+- **F3 — `RollingMetricsPanel` 3M toggle now reads `sharpe_30d`.** The 3M button was sourcing `sharpe_90d` (the 6M series), so allocators saw identical data for 3M and 6M with no way to tell. `SHARPE_KEY_BY_WINDOW["3M"]` flipped to `{ primary: "sharpe_30d", fallback: "sharpe_90d" }`; sparse-data fallback to 90d preserved for strategies that don't carry a 30d series. Test 5b pins 3M ≠ 6M via `.toBe` identity to prevent regression.
+- **F2 — `useLazyPanelMetrics` mount guard + cross-strategy reuse defense.** In-flight fetches now short-circuit on `mountedRef.current === false` OR a stale `strategyId`, so abc's late payload no longer calls `setData` on a hook instance React reused for xyz (panels were re-keyed by `strategy.id` in the same pass; the hook guard is belt-and-suspenders for any future panel that forgets the key prop). Tests 10/11 cover the .then path, Tests 12/13 cover the .catch path (observable via `console.error` spy on the rejection's structured-log call).
+- **F2 follow-up — 5 lazy panels keyed by `strategy.id`.** `RollingMetricsPanel`, `TradeAndPositionPanel`, `ExposureAndGreeksPanel`, `ReturnsDistributionPanel`, and `HeadlineMetricsPanel` all carry `key={strategy.id}` so cross-strategy nav forces a fresh mount instead of reusing the prior strategy's hook state. `OverviewPanel` and `DrawdownPanel` intentionally unkeyed — they hold no client fetch state.
+- **F4 — `strategy.ui_v2` localStorage key versioned to `strategy.ui_v2.v17`.** The v0.17.1 cutover removes the v1 route, so a legacy `"false"` opt-out from the Phase 14a opt-in period would 404 those users. The versioned key silently retires legacy opt-outs at this milestone boundary; the legacy const stays exported for migration tooling and tests.
+- **SR-1 — `DailyHeatmap` canvas year-row lookup O(1) `Map`.** Replaces a per-cell `yearOrder.indexOf(yr)` (~9k string comparisons on a 5y strategy) with a memoized `Map<year, rowIndex>` folded directly off `rowsByYear`. The dead `yearOrder` intermediate was removed in the same commit.
+- **SR-2 — `DailyHeatmap` canvas paint wrapped in `save/restore` + `clearRect` before redraw.** The per-cell `globalAlpha` mutations are now isolated so the final cell's alpha doesn't leak into any subsequent draw on the context (canvas is dedicated today, but the pair removes a latent hazard at near-zero cost). `clearRect(0, 0, CANVAS_WIDTH, canvasHeight)` precedes the paint loop so stale pixels from the prior paint don't persist when `data` shrinks within the same year set (canvas auto-clear only fires on width/height attr changes, which `canvasHeight` doesn't trigger when year-count is stable).
+- **Adversarial A→B→A flip race in `useLazyPanelMetrics`.** Bare `optsRef.current.strategyId === strategyId` equality misses the case where the user navigates abc → xyz → abc within the same hook instance: the captured strategyId again matches current at resolve-time, so a stale payload from the first abc fetch would clobber the third-mount state. Fix: monotonic `versionRef` bumped on every `[opts.strategyId]` change; `.then`/`.catch` gate on `versionRef.current === requestVersion`. Caught by cross-model adversarial review (Claude conf 7 + Grok 4.20 P1). Test 14 reproduces the scenario.
+- **Adversarial localStorage value normalization in `strategy-ui-v2-flag`.** `raw === "false"` exact-match silently dropped `"FALSE"`, `"False"`, `" false "`, `"true\n"` etc. into the default-ON branch — a trust-boundary issue that ignored clear user opt-out intent. `raw?.trim().toLowerCase()` before comparison preserves intent without broadening the opt-out surface (garbage values still fall through to default-ON). Caught by cross-model adversarial review (Claude conf 8 + Grok 4.20 P1).
+
+### Tests
+
+- **2381 → 2608 (+227 new tests).** F2 race coverage Tests 10–14 (strategyId mid-fetch, post-unmount setData, .catch + strategyId/unmount races, A→B→A flip via `versionRef`). DailyHeatmap canvas Tests 17–18 (save/restore/clearRect ordering with exact dimensions `730 × 5×80`, re-paint with new data identity re-clears the canvas). localStorage normalization Test 12 (7 OFF variants + 6 ON variants + 2 intent-preservation negatives — `"banana"` and `"   "` still default-ON). Each new regression test verified to fail when the corresponding fix is reverted, then restored. Pre-landing review and adversarial pass on this branch found nothing else above the conf-7 / P1 threshold after these fixes landed.
+
+### Internal
+
+- **Pre-landing review hygiene** in `577a9aa`: dropped redundant `.not.toBe` assertion (Test 5b's `.toBe` identity check is strictly stronger), DRY guard on the year-set comparison, and `clearRect` mock no-op extension for jsdom.
+- **DailyHeatmap React.memo deps + Test 11 hardening** in `b5f0883`: `useEffect` deps now include `canvasHeight` for `react-hooks/exhaustive-deps` cleanliness; Test 11 (unmount race on .then path) documents its limited assertion power (vacuous in React 18 because `setState` on unmounted hooks no-ops silently — Test 13 covers the same scenario observably via the `.catch` path's `console.error`).
+
 ## [0.17.1.1] - 2026-04-29
 
 **Phase 13 polish — accessibility hardening + lint cleanup.** Discovery v2's Customize drawer now properly traps keyboard focus while open, returns focus to the cog button on close, and animates in over 300ms (UI-SPEC contract that shipped silently broken in 0.17.1.0). The watchlist tablist gets Home/End keys per WAI-ARIA, unique tab IDs via `useId()` so multiple StrategyTables on a page can't collide, and the right-side filter affordances finally anchor right. Pre-existing lint debt across allocator dashboard files cleaned up in the same pass.

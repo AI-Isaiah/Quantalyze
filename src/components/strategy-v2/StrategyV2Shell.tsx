@@ -79,6 +79,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         <OverviewPanel panel1={panel1} history_days={history_days} />
 
         <HeadlineMetricsPanel
+          key={strategy.id}
           strategyId={strategy.id}
           panel2Headline={panel2Headline}
           panel2Equity={panel2Equity}
@@ -88,7 +89,25 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
 
         <DrawdownPanel panel3={panel3} history_days={history_days} />
 
+        {/*
+          F2 follow-up (v0.17.1) — `key={strategy.id}` forces a full
+          unmount + remount of each panel that holds per-strategy client
+          state on cross-strategy navigation. Without it,
+          /strategy/abc/v2 → /strategy/xyz/v2 reuses the same React
+          instances; abc's resolved fetch state lingers on xyz's panel
+          (the hook's mountedRef + strategyId guards prevent the LEAK
+          but cannot retrigger a fetch on the new strategyId).
+
+          Keyed: the 4 lazy panels below (useLazyPanelMetrics-driven) AND
+          HeadlineMetricsPanel above (calls fetchStrategyLazyMetricsClient
+          for the Log-returns toggle and caches the result in useState —
+          identical bug class to the lazy panels).
+
+          Unkeyed: Overview / Drawdown — pure server-prop renderers with
+          no client-side per-strategy state.
+         */}
         <ReturnsDistributionPanel
+          key={strategy.id}
           strategyId={strategy.id}
           history_days={history_days}
           monthly_returns={panel4Inputs.monthly_returns}
@@ -98,6 +117,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         />
 
         <RollingMetricsPanel
+          key={strategy.id}
           strategyId={strategy.id}
           history_days={history_days}
           rolling_metrics={panel5Inputs.rolling_metrics}
@@ -105,11 +125,13 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         />
 
         <TradeAndPositionPanel
+          key={strategy.id}
           strategyId={strategy.id}
           trade_metrics={panel6Inputs.trade_metrics}
         />
 
         <ExposureAndGreeksPanel
+          key={strategy.id}
           strategyId={strategy.id}
           history_days={history_days}
           benchmark_greeks={panel7Inputs.benchmark_greeks}

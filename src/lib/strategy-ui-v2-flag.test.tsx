@@ -5,6 +5,7 @@ import {
   isStrategyUiV2Enabled,
   isStrategyUiV2EnabledClient,
   STRATEGY_UI_V2_STORAGE_KEY,
+  STRATEGY_UI_V2_LEGACY_STORAGE_KEY,
   STRATEGY_UI_V2_URL_OVERRIDE,
 } from "./strategy-ui-v2-flag";
 
@@ -55,8 +56,9 @@ describe("strategy-ui-v2-flag", () => {
     store.clear();
   });
 
-  it("constants match Phase 14a/b CONTEXT.md", () => {
-    expect(STRATEGY_UI_V2_STORAGE_KEY).toBe("strategy.ui_v2");
+  it("constants match v0.17.1 versioned-key contract (F4)", () => {
+    expect(STRATEGY_UI_V2_STORAGE_KEY).toBe("strategy.ui_v2.v17");
+    expect(STRATEGY_UI_V2_LEGACY_STORAGE_KEY).toBe("strategy.ui_v2");
     expect(STRATEGY_UI_V2_URL_OVERRIDE).toBe("strategy_v2");
   });
 
@@ -94,9 +96,8 @@ describe("strategy-ui-v2-flag", () => {
   });
 
   // Test 4 (regression critical) — URL override OFF wins over default-on +
-  // localStorage true. This is the canonical opt-out for users who hit
-  // issues post-flip.
-  it("URL ?strategy_v2=off returns false even if localStorage has \"true\"", () => {
+  // versioned-key true. Canonical opt-out for users who hit issues post-flip.
+  it("URL ?strategy_v2=off returns false even if v17 key has \"true\"", () => {
     localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "true");
     expect(isStrategyUiV2Enabled({ search: "?strategy_v2=off" })).toBe(false);
   });
@@ -105,27 +106,47 @@ describe("strategy-ui-v2-flag", () => {
     expect(isStrategyUiV2Enabled({ search: "?strategy_v2=false" })).toBe(false);
   });
 
-  // Test 5 — localStorage explicit ON
-  it("localStorage \"true\" with no URL returns true", () => {
+  // Test 5 — versioned-key explicit ON
+  it("v17 key \"true\" with no URL returns true", () => {
     localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "true");
     expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
   });
 
-  // Test 6 (Grok B-05 critical) — Legacy users who manually opted out keep
-  // their preference. SSR returns false → client also returns false → no
-  // hydration mismatch.
-  it("localStorage \"false\" with no URL returns false (legacy opt-out persists)", () => {
+  // Test 6 — versioned-key explicit OFF (post-v0.17.1 opt-out is now keyed
+  // on the v17 key, NOT the legacy "strategy.ui_v2").
+  it("v17 key \"false\" with no URL returns false", () => {
     localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "false");
     expect(isStrategyUiV2Enabled({ search: "" })).toBe(false);
   });
 
-  // Test 7 — URL beats localStorage
-  it("URL ?strategy_v2=on wins over localStorage \"false\"", () => {
+  // Test 6b (F4 critical) — Legacy unversioned "false" opt-out is silently
+  // retired at v0.17.1. Without this, the upcoming v1-route removal would
+  // 404 anyone who had set strategy.ui_v2="false" during 14a opt-in.
+  it("legacy strategy.ui_v2=\"false\" is IGNORED — returns default true (F4)", () => {
+    localStorage.setItem(STRATEGY_UI_V2_LEGACY_STORAGE_KEY, "false");
+    expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+  });
+
+  // Test 6c (F4) — Conflicting values: v17 key wins over legacy.
+  it("v17 \"false\" wins over legacy \"true\" (F4)", () => {
+    localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "false");
+    localStorage.setItem(STRATEGY_UI_V2_LEGACY_STORAGE_KEY, "true");
+    expect(isStrategyUiV2Enabled({ search: "" })).toBe(false);
+  });
+
+  it("v17 \"true\" with legacy \"false\" returns true (F4)", () => {
+    localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "true");
+    localStorage.setItem(STRATEGY_UI_V2_LEGACY_STORAGE_KEY, "false");
+    expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+  });
+
+  // Test 7 — URL beats versioned-key
+  it("URL ?strategy_v2=on wins over v17 key \"false\"", () => {
     localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "false");
     expect(isStrategyUiV2Enabled({ search: "?strategy_v2=on" })).toBe(true);
   });
 
-  // Test 8 — Malformed URL value falls through to localStorage; if absent,
+  // Test 8 — Malformed URL value falls through to versioned-key; if absent,
   // returns the new browser default (true).
   it("URL ?strategy_v2=banana falls through to default true", () => {
     expect(isStrategyUiV2Enabled({ search: "?strategy_v2=banana" })).toBe(
@@ -133,7 +154,7 @@ describe("strategy-ui-v2-flag", () => {
     );
   });
 
-  it("URL ?strategy_v2=banana falls through to localStorage \"false\"", () => {
+  it("URL ?strategy_v2=banana falls through to v17 key \"false\"", () => {
     localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "false");
     expect(isStrategyUiV2Enabled({ search: "?strategy_v2=banana" })).toBe(
       false,
@@ -152,6 +173,51 @@ describe("strategy-ui-v2-flag", () => {
     } finally {
       localStorageMock.getItem = original;
     }
+  });
+
+  // Test 12 (Adversarial v0.17.1 follow-up) — localStorage values are
+  // normalized via .trim().toLowerCase() before comparison so case variants
+  // and stray whitespace honor the user's clear intent. Cross-model
+  // adversarial review (Claude conf 8 + Grok 4.20 P1) flagged the prior
+  // exact-match comparison as a silent-bypass trust-boundary issue: a
+  // value like "FALSE" or " false " would fall through to the default-ON
+  // branch, ignoring the opt-out.
+  describe("Test 12 (Adversarial): localStorage value normalization", () => {
+    const offVariants = [
+      "FALSE",
+      "False",
+      "false ",
+      " false",
+      "  false  ",
+      "false\n",
+      "fAlSe",
+    ];
+    for (const variant of offVariants) {
+      it(`v17 key ${JSON.stringify(variant)} normalizes to "false" → returns false`, () => {
+        localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, variant);
+        expect(isStrategyUiV2Enabled({ search: "" })).toBe(false);
+      });
+    }
+
+    const onVariants = ["TRUE", "True", "true ", " true", "TrUe", "true\t"];
+    for (const variant of onVariants) {
+      it(`v17 key ${JSON.stringify(variant)} normalizes to "true" → returns true`, () => {
+        localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, variant);
+        expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+      });
+    }
+
+    // Garbage values still fall through to default-ON. Normalization should
+    // NOT broaden the opt-out surface — only honor genuine user intent.
+    it("v17 key \"banana\" still falls through to default true (normalization is intent-preserving)", () => {
+      localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "banana");
+      expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+    });
+
+    it("v17 key \"\" (empty after trim) falls through to default true", () => {
+      localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "   ");
+      expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+    });
   });
 
   // Test 10 — isStrategyUiV2EnabledClient is a thin wrapper that throws in
@@ -214,17 +280,27 @@ describe("strategy-ui-v2-flag", () => {
       expect(screen.getByTestId("path").textContent).toBe("v2");
     });
 
-    it("legacy opt-out user (localStorage=\"false\") — v1 stays v1 with no flip", async () => {
-      // Grok B-05's flagged scenario: SSR returns false → client also returns
-      // false → useEffect sets state to false → no flicker, no flip.
+    it("v17 opt-out user (v17 key=\"false\") — v1 stays v1 with no flip", async () => {
+      // Post-v0.17.1 opt-outs target the versioned key. SSR returns false →
+      // client also returns false → useEffect sets state to false → no flip.
       localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "false");
       render(<FlagConsumer search="" />);
       // Initial render is v1 (SSR-safe default).
       expect(screen.getByTestId("path").textContent).toBe("v1");
-      // Allow useEffect to flush; expect state to remain v1 (matches the
-      // localStorage opt-out).
       await waitFor(() => {
         expect(screen.getByTestId("path").textContent).toBe("v1");
+      });
+    });
+
+    it("F4: legacy unversioned \"false\" no longer pins to v1 — upgrades to v2 post-hydration", async () => {
+      // F4 (v0.17.1) — the legacy "strategy.ui_v2" key is silently retired.
+      // Users with a stale opt-out from Phase 14a now upgrade to v2 instead
+      // of being trapped on a v1 route that the v0.17.1 cutover will remove.
+      localStorage.setItem(STRATEGY_UI_V2_LEGACY_STORAGE_KEY, "false");
+      render(<FlagConsumer search="" />);
+      // Post-hydration must flip to v2 (legacy key ignored).
+      await waitFor(() => {
+        expect(screen.getByTestId("path").textContent).toBe("v2");
       });
     });
 

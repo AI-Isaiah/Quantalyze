@@ -193,7 +193,7 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
     expect(lastSortinoData).toBe(PANEL5_LAZY_FULL.rolling_sortino_12m);
   });
 
-  it("Test 5: Sharpe key mapping (Grok B-01) — 6M default → sharpe_90d; 3M → sharpe_90d; 12M → sharpe_365d", () => {
+  it("Test 5: Sharpe key mapping (Grok B-01 + F3) — 6M → sharpe_90d; 3M → sharpe_30d; 12M → sharpe_365d", () => {
     mockHookReturn = { ref: () => {}, data: PANEL5_LAZY_FULL, status: "ready" };
     const { container } = render(
       <RollingMetricsPanel
@@ -212,7 +212,11 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
     const buttons = Array.from(container.querySelectorAll("button"));
     const threeM = buttons.find((b) => b.textContent?.trim() === "3M");
     fireEvent.click(threeM!);
-    expect(Object.keys(lastRollingMetricsProps.data ?? {})).toEqual(["sharpe_90d"]);
+    // F3 (v0.17.1): 3M maps to sharpe_30d (exact-match), distinct from 6M's sharpe_90d.
+    expect(Object.keys(lastRollingMetricsProps.data ?? {})).toEqual(["sharpe_30d"]);
+    expect((lastRollingMetricsProps.data as Record<string, unknown>).sharpe_30d).toBe(
+      ROLLING_METRICS_FULL.sharpe_30d,
+    );
 
     const twelveM = buttons.find((b) => b.textContent?.trim() === "12M");
     fireEvent.click(twelveM!);
@@ -222,8 +226,8 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
     );
   });
 
-  it("Test 6: Sharpe fallback chain (Grok B-01) — sparse rolling_metrics with only sharpe_30d, 3M active uses fallback", () => {
-    const sparse = { sharpe_30d: ROLLING_METRICS_FULL.sharpe_30d };
+  it("Test 6: Sharpe fallback chain (Grok B-01 + F3) — sparse rolling_metrics with only sharpe_90d, 3M active uses fallback", () => {
+    const sparse = { sharpe_90d: ROLLING_METRICS_FULL.sharpe_90d };
     mockHookReturn = { ref: () => {}, data: PANEL5_LAZY_FULL, status: "ready" };
     const { container } = render(
       <RollingMetricsPanel
@@ -236,8 +240,8 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
     const buttons = Array.from(container.querySelectorAll("button"));
     const threeM = buttons.find((b) => b.textContent?.trim() === "3M");
     fireEvent.click(threeM!);
-    // 3M primary = sharpe_90d (absent), fallback = sharpe_30d → present
-    expect(Object.keys(lastRollingMetricsProps.data ?? {})).toEqual(["sharpe_30d"]);
+    // F3 (v0.17.1): 3M primary = sharpe_30d (absent in sparse payload), fallback = sharpe_90d → present.
+    expect(Object.keys(lastRollingMetricsProps.data ?? {})).toEqual(["sharpe_90d"]);
   });
 
   it("Test 7: Sharpe gated when ALL 3 keys absent — null rolling_metrics renders sub-banner not chart", () => {
@@ -425,6 +429,41 @@ describe("RollingMetricsPanel — Phase 14b-03 Task 2", () => {
     );
     expect(lastAlphaBetaProps.alpha).toBe(PANEL5_LAZY_FULL.rolling_alpha);
     expect(lastAlphaBetaProps.beta).toBe(PANEL5_LAZY_FULL.rolling_beta);
+  });
+
+  it("Test 5b (F3 v0.17.1): 3M and 6M return DISTINCT Sharpe series when all three keys are populated", () => {
+    // Grok F3 (v0.17.0.0 adversarial) — both 3M and 6M used to map to sharpe_90d,
+    // making the two windows render bit-identical charts. After the fix:
+    //   3M → sharpe_30d (matches Phase 12 metrics.py:145 nearest-window)
+    //   6M → sharpe_90d (unchanged — B-01 mitigation accepted)
+    mockHookReturn = { ref: () => {}, data: PANEL5_LAZY_FULL, status: "ready" };
+    const { container } = render(
+      <RollingMetricsPanel
+        strategyId="s1"
+        history_days={365}
+        rolling_metrics={ROLLING_METRICS_FULL}
+        sharpe={1.2}
+      />,
+    );
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const threeM = buttons.find((b) => b.textContent?.trim() === "3M");
+    const sixM = buttons.find((b) => b.textContent?.trim() === "6M");
+
+    fireEvent.click(threeM!);
+    const threeMKeys = Object.keys(lastRollingMetricsProps.data ?? {});
+    const threeMSeries = (lastRollingMetricsProps.data as Record<string, unknown>)[threeMKeys[0]];
+
+    fireEvent.click(sixM!);
+    const sixMKeys = Object.keys(lastRollingMetricsProps.data ?? {});
+    const sixMSeries = (lastRollingMetricsProps.data as Record<string, unknown>)[sixMKeys[0]];
+
+    expect(threeMKeys).toEqual(["sharpe_30d"]);
+    expect(sixMKeys).toEqual(["sharpe_90d"]);
+    // The two .toBe lines below are stronger than a .not.toBe identity check —
+    // they pin each series to its expected fixture reference, which implicitly
+    // proves 3M ≠ 6M for any non-trivial fixture.
+    expect(threeMSeries).toBe(ROLLING_METRICS_FULL.sharpe_30d);
+    expect(sixMSeries).toBe(ROLLING_METRICS_FULL.sharpe_90d);
   });
 
   it("Test 16: source forbids v2 type-contract violators (font-medium / text-sm / text-xl / text-2xl)", () => {

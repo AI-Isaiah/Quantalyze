@@ -383,18 +383,50 @@ export interface StrategyV2Detail {
   history_days: number;
 }
 
+/**
+ * MA-1 / METRICS-15 path-extraction. Replaces the wildcard
+ * `select("*, strategy_analytics (*)")` with explicit column lists so the
+ * row payload stays close to what the seven panels actually consume.
+ *
+ * Strategy columns: every field touched by `panel1` mapping (panel1 fans
+ * out into the dl row), plus `id` / `name` / `start_date` which the page
+ * metadata + shell header read off `result.strategy`. Status is filtered
+ * server-side and does not need to be in the projection.
+ *
+ * Analytics columns: every field that getStrategyDetailV2 unpacks below.
+ * `metrics_json` is intentionally a single blob fetch — its keys
+ * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
+ * alpha/beta/IR/Treynor) drive multiple panels and PostgREST cannot project
+ * a JSONB sub-tree without an RPC. Trimming the surrounding scalar/array
+ * columns is the bandwidth win the SC#3b p95<50ms contract was waiting on.
+ */
+const STRATEGY_V2_STRATEGY_COLUMNS =
+  "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";
+
+const STRATEGY_V2_ANALYTICS_COLUMNS =
+  "computation_status, metrics_json, cumulative_return, cagr, sharpe, sortino, max_drawdown, volatility, returns_series, drawdown_series, monthly_returns, return_quantiles, rolling_metrics, trade_metrics";
+
 export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   strategyId: string,
 ): Promise<StrategyV2Detail | null> {
   const supabase = await createClient();
   const { data: strategy, error } = await supabase
     .from("strategies")
-    .select("*, strategy_analytics (*)")
+    .select(
+      `${STRATEGY_V2_STRATEGY_COLUMNS}, strategy_analytics (${STRATEGY_V2_ANALYTICS_COLUMNS})`,
+    )
     .eq("id", strategyId)
     .eq("status", "published")
     .single();
 
   if (error || !strategy) return null;
+
+  // MA-1: the explicit projection above narrows the inferred Supabase row
+  // type to a subset of `Strategy` (panel-relevant columns only). The cast
+  // through `unknown` acknowledges that — we never read fields outside the
+  // projection from this binding. `result.strategy` consumers (page
+  // metadata + shell header) only use id / name / start_date.
+  const s = strategy as unknown as Strategy;
 
   // Pitfall 8: do NOT fall back to EMPTY_ANALYTICS. Read the row directly so
   // missing keys remain `null` and per-panel banners trigger correctly.
@@ -404,12 +436,12 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   const metricsJson = (a?.metrics_json ?? {}) as Record<string, unknown>;
 
   const panel1 = {
-    supported_exchanges: (strategy as Strategy).supported_exchanges ?? [],
-    strategy_types: (strategy as Strategy).strategy_types ?? [],
-    subtypes: (strategy as Strategy).subtypes ?? [],
-    markets: (strategy as Strategy).markets ?? [],
-    leverage_range: (strategy as Strategy).leverage_range ?? null,
-    avg_daily_turnover: (strategy as Strategy).avg_daily_turnover ?? null,
+    supported_exchanges: s.supported_exchanges ?? [],
+    strategy_types: s.strategy_types ?? [],
+    subtypes: s.subtypes ?? [],
+    markets: s.markets ?? [],
+    leverage_range: s.leverage_range ?? null,
+    avg_daily_turnover: s.avg_daily_turnover ?? null,
   };
 
   const panel2Headline = {
@@ -511,7 +543,7 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   const history_days = historyDaysFromJson ?? historyDaysFromSeries;
 
   return {
-    strategy: strategy as Strategy,
+    strategy: s,
     panel1,
     panel2Headline,
     panel2Equity,

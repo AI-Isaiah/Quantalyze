@@ -1,7 +1,7 @@
 "use client";
 
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell } from "recharts";
-import { CHART_AXIS_TICK, CHART_BORDER, CHART_FONT_MONO, CHART_NEGATIVE, CHART_POSITIVE } from "./chart-tokens";
+import { CHART_BORDER, CHART_NEGATIVE, CHART_POSITIVE, CHART_TICK_STYLE } from "./chart-tokens";
 
 interface MonthlyReturnsBarProps {
   data: Record<string, Record<string, number>>;
@@ -20,13 +20,13 @@ export function MonthlyReturnsBar({ data }: MonthlyReturnsBarProps) {
       <BarChart data={flat} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="label"
-          tick={{ fontSize: 10, fill: CHART_AXIS_TICK }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={{ stroke: CHART_BORDER }}
           interval={2}
         />
         <YAxis
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
           tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
