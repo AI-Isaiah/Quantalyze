@@ -300,6 +300,129 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 }
 
 /**
+ * Phase 14a / METRICS-15 path-extraction half (consumer half shipped Plan 12-08
+ * as `fetchStrategyLazyMetrics`). Reads scalars + above-the-fold series for the
+ * `/strategy/[id]/v2` 7-panel UI (Panels 1–3 eager). Heavy series for Panels
+ * 4–7 are deferred to Phase 14b, which calls `fetchStrategyLazyMetrics` from
+ * inside the IntersectionObserver-mounted lazy panels.
+ *
+ * Visibility gate: same as `getPublicStrategyDetail` — `status='published'`
+ * predicate. Private/unpublished strategies return `null` (rendered as 404 by
+ * the page-level `notFound()` call).
+ *
+ * Pitfall 8 contract: does NOT fall back to EMPTY_ANALYTICS when no analytics
+ * row exists. Returns `null` for missing scalars so per-panel partial-data
+ * banners can distinguish "no data" from "0% return".
+ */
+export interface StrategyV2Detail {
+  strategy: Strategy;
+  panel1: {
+    supported_exchanges: string[];
+    strategy_types: string[];
+    subtypes: string[];
+    markets: string[];
+    leverage_range: string | null;
+    avg_daily_turnover: number | null;
+  };
+  panel2Headline: {
+    cumulative_return: number | null;
+    cagr: number | null;
+    sharpe: number | null;
+    sortino: number | null;
+    max_drawdown: number | null;
+    volatility: number | null;
+  };
+  panel2Equity: {
+    series: { date: string; value: number }[] | null;
+    btc_overlay: { date: string; value: number }[] | null;
+  };
+  panel3: {
+    drawdown_series: { date: string; value: number }[] | null;
+    drawdown_episodes: unknown[] | null;
+  };
+  lazyKeys: ("panel4" | "panel5" | "panel6" | "panel7")[];
+  history_days: number;
+}
+
+export async function getStrategyDetailV2(
+  strategyId: string,
+): Promise<StrategyV2Detail | null> {
+  const supabase = await createClient();
+  const { data: strategy, error } = await supabase
+    .from("strategies")
+    .select("*, strategy_analytics (*)")
+    .eq("id", strategyId)
+    .eq("status", "published")
+    .single();
+
+  if (error || !strategy) return null;
+
+  // Pitfall 8: do NOT fall back to EMPTY_ANALYTICS. Read the row directly so
+  // missing keys remain `null` and per-panel banners trigger correctly.
+  const analyticsRaw = (strategy as Record<string, unknown>).strategy_analytics;
+  const a = extractAnalytics(analyticsRaw);
+  const isComplete = a?.computation_status === "complete";
+  const metricsJson = (a?.metrics_json ?? {}) as Record<string, unknown>;
+
+  const panel1 = {
+    supported_exchanges: (strategy as Strategy).supported_exchanges ?? [],
+    strategy_types: (strategy as Strategy).strategy_types ?? [],
+    subtypes: (strategy as Strategy).subtypes ?? [],
+    markets: (strategy as Strategy).markets ?? [],
+    leverage_range: (strategy as Strategy).leverage_range ?? null,
+    avg_daily_turnover: (strategy as Strategy).avg_daily_turnover ?? null,
+  };
+
+  const panel2Headline = {
+    cumulative_return: isComplete ? (a?.cumulative_return ?? null) : null,
+    cagr: isComplete ? (a?.cagr ?? null) : null,
+    sharpe: isComplete ? (a?.sharpe ?? null) : null,
+    sortino: isComplete ? (a?.sortino ?? null) : null,
+    max_drawdown: isComplete ? (a?.max_drawdown ?? null) : null,
+    volatility: isComplete ? (a?.volatility ?? null) : null,
+  };
+
+  const equitySeries = isComplete
+    ? ((metricsJson["equity_series_1y"] as { date: string; value: number }[] | undefined)
+        ?? a?.returns_series
+        ?? null)
+    : null;
+  const btcOverlay = isComplete
+    ? ((metricsJson["btc_benchmark_returns"] as { date: string; value: number }[] | undefined) ?? null)
+    : null;
+
+  const panel2Equity = {
+    series: equitySeries,
+    btc_overlay: btcOverlay,
+  };
+
+  const panel3 = {
+    drawdown_series: isComplete ? (a?.drawdown_series ?? null) : null,
+    drawdown_episodes: isComplete
+      ? ((metricsJson["drawdown_episodes"] as unknown[] | undefined) ?? null)
+      : null,
+  };
+
+  // history_days: prefer metrics_json.history_days when populated; otherwise
+  // derive from returns_series length; default 0.
+  const historyDaysFromJson = typeof metricsJson["history_days"] === "number"
+    ? (metricsJson["history_days"] as number)
+    : null;
+  const historyDaysFromSeries = a?.returns_series?.length ?? 0;
+  const history_days = historyDaysFromJson ?? historyDaysFromSeries;
+
+  return {
+    strategy: strategy as Strategy,
+    panel1,
+    panel2Headline,
+    panel2Equity,
+    panel3,
+    lazyKeys: ["panel4", "panel5", "panel6", "panel7"],
+    history_days,
+  };
+}
+
+/**
  * Phase 12 / Plan 12-08 / METRICS-15 / D-04: Panel IDs accepted by the
  * `fetch_strategy_lazy_metrics` RPC. MUST stay in sync with the SQL `CASE`
  * statement in `supabase/migrations/087_strategy_analytics_series.sql`. Adding

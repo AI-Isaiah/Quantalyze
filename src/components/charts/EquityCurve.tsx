@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, type SeriesType } from "lightweight-charts";
+import { CHART_ACCENT, CHART_FONT_MONO } from "./chart-tokens";
 
 interface EquityCurveProps {
   data: { date: string; value: number }[];
@@ -26,7 +27,7 @@ export function EquityCurve({ data, benchmarkSeries, height = 350 }: EquityCurve
       layout: {
         background: { color: "#FFFFFF" },
         textColor: "#64748B",
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: CHART_FONT_MONO,
         fontSize: 11,
       },
       grid: {
@@ -36,13 +37,13 @@ export function EquityCurve({ data, benchmarkSeries, height = 350 }: EquityCurve
       rightPriceScale: { borderColor: "#E2E8F0" },
       timeScale: { borderColor: "#E2E8F0" },
       crosshair: {
-        vertLine: { labelBackgroundColor: "#0D9488" },
-        horzLine: { labelBackgroundColor: "#0D9488" },
+        vertLine: { labelBackgroundColor: CHART_ACCENT },
+        horzLine: { labelBackgroundColor: CHART_ACCENT },
       },
     });
 
     const series = chart.addSeries(LineSeries, {
-      color: "#0D9488",
+      color: CHART_ACCENT,
       lineWidth: 2,
       title: "Strategy",
       priceFormat: { type: "custom", formatter: PRICE_FORMATTER },
