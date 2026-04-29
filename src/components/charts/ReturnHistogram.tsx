@@ -3,6 +3,8 @@
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Cell } from "recharts";
 import {
   CHART_BORDER,
+  CHART_NEGATIVE,
+  CHART_POSITIVE,
   CHART_TEXT_MUTED,
   CHART_TICK_STYLE,
 } from "./chart-tokens";
@@ -87,7 +89,7 @@ export function ReturnHistogram({ returns, benchmarkReturns, bins = 20 }: Return
         />
         <Bar dataKey="count" radius={[2, 2, 0, 0]}>
           {histogram.map((entry, i) => (
-            <Cell key={i} fill={entry.value >= 0 ? "#16A34A" : "#DC2626"} />
+            <Cell key={i} fill={entry.value >= 0 ? CHART_POSITIVE : CHART_NEGATIVE} />
           ))}
         </Bar>
         {benchmarkAvailable && (

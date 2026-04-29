@@ -29,10 +29,10 @@ export function BenchmarkGreeksTable({
 }: BenchmarkGreeksTableProps) {
   return (
     <div className="grid grid-cols-4 gap-3">
-      <MetricCell label="alpha" value={fmt(alpha)} negative={isNeg(alpha)} />
-      <MetricCell label="beta" value={fmt(beta)} negative={isNeg(beta)} />
-      <MetricCell label="IR" value={fmt(ir)} />
-      <MetricCell label="Treynor" value={fmt(treynor)} negative={isNeg(treynor)} />
+      <div className="p-3"><MetricCell label="alpha" value={fmt(alpha)} negative={isNeg(alpha)} /></div>
+      <div className="p-3"><MetricCell label="beta" value={fmt(beta)} negative={isNeg(beta)} /></div>
+      <div className="p-3"><MetricCell label="IR" value={fmt(ir)} /></div>
+      <div className="p-3"><MetricCell label="Treynor" value={fmt(treynor)} negative={isNeg(treynor)} /></div>
     </div>
   );
 }
