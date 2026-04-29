@@ -95,7 +95,15 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
   const windowGated = props.history_days < windowDays;
 
   const sharpeForWindow = pickSharpeForWindow(props.rolling_metrics, activeWindow);
-  const sharpeGated = windowGated || Object.keys(sharpeForWindow).length === 0;
+  const sharpeKeyAbsent = Object.keys(sharpeForWindow).length === 0;
+  const sharpeGated = windowGated || sharpeKeyAbsent;
+
+  // WR-03: distinguish "not enough history" from "history is fine but key is absent".
+  // The latter occurs when analytics recompute is pending or a legacy row was never
+  // backfilled — showing "need ≥N days" for a 500-day strategy is factually wrong.
+  const sharpeGatedBody = windowGated
+    ? subBannerBody
+    : "Rolling Sharpe series not yet computed for this strategy. Check back after the next analytics run.";
 
   const volKey = `rolling_volatility_${windowSuffix}` as const;
   const sortinoKey = `rolling_sortino_${windowSuffix}` as const;
@@ -160,7 +168,7 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
           <SubChartSection
             title="Rolling Sharpe"
             gated={sharpeGated}
-            gatedBody={subBannerBody}
+            gatedBody={sharpeGatedBody}
           >
             <RollingMetrics
               data={sharpeForWindow}
