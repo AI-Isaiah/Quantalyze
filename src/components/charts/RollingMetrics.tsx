@@ -4,12 +4,11 @@ import { useMemo } from "react";
 import { Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend } from "recharts";
 import {
   CHART_ACCENT,
-  CHART_AXIS_TICK,
   CHART_BORDER,
-  CHART_FONT_MONO,
   CHART_REFERENCE_DASH,
   CHART_TEXT_MUTED,
   CHART_TEXT_SECONDARY,
+  CHART_TICK_STYLE,
 } from "./chart-tokens";
 
 interface RollingMetricsProps {
@@ -65,14 +64,14 @@ export function RollingMetrics({ data, overallSharpe }: RollingMetricsProps) {
       <LineChart data={merged} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={{ stroke: CHART_BORDER }}
           tickFormatter={(d: string) => d.slice(5)}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
         />
@@ -89,7 +88,7 @@ export function RollingMetrics({ data, overallSharpe }: RollingMetricsProps) {
             label={{
               value: "avg",
               position: "right",
-              fontSize: 10,
+              fontSize: 12,
               fill: CHART_TEXT_SECONDARY,
             }}
           />
