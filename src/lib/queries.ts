@@ -344,7 +344,7 @@ export interface StrategyV2Detail {
   history_days: number;
 }
 
-export async function getStrategyDetailV2(
+export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   strategyId: string,
 ): Promise<StrategyV2Detail | null> {
   const supabase = await createClient();
@@ -420,7 +420,7 @@ export async function getStrategyDetailV2(
     lazyKeys: ["panel4", "panel5", "panel6", "panel7"],
     history_days,
   };
-}
+});
 
 /**
  * Phase 12 / Plan 12-08 / METRICS-15 / D-04: Panel IDs accepted by the
