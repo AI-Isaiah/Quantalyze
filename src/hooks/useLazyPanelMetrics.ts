@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type LazyStatus = "idle" | "loading" | "error" | "ready";
 export type LazyPanelId = "panel4" | "panel5" | "panel6" | "panel7";
@@ -50,7 +50,12 @@ export function useLazyPanelMetrics<T = unknown>(
     };
   }, []);
 
-  const ref = (node: HTMLElement | null) => {
+  // useCallback gives the ref a stable identity across renders — prevents
+  // IntersectionObserver disconnect/reconnect on every parent re-render.
+  // opts.rootMargin is intentionally excluded from deps: opts is not stable;
+  // if callers need dynamic rootMargin, extract it to a separate stable param.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const ref = useCallback((node: HTMLElement | null) => {
     if (!node) return;
     if (typeof IntersectionObserver === "undefined") {
       // SSR or test environment without polyfill — emit ready immediately.
@@ -76,7 +81,7 @@ export function useLazyPanelMetrics<T = unknown>(
       { rootMargin: opts.rootMargin ?? "200px" },
     );
     observerRef.current.observe(node);
-  };
+  }, []); // stable ref — opts.rootMargin excluded intentionally (see comment above)
 
   return { ref, data, status };
 }
