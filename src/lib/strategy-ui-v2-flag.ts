@@ -7,7 +7,7 @@
  * Phase 11. Consumers MUST do a two-pass mount: initial render uses the
  * SSR-safe v1 path; on `useEffect`, read this flag and upgrade to v2 if
  * it resolves true. This prevents the hydration mismatch flagged by Grok
- * B-05 for legacy users with `localStorage["strategy.ui_v2"]="false"`.
+ * B-05.
  *
  * Recommended consumer pattern (mirrors AllocationsTabs.tsx:225-243):
  *
@@ -18,9 +18,16 @@
  * Override hierarchy (highest precedence first):
  *   - URL ?strategy_v2=on / ?strategy_v2=v2 / ?strategy_v2=true → ON for this load
  *   - URL ?strategy_v2=off / ?strategy_v2=false                  → OFF for this load
- *   - localStorage.setItem("strategy.ui_v2", "true")  → persistent ON (redundant under 14b but accepted)
- *   - localStorage.setItem("strategy.ui_v2", "false") → persistent OFF (legacy opt-out preserved)
- *   - missing / any other localStorage value → DEFAULT ON (Phase 14b flip)
+ *   - localStorage.setItem("strategy.ui_v2.v17", "true")  → persistent ON (redundant under default-ON but accepted)
+ *   - localStorage.setItem("strategy.ui_v2.v17", "false") → persistent OFF (post-v0.17.1 opt-out)
+ *   - missing / any other value → DEFAULT ON (Phase 14b flip)
+ *
+ * F4 (v0.17.1) — the legacy `"strategy.ui_v2"` key from the Phase 14a opt-in
+ * period is NO LONGER READ. The v0.17.1 cutover removes the v1 route, so a
+ * legacy `"false"` opt-out would 404 those users. Versioning the key to
+ * `"strategy.ui_v2.v17"` silently retires legacy opt-outs at this milestone
+ * boundary; new opt-outs (e.g., a future `?strategy_v2=off` write) target the
+ * versioned key. Source: .planning/v0.17.0.0-GROK-42-ADVERSARIAL.md F4.
  *
  * SSR safety: returns `false` (the safe default) when `typeof window ===
  * "undefined"`, avoiding hydration mismatch between server-rendered HTML and
@@ -33,7 +40,19 @@
  * invoked during SSR, surfacing accidental server-side reads early.
  */
 
-export const STRATEGY_UI_V2_STORAGE_KEY = "strategy.ui_v2";
+/**
+ * F4 (v0.17.1) — versioned storage key. The unversioned `"strategy.ui_v2"`
+ * key from Phase 14a is intentionally NOT read; future cutovers should bump
+ * this to `.v18`, `.v19`, etc., to retire stale opt-outs at each milestone.
+ */
+export const STRATEGY_UI_V2_STORAGE_KEY = "strategy.ui_v2.v17";
+/**
+ * Legacy unversioned key (Phase 14a opt-in period). Exported for migration
+ * tooling and tests; reads of this key are deliberately ignored by the
+ * runtime flag reader to prevent legacy opt-outs from blocking v0.17.1
+ * cutover.
+ */
+export const STRATEGY_UI_V2_LEGACY_STORAGE_KEY = "strategy.ui_v2";
 export const STRATEGY_UI_V2_URL_OVERRIDE = "strategy_v2";
 
 export interface StrategyUiV2Options {
@@ -65,9 +84,12 @@ export function isStrategyUiV2Enabled(opts?: StrategyUiV2Options): boolean {
   }
 
   // Fall through to localStorage. Default-ON contract for the browser:
-  //   - "false" → explicit user opt-out → return false (legacy opt-out persists)
+  //   - "false" → explicit user opt-out → return false
   //   - "true"  → explicit user opt-in (redundant but accepted) → return true
-  //   - missing / any other value → default ON (new in Phase 14b)
+  //   - missing / any other value → default ON (Phase 14b)
+  // F4 (v0.17.1): only the versioned key is read; the legacy unversioned
+  // "strategy.ui_v2" key is silently retired at this milestone boundary so
+  // legacy opt-outs do not block the upcoming v1-route removal.
   try {
     const raw = window.localStorage.getItem(STRATEGY_UI_V2_STORAGE_KEY);
     if (raw === "false") return false;
