@@ -279,7 +279,12 @@ describe("PATCH /api/notes — user_note.portfolio.update emission", () => {
     const { PATCH } = await import("@/app/api/notes/route");
     const req = new NextRequest("http://localhost:3000/api/notes", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        // CSRF guard — assertSameOrigin requires Origin/Referer to match
+        // the localhost dev allowlist.
+        origin: "http://localhost:3000",
+      },
       body: JSON.stringify({
         scope_kind: "portfolio",
         scope_ref: PORTFOLIO_ID,
@@ -349,7 +354,10 @@ describe("PATCH /api/notes — user_note.holding.update emission", () => {
     const { PATCH } = await import("@/app/api/notes/route");
     const req = new NextRequest("http://localhost:3000/api/notes", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+      },
       body: JSON.stringify({
         scope_kind: "holding",
         scope_ref: SCOPE_REF,
@@ -414,7 +422,10 @@ describe("PATCH /api/notes — user_note.bridge_outcome.update emission", () => 
     const { PATCH } = await import("@/app/api/notes/route");
     const req = new NextRequest("http://localhost:3000/api/notes", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+      },
       body: JSON.stringify({
         scope_kind: "bridge_outcome",
         scope_ref: OUTCOME_ID,
@@ -488,7 +499,10 @@ describe("PATCH /api/notes — user_note.strategy.update emission", () => {
     const { PATCH } = await import("@/app/api/notes/route");
     const req = new NextRequest("http://localhost:3000/api/notes", {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+      },
       body: JSON.stringify({
         scope_kind: "strategy",
         scope_ref: STRATEGY_ID,
