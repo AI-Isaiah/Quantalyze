@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createChart, LineSeries, type IChartApi, type ISeriesApi, type SeriesType } from "lightweight-charts";
-import { CHART_ACCENT, CHART_FONT_MONO } from "./chart-tokens";
+import { CHART_ACCENT, CHART_FONT_MONO, CHART_TEXT_MUTED } from "./chart-tokens";
 
 interface EquityCurveProps {
   data: { date: string; value: number }[];
@@ -102,7 +102,7 @@ export function EquityCurve({
     // Add benchmark series if toggled on and data exists
     if (showBenchmark && benchmarkSeries && benchmarkSeries.length > 0) {
       const bmSeries = chart.addSeries(LineSeries, {
-        color: "#94A3B8",
+        color: CHART_TEXT_MUTED,
         lineWidth: 1,
         title: "BTC",
         priceFormat: { type: "custom", formatter: PRICE_FORMATTER },
@@ -127,7 +127,7 @@ export function EquityCurve({
               onChange={(e) => setShowBenchmark(e.target.checked)}
               className="accent-slate-400 w-3.5 h-3.5"
             />
-            <span className="inline-block w-3 h-0.5 rounded-full bg-[#94A3B8]" />
+            <span className="inline-block w-3 h-0.5 rounded-full" style={{ backgroundColor: CHART_TEXT_MUTED }} />
             BTC Benchmark
           </label>
         </div>
