@@ -45,7 +45,7 @@ export function EquityCurve({
         background: { color: "#FFFFFF" },
         textColor: "#64748B",
         fontFamily: CHART_FONT_MONO,
-        fontSize: 11,
+        fontSize: 12,   // matches CHART_TICK_STYLE 12px caption tier (UI-SPEC §2)
       },
       grid: {
         vertLines: { color: "#F1F5F9" },
