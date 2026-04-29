@@ -141,14 +141,14 @@ export function CustomizeDrawer({
       aria-labelledby="customize-heading"
     >
       <div
-        className={`absolute inset-0 bg-black/40 transition-opacity duration-250 ease-out motion-reduce:transition-none ${
+        className={`absolute inset-0 bg-black/40 transition-opacity duration-300 ease-out motion-reduce:transition-none ${
           entered ? "opacity-100" : "opacity-0"
         }`}
         onClick={onClose}
         aria-hidden="true"
       />
       <aside
-        className={`relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto transition-transform duration-250 ease-out motion-reduce:transition-none ${
+        className={`relative z-10 w-full max-w-md bg-surface border-l border-border shadow-elevated overflow-y-auto transition-transform duration-300 ease-out motion-reduce:transition-none ${
           entered ? "translate-x-0" : "translate-x-full"
         }`}
       >

@@ -116,4 +116,42 @@ describe("WatchlistTabs", () => {
     fireEvent.click(screen.getByRole("tab", { name: /^All$/ }));
     expect(onScopeChange).toHaveBeenCalledWith("all");
   });
+
+  it("Home key jumps focus to All tab and activates 'all' scope", () => {
+    const onScopeChange = vi.fn();
+    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={2} idBase="t" panelId="p" />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    watchTab.focus();
+    fireEvent.keyDown(watchTab, { key: "Home" });
+    expect(document.activeElement).toBe(allTab);
+    expect(onScopeChange).toHaveBeenCalledWith("all");
+  });
+
+  it("End key jumps focus to My Watchlist tab and activates 'watchlist' scope", () => {
+    const onScopeChange = vi.fn();
+    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={2} idBase="t" panelId="p" />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    allTab.focus();
+    fireEvent.keyDown(allTab, { key: "End" });
+    expect(document.activeElement).toBe(watchTab);
+    expect(onScopeChange).toHaveBeenCalledWith("watchlist");
+  });
+
+  it("tab DOM ids derive from idBase prop, not hardcoded strings (multi-instance safety)", () => {
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="abc123" panelId="panel-x" />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    expect(allTab.id).toBe("abc123-tab-all");
+    expect(watchTab.id).toBe("abc123-tab-watchlist");
+  });
+
+  it("aria-controls on each tab points at the panelId prop", () => {
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="my-custom-panel" />);
+    const allTab = screen.getByRole("tab", { name: /^All$/ });
+    const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
+    expect(allTab.getAttribute("aria-controls")).toBe("my-custom-panel");
+    expect(watchTab.getAttribute("aria-controls")).toBe("my-custom-panel");
+  });
 });

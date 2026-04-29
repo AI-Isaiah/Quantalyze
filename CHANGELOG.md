@@ -16,7 +16,7 @@ can bump without ambiguity.
 - **A11y — `<div role="tabpanel">` `aria-labelledby` wired up.** Tab buttons get DOM ids from `useId()` (`${idBase}-tab-all` / `${idBase}-tab-watchlist`); the panel's `aria-labelledby` resolves to whichever tab is active. `aria-controls` on the tabs points at the panel's matching dynamic id. Two StrategyTables on one page no longer share IDs.
 - **A11y — `WatchlistTabs` Home / End keys.** `Home` jumps focus to the All tab and activates it; `End` does the same for My Watchlist. Existing ArrowLeft / ArrowRight automatic-activation behavior unchanged.
 - **`StrategyFilters` Sort group anchors right via `ml-auto`.** Cog + view toggle now drift to the right edge per UI-SPEC layout contract (search → filters → leadingSlot → Hide-examples → Sort → Customize cog → ViewToggle).
-- **`CustomizeDrawer` slide-in animation.** Drawer translates from `translate-x-full → translate-x-0` over 250ms with backdrop fade `opacity-0 → opacity-100`; both wrapped in `motion-reduce:transition-none`.
+- **`CustomizeDrawer` slide-in animation.** Drawer translates from `translate-x-full → translate-x-0` over 300ms with backdrop fade `opacity-0 → opacity-100`; both wrapped in `motion-reduce:transition-none`. (`duration-250` is not a valid Tailwind v4 default token — would have silently dropped the animation; `duration-300` is the closest valid scale step.)
 - **`StrategyFilters` All-Filters chip uses valid Tailwind sizing.** `w-4.5 h-4.5` (silently dropped — no such token) replaced with `min-w-[18px] h-[18px]` matching `WatchlistTabs`'s count badge pattern.
 - **Settings cog uses `rounded-md` to match Button neighbors** (was `rounded` 4px next to 6px Button, visible jar in the row).
 
@@ -31,7 +31,7 @@ can bump without ambiguity.
 
 ### Tests
 
-- 2372 → 2372 (no behavior change; `WatchlistTabs.test.tsx` updated to pass new `idBase` + `panelId` props). All 250 test files green, 0 typecheck errors, 0 ESLint errors on touched files.
+- 2372 → 2381 (+9 new a11y tests). New CustomizeDrawer tests cover initial-focus to heading, return-focus to opener on close, Tab cycling from last-to-first focusable, Shift+Tab from heading to last, and Tab-while-focus-outside pulled back inside. New WatchlistTabs tests cover Home/End keys, dynamic `idBase`-derived tab DOM ids, and `aria-controls` resolving to `panelId`. All 250 test files green, 0 typecheck errors, 0 ESLint errors on touched files.
 
 ## [0.17.1.0] - 2026-04-28
 
