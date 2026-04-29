@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.6] - 2026-04-29
+
+**Tech-debt PR-2 — `cleanup-wizard-drafts` cron tested.** v0.17.1.4's specialist review flagged the `/api/cron/cleanup-wizard-drafts` route as +136 LOC of untested critical behavior: missing `CRON_SECRET` 401, `safeCompare` timing-safe path, 30-day cutoff math, ON DELETE CASCADE, TOCTOU re-filter on the delete clause, and the orphaned-key revoke logic — the most dangerous path, since a wrong `refCount > 0` skip yanks an api_key from a live, published strategy that happens to share the key. This PR adds 14 test cases (28 with GET/POST parameterization) covering all six behaviors. Test-only — no source changes.
+
+### Tests
+
+- **`src/app/api/cron/cleanup-wizard-drafts/route.test.ts`** — 14 cases parameterized across GET + POST (28 total):
+  - Auth guard (3): missing CRON_SECRET / missing Authorization header / wrong bearer all return 401 before any supabase call.
+  - Timing-safe constant-time path: mocks `@/lib/timing-safe-compare.safeCompare` to verify the route delegates to it on every call (with the request bearer + `Bearer ${SECRET}`) and that flipping the mock to `true` lets the request through — proves the auth gate is wired through `safeCompare`, not a naive `===` that would short-circuit on length-mismatching attacker input.
+  - Empty result: 0 drafts → 200 `{deleted:0, orphaned_keys_revoked:0}` and no DELETE issued.
+  - Cutoff math: SELECT applies `.lt("created_at", cutoff)` where `cutoff` is `(now − 30d).toISOString()`; verified against pre/post wall-clock bounds. Belt-on `.eq("source","wizard").eq("status","draft")` on the SELECT.
+  - Happy path: 3 drafts with distinct `api_key_id`s → 1 SELECT, 1 DELETE with `count:"exact"` and `.in("id", [d1,d2,d3])`, then 3 × (COUNT_REFS, DELETE_KEY) for an `orphaned_keys_revoked: 3` response.
+  - **TOCTOU re-filter**: DELETE clause re-applies both `.eq("source","wizard")` and `.eq("status","draft")` so a row that flipped to pending_review between SELECT and DELETE is left intact, not clobbered.
+  - **Orphaned-key revoke logic (the dangerous test)**: 2 drafts where one references a key still used by a non-wizard strategy (refCount=1) and one references an orphan key (refCount=0). Asserts the api_keys DELETE fires EXACTLY ONCE and ONLY for the orphan — never for the shared key — and that no api_keys-stage filter ever takes the shared key as a value. Defense-in-depth coverage of the most dangerous failure mode.
+  - api_key_id dedup + null skip: 3 drafts (two share a key, one has null api_key_id) → 1 COUNT_REFS, 1 DELETE_KEY (set-based dedup + null filter).
+  - Error paths: SELECT error → 500 with PG message; DELETE error → 500 with PG message; per-key COUNT_REFS error → log + continue (cron stays best-effort, response stays 200).
+  - Count-null fallback: PG returning `count: null` on the DELETE falls back to `draftIds.length` so the response stays monotonic with the request.
+- Mock pattern: project-standard recorders (`fromCalls`, `selectCalls`, `eqCalls`, `ltCalls`, `inCalls`, `deleteCalls`); `createAdminClient` returns a chainable thenable that records every call and resolves based on the chain shape (SELECT_DRAFTS / DELETE_DRAFTS / COUNT_REFS / DELETE_KEY). `import "server-only"` stubbed for jsdom; `console.error` / `console.warn` silenced (Sentry deferral pattern).
+- 2619 → 2647 (+28 new). 0 typecheck errors. Full suite green.
+
+### Internal
+
+- **0.17.1.5 skipped** — number reserved for an in-flight tech-debt PR landing in parallel; this PR claims 0.17.1.6 to avoid a VERSION race.
+
 ## [0.17.1.4] - 2026-04-29
 
 **Audit follow-up — test gaps closed + CI seed-gate widened.** Three deferred audit items addressed: SR-3 adds component coverage for the v2 route's error boundary plus a `notFound()` contract test; SR-4 fills three uncovered branches in `useLazyPanelMetrics` (`ref(null)` early-return, SSR fallback when `IntersectionObserver` is undefined, non-intersecting entry skipped); MA-8 extends the BLOCK-3 CI gate so all 8 seed-dependent Playwright specs run together as soon as `E2E_TEST_DB_CONFIGURED` is set on the repo. MA-2 (v1 → v2 cutover) and MA-3 (4-bucket Trade Mix flip) intentionally not done — both need product input (MA-2) or upstream `is_maker` ingestion (MA-3) before scaffolding adds value.
