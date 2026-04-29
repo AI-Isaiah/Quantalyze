@@ -159,6 +159,8 @@ export function HeadlineMetricsPanel({
 
   return (
     <section
+      id="panel-headline-equity"
+      tabIndex={-1}
       data-panel="headline-equity"
       aria-label="Headline metrics & equity vs BTC"
       className="mt-8 rounded-lg border border-border bg-surface p-6 shadow-card"

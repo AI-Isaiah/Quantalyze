@@ -154,3 +154,211 @@ export async function seedBridgeCandidate(): Promise<SeededStrategy> {
 
   return { strategyId: data.id, ownerUserId: ownerData.user.id };
 }
+
+/**
+ * Phase 14b — seeds a published strategy with N days of synthetic returns
+ * for the partial-data, axe, keyboard, and chart-parity Playwright specs.
+ *
+ * Inserts:
+ *  - one owner profile (re-using the seedBridgeCandidate idiom — owner is
+ *    a separate user so the strategy is "external" w.r.t. any test
+ *    allocator)
+ *  - one row in `strategies` with status='published'
+ *  - one row in `strategy_analytics` with `computation_status='complete'`,
+ *    a deterministic `returns_series` of length `days`, plus minimal
+ *    scalars + JSONB blobs to drive eager panels 1-3 (and panels 4-7
+ *    where the eager analytics blob is sufficient).
+ *
+ * Heavy series (sibling-table contract per migration 087 — daily_returns_grid,
+ * exposure_series, turnover_series, rolling_*_series, log_returns_series)
+ * are NOT seeded here. Lazy panels 4-7 fall through to their empty-payload
+ * sub-banners gracefully — that's the partial-data path the spec asserts.
+ *
+ * Returns the strategy id. Cleanup is the caller's responsibility (mirrors
+ * seedBridgeCandidate's leave-it-around behaviour; a dedicated cron / manual
+ * reset is the existing convention).
+ *
+ * Phase 14b-07 — replaces the placeholder helper that lived at the bottom
+ * of e2e/strategy-v2-partial-data.spec.ts.
+ */
+export async function seedStrategyWithHistory(opts: {
+  days: number;
+  name?: string;
+}): Promise<string> {
+  const admin = getAdmin();
+
+  // Owner profile — separate from any test allocator, mirrors seedBridgeCandidate.
+  const ownerEmail = `e2e-strategy-v2-owner-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}@example.test`;
+  const { data: ownerData, error: ownerError } =
+    await admin.auth.admin.createUser({
+      email: ownerEmail,
+      password: `seed-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      email_confirm: true,
+    });
+  if (ownerError || !ownerData.user) {
+    throw new Error(
+      `seedStrategyWithHistory (owner) failed: ${ownerError?.message ?? "no user"}`,
+    );
+  }
+  await admin
+    .from("profiles")
+    .upsert(
+      { id: ownerData.user.id, display_name: ownerEmail },
+      { onConflict: "id" },
+    );
+
+  const name = opts.name ?? `Phase 14b ${opts.days}d fixture`;
+  const startDate = new Date(Date.now() - opts.days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+
+  // 1. Insert strategies row. NOTE — there is no `slug` column on the
+  // production strategies schema (verified via migration 001:47-67). Other
+  // text-array columns default to '{}' and DECIMAL fields are nullable, so
+  // we keep the payload minimal and let server defaults fill the rest.
+  const { data: strategy, error: sErr } = await admin
+    .from("strategies")
+    .insert({
+      user_id: ownerData.user.id,
+      name,
+      status: "published",
+      benchmark: "BTC",
+      start_date: startDate,
+      supported_exchanges: ["binance"],
+      strategy_types: ["spot"],
+      subtypes: [],
+      markets: ["BTC"],
+    })
+    .select("id")
+    .single();
+  if (sErr || !strategy) {
+    throw new Error(`seedStrategyWithHistory failed: ${sErr?.message}`);
+  }
+
+  // 2. Synthesize a deterministic returns_series of `days` length.
+  // Small drift via sin() so the curve isn't flat — drives the equity chart
+  // through enough variation to render meaningfully without random noise.
+  const series = Array.from({ length: opts.days }, (_, i) => ({
+    date: new Date(Date.now() - (opts.days - i) * 86_400_000)
+      .toISOString()
+      .slice(0, 10),
+    value: 1 + Math.sin(i / 30) * 0.05 * (i / Math.max(1, opts.days)),
+  }));
+
+  // 3. Build a minimal monthly_returns grid (used by Panel 4 + Yearly view)
+  //    only when we have enough data.
+  function buildMonthlyReturns(
+    s: { date: string; value: number }[],
+  ): Record<string, Record<string, number>> {
+    const out: Record<string, Record<string, number>> = {};
+    const months = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+    for (const p of s) {
+      const yr = p.date.slice(0, 4);
+      const mo = months[parseInt(p.date.slice(5, 7), 10) - 1];
+      if (!out[yr]) out[yr] = {};
+      // Last value of the month wins. Test fixture, not production accuracy.
+      out[yr][mo] = (p.value - 1) / Math.max(1, s.indexOf(p));
+    }
+    return out;
+  }
+
+  // 4. Insert strategy_analytics row.
+  const tradeMetrics =
+    opts.days >= 30
+      ? {
+          total_positions: 50,
+          open_positions: 5,
+          closed_positions: 45,
+          win_rate: 0.6,
+          avg_roi: 0.05,
+          avg_duration_days: 3,
+          long_count: 30,
+          short_count: 20,
+          best_trade_roi: 0.15,
+          worst_trade_roi: -0.08,
+          expectancy: 0.02,
+          risk_reward_ratio: 1.5,
+          weighted_risk_reward_ratio: 1.4,
+          sqn: 1.6,
+          profit_factor_long: 1.7,
+          profit_factor_short: 1.3,
+          gross_volume_usd: 1_000_000,
+          mean_trade_size_usd: 20_000,
+          daily_turnover_usd: 50_000,
+          monthly_turnover_usd: 1_500_000,
+          payoff_ratio: 1.4,
+          profit_factor: 1.5,
+          winners_count: 30,
+          losers_count: 15,
+          trade_mix: {
+            long: {
+              count: 30,
+              total_notional: 600_000,
+              avg_holding_period_hours: 72,
+            },
+            short: {
+              count: 20,
+              total_notional: 400_000,
+              avg_holding_period_hours: 48,
+            },
+          },
+        }
+      : null;
+
+  const rollingMetrics =
+    opts.days >= 90
+      ? {
+          sharpe_90d: series.slice(-90).map((p, i) => ({
+            date: p.date,
+            value: 1.0 + i * 0.001,
+          })),
+        }
+      : null;
+
+  const { error: aErr } = await admin.from("strategy_analytics").insert({
+    strategy_id: strategy.id,
+    computation_status: "complete",
+    benchmark: "BTC",
+    returns_series: series,
+    cumulative_return: series[series.length - 1].value - 1,
+    cagr: 0.12,
+    sharpe: 1.4,
+    sortino: 1.8,
+    max_drawdown: -0.08,
+    volatility: 0.18,
+    rolling_metrics: rollingMetrics,
+    monthly_returns: opts.days >= 30 ? buildMonthlyReturns(series) : null,
+    return_quantiles: null,
+    trade_metrics: tradeMetrics,
+    metrics_json: {
+      benchmark_returns:
+        opts.days >= 30
+          ? series.map((p) => ({ date: p.date, value: p.value * 0.95 }))
+          : null,
+      alpha: 0.03,
+      beta: 0.85,
+      information_ratio: 0.7,
+      treynor_ratio: 0.04,
+    },
+  });
+  if (aErr) {
+    throw new Error(`seedStrategyWithHistory analytics failed: ${aErr.message}`);
+  }
+
+  return strategy.id;
+}

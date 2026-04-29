@@ -19,6 +19,25 @@ export async function generateMetadata({
   };
 }
 
+/**
+ * Phase 14b-07 / A11Y-03 — Skip-link mechanism for the 7-panel scroll.
+ *
+ * Renders OUTSIDE <StrategyV2Shell> so the links appear at the very top of
+ * the route's tab order (per UI-SPEC §7.2). Each link targets the matching
+ * `<section data-panel id="panel-{key}">` element rendered inside the shell.
+ * The CSS in `globals.css` (.strategy-v2-skip-link) keeps them visually
+ * hidden until they receive keyboard focus.
+ */
+const SKIP_LINKS: { href: string; label: string }[] = [
+  { href: "#panel-overview", label: "Skip to Overview" },
+  { href: "#panel-headline-equity", label: "Skip to Headline metrics" },
+  { href: "#panel-drawdown", label: "Skip to Drawdown" },
+  { href: "#panel-returns-distribution", label: "Skip to Returns distribution" },
+  { href: "#panel-rolling", label: "Skip to Rolling metrics" },
+  { href: "#panel-trades", label: "Skip to Trades & positions" },
+  { href: "#panel-exposure", label: "Skip to Exposure & greeks" },
+];
+
 export default async function StrategyV2Page({
   params,
 }: {
@@ -27,5 +46,16 @@ export default async function StrategyV2Page({
   const { id } = await params;
   const result = await getStrategyDetailV2(id);
   if (!result) notFound();
-  return <StrategyV2Shell detail={result} />;
+  return (
+    <>
+      <nav aria-label="Page sections" className="strategy-v2-skip-nav">
+        {SKIP_LINKS.map((sl) => (
+          <a key={sl.href} href={sl.href} className="strategy-v2-skip-link">
+            {sl.label}
+          </a>
+        ))}
+      </nav>
+      <StrategyV2Shell detail={result} />
+    </>
+  );
 }

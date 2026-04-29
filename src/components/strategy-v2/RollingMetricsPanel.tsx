@@ -111,6 +111,8 @@ export function RollingMetricsPanel(props: RollingMetricsPanelProps) {
   return (
     <section
       ref={ref}
+      id="panel-rolling"
+      tabIndex={-1}
       data-panel="rolling"
       data-panel-status={status === "idle" ? "placeholder" : status}
       aria-label="Rolling metrics"

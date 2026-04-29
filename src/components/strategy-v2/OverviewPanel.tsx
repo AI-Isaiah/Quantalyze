@@ -36,6 +36,8 @@ export function OverviewPanel({ panel1, history_days }: OverviewPanelProps) {
 
   return (
     <section
+      id="panel-overview"
+      tabIndex={-1}
       data-panel="overview"
       aria-label="Overview"
       className="mt-8 rounded-lg border border-border bg-surface p-6 shadow-card"

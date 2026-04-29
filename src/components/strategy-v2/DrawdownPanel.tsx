@@ -39,6 +39,8 @@ export function DrawdownPanel({ panel3, history_days }: DrawdownPanelProps) {
 
   return (
     <section
+      id="panel-drawdown"
+      tabIndex={-1}
       data-panel="drawdown"
       aria-label="Drawdown analysis"
       className="mt-8 rounded-lg border border-border bg-surface p-6 shadow-card"

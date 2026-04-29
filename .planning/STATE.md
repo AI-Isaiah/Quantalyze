@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: Completed 14b-05-PLAN.md (Wave 2 — Panel 7)
-last_updated: "2026-04-29T13:49:18.699Z"
+stopped_at: Completed 14b-06-PLAN.md (Wave 3 — shell wiring + Panel 2 unlock)
+last_updated: "2026-04-29T14:07:50.158Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 28
-  completed_plans: 25
-  percent: 89
+  completed_plans: 26
+  percent: 93
 ---
 
 # Project State
@@ -163,6 +163,9 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 14b-05: BenchmarkGreeksTable label casing per UI-SPEC §10.4 — alpha/beta lowercase Greek; IR uppercase acronym; Treynor title-case proper noun. Tested case-sensitively.
 - Phase 14b-05: IR cell never receives negative styling — IR sign-conventions vary by benchmark (some invert when underlying returns are negative). Alpha/beta/Treynor get text-negative when value < 0.
 - Phase 14b-05: CorrelationWithBenchmark reused unmodified via narrow analytics-subset cast (`as never` at call site). Forking would have duplicated 100+ lines of 90d rolling-correlation math + cumulative→daily conversion for zero benefit. Pattern matches existing v1 PerformanceReport.tsx idiom.
+- Wave-3 lazy-panel wiring uses fetchStrategyLazyMetricsClient (client-safe mirror) — server-only fetchStrategyLazyMetrics cannot be imported into 'use client' graphs
+- Log returns lazy fetch fires from SegmentedControl onChange handler (event-driven), not useEffect — satisfies React 19 react-hooks/set-state-in-effect lint rule
+- panel6Inputs.trade_metrics widened to (TradeMetrics & Record<string, unknown>) | null to match Phase 12 volume-aggregator-extras JSONB shape
 
 ### Roadmap drafted (2026-04-26)
 
@@ -193,8 +196,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T13:48:58.307Z
-Stopped at: Completed 14b-05-PLAN.md (Wave 2 — Panel 7)
+Last session: 2026-04-29T14:07:50.152Z
+Stopped at: Completed 14b-06-PLAN.md (Wave 3 — shell wiring + Panel 2 unlock)
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)

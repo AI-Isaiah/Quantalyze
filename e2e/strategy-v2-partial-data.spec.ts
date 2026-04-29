@@ -31,6 +31,7 @@
  */
 
 import { test, expect } from "@playwright/test";
+import { seedStrategyWithHistory } from "./helpers/seed-test-project";
 
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
@@ -129,6 +130,62 @@ test.describe("Phase 14a — partial-data history bands (KPI-23a)", () => {
             ),
           ).toHaveCount(0);
         }
+
+        // Phase 14b-07 / KPI-23b — Panel 4-7 partial-data banner matrix.
+        // Panels 4, 5, 7 are lazy-mounted. Scroll each into view BEFORE
+        // asserting their banner copy so the IntersectionObserver fires and
+        // the panel transitions to data-panel-status="ready" (mirrors the
+        // Grok W-02 mitigation in strategy-v2-keyboard.spec.ts).
+
+        // Panel 4 — Returns distribution: panel-level banner when <30d.
+        if (band.days < 30) {
+          const returnsDist = page.locator(
+            'section[data-panel="returns-distribution"]',
+          );
+          await returnsDist.scrollIntoViewIfNeeded();
+          await expect(
+            returnsDist.getByText(
+              /at least 30 days of trading history to populate Returns distribution/,
+            ),
+          ).toBeVisible();
+        }
+
+        // Panel 5 — Rolling metrics: panel-level banner when <90d.
+        if (band.days < 90) {
+          const rolling = page.locator('section[data-panel="rolling"]');
+          await rolling.scrollIntoViewIfNeeded();
+          await expect(
+            rolling.getByText(
+              /at least 90 days of trading history for rolling 3M metrics/,
+            ),
+          ).toBeVisible();
+        }
+
+        // Panel 6 — Trades & positions: banner when seed makes
+        // trade_metrics null (band.days < 30 in seedStrategyWithHistory).
+        if (band.days < 30) {
+          const trades = page.locator('section[data-panel="trades"]');
+          await trades.scrollIntoViewIfNeeded();
+          await expect(
+            trades.getByText(
+              /This strategy hasn't logged any trades yet/,
+            ),
+          ).toBeVisible();
+        }
+
+        // Panel 7 — Exposure & greeks: panel-level banner when <30d.
+        if (band.days < 30) {
+          const exposure = page.locator('section[data-panel="exposure"]');
+          await exposure.scrollIntoViewIfNeeded();
+          await expect(
+            exposure.getByText(
+              /at least 30 days of trading history to compute exposure and benchmark greeks/,
+            ),
+          ).toBeVisible();
+        }
+
+        // Panel-count invariant remains 7 after lazy panels mount.
+        await expect(page.locator("section[data-panel]")).toHaveCount(7);
       } finally {
         // Phase 14b: invoke helper-side cleanup once seedStrategyWithHistory
         // returns a real strategy id and an idempotent teardown handle.
@@ -136,27 +193,3 @@ test.describe("Phase 14a — partial-data history bands (KPI-23a)", () => {
     });
   }
 });
-
-/**
- * Placeholder until executor wires the seed helper. The existing
- * `seedTestAllocator` / `seedBridgeCandidate` helpers in
- * `e2e/helpers/seed-test-project.ts` do not support arbitrary
- * returns_series length — wiring this is deferred to Phase 14b along
- * with the lazy-panel body fixtures.
- *
- * The `test.skip(!HAS_SEED_ENV, ...)` gate above ensures this throwing
- * stub is never called in CI without the seed env vars. Local runs with
- * the env vars set will fail loudly with the message below pointing at
- * the helper extension.
- */
-async function seedStrategyWithHistory(_opts: {
-  days: number;
-}): Promise<string> {
-  throw new Error(
-    "seedStrategyWithHistory not yet wired — see e2e/helpers/seed-test-project.ts " +
-      "pattern (seedTestAllocator / seedBridgeCandidate). Phase 14b will " +
-      "extend the helper to seed a published strategy with a deterministic " +
-      "returns_series of N days. Until then this spec is " +
-      "authored-but-skipped via the TEST_SUPABASE_URL env-var gate.",
-  );
-}

@@ -79,6 +79,8 @@ export function ExposureAndGreeksPanel({
   return (
     <section
       ref={ref}
+      id="panel-exposure"
+      tabIndex={-1}
       data-panel="exposure"
       data-panel-status={status === "idle" ? "placeholder" : status}
       aria-label="Exposure & benchmark greeks"

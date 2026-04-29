@@ -70,6 +70,8 @@ export function ReturnsDistributionPanel(props: ReturnsDistributionPanelProps) {
   return (
     <section
       ref={ref}
+      id="panel-returns-distribution"
+      tabIndex={-1}
       data-panel="returns-distribution"
       data-panel-status={status === "idle" ? "placeholder" : status}
       aria-label="Returns distribution"

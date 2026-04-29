@@ -88,6 +88,8 @@ export function TradeAndPositionPanel({
   return (
     <section
       ref={ref}
+      id="panel-trades"
+      tabIndex={-1}
       data-panel="trades"
       data-panel-status={status === "idle" ? "placeholder" : status}
       aria-label="Trades & positions"
