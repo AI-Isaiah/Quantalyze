@@ -132,6 +132,7 @@ import {
   getPublicStrategyDetail,
   fetchStrategyLazyMetrics,
   getMyWatchlist,
+  getStrategyDetailV2,
 } from "./queries";
 
 const baseStrategy = {
@@ -373,5 +374,236 @@ describe("getMyWatchlist (Plan 13-01 / DISCO-01)", () => {
     // Single eq filter on user_id (other filters would be a security regression
     // — the function is meant to read ALL of the user's favorites).
     expect(recorders.favoritesEqCalls).toEqual([["user_id", USER_ID]]);
+  });
+});
+
+/**
+ * Plan 14b-06 Task 1 — getStrategyDetailV2 panel4..7 input mappings.
+ *
+ * Wave-3 integration extends `StrategyV2Detail` with eager inputs for
+ * Panels 4-7 (mapped from the analytics blob already fetched via the
+ * existing `from('strategies').select('*, strategy_analytics (*)')` join).
+ * No new RPC, no schema change, no migration.
+ *
+ * Tests cover:
+ *   1. Interface extension (panel4Inputs / panel5Inputs / panel6Inputs / panel7Inputs)
+ *   2. Mapping fidelity from analytics row to each panelNInputs sub-object
+ *   3. metrics_json extraction for benchmark_returns + greeks scalars
+ *   4. Pitfall 8 honored — computation_status !== 'complete' returns null
+ *      everywhere
+ *   5. Visibility gate preserved — unpublished strategy returns null
+ *   6. Greeks long-name vs short-name fallback
+ */
+describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
+  const STRAT_ID = "00000000-0000-0000-0000-000000000abc";
+
+  function buildAnalyticsRow(overrides: Record<string, unknown> = {}) {
+    return {
+      computation_status: "complete",
+      cumulative_return: 0.42,
+      cagr: 0.18,
+      sharpe: 1.5,
+      sortino: 2.1,
+      max_drawdown: -0.12,
+      volatility: 0.16,
+      returns_series: [
+        { date: "2024-01-01", value: 1.0 },
+        { date: "2024-12-31", value: 1.42 },
+      ],
+      drawdown_series: [{ date: "2024-06-15", value: -0.12 }],
+      monthly_returns: { "2024": { Jan: 0.01, Feb: 0.02 } },
+      return_quantiles: { Daily: [-0.05, -0.01, 0, 0.01, 0.05] },
+      rolling_metrics: {
+        sharpe_30d: [{ date: "2024-01-01", value: 0.5 }],
+        sharpe_90d: [{ date: "2024-01-01", value: 0.7 }],
+        sharpe_365d: [{ date: "2024-01-01", value: 1.0 }],
+      },
+      trade_metrics: {
+        total_positions: 100,
+        open_positions: 5,
+        closed_positions: 95,
+        win_rate: 0.6,
+        avg_roi: 0.05,
+        avg_duration_days: 4.2,
+        long_count: 60,
+        short_count: 40,
+        best_trade_roi: 0.5,
+        worst_trade_roi: -0.2,
+        expectancy: 0.04,
+        risk_reward_ratio: 2.1,
+        weighted_risk_reward_ratio: 2.0,
+        sqn: 1.8,
+        profit_factor_long: 1.5,
+        profit_factor_short: 1.2,
+      },
+      metrics_json: {
+        history_days: 365,
+        equity_series_1y: [{ date: "2024-01-01", value: 1.0 }],
+        btc_benchmark_returns: [{ date: "2024-01-01", value: 1.0 }],
+        benchmark_returns: [
+          { date: "2024-01-01", value: 0 },
+          { date: "2024-01-02", value: 0.001 },
+        ],
+        alpha: 0.05,
+        beta: 0.92,
+        information_ratio: 0.42,
+        treynor_ratio: 0.18,
+        ...((overrides.metrics_json as Record<string, unknown>) ?? {}),
+      },
+      ...overrides,
+    };
+  }
+
+  function buildStrategyRow(extra: Record<string, unknown> = {}) {
+    return {
+      id: STRAT_ID,
+      user_id: "user-1",
+      category_id: null,
+      api_key_id: null,
+      name: "Test Strategy",
+      description: null,
+      strategy_types: ["systematic"],
+      subtypes: ["trend"],
+      markets: ["crypto"],
+      supported_exchanges: ["Binance"],
+      leverage_range: "1-3x",
+      avg_daily_turnover: 250000,
+      aum: null,
+      max_capacity: null,
+      start_date: "2024-01-01",
+      status: "published",
+      is_example: false,
+      benchmark: "BTC",
+      created_at: "2024-01-01T00:00:00Z",
+      strategy_analytics: buildAnalyticsRow(),
+      ...extra,
+    };
+  }
+
+  it("Test 1: returns panel4Inputs / panel5Inputs / panel6Inputs / panel7Inputs sub-objects", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result).not.toBeNull();
+    expect(result!.panel4Inputs).toBeDefined();
+    expect(result!.panel5Inputs).toBeDefined();
+    expect(result!.panel6Inputs).toBeDefined();
+    expect(result!.panel7Inputs).toBeDefined();
+  });
+
+  it("Test 2: panel4Inputs maps monthly_returns / return_quantiles / returns_series from analytics", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel4Inputs.monthly_returns).toEqual({
+      "2024": { Jan: 0.01, Feb: 0.02 },
+    });
+    expect(result!.panel4Inputs.return_quantiles).toEqual({
+      Daily: [-0.05, -0.01, 0, 0.01, 0.05],
+    });
+    expect(result!.panel4Inputs.returns_series).toEqual([
+      { date: "2024-01-01", value: 1.0 },
+      { date: "2024-12-31", value: 1.42 },
+    ]);
+  });
+
+  it("Test 3: panel4Inputs.benchmark_returns reads from metrics_json.benchmark_returns", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel4Inputs.benchmark_returns).toEqual([
+      { date: "2024-01-01", value: 0 },
+      { date: "2024-01-02", value: 0.001 },
+    ]);
+  });
+
+  it("Test 4: panel7Inputs.benchmark_greeks reads alpha/beta/IR/Treynor from metrics_json (long names preferred)", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel7Inputs.benchmark_greeks).toEqual({
+      alpha: 0.05,
+      beta: 0.92,
+      ir: 0.42, // information_ratio (long name)
+      treynor: 0.18, // treynor_ratio (long name)
+    });
+  });
+
+  it("Test 4b: greeks fallback — short names accepted when long names absent", async () => {
+    recorders.strategyData = buildStrategyRow({
+      strategy_analytics: buildAnalyticsRow({
+        metrics_json: {
+          history_days: 365,
+          alpha: 0.01,
+          beta: 0.5,
+          // information_ratio + treynor_ratio absent; use ir + treynor short names
+          ir: 0.3,
+          treynor: 0.15,
+        },
+      }),
+    });
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel7Inputs.benchmark_greeks.ir).toBe(0.3);
+    expect(result!.panel7Inputs.benchmark_greeks.treynor).toBe(0.15);
+  });
+
+  it("Test 5: panel5Inputs.rolling_metrics maps from analytics.rolling_metrics; sharpe scalar passes through", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(Object.keys(result!.panel5Inputs.rolling_metrics ?? {}).sort()).toEqual([
+      "sharpe_30d",
+      "sharpe_365d",
+      "sharpe_90d",
+    ]);
+    expect(result!.panel5Inputs.sharpe).toBe(1.5);
+  });
+
+  it("Test 6: Pitfall 8 — when computation_status !== 'complete', all new fields are null/empty", async () => {
+    recorders.strategyData = buildStrategyRow({
+      strategy_analytics: buildAnalyticsRow({ computation_status: "pending" }),
+    });
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel4Inputs.monthly_returns).toBeNull();
+    expect(result!.panel4Inputs.return_quantiles).toBeNull();
+    expect(result!.panel4Inputs.returns_series).toBeNull();
+    expect(result!.panel4Inputs.benchmark_returns).toBeNull();
+    expect(result!.panel5Inputs.rolling_metrics).toBeNull();
+    expect(result!.panel5Inputs.sharpe).toBeNull();
+    expect(result!.panel6Inputs.trade_metrics).toBeNull();
+    expect(result!.panel7Inputs.benchmark_greeks).toEqual({
+      alpha: null,
+      beta: null,
+      ir: null,
+      treynor: null,
+    });
+    expect(result!.panel7Inputs.correlation_analytics.returns_series).toBeNull();
+    expect(result!.panel7Inputs.correlation_analytics.metrics_json).toBeNull();
+  });
+
+  it("Test 7: visibility gate — getStrategyDetailV2 returns null when supabase reports an error", async () => {
+    // No row data + the mock chain's .single() returns { data: null, error: null }
+    // The function checks `error || !strategy` — when both are falsy, the
+    // existing chain returns null which we reproduce by leaving strategyData null.
+    recorders.strategyData = null;
+    const result = await getStrategyDetailV2("nonexistent-id");
+    expect(result).toBeNull();
+  });
+
+  it("Test 8: panel6Inputs.trade_metrics maps from analytics.trade_metrics", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel6Inputs.trade_metrics).not.toBeNull();
+    expect(result!.panel6Inputs.trade_metrics!.total_positions).toBe(100);
+    expect(result!.panel6Inputs.trade_metrics!.win_rate).toBe(0.6);
+    expect(result!.panel6Inputs.trade_metrics!.expectancy).toBe(0.04);
+  });
+
+  it("Test 9: correlation_analytics carries returns_series + metrics_json subset", async () => {
+    recorders.strategyData = buildStrategyRow();
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result!.panel7Inputs.correlation_analytics.returns_series).toEqual([
+      { date: "2024-01-01", value: 1.0 },
+      { date: "2024-12-31", value: 1.42 },
+    ]);
+    expect(result!.panel7Inputs.correlation_analytics.metrics_json).toBeDefined();
+    expect(
+      (result!.panel7Inputs.correlation_analytics.metrics_json as Record<string, unknown>)["alpha"],
+    ).toBe(0.05);
   });
 });

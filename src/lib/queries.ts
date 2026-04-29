@@ -27,6 +27,7 @@ import type {
   DisclosureTier,
   ManagerIdentity,
   LazyMetricsPayload,
+  TradeMetrics,
 } from "./types";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 
@@ -340,6 +341,35 @@ export interface StrategyV2Detail {
     drawdown_series: { date: string; value: number }[] | null;
     drawdown_episodes: unknown[] | null;
   };
+  // Phase 14b — eager inputs for Panels 4-7 (mapped from analytics blob,
+  // no new RPC). Heavy series for Panels 4-7 still flow through
+  // fetchStrategyLazyMetrics(strategyId, panelId) on first viewport
+  // intersection inside the lazy-panel components themselves.
+  panel4Inputs: {
+    monthly_returns: Record<string, Record<string, number>> | null;
+    return_quantiles: Record<string, number[]> | null;
+    returns_series: { date: string; value: number }[] | null;
+    benchmark_returns: { date: string; value: number }[] | null;
+  };
+  panel5Inputs: {
+    rolling_metrics: Record<string, { date: string; value: number }[]> | null;
+    sharpe: number | null;
+  };
+  panel6Inputs: {
+    trade_metrics: TradeMetrics | null;
+  };
+  panel7Inputs: {
+    benchmark_greeks: {
+      alpha: number | null;
+      beta: number | null;
+      ir: number | null;
+      treynor: number | null;
+    };
+    correlation_analytics: {
+      returns_series: { date: string; value: number }[] | null;
+      metrics_json: Record<string, unknown> | null;
+    };
+  };
   lazyKeys: ("panel4" | "panel5" | "panel6" | "panel7")[];
   history_days: number;
 }
@@ -403,6 +433,64 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
       : null,
   };
 
+  // Phase 14b — Panel 4..7 eager-input mappings. Each pulls from the same
+  // analytics blob already fetched above; no additional RPC. The lazy
+  // panels themselves still call fetchStrategyLazyMetrics for heavy series
+  // on intersection (panels 4/5/7) or render purely from these eager inputs
+  // (panel 6). Pitfall 8 mirrored: when computation_status !== 'complete',
+  // every field returns null/empty so the panel-level partial-data banners
+  // trigger correctly.
+  const panel4Inputs = {
+    monthly_returns: isComplete ? (a?.monthly_returns ?? null) : null,
+    return_quantiles: isComplete ? (a?.return_quantiles ?? null) : null,
+    returns_series: isComplete ? (a?.returns_series ?? null) : null,
+    benchmark_returns: isComplete
+      ? ((metricsJson["benchmark_returns"] as { date: string; value: number }[] | undefined) ?? null)
+      : null,
+  };
+
+  const panel5Inputs = {
+    rolling_metrics: isComplete ? (a?.rolling_metrics ?? null) : null,
+    sharpe: isComplete ? (a?.sharpe ?? null) : null,
+  };
+
+  const panel6Inputs = {
+    trade_metrics: isComplete ? (a?.trade_metrics ?? null) : null,
+  };
+
+  // Greeks scalars: metrics.py emits both `information_ratio` and `treynor_ratio`
+  // (long names). Prefer those; fall back to short names if they ever appear.
+  const panel7Inputs = {
+    benchmark_greeks: isComplete
+      ? {
+          alpha:
+            typeof metricsJson["alpha"] === "number"
+              ? (metricsJson["alpha"] as number)
+              : null,
+          beta:
+            typeof metricsJson["beta"] === "number"
+              ? (metricsJson["beta"] as number)
+              : null,
+          ir:
+            typeof metricsJson["information_ratio"] === "number"
+              ? (metricsJson["information_ratio"] as number)
+              : typeof metricsJson["ir"] === "number"
+                ? (metricsJson["ir"] as number)
+                : null,
+          treynor:
+            typeof metricsJson["treynor_ratio"] === "number"
+              ? (metricsJson["treynor_ratio"] as number)
+              : typeof metricsJson["treynor"] === "number"
+                ? (metricsJson["treynor"] as number)
+                : null,
+        }
+      : { alpha: null, beta: null, ir: null, treynor: null },
+    correlation_analytics: {
+      returns_series: isComplete ? (a?.returns_series ?? null) : null,
+      metrics_json: isComplete ? metricsJson : null,
+    },
+  };
+
   // history_days: prefer metrics_json.history_days when populated; otherwise
   // derive from returns_series length; default 0.
   const historyDaysFromJson = typeof metricsJson["history_days"] === "number"
@@ -417,6 +505,10 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
     panel2Headline,
     panel2Equity,
     panel3,
+    panel4Inputs: panel4Inputs,
+    panel5Inputs: panel5Inputs,
+    panel6Inputs: panel6Inputs,
+    panel7Inputs: panel7Inputs,
     lazyKeys: ["panel4", "panel5", "panel6", "panel7"],
     history_days,
   };
