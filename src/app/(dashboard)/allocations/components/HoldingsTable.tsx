@@ -39,7 +39,7 @@ import {
   HoldingNoteRow,
 } from "@/components/notes/HoldingNoteRow";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
-import { formatPercent } from "@/lib/utils";
+import { formatNumber, formatPercent } from "@/lib/utils";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
 import { HoldingDetail } from "./HoldingDetail";
@@ -85,14 +85,6 @@ function formatPnl(n: number | null): string {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   })}`;
-}
-
-function formatNumber(n: number | null, digits = 2): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toLocaleString("en-US", {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
 }
 
 function formatDays(n: number | null): string {
