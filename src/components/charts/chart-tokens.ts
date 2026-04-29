@@ -21,3 +21,19 @@ export const CHART_TOOLTIP_STYLE = {
   borderColor: CHART_BORDER,
   borderRadius: 6,
 } as const;
+
+/**
+ * Recharts <text> SVG elements don't inherit font-variant-numeric from a
+ * parent CSS class. Spread this object directly on <XAxis tick={...}> /
+ * <YAxis tick={...}> so chart axis ticks render in tabular-nums.
+ *
+ * Pitfall 14 mitigation. Centralized fix for DESIGN-02. fontSize: 12 matches
+ * the v2 caption tier (DESIGN.md 12px caption) — well within WCAG AA at
+ * #64748B on #FFFFFF (4.85:1).
+ */
+export const CHART_TICK_STYLE = {
+  fontFamily: CHART_FONT_MONO,
+  fontSize: 12,
+  fontVariantNumeric: "tabular-nums",
+  fill: CHART_AXIS_TICK,
+} as const;

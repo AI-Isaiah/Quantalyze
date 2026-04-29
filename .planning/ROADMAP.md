@@ -118,7 +118,13 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   3. The 7-panel scrollable shell renders with exactly 7 top-level `<section data-panel>` elements (`tests/visual/strategy-v2-panel-count.test.ts`); panels 1–3 show their full eager bodies (Overview cards / Headline + Equity vs BTC overlay / Drawdown + Worst 5 Drawdowns), panels 4–7 show "Loading..." placeholders mounted lazily via IntersectionObserver scaffold ready for Phase 14b body landing.
   4. Per-panel partial-data states render gracefully across history bands for panels 1–3 — Playwright spec covers 7-day / 30-day / 90-day / 365-day synthetic histories, asserts each of panels 1–3 shows its documented "Awaiting more data (need ≥X days)" copy or its full-data render, never crashes, and never hides a panel (preserves layout shape).
   5. `@nivo/boxplot` is removed from `package.json`; `npm run build` produces a smaller bundle (~80KB gzipped saved); DESIGN.md decisions log carries the UC#7 7-panel density-rule deviation entry; PR-template includes the per-chart identity checklist.
-**Plans:** TBD
+**Plans:** 6 plans
+- [ ] 14a-01-PLAN.md — chart-tokens CHART_TICK_STYLE extension + EquityCurve DESIGN-01 hex audit (Wave 1)
+- [ ] 14a-02-PLAN.md — getStrategyDetailV2 path-extraction + strategy-ui-v2-flag reader (Wave 1)
+- [ ] 14a-03-PLAN.md — useLazyPanelMetrics hook + 7 strategy-v2 components (StrategyV2Shell + 6 panels/banner/control) (Wave 2)
+- [ ] 14a-04-PLAN.md — /strategy/[id]/v2 route page.tsx + error.tsx (Wave 2)
+- [ ] 14a-05-PLAN.md — vitest config + IntersectionObserver stub + 3 Vitest tests + Playwright partial-data spec (Wave 3)
+- [ ] 14a-06-PLAN.md — @nivo/boxplot uninstall + DESIGN.md decisions log + .github/PULL_REQUEST_TEMPLATE.md (Wave 3)
 **UI hint**: yes
 **Complexity:** Medium — visual contract is unforgiving on the eager half + identity baseline; `is_maker`-gated Trade Mix sub-panel deferred to 14b; lazy scaffolding is the load-bearing piece.
 
