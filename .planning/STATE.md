@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: Completed 14b-06-PLAN.md (Wave 3 — shell wiring + Panel 2 unlock)
-last_updated: "2026-04-29T14:07:50.158Z"
+stopped_at: "Completed 14b-07-PLAN.md (Wave 4 — test infra: axe + keyboard + chart-parity + skip-links)"
+last_updated: "2026-04-29T14:21:39.353Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 28
-  completed_plans: 26
-  percent: 93
+  completed_plans: 27
+  percent: 96
 ---
 
 # Project State
@@ -166,6 +166,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Wave-3 lazy-panel wiring uses fetchStrategyLazyMetricsClient (client-safe mirror) — server-only fetchStrategyLazyMetrics cannot be imported into 'use client' graphs
 - Log returns lazy fetch fires from SegmentedControl onChange handler (event-driven), not useEffect — satisfies React 19 react-hooks/set-state-in-effect lint rule
 - panel6Inputs.trade_metrics widened to (TradeMetrics & Record<string, unknown>) | null to match Phase 12 volume-aggregator-extras JSONB shape
+- Phase 14b-07: A11Y-02 axe-core CI green-gated; A11Y-03 keyboard-nav spec asserts skip-link → Panel 2 (5 stops) → Panel 5 (3 stops) per UI-SPEC §7.3 with Grok W-02 scrollIntoViewIfNeeded() pre-assertion. discovery-axe gates on DISCOVERY_SLUG (W-02). KPI-23b extension covers Panels 4-7 partial-data banners. 4 Playwright specs authored-but-skipped under HAS_SEED_ENV gate; goldens captured on first local run.
 
 ### Roadmap drafted (2026-04-26)
 
@@ -196,8 +197,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T14:07:50.152Z
-Stopped at: Completed 14b-06-PLAN.md (Wave 3 — shell wiring + Panel 2 unlock)
+Last session: 2026-04-29T14:21:39.347Z
+Stopped at: Completed 14b-07-PLAN.md (Wave 4 — test infra: axe + keyboard + chart-parity + skip-links)
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
