@@ -10,6 +10,7 @@ export default defineConfig({
       "src/**/*.test.{ts,tsx}",
       "tests/a11y/**/*.test.ts",
       "tests/visual/**/*.test.ts",
+      "tests/visual/**/*.test.tsx",
     ],
     setupFiles: ["src/test-setup.ts"],
   },
