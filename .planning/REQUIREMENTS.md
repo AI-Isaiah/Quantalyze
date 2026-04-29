@@ -24,13 +24,20 @@
 
 #### Phase 14a — Eager panels + identity baseline
 
-- [ ] **KPI-01**: User opens `/strategy/[id]/v2` (or v1 with localStorage `strategy.ui_v2` flag toggling the swap); flag pattern mirrors production-validated `allocations.ui_v2` at `AllocationsTabs.tsx:111`
-- [ ] **KPI-02**: Panel 1 — Overview cards row: Supported Exchanges / Types / Subtypes / Markets / Leverage / Avg DTO; data sourced from `strategies` row + `metrics_json` aggregates
-- [ ] **KPI-03**: Panel 2 — Headline metrics 6-cell strip: Cumulative Return / CAGR / Sharpe / Sortino / Max DD / Vol; renders existing scalars from `metrics.py:48–54`
-- [ ] **KPI-04**: Panel 2 — Equity vs BTC overlay with Cumulative ▾ / Underwater / Rolling Sharpe / Log Returns segmented control; **BTC overlay default-ON** (DIFF-03), uses existing `EquityCurve` + `DrawdownChart` + `RollingMetrics` wrapped in tab control
-- [ ] **KPI-05**: Panel 3 — Full-width DrawdownChart + Worst 5 Drawdowns table (Started / Recovered / Drawdown % / Days); reuses existing `DrawdownChart` + `WorstDrawdowns`
-- [ ] **KPI-22**: 7-panel single-page scrollable shell with placeholders for panels 4–7 (UC#7 DESIGN.md "data density > card density" deviation explicitly accepted); panels 4–7 lazy-mount via IntersectionObserver to keep TTI < 2s on 5y-history strategies. Phase 14a ships the shell + IntersectionObserver scaffold; placeholders for panels 4–7 show "Loading..." (bodies deferred to Phase 14b).
-- [ ] **KPI-23a**: Per-panel partial-data state for panels 1–3 — strategies with <30/<90/<365 days of history show "Awaiting more data (need ≥X days)" copy on the affected panel/sub-panel; never crash; per-panel matrix documented in PR template (Pitfall 17 mitigation, panels 1–3 only).
+- [x] **KPI-01
+**: User opens `/strategy/[id]/v2` (or v1 with localStorage `strategy.ui_v2` flag toggling the swap); flag pattern mirrors production-validated `allocations.ui_v2` at `AllocationsTabs.tsx:111`
+- [x] **KPI-02
+**: Panel 1 — Overview cards row: Supported Exchanges / Types / Subtypes / Markets / Leverage / Avg DTO; data sourced from `strategies` row + `metrics_json` aggregates
+- [x] **KPI-03
+**: Panel 2 — Headline metrics 6-cell strip: Cumulative Return / CAGR / Sharpe / Sortino / Max DD / Vol; renders existing scalars from `metrics.py:48–54`
+- [x] **KPI-04
+**: Panel 2 — Equity vs BTC overlay with Cumulative ▾ / Underwater / Rolling Sharpe / Log Returns segmented control; **BTC overlay default-ON** (DIFF-03), uses existing `EquityCurve` + `DrawdownChart` + `RollingMetrics` wrapped in tab control
+- [x] **KPI-05
+**: Panel 3 — Full-width DrawdownChart + Worst 5 Drawdowns table (Started / Recovered / Drawdown % / Days); reuses existing `DrawdownChart` + `WorstDrawdowns`
+- [x] **KPI-22
+**: 7-panel single-page scrollable shell with placeholders for panels 4–7 (UC#7 DESIGN.md "data density > card density" deviation explicitly accepted); panels 4–7 lazy-mount via IntersectionObserver to keep TTI < 2s on 5y-history strategies. Phase 14a ships the shell + IntersectionObserver scaffold; placeholders for panels 4–7 show "Loading..." (bodies deferred to Phase 14b).
+- [x] **KPI-23a
+**: Per-panel partial-data state for panels 1–3 — strategies with <30/<90/<365 days of history show "Awaiting more data (need ≥X days)" copy on the affected panel/sub-panel; never crash; per-panel matrix documented in PR template (Pitfall 17 mitigation, panels 1–3 only).
 
 #### Phase 14b — Lazy panels + Trade & Exposure
 

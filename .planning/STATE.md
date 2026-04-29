@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
-status: verifying
-stopped_at: Completed 13-04-PLAN.md (Phase 13 — DISCO-04 single-accent sparkline rule)
-last_updated: "2026-04-29T00:30:00.000Z"
-last_activity: 2026-04-29
+status: executing
+stopped_at: Completed 14a-02-PLAN.md
+last_updated: "2026-04-29T10:09:53.669Z"
+last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 14
-  completed_plans: 13
-  percent: 93
+  completed_phases: 2
+  total_plans: 20
+  completed_plans: 16
+  percent: 80
 ---
 
 # Project State
@@ -21,15 +21,15 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-26 at v0.17.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Phase 12 — backend-metric-contracts
+**Current focus:** Phase --phase — 14a
 **Concurrent on `main`:** v0.16.0.0 Phase 11 (Onboarding + Security Readiness) executing in parallel — independent surface area, not a blocker.
 
 ## Current Position
 
-Phase: 12 (backend-metric-contracts) — COMPLETE (10/10 plans)
-Plan: 10 of 10 complete (12-01..12-10 all shipped)
-Status: Phase complete — ready for verification
-Last activity: 2026-04-28
+Phase: --phase (14a) — EXECUTING
+Plan: 1 of --name
+Status: Executing Phase --phase
+Last activity: 2026-04-29 -- Phase --phase execution started
 
 ## Milestone Summary (v0.17.0.0)
 
@@ -140,6 +140,9 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Phase 12 Plan 09: METRICS-13 — cross-runtime parity test pair (Python math gate + TS schema gate per Reading A from RESEARCH.md §9.3). Three artifacts: regen_golden.py (deterministic 252-day fixture generator with np.random.seed(42)) + golden_252d_input.parquet + golden_252d_input.json + golden_252d_expected.json (committed expected output, exactly 12 D-01 sibling kinds incl. exposure_series + turnover_series per H-A1, equity_series_1y excluded per H-D, weighted_risk_reward_ratio present per H-F / METRICS-07). Python parity test asserts D-11 hybrid tolerance (12-sig-digit + 1e-12 epsilon fallback per M-Grok-2 for scalars; 1e-9 relative epsilon with NaN==NaN and +0==-0 per H-C for series); fail-loud on missing/extra keys (D-12). TS parity test (Reading A schema gate) reads expected.json and asserts every sibling kind is a known StrategyAnalyticsSeriesKind, every trade_metrics key is in FROZEN_TRADE_METRICS_KEYS (D-16 — 33 frozen keys including the 7 derived per H-F + 5 reconstruct_positions extension keys + 6 volume keys + 4 aggregator keys + trade_mix), trade_mix bucket count matches D-15 audit (TRADE_MIX_HAS_MAKER_TAKER=false → 2-bucket {long, short}). Issue-6 fix: TS sibling-count assertion tracks EXPECTED_SIBLING_KINDS.size dynamically (no hardcoded 12). Both runtimes 5/5 green. Single Rule-3 deviation: pyarrow installed user-site (PEP-668) since requirements.txt does not pin a parquet engine; pin deferred to Plan 12-10 deploy script. Pre-existing TS test fixture drift in MetricPanel.test.tsx and PositionsTab.test.tsx (Plan 12-02 TradeMetrics expansion never propagated) logged to deferred-items.md — out of scope.
 - Phase 13 Plan 04: DISCO-04 — single-accent sparkline rule. Two artifacts plus three call-site/test edits. New `src/lib/sparkline-color.ts` (9 LOC pure helper) returns CSS-variable strings (var(--color-accent) / var(--color-negative) / var(--color-chart-benchmark)) driven by the FINAL value of sparkline_returns; empty/nullish → benchmark grey. Sparkline.tsx itself untouched (caller-picks-color contract preserved per CONTEXT.md DISCO-04 lock). StrategyTable.tsx + StrategyGrid.tsx wire the helper to their respective sparkline_returns Sparkline call sites with `color={sparklineColor(s.analytics.sparkline_returns ?? [])}`. Pitfall 7 invariant preserved: drawdown call site at StrategyTable.tsx:466 keeps static `color="var(--color-negative)"` — drawdown is non-positive by definition, sign-driven rule does not bleed in. e2e/discovery-sparkline-regression.spec.ts adds 3 Playwright tests against /discovery/crypto-sma — (a) no SVG mixes #16A34A and #DC2626 strokes, (b) each sparkline owns at most one stroke color, (c) drawdown SVGs use var(--color-negative) so the negative-color render path executes on live data even though all 8 seed STRATEGY_PROFILES have positive annualized return (SYNTHESIS BLOCKER 1 fix). Tests: 6 helper unit cases + 4 StrategyTable component cases (3 sign branches + Pitfall 7 invariant) + 3 StrategyGrid component cases + 3 Playwright tests. Full vitest suite advances 2356 → 2369 passed (+13 net), 0 regressions, npm run build exits 0. Zero deviations — plan executed exactly as written. DISCO-04 marked complete.
 - Phase 12 Plan 10: METRICS-16 — deploy orchestration scripts. Four artifacts in analytics-service/scripts/ — (1) analyze_metrics_size.sql: pg_column_size p99.9 probe (post-TOAST, M-03 single source-of-truth — pre-TOAST raw JSON measurement explicitly forbidden in docstrings + grep-asserted absent); CSV output schema p50/p95/p99/p999/max/strategy_count for psql -tAF, parsing. (2) phase12_kill_switch.py: D-07 automation. SKIP_KILL_SWITCH=1 honored; --p999/--count CLI args via argparse so phase12_deploy.py can pass authoritative DB-side values without re-running psql; falls back to direct subprocess re-run when invoked standalone. Cutover uses M-Grok-1 atomic batch RPC `upsert_strategy_analytics_series_batch` for transactional multi-kind upsert per strategy. HEAVY_KINDS = exactly 12 D-01 sibling kinds (equity_series_1y intentionally excluded per H-D — that key stays in metrics_json above-the-fold). TODOS.md trigger log entry gated on path existence so the script remains runnable in Railway-only deploy environments. (3) phase12_backfill_enqueue.py: D-08 eager re-enqueue at priority='low'. M-02 duplicate-job pre-check via PostgREST `count='exact'` on pending compute_analytics rows; emits the literal log line `[backfill] {N} existing pending compute_analytics jobs found — skipping to avoid duplicates` that the acceptance grep matches. Insert payload includes `strategy_id` (CHECK constraint requires it for compute_analytics kind per migration 032) + `metadata` JSONB (real column name; the plan skeleton's `payload` field doesn't exist on compute_jobs). (4) phase12_deploy.py: top-level orchestrator chaining all 4 in M-01 → M-03 → kill-switch → M-02 order. _read_trade_mix_flag_from_todos uses regex `TRADE_MIX_HAS_MAKER_TAKER\s*=\s*(true|false)` against TODOS.md text; default 'false' on absent file or unmatched line. _write_env_test preserves any existing keys in .env.test (other than TRADE_MIX_HAS_MAKER_TAKER) and rewrites only ours. _run_sql_probe invokes psql against DATABASE_URL/SUPABASE_DB_URL. .gitignore: explicit `.env.test` line satisfying the Plan 12-10 acceptance grep `^\.env\.test$` (the existing `.env*` glob already covered the file but the grep is the literal contract). 12-CONTEXT.md `<specifics>`: documents the canonical M-01 propagation path TODOS.md → phase12_deploy.py regex → .env.test (gitignored) → CI sources before parity tests. TODOS.md: `## Phase 12 SC#4 — queue-depth probe` section header added with bash invocation + table scaffold for recording the 12-min monitoring window (data filled at deploy time). Three Rule-1/2/3 deviations folded into Task 1 commit: (Rule 1 bug) docstring rephrasing to remove `len(json.dumps` literal that the inverted acceptance grep flagged in comments; (Rule 2 critical) added `strategy_id` to backfill insert + renamed `payload` → `metadata`; (Rule 3 blocking) plan placeholder imports mapped to actual `services.db` module. Production-run portion (executing phase12_deploy.py against live khslejtfbuezsmvmtsdn + 12-min queue-depth recording for SC#4) deferred to operator/checkpoint:human-verify per autonomous=false plan frontmatter and orchestrator directive "plan ships SCRIPTS, not the deploy itself". METRICS-16 marked complete; 17 of 17 METRICS-XX requirements landed across the 10 plans. Phase 12 is feature-complete at the source level; operational deploy is the only remaining external action. Phase 14a is unblocked.
+- Pitfall 8 honored: getStrategyDetailV2 returns null for missing scalars; never falls back to EMPTY_ANALYTICS
+- strategy.ui_v2 flag default = OFF in Phase 14a; flips to ON in 14b once lazy panel bodies ship
+- Map-backed localStorage stub adopted for strategy-ui-v2-flag.test.ts (matches widget-state-flag.test.ts idiom)
 
 ### Roadmap drafted (2026-04-26)
 
@@ -170,8 +173,10 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T00:30:00.000Z
-Stopped at: Completed 13-04-PLAN.md (Phase 13 — DISCO-04 single-accent sparkline rule)
+Last session: 2026-04-29T10:09:53.361Z
+Stopped at: Completed 14a-02-PLAN.md
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)
+
+**Planned Phase:** 14a (Single-Strategy v2 — Eager Panels + Identity) — 6 plans — 2026-04-29T09:59:08.277Z
