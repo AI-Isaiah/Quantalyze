@@ -88,7 +88,20 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
 
         <DrawdownPanel panel3={panel3} history_days={history_days} />
 
+        {/*
+          F2 follow-up (v0.17.1) — `key={strategy.id}` forces a full
+          unmount + remount of each lazy panel on cross-strategy navigation.
+          Without it, /strategy/abc/v2 → /strategy/xyz/v2 reuses the same
+          React instances and the useLazyPanelMetrics hook keeps abc's
+          resolved data alongside xyz's stale "loading" status (the hook's
+          mountedRef + strategyId guards prevent the LEAK but cannot
+          retrigger the fetch). The key isolates each panel's lifecycle
+          to one strategy. Eager panels above (Overview / Headline /
+          Drawdown) read from server-rendered props and don't carry
+          per-strategy fetch state, so they are intentionally unkeyed.
+         */}
         <ReturnsDistributionPanel
+          key={strategy.id}
           strategyId={strategy.id}
           history_days={history_days}
           monthly_returns={panel4Inputs.monthly_returns}
@@ -98,6 +111,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         />
 
         <RollingMetricsPanel
+          key={strategy.id}
           strategyId={strategy.id}
           history_days={history_days}
           rolling_metrics={panel5Inputs.rolling_metrics}
@@ -105,11 +119,13 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         />
 
         <TradeAndPositionPanel
+          key={strategy.id}
           strategyId={strategy.id}
           trade_metrics={panel6Inputs.trade_metrics}
         />
 
         <ExposureAndGreeksPanel
+          key={strategy.id}
           strategyId={strategy.id}
           history_days={history_days}
           benchmark_greeks={panel7Inputs.benchmark_greeks}

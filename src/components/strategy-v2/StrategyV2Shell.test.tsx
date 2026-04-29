@@ -269,6 +269,35 @@ describe("StrategyV2Shell — Phase 14b-06 Task 2 wiring", () => {
     expect(true).toBe(true);
   });
 
+  it("Test 6b (F2 follow-up v0.17.1): each lazy panel carries key={strategy.id} so cross-strategy nav remounts them", () => {
+    // F2 follow-up — without key={strategy.id}, navigating /strategy/abc/v2
+    // → /strategy/xyz/v2 reuses each lazy panel's React instance and the
+    // useLazyPanelMetrics hook keeps abc's resolved data on xyz's panel.
+    // The hook's mountedRef + strategyId guards prevent the LEAK but cannot
+    // retrigger the fetch for the new strategy. The key forces a full
+    // unmount+remount — fresh hook state, fresh observer, fresh fetch.
+    //
+    // Structural assertion (matches Test 5's pattern): we verify the four
+    // lazy panel JSX elements carry `key={strategy.id}` directly in the
+    // shell source. Behavioral verification is at the hook level
+    // (useLazyPanelMetrics.test.ts Test 10/11 covers the F2 mount race;
+    // Playwright covers nav reload).
+    const src = readFileSync(
+      resolve(process.cwd(), "src/components/strategy-v2/StrategyV2Shell.tsx"),
+      "utf-8",
+    );
+    expect(src).toMatch(/<ReturnsDistributionPanel\s+key=\{strategy\.id\}/);
+    expect(src).toMatch(/<RollingMetricsPanel\s+key=\{strategy\.id\}/);
+    expect(src).toMatch(/<TradeAndPositionPanel\s+key=\{strategy\.id\}/);
+    expect(src).toMatch(/<ExposureAndGreeksPanel\s+key=\{strategy\.id\}/);
+    // Eager panels (Overview / Headline / Drawdown) are intentionally NOT
+    // keyed — they read from server-rendered props with no per-strategy
+    // fetch state. Keying them would force a needless paint on every nav.
+    expect(src).not.toMatch(/<OverviewPanel\s+key=/);
+    expect(src).not.toMatch(/<HeadlineMetricsPanel\s+key=/);
+    expect(src).not.toMatch(/<DrawdownPanel\s+key=/);
+  });
+
   it("Test 7: panel order preserved — Overview → Headline+Equity → Drawdown → Returns → Rolling → Trades → Exposure", () => {
     render(<StrategyV2Shell detail={FIXTURE} />);
     const order = Array.from(document.querySelectorAll("section[data-panel]")).map(
