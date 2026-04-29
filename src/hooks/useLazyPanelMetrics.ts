@@ -122,15 +122,18 @@ export function useLazyPanelMetrics<T = unknown>(
             return; // stays in 'idle'
           }
           setStatus("loading");
-          // Dynamic import keeps the `@/lib/queries` server-only barrier
-          // OUT of the client-side module graph at load time. The import
-          // resolves only at intersection-time — well after hydration —
-          // so jsdom-based component tests that render placeholders
-          // never trigger the server-only directive.
+          // Dynamic import of the CLIENT-SAFE mirror at
+          // `src/lib/queries-client.ts`. The original
+          // `fetchStrategyLazyMetrics` in `src/lib/queries.ts` cannot be
+          // imported here (statically OR dynamically) because it transitively
+          // pulls in `next/headers` + `import "server-only"` via
+          // `@/lib/supabase/admin`, which Turbopack rejects when the module
+          // is reachable from a Client Component graph (Plan 14b-01 Rule 3
+          // deviation — see SUMMARY.md).
           const strategyId = currentOpts.strategyId;
-          import("@/lib/queries")
-            .then(({ fetchStrategyLazyMetrics }) =>
-              fetchStrategyLazyMetrics(strategyId, PANEL_TO_ID[panelId]),
+          import("@/lib/queries-client")
+            .then(({ fetchStrategyLazyMetricsClient }) =>
+              fetchStrategyLazyMetricsClient(strategyId, PANEL_TO_ID[panelId]),
             )
             .then((payload) => {
               setData(payload as T);

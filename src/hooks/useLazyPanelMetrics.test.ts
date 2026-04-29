@@ -95,8 +95,8 @@ function fireIntersection(observer: CapturedObserver, target: Element) {
 }
 
 const fetchSpy = vi.fn();
-vi.mock("@/lib/queries", () => ({
-  fetchStrategyLazyMetrics: (...args: unknown[]) => fetchSpy(...args),
+vi.mock("@/lib/queries-client", () => ({
+  fetchStrategyLazyMetricsClient: (...args: unknown[]) => fetchSpy(...args),
 }));
 
 let useLazyPanelMetrics: typeof import("./useLazyPanelMetrics").useLazyPanelMetrics;
