@@ -213,13 +213,13 @@ const CanvasRenderer = memo(function CanvasRenderer({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const rowsByYear = useMemo(() => groupByYear(data), [data]);
-  const yearOrder = useMemo(() => rowsByYear.map((r) => r.year), [rowsByYear]);
-  // SR-1 (v0.17.1): O(1) year-index lookup. Replaces yearOrder.indexOf(yr)
-  // inside the per-cell paint loop, which was O(n × y) for n cells × y years
-  // (1825 × 5 ≈ 9k string comparisons on a 5-year strategy).
+  // SR-1 (v0.17.1): O(1) year-index lookup. Replaces an O(n × y) indexOf
+  // inside the per-cell paint loop (1825 × 5 ≈ 9k string comparisons on a
+  // 5-year strategy). Folded directly off rowsByYear — the prior dedicated
+  // `yearOrder` memo was a dead intermediate after the SR-1 refactor.
   const yearIndex = useMemo(
-    () => new Map(yearOrder.map((y, i) => [y, i] as const)),
-    [yearOrder],
+    () => new Map(rowsByYear.map((r, i) => [r.year, i] as const)),
+    [rowsByYear],
   );
 
   // WR-01: dynamic height — grows with the actual number of distinct years.
@@ -265,7 +265,7 @@ const CanvasRenderer = memo(function CanvasRenderer({
       // performance.measure can throw if the marks were cleared between
       // mount and effect — non-fatal for paint correctness.
     }
-  }, [data, yearIndex]);
+  }, [data, yearIndex, canvasHeight]);
 
   return (
     <div className="relative w-full" style={{ minHeight: Math.max(360, rowsByYear.length * CELL_H) }}>
