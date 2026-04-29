@@ -628,4 +628,105 @@ describe("useLazyPanelMetrics — Phase 14b extension", () => {
     expect(() => unmount()).not.toThrow();
     expect(observers[0].disconnectCalls).toBeGreaterThanOrEqual(1);
   });
+
+  /**
+   * SR-4 (v0.17.1.4) — three branches the prior 14 tests left uncovered.
+   * Each guards a distinct edge of the ref-callback contract: the React
+   * detach call (ref(null)), the SSR/no-polyfill environment, and the
+   * IntersectionObserver entry-loop's per-entry isIntersecting filter.
+   */
+
+  it("Test SR-4.1: ref(null) early-returns without creating an observer", () => {
+    // React calls the ref callback with null on detach (and during fast
+    // refresh in dev). The hook must not crash on null and must not
+    // synthesize a fresh observer for a non-element argument.
+    const { result } = renderHook(() =>
+      useLazyPanelMetrics("panel4", { fetchOnIntersect: true, strategyId: "abc" }),
+    );
+    expect(observers).toHaveLength(0);
+
+    act(() => {
+      result.current.ref(null);
+    });
+    expect(observers).toHaveLength(0);
+    expect(result.current.status).toBe("idle");
+    expect(result.current.data).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("Test SR-4.2: IntersectionObserver=undefined SSR fallback flips to ready immediately", () => {
+    // The hook's runtime guard checks for `typeof IntersectionObserver`.
+    // When the global is absent (SSR-shaped jsdom configuration, or a
+    // future test runner without the polyfill), the hook MUST flip to
+    // "ready" so consumers don't deadlock on "idle" forever. No fetch
+    // is fired and no observer is created.
+    const original = (globalThis as { IntersectionObserver?: typeof IntersectionObserver })
+      .IntersectionObserver;
+    delete (globalThis as { IntersectionObserver?: typeof IntersectionObserver })
+      .IntersectionObserver;
+    try {
+      const { result } = renderHook(() =>
+        useLazyPanelMetrics("panel4", {
+          fetchOnIntersect: true,
+          strategyId: "abc",
+        }),
+      );
+      const node = document.createElement("div");
+      act(() => {
+        result.current.ref(node);
+      });
+
+      expect(result.current.status).toBe("ready");
+      expect(result.current.data).toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(observers).toHaveLength(0);
+    } finally {
+      (globalThis as { IntersectionObserver?: typeof IntersectionObserver })
+        .IntersectionObserver = original;
+    }
+  });
+
+  it("Test SR-4.3: non-intersecting entries do not flip status or fetch", async () => {
+    // The observer callback's per-entry loop short-circuits with
+    // `if (!entry.isIntersecting) continue;`. Without coverage, a
+    // regression that flipped the polarity (treating a leave event as
+    // an enter) would silently fire fetches for panels the user has
+    // scrolled away from.
+    fetchSpy.mockResolvedValueOnce({});
+    const { result } = renderHook(() =>
+      useLazyPanelMetrics("panel4", { fetchOnIntersect: true, strategyId: "abc" }),
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    expect(observers).toHaveLength(1);
+
+    // Synthesize an entry with isIntersecting=false. Our stub's
+    // fireIntersection helper hard-codes true, so call the captured
+    // callback directly with a "leave" entry.
+    const obs = observers[0];
+    act(() => {
+      const leaveEntry: Partial<IntersectionObserverEntry> = {
+        isIntersecting: false,
+        target: node,
+      };
+      obs.cb(
+        [leaveEntry as IntersectionObserverEntry],
+        obs as unknown as IntersectionObserver,
+      );
+    });
+
+    // Drain microtasks in case a stray .then snuck in.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.status).toBe("idle");
+    expect(result.current.data).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Target stays observed — only an actual intersection unobserves it.
+    expect(obs.unobserveCalls).not.toContain(node);
+  });
 });
