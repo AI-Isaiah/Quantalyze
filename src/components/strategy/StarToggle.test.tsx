@@ -273,4 +273,111 @@ describe("StarToggle", () => {
       ).toBeDefined();
     });
   });
+
+  it("does NOT retry on a 401 — surfaces the auth-specific hint immediately", async () => {
+    const onToggle = vi.fn();
+    fetchMock.mockResolvedValue({ ok: false, status: 401 });
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+
+    // Auth failures must not consume a retry slot.
+    await waitFor(() => {
+      expect(screen.getByText(/Sign in again/i)).toBeDefined();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenNthCalledWith(1, STRATEGY_ID, true);
+    expect(onToggle).toHaveBeenNthCalledWith(2, STRATEGY_ID, false);
+  });
+
+  it("does NOT retry on a 403 — same auth-no-retry path as 401", async () => {
+    const onToggle = vi.fn();
+    fetchMock.mockResolvedValue({ ok: false, status: 403 });
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Sign in again/i)).toBeDefined();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenNthCalledWith(2, STRATEGY_ID, false);
+  });
+
+  it("respects the Retry-After header on a 429 and uses the rate-limit hint copy", async () => {
+    const onToggle = vi.fn();
+    const headers = new Headers({ "Retry-After": "1" });
+    // Both attempts return 429 so we exhaust the retry chain and surface
+    // the hint. The retry delay is driven by Retry-After, not the 600ms
+    // fallback.
+    fetchMock.mockResolvedValue({ ok: false, status: 429, headers });
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }, { timeout: 3000 });
+    await waitFor(() => {
+      expect(screen.getByText(/Try again shortly/i)).toBeDefined();
+    });
+    expect(onToggle).toHaveBeenNthCalledWith(2, STRATEGY_ID, false);
+  });
+
+  it("uses the network-specific hint when fetch rejects (no response)", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn.t reach the server/i)).toBeDefined();
+    });
+  });
+
+  it("renders the failure hint as a live region (role=status, aria-live=polite)", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 500 });
+
+    render(
+      <StarToggle
+        strategyId={STRATEGY_ID}
+        name={STRATEGY_NAME}
+        starred={false}
+        onToggle={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() => {
+      const hint = screen.getByText(/Couldn.t update watchlist/i);
+      expect(hint.getAttribute("role")).toBe("status");
+      expect(hint.getAttribute("aria-live")).toBe("polite");
+    });
+  });
 });

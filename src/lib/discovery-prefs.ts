@@ -10,11 +10,32 @@ export interface DiscoveryViewPreferences {
   hide_examples: boolean;
 }
 
+// Versioned localStorage shape. Bumping CURRENT_VERSION rejects all stored
+// data with a higher version (forward compat) and migrates older versions
+// through explicit branches in safeRead.
+const CURRENT_VERSION = 1;
+
+interface StoredPrefs extends DiscoveryViewPreferences {
+  version: number;
+}
+
 export const DEFAULTS: DiscoveryViewPreferences = {
   view: "table",
   sort: { key: "sharpe", dir: "desc" },
   hide_examples: true,
 };
+
+const VALID_VIEWS: ReadonlySet<ViewMode> = new Set(["table", "grid"]);
+const VALID_SORT_KEYS: ReadonlySet<SortKey> = new Set([
+  "computed_at",
+  "cumulative_return",
+  "cagr",
+  "sharpe",
+  "max_drawdown",
+  "volatility",
+  "aum",
+]);
+const VALID_SORT_DIRS: ReadonlySet<SortDir> = new Set(["asc", "desc"]);
 
 export function keyFor(uid: string, slug: string): string {
   return `discovery_view_preferences:${uid}:${slug}`;
@@ -25,11 +46,34 @@ export function safeRead(uid: string, slug: string): DiscoveryViewPreferences {
   try {
     const raw = window.localStorage.getItem(keyFor(uid, slug));
     if (!raw) return DEFAULTS;
-    const parsed = JSON.parse(raw) as Partial<DiscoveryViewPreferences>;
+    const parsed = JSON.parse(raw) as Partial<StoredPrefs>;
+    // Reject stored data we don't understand (newer schema). Legacy
+    // unversioned shapes (version === undefined) are accepted as v1.
+    if (typeof parsed.version === "number" && parsed.version > CURRENT_VERSION) {
+      return DEFAULTS;
+    }
+    // Per-field enum validation. A renamed/removed enum value in legacy or
+    // v1 data must not flow through to setViewMode/setSortKey/etc., where
+    // it would silently take a wrong branch (e.g., a non-"table" view falls
+    // through to grid in the consumer).
+    const view =
+      parsed.view && VALID_VIEWS.has(parsed.view) ? parsed.view : DEFAULTS.view;
+    const sortKey =
+      parsed.sort?.key && VALID_SORT_KEYS.has(parsed.sort.key)
+        ? parsed.sort.key
+        : DEFAULTS.sort.key;
+    const sortDir =
+      parsed.sort?.dir && VALID_SORT_DIRS.has(parsed.sort.dir)
+        ? parsed.sort.dir
+        : DEFAULTS.sort.dir;
+    const hideExamples =
+      typeof parsed.hide_examples === "boolean"
+        ? parsed.hide_examples
+        : DEFAULTS.hide_examples;
     return {
-      ...DEFAULTS,
-      ...parsed,
-      sort: { ...DEFAULTS.sort, ...(parsed.sort ?? {}) },
+      view,
+      sort: { key: sortKey, dir: sortDir },
+      hide_examples: hideExamples,
     };
   } catch {
     return DEFAULTS;
@@ -55,7 +99,8 @@ export function useDiscoveryPrefs(uid: string | undefined, slug: string) {
     if (!uid) return;
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(keyFor(uid, slug), JSON.stringify(prefs));
+      const payload: StoredPrefs = { ...prefs, version: CURRENT_VERSION };
+      window.localStorage.setItem(keyFor(uid, slug), JSON.stringify(payload));
     } catch {
       // Safari private mode / quota — non-fatal.
     }

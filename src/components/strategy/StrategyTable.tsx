@@ -184,6 +184,17 @@ export function StrategyTable({
 
   const handleSavePrefs = useCallback(() => {
     setPrefs(draftPrefs);
+    // Apply the saved prefs to the legacy state slots immediately so the
+    // visible view reflects the change without a refresh. Without this the
+    // hydration effect — gated on `prefsHydrated` only — leaves the table
+    // showing the previous view/sort/hide-examples until reload.
+    setViewMode(draftPrefs.view);
+    setSortKey(draftPrefs.sort.key);
+    setSortDir(draftPrefs.sort.dir);
+    setTableSortKey(draftPrefs.sort.key);
+    setTableSortDir(draftPrefs.sort.dir);
+    setShowExamples(!draftPrefs.hide_examples);
+    setPage(0);
     setCustomizeOpen(false);
   }, [draftPrefs, setPrefs]);
 
