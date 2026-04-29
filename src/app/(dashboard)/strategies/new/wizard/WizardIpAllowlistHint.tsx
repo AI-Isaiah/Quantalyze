@@ -9,7 +9,7 @@ import { WarningBanner } from "@/components/ui/WarningBanner";
  * <WithdrawalWarningStrip /> (S5) with `mt-2` (8px gap) so the two
  * single-purpose safety notices stack without merging.
  *
- * UI-SPEC §S7 LOCKED contract:
+ * Locked copy contract:
  *   - Verbatim CONTEXT D-07 sentence: "Locking your exchange key to an
  *     IP allowlist? Allow our egress IPs — see /security#egress-ips."
  *   - The `/security#egress-ips` token renders as a real <a> with

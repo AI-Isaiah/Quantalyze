@@ -11,16 +11,15 @@ interface TradeMixSubPanelProps {
 }
 
 /**
- * Phase 14b-04 / KPI-17 (partial) — Trade Mix sub-panel.
+ * Trade Mix sub-panel.
  *
  * Ships 2-bucket Long/Short bar visualization. The `mode='2-bucket' | '4-bucket'`
- * prop is reserved for v0.17.1 maker/taker flip (gated on `is_maker`
+ * prop is reserved for the future maker/taker flip (gated on `is_maker`
  * population fix in `analytics-service/services/exchange.py` for
- * Binance/OKX/Bybit). The 4-bucket render branch is intentionally NOT
- * implemented in 14b — it renders a fallback message so the prop signature
- * is stable across the flip.
+ * Binance/OKX/Bybit). The 4-bucket render branch renders a fallback message
+ * so the prop signature stays stable across the flip.
  *
- * Visual contract (UI-SPEC §3.3):
+ * Visual contract:
  *   - mt-8 border-t border-border pt-6 container
  *   - H3 "Trade mix" (sentence-case) — 12px uppercase tracking-wider muted
  *   - 2 horizontal bars: Long fill CHART_ACCENT, Short fill CHART_TEXT_MUTED
@@ -36,9 +35,9 @@ export function TradeMixSubPanel({
   mode = "2-bucket",
 }: TradeMixSubPanelProps) {
   if (mode === "4-bucket") {
-    // Phase 14b ships 2-bucket only. Maker/taker 4-bucket dimension is
-    // descoped to v0.17.1 — gated on `is_maker` flag fix in
-    // analytics-service/services/exchange.py for Binance/OKX/Bybit.
+    // 2-bucket-only. Maker/taker 4-bucket dimension is gated on `is_maker`
+    // flag fix in analytics-service/services/exchange.py for
+    // Binance/OKX/Bybit.
     return (
       <div className="mt-8 border-t border-border pt-6">
         <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">

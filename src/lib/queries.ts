@@ -301,19 +301,18 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 }
 
 /**
- * Phase 14a / METRICS-15 path-extraction half (consumer half shipped Plan 12-08
- * as `fetchStrategyLazyMetrics`). Reads scalars + above-the-fold series for the
- * `/strategy/[id]/v2` 7-panel UI (Panels 1–3 eager). Heavy series for Panels
- * 4–7 are deferred to Phase 14b, which calls `fetchStrategyLazyMetrics` from
- * inside the IntersectionObserver-mounted lazy panels.
+ * Path-extraction loader for the `/strategy/[id]/v2` 7-panel UI. Reads
+ * scalars + above-the-fold series eagerly for Panels 1–3. Heavy series for
+ * Panels 4–7 flow through `fetchStrategyLazyMetrics` from inside the
+ * IntersectionObserver-mounted lazy panels.
  *
  * Visibility gate: same as `getPublicStrategyDetail` — `status='published'`
- * predicate. Private/unpublished strategies return `null` (rendered as 404 by
- * the page-level `notFound()` call).
+ * predicate. Private/unpublished strategies return `null` (rendered as 404
+ * by the page-level `notFound()` call).
  *
- * Pitfall 8 contract: does NOT fall back to EMPTY_ANALYTICS when no analytics
- * row exists. Returns `null` for missing scalars so per-panel partial-data
- * banners can distinguish "no data" from "0% return".
+ * Does NOT fall back to EMPTY_ANALYTICS when no analytics row exists.
+ * Returns `null` for missing scalars so per-panel partial-data banners can
+ * distinguish "no data" from "0% return".
  */
 export interface StrategyV2Detail {
   strategy: Strategy;
@@ -341,8 +340,8 @@ export interface StrategyV2Detail {
     drawdown_series: { date: string; value: number }[] | null;
     drawdown_episodes: unknown[] | null;
   };
-  // Phase 14b — eager inputs for Panels 4-7 (mapped from analytics blob,
-  // no new RPC). Heavy series for Panels 4-7 still flow through
+  // Eager inputs for Panels 4-7 (mapped from analytics blob, no new RPC).
+  // Heavy series for Panels 4-7 still flow through
   // fetchStrategyLazyMetrics(strategyId, panelId) on first viewport
   // intersection inside the lazy-panel components themselves.
   panel4Inputs: {
@@ -357,13 +356,12 @@ export interface StrategyV2Detail {
   };
   panel6Inputs: {
     /**
-     * Phase 12 / Plan 12-05 SUMMARY documents that the trade_metrics JSONB
-     * blob carries volume-aggregator extras BEYOND the frozen TradeMetrics
-     * interface (gross_volume_usd, mean_trade_size_usd, daily_turnover_usd,
-     * monthly_turnover_usd, payoff_ratio, profit_factor, winners_count,
-     * losers_count). The wider intersection type matches what
-     * `TradeAndPositionPanel` expects so the shell can pass through
-     * unchanged.
+     * The trade_metrics JSONB blob carries volume-aggregator extras BEYOND
+     * the frozen TradeMetrics interface (gross_volume_usd,
+     * mean_trade_size_usd, daily_turnover_usd, monthly_turnover_usd,
+     * payoff_ratio, profit_factor, winners_count, losers_count). The wider
+     * intersection type matches what `TradeAndPositionPanel` expects so
+     * the shell can pass through unchanged.
      */
     trade_metrics: (TradeMetrics & Record<string, unknown>) | null;
   };
@@ -384,7 +382,7 @@ export interface StrategyV2Detail {
 }
 
 /**
- * MA-1 / METRICS-15 path-extraction. Replaces the wildcard
+ * Path-extraction projection. Replaces the wildcard
  * `select("*, strategy_analytics (*)")` with explicit column lists so the
  * row payload stays close to what the seven panels actually consume.
  *
@@ -398,7 +396,7 @@ export interface StrategyV2Detail {
  * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
  * alpha/beta/IR/Treynor) drive multiple panels and PostgREST cannot project
  * a JSONB sub-tree without an RPC. Trimming the surrounding scalar/array
- * columns is the bandwidth win the SC#3b p95<50ms contract was waiting on.
+ * columns is the bandwidth win the p95<50ms detail-fetch contract requires.
  */
 const STRATEGY_V2_STRATEGY_COLUMNS =
   "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";
@@ -421,11 +419,11 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
 
   if (error || !strategy) return null;
 
-  // MA-1: the explicit projection above narrows the inferred Supabase row
-  // type to a subset of `Strategy` (panel-relevant columns only). The cast
-  // through `unknown` acknowledges that — we never read fields outside the
-  // projection from this binding. `result.strategy` consumers (page
-  // metadata + shell header) only use id / name / start_date.
+  // The explicit projection above narrows the inferred Supabase row type to a
+  // subset of `Strategy` (panel-relevant columns only). The cast through
+  // `unknown` acknowledges that — we never read fields outside the projection
+  // from this binding. `result.strategy` consumers (page metadata + shell
+  // header) only use id / name / start_date.
   const s = strategy as unknown as Strategy;
 
   // Pitfall 8: do NOT fall back to EMPTY_ANALYTICS. Read the row directly so
@@ -474,13 +472,12 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
       : null,
   };
 
-  // Phase 14b — Panel 4..7 eager-input mappings. Each pulls from the same
-  // analytics blob already fetched above; no additional RPC. The lazy
-  // panels themselves still call fetchStrategyLazyMetrics for heavy series
-  // on intersection (panels 4/5/7) or render purely from these eager inputs
-  // (panel 6). Pitfall 8 mirrored: when computation_status !== 'complete',
-  // every field returns null/empty so the panel-level partial-data banners
-  // trigger correctly.
+  // Panel 4..7 eager-input mappings. Each pulls from the same analytics
+  // blob already fetched above; no additional RPC. The lazy panels
+  // themselves still call fetchStrategyLazyMetrics for heavy series on
+  // intersection (panels 4/5/7) or render purely from these eager inputs
+  // (panel 6). When computation_status !== 'complete', every field returns
+  // null/empty so the panel-level partial-data banners trigger correctly.
   const panel4Inputs = {
     monthly_returns: isComplete ? (a?.monthly_returns ?? null) : null,
     return_quantiles: isComplete ? (a?.return_quantiles ?? null) : null,
@@ -558,15 +555,15 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
 });
 
 /**
- * Phase 12 / Plan 12-08 / METRICS-15 / D-04: Panel IDs accepted by the
- * `fetch_strategy_lazy_metrics` RPC. MUST stay in sync with the SQL `CASE`
- * statement in `supabase/migrations/087_strategy_analytics_series.sql`. Adding
- * a new panel here without a matching SQL CASE branch results in the RPC
- * silently returning `{}` (defense-in-depth: see threat T-12-08-02).
+ * Panel IDs accepted by the `fetch_strategy_lazy_metrics` RPC. MUST stay
+ * in sync with the SQL `CASE` statement in
+ * `supabase/migrations/087_strategy_analytics_series.sql`. Adding a new
+ * panel here without a matching SQL CASE branch results in the RPC
+ * silently returning `{}`.
  *
  * Panel → kinds mapping (per migration 087):
  *   - overview     → []                              (scalars only, no series)
- *   - equity       → [log_returns_series]           (equity_series_1y stays in metrics_json per H-D)
+ *   - equity       → [log_returns_series]           (equity_series_1y stays in metrics_json)
  *   - drawdown     → []                              (scalars only)
  *   - returns_dist → [daily_returns_grid]
  *   - rolling      → [rolling_sortino_3m/6m/12m, rolling_volatility_3m/6m/12m, rolling_alpha, rolling_beta]
@@ -583,25 +580,22 @@ export type LazyMetricsPanelId =
   | "exposure";
 
 /**
- * Phase 12 / Plan 12-08 / METRICS-15 / D-04: Lazy-fetch heavy series for
- * panels 4–7 of the Single-Strategy v2 page. Wraps the
- * `fetch_strategy_lazy_metrics(p_strategy_id, p_panel_id)` SECURITY DEFINER
- * RPC shipped in migration 087.
+ * Lazy-fetch heavy series for panels 4–7 of the Single-Strategy v2 page.
+ * Wraps the `fetch_strategy_lazy_metrics(p_strategy_id, p_panel_id)`
+ * SECURITY DEFINER RPC shipped in migration 087.
  *
  * Returns a `{kind: payload}` map where `kind` is a value of
  * `StrategyAnalyticsSeriesKind` applicable to the requested panel. Returns
  * an empty object `{}` when:
  *   - The panel has no series (overview / drawdown / trades — scalars only)
  *   - The strategy is not visible to the caller (private + not the owner;
- *     RPC returns `{}` rather than an error to avoid leaking existence —
- *     T-12-08-01)
+ *     RPC returns `{}` rather than an error to avoid leaking existence)
  *   - The strategy has no series rows yet (compute_analytics not run)
- *   - The RPC call fails for any reason (defensive fallback; T-12-08-01)
+ *   - The RPC call fails for any reason (defensive fallback)
  *
- * Phase 12 ships only the consumer + type union. Phase 14b actually invokes
- * this from each lazy panel's `useEffect` once the panel mounts via the
- * IntersectionObserver scaffold (KPI-22). Memoization (React Query / SWR /
- * useEffect deps) is the consumer's responsibility — see threat T-12-08-04.
+ * Each lazy panel invokes this from its `useEffect` once the panel mounts
+ * via the IntersectionObserver scaffold. Memoization (React Query / SWR /
+ * useEffect deps) is the consumer's responsibility.
  */
 export async function fetchStrategyLazyMetrics(
   strategyId: string,
@@ -614,9 +608,9 @@ export async function fetchStrategyLazyMetrics(
   });
 
   if (error) {
-    // T-12-08-01: log for developer observability but never propagate the
-    // error to UI. Returning `{}` matches the visibility-miss path so a
-    // caller cannot distinguish "private strategy" from "transient error".
+    // Log for developer observability but never propagate the error to
+    // UI. Returning `{}` matches the visibility-miss path so a caller
+    // cannot distinguish "private strategy" from "transient error".
     console.error("fetchStrategyLazyMetrics RPC error:", {
       strategyId,
       panelId,
@@ -1093,7 +1087,7 @@ export interface MyAllocationDashboardPayload {
    * the MandateQuickSetCard (S2) visibility predicate to hide the
    * card once the user has explicitly saved a mandate.
    *
-   * Derivation (matches UI-SPEC §Interaction Contract):
+   * Derivation:
    *   mandate !== null
    *   && (mandate.max_weight !== null
    *       || (mandate.preferred_strategy_types?.length ?? 0) > 0)
@@ -1942,36 +1936,32 @@ export const getMyAllocationDashboard = cache(
 );
 
 /**
- * Phase 13 / Plan 13-01 / DISCO-01 — getMyWatchlist
+ * Reads the authenticated user's watchlist (`user_favorites` rows) and
+ * returns a Set<strategy_id> for O(1) lookup at the row-render layer.
  *
- * Reads the authenticated user's full watchlist (`user_favorites` rows) and
- * returns a Set<strategy_id> for O(1) lookup at the row-render layer. Used by
- * StrategyTable's leading-column StarToggle to decide filled vs. outline icon
- * state on initial server render (matches starred state on first paint).
+ * Returns `null` on a transient DB / RLS error so the caller can distinguish
+ * "user has nothing starred" from "we failed to read" and surface a banner
+ * (without `null`, a stale-empty-state would silently re-add a starred row
+ * the user already toggled in a previous session).
  *
- * - Schema: migration 024 ships `user_favorites (user_id, strategy_id)` PK,
- *   RLS enforces `auth.uid() = user_id`.
- * - On error or empty data: returns empty Set (read path is non-fatal — a
- *   transient DB error must not break /discovery render).
- *
- * Cross-link: `getMyWatchlist` complements the toggle handler at
- * `src/app/api/watchlist/[strategyId]/route.ts`. Together they implement the
- * full DISCO-01 contract.
+ * Schema: migration 024 ships `user_favorites (user_id, strategy_id)` PK,
+ * RLS enforces `auth.uid() = user_id`.
  */
-export async function getMyWatchlist(userId: string): Promise<Set<string>> {
+export async function getMyWatchlist(
+  userId: string,
+): Promise<Set<string> | null> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("user_favorites")
     .select("strategy_id")
     .eq("user_id", userId);
-  if (error || !data) {
-    if (error) {
-      console.error(
-        "[queries.getMyWatchlist] supabase error:",
-        error.message ?? error,
-      );
-    }
-    return new Set<string>();
+  if (error) {
+    console.error(
+      "[queries.getMyWatchlist] supabase error:",
+      error.message ?? error,
+    );
+    return null;
   }
+  if (!data) return new Set<string>();
   return new Set(data.map((row) => row.strategy_id as string));
 }

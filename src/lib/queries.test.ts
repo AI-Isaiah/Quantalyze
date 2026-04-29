@@ -345,25 +345,26 @@ describe("getMyWatchlist (Plan 13-01 / DISCO-01)", () => {
     };
     const result = await getMyWatchlist(USER_ID);
     expect(result).toBeInstanceOf(Set);
+    if (!result) throw new Error("expected Set, got null");
     expect(result.size).toBe(2);
     expect(result.has("cccccccc-0001-4000-8000-000000000001")).toBe(true);
     expect(result.has("cccccccc-0001-4000-8000-000000000002")).toBe(true);
   });
 
-  it("returns an empty Set when supabase reports an error", async () => {
+  it("returns null when supabase reports an error (so callers can distinguish empty-state from failure)", async () => {
     recorders.favoritesResponse = {
       data: null,
       error: { message: "rls denied" },
     };
     const result = await getMyWatchlist(USER_ID);
-    expect(result).toBeInstanceOf(Set);
-    expect(result.size).toBe(0);
+    expect(result).toBeNull();
   });
 
   it("returns an empty Set when data is an empty array", async () => {
     recorders.favoritesResponse = { data: [], error: null };
     const result = await getMyWatchlist(USER_ID);
-    expect(result.size).toBe(0);
+    expect(result).toBeInstanceOf(Set);
+    expect((result as Set<string>).size).toBe(0);
   });
 
   it("queries user_favorites with select('strategy_id') and eq('user_id', uid)", async () => {

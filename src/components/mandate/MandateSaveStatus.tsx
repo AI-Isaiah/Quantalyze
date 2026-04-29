@@ -16,10 +16,10 @@ interface Props {
 }
 
 /**
- * Form-level aria-live region. Per UI-SPEC (D-16 reinterpretation), the
- * "toast" is an inline region — no floating-toast dependency. The text
- * briefly flashes "Mandate saved" (2s) then reverts to the relative
- * timestamp, preserving the toast UX shape.
+ * Form-level aria-live region. The "toast" is an inline region — no
+ * floating-toast dependency. The text briefly flashes "Mandate saved"
+ * (2s) then reverts to the relative timestamp, preserving the toast UX
+ * shape.
  *
  * The relative timestamp ("Last saved: N min ago") self-refreshes via an
  * internal tick. Without it, React never re-renders on wall-clock advance

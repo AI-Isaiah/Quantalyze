@@ -25,7 +25,7 @@ interface NetGrossExposureChartProps {
 }
 
 /**
- * Phase 14b-05 / KPI-18 — Net & Gross Exposure chart.
+ * Net & Gross Exposure chart.
  *
  * Recharts ComposedChart with two visual layers:
  *   - Gross: filled <Area> at CHART_ACCENT with fillOpacity 0.2 (no stroke).
@@ -36,8 +36,8 @@ interface NetGrossExposureChartProps {
  *
  * Returns null on empty data — caller renders the empty-state banner.
  *
- * Decimal-fraction convention: `gross`/`net` are dimensionless ratios
- * (Phase 12 METRICS-05 / METRICS-06). Y-axis multiplies by 100 for display.
+ * Decimal-fraction convention: `gross`/`net` are dimensionless ratios.
+ * Y-axis multiplies by 100 for display.
  */
 export function NetGrossExposureChart({ data }: NetGrossExposureChartProps) {
   if (!data || data.length === 0) return null;

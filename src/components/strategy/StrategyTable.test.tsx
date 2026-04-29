@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { StrategyTable } from "./StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 
@@ -258,6 +258,94 @@ describe("StrategyTable — Watchlist extension (DISCO-01)", () => {
     expect(screen.getByText("Alpha Stellar")).toBeDefined();
     expect(screen.getByText("Beta Voyager")).toBeDefined();
     expect(screen.getByText("Gamma Pioneer")).toBeDefined();
+  });
+
+  it("Save preferences applies the new hide_examples value to the rendered table immediately", async () => {
+    // Default DEFAULTS.hide_examples=true, so an example strategy is hidden
+    // on first paint. Opening Customize, flipping the toggle off, and
+    // clicking Save must reveal the example row without requiring a reload.
+    const STRATEGIES_WITH_EXAMPLE: StrategyWithAnalytics[] = [
+      makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" }),
+      makeStrategy({ id: STRATEGY_ID_B, name: "Beta Voyager" }),
+      makeStrategy({
+        id: STRATEGY_ID_C,
+        name: "Example Demo Strategy",
+        is_example: true,
+      }),
+    ];
+
+    render(
+      <StrategyTable
+        strategies={STRATEGIES_WITH_EXAMPLE}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+
+    // After hydration the example strategy is hidden (hide_examples=true).
+    await waitFor(() => {
+      expect(screen.queryByText("Example Demo Strategy")).toBeNull();
+    });
+    expect(screen.getByText("Alpha Stellar")).toBeDefined();
+
+    // Open the Customize drawer.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Customize discovery view" }),
+    );
+
+    // Flip the Hide examples toggle OFF and Save.
+    const checkboxes = screen.getAllByRole("checkbox");
+    const hideExamplesCheckbox = checkboxes.find(
+      (el) => (el as HTMLInputElement).checked,
+    );
+    expect(hideExamplesCheckbox).toBeDefined();
+    fireEvent.click(hideExamplesCheckbox!);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save preferences" }));
+
+    // The example strategy is now visible without a reload.
+    await waitFor(() => {
+      expect(screen.getByText("Example Demo Strategy")).toBeDefined();
+    });
+  });
+
+  it("Save preferences applies view-mode change to the rendered table immediately", async () => {
+    // Locks down the second legacy state slot (viewMode) — a regression
+    // dropping setViewMode from handleSavePrefs would be invisible to the
+    // hide_examples test alone.
+    render(
+      <StrategyTable
+        strategies={STRATEGIES}
+        categorySlug="crypto-sma"
+        userId="u-1"
+        initialWatchedSet={new Set()}
+      />,
+    );
+
+    // Default view is "table" → table element is in DOM.
+    await waitFor(() => {
+      expect(document.querySelector("table")).not.toBeNull();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Customize discovery view" }),
+    );
+
+    // Flip the view radio/toggle to grid. CustomizeDrawer renders a "Grid"
+    // option; click whichever button reads "Grid".
+    const gridButton = screen
+      .getAllByRole("button")
+      .find((b) => /^Grid$/i.test(b.textContent ?? ""));
+    expect(gridButton).toBeDefined();
+    fireEvent.click(gridButton!);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save preferences" }));
+
+    // After Save the table element is gone (grid replaces it) without a reload.
+    await waitFor(() => {
+      expect(document.querySelector("table")).toBeNull();
+    });
   });
 });
 

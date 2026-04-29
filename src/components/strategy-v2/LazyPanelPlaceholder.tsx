@@ -11,12 +11,13 @@ interface LazyPanelPlaceholderProps {
 }
 
 /**
- * Phase 14a — placeholder card for Panels 4–7.
+ * Placeholder card for the lazy strategy-detail panels (4–7).
  *
  * Renders the white-card chrome + H2 heading + a centered "Loading…" body
- * (Unicode U+2026 per UI-SPEC §7) inside an `aria-live="polite"` region.
- * The `useLazyPanelMetrics` hook wires an IntersectionObserver that tracks
- * lifecycle but does NOT fetch in 14a — Phase 14b flips `fetchOnIntersect: true`.
+ * (Unicode U+2026) inside an `aria-live="polite"` region. The
+ * `useLazyPanelMetrics` hook wires an IntersectionObserver that tracks
+ * lifecycle. Callers that also need the lazy fetch flip
+ * `fetchOnIntersect: true` and read the `data` field from the hook.
  *
  * Note: project tokens use `bg-surface` for the white card surface
  * (not `bg-card` — see globals.css `--color-surface: #FFFFFF`).

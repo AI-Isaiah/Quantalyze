@@ -4,8 +4,8 @@
  * Allocator-facing exchange connection manager.
  *
  * Lists the allocator's connected read-only exchange API keys, shows sync
- * status via AllocatorSyncStatus (7-state pill + helper line per UI-SPEC
- * D-08), and lets them add new ones. Phase 06 Plan 04 wires:
+ * status via AllocatorSyncStatus (7-state pill + helper line), and lets
+ * them add new ones. Wires:
  *
  *   - Real "Sync now" button that POSTs to /api/allocator/holdings/sync
  *     (INGEST-06 / D-10) with optimistic sync_status='syncing' and

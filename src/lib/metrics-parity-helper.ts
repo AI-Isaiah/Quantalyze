@@ -1,21 +1,23 @@
 /**
- * Phase 12 / METRICS-13: TS-side parity helper.
+ * TS-side parity helper.
  *
- * Per RESEARCH.md §9.3, this is a SCHEMA gate (Reading A), not a math gate.
- * D-01 establishes Python is the single math source. The TS side asserts that
- * the committed expected JSON has the keys the typed contract expects — no key
- * may be missing, no unknown key may be present.
+ * This is a SCHEMA gate, not a math gate. Python is the single math
+ * source; the TS side asserts that the committed expected JSON has the
+ * keys the typed contract expects — no key may be missing, no unknown
+ * key may be present.
  *
- * Math drift is gated by the Python-side parity test (test_metrics_parity.py).
+ * Math drift is gated by the Python-side parity test
+ * (test_metrics_parity.py).
  */
 import type { StrategyAnalyticsSeriesKind } from "./types";
 
 /**
- * H-D from 12-REVIEWS.md: equity_series_1y is INTENTIONALLY excluded from this set.
- * Per D-01, equity_series_1y lives in metrics_json (above-the-fold series), NOT in
- * the strategy_analytics_series sibling table. Phase 14b path-extracts it from
- * metrics_json directly via `metrics_json -> 'equity_series_1y'`, never via
- * fetch_strategy_lazy_metrics RPC.
+ * `equity_series_1y` is INTENTIONALLY excluded from this set: it lives in
+ * `metrics_json` (above-the-fold series), NOT in the
+ * `strategy_analytics_series` sibling table. The strategy-detail v2
+ * loader path-extracts it from `metrics_json` directly via
+ * `metrics_json -> 'equity_series_1y'`, never via the
+ * `fetch_strategy_lazy_metrics` RPC.
  *
  * Set size MUST equal exactly 12 (matches Python's
  * `len(data['sibling']) == 12` invariant in test_metrics_parity_full).
@@ -40,8 +42,7 @@ export const EXPECTED_SIBLING_KINDS: ReadonlySet<StrategyAnalyticsSeriesKind> = 
  *
  * Includes:
  * - The 10 base keys from `reconstruct_positions` output.
- * - Phase 12 / D-13 + H-F derived metrics (7 — METRICS-07 7th metric is
- *   `weighted_risk_reward_ratio`).
+ * - Derived metrics (7 — the 7th is `weighted_risk_reward_ratio`).
  * - Plan 12-05 reconstruct_positions extension keys (B-01 path-b inputs).
  * - Plan 12-06 merges of `_compute_volume_metrics` + `_compute_volume_aggregator`
  *   output keys directly into trade_metrics.
@@ -62,7 +63,7 @@ export const FROZEN_TRADE_METRICS_KEYS: ReadonlyArray<string> = [
   "short_count",
   "best_trade_roi",
   "worst_trade_roi",
-  // Phase 12 / D-13 + H-F derived (METRICS-07 7th metric: weighted_risk_reward_ratio)
+  // Derived metrics (7th: weighted_risk_reward_ratio)
   "expectancy",
   "risk_reward_ratio",
   "weighted_risk_reward_ratio",

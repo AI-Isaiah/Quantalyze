@@ -11,8 +11,8 @@ interface TradeAndPositionPanelProps {
   /**
    * From getStrategyDetailV2 — the trade_metrics JSONB blob may carry
    * volume-aggregator extras beyond the frozen TradeMetrics interface
-   * (Phase 12 Plan 12-05 SUMMARY merges {gross/mean/daily/monthly}_volume_usd
-   * etc. into the same blob at orchestrator level).
+   * ({gross/mean/daily/monthly}_volume_usd etc. are merged into the same
+   * blob at the orchestrator level).
    */
   trade_metrics: (TradeMetrics & Record<string, unknown>) | null;
 }
@@ -64,30 +64,29 @@ function fmtCount(v: number | null | undefined): string | null {
 }
 
 /**
- * Phase 14b-04 / KPI-12+13+14+15+16+17(2-bucket)+23b — Panel 6 wrapper.
+ * Trades & positions panel wrapper.
  *
  * Mounts a 4-row metric strip (Trade Summary / Position Summary /
- * Risk-Reward + SQN / Volume) and a 2-bucket Trade Mix sub-panel inside the
- * 14a panel chrome. Reads from the EAGER analytics blob's `trade_metrics`
- * field (Phase 12 METRICS-07 / METRICS-08 / METRICS-09 shipped derived
- * metrics into `strategy_analytics.trade_metrics` JSONB).
+ * Risk-Reward + SQN / Volume) and a 2-bucket Trade Mix sub-panel. Reads
+ * from the EAGER analytics blob's `trade_metrics` field — derived metrics
+ * are persisted in `strategy_analytics.trade_metrics` JSONB.
  *
- * Grok B-04: panel6 maps to 'trades' which migration 087 returns as
- * ARRAY[]::TEXT[] (no sibling kinds). All Panel-6 data lives on the eager
- * analytics blob (props.trade_metrics). Firing the lazy fetch creates an
- * opportunity for transient RPC errors to mask valid eager data with no
- * upside (lazy payload is always {}). The opts.fetchOnIntersect=false flag
- * (see hook call below) makes the hook only track intersection lifecycle
- * (idle → ready) without firing a fetch — keyboard,
- * chart-parity, and partial-data tests still see `data-panel-status="ready"`
- * once the section scrolls into view, but no network call is made.
+ * The trades panel maps to a kinds row that returns ARRAY[]::TEXT[] (no
+ * sibling kinds). All panel data lives on the eager analytics blob
+ * (props.trade_metrics). Firing the lazy fetch creates an opportunity for
+ * transient RPC errors to mask valid eager data with no upside (lazy
+ * payload is always {}). The opts.fetchOnIntersect=false flag (see hook
+ * call below) makes the hook only track intersection lifecycle
+ * (idle → ready) without firing a fetch — keyboard, chart-parity, and
+ * partial-data tests still see `data-panel-status="ready"` once the
+ * section scrolls into view, but no network call is made.
  *
  * Eager partial-data gate looks at props.trade_metrics ONLY — independent
  * of `status` so a transient lazy lifecycle hiccup cannot hide valid data.
  *
- * KPI-17 partial: 2-bucket Trade Mix only. The 4-bucket maker/taker
- * dimension is descoped to v0.17.1 (gated on `is_maker` ingestion fix in
- * analytics-service/services/exchange.py for Binance/OKX/Bybit).
+ * Trade Mix is rendered as 2-bucket only. The 4-bucket maker/taker
+ * dimension is gated on the `is_maker` ingestion fix in
+ * analytics-service/services/exchange.py for Binance/OKX/Bybit.
  */
 export function TradeAndPositionPanel({
   strategyId,
@@ -136,8 +135,8 @@ function Body({
 }: {
   trade_metrics: TradeMetrics & Record<string, unknown>;
 }) {
-  // Volume aggregator extras (Phase 12 Plan 12-05 SUMMARY) live as JSONB extras
-  // on the trade_metrics blob. Read defensively.
+  // Volume aggregator extras live as JSONB extras on the trade_metrics
+  // blob. Read defensively.
   const grossVolume = tm["gross_volume_usd"] as number | null | undefined;
   const meanTradeSize = tm["mean_trade_size_usd"] as number | null | undefined;
   const dailyTurnover = tm["daily_turnover_usd"] as number | null | undefined;
@@ -220,7 +219,7 @@ function Body({
         </Grid>
       </Section>
 
-      {/* Trade Mix sub-panel (KPI-17 partial — 2-bucket only; v0.17.1 flips 4-bucket) */}
+      {/* Trade Mix sub-panel (2-bucket only; 4-bucket gated on is_maker ingestion fix) */}
       <TradeMixSubPanel buckets={tm.trade_mix} mode="2-bucket" />
     </div>
   );

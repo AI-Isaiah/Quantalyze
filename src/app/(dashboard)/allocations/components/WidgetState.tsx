@@ -23,14 +23,14 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * widgets are wrapped in this phase regardless; the rest opt in via
  * the flag, isolating blast radius.
  *
- * Mode dispatch (UI-SPEC §S3 LOCKED):
+ * Mode dispatch (locked contract):
  *   - mode='loading' → Card with `aria-busy="true"` + animate-pulse
  *                      skeleton lines.
  *   - mode='empty'   → Card with centered text + optional title +
  *                      description + accent CTA (caller-supplied).
  *   - mode='partial' → children + DUAL ARIA pill: visible
  *                      `aria-hidden="true"` chip + sibling `sr-only`
- *                      announcement (UI-SPEC AC #16).
+ *                      announcement.
  *   - mode='error'   → Card with `role="alert" aria-live="polite"`,
  *                      negative-tinted chrome, optional Retry button.
  *   - mode='success' → bare children. NO Card chrome.

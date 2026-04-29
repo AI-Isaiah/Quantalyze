@@ -1,20 +1,19 @@
 "use client";
 
 /**
- * Phase 08 Plan 04 Task 3 — StrategyNoteCard (MANAGE-05 strategy scope).
+ * StrategyNoteCard — strategy-scoped private note card.
  *
  * Full-width card on the /strategy/[id] factsheet, sandwiched between
- * the sparkline card and the CTA card (UI-SPEC §4d). Consumes the three
- * shared Plan 03 primitives (NoteRender + useNoteAutoSave + NoteSaveStatus).
+ * the sparkline card and the CTA card. Consumes the three shared note
+ * primitives (NoteRender + useNoteAutoSave + NoteSaveStatus).
  *
  * scope_kind = "strategy"; scope_ref = strategyId (strategies.id UUID).
- * Per Research Finding #3 the ownership predicate is
- * strategies.status = 'published' — ANY authenticated allocator can
- * annotate any published strategy. RLS on user_notes enforces
- * per-allocator privacy.
+ * The ownership predicate is strategies.status = 'published' — ANY
+ * authenticated allocator can annotate any published strategy. RLS on
+ * user_notes enforces per-allocator privacy.
  *
- * The S2 contract still applies: no unmount flush. If a future
- * navigation path closes the page before blur, the draft is lost.
+ * No unmount flush: if a future navigation path closes the page before
+ * blur, the draft is lost.
  */
 
 import { useState } from "react";

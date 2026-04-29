@@ -12,14 +12,13 @@ interface ReturnQuantilesProps {
 }
 
 /**
- * Phase 14b / KPI-06 — Return Quantiles box plot for Panel 4.
+ * Return Quantiles box plot for the Returns Distribution panel.
  *
- * DESIGN-01 identity audit (14b-02):
- *   - Box stroke + fill + median line: CHART_ACCENT (#1B6B5A) — replaced legacy teal
- *   - Whisker strokes: CHART_TEXT_MUTED (#94A3B8) — strokes (not text fills)
- *     so A11Y-01 forbidden-as-text rule does NOT apply per UI-SPEC §5
- *   - Y-axis tick text: fontFamily={CHART_FONT_MONO} (was literal "'JetBrains Mono', monospace")
- *   - All axis text fill: CHART_AXIS_TICK token
+ * Identity tokens:
+ *   - Box stroke + fill + median line: CHART_ACCENT (#1B6B5A)
+ *   - Whisker strokes: CHART_TEXT_MUTED (#94A3B8) — strokes, not text
+ *     fills, so the muted-as-text accessibility rule does not apply
+ *   - Y-axis tick text uses CHART_FONT_MONO and CHART_AXIS_TICK fill
  */
 export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
   const periods = Object.keys(data);
@@ -72,7 +71,7 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
 
         return (
           <g key={period}>
-            {/* Whisker (strokes — not text fill, A11Y-01 does not apply) */}
+            {/* Whisker (strokes, not text fill) */}
             <line x1={cx} x2={cx} y1={yScale(q0)} y2={yScale(q100)} stroke={CHART_TEXT_MUTED} strokeWidth={1} />
             <line x1={cx - halfBox / 2} x2={cx + halfBox / 2} y1={yScale(q0)} y2={yScale(q0)} stroke={CHART_TEXT_MUTED} strokeWidth={1} />
             <line x1={cx - halfBox / 2} x2={cx + halfBox / 2} y1={yScale(q100)} y2={yScale(q100)} stroke={CHART_TEXT_MUTED} strokeWidth={1} />

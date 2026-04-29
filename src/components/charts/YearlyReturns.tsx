@@ -8,12 +8,11 @@ interface YearlyReturnsProps {
 }
 
 /**
- * Phase 14b / KPI-06 — Yearly Returns bar chart for Panel 4.
+ * Yearly Returns bar chart for the Returns Distribution panel.
  *
- * DESIGN-01 identity audit (14b-02):
- *   - Positive bars: #16A34A (replaced legacy emerald-600)
- *   - Axis ticks: spread CHART_TICK_STYLE (was inline { fontSize, fill, fontFamily } literals)
- *   - Tooltip border + axis line: CHART_BORDER token (was literal "#E2E8F0")
+ * Identity tokens: positive bars use CHART_POSITIVE / negative use
+ * CHART_NEGATIVE; axis ticks spread CHART_TICK_STYLE; tooltip border +
+ * axis line use the CHART_BORDER token.
  */
 export function YearlyReturns({ monthlyReturns }: YearlyReturnsProps) {
   if (!monthlyReturns) return null;

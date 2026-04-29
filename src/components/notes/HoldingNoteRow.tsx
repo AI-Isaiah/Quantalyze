@@ -1,23 +1,21 @@
 "use client";
 
 /**
- * Phase 08 Plan 04 Task 1 — HoldingNoteRow + HoldingNoteIconButton
- * (MANAGE-05 holding scope).
+ * HoldingNoteRow + HoldingNoteIconButton (holding-scope notes).
  *
- * Glue code between the Plan 02 HoldingsTable (trailing placeholder column
- * reserved for this icon) and the Plan 03 shared notes primitives
- * (NoteRender + useNoteAutoSave + NoteSaveStatus).
+ * Glue code between HoldingsTable (trailing placeholder column reserved for
+ * this icon) and the shared notes primitives (NoteRender + useNoteAutoSave +
+ * NoteSaveStatus).
  *
- * Icon states (UI-SPEC §3):
+ * Icon states:
  *   hasNote=false, revoked=false → outlined glyph, text-text-muted
  *   hasNote=true,  revoked=false → solid glyph,    text-accent
  *   hasNote=true,  revoked=true  → solid glyph,    color-warning #D97706
  *   hasNote=false, revoked=true  → outlined glyph, color-warning #D97706
  *
- * Sub-row (UI-SPEC §4b): a full-width <tr> with a single colSpan-ed <td>
- * hosting the editing/read toggle. Per the S2 no-unmount-flush contract
- * shipped in Plan 03, consumers rely on textarea blur (not unmount) to
- * persist — same shape as NotesWidget.
+ * Sub-row: a full-width <tr> with a single colSpan-ed <td> hosting the
+ * editing/read toggle. Per the no-unmount-flush contract, consumers rely on
+ * textarea blur (not unmount) to persist — same shape as NotesWidget.
  */
 
 import { useEffect, useState } from "react";
@@ -29,10 +27,10 @@ import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 // ---------------------------------------------------------------- icon glyph
 
 /**
- * 16×16 inline document-note SVG per UI-SPEC §3. The outlined variant uses
- * currentColor strokes on a transparent fill; the solid variant uses
- * currentColor fill with white interior lines so the horizontal rules stay
- * readable against the filled rectangle.
+ * 16×16 inline document-note SVG. The outlined variant uses currentColor
+ * strokes on a transparent fill; the solid variant uses currentColor fill
+ * with white interior lines so the horizontal rules stay readable against
+ * the filled rectangle.
  */
 function NoteIconSvg({ solid }: { solid: boolean }) {
   if (solid) {
@@ -90,9 +88,9 @@ export interface HoldingNoteIconButtonProps {
 
 export function HoldingNoteIconButton(props: HoldingNoteIconButtonProps) {
   // Revoked rows override the default accent-vs-muted palette with the
-  // UI-SPEC §2 amber warning hex. Non-revoked rows use accent when a note
-  // exists, muted when empty. We encode the amber directly in the class
-  // string so Tailwind's arbitrary-value pipeline emits the rule.
+  // amber warning hex. Non-revoked rows use accent when a note exists,
+  // muted when empty. We encode the amber directly in the class string so
+  // Tailwind's arbitrary-value pipeline emits the rule.
   const colorClass = props.revoked
     ? "text-[#D97706]"
     : props.hasNote
@@ -134,16 +132,14 @@ export function HoldingNoteRow(props: HoldingNoteRowProps) {
     holding_type: props.holding_type,
   });
 
-  // Phase 08 Plan 05 — lazy GET on mount, mirroring
-  // BridgeOutcomeNoteSection's pattern. Closes VERIFICATION gaps[0]
-  // (IN-04 / MANAGE-05 holding-scope read-back).
+  // Lazy GET on mount, mirroring BridgeOutcomeNoteSection's pattern for
+  // holding-scope read-back.
   //
-  // HoldingsTable does not server-side-prefetch holding-scope notes
-  // (that would widen getMyAllocationDashboard — deferred to Phase 11+
-  // per D-24). Instead the row fetches its own note when the sub-row
-  // mounts. Only one sub-row is open at a time so the cost is a single
-  // round-trip per open, which is acceptable for the low-frequency
-  // note-open UX.
+  // HoldingsTable does not server-side-prefetch holding-scope notes (that
+  // would widen getMyAllocationDashboard — deferred). Instead the row
+  // fetches its own note when the sub-row mounts. Only one sub-row is open
+  // at a time so the cost is a single round-trip per open, which is
+  // acceptable for the low-frequency note-open UX.
   const [content, setContent] = useState("");
   const [draft, setDraft] = useState("");
   const [initialLoaded, setInitialLoaded] = useState(false);

@@ -17,8 +17,7 @@ import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
  * `var(--font-serif)` on the heading, design-token spacing, no behavior
  * change. Phase 10 replaces the body with the Scenario composer.
  *
- * Copy strings are preserved from 07-UI-SPEC.md §Copywriting. Do not
- * modify without a design review.
+ * Copy strings are locked. Do not modify without a design review.
  */
 export interface ScenarioStubProps {
   /** Phase 09. When non-empty, replaces the stub card with the flagged list. */

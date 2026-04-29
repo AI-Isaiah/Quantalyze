@@ -4,28 +4,25 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 
 /**
- * Phase 11 / S6 / D-05 — Authenticated audit-log download subsection on
+ * Authenticated audit-log download subsection on
  * `/profile?tab=security`.
  *
- * Calls GET /api/me/audit-log/export (Plan 11-02 route handler) which
- * returns text/csv with `Content-Disposition: attachment; filename=…`.
- * The browser-download trigger is implemented client-side via a
- * Blob URL + transient `<a download>` element so we can present an
- * inline error UI on 4xx/5xx without losing the click context — a plain
- * anchor href would surface 401/500 as a navigation error, which is
- * worse UX than the S3-style inline retry.
+ * Calls GET /api/me/audit-log/export which returns text/csv with
+ * `Content-Disposition: attachment; filename=…`. The browser-download
+ * trigger is implemented client-side via a Blob URL + transient
+ * `<a download>` element so we can present an inline error UI on 4xx/5xx
+ * without losing the click context — a plain anchor href would surface
+ * 401/500 as a navigation error, which is worse UX than the inline retry.
  *
- * UI-SPEC §S6 LOCKED contract:
+ * Locked copy contract:
  *   - Heading verbatim "Audit log"
- *   - Description verbatim
  *   - Primary CTA verbatim "Download CSV (last 90 days)" with
  *     aria-label "Download audit log CSV for the last 90 days"
- *   - Caption verbatim
- *   - On 4xx/5xx: S3 error shape (inline alert + Retry click that
- *     re-triggers the same fetch)
+ *   - On 4xx/5xx: inline alert + Retry click that re-triggers the same
+ *     fetch.
  *
- * Loading copy is at planner discretion (UI-SPEC §S6) — using
- * "Preparing…" matches the existing project button-loading idiom.
+ * "Preparing…" loading copy matches the existing project button-loading
+ * idiom.
  */
 export function AuditLogSubsection() {
   const [downloading, setDownloading] = useState(false);

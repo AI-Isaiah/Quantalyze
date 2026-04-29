@@ -14,7 +14,7 @@ interface StrategyV2ShellProps {
 }
 
 /**
- * Phase 14a + 14b — Single-Strategy v2 page shell.
+ * Single-Strategy v2 page shell.
  *
  * Server component. Renders the full 7-panel scrollable layout:
  *   - Page header (H1 = strategy name in Instrument Serif 32px;
@@ -28,14 +28,13 @@ interface StrategyV2ShellProps {
  *   - Panel 7 Exposure & benchmark greeks (lazy body)
  *   - Strategy disclaimer footer
  *
- * Layout follows UI-SPEC §4: max-w-[1200px] container, px-6 py-12, panels
- * spaced via mt-8 (32px) on each section. The 7-panel hard count is asserted
- * by `tests/visual/strategy-v2-panel-count.test.tsx` (Plan 14a-05) AND
- * `src/components/strategy-v2/StrategyV2Shell.test.tsx` (Plan 14b-06).
+ * Layout: max-w-[1200px] container, px-6 py-12, panels spaced via mt-8 (32px)
+ * on each section. The 7-panel hard count is asserted by
+ * `tests/visual/strategy-v2-panel-count.test.tsx` AND
+ * `src/components/strategy-v2/StrategyV2Shell.test.tsx`.
  *
- * Wave-3 wiring: Plan 14b-06 replaced the four 14a placeholder slots with
- * the real Wave-2 panel bodies. The lazy components manage their own
- * IntersectionObserver lifecycle internally via `useLazyPanelMetrics`.
+ * The lazy components manage their own IntersectionObserver lifecycle
+ * internally via `useLazyPanelMetrics`.
  */
 export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
   const {

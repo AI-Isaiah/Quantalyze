@@ -25,7 +25,7 @@ export const CHART_POSITIVE = "#16A34A"; // = --color-positive
 export const CHART_NEGATIVE = "#DC2626"; // = --color-negative
 export const CHART_NEUTRAL = "#FFFFFF"; // neutral / zero cell
 
-/** Shared Recharts Tooltip contentStyle — identical across all Sprint 3 widgets. */
+/** Shared Recharts Tooltip contentStyle — identical across all chart widgets. */
 export const CHART_TOOLTIP_STYLE = {
   fontSize: 12,
   fontFamily: CHART_FONT_MONO,
@@ -38,9 +38,8 @@ export const CHART_TOOLTIP_STYLE = {
  * parent CSS class. Spread this object directly on <XAxis tick={...}> /
  * <YAxis tick={...}> so chart axis ticks render in tabular-nums.
  *
- * Pitfall 14 mitigation. Centralized fix for DESIGN-02. fontSize: 12 matches
- * the v2 caption tier (DESIGN.md 12px caption) — well within WCAG AA at
- * #64748B on #FFFFFF (4.85:1).
+ * fontSize: 12 matches the v2 caption tier (DESIGN.md 12px caption) —
+ * well within WCAG AA at #64748B on #FFFFFF (4.85:1).
  */
 export const CHART_TICK_STYLE = {
   fontFamily: CHART_FONT_MONO,

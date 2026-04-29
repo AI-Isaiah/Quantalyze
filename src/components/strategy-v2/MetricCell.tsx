@@ -6,15 +6,14 @@ interface MetricCellProps {
 }
 
 /**
- * Phase 14b-04 — Shared metric-cell primitive used in Panel 6 (4 metric rows)
- * and Panel 7 (Benchmark Greeks table). Pattern:
+ * Shared metric-cell primitive used in Panel 6 (4 metric rows) and Panel 7
+ * (Benchmark Greeks table). Pattern:
  *   - 12px DM Sans regular text-text-muted label
  *   - 18px Geist Mono semibold tabular-nums value
  *   - Em-dash (U+2014) for null
  *   - text-negative when `negative=true`
  *
- * Wrapped in <dl>/<dt>/<dd> for the project A11Y semantic-HTML rule
- * (UI-SPEC §3.3 / DESIGN.md identity).
+ * Wrapped in <dl>/<dt>/<dd> for the project A11Y semantic-HTML rule.
  */
 export function MetricCell({ label, value, negative }: MetricCellProps) {
   return (

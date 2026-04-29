@@ -10,7 +10,7 @@ import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
 /**
  * Phase 11 / 11-05 / S2 / ONBOARD-02 — Mandate quick-set card.
  *
- * Visibility predicate (UI-SPEC §Interaction Contract — parent gates):
+ * Visibility predicate (parent gates):
  *   visible = (apiKeysCount === 0)
  *           && (mandateIsSet === false)
  *           && !sessionStorage["allocations.mandate_card_dismissed"]

@@ -20,10 +20,10 @@ export async function generateMetadata({
 }
 
 /**
- * Phase 14b-07 / A11Y-03 — Skip-link mechanism for the 7-panel scroll.
+ * Skip-link mechanism for the 7-panel scroll.
  *
  * Renders OUTSIDE <StrategyV2Shell> so the links appear at the very top of
- * the route's tab order (per UI-SPEC §7.2). Each link targets the matching
+ * the route's tab order. Each link targets the matching
  * `<section data-panel id="panel-{key}">` element rendered inside the shell.
  * The CSS in `globals.css` (.strategy-v2-skip-link) keeps them visually
  * hidden until they receive keyboard focus.

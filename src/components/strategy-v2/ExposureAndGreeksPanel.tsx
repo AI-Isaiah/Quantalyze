@@ -41,12 +41,12 @@ interface Panel7LazyPayload {
 }
 
 /**
- * Phase 14b-05 / KPI-18+19+20+21+23b — Panel 7 Exposure & benchmark greeks.
+ * Panel 7 Exposure & benchmark greeks.
  *
- * Lazy-fetches `panel7` → `exposure` (migration 087 sibling-table contract,
- * verified Grok B-03 — line 174 maps to ARRAY['exposure_series',
- * 'turnover_series']) on first viewport intersection. Mounts 4 stacked
- * sub-sections when status==='ready' and history_days >= 30:
+ * Lazy-fetches `panel7` → `exposure` (migration 087 sibling-table contract;
+ * line 174 maps to ARRAY['exposure_series', 'turnover_series']) on first
+ * viewport intersection. Mounts 4 stacked sub-sections when status==='ready'
+ * and history_days >= 30:
  *
  *   1. Net & gross exposure — NetGrossExposureChart (lazy `exposure_series`)
  *   2. Turnover            — TurnoverChart (lazy `turnover_series`)
@@ -55,13 +55,11 @@ interface Panel7LazyPayload {
  *   4. Benchmark greeks    — BenchmarkGreeksTable (eager scalars from
  *      `metrics_json`: alpha / beta / IR / Treynor)
  *
- * Partial-data thresholds (UI-SPEC §4.3):
+ * Partial-data thresholds:
  *   - Panel-level: history_days < 30 → PartialDataBanner replaces all 4 sub-sections
  *   - Sub Net&Gross: empty exposure_series → SubBanner only
  *   - Sub Turnover:  empty turnover_series → SubBanner only
  *   - Sub Correlation: <90 day banner is internal to CorrelationWithBenchmark
- *
- * NOT yet mounted in StrategyV2Shell — that wiring lands in 14b-06.
  */
 export function ExposureAndGreeksPanel({
   strategyId,

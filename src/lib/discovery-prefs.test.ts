@@ -128,6 +128,55 @@ describe("discovery-prefs: safeRead", () => {
     store.set(keyFor(UID_A, SLUG), "not-json{");
     expect(safeRead(UID_A, SLUG)).toEqual(DEFAULTS);
   });
+
+  it("accepts a legacy unversioned shape and returns it merged with DEFAULTS", () => {
+    // Legacy data persisted before versioning landed.
+    store.set(
+      keyFor(UID_A, SLUG),
+      JSON.stringify({
+        view: "grid",
+        sort: { key: "cagr", dir: "asc" },
+        hide_examples: false,
+      }),
+    );
+    expect(safeRead(UID_A, SLUG)).toEqual({
+      view: "grid",
+      sort: { key: "cagr", dir: "asc" },
+      hide_examples: false,
+    });
+  });
+
+  it("accepts a v1 shape verbatim", () => {
+    store.set(
+      keyFor(UID_A, SLUG),
+      JSON.stringify({
+        version: 1,
+        view: "grid",
+        sort: { key: "sharpe", dir: "desc" },
+        hide_examples: false,
+      }),
+    );
+    expect(safeRead(UID_A, SLUG)).toEqual({
+      view: "grid",
+      sort: { key: "sharpe", dir: "desc" },
+      hide_examples: false,
+    });
+  });
+
+  it("rejects a future-version shape and returns DEFAULTS (forward compat)", () => {
+    // A user who briefly used a future build would have v2 data; stable
+    // builds must not silently coerce it (could mis-cast renamed fields).
+    store.set(
+      keyFor(UID_A, SLUG),
+      JSON.stringify({
+        version: 2,
+        view: "grid",
+        sort: { key: "sharpe", dir: "desc" },
+        hide_examples: false,
+      }),
+    );
+    expect(safeRead(UID_A, SLUG)).toEqual(DEFAULTS);
+  });
 });
 
 describe("discovery-prefs: useDiscoveryPrefs", () => {
@@ -180,7 +229,9 @@ describe("discovery-prefs: useDiscoveryPrefs", () => {
     });
     const [k, v] = setItemSpy.mock.calls[setItemSpy.mock.calls.length - 1];
     expect(k).toBe(`discovery_view_preferences:${UID_A}:${SLUG}`);
-    expect(JSON.parse(v as string)).toEqual(next);
+    // Persisted shape carries `version: 1` so a future schema bump can
+    // detect-and-reject stale stored data instead of silently coercing it.
+    expect(JSON.parse(v as string)).toEqual({ ...next, version: 1 });
   });
 
   it("two different uids produce two different localStorage keys (isolation)", async () => {

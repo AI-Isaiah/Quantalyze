@@ -76,8 +76,8 @@ const RiskTabPanel = dynamic(
 
 // Phase 10 / 10-06b — full Scenario tab body. L4: dynamic() lives at MODULE
 // scope so re-renders don't re-create the dynamic component. The loading
-// skeleton mirrors the KpiStrip + chart skeleton states from UI-SPEC States
-// Matrix to avoid a "blank → composer" flash on tab activation. The composer
+// skeleton mirrors the KpiStrip + chart skeleton shapes to avoid a
+// "blank → composer" flash on tab activation. The composer
 // pulls in chart + drawer dependencies that the Overview tab never needs;
 // keeping it dynamic keeps the Overview-first bundle small.
 const ScenarioComposer = dynamic(
@@ -336,7 +336,7 @@ export function AllocationsTabs(props: MyAllocationDashboardPayload) {
   //     mandate is not yet set (D-04). The card respects its own
   //     sessionStorage Skip flag post-mount.
   // Both surfaces live ABOVE the existing tab nav and do NOT touch tab
-  // content — purely additive (UI-SPEC §Interaction Contract).
+  // content — purely additive.
   const showOnboardingBanner = props.apiKeysCount === 0;
   const showMandateQuickSet =
     props.apiKeysCount === 0 && !props.mandateIsSet;

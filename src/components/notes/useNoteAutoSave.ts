@@ -1,11 +1,9 @@
 "use client";
 
 /**
- * Phase 08 Plan 03 — useNoteAutoSave.
- *
- * Shared on-blur autosave hook for all 4 note scopes (portfolio / holding /
- * bridge_outcome / strategy). Cloned from useMandateAutoSave with three
- * simplifications matching UI-SPEC §6:
+ * useNoteAutoSave — shared on-blur autosave hook for all 4 note scopes
+ * (portfolio / holding / bridge_outcome / strategy). Cloned from
+ * useMandateAutoSave with three simplifications:
  *
  *   1. No per-field fieldErrors map — single content field per hook instance.
  *   2. No 429 Retry-After handling — /api/notes has no rate limiter.

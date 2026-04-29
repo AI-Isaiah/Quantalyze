@@ -13,7 +13,7 @@ export type LazyPanelId = "panel4" | "panel5" | "panel6" | "panel7";
  * LazyPanelId without extending this map produces a type error — that is
  * intentional. `"equity"` is intentionally NOT in this map: panel 2 is
  * eager-mounted and `HeadlineMetricsPanel` calls `fetchStrategyLazyMetrics`
- * directly with `"equity"` (see Plan 14b-06 Task 3 / Grok B-03).
+ * directly with `"equity"`.
  *
  * The `as const` annotation pins the literal value union without forcing a
  * static `import { LazyMetricsPanelId } from "@/lib/queries"` — that import
@@ -34,10 +34,10 @@ export interface UseLazyPanelMetricsOptions {
   /** rootMargin for the IntersectionObserver. Defaults to "200px" (pre-mount before user reaches panel). */
   rootMargin?: string;
   /**
-   * Phase 14b: when `true`, fires `fetchStrategyLazyMetrics` on first
-   * intersection and exposes the resolved payload via `data`. Phase 14a
-   * left this `false` so the hook only managed the placeholder lifecycle.
-   * When `true`, `strategyId` is REQUIRED — a runtime guard logs a
+   * When `true`, fires `fetchStrategyLazyMetrics` on first intersection
+   * and exposes the resolved payload via `data`. When `false`, the hook
+   * only manages the placeholder lifecycle without firing a fetch. When
+   * `true`, `strategyId` is REQUIRED — a runtime guard logs a
    * `console.error` and the hook stays in `idle` if it is omitted.
    */
   fetchOnIntersect?: boolean;
@@ -46,19 +46,17 @@ export interface UseLazyPanelMetricsOptions {
 }
 
 /**
- * Phase 14a / KPI-22 + Phase 14b / KPI-07 — IntersectionObserver scaffold for
- * panels 4–7.
+ * IntersectionObserver scaffold for the lazy strategy-detail panels (4–7).
  *
  * Lifecycle: `idle` (initial) → on first intersection emit `loading` (only
  * when `fetchOnIntersect=true`), call `fetchStrategyLazyMetrics(strategyId,
  * PANEL_TO_ID[panelId])`, then transition to `ready` (data populated) or
  * `error` (data stays null, console.error logged with structured metadata).
- * When `fetchOnIntersect=false` (Phase 14a placeholders) the hook skips the
- * fetch and emits `ready` immediately on first intersection — preserving
- * the 14a `<LazyPanelPlaceholder>` semantics verbatim.
+ * When `fetchOnIntersect=false` (placeholder lifecycle only) the hook
+ * skips the fetch and emits `ready` immediately on first intersection.
  *
  * Observer cleanup runs on unmount via the existing useEffect cleanup
- * (Grok I-01 — prevents observer leak across rapid navigation).
+ * to prevent observer leaks across rapid navigation.
  *
  * SSR-safe: short-circuits when `typeof IntersectionObserver === "undefined"`
  * (server, or tests without the stub at `src/test-setup.ts`).
@@ -80,13 +78,12 @@ export function useLazyPanelMetrics<T = unknown>(
   const optsRef = useRef(opts);
   optsRef.current = opts;
 
-  // F2 (v0.17.1): mount guard for the fetch race. The IntersectionObserver
-  // unobserve-on-first-fire prevents repeat fetches, but in-flight promises
-  // still resolve after unmount or after a route reconciliation reuses this
-  // hook instance for a different strategyId (StrategyV2Shell renders panels
-  // without a key={strategyId}, so /strategy/abc/v2 → /strategy/xyz/v2 keeps
-  // the same hook instance with new props). Without this guard, abc's late
-  // payload would call setData on the instance now bound to xyz.
+  // Mount guard for the fetch race. The IntersectionObserver
+  // unobserve-on-first-fire prevents repeat fetches, but in-flight
+  // promises still resolve after unmount or after a route reconciliation
+  // reuses this hook instance for a different strategyId. Without this
+  // guard, the original strategy's late payload would setData on the
+  // instance now bound to a different strategyId.
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -98,16 +95,13 @@ export function useLazyPanelMetrics<T = unknown>(
     };
   }, []);
 
-  // Adversarial fix (v0.17.1 follow-up): monotonic version counter. Bare
-  // strategyId-equality misses the A→B→A flip race — when the user
-  // navigates back to the original strategyId before the first fetch
-  // resolves, the captured strategyId again matches optsRef.current and
-  // the stale payload would clobber state. Bumping versionRef on every
-  // strategyId change and gating .then/.catch on a version match catches
-  // this. With panel keying (the F2 follow-up commits) the same hook
-  // instance shouldn't see strategyId churn in production, but this is
-  // defense-in-depth for any future panel that forgets the key prop.
-  // Cross-model adversarial review (Claude conf 7 + Grok 4.20 P1).
+  // Monotonic version counter. Bare strategyId-equality misses the
+  // A→B→A flip race — when the user navigates back to the original
+  // strategyId before the first fetch resolves, the captured strategyId
+  // again matches optsRef.current and the stale payload would clobber
+  // state. Bumping versionRef on every strategyId change and gating
+  // .then/.catch on a version match catches this. Defense-in-depth for
+  // any panel that forgets a `key={strategyId}` on its parent.
   const versionRef = useRef(0);
   useEffect(() => {
     versionRef.current += 1;
@@ -134,7 +128,7 @@ export function useLazyPanelMetrics<T = unknown>(
 
           const currentOpts = optsRef.current;
           if (!currentOpts.fetchOnIntersect) {
-            // Phase 14a placeholder semantics — no fetch, just lifecycle.
+            // Placeholder semantics — no fetch, just lifecycle.
             setStatus("ready");
             return;
           }
@@ -154,16 +148,13 @@ export function useLazyPanelMetrics<T = unknown>(
           // imported here (statically OR dynamically) because it transitively
           // pulls in `next/headers` + `import "server-only"` via
           // `@/lib/supabase/admin`, which Turbopack rejects when the module
-          // is reachable from a Client Component graph (Plan 14b-01 Rule 3
-          // deviation — see SUMMARY.md).
+          // is reachable from a Client Component graph.
           const strategyId = currentOpts.strategyId;
-          // F2 + adversarial follow-up — keep the .then/.catch guards in
-          // lockstep. The version match (versionRef bumps on every strategyId
-          // change via the useEffect above) is strictly stronger than the
-          // bare strategyId equality the original F2 fix used: it catches
-          // both the cross-strategy reuse race AND the A→B→A flip race
-          // where the user cycles back to the original strategyId before
-          // the first fetch resolves. The strategyId capture is retained
+          // Keep the .then/.catch guards in lockstep. versionRef matching
+          // is strictly stronger than bare strategyId equality: it catches
+          // both the cross-strategy hook-instance reuse race AND the A→B→A
+          // flip race where the user cycles back to the original strategyId
+          // before the first fetch resolves. The strategyId capture is retained
           // for the structured-log payload in the .catch branch.
           const requestVersion = versionRef.current;
           const isStillRelevant = () =>

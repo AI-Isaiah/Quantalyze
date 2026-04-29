@@ -8,12 +8,11 @@ interface BenchmarkGreeksTableProps {
 }
 
 /**
- * Phase 14b-05 / KPI-21 — Benchmark Greeks 4-cell strip.
+ * Benchmark Greeks 4-cell strip.
  *
- * Composes MetricCell (Plan 14b-04 primitive) into a grid-cols-4 strip.
- * Cells in order: alpha / beta / IR / Treynor (UI-SPEC §10.4 case-sensitive
- * label convention — alpha/beta lowercase Greek; IR uppercase acronym;
- * Treynor title-case proper noun).
+ * Composes MetricCell into a grid-cols-4 strip. Cells in order:
+ * alpha / beta / IR / Treynor (case-sensitive label convention — alpha/beta
+ * lowercase Greek; IR uppercase acronym; Treynor title-case proper noun).
  *
  * Values render to 3 decimals via toFixed(3); null/NaN/Infinity render as
  * em-dash via MetricCell. Alpha/beta/Treynor receive negative=true when

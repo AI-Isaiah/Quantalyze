@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/Card";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 
 /**
- * Phase 07 Plan 05 / PURGE-04 / D-07 / D-08 — Allocations empty state.
+ * Allocations empty state.
  *
  * Branches:
  *   - hasSyncing === true  → render a thin InfoBanner with the first-sync
@@ -17,15 +17,14 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
  *                                "No positions to analyze yet."
  *                              • single DM Sans 14px sub-line
  *                              • single primary button "Connect Exchange →"
- *                                routing to /profile?tab=exchanges (Phase 06 IA)
+ *                                routing to /profile?tab=exchanges
  *
- * D-07 minimalism gate: one headline, one sub-line, one button. No
+ * Minimalism gate: one headline, one sub-line, one button. No
  * illustration, no 3-step explainer, no checklist. Copy strings are
- * verbatim from 07-UI-SPEC.md §Copywriting — do not rephrase.
+ * locked — do not rephrase.
  *
- * Route: every "Connect Exchange" CTA in Phase 07 routes to
- * /profile?tab=exchanges. The legacy /connections and /exchanges surfaces
- * were retired during Phase 06 UAT.
+ * Route: every "Connect Exchange" CTA routes to /profile?tab=exchanges.
+ * The legacy /connections and /exchanges surfaces have been retired.
  */
 
 interface EmptyStateProps {

@@ -107,7 +107,7 @@ export function ScenarioCommitDrawer({
     return () => document.removeEventListener("keydown", onKey);
   }, [isOpen, onClose]);
 
-  // 1.5s success auto-close — UI-SPEC fixes the timing.
+  // 1.5s success auto-close.
   useEffect(() => {
     if (state !== "success") return;
     const t = setTimeout(() => {
@@ -252,7 +252,7 @@ export function ScenarioCommitDrawer({
           animation: "bd-fade 160ms ease",
         }}
       />
-      {/* Drawer panel — width 720 per UI-SPEC */}
+      {/* Drawer panel — width 720. */}
       <div
         ref={drawerRef}
         {...drawerRoleProps}

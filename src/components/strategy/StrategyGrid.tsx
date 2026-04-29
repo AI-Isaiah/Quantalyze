@@ -19,10 +19,9 @@ interface StrategyGridProps {
   categorySlug: string;
   basePath?: string;
   /**
-   * Phase 13 / Plan 13-01 / DISCO-01 — when present (allocator on /discovery)
-   * each card renders a top-right <StarToggle> wired to the parent's
-   * watchedSet + onToggleStar. Undefined on /browse (public, unauth) — cards
-   * render unchanged.
+   * When present (allocator on /discovery) each card renders a top-right
+   * <StarToggle> wired to the parent's watchedSet + onToggleStar. Undefined
+   * on /browse (public, unauth) — cards render unchanged.
    */
   userId?: string;
   watchedSet?: Set<string>;
@@ -133,9 +132,8 @@ export function StrategyGrid({
               </div>
             </Card>
           </Link>
-          {/* Phase 13 / DISCO-01 — top-right star overlay (sibling to the
-              <Link>, NOT a child, to keep <button>-inside-<a> illegal markup
-              out of the DOM). Per UI-SPEC Layout Contract: top-2 right-2. */}
+          {/* Top-right star overlay (sibling to the <Link>, NOT a child, to
+              keep <button>-inside-<a> illegal markup out of the DOM). */}
           {userId !== undefined && onToggleStar && (
             <div className="absolute top-2 right-2 z-10">
               <StarToggle

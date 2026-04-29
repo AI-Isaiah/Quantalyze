@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.7] - 2026-04-29
+
+**Comment-rot mass strip.** ~135 phase-tag, finding-ID, and review-iteration references removed from ~50 source files. The cross-PR specialist review of #84 / #85 / #86 found that `Phase 13 / Plan 13-01 / DISCO-01` JSDoc banners, `MA-X / SR-X / F-X (v0.17.1)` finding tags, `T-13-01-01..06` threat IDs, `WR-XX / IN-XX / MD-XX / LW-XX` review IDs, `Grok-4.20 P1` and `Cross-model adversarial review` change-log narrative, and `Plan 14b-XX / KPI-NN / METRICS-NN / DESIGN-NN / A11Y-NN` references inflated comment LOC by 80%+ on Phase 13 / 14a / 14b code paths and rotted into noise as soon as the original artifacts archived. Per the project's "Default to writing no comments. Only add one when the WHY is non-obvious" rule, the WHY content was preserved while the meta-narrative tags were dropped.
+
+### Internal
+
+- 50 source files cleaned across `src/components/strategy/`, `src/components/strategy-v2/`, `src/components/charts/`, `src/components/notes/`, `src/components/mandate/`, `src/components/exchanges/`, `src/hooks/`, `src/lib/`, `src/app/strategy/`, and `src/app/(dashboard)/`.
+- Test files NOT touched — finding IDs in test files (`SR-3`, `SR-4`, `F2/F3/F4`, `REVIEW.md MEDIUM-3`) pin regression intent and are load-bearing.
+- `@audit-skip:` pragmas in `src/app/api/watchlist/[strategyId]/route.ts` preserved — they are load-bearing test annotations, not rot.
+- Net diff: +587 / -743 (comment LOC reduced; zero code, type, or signature changes).
+- Vitest: 2629 passed / 0 failed / 148 skipped (264 files). TypeScript: clean.
+
 ## [0.17.1.6] - 2026-04-29
 
 **Tech-debt PR-2 — `cleanup-wizard-drafts` cron tested.** v0.17.1.4's specialist review flagged the `/api/cron/cleanup-wizard-drafts` route as +136 LOC of untested critical behavior: missing `CRON_SECRET` 401, `safeCompare` timing-safe path, 30-day cutoff math, ON DELETE CASCADE, TOCTOU re-filter on the delete clause, and the orphaned-key revoke logic — the most dangerous path, since a wrong `refCount > 0` skip yanks an api_key from a live, published strategy that happens to share the key. This PR adds 14 test cases (28 with GET/POST parameterization) covering all six behaviors. Test-only — no source changes.
@@ -25,10 +37,21 @@ can bump without ambiguity.
   - Count-null fallback: PG returning `count: null` on the DELETE falls back to `draftIds.length` so the response stays monotonic with the request.
 - Mock pattern: project-standard recorders (`fromCalls`, `selectCalls`, `eqCalls`, `ltCalls`, `inCalls`, `deleteCalls`); `createAdminClient` returns a chainable thenable that records every call and resolves based on the chain shape (SELECT_DRAFTS / DELETE_DRAFTS / COUNT_REFS / DELETE_KEY). `import "server-only"` stubbed for jsdom; `console.error` / `console.warn` silenced (Sentry deferral pattern).
 - 2619 → 2647 (+28 new). 0 typecheck errors. Full suite green.
+## [0.17.1.5] - 2026-04-29
 
-### Internal
+**Phase 13 discovery hardening.** Four follow-ups from the cross-PR specialist review of #84/#85/#86: starring a strategy now tells you what failed when the network drops or the server rate-limits you (instead of silently flipping back); the watchlist read distinguishes "you have nothing starred" from "we couldn't read your watchlist" and renders a notice banner in the second case; per-user discovery preferences gain a `version: 1` field plus per-field enum validation so a future schema rename can't silently corrupt stored data; saving Customize preferences applies the new view/sort/hide-examples to the table immediately instead of waiting for a reload.
 
-- **0.17.1.5 skipped** — number reserved for an in-flight tech-debt PR landing in parallel; this PR claims 0.17.1.6 to avoid a VERSION race.
+### Changed
+
+- **StarToggle status branching + visible failure hint.** Replaced the silent sr-only "Couldn't update watchlist. Retry?" with a visible aria-live status bubble that picks the right copy for the failure mode: 401/403 → "Sign in again to update watchlist" (no retry, surfaces immediately), 429 → "Try again shortly" (retry honors the server's `Retry-After` header, capped at 30 seconds), network failure → "Couldn't reach the server", 500/other → "Couldn't update watchlist — retry?". `console.error` now records the status code for the inevitable Sentry wiring.
+- **`getMyWatchlist` returns `Set<string> | null`** instead of swallowing DB errors as an empty Set. The discovery page renders a "Watchlist temporarily unavailable" notice when the read fails, so users don't silently re-toggle a row they already starred in a previous session.
+- **`DiscoveryViewPreferences` localStorage shape is versioned** (`version: 1`) and per-field validated on read. Future versions are rejected (return DEFAULTS) instead of silently coerced, and a renamed/removed enum value in legacy unversioned data is replaced with the default for that field rather than flowing through to `setViewMode`/`setSortKey`/etc. and taking the wrong branch.
+- **`CustomizeDrawer` Save now applies to the current view immediately.** Previously the hydration effect was gated on `prefsHydrated` only (intentional, to prevent post-Save clobbering of unrelated user-driven state), so saved view/sort/hide-examples wouldn't reflect until the next page load. `handleSavePrefs` now mirrors the saved prefs into the legacy state slots (viewMode, sortKey, sortDir, tableSortKey, tableSortDir, showExamples) plus resets pagination — the hydration effect's invariant is preserved because it stays gated on `prefsHydrated`.
+
+### Tests
+
+- **+15 new test cases** across StarToggle (401 no-retry / 403 no-retry / 429 + Retry-After / network rejection / role=status aria-live), discovery-prefs (legacy unversioned accept / v1 verbatim / future-version reject), queries (null on supabase error), and StrategyTable (Save applies hide_examples / Save applies view-mode change). Full vitest run: 2627 passed / 0 failed.
+>>>>>>> a97a26a (chore: bump version and changelog (v0.17.1.5))
 
 ## [0.17.1.4] - 2026-04-29
 

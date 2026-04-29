@@ -13,7 +13,7 @@ interface RollingVolatilityChartProps {
 }
 
 /**
- * Phase 14b-03 / KPI-09 — Rolling Volatility chart.
+ * Rolling Volatility chart.
  *
  * Single-line Recharts wrapper consuming `{ date, value }[]`. Stroke =
  * CHART_ACCENT (DESIGN.md identity). Y-axis renders as percent

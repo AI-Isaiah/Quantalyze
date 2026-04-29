@@ -16,10 +16,10 @@ interface HeadlineMetricsPanelProps {
   panel2Equity: StrategyV2Detail["panel2Equity"];
   /**
    * Eager rolling-Sharpe series from analytics.rolling_metrics. Fed by
-   * Plan 14b-06 Task 1's `panel5Inputs.rolling_metrics` mapping. Reused here
-   * so Panel 2's "Rolling Sharpe" toggle can render immediately without
-   * its own lazy fetch (Phase 12 metrics.py persists rolling Sharpe in
-   * strategy_analytics.rolling_metrics, NOT migration 087's sibling table).
+   * `panel5Inputs.rolling_metrics`. Reused here so Panel 2's "Rolling
+   * Sharpe" toggle can render immediately without its own lazy fetch —
+   * metrics.py persists rolling Sharpe in strategy_analytics.rolling_metrics,
+   * NOT migration 087's sibling table.
    */
   rolling_metrics: Record<string, { date: string; value: number }[]> | null;
   history_days: number;
@@ -47,7 +47,6 @@ function signColor(value: number | null): string {
 type ActiveView = "cumulative" | "underwater" | "rolling_sharpe" | "log_returns";
 
 /**
- * Phase 14a / KPI-03 + KPI-04 + Phase 14b / KPI-08 + KPI-23b —
  * Panel 2 Headline metrics + Equity vs BTC.
  *
  * Client component (owns segmented-control state + BTC checkbox state +
@@ -56,31 +55,31 @@ type ActiveView = "cumulative" | "underwater" | "rolling_sharpe" | "log_returns"
  *      sign-coloring on Cum return + CAGR; Max DD always negative-colored
  *   2. Segmented control: 4 buttons all enabled — Cumulative (default) /
  *      Underwater / Rolling Sharpe / Log returns
- *   3. BTC overlay checkbox (default-ON per DIFF-03; hidden when overlay
- *      data is null AND only relevant in Cumulative / Underwater views)
+ *   3. BTC overlay checkbox (default-ON; hidden when overlay data is null
+ *      AND only relevant in Cumulative / Underwater views)
  *   4. EquityCurve OR DrawdownChart OR RollingMetrics based on active view
  *
  * Partial-data banners gate on:
  *   - history_days < 30 → KPI strip replaced by banner
  *   - history_days < 7  → chart body replaced by banner
  *
- * Phase 14b additions (Plan 14b-06 Task 3):
+ * Sub-views:
  *   - Rolling Sharpe view: renders <RollingMetrics> against the eager
  *     `rolling_metrics` prop (analytics.rolling_metrics) with the overall
  *     Sharpe scalar as the dashed reference line. No lazy fetch needed —
- *     Phase 12 persists rolling Sharpe series in strategy_analytics.
+ *     metrics.py persists rolling Sharpe in strategy_analytics.
  *   - Log returns view: lazily fires `fetchStrategyLazyMetricsClient(
  *     strategyId, "equity")` on first activation (migration 087 maps
- *     'equity' → ARRAY['log_returns_series'] per Grok B-03 — see
+ *     'equity' → ARRAY['log_returns_series'] — see
  *     supabase/migrations/087_strategy_analytics_series.sql:165). Result
  *     is cached in component state; subsequent toggles do NOT re-fetch.
  *     Empty payload / error path renders the standard PartialDataBanner.
  *
- * NOTE: We use `fetchStrategyLazyMetricsClient` (the client-safe mirror
- * created in Plan 14b-01 at src/lib/queries-client.ts) NOT the server-only
- * `fetchStrategyLazyMetrics` from src/lib/queries.ts — the latter
- * transitively imports `next/headers` via @/lib/supabase/admin and
- * Turbopack rejects it inside any "use client" module graph.
+ * NOTE: We use `fetchStrategyLazyMetricsClient` (the client-safe mirror at
+ * src/lib/queries-client.ts) NOT the server-only `fetchStrategyLazyMetrics`
+ * from src/lib/queries.ts — the latter transitively imports `next/headers`
+ * via @/lib/supabase/admin and Turbopack rejects it inside any "use client"
+ * module graph.
  */
 export function HeadlineMetricsPanel({
   strategyId,
@@ -90,12 +89,12 @@ export function HeadlineMetricsPanel({
   history_days,
 }: HeadlineMetricsPanelProps) {
   const [activeView, setActiveView] = useState<ActiveView>("cumulative");
-  const [showBenchmark, setShowBenchmark] = useState<boolean>(true); // DIFF-03 default-ON
+  const [showBenchmark, setShowBenchmark] = useState<boolean>(true); // default-ON
 
-  // Phase 14b — Log returns lazy state. The fetch fires once on first
-  // activation of the Log returns view (triggered from the segmented-
-  // control click handler — event-driven, NOT inside an effect). Subsequent
-  // toggles read from the cached `logReturns` state (no re-fetch).
+  // Log returns lazy state. The fetch fires once on first activation of the
+  // Log returns view (triggered from the segmented-control click handler —
+  // event-driven, NOT inside an effect). Subsequent toggles read from the
+  // cached `logReturns` state (no re-fetch).
   // Lifecycle:
   //   idle    → user has not yet activated Log returns (no fetch)
   //   loading → fetch in flight; show centered "Loading…"
@@ -109,7 +108,7 @@ export function HeadlineMetricsPanel({
     "idle" | "loading" | "ready" | "error"
   >("idle");
 
-  // Grok B-03: panelId "equity" maps via migration 087 (line 165) to
+  // panelId "equity" maps via migration 087 (line 165) to
   // ARRAY['log_returns_series']. The RPC returns
   // { log_returns_series: [{date, value}, ...] } on success or {} on
   // visibility-gate / empty payload. Defensive null-check below renders
@@ -267,15 +266,11 @@ export function HeadlineMetricsPanel({
           <DrawdownChart
             data={
               // Underwater view derives drawdown from the equity series:
-              // value/maxSoFar - 1. Pre-computed series should be sourced
-              // upstream (Phase 14b lazy fetch); for 14a the executor's
-              // panel passes the equity series shape and the existing
-              // DrawdownChart consumes any time-series with negative
-              // values. If panel2Equity.series is the cumulative-return
-              // series (1.0 baseline), translating to drawdown is a
-              // local transformation. Keeping it simple: pass the series
-              // through; if the series is non-drawdown-shaped, Phase 14b
-              // will replace this with the dedicated underwater payload.
+              // value/maxSoFar - 1. The dedicated underwater payload is
+              // sourced upstream when available; otherwise this local
+              // transformation produces a usable drawdown view from the
+              // cumulative-return baseline. DrawdownChart consumes any
+              // time-series with negative values.
               (panel2Equity.series ?? []).map((d, i, arr) => {
                 const runningMax = arr.slice(0, i + 1).reduce(
                   (mx, p) => Math.max(mx, p.value),
