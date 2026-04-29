@@ -175,6 +175,51 @@ describe("strategy-ui-v2-flag", () => {
     }
   });
 
+  // Test 12 (Adversarial v0.17.1 follow-up) — localStorage values are
+  // normalized via .trim().toLowerCase() before comparison so case variants
+  // and stray whitespace honor the user's clear intent. Cross-model
+  // adversarial review (Claude conf 8 + Grok 4.20 P1) flagged the prior
+  // exact-match comparison as a silent-bypass trust-boundary issue: a
+  // value like "FALSE" or " false " would fall through to the default-ON
+  // branch, ignoring the opt-out.
+  describe("Test 12 (Adversarial): localStorage value normalization", () => {
+    const offVariants = [
+      "FALSE",
+      "False",
+      "false ",
+      " false",
+      "  false  ",
+      "false\n",
+      "fAlSe",
+    ];
+    for (const variant of offVariants) {
+      it(`v17 key ${JSON.stringify(variant)} normalizes to "false" → returns false`, () => {
+        localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, variant);
+        expect(isStrategyUiV2Enabled({ search: "" })).toBe(false);
+      });
+    }
+
+    const onVariants = ["TRUE", "True", "true ", " true", "TrUe", "true\t"];
+    for (const variant of onVariants) {
+      it(`v17 key ${JSON.stringify(variant)} normalizes to "true" → returns true`, () => {
+        localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, variant);
+        expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+      });
+    }
+
+    // Garbage values still fall through to default-ON. Normalization should
+    // NOT broaden the opt-out surface — only honor genuine user intent.
+    it("v17 key \"banana\" still falls through to default true (normalization is intent-preserving)", () => {
+      localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "banana");
+      expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+    });
+
+    it("v17 key \"\" (empty after trim) falls through to default true", () => {
+      localStorage.setItem(STRATEGY_UI_V2_STORAGE_KEY, "   ");
+      expect(isStrategyUiV2Enabled({ search: "" })).toBe(true);
+    });
+  });
+
   // Test 10 — isStrategyUiV2EnabledClient is a thin wrapper that throws in
   // SSR contexts and forwards to isStrategyUiV2Enabled in browsers.
   describe("isStrategyUiV2EnabledClient (browser-only convenience wrapper)", () => {

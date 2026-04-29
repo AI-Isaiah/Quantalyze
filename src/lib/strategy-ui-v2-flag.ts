@@ -92,8 +92,14 @@ export function isStrategyUiV2Enabled(opts?: StrategyUiV2Options): boolean {
   // legacy opt-outs do not block the upcoming v1-route removal.
   try {
     const raw = window.localStorage.getItem(STRATEGY_UI_V2_STORAGE_KEY);
-    if (raw === "false") return false;
-    if (raw === "true") return true;
+    // Adversarial fix (v0.17.1 follow-up): normalize before comparison so
+    // case variants ("FALSE", "False") and stray whitespace (" false ", "true\n")
+    // are treated as the user clearly intended — not silently dropped to the
+    // default-ON path. Cross-model adversarial review (Claude conf 8 + Grok
+    // 4.20 P1) flagged this as a silent-bypass trust-boundary issue.
+    const norm = raw?.trim().toLowerCase();
+    if (norm === "false") return false;
+    if (norm === "true") return true;
     return true;
   } catch {
     return true;

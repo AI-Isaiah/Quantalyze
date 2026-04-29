@@ -542,6 +542,73 @@ describe("useLazyPanelMetrics — Phase 14b extension", () => {
     errSpy.mockRestore();
   });
 
+  it("Test 14 (Adversarial v0.17.1): A→B→A flip discards A's stale resolve even when current strategyId is again 'abc'", async () => {
+    // Cross-model adversarial review (Claude conf 7 + Grok 4.20 P1) flagged
+    // the F2 fix's bare strategyId equality as missing the A→B→A flip race:
+    // user navigates abc → xyz → abc within the same hook instance (a panel
+    // missing key={strategy.id}, e.g.); abc's first fetch is still in
+    // flight; when it resolves, optsRef.current.strategyId is again "abc",
+    // so the equality check passes and stale data clobbers the third-mount
+    // state.
+    //
+    // Fix: a monotonic versionRef that bumps on every strategyId change.
+    // The captured requestVersion at intersection-time no longer matches
+    // versionRef.current after the round-trip, so the .then short-circuits.
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const stalePayload = {
+      rolling_volatility_3m: [{ date: "2024-01-01", value: 999 }],
+    };
+
+    const { result, rerender } = renderHook(
+      ({ strategyId }) =>
+        useLazyPanelMetrics("panel5", { fetchOnIntersect: true, strategyId }),
+      { initialProps: { strategyId: "abc" } },
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[0], node);
+
+    // Drain to start the fetch and capture requestVersion at intersection-time.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("abc", "rolling");
+    expect(result.current.status).toBe("loading");
+
+    // The flip: abc → xyz → abc. With panel keying in production this
+    // creates fresh hook instances, but we explicitly test the same hook
+    // instance scenario here to defend against any future panel forgetting
+    // the key prop. Each strategyId-change bumps versionRef.
+    rerender({ strategyId: "xyz" });
+    rerender({ strategyId: "abc" });
+
+    // Resolve abc's stale fetch. WITHOUT the version counter, the bare
+    // strategyId comparison would pass (current = "abc", captured = "abc")
+    // and the stale payload would be applied as the third-mount data.
+    await act(async () => {
+      resolveFetch(stalePayload);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Adversarial fix: stale payload from request-version 1 is discarded
+    // because versionRef has advanced to 3 (bumped on each strategyId change
+    // of the [opts.strategyId] useEffect).
+    expect(result.current.data).toBeNull();
+    expect(result.current.status).toBe("loading");
+  });
+
   it("Test 9: cleanup runs after fetch resolves without throwing", async () => {
     fetchSpy.mockResolvedValue({});
     const { result, unmount } = renderHook(() =>
