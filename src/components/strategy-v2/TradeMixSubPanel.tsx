@@ -1,6 +1,7 @@
 "use client";
 
 import type { TradeMixBuckets } from "@/lib/types";
+import { CHART_ACCENT, CHART_TEXT_MUTED } from "@/components/charts/chart-tokens";
 
 type TradeMixMode = "2-bucket" | "4-bucket";
 
@@ -69,13 +70,13 @@ export function TradeMixSubPanel({
             label="Long entries"
             count={longCount}
             total={total}
-            fillColor="#1B6B5A"
+            fillColor={CHART_ACCENT}
           />
           <BucketBar
             label="Short entries"
             count={shortCount}
             total={total}
-            fillColor="#94A3B8"
+            fillColor={CHART_TEXT_MUTED}
           />
         </div>
       )}
