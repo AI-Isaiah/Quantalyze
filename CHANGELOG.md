@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.5] - 2026-04-29
+
+**Phase 13 discovery hardening.** Four follow-ups from the cross-PR specialist review of #84/#85/#86: starring a strategy now tells you what failed when the network drops or the server rate-limits you (instead of silently flipping back); the watchlist read distinguishes "you have nothing starred" from "we couldn't read your watchlist" and renders a notice banner in the second case; per-user discovery preferences gain a `version: 1` field plus per-field enum validation so a future schema rename can't silently corrupt stored data; saving Customize preferences applies the new view/sort/hide-examples to the table immediately instead of waiting for a reload.
+
+### Changed
+
+- **StarToggle status branching + visible failure hint.** Replaced the silent sr-only "Couldn't update watchlist. Retry?" with a visible aria-live status bubble that picks the right copy for the failure mode: 401/403 → "Sign in again to update watchlist" (no retry, surfaces immediately), 429 → "Try again shortly" (retry honors the server's `Retry-After` header, capped at 30 seconds), network failure → "Couldn't reach the server", 500/other → "Couldn't update watchlist — retry?". `console.error` now records the status code for the inevitable Sentry wiring.
+- **`getMyWatchlist` returns `Set<string> | null`** instead of swallowing DB errors as an empty Set. The discovery page renders a "Watchlist temporarily unavailable" notice when the read fails, so users don't silently re-toggle a row they already starred in a previous session.
+- **`DiscoveryViewPreferences` localStorage shape is versioned** (`version: 1`) and per-field validated on read. Future versions are rejected (return DEFAULTS) instead of silently coerced, and a renamed/removed enum value in legacy unversioned data is replaced with the default for that field rather than flowing through to `setViewMode`/`setSortKey`/etc. and taking the wrong branch.
+- **`CustomizeDrawer` Save now applies to the current view immediately.** Previously the hydration effect was gated on `prefsHydrated` only (intentional, to prevent post-Save clobbering of unrelated user-driven state), so saved view/sort/hide-examples wouldn't reflect until the next page load. `handleSavePrefs` now mirrors the saved prefs into the legacy state slots (viewMode, sortKey, sortDir, tableSortKey, tableSortDir, showExamples) plus resets pagination — the hydration effect's invariant is preserved because it stays gated on `prefsHydrated`.
+
+### Tests
+
+- **+15 new test cases** across StarToggle (401 no-retry / 403 no-retry / 429 + Retry-After / network rejection / role=status aria-live), discovery-prefs (legacy unversioned accept / v1 verbatim / future-version reject), queries (null on supabase error), and StrategyTable (Save applies hide_examples / Save applies view-mode change). Full vitest run: 2627 passed / 0 failed.
+
 ## [0.17.1.4] - 2026-04-29
 
 **Audit follow-up — test gaps closed + CI seed-gate widened.** Three deferred audit items addressed: SR-3 adds component coverage for the v2 route's error boundary plus a `notFound()` contract test; SR-4 fills three uncovered branches in `useLazyPanelMetrics` (`ref(null)` early-return, SSR fallback when `IntersectionObserver` is undefined, non-intersecting entry skipped); MA-8 extends the BLOCK-3 CI gate so all 8 seed-dependent Playwright specs run together as soon as `E2E_TEST_DB_CONFIGURED` is set on the repo. MA-2 (v1 → v2 cutover) and MA-3 (4-bucket Trade Mix flip) intentionally not done — both need product input (MA-2) or upstream `is_maker` ingestion (MA-3) before scaffolding adds value.
