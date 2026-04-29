@@ -6,16 +6,30 @@ interface MonthlyHeatmapProps {
   data: Record<string, Record<string, number>>;
 }
 
-function cellColor(value: number): string {
-  if (value > 0.1) return "bg-emerald-600 text-white";
-  if (value > 0.05) return "bg-emerald-400 text-white";
-  if (value > 0.02) return "bg-emerald-200 text-emerald-900";
-  if (value > 0) return "bg-emerald-50 text-emerald-800";
-  if (value === 0) return "bg-white text-text-muted";
-  if (value > -0.02) return "bg-red-50 text-red-800";
-  if (value > -0.05) return "bg-red-200 text-red-900";
-  if (value > -0.1) return "bg-red-400 text-white";
-  return "bg-red-600 text-white";
+interface CellStyle {
+  backgroundColor: string;
+  opacity: number;
+  color: string;
+}
+
+/**
+ * Phase 14b / KPI-06 — DESIGN-01 identity audit:
+ *
+ * Replaces Tailwind `bg-emerald-*` / `bg-red-*` palette with explicit hex
+ * colors per UI-SPEC §5. Positive scale anchored at #16A34A (DESIGN.md
+ * positive token); negative scale anchored at #DC2626 (DESIGN.md negative
+ * token). Opacity steps replace Tailwind 50/200/400/600 numeric scale.
+ */
+function cellStyle(value: number): CellStyle {
+  if (value > 0.10) return { backgroundColor: "#16A34A", opacity: 1.0, color: "#FFFFFF" };
+  if (value > 0.05) return { backgroundColor: "#16A34A", opacity: 0.7, color: "#FFFFFF" };
+  if (value > 0.02) return { backgroundColor: "#16A34A", opacity: 0.4, color: "#0F3D2D" };
+  if (value > 0) return { backgroundColor: "#16A34A", opacity: 0.15, color: "#0F3D2D" };
+  if (value === 0) return { backgroundColor: "#FFFFFF", opacity: 1.0, color: "#94A3B8" };
+  if (value > -0.02) return { backgroundColor: "#DC2626", opacity: 0.15, color: "#7F1D1D" };
+  if (value > -0.05) return { backgroundColor: "#DC2626", opacity: 0.4, color: "#7F1D1D" };
+  if (value > -0.10) return { backgroundColor: "#DC2626", opacity: 0.7, color: "#FFFFFF" };
+  return { backgroundColor: "#DC2626", opacity: 1.0, color: "#FFFFFF" };
 }
 
 export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
@@ -23,28 +37,51 @@ export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
 
   return (
     <div className="overflow-x-auto">
-      <div className="grid gap-px bg-border" style={{ gridTemplateColumns: `80px repeat(12, minmax(48px, 1fr))` }}>
-        <div className="bg-surface px-2 py-2 text-xs font-medium text-text-muted" />
+      <div
+        className="grid gap-px bg-border"
+        style={{ gridTemplateColumns: `80px repeat(12, minmax(48px, 1fr))` }}
+      >
+        <div className="bg-surface px-2 py-2 text-xs font-normal text-text-muted" />
         {MONTHS.map((m) => (
-          <div key={m} className="bg-surface px-2 py-2 text-center text-xs font-medium text-text-muted">
+          <div
+            key={m}
+            className="bg-surface px-2 py-2 text-center text-xs font-normal text-text-muted"
+          >
             {m}
           </div>
         ))}
 
         {years.map((year) => (
           <Fragment key={year}>
-            <div className="bg-surface px-2 py-2 text-xs font-medium text-text-primary">
+            <div className="bg-surface px-2 py-2 text-xs font-normal text-text-primary">
               {year}
             </div>
             {MONTHS.map((m) => {
               const val = data[year]?.[m];
+              if (val == null) {
+                return (
+                  <div
+                    key={`${year}-${m}`}
+                    className="bg-surface px-1 py-2 text-center text-xs font-normal text-text-muted"
+                    title="N/A"
+                  >
+                    {""}
+                  </div>
+                );
+              }
+              const s = cellStyle(val);
               return (
                 <div
                   key={`${year}-${m}`}
-                  className={`px-1 py-2 text-center text-xs font-metric ${val != null ? cellColor(val) : "bg-surface text-text-muted"}`}
-                  title={val != null ? `${(val * 100).toFixed(1)}%` : "N/A"}
+                  className="px-1 py-2 text-center text-xs font-normal tabular-nums"
+                  style={{
+                    backgroundColor: s.backgroundColor,
+                    opacity: s.opacity,
+                    color: s.color,
+                  }}
+                  title={`${(val * 100).toFixed(1)}%`}
                 >
-                  {val != null ? `${(val * 100).toFixed(1)}%` : ""}
+                  {`${(val * 100).toFixed(1)}%`}
                 </div>
               );
             })}

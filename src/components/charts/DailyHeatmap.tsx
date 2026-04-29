@@ -269,9 +269,17 @@ const CanvasRenderer = memo(function CanvasRenderer({
  * - data.length === 0 → renders an empty placeholder div (no SVG / no canvas)
  * - data.length ≤ SVG_THRESHOLD_CELLS (365) → SVG renderer
  * - data.length > SVG_THRESHOLD_CELLS → Canvas renderer + offscreen <table>
+ *
+ * Phase 14b-02 / Grok W-01: the public symbol `DailyHeatmap` is the
+ * memoized version of `DailyHeatmapInner`. React.memo's default shallow
+ * compare on the `data` prop is the contract; consumers (notably
+ * `ReturnsDistributionPanel`) MUST stabilize the data prop reference via
+ * `useMemo` so panel-level status transitions don't re-paint the Canvas.
  */
-export const DailyHeatmap = memo(function DailyHeatmap({ data }: DailyHeatmapProps) {
+function DailyHeatmapInner({ data }: DailyHeatmapProps) {
   if (data.length === 0) return <div data-empty="true" />;
   if (data.length <= SVG_THRESHOLD_CELLS) return <SvgRenderer data={data} />;
   return <CanvasRenderer data={data} />;
-});
+}
+
+export const DailyHeatmap = memo(DailyHeatmapInner);

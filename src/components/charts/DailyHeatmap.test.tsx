@@ -243,4 +243,48 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
     const yValues = new Set(fillRectCalls.map((c) => c.y));
     expect(yValues.size).toBe(5);
   });
+
+  /**
+   * Phase 14b-02 / Grok W-01 — DailyHeatmap is wrapped with React.memo.
+   * When a parent re-renders with the SAME data array reference, the inner
+   * component is skipped (default shallow-compare on props) and the Canvas
+   * useEffect does NOT re-run — fillRect spy stays at one full paint.
+   */
+  it("Test 15 (Grok W-01): React.memo skips re-render when data prop reference is stable", () => {
+    const trimmed = buildFiveYearFixture().slice(0, 1825);
+    // Wrapper that re-renders with a stable data reference on each
+    // forceUpdate call. We expect Canvas paint to fire exactly ONCE
+    // across two parent renders.
+    function Parent({ tick, data }: { tick: number; data: { date: string; value: number }[] }) {
+      // tick is read but unused — its sole role is to force a re-render
+      // of the parent without changing the data prop reference.
+      void tick;
+      return <DailyHeatmap data={data} />;
+    }
+    const { rerender } = render(<Parent tick={0} data={trimmed} />);
+    const afterFirstPaint = fillRectCalls.length;
+    expect(afterFirstPaint).toBe(1825);
+    // Re-render with the SAME data reference but a different tick.
+    rerender(<Parent tick={1} data={trimmed} />);
+    rerender(<Parent tick={2} data={trimmed} />);
+    // memo'd inner component skips → no additional fillRect calls.
+    expect(fillRectCalls.length).toBe(afterFirstPaint);
+  });
+
+  /**
+   * Phase 14b-02 / Grok W-01 — when data identity changes (NEW reference,
+   * even with identical content), React.memo's default shallow-compare
+   * sees data !== prevData → component re-renders → Canvas re-paints.
+   * This is the contract: data identity drives re-paint.
+   */
+  it("Test 16 (Grok W-01): data identity change re-paints the Canvas", () => {
+    const trimmed1 = buildFiveYearFixture().slice(0, 1825);
+    const { rerender } = render(<DailyHeatmap data={trimmed1} />);
+    const afterFirstPaint = fillRectCalls.length;
+    expect(afterFirstPaint).toBe(1825);
+    // Same content, NEW array reference → re-paint expected.
+    const trimmed2 = trimmed1.slice();
+    rerender(<DailyHeatmap data={trimmed2} />);
+    expect(fillRectCalls.length).toBe(afterFirstPaint + 1825);
+  });
 });

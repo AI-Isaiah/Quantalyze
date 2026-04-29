@@ -1,9 +1,26 @@
 "use client";
 
+import {
+  CHART_ACCENT,
+  CHART_AXIS_TICK,
+  CHART_FONT_MONO,
+  CHART_TEXT_MUTED,
+} from "./chart-tokens";
+
 interface ReturnQuantilesProps {
   data: Record<string, number[]>;
 }
 
+/**
+ * Phase 14b / KPI-06 — Return Quantiles box plot for Panel 4.
+ *
+ * DESIGN-01 identity audit (14b-02):
+ *   - Box stroke + fill + median line: CHART_ACCENT (#1B6B5A) — replaced legacy teal
+ *   - Whisker strokes: CHART_TEXT_MUTED (#94A3B8) — strokes (not text fills)
+ *     so A11Y-01 forbidden-as-text rule does NOT apply per UI-SPEC §5
+ *   - Y-axis tick text: fontFamily={CHART_FONT_MONO} (was literal "'JetBrains Mono', monospace")
+ *   - All axis text fill: CHART_AXIS_TICK token
+ */
 export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
   const periods = Object.keys(data);
   if (periods.length === 0) return null;
@@ -34,7 +51,14 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
         return (
           <g key={frac}>
             <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} stroke="#F1F5F9" />
-            <text x={padding.left - 8} y={y + 4} textAnchor="end" fontSize={10} fill="#64748B" fontFamily="'JetBrains Mono', monospace">
+            <text
+              x={padding.left - 8}
+              y={y + 4}
+              textAnchor="end"
+              fontSize={10}
+              fill={CHART_AXIS_TICK}
+              fontFamily={CHART_FONT_MONO}
+            >
               {(val * 100).toFixed(1)}%
             </text>
           </g>
@@ -48,26 +72,26 @@ export function ReturnQuantiles({ data }: ReturnQuantilesProps) {
 
         return (
           <g key={period}>
-            {/* Whisker */}
-            <line x1={cx} x2={cx} y1={yScale(q0)} y2={yScale(q100)} stroke="#94A3B8" strokeWidth={1} />
-            <line x1={cx - halfBox / 2} x2={cx + halfBox / 2} y1={yScale(q0)} y2={yScale(q0)} stroke="#94A3B8" strokeWidth={1} />
-            <line x1={cx - halfBox / 2} x2={cx + halfBox / 2} y1={yScale(q100)} y2={yScale(q100)} stroke="#94A3B8" strokeWidth={1} />
+            {/* Whisker (strokes — not text fill, A11Y-01 does not apply) */}
+            <line x1={cx} x2={cx} y1={yScale(q0)} y2={yScale(q100)} stroke={CHART_TEXT_MUTED} strokeWidth={1} />
+            <line x1={cx - halfBox / 2} x2={cx + halfBox / 2} y1={yScale(q0)} y2={yScale(q0)} stroke={CHART_TEXT_MUTED} strokeWidth={1} />
+            <line x1={cx - halfBox / 2} x2={cx + halfBox / 2} y1={yScale(q100)} y2={yScale(q100)} stroke={CHART_TEXT_MUTED} strokeWidth={1} />
             {/* Box */}
             <rect
               x={cx - halfBox}
               y={yScale(q75)}
               width={boxWidth}
               height={yScale(q25) - yScale(q75)}
-              fill="#0D9488"
+              fill={CHART_ACCENT}
               opacity={0.15}
-              stroke="#0D9488"
+              stroke={CHART_ACCENT}
               strokeWidth={1}
               rx={2}
             />
             {/* Median */}
-            <line x1={cx - halfBox} x2={cx + halfBox} y1={yScale(q50)} y2={yScale(q50)} stroke="#0D9488" strokeWidth={2} />
-            {/* Label */}
-            <text x={cx} y={height - 8} textAnchor="middle" fontSize={11} fill="#64748B">
+            <line x1={cx - halfBox} x2={cx + halfBox} y1={yScale(q50)} y2={yScale(q50)} stroke={CHART_ACCENT} strokeWidth={2} />
+            {/* Period label */}
+            <text x={cx} y={height - 8} textAnchor="middle" fontSize={11} fill={CHART_AXIS_TICK}>
               {period}
             </text>
           </g>

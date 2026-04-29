@@ -42,7 +42,8 @@
 #### Phase 14b — Lazy panels + Trade & Exposure
 
 - [ ] **KPI-06**: Panel 4 — Returns Distribution: MonthlyHeatmap + DailyHeatmap + ReturnHistogram (with benchmark overlay) + ReturnQuantiles boxplot + YearlyReturns bar; layout-only for 4 of 5 components
-- [ ] **KPI-07**: Panel 4 — DailyHeatmap (12mo × N years grid); SVG renderer for ≤365 cells, Canvas API single-draw fallback above 365 (Pitfall 4 mitigation); IntersectionObserver-deferred paint to keep TTI under budget
+- [x] **KPI-07
+**: Panel 4 — DailyHeatmap (12mo × N years grid); SVG renderer for ≤365 cells, Canvas API single-draw fallback above 365 (Pitfall 4 mitigation); IntersectionObserver-deferred paint to keep TTI under budget
 - [ ] **KPI-08**: Panel 5 — Rolling Sharpe with 3M / 6M / 12M toggle + BTC benchmark overlay; existing 30/90/365-day windows relabeled in UI
 - [ ] **KPI-09**: Panel 5 — Rolling Volatility series with 3M / 6M / 12M toggle (NEW backend metric)
 - [ ] **KPI-10**: Panel 5 — Rolling Sortino series with 3M / 6M / 12M toggle (NEW backend metric)
