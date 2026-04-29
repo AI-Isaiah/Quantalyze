@@ -193,10 +193,13 @@ export function HeadlineMetricsPanel({
               // local transformation. Keeping it simple: pass the series
               // through; if the series is non-drawdown-shaped, Phase 14b
               // will replace this with the dedicated underwater payload.
-              (panel2Equity.series ?? []).map((d) => ({
-                date: d.date,
-                value: Math.min(0, d.value - 1),
-              }))
+              (panel2Equity.series ?? []).map((d, i, arr) => {
+                const runningMax = arr.slice(0, i + 1).reduce(
+                  (mx, p) => Math.max(mx, p.value),
+                  arr[0]?.value ?? 1,
+                );
+                return { date: d.date, value: d.value / runningMax - 1 };
+              })
             }
           />
         )}
