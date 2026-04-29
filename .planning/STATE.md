@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
 status: executing
-stopped_at: "Completed 14b-07-PLAN.md (Wave 4 — test infra: axe + keyboard + chart-parity + skip-links)"
-last_updated: "2026-04-29T14:21:39.353Z"
+stopped_at: Completed 14b-08-PLAN.md (Wave 4 final — strategy.ui_v2 OFF→ON browser-side flip + PR template Pitfall 17 matrix + DESIGN.md decisions log). Phase 14b feature-complete.
+last_updated: "2026-04-29T14:33:57.949Z"
 last_activity: 2026-04-29 -- Phase --phase execution started
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 28
-  completed_plans: 27
-  percent: 96
+  completed_plans: 28
+  percent: 100
 ---
 
 # Project State
@@ -167,6 +167,7 @@ Items carried forward from v0.15.0.0 / v0.16.0.0 milestones:
 - Log returns lazy fetch fires from SegmentedControl onChange handler (event-driven), not useEffect — satisfies React 19 react-hooks/set-state-in-effect lint rule
 - panel6Inputs.trade_metrics widened to (TradeMetrics & Record<string, unknown>) | null to match Phase 12 volume-aggregator-extras JSONB shape
 - Phase 14b-07: A11Y-02 axe-core CI green-gated; A11Y-03 keyboard-nav spec asserts skip-link → Panel 2 (5 stops) → Panel 5 (3 stops) per UI-SPEC §7.3 with Grok W-02 scrollIntoViewIfNeeded() pre-assertion. discovery-axe gates on DISCOVERY_SLUG (W-02). KPI-23b extension covers Panels 4-7 partial-data banners. 4 Playwright specs authored-but-skipped under HAS_SEED_ENV gate; goldens captured on first local run.
+- Phase 14b-08: strategy.ui_v2 default flipped OFF→ON browser-side; SSR keeps returning false (Grok B-05 invariant); two-pass mount via useEffect upgrades to v2 post-hydration; localStorage='false' continues to force v1; URL ?strategy_v2=off|on still wins; isStrategyUiV2EnabledClient browser-only wrapper added that throws in SSR; PR template extended with 4×7 partial-data matrix (Pitfall 17 / KPI-23b); DESIGN.md decisions log gains 2026-04-29 entry stamping the flip. Test file renamed .test.ts → .test.tsx for JSX hydration-safety integration test (Rule 3 deviation: blocking issue with .ts JSX parsing).
 
 ### Roadmap drafted (2026-04-26)
 
@@ -197,8 +198,8 @@ Cross-AI review (fresh Claude subagent + Grok-4-1-fast-reasoning) returned APPRO
 
 ## Session Continuity
 
-Last session: 2026-04-29T14:21:39.347Z
-Stopped at: Completed 14b-07-PLAN.md (Wave 4 — test infra: axe + keyboard + chart-parity + skip-links)
+Last session: 2026-04-29T14:33:57.944Z
+Stopped at: Completed 14b-08-PLAN.md (Wave 4 final — strategy.ui_v2 OFF→ON browser-side flip + PR template Pitfall 17 matrix + DESIGN.md decisions log). Phase 14b feature-complete.
 Next resume target: Phase 13 (Discovery v2 Polish) OR Phase 14a (Single-Strategy v2 — Eager Panels + Identity). Phase 13 is independent of Phase 12 and can run any time. Phase 14a is now unblocked and consumes Phase 12 outputs (frozen TS contracts, 12 D-01 sibling kinds, fetch_strategy_lazy_metrics RPC, 2-bucket Trade Mix per D-15 audit, M-01 .env.test propagation for parity-test CI). One outstanding operator action — running `cd analytics-service && python -m scripts.phase12_deploy` against production + recording the 12-min `compute_analytics` queue-depth window into TODOS.md `## Phase 12 SC#4 — queue-depth probe` table — is deferred per orchestrator directive (plan ships SCRIPTS, not the deploy itself). The deploy is not a blocker for Phase 14a since Phase 14a only consumes the SQL-level contracts that landed in earlier plans.
 
 **Planned milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 — 2026-04-26T00:00:00.000Z (revised post cross-AI review)

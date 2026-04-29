@@ -139,14 +139,14 @@ See `milestones/v0.16.0.0-MILESTONE-AUDIT.md` for full phase details, success cr
   4. Per-panel partial-data states render gracefully across history bands for panels 4–7 — Playwright spec covers 7-day / 30-day / 90-day / 365-day synthetic histories, asserts each of panels 4–7 shows its documented "Awaiting more data (need ≥X days)" copy or its full-data render, never crashes, and never hides a panel (preserves layout shape inherited from 14a).
   5. The `is_maker` audit close-out is documented: if Binance + OKX + Bybit all populate the flag, KPI-17 Trade Mix maker/taker breakdown ships in panel 6; if any of the three lacks the flag, KPI-17 + METRICS-10 are descoped to v0.17.1 with a TODOS.md entry, and the panel-count gate (=7) does not regress (the Trade Mix sub-panel is hidden, not the entire panel).
 **Plans:** 8 plans
-- [ ] 14b-01-PLAN.md — useLazyPanelMetrics real-fetch extension + DailyHeatmap dual SVG/Canvas component (Wave 1 foundation)
-- [ ] 14b-02-PLAN.md — Panel 4 ReturnsDistributionPanel wrapper + DESIGN-01 audit on 4 existing chart components (Wave 2)
-- [ ] 14b-03-PLAN.md — Panel 5 RollingMetricsPanel + 3 new rolling sub-charts (Volatility / Sortino / AlphaBeta) + shared 3M/6M/12M window toggle (Wave 2)
-- [ ] 14b-04-PLAN.md — Panel 6 TradeAndPositionPanel + TradeMixSubPanel (2-bucket only) + MetricCell primitive (Wave 2)
+- [x] 14b-01-PLAN.md — useLazyPanelMetrics real-fetch extension + DailyHeatmap dual SVG/Canvas component (Wave 1 foundation)
+- [x] 14b-02-PLAN.md — Panel 4 ReturnsDistributionPanel wrapper + DESIGN-01 audit on 4 existing chart components (Wave 2)
+- [x] 14b-03-PLAN.md — Panel 5 RollingMetricsPanel + 3 new rolling sub-charts (Volatility / Sortino / AlphaBeta) + shared 3M/6M/12M window toggle (Wave 2)
+- [x] 14b-04-PLAN.md — Panel 6 TradeAndPositionPanel + TradeMixSubPanel (2-bucket only) + MetricCell primitive (Wave 2)
 - [x] 14b-05-PLAN.md — Panel 7 ExposureAndGreeksPanel + NetGrossExposureChart + TurnoverChart + BenchmarkGreeksTable (Wave 2)
-- [ ] 14b-06-PLAN.md — StrategyV2Detail extension + StrategyV2Shell wiring + Panel 2 segmented control unlock (Rolling Sharpe + Log returns) (Wave 3)
-- [ ] 14b-07-PLAN.md — @axe-core/playwright install + 4 new Playwright specs (axe x2 / keyboard / chart-parity) + skip-link mechanism + partial-data spec extension (Wave 4)
-- [ ] 14b-08-PLAN.md — strategy.ui_v2 flag flip OFF→ON + PR template Pitfall 17 partial-data matrix + DESIGN.md decisions log entry (Wave 4 — milestone-final commit)
+- [x] 14b-06-PLAN.md — StrategyV2Detail extension + StrategyV2Shell wiring + Panel 2 segmented control unlock (Rolling Sharpe + Log returns) (Wave 3)
+- [x] 14b-07-PLAN.md — @axe-core/playwright install + 4 new Playwright specs (axe x2 / keyboard / chart-parity) + skip-link mechanism + partial-data spec extension (Wave 4)
+- [x] 14b-08-PLAN.md — strategy.ui_v2 flag flip OFF→ON + PR template Pitfall 17 partial-data matrix + DESIGN.md decisions log entry (Wave 4 — milestone-final commit)
 **UI hint**: yes
 **Complexity:** High — six chart-component wave (DailyHeatmap, Rolling 4-series, Trade & Position aggregations, Exposure series, Turnover series, BTC correlation) plus `is_maker`-gated Trade Mix close-out plus axe-core green; mount-to-paint budget is tight on the 5y fixture.
 

@@ -193,7 +193,7 @@ Coverage: **53 / 53** v0.17.0.0 requirements mapped (filled by gsd-roadmapper 20
 | KPI-21 | KPI | Phase 14b | Pending |
 | KPI-22 | KPI | Phase 14a | Pending (shell + IntersectionObserver scaffold; bodies for panels 4–7 in 14b) |
 | KPI-23a | KPI | Phase 14a | Pending (panels 1–3 partial-data) |
-| KPI-23b | KPI | Phase 14b | Pending (panels 4–7 partial-data) |
+| KPI-23b | KPI | Phase 14b | ✅ Complete 2026-04-29 (Plan 14b-08): Pitfall 17 partial-data matrix institutionalized in `.github/PULL_REQUEST_TEMPLATE.md` (4 history bands × 7 panels checklist); strategy.ui_v2 default OFF→ON browser-side with Grok B-05 SSR-safe two-pass mount; DESIGN.md decisions log stamped |
 | METRICS-01 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): MAR + `_rolling_sortino` shipped in metrics.py; QS-mirror RMS downside formula; Pitfall 11 parity diff=1.11e-16 at window==period |
 | METRICS-02 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_rolling_volatility` shipped in metrics.py; std × sqrt(252) |
 | METRICS-03 | METRICS | Phase 12 | ✅ Complete 2026-04-28 (Plan 12-03): `_rolling_alpha` + `_rolling_beta` shipped in metrics.py; wrap qs.stats.rolling_greeks(window=90) |
