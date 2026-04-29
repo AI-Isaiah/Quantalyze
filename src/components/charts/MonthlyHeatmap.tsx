@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { CHART_AXIS_TICK } from "./chart-tokens";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -25,7 +26,7 @@ function cellStyle(value: number): CellStyle {
   if (value > 0.05) return { backgroundColor: "#16A34A", opacity: 0.7, color: "#FFFFFF" };
   if (value > 0.02) return { backgroundColor: "#16A34A", opacity: 0.4, color: "#0F3D2D" };
   if (value > 0) return { backgroundColor: "#16A34A", opacity: 0.15, color: "#0F3D2D" };
-  if (value === 0) return { backgroundColor: "#FFFFFF", opacity: 1.0, color: "#94A3B8" };
+  if (value === 0) return { backgroundColor: "#FFFFFF", opacity: 1.0, color: CHART_AXIS_TICK };
   if (value > -0.02) return { backgroundColor: "#DC2626", opacity: 0.15, color: "#7F1D1D" };
   if (value > -0.05) return { backgroundColor: "#DC2626", opacity: 0.4, color: "#7F1D1D" };
   if (value > -0.10) return { backgroundColor: "#DC2626", opacity: 0.7, color: "#FFFFFF" };
