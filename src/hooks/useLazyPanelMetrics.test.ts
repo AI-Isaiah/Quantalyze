@@ -316,6 +316,111 @@ describe("useLazyPanelMetrics — Phase 14b extension", () => {
     expect(observers[0].disconnectCalls).toBeGreaterThanOrEqual(1);
   });
 
+  it("Test 10 (F2 v0.17.1): stale payload is discarded when strategyId changes mid-fetch", async () => {
+    // Grok F2 — without a mount-guard or strategyId-at-resolve check, the
+    // resolved payload from strategy A would call setData on the hook
+    // instance that React reuses for strategy B (no `key={strategyId}` on
+    // StrategyV2Shell's panel children). The fix gates the .then/.catch
+    // on (mountedRef.current && optsRef.current.strategyId === captured).
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const stalePayload = {
+      rolling_volatility_3m: [{ date: "2024-01-01", value: 999 }],
+    };
+
+    const { result, rerender } = renderHook(
+      ({ strategyId }) =>
+        useLazyPanelMetrics("panel5", { fetchOnIntersect: true, strategyId }),
+      { initialProps: { strategyId: "abc" } },
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[0], node);
+
+    // Drain dynamic-import microtasks; fetch is now in-flight.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("abc", "rolling");
+    expect(result.current.status).toBe("loading");
+
+    // User navigates: same hook instance (no key on panel), new strategyId.
+    rerender({ strategyId: "xyz" });
+
+    // Resolve abc's stale fetch. WITHOUT the fix, this calls setData(stale)
+    // on the hook instance now bound to xyz — leaks abc's data to xyz's panel.
+    await act(async () => {
+      resolveFetch(stalePayload);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // F2 fix: stale payload must be discarded.
+    expect(result.current.data).toBeNull();
+    expect(result.current.status).toBe("loading");
+  });
+
+  it("Test 11 (F2 v0.17.1): unmount mid-fetch suppresses post-unmount setState", async () => {
+    // Defends the unmount race independently from strategyId reuse: if the
+    // user navigates fully away from the strategy detail page before the
+    // fetch resolves, the .then chain must short-circuit on mountedRef.
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { result, unmount } = renderHook(() =>
+      useLazyPanelMetrics("panel4", { fetchOnIntersect: true, strategyId: "abc" }),
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[0], node);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("abc", "returns_dist");
+
+    unmount();
+
+    // Resolve after unmount. Must not throw, must not log a React warning.
+    await act(async () => {
+      resolveFetch({ daily_returns_grid: { rows: [] } });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // No React warning about state update on unmounted component.
+    const reactStateWarnings = errSpy.mock.calls.filter((args) =>
+      args.some(
+        (a) =>
+          typeof a === "string" &&
+          a.includes("Can't perform a React state update on an unmounted"),
+      ),
+    );
+    expect(reactStateWarnings).toEqual([]);
+    errSpy.mockRestore();
+  });
+
   it("Test 9: cleanup runs after fetch resolves without throwing", async () => {
     fetchSpy.mockResolvedValue({});
     const { result, unmount } = renderHook(() =>

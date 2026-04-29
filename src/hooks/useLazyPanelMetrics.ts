@@ -80,8 +80,19 @@ export function useLazyPanelMetrics<T = unknown>(
   const optsRef = useRef(opts);
   optsRef.current = opts;
 
+  // F2 (v0.17.1): mount guard for the fetch race. The IntersectionObserver
+  // unobserve-on-first-fire prevents repeat fetches, but in-flight promises
+  // still resolve after unmount or after a route reconciliation reuses this
+  // hook instance for a different strategyId (StrategyV2Shell renders panels
+  // without a key={strategyId}, so /strategy/abc/v2 → /strategy/xyz/v2 keeps
+  // the same hook instance with new props). Without this guard, abc's late
+  // payload would call setData on the instance now bound to xyz.
+  const mountedRef = useRef(true);
+
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       observerRef.current?.disconnect();
       observerRef.current = null;
     };
@@ -136,10 +147,15 @@ export function useLazyPanelMetrics<T = unknown>(
               fetchStrategyLazyMetricsClient(strategyId, PANEL_TO_ID[panelId]),
             )
             .then((payload) => {
+              // F2 — drop stale payloads after unmount or strategyId change.
+              if (!mountedRef.current) return;
+              if (optsRef.current.strategyId !== strategyId) return;
               setData(payload as T);
               setStatus("ready");
             })
             .catch((err: unknown) => {
+              if (!mountedRef.current) return;
+              if (optsRef.current.strategyId !== strategyId) return;
               const message = err instanceof Error ? err.message : String(err);
               console.error("useLazyPanelMetrics fetch failed", {
                 panelId,
