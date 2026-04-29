@@ -389,4 +389,55 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
     expect(saveCalls).toBe(2);
     expect(restoreCalls).toBe(2);
   });
+
+  /**
+   * F5 (v0.17.1) — when document.fonts reports status='loading', the
+   * Canvas paint loop must defer fillRect calls until document.fonts.ready
+   * resolves. Painting before fonts settle races a layout reflow on cold
+   * loads and leaves the cells visibly misaligned for one frame.
+   *
+   * Without this gate, the synchronous tests above (7, 9, 13–18) would
+   * still pass — jsdom reports status='loaded' so the synchronous fast
+   * path fires. This test installs a controlled FontFaceSet stub with
+   * status='loading' to exercise the gated branch directly.
+   */
+  it("Test 19 (F5): canvas paint defers until document.fonts.ready when status='loading'", async () => {
+    const trimmed = buildFiveYearFixture().slice(0, 1825);
+
+    let release: () => void = () => {};
+    const readyPromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fakeFonts = { status: "loading" as const, ready: readyPromise };
+    Object.defineProperty(document, "fonts", {
+      value: fakeFonts,
+      configurable: true,
+      writable: true,
+    });
+
+    try {
+      render(<DailyHeatmap data={trimmed} />);
+      // Gate is closed — no fillRect calls until fonts.ready resolves.
+      expect(fillRectCalls.length).toBe(0);
+      expect(saveCalls).toBe(0);
+      expect(clearRectCalls.length).toBe(0);
+
+      // Open the gate.
+      release();
+      await readyPromise;
+      // Extra microtask hop so the .then(paint) callback drains.
+      await Promise.resolve();
+
+      // Full paint completed.
+      expect(fillRectCalls.length).toBe(1825);
+      expect(saveCalls).toBe(1);
+      expect(restoreCalls).toBe(1);
+      expect(clearRectCalls.length).toBe(1);
+    } finally {
+      // Drop the override; prototype's FontFaceSet (if any) takes over again.
+      // Cast through `unknown` because Document.fonts is non-optional in the
+      // DOM lib types and TypeScript blocks `delete` on non-optional members.
+      delete (document as unknown as { fonts?: unknown }).fonts;
+    }
+  });
 });

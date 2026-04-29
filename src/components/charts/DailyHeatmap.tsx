@@ -226,45 +226,75 @@ const CanvasRenderer = memo(function CanvasRenderer({
   const canvasHeight = Math.max(CELL_H, rowsByYear.length * CELL_H);
 
   useEffect(() => {
-    performance.mark("panel-4-mount-start");
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (ctx) {
-      // SR-2 (v0.17.1): isolate per-cell globalAlpha mutations so the final
-      // cell's alpha does not leak into any subsequent draw on this context.
-      // Canvas is currently dedicated to the heatmap, but the save/restore
-      // pair removes a latent hazard at near-zero cost (one pair per paint).
-      ctx.save();
-      // Clear before paint — the canvas auto-clears when width/height attrs
-      // change, but `canvasHeight` only changes on year-count change. When
-      // `data` shrinks within the same year set (e.g., a refetch returns a
-      // subset), stale pixels from the prior paint would otherwise remain.
-      ctx.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
-      for (const point of data) {
-        const yr = point.date.slice(0, 4);
-        const yearIdx = yearIndex.get(yr);
-        if (yearIdx === undefined) continue;
-        const doy = dayOfYear(point.date);
-        const x = doy * CELL_W;
-        const y = yearIdx * CELL_H;
-        const { fill, opacity } = cellFill(point.value);
-        ctx.fillStyle = fill;
-        ctx.globalAlpha = opacity;
-        ctx.fillRect(x, y, CELL_W, CELL_H);
+    let cancelled = false;
+
+    const paint = () => {
+      if (cancelled) return;
+      performance.mark("panel-4-mount-start");
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (ctx) {
+        // SR-2 (v0.17.1): isolate per-cell globalAlpha mutations so the final
+        // cell's alpha does not leak into any subsequent draw on this context.
+        // Canvas is currently dedicated to the heatmap, but the save/restore
+        // pair removes a latent hazard at near-zero cost (one pair per paint).
+        ctx.save();
+        // Clear before paint — the canvas auto-clears when width/height attrs
+        // change, but `canvasHeight` only changes on year-count change. When
+        // `data` shrinks within the same year set (e.g., a refetch returns a
+        // subset), stale pixels from the prior paint would otherwise remain.
+        ctx.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
+        for (const point of data) {
+          const yr = point.date.slice(0, 4);
+          const yearIdx = yearIndex.get(yr);
+          if (yearIdx === undefined) continue;
+          const doy = dayOfYear(point.date);
+          const x = doy * CELL_W;
+          const y = yearIdx * CELL_H;
+          const { fill, opacity } = cellFill(point.value);
+          ctx.fillStyle = fill;
+          ctx.globalAlpha = opacity;
+          ctx.fillRect(x, y, CELL_W, CELL_H);
+        }
+        ctx.restore();
       }
-      ctx.restore();
+      performance.mark("panel-4-mount-end");
+      try {
+        performance.measure(
+          "panel-4-paint",
+          "panel-4-mount-start",
+          "panel-4-mount-end",
+        );
+      } catch {
+        // performance.measure can throw if the marks were cleared between
+        // mount and effect — non-fatal for paint correctness.
+      }
+    };
+
+    // F5: gate first paint on document.fonts.ready ONLY when fonts are
+    // currently loading. The surrounding panel typography (Geist Mono
+    // labels, year axis text) drives the canvas container's flow size on
+    // cold loads — painting before fonts settle can race a layout reflow
+    // and leave the cells visibly misaligned for a frame.
+    //
+    // The synchronous fast path matters for both warm renders (typical
+    // post-hydration: fonts already settled, no microtask hop needed) and
+    // for the test environment (jsdom / happy-dom report status="loaded"
+    // immediately, so canvas spies see fillRect on the same tick as
+    // render — the unit tests below depend on this). Both fulfillment and
+    // rejection paths fall through to paint() — fonts.ready is spec'd
+    // never to reject, but the dual-callback form is defensive against
+    // partial DOM implementations.
+    const fonts = typeof document !== "undefined" ? document.fonts : undefined;
+    if (fonts && fonts.status === "loading") {
+      fonts.ready.then(paint, paint);
+    } else {
+      paint();
     }
-    performance.mark("panel-4-mount-end");
-    try {
-      performance.measure(
-        "panel-4-paint",
-        "panel-4-mount-start",
-        "panel-4-mount-end",
-      );
-    } catch {
-      // performance.measure can throw if the marks were cleared between
-      // mount and effect — non-fatal for paint correctness.
-    }
+
+    return () => {
+      cancelled = true;
+    };
   }, [data, yearIndex, canvasHeight]);
 
   return (
