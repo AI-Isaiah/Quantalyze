@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useId } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
 import { Sparkline } from "@/components/charts/Sparkline";
@@ -111,6 +111,9 @@ export function StrategyTable({
   userId,
   initialWatchedSet,
 }: StrategyTableProps) {
+  const reactId = useId();
+  const tabIdBase = `watchlist${reactId}`;
+  const panelId = `strategy-list${reactId}`;
   const [search, setSearch] = useState("");
   const [showExamples, setShowExamples] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("sharpe");
@@ -159,17 +162,10 @@ export function StrategyTable({
   const [customizeOpen, setCustomizeOpen] = useState(false);
   const [draftPrefs, setDraftPrefs] = useState<DiscoveryViewPreferences>(prefs);
 
-  // Once prefs hydrate from localStorage, mirror them into the legacy
-  // viewMode / sortKey / sortDir / showExamples state so the existing UI
-  // logic (filter pipeline, paging, view-toggle button) continues to read
-  // from the same state slots. The mirror runs EXACTLY ONCE on hydration —
-  // gating on `prefsHydrated` only (not `prefs`) prevents a post-Save
-  // `setPrefs(draftPrefs)` re-render from clobbering subsequent user-driven
-  // column-sort or view-toggle changes that haven't been persisted yet.
-  // Draft seeding for the drawer is handled separately by `handleOpenCustomize`.
-  // There is no SSR mismatch because both initial values (table / sharpe-desc
-  // / showExamples=true) are deterministic.
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- mirror runs once on hydration; including `prefs` would re-clobber legacy state on every save.
+  // Mirror prefs into legacy state slots once on hydration. Gating on
+  // `prefsHydrated` only (not `prefs`) prevents a post-Save re-render from
+  // clobbering user-driven column-sort or view-toggle changes that haven't
+  // been persisted yet.
   useEffect(() => {
     if (!prefsHydrated) return;
     setViewMode(prefs.view);
@@ -178,6 +174,7 @@ export function StrategyTable({
     setTableSortKey(prefs.sort.key);
     setTableSortDir(prefs.sort.dir);
     setShowExamples(!prefs.hide_examples);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefsHydrated]);
 
   const handleOpenCustomize = useCallback(() => {
@@ -330,11 +327,6 @@ export function StrategyTable({
   const showStarColumn = userId !== undefined;
   const emptyRowColSpan = showStarColumn ? 12 : 11;
 
-  // Phase 13 / DISCO-01 \u2014 empty-watchlist sentinel. When the user is on the
-  // My Watchlist scope and has zero stars, replace the entire table/grid
-  // with the directional <EmptyWatchlist> empty-state. The wrapper still
-  // carries id="strategy-list" + role="tabpanel" so the WatchlistTabs
-  // aria-controls relationship resolves cleanly.
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
 
   return (
@@ -358,6 +350,8 @@ export function StrategyTable({
               scope={scope}
               onScopeChange={(s) => { setScope(s); setPage(0); }}
               count={watchedSet.size}
+              idBase={tabIdBase}
+              panelId={panelId}
             />
           ) : undefined
         }
@@ -366,7 +360,18 @@ export function StrategyTable({
         }
       />
 
-      <div id="strategy-list" role="tabpanel">
+      <div
+        id={panelId}
+        {...(userId !== undefined
+          ? {
+              role: "tabpanel",
+              "aria-labelledby":
+                scope === "watchlist"
+                  ? `${tabIdBase}-tab-watchlist`
+                  : `${tabIdBase}-tab-all`,
+            }
+          : {})}
+      >
         {showEmptyWatchlist ? (
           <EmptyWatchlist />
         ) : viewMode === "table" ? (
@@ -403,7 +408,7 @@ export function StrategyTable({
                 {paged.map((s) => (
                   <tr
                     key={s.id}
-                    className="border-b border-border last:border-0 hover:bg-page/50 transition-colors"
+                    className="border-b border-border last:border-0"
                   >
                     {showStarColumn && (
                       <td className="px-2 py-3 w-11 align-middle">

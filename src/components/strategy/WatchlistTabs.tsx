@@ -1,46 +1,38 @@
 "use client";
 
-/**
- * Phase 13 / Plan 13-01 / DISCO-01 — All / My Watchlist segmented control.
- *
- * Two-tab WAI-ARIA tablist that lives inside the StrategyFilters row,
- * left of the search input per UI-SPEC Layout Contract. Right tab carries
- * a count badge sourced from `watchedSet.size`; badge is hidden when zero
- * to avoid visual noise on a fresh allocator.
- *
- * Visual template: existing view-mode toggle at StrategyFilters.tsx:369
- * (1px border, 4px radius, accent fill on active). Badge style mirrors the
- * existing All-Filters chip at StrategyFilters.tsx:319 (now promoted to
- * text-[11px] font-semibold per UI-SPEC Typography "Micro-label exception").
- *
- * Keyboard: ArrowLeft/ArrowRight move focus between tabs (WAI-ARIA tablist
- * pattern). Tab itself enters/exits the group via aria-controls pointing
- * at "strategy-list" — the table/grid wrapper inside StrategyTable.
- */
-
 import { useRef } from "react";
 
 interface WatchlistTabsProps {
   scope: "all" | "watchlist";
   onScopeChange: (scope: "all" | "watchlist") => void;
   count: number;
+  /** Stable ID base from parent (e.g. React.useId()) — used to build tab DOM ids and aria-controls. */
+  idBase: string;
+  /** Element id of the tabpanel this tablist controls. */
+  panelId: string;
 }
 
-export function WatchlistTabs({ scope, onScopeChange, count }: WatchlistTabsProps) {
+export function WatchlistTabs({ scope, onScopeChange, count, idBase, panelId }: WatchlistTabsProps) {
   const allRef = useRef<HTMLButtonElement>(null);
   const watchRef = useRef<HTMLButtonElement>(null);
 
-  // Automatic-activation tablist pattern (WAI-ARIA APG): ArrowLeft/ArrowRight
-  // BOTH move focus AND change scope. Edge cases:
-  //   - ArrowLeft from "All" is a no-op (no swap, no scope change)
-  //   - ArrowRight from "watchlist" is a no-op (no wrap-around)
   const handleKey = (
     e: React.KeyboardEvent<HTMLButtonElement>,
     target: "all" | "watchlist",
   ) => {
+    if (e.key === "Home") {
+      e.preventDefault();
+      allRef.current?.focus();
+      onScopeChange("all");
+      return;
+    }
+    if (e.key === "End") {
+      e.preventDefault();
+      watchRef.current?.focus();
+      onScopeChange("watchlist");
+      return;
+    }
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-
-    // No-op edge cases
     if (target === "all" && e.key === "ArrowLeft") return;
     if (target === "watchlist" && e.key === "ArrowRight") return;
 
@@ -58,10 +50,11 @@ export function WatchlistTabs({ scope, onScopeChange, count }: WatchlistTabsProp
     >
       <button
         ref={allRef}
+        id={`${idBase}-tab-all`}
         type="button"
         role="tab"
         aria-selected={scope === "all"}
-        aria-controls="strategy-list"
+        aria-controls={panelId}
         tabIndex={scope === "all" ? 0 : -1}
         onClick={() => onScopeChange("all")}
         onKeyDown={(e) => handleKey(e, "all")}
@@ -75,10 +68,11 @@ export function WatchlistTabs({ scope, onScopeChange, count }: WatchlistTabsProp
       </button>
       <button
         ref={watchRef}
+        id={`${idBase}-tab-watchlist`}
         type="button"
         role="tab"
         aria-selected={scope === "watchlist"}
-        aria-controls="strategy-list"
+        aria-controls={panelId}
         tabIndex={scope === "watchlist" ? 0 : -1}
         onClick={() => onScopeChange("watchlist")}
         onKeyDown={(e) => handleKey(e, "watchlist")}

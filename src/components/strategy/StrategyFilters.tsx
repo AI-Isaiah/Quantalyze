@@ -329,7 +329,7 @@ export function StrategyFilters({
         >
           All Filters
           {activeCount > 0 && (
-            <span className="ml-1.5 inline-flex items-center justify-center rounded-full bg-accent text-white text-[11px] font-semibold w-4.5 h-4.5 min-w-[18px] px-1">
+            <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-white text-[11px] font-semibold">
               {activeCount}
             </span>
           )}
@@ -351,7 +351,7 @@ export function StrategyFilters({
         </label>
 
         {/* Sort by */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 ml-auto">
           <span className="text-xs text-text-muted">Sort:</span>
           <select
             value={sortKey}
@@ -388,7 +388,7 @@ export function StrategyFilters({
             onClick={onOpenCustomize}
             aria-label="Customize discovery view"
             aria-haspopup="dialog"
-            className="h-9 w-9 inline-flex items-center justify-center rounded border border-border bg-surface text-text-secondary hover:bg-page hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="h-9 w-9 inline-flex items-center justify-center rounded-md border border-border bg-surface text-text-secondary hover:bg-page hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             <SettingsCogIcon />
           </button>

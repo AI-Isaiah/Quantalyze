@@ -16,19 +16,19 @@ import { WatchlistTabs } from "./WatchlistTabs";
 
 describe("WatchlistTabs", () => {
   it("renders a tablist with the locked aria-label 'Strategy list scope'", () => {
-    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} />);
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const tablist = screen.getByRole("tablist");
     expect(tablist.getAttribute("aria-label")).toBe("Strategy list scope");
   });
 
   it("renders exactly two tabs", () => {
-    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} />);
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const tabs = screen.getAllByRole("tab");
     expect(tabs).toHaveLength(2);
   });
 
   it("marks the All tab aria-selected when scope='all'", () => {
-    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} />);
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     expect(allTab.getAttribute("aria-selected")).toBe("true");
@@ -36,7 +36,7 @@ describe("WatchlistTabs", () => {
   });
 
   it("marks the My Watchlist tab aria-selected when scope='watchlist'", () => {
-    render(<WatchlistTabs scope="watchlist" onScopeChange={() => {}} count={0} />);
+    render(<WatchlistTabs scope="watchlist" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     expect(allTab.getAttribute("aria-selected")).toBe("false");
@@ -44,14 +44,14 @@ describe("WatchlistTabs", () => {
   });
 
   it("renders the count badge with the numeric value when count > 0", () => {
-    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={3} />);
+    render(<WatchlistTabs scope="all" onScopeChange={() => {}} count={3} idBase="t" panelId="p" />);
     // The badge is the only place '3' appears in the rendered output.
     expect(screen.getByText("3")).toBeDefined();
   });
 
   it("does not render a count badge when count === 0", () => {
     const { container } = render(
-      <WatchlistTabs scope="all" onScopeChange={() => {}} count={0} />,
+      <WatchlistTabs scope="all" onScopeChange={() => {}} count={0} idBase="t" panelId="p" />,
     );
     // No '0' digit anywhere AND no element with the badge fill class. The
     // text-content check is the strict assertion; the class check is a
@@ -63,7 +63,7 @@ describe("WatchlistTabs", () => {
 
   it("ArrowRight on focused All tab moves focus to My Watchlist AND activates the scope (automatic activation)", () => {
     const onScopeChange = vi.fn();
-    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} />);
+    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     allTab.focus();
@@ -74,7 +74,7 @@ describe("WatchlistTabs", () => {
 
   it("ArrowLeft on focused My Watchlist tab moves focus to All AND activates the scope (automatic activation)", () => {
     const onScopeChange = vi.fn();
-    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} />);
+    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     watchTab.focus();
@@ -85,7 +85,7 @@ describe("WatchlistTabs", () => {
 
   it("ArrowLeft on focused All tab is a no-op (no focus change, no scope change)", () => {
     const onScopeChange = vi.fn();
-    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} />);
+    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     const allTab = screen.getByRole("tab", { name: /^All$/ });
     allTab.focus();
     fireEvent.keyDown(allTab, { key: "ArrowLeft" });
@@ -95,7 +95,7 @@ describe("WatchlistTabs", () => {
 
   it("ArrowRight on focused My Watchlist tab is a no-op (no wrap-around, no scope change)", () => {
     const onScopeChange = vi.fn();
-    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} />);
+    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     const watchTab = screen.getByRole("tab", { name: /My Watchlist/ });
     watchTab.focus();
     fireEvent.keyDown(watchTab, { key: "ArrowRight" });
@@ -105,14 +105,14 @@ describe("WatchlistTabs", () => {
 
   it("clicking My Watchlist calls onScopeChange('watchlist')", () => {
     const onScopeChange = vi.fn();
-    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} />);
+    render(<WatchlistTabs scope="all" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     fireEvent.click(screen.getByRole("tab", { name: /My Watchlist/ }));
     expect(onScopeChange).toHaveBeenCalledWith("watchlist");
   });
 
   it("clicking All calls onScopeChange('all')", () => {
     const onScopeChange = vi.fn();
-    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} />);
+    render(<WatchlistTabs scope="watchlist" onScopeChange={onScopeChange} count={0} idBase="t" panelId="p" />);
     fireEvent.click(screen.getByRole("tab", { name: /^All$/ }));
     expect(onScopeChange).toHaveBeenCalledWith("all");
   });
