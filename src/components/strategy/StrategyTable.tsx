@@ -408,7 +408,7 @@ export function StrategyTable({
                 {paged.map((s) => (
                   <tr
                     key={s.id}
-                    className="border-b border-border last:border-0"
+                    className="border-b border-border last:border-0 hover:bg-page/50 transition-colors"
                   >
                     {showStarColumn && (
                       <td className="px-2 py-3 w-11 align-middle">

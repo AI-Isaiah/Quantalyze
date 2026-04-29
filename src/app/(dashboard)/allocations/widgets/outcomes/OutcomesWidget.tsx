@@ -26,8 +26,8 @@ import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
  *   - Row-expand: 3 window cards (30d/90d/180d) with progress bars
  *   - Note section (Phase 08 MANAGE-05 BridgeOutcomeNoteSection) preserved
  *
- * computeOutcomeKPIs / deriveOutcomeLabel / deriveOutcomeStatusPill /
- * BridgeOutcomeNoteSection are preserved verbatim (do not regress Phase 5/8).
+ * computeOutcomeKPIs and BridgeOutcomeNoteSection are preserved verbatim
+ * (do not regress Phase 5/8).
  */
 
 // ---------------------------------------------------------------- types
@@ -484,8 +484,6 @@ function ExpandedPanel({
 /**
  * Phase 09.1 Plan 10 — Designer table row (outcomes.jsx:79-132).
  * Columns: From → To / Size / Recorded / Δ30 / Δ90 / Δ180 / caret.
- * Preserves deriveOutcomeStatusPill + deriveOutcomeLabel for accessibility
- * tooltips and screen-reader semantics.
  */
 function TimelineRow({
   outcome,

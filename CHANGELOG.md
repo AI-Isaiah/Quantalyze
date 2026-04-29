@@ -8,7 +8,7 @@ can bump without ambiguity.
 
 ## [0.17.1.1] - 2026-04-29
 
-**Phase 13 polish — accessibility hardening + lint cleanup.** Discovery v2's Customize drawer now properly traps keyboard focus while open, returns focus to the cog button on close, and animates in over 250ms (UI-SPEC contract that shipped silently broken in 0.17.1.0). The watchlist tablist gets Home/End keys per WAI-ARIA, unique tab IDs via `useId()` so multiple StrategyTables on a page can't collide, and the right-side filter affordances finally anchor right. Pre-existing lint debt across allocator dashboard files cleaned up in the same pass.
+**Phase 13 polish — accessibility hardening + lint cleanup.** Discovery v2's Customize drawer now properly traps keyboard focus while open, returns focus to the cog button on close, and animates in over 300ms (UI-SPEC contract that shipped silently broken in 0.17.1.0). The watchlist tablist gets Home/End keys per WAI-ARIA, unique tab IDs via `useId()` so multiple StrategyTables on a page can't collide, and the right-side filter affordances finally anchor right. Pre-existing lint debt across allocator dashboard files cleaned up in the same pass.
 
 ### Fixed
 
@@ -22,8 +22,8 @@ can bump without ambiguity.
 
 ### Changed
 
-- **`StrategyTable` row hover-bg dropped.** Row appeared clickable on hover but only the strategy-name link navigates — UX inconsistency removed.
 - **Preamble JSDocs trimmed across 6 Phase-13 files** (~130 lines of institutional storytelling removed). One-line file headers per project "no over-commenting" convention. Behavior unchanged.
+- **`OutcomesWidget` JSDocs synced** with the lint-cleanup deletion of `deriveOutcomeLabel` + `deriveOutcomeStatusPill` references — the file-level "preserved verbatim" list and the `TimelineRow` JSDoc no longer claim helpers that were removed.
 
 ### Internal
 
