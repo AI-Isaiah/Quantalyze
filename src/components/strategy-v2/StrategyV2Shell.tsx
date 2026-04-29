@@ -1,5 +1,6 @@
 import type { StrategyV2Detail } from "@/lib/queries";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { OverviewPanel } from "./OverviewPanel";
 import { HeadlineMetricsPanel } from "./HeadlineMetricsPanel";
 import { DrawdownPanel } from "./DrawdownPanel";
@@ -32,17 +33,20 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
     <main className="min-h-screen bg-page">
       <div className="mx-auto max-w-[1200px] px-6 py-12">
         <header className="mb-8">
-          <h1
-            className="text-text-primary"
-            style={{
-              fontFamily: "var(--font-serif), serif",
-              fontSize: "32px",
-              fontWeight: 400,
-              lineHeight: 1.1,
-            }}
-          >
-            {strategy.name}
-          </h1>
+          <div className="flex items-center gap-3">
+            <h1
+              className="text-text-primary"
+              style={{
+                fontFamily: "var(--font-serif), serif",
+                fontSize: "32px",
+                fontWeight: 400,
+                lineHeight: 1.1,
+              }}
+            >
+              {strategy.name}
+            </h1>
+            <VerifiedBadge />
+          </div>
           {strategy.start_date ? (
             <p className="mt-2 text-xs font-normal text-text-muted">
               Live since {strategy.start_date}
