@@ -3,9 +3,8 @@
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   CHART_ACCENT,
-  CHART_AXIS_TICK,
   CHART_BORDER,
-  CHART_FONT_MONO,
+  CHART_TICK_STYLE,
 } from "./chart-tokens";
 
 interface DrawdownChartProps {
@@ -24,14 +23,14 @@ export function DrawdownChart({ data }: DrawdownChartProps) {
         </defs>
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={{ stroke: CHART_BORDER }}
           tickFormatter={(d: string) => d.slice(5)}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
+          tick={CHART_TICK_STYLE}
           tickLine={false}
           axisLine={false}
           tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
