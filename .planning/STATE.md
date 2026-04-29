@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v0.17.0.0
 milestone_name: "Sprint 12: KPI Parity and Discovery v2"
-status: executing
-stopped_at: Completed 14b-08-PLAN.md (Wave 4 final — strategy.ui_v2 OFF→ON browser-side flip + PR template Pitfall 17 matrix + DESIGN.md decisions log). Phase 14b feature-complete.
-last_updated: "2026-04-29T14:33:57.949Z"
-last_activity: 2026-04-29 -- Phase --phase execution started
+status: complete
+stopped_at: Milestone closed 2026-04-29. All 28 plans complete across 4 phases (12, 13, 14a, 14b). Audit verdict tech_debt (52/53 REQs). Tag v0.17.0.0 created locally.
+last_updated: "2026-04-29T18:15:00.000Z"
+last_activity: 2026-04-29 — milestone close (/gsd-complete-milestone)
 progress:
   total_phases: 4
   completed_phases: 4
@@ -21,15 +21,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-26 at v0.17.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Phase --phase — 14a
-**Concurrent on `main`:** v0.16.0.0 Phase 11 (Onboarding + Security Readiness) executing in parallel — independent surface area, not a blocker.
+**Current focus:** Planning next milestone — v0.17.1 (hotfix) OR v0.18.0.0 (Manager Workspace IA)
+**Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29, tech_debt verdict)
 
 ## Current Position
 
-Phase: --phase (14a) — EXECUTING
-Plan: 1 of --name
-Status: Executing Phase --phase
-Last activity: 2026-04-29 -- Phase --phase execution started
+Phase: — (milestone closed)
+Status: v0.17.0.0 complete. Awaiting next milestone kick-off.
+Last activity: 2026-04-29 — /gsd-complete-milestone executed
 
 ## Milestone Summary (v0.17.0.0)
 

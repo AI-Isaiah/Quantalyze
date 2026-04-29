@@ -72,14 +72,15 @@ function isLeapYear(y: number): boolean {
   return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
 }
 
-const MONTH_OFFSETS = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+/** Month start day-of-year offsets (0-indexed). Used by dayOfYear() and SVG month labels. */
+const MONTH_DOY_START = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
 /** 0-based day-of-year, clamped to [0, 364] to match the 365-column layout. */
 function dayOfYear(dateStr: string): number {
   const year = Number(dateStr.slice(0, 4));
   const month = Number(dateStr.slice(5, 7)); // 1-12
   const day = Number(dateStr.slice(8, 10)); // 1-31
-  let doy = MONTH_OFFSETS[month - 1] + (day - 1);
+  let doy = MONTH_DOY_START[month - 1] + (day - 1);
   if (month >= 3 && isLeapYear(year)) doy += 1;
   if (doy > 364) doy = 364;
   if (doy < 0) doy = 0;
@@ -117,9 +118,6 @@ const SVG_DOY_CELL_W = 2; // 365 * 2 = 730px — matches Canvas CANVAS_WIDTH
 const SVG_CELL_H = 16;
 const SVG_LEFT_GUTTER = 56; // room for the year label
 const SVG_TOP_GUTTER = 24; // room for the month label
-
-/** Month-label x-positions for the day-of-year layout (approximate mid-month). */
-const MONTH_DOY_START = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
 const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapDataPoint[] }) {
   const rows = useMemo(() => groupByYear(data), [data]);
