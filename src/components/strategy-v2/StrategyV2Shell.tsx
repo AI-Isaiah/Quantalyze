@@ -79,6 +79,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
         <OverviewPanel panel1={panel1} history_days={history_days} />
 
         <HeadlineMetricsPanel
+          key={strategy.id}
           strategyId={strategy.id}
           panel2Headline={panel2Headline}
           panel2Equity={panel2Equity}
@@ -90,15 +91,20 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
 
         {/*
           F2 follow-up (v0.17.1) — `key={strategy.id}` forces a full
-          unmount + remount of each lazy panel on cross-strategy navigation.
-          Without it, /strategy/abc/v2 → /strategy/xyz/v2 reuses the same
-          React instances and the useLazyPanelMetrics hook keeps abc's
-          resolved data alongside xyz's stale "loading" status (the hook's
-          mountedRef + strategyId guards prevent the LEAK but cannot
-          retrigger the fetch). The key isolates each panel's lifecycle
-          to one strategy. Eager panels above (Overview / Headline /
-          Drawdown) read from server-rendered props and don't carry
-          per-strategy fetch state, so they are intentionally unkeyed.
+          unmount + remount of each panel that holds per-strategy client
+          state on cross-strategy navigation. Without it,
+          /strategy/abc/v2 → /strategy/xyz/v2 reuses the same React
+          instances; abc's resolved fetch state lingers on xyz's panel
+          (the hook's mountedRef + strategyId guards prevent the LEAK
+          but cannot retrigger a fetch on the new strategyId).
+
+          Keyed: the 4 lazy panels below (useLazyPanelMetrics-driven) AND
+          HeadlineMetricsPanel above (calls fetchStrategyLazyMetricsClient
+          for the Log-returns toggle and caches the result in useState —
+          identical bug class to the lazy panels).
+
+          Unkeyed: Overview / Drawdown — pure server-prop renderers with
+          no client-side per-strategy state.
          */}
         <ReturnsDistributionPanel
           key={strategy.id}

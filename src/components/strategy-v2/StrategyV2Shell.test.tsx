@@ -290,11 +290,13 @@ describe("StrategyV2Shell — Phase 14b-06 Task 2 wiring", () => {
     expect(src).toMatch(/<RollingMetricsPanel\s+key=\{strategy\.id\}/);
     expect(src).toMatch(/<TradeAndPositionPanel\s+key=\{strategy\.id\}/);
     expect(src).toMatch(/<ExposureAndGreeksPanel\s+key=\{strategy\.id\}/);
-    // Eager panels (Overview / Headline / Drawdown) are intentionally NOT
-    // keyed — they read from server-rendered props with no per-strategy
-    // fetch state. Keying them would force a needless paint on every nav.
+    // HeadlineMetricsPanel ALSO carries client-side per-strategy fetch state
+    // (calls fetchStrategyLazyMetricsClient for the Log-returns toggle and
+    // caches it in useState), so it must be keyed too — identical F2 leak
+    // class to the lazy panels.
+    expect(src).toMatch(/<HeadlineMetricsPanel\s+key=\{strategy\.id\}/);
+    // Pure server-prop renderers stay unkeyed — no client per-strategy state.
     expect(src).not.toMatch(/<OverviewPanel\s+key=/);
-    expect(src).not.toMatch(/<HeadlineMetricsPanel\s+key=/);
     expect(src).not.toMatch(/<DrawdownPanel\s+key=/);
   });
 
