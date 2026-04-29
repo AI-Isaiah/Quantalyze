@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.4] - 2026-04-29
+
+**Audit follow-up — test gaps closed + CI seed-gate widened.** Three deferred audit items addressed: SR-3 adds component coverage for the v2 route's error boundary plus a `notFound()` contract test; SR-4 fills three uncovered branches in `useLazyPanelMetrics` (`ref(null)` early-return, SSR fallback when `IntersectionObserver` is undefined, non-intersecting entry skipped); MA-8 extends the BLOCK-3 CI gate so all 8 seed-dependent Playwright specs run together as soon as `E2E_TEST_DB_CONFIGURED` is set on the repo. MA-2 (v1 → v2 cutover) and MA-3 (4-bucket Trade Mix flip) intentionally not done — both need product input (MA-2) or upstream `is_maker` ingestion (MA-3) before scaffolding adds value.
+
+### Added
+
+- **SR-3 — `/strategy/[id]/v2/error.tsx` component test (5 cases).** Heading + body copy + CTAs render; Reload button invokes `unstable_retry()`; v1-fallback `Link` strips the trailing `/v2` from `usePathname()`; pathname `null` falls back to `/`; `console.error` fires with the thrown error on mount. Each test verified to fail when the corresponding line is reverted.
+- **SR-3 — `/strategy/[id]/v2/page.tsx` notFound contract test (2 cases).** `getStrategyDetailV2` returning null invokes `notFound()` and short-circuits the render; a populated result does NOT call `notFound()` and forwards `detail` through to `<StrategyV2Shell>`. Mocks the data fetcher + shell + `next/navigation.notFound` so the server-component contract is exercised without the full Next.js runtime (mirrors the existing v1 page.test.tsx convention — async server components are awkward to mount in jsdom).
+- **SR-4 — three new `useLazyPanelMetrics` tests** filling uncovered branches: `ref(null)` early-return (React detach + fast-refresh path), `IntersectionObserver=undefined` SSR fallback (status flips to ready immediately, no observer created, no fetch fired), non-intersecting entry per-entry filter (status stays idle, target stays observed). 14 → 17 tests.
+
+### Changed
+
+- **MA-8 — CI BLOCK-3 gate now covers all 8 seed-dependent specs** (was 1: `onboarding-funnel`). When `vars.E2E_TEST_DB_CONFIGURED == 'true'`, the workflow now runs `discovery-axe`, `discovery-hide-examples-default`, `discovery-prefs-isolation`, `strategy-v2-partial-data`, `strategy-v2-chart-parity`, `strategy-v2-keyboard`, `strategy-v2-axe`, and `onboarding-funnel` together. Each spec's HAS_SEED_ENV constant continues to self-skip when the env isn't set, so fork PRs and unconfigured forks still pass cleanly. Step renamed `Run onboarding-funnel spec (...)` → `Run seed-gated specs (MA-8 / ...)`.
+
+### Internal
+
+- **MA-2 (v1 → v2 cutover) deferred — needs product direction.** v1 (`/strategy/[id]`) and v2 (`/strategy/[id]/v2`) serve different audiences: v1 is the public marketing factsheet (calls `getPublicStrategyDetail`, includes `StrategyNoteCard` for authenticated viewers and a sign-up CTA for unauthenticated visitors); v2 is the allocator detail surface (calls `getStrategyDetailV2`, returns null for unpublished strategies, no public-marketing affordances). The flag `isStrategyUiV2Enabled` is currently dead code — no consumer wires it. A clean cutover is a feature port (notes + CTA into the v2 shell) plus an audience redesign, not a code-level fix. Surfaced for v0.17.2 planning.
+- **MA-3 (4-bucket Trade Mix flip) deferred — blocked on upstream data.** The `TRADE_MIX_HAS_MAKER_TAKER` flag and `TradeMixSubPanel`'s `mode='4-bucket'` prop already exist as scaffolding, but the 4-bucket render branch is intentionally a fallback message until `analytics-service/services/exchange.py` populates `is_maker` for Binance/OKX/Bybit (D-15 audit ≥ 99% required). Implementing the flip without data would render four empty buckets — worse than the 2-bucket status quo.
+- **MA-9 / MA-10 (DISCO-05 migration push + Phase 12 SC#4 sign-off) — operator actions, not code.** Documented for the next operator-pass sweep.
+
+### Tests
+
+- 2609 → 2619 (+10 new). 5 error.test.tsx cases + 2 page.test.tsx cases (SR-3) + 3 useLazyPanelMetrics gap cases (SR-4). 264 test files green, 0 typecheck errors.
+
 ## [0.17.1.3] - 2026-04-29
 
 **Milestone-audit clean-up — analytics path-extraction, cron GC, locale safety, chart-token consolidation.** Eight audit findings landed in one pass: `getStrategyDetailV2` stops fetching the full analytics blob per request, `OverviewPanel` is locale-stable across SSR/client, `DrawdownPanel` runs on a single hydration pass, every Sprint-3 chart sources its hex from `chart-tokens`, the Daily Heatmap canvas no longer races font load on cold renders, and abandoned wizard drafts have a weekly auto-cleanup cron now that the project is on Vercel Pro.
