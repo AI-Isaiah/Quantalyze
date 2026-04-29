@@ -428,6 +428,120 @@ describe("useLazyPanelMetrics — Phase 14b extension", () => {
     expect(result.current.data).toBeNull();
   });
 
+  it("Test 12 (F2 v0.17.1): .catch guard discards stale rejection when strategyId changes mid-fetch", async () => {
+    // GAP-1 from coverage audit: the .then guard is exercised by Test 10, but
+    // the symmetric .catch guard was not. Without `if (!isStillRelevant())`
+    // on the .catch chain, abc's late rejection would fire console.error +
+    // setStatus("error") on the hook instance now bound to xyz — flashing a
+    // stale error in xyz's panel. Observable via the fiber-still-mounted
+    // setStatus side effect AND the console.error log call.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let rejectFetch: (e: unknown) => void = () => {};
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFetch = reject;
+        }),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ strategyId }) =>
+        useLazyPanelMetrics("panel5", { fetchOnIntersect: true, strategyId }),
+      { initialProps: { strategyId: "abc" } },
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[0], node);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("abc", "rolling");
+    expect(result.current.status).toBe("loading");
+
+    // Same hook instance, new strategyId.
+    rerender({ strategyId: "xyz" });
+
+    // Reject abc's stale fetch. WITHOUT the .catch guard, this fires
+    // console.error and setStatus("error") on the xyz-bound instance.
+    await act(async () => {
+      rejectFetch(new Error("stale-error"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // F2 .catch fix: stale rejection must be discarded — no error log, no
+    // status flip, no data mutation.
+    expect(result.current.status).toBe("loading");
+    expect(result.current.data).toBeNull();
+    expect(errSpy).not.toHaveBeenCalledWith(
+      "useLazyPanelMetrics fetch failed",
+      expect.objectContaining({ strategyId: "abc" }),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("Test 13 (F2 v0.17.1): .catch guard discards rejection that resolves post-unmount", async () => {
+    // GAP-1 (catch + unmount): unlike Test 11's .then unmount race (which
+    // is vacuous because React 18 silently no-ops setState on unmounted
+    // components), the .catch path's first statement is `console.error(...)`.
+    // That call has an OBSERVABLE side effect — independent of React's
+    // post-unmount setState behavior — so spying on console.error genuinely
+    // distinguishes guard-present from guard-absent.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let rejectFetch: (e: unknown) => void = () => {};
+    fetchSpy.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectFetch = reject;
+        }),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useLazyPanelMetrics("panel4", { fetchOnIntersect: true, strategyId: "abc" }),
+    );
+    const node = document.createElement("div");
+    act(() => {
+      result.current.ref(node);
+    });
+    fireIntersection(observers[0], node);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("abc", "returns_dist");
+    expect(result.current.status).toBe("loading");
+
+    unmount();
+
+    // Reject after unmount. Without the mountedRef guard, console.error fires
+    // before the setStatus("error") call — and console.error is a side
+    // effect we CAN observe, regardless of React's reconciler dropping
+    // setState on the dead fiber.
+    await act(async () => {
+      rejectFetch(new Error("post-unmount-rejection"));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // F2 .catch fix: console.error must NOT be called for the discarded
+    // rejection. Filter on the structured-log payload to avoid catching
+    // any unrelated React internal warnings.
+    expect(errSpy).not.toHaveBeenCalledWith(
+      "useLazyPanelMetrics fetch failed",
+      expect.objectContaining({ strategyId: "abc", message: "post-unmount-rejection" }),
+    );
+    errSpy.mockRestore();
+  });
+
   it("Test 9: cleanup runs after fetch resolves without throwing", async () => {
     fetchSpy.mockResolvedValue({});
     const { result, unmount } = renderHook(() =>

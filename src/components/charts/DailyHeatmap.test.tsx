@@ -31,11 +31,32 @@ interface FillRectCall {
   globalAlpha: number;
 }
 
+interface ClearRectCall {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+type CanvasOp =
+  | { op: "save" }
+  | { op: "restore" }
+  | { op: "clearRect"; args: ClearRectCall }
+  | { op: "fillRect"; args: { x: number; y: number; w: number; h: number } };
+
 let fillRectCalls: FillRectCall[] = [];
+let clearRectCalls: ClearRectCall[] = [];
+let saveCalls = 0;
+let restoreCalls = 0;
+let canvasOps: CanvasOp[] = [];
 let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
 
 function installCanvasMock() {
   fillRectCalls = [];
+  clearRectCalls = [];
+  saveCalls = 0;
+  restoreCalls = 0;
+  canvasOps = [];
   originalGetContext = HTMLCanvasElement.prototype.getContext;
   const fakeCtx = {
     fillStyle: "" as string,
@@ -49,15 +70,27 @@ function installCanvasMock() {
         fillStyle: this.fillStyle,
         globalAlpha: this.globalAlpha,
       });
+      canvasOps.push({ op: "fillRect", args: { x, y, w, h } });
     },
     // SR-2 (v0.17.1): the per-paint save/restore pair isolates globalAlpha
-    // mutations on the canvas context. Mocked as no-ops; integration paths
-    // exercise the real CanvasRenderingContext2D in the browser/Playwright.
-    save() {},
-    restore() {},
-    // clearRect mock — SR-2 follow-up (review fix): paint loop clears stale
-    // pixels before redrawing so subsetted data doesn't leave ghost cells.
-    clearRect(_x: number, _y: number, _w: number, _h: number) {},
+    // mutations on the canvas context. Tracked via saveCalls/restoreCalls
+    // counters and the canvasOps sequence log so Test 17 can assert
+    // ordering. Production code uses the real CanvasRenderingContext2D.
+    save() {
+      saveCalls += 1;
+      canvasOps.push({ op: "save" });
+    },
+    restore() {
+      restoreCalls += 1;
+      canvasOps.push({ op: "restore" });
+    },
+    // SR-2 follow-up: paint loop clears stale pixels before redrawing so
+    // subsetted data doesn't leave ghost cells. Tracked so Test 17 can
+    // assert dimensions and Test 18 can assert re-paint behavior.
+    clearRect(x: number, y: number, w: number, h: number) {
+      clearRectCalls.push({ x, y, w, h });
+      canvasOps.push({ op: "clearRect", args: { x, y, w, h } });
+    },
   };
   HTMLCanvasElement.prototype.getContext = vi.fn(() => fakeCtx) as never;
 }
@@ -65,6 +98,10 @@ function installCanvasMock() {
 function restoreCanvasMock() {
   HTMLCanvasElement.prototype.getContext = originalGetContext;
   fillRectCalls = [];
+  clearRectCalls = [];
+  saveCalls = 0;
+  restoreCalls = 0;
+  canvasOps = [];
 }
 
 /**
@@ -294,5 +331,62 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
     const trimmed2 = trimmed1.slice();
     rerender(<DailyHeatmap data={trimmed2} />);
     expect(fillRectCalls.length).toBe(afterFirstPaint + 1825);
+  });
+
+  /**
+   * SR-2 (v0.17.1) — the Canvas paint loop must isolate per-cell
+   * globalAlpha mutations and clear stale pixels before redraw. Without
+   * the save/restore pair, the final cell's alpha leaks into any
+   * subsequent draw on this context. Without clearRect, a re-paint with
+   * shrunk data leaves ghost cells from the prior paint visible.
+   *
+   * Coverage audit GAP-2 + GAP-3: the prior tests mocked save/restore/
+   * clearRect as no-ops without asserting they were called, so removing
+   * any of those three lines from CanvasRenderer would silently pass.
+   */
+  it("Test 17 (SR-2): Canvas paint wraps fillRects in save/restore and clears canvas first", () => {
+    const trimmed = buildFiveYearFixture().slice(0, 1825);
+    render(<DailyHeatmap data={trimmed} />);
+
+    // One save + one restore per paint.
+    expect(saveCalls).toBe(1);
+    expect(restoreCalls).toBe(1);
+
+    // Exactly one full-canvas clear per paint.
+    expect(clearRectCalls.length).toBe(1);
+    // 5 unique years × CELL_H(80) = 400px tall, 365 cols × CELL_W(2) = 730px.
+    expect(clearRectCalls[0]).toEqual({ x: 0, y: 0, w: 730, h: 5 * 80 });
+
+    // Ordering: save → clearRect → fillRect+ → restore. The first op is
+    // save; the second is clearRect; the last is restore; every op
+    // between clearRect and restore is fillRect.
+    expect(canvasOps[0]).toEqual({ op: "save" });
+    expect(canvasOps[1].op).toBe("clearRect");
+    expect(canvasOps[canvasOps.length - 1]).toEqual({ op: "restore" });
+    const between = canvasOps.slice(2, -1);
+    expect(between.length).toBe(1825);
+    for (const op of between) {
+      expect(op.op).toBe("fillRect");
+    }
+  });
+
+  it("Test 18 (SR-2 follow-up): re-paint with new data identity re-clears the canvas", () => {
+    const trimmed1 = buildFiveYearFixture().slice(0, 1825);
+    const { rerender } = render(<DailyHeatmap data={trimmed1} />);
+    expect(clearRectCalls.length).toBe(1);
+    expect(saveCalls).toBe(1);
+    expect(restoreCalls).toBe(1);
+
+    // New array identity, same year set → React.memo invalidates → re-paint.
+    // The stale-pixel hazard is real here: canvas dimensions don't change
+    // (same year set), so the canvas does NOT auto-clear via attr change.
+    // clearRect is what wipes the prior paint.
+    const trimmed2 = trimmed1.slice();
+    rerender(<DailyHeatmap data={trimmed2} />);
+
+    expect(clearRectCalls.length).toBe(2);
+    expect(clearRectCalls[1]).toEqual({ x: 0, y: 0, w: 730, h: 5 * 80 });
+    expect(saveCalls).toBe(2);
+    expect(restoreCalls).toBe(2);
   });
 });
