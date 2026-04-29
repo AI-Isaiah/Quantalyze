@@ -214,6 +214,13 @@ const CanvasRenderer = memo(function CanvasRenderer({
 
   const rowsByYear = useMemo(() => groupByYear(data), [data]);
   const yearOrder = useMemo(() => rowsByYear.map((r) => r.year), [rowsByYear]);
+  // SR-1 (v0.17.1): O(1) year-index lookup. Replaces yearOrder.indexOf(yr)
+  // inside the per-cell paint loop, which was O(n × y) for n cells × y years
+  // (1825 × 5 ≈ 9k string comparisons on a 5-year strategy).
+  const yearIndex = useMemo(
+    () => new Map(yearOrder.map((y, i) => [y, i] as const)),
+    [yearOrder],
+  );
 
   // WR-01: dynamic height — grows with the actual number of distinct years.
   const canvasHeight = Math.max(CELL_H, rowsByYear.length * CELL_H);
@@ -223,10 +230,15 @@ const CanvasRenderer = memo(function CanvasRenderer({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (ctx) {
+      // SR-2 (v0.17.1): isolate per-cell globalAlpha mutations so the final
+      // cell's alpha does not leak into any subsequent draw on this context.
+      // Canvas is currently dedicated to the heatmap, but the save/restore
+      // pair removes a latent hazard at near-zero cost (one pair per paint).
+      ctx.save();
       for (const point of data) {
         const yr = point.date.slice(0, 4);
-        const yearIdx = yearOrder.indexOf(yr);
-        if (yearIdx < 0) continue;
+        const yearIdx = yearIndex.get(yr);
+        if (yearIdx === undefined) continue;
         const doy = dayOfYear(point.date);
         const x = doy * CELL_W;
         const y = yearIdx * CELL_H;
@@ -235,6 +247,7 @@ const CanvasRenderer = memo(function CanvasRenderer({
         ctx.globalAlpha = opacity;
         ctx.fillRect(x, y, CELL_W, CELL_H);
       }
+      ctx.restore();
     }
     performance.mark("panel-4-mount-end");
     try {
@@ -247,7 +260,7 @@ const CanvasRenderer = memo(function CanvasRenderer({
       // performance.measure can throw if the marks were cleared between
       // mount and effect — non-fatal for paint correctness.
     }
-  }, [data, yearOrder]);
+  }, [data, yearIndex]);
 
   return (
     <div className="relative w-full" style={{ minHeight: Math.max(360, rowsByYear.length * CELL_H) }}>

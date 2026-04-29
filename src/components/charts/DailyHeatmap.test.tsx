@@ -50,6 +50,11 @@ function installCanvasMock() {
         globalAlpha: this.globalAlpha,
       });
     },
+    // SR-2 (v0.17.1): the per-paint save/restore pair isolates globalAlpha
+    // mutations on the canvas context. Mocked as no-ops; integration paths
+    // exercise the real CanvasRenderingContext2D in the browser/Playwright.
+    save() {},
+    restore() {},
   };
   HTMLCanvasElement.prototype.getContext = vi.fn(() => fakeCtx) as never;
 }
