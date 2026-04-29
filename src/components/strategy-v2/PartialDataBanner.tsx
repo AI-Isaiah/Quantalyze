@@ -13,7 +13,10 @@ interface PartialDataBannerProps {
  */
 export function PartialDataBanner({ heading, body }: PartialDataBannerProps) {
   return (
-    <div className="mx-auto max-w-[480px] rounded-md border border-border bg-surface-subtle p-4 text-center">
+    <div
+      role="status"
+      className="mx-auto max-w-[480px] rounded-md border border-border bg-surface-subtle p-4 text-center"
+    >
       <p className="text-xs font-normal uppercase tracking-wider text-text-secondary">
         {heading}
       </p>
