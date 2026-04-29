@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.8] - 2026-04-29
+
+**Long-tail tech-debt safe batch.** Eight low-regression-surface items pulled from the cross-PR specialist tech-debt list and shipped together. Riskier items (chromium 15-majors, ts5→6, queries.ts split, TabPanel as-any refactor, EquityChart split, full knip widget removal) explicitly DEFERRED.
+
+### Added
+
+- **CSRF guard on `/api/notes` PATCH.** Adds `assertSameOrigin(request)` at the top of the mutating handler, bringing notes into line with every other mutating route in `src/app/api/`. Regression test asserts a PATCH with no Origin/Referer returns 403 — the audit-fanout integration suite was updated alongside to set the same-origin localhost header on its 4 notes-scope test cases.
+- **Vitest v8 coverage tracking.** New `@vitest/coverage-v8` devDependency, `coverage` block in `vitest.config.ts` (provider v8, reporters text+html+json-summary, 60% thresholds on lines/functions/branches/statements), `npm run test:coverage` script, and a `## Test Coverage` section in `CLAUDE.md` documenting 60% floor / 80% target. Measurement-only — NOT a CI gate yet.
+- **`SparklineTone` discriminated union.** Splits `src/lib/sparkline-color.ts` into a typed three-tone enum (`positive` / `negative` / `neutral`) plus a `SPARKLINE_TONE_COLOR` Record and a `sparklineTone(values)` classifier. Existing `sparklineColor()` callers (StrategyGrid + StrategyTable) continue to work unchanged — the wrapper composes the two pieces.
+
+### Changed
+
+- **`formatNumber()` deduped.** `src/app/(dashboard)/allocations/components/HoldingsTable.tsx` and `HoldingDetail.tsx` each carried near-identical local copies; both now import from `@/lib/utils`. The lib helper was hardened with the same `Number.isFinite` guard the local copies had so Sharpe/Sortino/Calmar of `Infinity` continue to render `—` instead of `∞`. Regression test pins the new behavior on `NaN`, `+Infinity`, `-Infinity`.
+- **Silent `.catch(() => {})` cleanup.** Four sites swallowed background-task failures with no observability; each now logs a contextual message via `console.error` so a flood of failures surfaces during local debugging. Affected: `src/app/api/admin/strategy-review/route.ts` (manager-approval notify), `src/app/api/admin/intro-request/route.ts` (allocator-status notify), `src/components/strategy/StrategyActions.tsx` (founder-submission notify), `src/lib/discovery-prefs.ts` (`localStorage.setItem` quota / Safari private-mode). Sentry-deferral pattern: console-only until a structured sink lands.
+
+### Removed
+
+- **Three hardcoded-skip Playwright specs.** `e2e/admin-compute-jobs.spec.ts`, `e2e/bridge-outcome.spec.ts`, and `e2e/api-key-flow.spec.ts` each used unconditional `test.skip(true, ...)` (NOT env-gated) — they sat-rotted in CI by passing trivially. Each can be re-implemented when its underlying scaffolding is ready.
+- **Four orphan source files.** `src/lib/observability.ts`, `src/lib/qa-mode.ts`, `src/lib/mock-data.ts`, and `scripts/seed-full-app-demo.ts` had zero non-test importers (triple-verified via grep + tsc clean post-removal). DEFERRED on this pass: the 25 widget files, `supabase/functions/` orphans, `database.types.ts`, and the four package.json devDeps that knip flags — all four cohorts may be live at runtime and need verification before removal.
+
+### Tests
+
+- New CSRF regression test on `/api/notes` PATCH (`route.test.ts`, 17 → 17 tests passing).
+- New `Number.isFinite` regression on `formatNumber()` (`utils.test.ts`).
+- Six new tests around `SparklineTone` + `SPARKLINE_TONE_COLOR` round-trip (`sparkline-color.test.ts`, 6 → 12).
+- Audit-fanout integration suite updated to set the same-origin Origin header on 4 notes-PATCH cases.
+
 ## [0.17.1.7] - 2026-04-29
 
 **Comment-rot mass strip.** ~135 phase-tag, finding-ID, and review-iteration references removed from ~50 source files. The cross-PR specialist review of #84 / #85 / #86 found that `Phase 13 / Plan 13-01 / DISCO-01` JSDoc banners, `MA-X / SR-X / F-X (v0.17.1)` finding tags, `T-13-01-01..06` threat IDs, `WR-XX / IN-XX / MD-XX / LW-XX` review IDs, `Grok-4.20 P1` and `Cross-model adversarial review` change-log narrative, and `Plan 14b-XX / KPI-NN / METRICS-NN / DESIGN-NN / A11Y-NN` references inflated comment LOC by 80%+ on Phase 13 / 14a / 14b code paths and rotted into noise as soon as the original artifacts archived. Per the project's "Default to writing no comments. Only add one when the WHY is non-obvious" rule, the WHY content was preserved while the meta-narrative tags were dropped.
@@ -51,7 +78,6 @@ can bump without ambiguity.
 ### Tests
 
 - **+15 new test cases** across StarToggle (401 no-retry / 403 no-retry / 429 + Retry-After / network rejection / role=status aria-live), discovery-prefs (legacy unversioned accept / v1 verbatim / future-version reject), queries (null on supabase error), and StrategyTable (Save applies hide_examples / Save applies view-mode change). Full vitest run: 2627 passed / 0 failed.
->>>>>>> a97a26a (chore: bump version and changelog (v0.17.1.5))
 
 ## [0.17.1.4] - 2026-04-29
 
