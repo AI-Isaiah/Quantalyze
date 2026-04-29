@@ -109,6 +109,27 @@ const FIXTURE: StrategyV2Detail = {
     ],
     drawdown_episodes: [],
   },
+  // Phase 14b — Wave-3 wiring requires panel4..7 inputs on the fixture.
+  // Use sensible empty-but-non-throwing values so the panel bodies render
+  // their partial-data sub-banners (the panel-count assertion does not care
+  // about chart contents — only the 7 outermost <section data-panel> nodes).
+  panel4Inputs: {
+    monthly_returns: null,
+    return_quantiles: null,
+    returns_series: null,
+    benchmark_returns: null,
+  },
+  panel5Inputs: {
+    rolling_metrics: null,
+    sharpe: null,
+  },
+  panel6Inputs: {
+    trade_metrics: null,
+  },
+  panel7Inputs: {
+    benchmark_greeks: { alpha: null, beta: null, ir: null, treynor: null },
+    correlation_analytics: { returns_series: null, metrics_json: null },
+  },
   lazyKeys: ["panel4", "panel5", "panel6", "panel7"],
   history_days: 365,
 };

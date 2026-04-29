@@ -356,7 +356,16 @@ export interface StrategyV2Detail {
     sharpe: number | null;
   };
   panel6Inputs: {
-    trade_metrics: TradeMetrics | null;
+    /**
+     * Phase 12 / Plan 12-05 SUMMARY documents that the trade_metrics JSONB
+     * blob carries volume-aggregator extras BEYOND the frozen TradeMetrics
+     * interface (gross_volume_usd, mean_trade_size_usd, daily_turnover_usd,
+     * monthly_turnover_usd, payoff_ratio, profit_factor, winners_count,
+     * losers_count). The wider intersection type matches what
+     * `TradeAndPositionPanel` expects so the shell can pass through
+     * unchanged.
+     */
+    trade_metrics: (TradeMetrics & Record<string, unknown>) | null;
   };
   panel7Inputs: {
     benchmark_greeks: {
@@ -454,8 +463,10 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
     sharpe: isComplete ? (a?.sharpe ?? null) : null,
   };
 
-  const panel6Inputs = {
-    trade_metrics: isComplete ? (a?.trade_metrics ?? null) : null,
+  const panel6Inputs: StrategyV2Detail["panel6Inputs"] = {
+    trade_metrics: isComplete
+      ? ((a?.trade_metrics ?? null) as (TradeMetrics & Record<string, unknown>) | null)
+      : null,
   };
 
   // Greeks scalars: metrics.py emits both `information_ratio` and `treynor_ratio`
