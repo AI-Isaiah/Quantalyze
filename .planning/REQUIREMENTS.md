@@ -84,7 +84,8 @@
 - [ ] **DESIGN-01**: Every chart in Single-Strategy v2 + Discovery v2 audited against DESIGN.md identity rules (white card #FFFFFF, accent #1B6B5A strategy series, muted #94A3B8 BENCHMARK STROKES ONLY — never as text; positive #16A34A, negative #DC2626; 1px gridlines #E2E8F0; no Plotly modebar; DM Sans 11px axis labels; Geist Mono 11px tabular-nums ticks)
 - [x] **DESIGN-02
 **: All numeric cells (KPI strip, table cells, axis ticks) use `font-variant-numeric: tabular-nums`; centralized in new `CHART_TICK_STYLE` token (Pitfall 14 — Recharts SVG `<text>` doesn't inherit `font-variant-numeric` from CSS class)
-- [ ] **DESIGN-03**: DESIGN.md decisions log entry stamped at milestone close documenting UC#7 7-panel density-rule deviation; PR-template addition of per-chart identity checklist (Pitfall 13)
+- [x] **DESIGN-03
+**: DESIGN.md decisions log entry stamped at milestone close documenting UC#7 7-panel density-rule deviation; PR-template addition of per-chart identity checklist (Pitfall 13)
 
 ### A11Y — Accessibility verification (Phase 14a + Phase 14b)
 
@@ -95,7 +96,8 @@
 
 ### CLEANUP — Bundle hygiene (Phase 14a)
 
-- [ ] **CLEANUP-01**: `npm uninstall @nivo/boxplot` (~80KB gzipped saved); `ReturnQuantiles` is hand-rolled SVG with no dependency on the lib
+- [x] **CLEANUP-01
+**: `npm uninstall @nivo/boxplot` (~80KB gzipped saved); `ReturnQuantiles` is hand-rolled SVG with no dependency on the lib
 
 ---
 
