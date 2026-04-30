@@ -6,6 +6,8 @@ import type { StrategyAnalytics } from "@/lib/types";
 export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics }) {
   const dqf = analytics.data_quality_flags ?? null;
   const positionMetricsFailed = dqf?.position_metrics_failed === true;
+  const fillsFetchFailed = dqf?.fills_fetch_failed === true;
+  const positionSideVolumeFailed = dqf?.position_side_volume_failed === true;
 
   const vm = analytics.volume_metrics as {
     buy_volume_pct?: number;
@@ -46,7 +48,7 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
   return (
     <>
       {/* Error state */}
-      {positionMetricsFailed && (
+      {(positionMetricsFailed || fillsFetchFailed) && (
         <div className="mb-4 rounded-lg border border-warning/30 bg-warning/5 px-4 py-3">
           <p className="text-sm font-medium text-warning">
             Volume metrics couldn&apos;t be computed.
@@ -72,7 +74,14 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
 
           {/* Long/Short volume bar */}
           <div className="bg-white border border-border rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-text-primary mb-3">Long / Short Volume</h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-text-primary">Long / Short Volume</h3>
+              {positionSideVolumeFailed && (
+                <span className="text-xs font-medium text-warning">
+                  Approximate — attribution unavailable
+                </span>
+              )}
+            </div>
             <HorizontalStackedBar
               leftPct={longPct}
               rightPct={shortPct}

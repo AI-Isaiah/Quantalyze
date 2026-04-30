@@ -125,6 +125,7 @@ const FIXTURE: StrategyV2Detail = {
   },
   panel6Inputs: {
     trade_metrics: null,
+    data_quality_flags: null,
   },
   panel7Inputs: {
     benchmark_greeks: { alpha: null, beta: null, ir: null, treynor: null },

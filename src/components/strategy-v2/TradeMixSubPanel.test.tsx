@@ -15,8 +15,8 @@ describe("TradeMixSubPanel", () => {
     const { container } = render(
       <TradeMixSubPanel
         buckets={{
-          long: { count: 1247, total_notional: 1, avg_holding_period_hours: 0 },
-          short: { count: 701, total_notional: 1, avg_holding_period_hours: 0 },
+          long: { count: 1247, total_notional: 1 },
+          short: { count: 701, total_notional: 1 },
         }}
       />,
     );
@@ -46,8 +46,8 @@ describe("TradeMixSubPanel", () => {
     render(
       <TradeMixSubPanel
         buckets={{
-          long: { count: 1247, total_notional: 1, avg_holding_period_hours: 0 },
-          short: { count: 701, total_notional: 1, avg_holding_period_hours: 0 },
+          long: { count: 1247, total_notional: 1 },
+          short: { count: 701, total_notional: 1 },
         }}
       />,
     );
@@ -59,8 +59,8 @@ describe("TradeMixSubPanel", () => {
     const { container } = render(
       <TradeMixSubPanel
         buckets={{
-          long: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
-          short: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
+          long: { count: 100, total_notional: 1 },
+          short: { count: 100, total_notional: 1 },
         }}
       />,
     );
@@ -72,10 +72,10 @@ describe("TradeMixSubPanel", () => {
     const { container } = render(
       <TradeMixSubPanel
         buckets={{
-          long_maker: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
-          long_taker: { count: 200, total_notional: 1, avg_holding_period_hours: 0 },
-          short_maker: { count: 50, total_notional: 1, avg_holding_period_hours: 0 },
-          short_taker: { count: 150, total_notional: 1, avg_holding_period_hours: 0 },
+          long_maker: { count: 100, total_notional: 1 },
+          long_taker: { count: 200, total_notional: 1 },
+          short_maker: { count: 50, total_notional: 1 },
+          short_taker: { count: 150, total_notional: 1 },
         }}
       />,
     );
@@ -111,10 +111,10 @@ describe("TradeMixSubPanel", () => {
     const { container } = render(
       <TradeMixSubPanel
         buckets={{
-          long_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
-          long_taker: { count: 120, total_notional: 1, avg_holding_period_hours: 0 },
-          short_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
-          short_taker: { count: 80, total_notional: 1, avg_holding_period_hours: 0 },
+          long_maker: { count: 0, total_notional: 0 },
+          long_taker: { count: 120, total_notional: 1 },
+          short_maker: { count: 0, total_notional: 0 },
+          short_taker: { count: 80, total_notional: 1 },
         }}
       />,
     );
@@ -130,10 +130,10 @@ describe("TradeMixSubPanel", () => {
     const { container } = render(
       <TradeMixSubPanel
         buckets={{
-          long_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
-          long_taker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
-          short_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
-          short_taker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
+          long_maker: { count: 0, total_notional: 0 },
+          long_taker: { count: 0, total_notional: 0 },
+          short_maker: { count: 0, total_notional: 0 },
+          short_taker: { count: 0, total_notional: 0 },
         }}
       />,
     );

@@ -310,16 +310,8 @@ export async function seedStrategyWithHistory(opts: {
           winners_count: 30,
           losers_count: 15,
           trade_mix: {
-            long: {
-              count: 30,
-              total_notional: 600_000,
-              avg_holding_period_hours: 72,
-            },
-            short: {
-              count: 20,
-              total_notional: 400_000,
-              avg_holding_period_hours: 48,
-            },
+            long: { count: 30, total_notional: 600_000 },
+            short: { count: 20, total_notional: 400_000 },
           },
         }
       : null;

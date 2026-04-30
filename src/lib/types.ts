@@ -152,6 +152,18 @@ export interface TradeMetrics {
   sqn: number | null;
   profit_factor_long: number | null;
   profit_factor_short: number | null;
+  // Volume aggregator extras emitted into the same JSONB blob by
+  // _compute_volume_aggregator + _compute_derived_trade_metrics. Optional
+  // because `reconstruct_positions` may have failed (degraded run) — a
+  // consumer that reads `gross_volume_usd` should null-check.
+  gross_volume_usd?: number | null;
+  mean_trade_size_usd?: number | null;
+  daily_turnover_usd?: number | null;
+  monthly_turnover_usd?: number | null;
+  payoff_ratio?: number | null;
+  profit_factor?: number | null;
+  winners_count?: number;
+  losers_count?: number;
   // Trade mix breakdown (4-bucket when is_maker is reliably reported on
   // every venue; 2-bucket fallback otherwise).
   trade_mix?: TradeMixBuckets;
@@ -164,7 +176,6 @@ export interface TradeMetrics {
 export interface TradeMixBucket {
   count: number;
   total_notional: number;
-  avg_holding_period_hours: number;
 }
 
 /**

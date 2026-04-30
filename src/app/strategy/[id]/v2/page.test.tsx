@@ -86,7 +86,7 @@ describe("/strategy/[id]/v2/page.tsx — SR-3 notFound contract", () => {
         benchmark_returns: null,
       },
       panel5Inputs: { rolling_metrics: null, sharpe: null },
-      panel6Inputs: { trade_metrics: null },
+      panel6Inputs: { trade_metrics: null, data_quality_flags: null },
       panel7Inputs: {
         benchmark_greeks: { alpha: null, beta: null, ir: null, treynor: null },
         correlation_analytics: { returns_series: null, metrics_json: null },

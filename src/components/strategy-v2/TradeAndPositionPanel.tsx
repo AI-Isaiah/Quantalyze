@@ -9,12 +9,19 @@ import type { TradeMetrics } from "@/lib/types";
 interface TradeAndPositionPanelProps {
   strategyId: string;
   /**
-   * From getStrategyDetailV2 — the trade_metrics JSONB blob may carry
-   * volume-aggregator extras beyond the frozen TradeMetrics interface
-   * ({gross/mean/daily/monthly}_volume_usd etc. are merged into the same
-   * blob at the orchestrator level).
+   * From getStrategyDetailV2 — the trade_metrics JSONB blob carries
+   * volume-aggregator extras (gross/mean/daily/monthly volume, payoff,
+   * profit_factor, winners/losers counts). All are declared optional on
+   * `TradeMetrics` so consumers must null-check; no `Record<string,unknown>`
+   * widening is needed.
    */
-  trade_metrics: (TradeMetrics & Record<string, unknown>) | null;
+  trade_metrics: TradeMetrics | null;
+  /**
+   * data_quality_flags subset relevant to this panel. trade_mix_approximation
+   * is true when the strategy has any short positions — the buy→long fill-side
+   * bucketing mis-attributes "buy to close short" as a long entry.
+   */
+  data_quality_flags?: { trade_mix_approximation?: boolean } | null;
 }
 
 /**
@@ -91,6 +98,7 @@ function fmtCount(v: number | null | undefined): string | null {
 export function TradeAndPositionPanel({
   strategyId,
   trade_metrics,
+  data_quality_flags,
 }: TradeAndPositionPanelProps) {
   // strategyId is intentionally referenced (not consumed) to keep the
   // parent wiring contract identical to other lazy panels for symmetry.
@@ -124,7 +132,10 @@ export function TradeAndPositionPanel({
           />
         </div>
       ) : (
-        <Body trade_metrics={trade_metrics!} />
+        <Body
+          trade_metrics={trade_metrics!}
+          data_quality_flags={data_quality_flags}
+        />
       )}
     </section>
   );
@@ -132,19 +143,19 @@ export function TradeAndPositionPanel({
 
 function Body({
   trade_metrics: tm,
+  data_quality_flags,
 }: {
-  trade_metrics: TradeMetrics & Record<string, unknown>;
+  trade_metrics: TradeMetrics;
+  data_quality_flags?: { trade_mix_approximation?: boolean } | null;
 }) {
-  // Volume aggregator extras live as JSONB extras on the trade_metrics
-  // blob. Read defensively.
-  const grossVolume = tm["gross_volume_usd"] as number | null | undefined;
-  const meanTradeSize = tm["mean_trade_size_usd"] as number | null | undefined;
-  const dailyTurnover = tm["daily_turnover_usd"] as number | null | undefined;
-  const monthlyTurnover = tm["monthly_turnover_usd"] as number | null | undefined;
-  const payoffRatio = tm["payoff_ratio"] as number | null | undefined;
-  const profitFactor = tm["profit_factor"] as number | null | undefined;
-  const winners = tm["winners_count"] as number | null | undefined;
-  const losers = tm["losers_count"] as number | null | undefined;
+  const grossVolume = tm.gross_volume_usd;
+  const meanTradeSize = tm.mean_trade_size_usd;
+  const dailyTurnover = tm.daily_turnover_usd;
+  const monthlyTurnover = tm.monthly_turnover_usd;
+  const payoffRatio = tm.payoff_ratio;
+  const profitFactor = tm.profit_factor;
+  const winners = tm.winners_count;
+  const losers = tm.losers_count;
 
   return (
     <div className="mt-4 space-y-4">
@@ -219,8 +230,10 @@ function Body({
         </Grid>
       </Section>
 
-      {/* Trade Mix sub-panel — 2-bucket / 4-bucket auto-detected from buckets shape */}
-      <TradeMixSubPanel buckets={tm.trade_mix} />
+      <TradeMixSubPanel
+        buckets={tm.trade_mix}
+        approximate={data_quality_flags?.trade_mix_approximation === true}
+      />
     </div>
   );
 }

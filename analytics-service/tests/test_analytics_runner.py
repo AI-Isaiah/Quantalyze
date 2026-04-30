@@ -591,7 +591,6 @@ def test_trade_mix_4_bucket(sample_fills_with_maker_taker):
         bucket = result[bucket_key]
         assert "count" in bucket
         assert "total_notional" in bucket
-        assert "avg_holding_period_hours" in bucket
 
 
 def test_trade_mix_2_bucket_fallback(sample_fills):
@@ -604,7 +603,6 @@ def test_trade_mix_2_bucket_fallback(sample_fills):
         bucket = result[bucket_key]
         assert "count" in bucket
         assert "total_notional" in bucket
-        assert "avg_holding_period_hours" in bucket
     # Long: 4 fills → count=4, notional=1000+500+1200+900=3600
     # Short: 2 fills → count=2, notional=800+600=1400
     assert result["long"]["count"] == 4
@@ -623,7 +621,6 @@ def test_trade_mix_empty_fills():
     }
     assert result_4["long_maker"]["count"] == 0
     assert result_4["long_maker"]["total_notional"] == 0.0
-    assert result_4["long_maker"]["avg_holding_period_hours"] == 0.0
 
     result_2 = _compute_trade_mix([], has_maker_taker=False)
     assert set(result_2.keys()) == {"long", "short"}
@@ -637,29 +634,16 @@ def test_trade_mix_4_bucket_skips_fills_missing_is_maker():
     from services.analytics_runner import _compute_trade_mix
 
     fills = [
-        {"side": "long", "is_maker": True, "notional_usd": 1000.0,
-         "holding_period_hours": 4.0},
+        {"side": "long", "is_maker": True, "notional_usd": 1000.0},
         # is_maker missing — must be skipped
-        {"side": "long", "notional_usd": 500.0, "holding_period_hours": 2.0},
-        {"side": "short", "is_maker": False, "notional_usd": 800.0,
-         "holding_period_hours": 3.0},
+        {"side": "long", "notional_usd": 500.0},
+        {"side": "short", "is_maker": False, "notional_usd": 800.0},
     ]
     result = _compute_trade_mix(fills, has_maker_taker=True)
     assert result["long_maker"]["count"] == 1
     assert result["long_taker"]["count"] == 0  # the missing-flag fill is dropped
     assert result["short_taker"]["count"] == 1
     assert result["short_maker"]["count"] == 0
-
-
-def test_trade_mix_avg_holding_period_computed(sample_fills):
-    """METRICS-10: avg_holding_period_hours = sum(holding_period) / count per bucket."""
-    from services.analytics_runner import _compute_trade_mix
-
-    result = _compute_trade_mix(sample_fills, has_maker_taker=False)
-    # Long fills: holding_period [4, 6, 8, 5] → mean = 23/4 = 5.75
-    assert abs(result["long"]["avg_holding_period_hours"] - 23.0 / 4) < 1e-6
-    # Short fills: holding_period [2, 3] → mean = 5/2 = 2.5
-    assert abs(result["short"]["avg_holding_period_hours"] - 2.5) < 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -866,12 +850,16 @@ def _build_runner_mock_supabase(
     snapshot_rows: list[dict],
     rpc_calls: list[dict],
     sa_upsert_calls: list[dict],
+    trades_select_calls: list[str] | None = None,
 ):
     """Shared MagicMock factory for the Plan 06 smoke tests.
 
     Captures:
       - rpc_calls: every supabase.rpc(name, params) invocation
       - sa_upsert_calls: every strategy_analytics.upsert(data) invocation
+      - trades_select_calls (optional): every trades.select(cols) column list
+        — pass `[]` to capture; pin the projection in regression tests so a
+        future PostgREST 42703 doesn't go latent again.
     """
     mock = MagicMock()
 
@@ -921,7 +909,13 @@ def _build_runner_mock_supabase(
             eq_strat.neq = _neq
             eq_strat.eq = _eq_fill
             sel.eq.return_value = eq_strat
-            t.select.return_value = sel
+
+            def _select(cols):
+                if trades_select_calls is not None:
+                    trades_select_calls.append(cols)
+                return sel
+
+            t.select = _select
         elif name == "api_keys":
             sel = MagicMock()
             eq = MagicMock()
@@ -1191,3 +1185,90 @@ async def test_run_strategy_analytics_derived_metrics_present() -> None:
     assert "profit_factor_long" in tm
     assert "profit_factor_short" in tm
     assert "trade_mix" in tm
+
+
+@pytest.mark.asyncio
+async def test_run_strategy_analytics_pins_fills_select_column_list() -> None:
+    """KPI-17 follow-up: pin the trades-fills SELECT column list.
+
+    PR #96 (v0.17.1.14) narrowed the projection to columns that actually exist
+    in the trades schema (`side, cost, is_maker, timestamp`). The prior list
+    (`notional_usd, holding_period_hours, filled_at, created_at`) hit
+    PostgREST 42703 ("column does not exist") and was swallowed by the
+    fills-fetch try/except — analytics ran with empty fills for ~3 versions
+    until the cascade became visible.
+
+    Pin the column string so any future drift (a column rename, a typo on
+    re-add, a copy-paste from a sibling helper) surfaces in CI instead of
+    going latent again.
+    """
+    from services.analytics_runner import run_strategy_analytics
+
+    rpc_calls: list[dict] = []
+    sa_upsert_calls: list[dict] = []
+    trades_select_calls: list[str] = []
+
+    daily_rows = [
+        {
+            "id": f"trade-{i}",
+            "strategy_id": "strat-test",
+            "symbol": "PORTFOLIO",
+            "side": "buy" if i % 2 == 0 else "sell",
+            "price": 100 + i,
+            "quantity": 1,
+            "fee": 0,
+            "timestamp": f"2024-01-{i+1:02d}T00:00:00+00:00",
+            "is_fill": False,
+        }
+        for i in range(10)
+    ]
+    mock_supabase = _build_runner_mock_supabase(
+        daily_pnl_rows=daily_rows,
+        fills_rows=[],
+        snapshot_rows=[],
+        rpc_calls=rpc_calls,
+        sa_upsert_calls=sa_upsert_calls,
+        trades_select_calls=trades_select_calls,
+    )
+
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    mock_returns = pd.Series([0.001] * 10, index=dates)
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
+         patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
+         patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
+        await run_strategy_analytics("strat-test")
+
+    fills_selects = [
+        c for c in trades_select_calls
+        if "is_maker" in c or "cost" in c
+    ]
+    assert fills_selects, (
+        "Expected at least one fills SELECT with is_maker/cost. "
+        f"All trades.select() column-lists captured: {trades_select_calls!r}"
+    )
+    columns = fills_selects[0]
+    assert "is_maker" in columns
+    assert "cost" in columns
+    assert "side" in columns
+    assert "timestamp" in columns
+    assert "notional_usd" not in columns, (
+        f"trades schema has no notional_usd column (PostgREST 42703 — see PR #96). "
+        f"Found in select: {columns!r}"
+    )
+    assert "holding_period_hours" not in columns, (
+        f"trades schema has no holding_period_hours column. Found: {columns!r}"
+    )
+    assert "filled_at" not in columns, (
+        f"trades schema has no filled_at column (it is `timestamp`). "
+        f"Found: {columns!r}"
+    )
+    assert "created_at" not in columns, (
+        f"trades schema has no created_at column on fills. Found: {columns!r}"
+    )

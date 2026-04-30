@@ -415,29 +415,25 @@ def _compute_volume_aggregator(fills: list[dict]) -> dict[str, float]:
 def _compute_trade_mix(
     fills: list[dict], has_maker_taker: bool
 ) -> dict[str, dict[str, float]]:
-    """METRICS-10: Trade Mix breakdown by side × maker/taker.
+    """Trade Mix breakdown by side × maker/taker.
 
-    D-14 / D-15: bucket count branches off the is_maker audit outcome.
+    Bucket count branches off the is_maker audit outcome:
       - has_maker_taker=True  → 4 buckets (long_maker, long_taker, short_maker, short_taker)
       - has_maker_taker=False → 2 buckets fallback (long, short)
 
-    Each bucket: {count, total_notional, avg_holding_period_hours}.
+    Each bucket: {count, total_notional}.
 
-    T-12-05-04: in 4-bucket mode, fills with `is_maker` missing/None are
-    skipped (cannot bucket without the flag). The audit gate (Plan 12-01)
-    only sets `has_maker_taker=True` when ≥99% of fills carry the flag, so
-    skipped fills represent a known small fraction.
+    In 4-bucket mode, fills with `is_maker` missing/None are skipped — can't
+    bucket without the flag. The audit gate only sets has_maker_taker=True
+    when ≥99% of fills carry it, so skipped fills are a known small fraction.
 
-    Plan 12-06 reads `TRADE_MIX_HAS_MAKER_TAKER` from env (set by the deploy
-    script per M-01) to decide which mode to call this in.
+    Side mapping is fill-level (buy→long, sell→short); a "buy to close short"
+    is bucketed as a long entry. The approximation matches the panel labels
+    (maker/taker fee-tier exposure vs entry direction).
     """
 
     def _empty_bucket() -> dict[str, float]:
-        return {
-            "count": 0,
-            "total_notional": 0.0,
-            "avg_holding_period_hours": 0.0,
-        }
+        return {"count": 0, "total_notional": 0.0}
 
     if has_maker_taker:
         buckets: dict[str, dict[str, float]] = {
@@ -452,16 +448,7 @@ def _compute_trade_mix(
             "short": _empty_bucket(),
         }
 
-    holding_sums: dict[str, float] = {k: 0.0 for k in buckets}
     for f in fills:
-        # Raw fills carry buy/sell side from the venue; positions carry
-        # long/short. Trade Mix is a fill-level aggregate, so map buy->long
-        # / sell->short so the bucketing matches the visible "long maker /
-        # long taker / short maker / short taker" panel labels. This is
-        # an approximation: a "buy to close short" is bucketed as a long
-        # entry. For the use-case (read maker/taker fee-tier exposure
-        # against entry direction) the approximation matches what the
-        # panel labels promise.
         side = f.get("side")
         if side == "buy":
             side = "long"
@@ -470,12 +457,10 @@ def _compute_trade_mix(
         if side not in ("long", "short"):
             continue
         notional = abs(float(f.get("notional_usd", 0.0) or 0.0))
-        holding = float(f.get("holding_period_hours") or 0.0)
 
         if has_maker_taker:
             is_maker = f.get("is_maker")
             if is_maker is None:
-                # T-12-05-04: skip — can't bucket without the flag
                 continue
             maker_key = "maker" if is_maker else "taker"
             bucket_key = f"{side}_{maker_key}"
@@ -484,12 +469,6 @@ def _compute_trade_mix(
 
         buckets[bucket_key]["count"] += 1
         buckets[bucket_key]["total_notional"] += notional
-        holding_sums[bucket_key] += holding
-
-    # Finalize avg holding period
-    for k, b in buckets.items():
-        if b["count"] > 0:
-            b["avg_holding_period_hours"] = holding_sums[k] / b["count"]
 
     return buckets
 
@@ -571,6 +550,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # Link: strategies.api_key_id -> api_keys.id (api_keys has no
         # strategy_id column).
         account_balance = None
+        account_balance_unavailable = False
         try:
             api_key_id = (
                 strategy_result.data.get("api_key_id")
@@ -589,10 +569,18 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     account_balance = float(
                         key_result.data["account_balance_usdt"]
                     )
+                else:
+                    # No balance configured for this api_key — turnover series
+                    # falls back to the gross-exposure NAV proxy. Different
+                    # denominator means cross-strategy comparison is off-scale.
+                    account_balance_unavailable = True
+            else:
+                account_balance_unavailable = True
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Could not fetch account balance for %s: %s", strategy_id, str(e)
             )
+            account_balance_unavailable = True
 
         # Transform trades to daily returns
         returns = trades_to_daily_returns(
@@ -684,6 +672,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # `timestamp` -> `filled_at` so downstream helpers see the keys
         # they expect; missing keys still fall through `.get(..., default)`.
         fills_data: list[dict] = []
+        fills_fetch_failed = False
+        fills_fetch_error: str | None = None
         try:
             fills_result = await db_execute(
                 lambda: supabase.table("trades")
@@ -706,6 +696,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 "Fills fetch failed for %s: %s", strategy_id, str(exc)
             )
             fills_data = []
+            fills_fetch_failed = True
+            fills_fetch_error = str(exc)[:200]
 
         # B-01 path (b) merge: volume_metrics + volume_aggregator + derived +
         # trade_mix all flow into the trade_metrics JSONB before the upsert.
@@ -722,6 +714,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # helper can attribute fills by timestamp instead of pretending
         # buy_volume_pct equals long_volume_pct.
         position_side_pcts: dict = {}
+        position_side_volume_failed = False
+        position_side_volume_error: str | None = None
+        trade_mix_approximate = False
         if fills_data:
             try:
                 pos_result = await db_execute(
@@ -734,11 +729,20 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 position_side_pcts = _compute_position_side_volume_pcts(
                     fills_data, positions_list
                 )
+                # Trade Mix maps buy→long / sell→short on raw fills, which
+                # mis-attributes "buy to close short" as a long entry. The
+                # bucketing matches the panel labels for long-only strategies;
+                # for any strategy with shorts the breakdown is an approximation.
+                trade_mix_approximate = any(
+                    p.get("side") == "short" for p in positions_list
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Position-side volume attribution failed for %s: %s",
                     strategy_id, str(exc),
                 )
+                position_side_volume_failed = True
+                position_side_volume_error = str(exc)[:200]
         # KPI-17: 4-bucket Trade Mix gated on (env flag) AND (per-strategy
         # is_maker coverage ≥99% on this strategy's actual fills). The
         # env flag is the global kill switch; the per-strategy coverage
@@ -843,6 +847,28 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 )
             data_quality_flags["position_metrics_error"] = "; ".join(legacy_parts)
 
+        # Distinguish "real 0% volume" from "we couldn't compute it" so the
+        # frontend doesn't render a confident flat-strategy reading after a
+        # transient fetch failure.
+        if fills_fetch_failed:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["fills_fetch_failed"] = True
+            if fills_fetch_error is not None:
+                data_quality_flags["fills_fetch_error"] = fills_fetch_error
+        if position_side_volume_failed:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["position_side_volume_failed"] = True
+            if position_side_volume_error is not None:
+                data_quality_flags["position_side_volume_error"] = (
+                    position_side_volume_error
+                )
+        if trade_mix_approximate:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["trade_mix_approximation"] = True
+        if account_balance_unavailable:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["account_balance_unavailable"] = True
+
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure
         # aggregates (without exposure_series, which moved to sibling_kinds).
@@ -902,8 +928,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                         )
                         .execute()
                     )
-                except Exception:
-                    pass
+                except Exception as flag_exc:  # noqa: BLE001
+                    # The flag write itself failed — operators have no signal
+                    # that panels 4-7 are blank. Log loudly so production
+                    # monitoring picks this up; we still return "complete"
+                    # because the scalar metrics are valid.
+                    logger.error(
+                        "Failed to record sibling_kinds_failed flag for %s: %s",
+                        strategy_id, str(flag_exc),
+                    )
 
         return {"status": "complete", "strategy_id": strategy_id}
 

@@ -170,6 +170,7 @@ const FIXTURE: StrategyV2Detail = {
     sharpe: 1.5,
   },
   panel6Inputs: {
+    data_quality_flags: null,
     trade_metrics: {
       total_positions: 100,
       open_positions: 0,

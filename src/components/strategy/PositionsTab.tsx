@@ -270,7 +270,11 @@ function TradesTable({ trades }: { trades: Position[] }) {
               {formatPercent(t.roi)}
             </td>
             <td className="px-3 py-2 font-metric text-xs text-text-secondary">
-              {t.duration_days != null ? `${t.duration_days}d` : "--"}
+              {t.duration_days != null
+                ? t.duration_days < 1
+                  ? `${(t.duration_days * 24).toFixed(1)}h`
+                  : `${t.duration_days.toFixed(1)}d`
+                : "--"}
             </td>
             <td className="px-3 py-2 text-xs text-text-muted">
               {t.opened_at ? new Date(t.opened_at).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }) : "--"}
