@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.25] - 2026-04-30
+
+**Closes TIER 1 + TIER 2 findings from the 5/5-reviewer pass on PR #107 + corrects two factual errors (contrast math + chart-scope claim).** The previous round's recharts-keyboard fix only covered `src/components/charts/`; this round widens it to every recharts chart in the codebase (allocator dashboard widgets, portfolio components, strategy compare overlay) plus pins the contract via a whole-codebase grep. The `--color-warning` shift now has a real WCAG unit test, with the actual measured contrast (3.19:1, not the 3.94:1 from the prior round's docs).
+
+### Fixed
+
+- **`src/app/globals.css:27` + `DESIGN.md`** — Inline contrast math corrected from 3.94:1 to **3.19:1** (verified via WCAG sRGB-luminance formula: `L_warning_old=0.2793, contrast on white = 1.05 / 0.3293 = 3.19:1`). The 4.6:1 figure originally quoted in the 2026-04-11 row was a memory error; both rows now record the actual measurement. The 2026-04-30 row was also moved to the chronologically-correct slot at the bottom of the decision log.
+
+- **20 recharts charts outside `src/components/charts/`** — Every recharts top-level chart in the codebase now sets `accessibilityLayer={false}`, not just the strategy-v2 panel charts. PR #107's fix closed the keyboard tab-order bug for `/strategy/{id}/v2` but left it open on every other route that renders recharts: 16 widgets in `src/app/(dashboard)/allocations/widgets/` (allocation, attribution, outcomes, performance, positions, risk subtrees), 3 in `src/components/portfolio/` (AttributionBar, CompositionDonut, RiskAttribution), and `src/components/strategy/CompareEquityOverlay.tsx`. Same e2e symptom (empty-focus tab stop on chart SVG) would re-fail any future keyboard-nav spec on those pages.
+
+- **`tests/visual/chart-accessibility-layer.test.ts`** — Source-grep contract widened from `src/components/charts/` to the whole `src/` tree. The walker now filters to files that import from `"recharts"` and asserts every `<AreaChart|LineChart|BarChart|ComposedChart|ScatterChart|PieChart|RadarChart|RadialBarChart>` opening tag carries `accessibilityLayer={false}`. A new chart that forgets the prop on any route fails this test before it can land. Also includes a smoke check on the recharts-file count (≥28) so a future repo restructure that splits charts across new directories doesn't quietly drop them from the scan.
+
+- **`analytics-service/services/analytics_runner.py`** — Three corrections to the account-balance branch:
+  1. `account_balance_usdt` truthy check (`if balance:`) replaced with `is not None` so a literal `0` / `0.0` (drained account or operator-zeroed) is distinguishable from `NULL`. The prior code silently marked drained accounts as degraded forever.
+  2. Bare `except Exception` now uses `logger.exception(...)` to capture the full traceback instead of just `str(e)`. The stack trace was being lost for any non-trivial fetch failure.
+  3. The exception path now branches on whether `api_key_id` was actually resolved before the throw — only a real failure WITH a known api_key_id is the degraded path. A throw with `api_key_id is None` falls through to `no_linked_api_key`, preserving the demo-vs-failure split.
+
+### Added
+
+- **`tests/a11y/chart-contrast.test.ts`** — 3 new pinning tests for `--color-warning #B45309`: contrast on white (≥4.5:1, lands at 5.05:1), contrast on `bg-warning/5` fills (≥4.5:1, lands at 4.56:1), and a literal-hex pin against `globals.css` so a regression to a different AA-passing-but-wrong color still trips the suite.
+
+- **`src/components/strategy/VolumeExposureTab.test.tsx`** — NEW file with 4 tests pinning the v1 chip-precedence chain (`account_balance_unavailable` ranks above `no_linked_api_key`; neither flag → "Turnover analysis coming soon."). The v2 panel's precedence is locked by `TradeAndPositionPanel.test.tsx`; this file mirrors the contract for the v1 strategy detail page that's still in production.
+
+- **`analytics-service/tests/test_analytics_runner.py`** — 5 new flag-routing tests pin the `account_balance_unavailable` vs `no_linked_api_key` emission contract:
+  - `api_key_id=None` → only `no_linked_api_key=True`
+  - `api_key_id` set + balance returns `None` → only `account_balance_unavailable=True`
+  - `api_key_id` set + balance is `0.0` → no flag (drained account is valid)
+  - exception with known `api_key_id` → `account_balance_unavailable` (degraded path)
+  - exception with `api_key_id=None` → `no_linked_api_key` (demo path preserved)
+  These tests pin the writer-side decision the prior PR's UI tests took as input.
+
+### Notes
+
+The `discovery-axe` + `strategy-v2-axe` + `discovery-prefs-isolation` + `strategy-v2-keyboard` Playwright specs all failed on PR #107's CI run. The widened chart scope addresses the keyboard spec; the corrected `--color-warning` token + the existing globals.css change address the axe specs. `discovery-prefs-isolation` likely needs a separate investigation (it's flagged as REAL-BUG in issue #104's hypothesis: cross-account state leakage). `onboarding-funnel` + `strategy-v2-chart-parity` remain known-deferred from PR #107.
+
 ## [0.17.1.24] - 2026-04-30
 
 **Closes TIER 2 + TIER 3 + standalone audit findings from PR #106 + 5 of 7 seed-gated Playwright spec failures.** The audit's three deferred follow-ups land alongside fixes for the discovery + strategy-v2 axe specs (color contrast on the warning token), both DISCO specs that timed out at the login form (missing `name` attributes), and the strategy-v2 keyboard tab order (recharts 3.x `accessibilityLayer` defaulting to `true` injects `tabIndex=0` SVGs into the tab order). `onboarding-funnel` and `strategy-v2-chart-parity` remain known-deferred — they need server-side state investigation and a one-time `--update-snapshots` on the Linux runner respectively, both out of scope for this round.
