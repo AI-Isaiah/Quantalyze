@@ -12,11 +12,17 @@
 
   --color-text-primary: #1A1A2E;
   --color-text-secondary: #4A5568;
-  --color-text-muted: #718096;
+  /* WCAG 2 AA: was #718096 (3.8:1 on bg-page, 4.01:1 on bg-surface — fails
+     for 12px small text). #64748B is the same shade DESIGN.md already
+     blesses for chart axis ticks (4.85:1 on white, AA pass). */
+  --color-text-muted: #64748B;
 
   --color-accent: #1B6B5A;
   --color-accent-hover: #155A4B;
-  --color-positive: #16A34A;
+  /* WCAG 2 AA: was #16A34A (3.12:1 on bg-page — fails for 12px small text
+     like the inline status pill on /strategy/[id]/v2). #15803D is Tailwind
+     green-700, 5.12:1 on white and 4.91:1 on bg-page. */
+  --color-positive: #15803D;
   --color-negative: #DC2626;
   --color-warning: #D97706;
 

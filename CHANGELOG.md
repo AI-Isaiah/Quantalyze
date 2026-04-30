@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.21] - 2026-04-30
+
+**A11y: meet WCAG 2 AA on `--color-text-muted` and `--color-positive` for 12px small text.** Once the seed-gated e2e step actually started running (after #100 + #101 + #102 + the GitHub secret rotation), the axe specs surfaced three pre-existing color-contrast violations on `/discovery/[slug]` and `/strategy/[id]/v2`:
+
+- `text-positive` (#16A34A) on `bg-page` (#F8F9FA) → 3.12:1 (need 4.5)
+- `text-text-muted` (#718096) on `bg-surface` (#FFFFFF) → 4.01:1 (need 4.5)
+- `text-text-muted` (#718096) on `bg-page` (#F8F9FA) → 3.8:1 (need 4.5)
+
+DESIGN.md's 2026-04-29 entry already records the v2 chart-axis tick shift to `#64748B` at 4.85:1 ("well within WCAG AA") — this lifts the same shade up to the global muted-text token. The positive shade moves to Tailwind `green-700` `#15803D` (5.12:1 on white, 4.91:1 on bg-page).
+
+### Fixed
+
+- **`src/app/globals.css:13-22`** — `--color-text-muted` `#718096 → #64748B`, `--color-positive` `#16A34A → #15803D`. Inline notes record the prior values + the contrast math so the reasoning survives in source.
+- **`DESIGN.md:42-43`** — token entries updated with the new hex + the WCAG math + the date.
+- **`src/app/(dashboard)/allocations/components/WidgetChrome.tsx:215,238,266`** — three CSS-custom-property fallbacks `var(--text-muted, #718096) → var(--text-muted, #64748B)` so the literal-fallback path matches the new token shade. (Note: the actual var name is `--color-text-muted` not `--text-muted`, so these calls always fell back to the literal — the underlying refactor to use the right var name is separate.)
+- **`e2e/discovery-sparkline-regression.spec.ts:42,71`** — title + regex updated to match the new `#15803D` AND keep the prior `#16A34A` so the guard survives in-flight migrations and historical fixtures.
+
+### Out of scope (separate PRs)
+
+The 5 non-axe seed-gated e2e specs (`discovery-hide-examples-default`, `discovery-prefs-isolation`, `onboarding-funnel`, `strategy-v2-keyboard`, `strategy-v2-chart-parity`) failed in the same run with `expect(locator).toBeVisible()` and chart-snapshot diffs — those are unrelated pre-existing tech debt that was masked while the seed step was broken. Each needs its own root-cause pass.
+
 ## [0.17.1.20] - 2026-04-30
 
 **v0.17.1 KPI-17 saga follow-up — eight findings from cross-agent review of PRs #95–#100.** Closes the four CRITICAL issues that surfaced once the saga reached production, plus four HIGH-severity hardening items. Source: 5 review agents (code-reviewer, silent-failure-hunter, type-design-analyzer, comment-analyzer, pr-test-analyzer) ran on the saga, then a /simplify pass (reuse, quality, efficiency) added the cross-checks. Cross-corroboration matters: items 1 + 4 below were independently flagged by three agents each.

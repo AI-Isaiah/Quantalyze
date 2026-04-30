@@ -39,8 +39,8 @@
 - **Sidebar:** #0F172A — dark navy (keep current)
 - **Text primary:** #1A1A2E — dark navy, nearly black
 - **Text secondary:** #4A5568 — for descriptions, secondary content
-- **Text muted:** #718096 — for labels, captions, timestamps
-- **Positive:** #16A34A — gains, verified status, success
+- **Text muted:** #64748B — for labels, captions, timestamps. Was #718096 (3.8:1 on bg-page, 4.01:1 on bg-surface) — shifted 2026-04-30 to meet WCAG 2 AA (4.85:1 on white) for 12px small text. Same shade DESIGN.md already blessed for chart axis ticks (see 2026-04-29 entry below).
+- **Positive:** #15803D — gains, verified status, success. Was #16A34A (3.12:1 on bg-page) — shifted 2026-04-30 to meet WCAG 2 AA (5.12:1 on white, 4.91:1 on bg-page) for 12px small text. Tailwind `green-700`.
 - **Negative:** #DC2626 — losses, errors, permanent failures
 - **Warning:** #D97706 — transient retry states, non-critical warnings (added 2026-04-11)
 - **Warning bg / border:** #FEF3C7 / #FDE68A — light amber chip surface + border for warning-tier badges (e.g. HoldingsTable revoked-key indicator). Pairs with `--color-warning` on text. Added 2026-04-26 (Phase 09.1 UI-FLAG-01).
