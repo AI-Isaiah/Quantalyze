@@ -730,6 +730,21 @@ async function main() {
   if (portWipeErr) throw portWipeErr;
 
   console.log("[seed] Wiping existing is_example=true rows ...");
+  // Delete match_decisions referencing the demo strategies first.
+  // `match_decisions.original_strategy_id` (migration 064) is `ON DELETE
+  // RESTRICT`, so a previous seed run's match_decisions row referencing
+  // STRATEGY_UUIDS[1] via original_strategy_id blocks the strategies wipe
+  // even though that same row's strategy_id FK is `ON DELETE CASCADE`.
+  // PostgreSQL checks RESTRICT before evaluating CASCADE, so the cascade
+  // chain doesn't help. Wipe both sides explicitly.
+  const { error: mdWipeErr } = await supabase
+    .from("match_decisions")
+    .delete()
+    .or(
+      `strategy_id.in.(${STRATEGY_UUIDS.join(",")}),original_strategy_id.in.(${STRATEGY_UUIDS.join(",")})`,
+    );
+  if (mdWipeErr) throw mdWipeErr;
+
   // Delete analytics first (FK cascade would also work, but being explicit
   // keeps the logs readable). strategy_analytics has a UNIQUE FK so we
   // cascade via strategies anyway.

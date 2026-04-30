@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.27] - 2026-04-30
+
+**Unblocks the seed step that gates every seed-gated e2e spec.**
+
+### Fixed
+
+- **`scripts/seed-demo-data.ts`** — Wipe `match_decisions` rows referencing demo strategies BEFORE wiping the strategies themselves. Migration 064 declared `match_decisions.original_strategy_id` as `ON DELETE RESTRICT`, so a previous seed run's intro decision (line ~1086 inserts one with `original_strategy_id = STRATEGY_UUIDS[1]`) blocks the next run's `delete from strategies where is_example=true` with `code 23503`. PostgreSQL checks RESTRICT before evaluating the CASCADE on the same row's `strategy_id`, so the existing cascade chain doesn't help. Two-line wipe of `match_decisions where strategy_id in (...) or original_strategy_id in (...)` resolves it. CI seed step (e2e job) was failing here pre-spec for 10+ runs.
+
 ## [0.17.1.26] - 2026-04-30
 
 **Closes the 6 seed-gated e2e specs that have been red against `main` for 10+ runs.** Parallel root-cause discovery across all six specs after PR #108's frontend job went green; this commit fixes the remaining `e2e` job. Three real fixes (one a11y bug, two test-infra gaps), two test-rewrite skips with TODOs, and one cleanup-only fallout.
