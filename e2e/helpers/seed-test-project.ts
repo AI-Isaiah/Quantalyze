@@ -97,6 +97,29 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
     );
   }
 
+  // Stamp an investor_attestations row so the seeded user clears the
+  // accredited-investor gate at src/app/(dashboard)/discovery/layout.tsx
+  // (and any sibling gate that checks the same table). Without this,
+  // every seeded user lands on the gate component instead of the
+  // requested page — discovery-axe + discovery-prefs-isolation specs
+  // both regressed on this in PR #108 review.
+  const { error: attestationError } = await admin
+    .from("investor_attestations")
+    .upsert(
+      {
+        user_id: data.user.id,
+        attested_at: new Date().toISOString(),
+        version: "e2e-seed",
+        ip_address: null,
+      },
+      { onConflict: "user_id" },
+    );
+  if (attestationError) {
+    console.warn(
+      `[seed-test-project] attestation upsert warning: ${attestationError.message}`,
+    );
+  }
+
   return { userId: data.user.id, email, password };
 }
 

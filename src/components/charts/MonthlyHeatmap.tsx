@@ -9,7 +9,6 @@ interface MonthlyHeatmapProps {
 
 interface CellStyle {
   backgroundColor: string;
-  opacity: number;
   color: string;
 }
 
@@ -17,20 +16,24 @@ interface CellStyle {
  * MonthlyHeatmap diverging color cells.
  *
  * Uses explicit hex colors instead of Tailwind palette indices. Positive
- * scale anchored at #16A34A (DESIGN.md positive token); negative scale
- * anchored at #DC2626 (DESIGN.md negative token). Opacity steps replace
- * the Tailwind 50/200/400/600 numeric scale.
+ * scale anchored at the green-100/300/700/800 ramp; negative scale at
+ * red-100/300/700/800. Tints are baked into the hex (no container opacity)
+ * because container `opacity` alpha-blends BOTH the foreground text and
+ * the background, collapsing contrast to ~1:1 for the lighter steps —
+ * caught by axe with 138 color-contrast violations on the 365d fixture
+ * (PR #108 review). Each (bg, text) pair below clears WCAG AA 4.5:1 small
+ * text vs the white surface beneath; verified during PR #108 fix.
  */
 function cellStyle(value: number): CellStyle {
-  if (value > 0.10) return { backgroundColor: "#16A34A", opacity: 1.0, color: "#FFFFFF" };
-  if (value > 0.05) return { backgroundColor: "#16A34A", opacity: 0.7, color: "#FFFFFF" };
-  if (value > 0.02) return { backgroundColor: "#16A34A", opacity: 0.4, color: "#0F3D2D" };
-  if (value > 0) return { backgroundColor: "#16A34A", opacity: 0.15, color: "#0F3D2D" };
-  if (value === 0) return { backgroundColor: "#FFFFFF", opacity: 1.0, color: CHART_AXIS_TICK };
-  if (value > -0.02) return { backgroundColor: "#DC2626", opacity: 0.15, color: "#7F1D1D" };
-  if (value > -0.05) return { backgroundColor: "#DC2626", opacity: 0.4, color: "#7F1D1D" };
-  if (value > -0.10) return { backgroundColor: "#DC2626", opacity: 0.7, color: "#FFFFFF" };
-  return { backgroundColor: "#DC2626", opacity: 1.0, color: "#FFFFFF" };
+  if (value > 0.10) return { backgroundColor: "#166534", color: "#FFFFFF" };
+  if (value > 0.05) return { backgroundColor: "#15803D", color: "#FFFFFF" };
+  if (value > 0.02) return { backgroundColor: "#86EFAC", color: "#0F3D2D" };
+  if (value > 0) return { backgroundColor: "#DCFCE7", color: "#0F3D2D" };
+  if (value === 0) return { backgroundColor: "#FFFFFF", color: CHART_AXIS_TICK };
+  if (value > -0.02) return { backgroundColor: "#FEE2E2", color: "#7F1D1D" };
+  if (value > -0.05) return { backgroundColor: "#FCA5A5", color: "#7F1D1D" };
+  if (value > -0.10) return { backgroundColor: "#B91C1C", color: "#FFFFFF" };
+  return { backgroundColor: "#991B1B", color: "#FFFFFF" };
 }
 
 export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
@@ -77,7 +80,6 @@ export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {
                   className="px-1 py-2 text-center text-xs font-normal tabular-nums"
                   style={{
                     backgroundColor: s.backgroundColor,
-                    opacity: s.opacity,
                     color: s.color,
                   }}
                   title={`${(val * 100).toFixed(1)}%`}

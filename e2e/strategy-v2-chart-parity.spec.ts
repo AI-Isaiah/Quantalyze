@@ -34,6 +34,24 @@ const PANEL_KEYS = [
 ] as const;
 
 test.describe("Phase 14b — chart-snapshot parity (SC#1)", () => {
+  // PR #108 review: spec authored against Recharts assumptions
+  // (`#1B6B5A` SVG `<path stroke>`, `.recharts-cartesian-axis-tick text`)
+  // but `EquityCurve` is implemented with `lightweight-charts` (canvas).
+  // No SVG paths exist; the structural assertions at lines 88-93 + 105-111
+  // can never pass against the current component. Goldens have never been
+  // committed (e2e/__snapshots__/ does not exist on any branch). Spec was
+  // authored skipped (commit f0c3ec7) and once HAS_SEED_ENV got wired in
+  // CI it stopped skipping and has been red ever since.
+  // Keeping it skipped until a follow-up rewrite re-targets the canvas
+  // API and bakes the goldens. See PR #108 / GitHub issue TBD.
+  test.skip(
+    true,
+    "TODO: rewrite for lightweight-charts canvas API; goldens never " +
+      "baselined. Tracked in PR #108 deferred follow-ups.",
+  );
+
+  // Original env-gate kept as a no-op below in case the rewrite
+  // consumes it directly.
   test.skip(
     !HAS_SEED_ENV,
     "strategy-v2 chart parity: seed-helper env vars not wired " +
