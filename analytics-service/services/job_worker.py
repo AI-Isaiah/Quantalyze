@@ -535,21 +535,39 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         except Exception:  # pragma: no cover - defensive cleanup
             pass
 
-    # Persist trades atomically via sync_trades RPC
+    # Persist trades atomically via sync_trades RPC.
+    #
+    # PostgREST JSONB shape: pass `trades` (list[dict]) directly. The supabase
+    # Python client serializes the params dict via json.dumps internally — if
+    # we pre-serialize via json.dumps(trades), PostgREST receives a JSON STRING
+    # (the literal "[…]" text) and casts it to a JSONB scalar string, not a
+    # JSONB array. Then `jsonb_array_elements(p_trades)` inside migration 007's
+    # sync_trades function fails with 22023 "cannot extract elements from a
+    # scalar". Pass the raw list — supabase-py does the serialization once.
+    #
+    # Phase 1 wrapped in try/except: a 22023 (or any other persist failure on
+    # the daily-PnL DELETE+INSERT path) must NOT abort Phase 2's raw-fill
+    # ingestion below — raw fills are the canonical fill-level data that
+    # downstream analytics + the wizard's verify-data gate count on.
     if trades:
-        trades_json = json.dumps(trades, default=str)
-
         def _sync() -> int:
             res = ctx.supabase.rpc(
                 "sync_trades",
-                {"p_strategy_id": strategy_id, "p_trades": trades_json},
+                {"p_strategy_id": strategy_id, "p_trades": trades},
             ).execute()
             return int(res.data or 0)
 
-        inserted = await db_execute(_sync)
-        logger.info(
-            "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
-        )
+        try:
+            inserted = await db_execute(_sync)
+            logger.info(
+                "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
+            )
+        except Exception as e:
+            logger.warning(
+                "sync_trades Phase 1 (daily PnL) failed for strategy %s — "
+                "continuing to Phase 2 raw-fill ingestion: %s",
+                strategy_id, str(e),
+            )
 
     # Persist raw fills (Phase 2, after exchange is closed)
     if raw_fills:
