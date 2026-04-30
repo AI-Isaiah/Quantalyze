@@ -383,7 +383,19 @@ def _compute_trade_mix(
 
     holding_sums: dict[str, float] = {k: 0.0 for k in buckets}
     for f in fills:
+        # Raw fills carry buy/sell side from the venue; positions carry
+        # long/short. Trade Mix is a fill-level aggregate, so map buy->long
+        # / sell->short so the bucketing matches the visible "long maker /
+        # long taker / short maker / short taker" panel labels. This is
+        # an approximation: a "buy to close short" is bucketed as a long
+        # entry. For the use-case (read maker/taker fee-tier exposure
+        # against entry direction) the approximation matches what the
+        # panel labels promise.
         side = f.get("side")
+        if side == "buy":
+            side = "long"
+        elif side == "sell":
+            side = "short"
         if side not in ("long", "short"):
             continue
         notional = abs(float(f.get("notional_usd", 0.0) or 0.0))

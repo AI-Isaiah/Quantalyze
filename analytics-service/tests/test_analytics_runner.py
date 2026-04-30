@@ -708,6 +708,44 @@ def test_has_maker_taker_coverage_handles_missing_key():
     assert _has_maker_taker_coverage(fills) is False
 
 
+def test_trade_mix_buy_sell_side_normalized_to_long_short():
+    """Raw fills carry buy/sell side from the venue; trade_mix buckets by
+    long/short. Without normalization, _compute_trade_mix drops every fill
+    and the 4-bucket render shows 0 counts (the bug surfaced in v0.17.1.14
+    against the OKX prod fills: 200 fills with side=buy/sell, all dropped)."""
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "buy", "is_maker": True, "notional_usd": 100.0,
+         "holding_period_hours": 1.0},
+        {"side": "buy", "is_maker": False, "notional_usd": 100.0,
+         "holding_period_hours": 1.0},
+        {"side": "sell", "is_maker": True, "notional_usd": 100.0,
+         "holding_period_hours": 1.0},
+        {"side": "sell", "is_maker": False, "notional_usd": 100.0,
+         "holding_period_hours": 1.0},
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=True)
+    assert result["long_maker"]["count"] == 1
+    assert result["long_taker"]["count"] == 1
+    assert result["short_maker"]["count"] == 1
+    assert result["short_taker"]["count"] == 1
+
+
+def test_trade_mix_2_bucket_buy_sell_normalized():
+    """Same buy/sell normalization in 2-bucket fallback mode."""
+    from services.analytics_runner import _compute_trade_mix
+
+    fills = [
+        {"side": "buy", "notional_usd": 100.0, "holding_period_hours": 1.0},
+        {"side": "buy", "notional_usd": 100.0, "holding_period_hours": 1.0},
+        {"side": "sell", "notional_usd": 100.0, "holding_period_hours": 1.0},
+    ]
+    result = _compute_trade_mix(fills, has_maker_taker=False)
+    assert result["long"]["count"] == 2
+    assert result["short"]["count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Phase 12 Plan 06 / METRICS-15 / METRICS-17 — runner integration smoke tests
 # ---------------------------------------------------------------------------
