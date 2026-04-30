@@ -39,7 +39,7 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     await page.waitForSelector("table tbody tr", { timeout: 10000 });
   });
 
-  test("no sparkline SVG on /discovery/crypto-sma mixes positive (#16A34A) and negative (#DC2626) strokes", async ({
+  test("no sparkline SVG on /discovery/crypto-sma mixes positive (#15803D) and negative (#DC2626) strokes", async ({
     page,
   }) => {
     const distinctPerSvg = await page.evaluate(() => {
@@ -62,13 +62,15 @@ test.describe("Discovery sparkline single-accent rule (DESIGN.md DIFF-05)", () =
     expect(distinctPerSvg.length).toBeGreaterThan(0);
 
     for (const strokes of distinctPerSvg) {
-      // Forbidden: any single SVG mixing #16A34A (positive) and #DC2626
-      // (negative) on the same trace. The accent #1B6B5A is the canonical
-      // positive stroke; #16A34A is the positive-text-color and would only
-      // appear on sparklines if someone reintroduced split-color. Either
-      // being on the same path as #DC2626 is a failure.
+      // Forbidden: any single SVG mixing the positive-text color (#15803D
+      // post-2026-04-30, #16A34A pre-shift) and negative (#DC2626) on the
+      // same trace. The accent #1B6B5A is the canonical positive stroke;
+      // the positive-text color would only appear on sparklines if someone
+      // reintroduced split-color. Either being on the same path as #DC2626
+      // is a failure. Both old + new green hex are matched so this guard
+      // survives in-flight migrations.
       const hasGreen = strokes.some((s) =>
-        /#16a34a|var\(--color-positive\)/i.test(s),
+        /#15803d|#16a34a|var\(--color-positive\)/i.test(s),
       );
       const hasRed = strokes.some((s) =>
         /#dc2626|var\(--color-negative\)/i.test(s),
