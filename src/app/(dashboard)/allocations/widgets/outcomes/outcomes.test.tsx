@@ -231,7 +231,7 @@ describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
     expect(valueNode!.className).toContain("tabular-nums");
   });
 
-  it("className presence check: avg-realized-α color >=0 -> #16A34A; <0 -> #DC2626; null -> em-dash (Phase 09.1 Plan 10 designer KPIStripCell color prop)", () => {
+  it("className presence check: avg-realized-α color >=0 -> #15803D; <0 -> #DC2626; null -> em-dash (Phase 09.1 Plan 10 designer KPIStripCell color prop)", () => {
     // >=0: positive avg realized α (single win). The KPI strip and the
     // row's Δ 30d cell both render +4.0%, so disambiguate by picking the
     // KPI-cell node (text-[22px]) vs the row delta cell (text-[13px]).
@@ -242,7 +242,7 @@ describe("OutcomesWidget — KPI strip (inline KpiStrip)", () => {
       .getAllByText("+4.0%")
       .find((n) => n.className.includes("text-[22px]"));
     expect(avgWinKpi).toBeDefined();
-    expect(avgWinKpi!.getAttribute("style")).toContain("16A34A");
+    expect(avgWinKpi!.getAttribute("style")).toContain("15803D");
     unmount();
 
     // <0: negative avg realized α (single loss)
@@ -377,7 +377,7 @@ describe("OutcomesWidget — Timeline (inline TimelineTable + TimelineRow)", () 
       .getAllByText("+4.0%")
       .find((n) => n.className.includes("text-[13px]"));
     expect(winCell).toBeDefined();
-    expect(winCell!.getAttribute("style")).toContain("16A34A");
+    expect(winCell!.getAttribute("style")).toContain("15803D");
     // Loss: -3.0% in red (delta_30d row cell — same disambiguation).
     const lossCell = screen
       .getAllByText("-3.0%")

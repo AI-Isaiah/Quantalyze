@@ -55,14 +55,14 @@ export default function RollingVolatility({ data }: WidgetProps) {
       <LineChart accessibilityLayer={false} data={merged} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: "#718096" }}
+          tick={{ fontSize: 11, fill: "#64748B" }}
           tickLine={false}
           axisLine={{ stroke: "#E2E8F0" }}
           tickFormatter={(d: string) => d.slice(5)}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fontSize: 11, fill: "#718096", fontFamily: "var(--font-geist-mono), monospace" }}
+          tick={{ fontSize: 11, fill: "#64748B", fontFamily: "var(--font-geist-mono), monospace" }}
           tickLine={false}
           axisLine={false}
           tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}

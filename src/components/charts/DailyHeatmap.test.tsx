@@ -8,7 +8,7 @@ import { DailyHeatmap, SVG_THRESHOLD_CELLS } from "./DailyHeatmap";
  * 14 acceptance criteria from 14b-01-PLAN Task 2:
  *  1. SVG branch when data.length === 30 (≤365 cells)
  *  2. Canvas branch when data.length === 1825 (5y, > 365 cells); offscreen <table> mirror present
- *  3. SVG cell with value > 0.10 → fill="#16A34A" (saturated positive)
+ *  3. SVG cell with value > 0.10 → fill="#15803D" (saturated positive)
  *  4. SVG cell with value < -0.10 → fill="#DC2626" (saturated negative)
  *  5. SVG cell with value === 0 → fill="#FFFFFF" + non-empty <title>
  *  6. SVG cell stroke="#E2E8F0" (CHART_BORDER) gridline
@@ -165,19 +165,23 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
     expect(cells.length).toBe(1825);
   });
 
-  it("Test 3: SVG cell with value > 0.10 has fill='#16A34A'", () => {
+  it("Test 3: SVG cell with value > 0.10 has saturated baked-tint fill='#166534' and no fill-opacity", () => {
     const data = [{ date: "2024-01-01", value: 0.15 }];
     const { container } = render(<DailyHeatmap data={data} />);
     const rect = container.querySelector("svg rect[data-cell]");
     expect(rect).not.toBeNull();
-    expect(rect?.getAttribute("fill")).toBe("#16A34A");
+    expect(rect?.getAttribute("fill")).toBe("#166534");
+    // PR #108 follow-up: per-shape opacity is gone — the prior `fillOpacity`
+    // pattern alpha-blends through to the surface and collapses contrast.
+    expect(rect?.getAttribute("fill-opacity")).toBeNull();
   });
 
-  it("Test 4: SVG cell with value < -0.10 has fill='#DC2626'", () => {
+  it("Test 4: SVG cell with value < -0.10 has saturated baked-tint fill='#991B1B' and no fill-opacity", () => {
     const data = [{ date: "2024-01-01", value: -0.15 }];
     const { container } = render(<DailyHeatmap data={data} />);
     const rect = container.querySelector("svg rect[data-cell]");
-    expect(rect?.getAttribute("fill")).toBe("#DC2626");
+    expect(rect?.getAttribute("fill")).toBe("#991B1B");
+    expect(rect?.getAttribute("fill-opacity")).toBeNull();
   });
 
   it("Test 5: SVG cell with value === 0 has fill='#FFFFFF' and non-empty <title>", () => {
@@ -228,17 +232,20 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
     expect(endCall).toBeDefined();
   });
 
-  it("Test 10: 9-step diverging color scale across [+0.15, +0.07, +0.03, +0.01, 0, -0.01, -0.03, -0.07, -0.15]", () => {
-    const cases: Array<{ value: number; fill: string; opacity: number }> = [
-      { value: 0.15, fill: "#16A34A", opacity: 1 },
-      { value: 0.07, fill: "#16A34A", opacity: 0.7 },
-      { value: 0.03, fill: "#16A34A", opacity: 0.4 },
-      { value: 0.01, fill: "#16A34A", opacity: 0.15 },
-      { value: 0, fill: "#FFFFFF", opacity: 1 },
-      { value: -0.01, fill: "#DC2626", opacity: 0.15 },
-      { value: -0.03, fill: "#DC2626", opacity: 0.4 },
-      { value: -0.07, fill: "#DC2626", opacity: 0.7 },
-      { value: -0.15, fill: "#DC2626", opacity: 1 },
+  it("Test 10: 9-step baked-tint diverging color scale across [+0.15, +0.07, +0.03, +0.01, 0, -0.01, -0.03, -0.07, -0.15]", () => {
+    // PR #108 follow-up: tints baked into hex (no fill-opacity) so each
+    // bucket pair clears WCAG AA on the white surface beneath. Mirrors the
+    // chart-tokens.ts ramp that MonthlyHeatmap also consumes.
+    const cases: Array<{ value: number; fill: string }> = [
+      { value: 0.15, fill: "#166534" }, // CHART_POSITIVE_800
+      { value: 0.07, fill: "#15803D" }, // CHART_POSITIVE_700
+      { value: 0.03, fill: "#86EFAC" }, // CHART_POSITIVE_300
+      { value: 0.01, fill: "#DCFCE7" }, // CHART_POSITIVE_100
+      { value: 0, fill: "#FFFFFF" }, // CHART_NEUTRAL
+      { value: -0.01, fill: "#FEE2E2" }, // CHART_NEGATIVE_100
+      { value: -0.03, fill: "#FCA5A5" }, // CHART_NEGATIVE_300
+      { value: -0.07, fill: "#B91C1C" }, // CHART_NEGATIVE_700
+      { value: -0.15, fill: "#991B1B" }, // CHART_NEGATIVE_800
     ];
     for (const c of cases) {
       const { container, unmount } = render(
@@ -246,8 +253,8 @@ describe("DailyHeatmap — Phase 14b dual renderer", () => {
       );
       const rect = container.querySelector("svg rect[data-cell]");
       expect(rect?.getAttribute("fill")).toBe(c.fill);
-      const opacityAttr = rect?.getAttribute("fill-opacity") ?? "1";
-      expect(parseFloat(opacityAttr)).toBeCloseTo(c.opacity, 5);
+      // No alpha attribute — baked into the hex.
+      expect(rect?.getAttribute("fill-opacity")).toBeNull();
       unmount();
     }
   });

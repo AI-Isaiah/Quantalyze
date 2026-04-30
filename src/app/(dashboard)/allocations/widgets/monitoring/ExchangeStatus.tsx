@@ -33,7 +33,7 @@ export function ExchangeStatus({ data }: WidgetProps) {
   if (apiKeys.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
-        <span className="text-sm" style={{ color: "#718096" }}>
+        <span className="text-sm" style={{ color: "#64748B" }}>
           No exchange connections
         </span>
       </div>
@@ -51,7 +51,7 @@ export function ExchangeStatus({ data }: WidgetProps) {
           >
             <span
               className="inline-block h-2 w-2 rounded-full flex-shrink-0"
-              style={{ backgroundColor: healthy ? "#16A34A" : "#DC2626" }}
+              style={{ backgroundColor: healthy ? "#15803D" : "#DC2626" }}
               aria-label={healthy ? "Connected" : "Disconnected"}
             />
             <span
@@ -62,7 +62,7 @@ export function ExchangeStatus({ data }: WidgetProps) {
             </span>
             <span
               className="text-xs whitespace-nowrap"
-              style={{ color: "#718096" }}
+              style={{ color: "#64748B" }}
             >
               {timeAgo(key.last_sync_at)}
             </span>

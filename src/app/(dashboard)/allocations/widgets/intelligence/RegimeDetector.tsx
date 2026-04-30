@@ -14,7 +14,7 @@ interface StrategyRow {
 }
 
 const REGIME_CONFIG = {
-  bullish: { label: "Bull Market", color: "#16A34A", bg: "rgba(22,163,74,0.08)" },
+  bullish: { label: "Bull Market", color: "#15803D", bg: "rgba(21,128,61,0.08)" },
   bearish: { label: "Bear Market", color: "#DC2626", bg: "rgba(220,38,38,0.08)" },
   neutral: { label: "Range-bound", color: "#D97706", bg: "rgba(217,119,6,0.08)" },
 } as const;
@@ -74,7 +74,7 @@ export function RegimeDetector({ data }: WidgetProps) {
   if (!regime) {
     return (
       <div className="flex h-full items-center justify-center">
-        <span className="text-sm" style={{ color: "#718096" }}>
+        <span className="text-sm" style={{ color: "#64748B" }}>
           Insufficient data for regime detection (need 200+ days)
         </span>
       </div>
@@ -104,7 +104,7 @@ export function RegimeDetector({ data }: WidgetProps) {
         </span>
       </div>
 
-      <div className="flex items-center gap-4 text-xs" style={{ color: "#718096" }}>
+      <div className="flex items-center gap-4 text-xs" style={{ color: "#64748B" }}>
         <span>
           Since{" "}
           <span className="font-mono tabular-nums">

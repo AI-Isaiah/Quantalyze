@@ -138,7 +138,7 @@ export function AddWidgetModal({
             type="button"
             onClick={onClose}
             aria-label="Close modal"
-            className="rounded p-1 text-[#718096] hover:bg-[#F8F9FA] hover:text-[#1A1A2E] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
+            className="rounded p-1 text-[#64748B] hover:bg-[#F8F9FA] hover:text-[#1A1A2E] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A]"
           >
             <span aria-hidden="true" style={{ fontSize: 18 }}>
               &times;
@@ -163,7 +163,7 @@ export function AddWidgetModal({
         <div className="flex-1 overflow-y-auto px-5 py-3">
           {/* Empty state */}
           {noResults && (
-            <p className="py-8 text-center text-sm" style={{ color: "#718096" }}>
+            <p className="py-8 text-center text-sm" style={{ color: "#64748B" }}>
               No widgets match &ldquo;{search}&rdquo;
             </p>
           )}
@@ -173,7 +173,7 @@ export function AddWidgetModal({
             <div className="mb-4">
               <h3
                 className="mb-2 text-[11px] font-semibold uppercase tracking-wider"
-                style={{ color: "#718096" }}
+                style={{ color: "#64748B" }}
               >
                 Recently Closed
               </h3>
@@ -222,7 +222,7 @@ export function AddWidgetModal({
                     </span>
                     <span
                       className="ml-1 text-[11px]"
-                      style={{ color: "#718096" }}
+                      style={{ color: "#64748B" }}
                     >
                       ({catWidgets.length})
                     </span>
@@ -290,7 +290,7 @@ function WidgetRow({
         <p className="text-[13px] font-medium truncate" style={{ color: "#1A1A2E" }}>
           {highlightMatch(widget.name)}
         </p>
-        <p className="text-[11px] truncate" style={{ color: "#718096" }}>
+        <p className="text-[11px] truncate" style={{ color: "#64748B" }}>
           {highlightMatch(widget.description)}
         </p>
       </div>
@@ -301,7 +301,7 @@ function WidgetRow({
         aria-label={isActive ? `${widget.name} already active` : `Add ${widget.name}`}
         className="flex-shrink-0 rounded-md px-2 py-0.5 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1B6B5A] disabled:cursor-not-allowed disabled:opacity-40"
         style={{
-          color: isActive ? "#718096" : "#1B6B5A",
+          color: isActive ? "#64748B" : "#1B6B5A",
           backgroundColor: isActive ? "transparent" : "rgba(27,107,90,0.08)",
         }}
       >

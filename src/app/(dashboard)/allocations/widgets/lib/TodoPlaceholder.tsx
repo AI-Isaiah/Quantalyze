@@ -24,7 +24,7 @@ export function TodoPlaceholder({
         style={{ maxWidth: 360 }}
       >
         {icon}
-        <p className="text-sm leading-relaxed" style={{ color: "#718096" }}>
+        <p className="text-sm leading-relaxed" style={{ color: "#64748B" }}>
           {message}
         </p>
       </div>

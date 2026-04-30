@@ -64,7 +64,7 @@ export default function AllocationOverTime({ data }: WidgetProps) {
     return (
       <div
         className="flex h-full items-center justify-center p-6 text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         No weight history yet. History builds automatically as positions are tracked.
       </div>

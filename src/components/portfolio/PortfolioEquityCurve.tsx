@@ -55,7 +55,7 @@ export function PortfolioEquityCurve({
       height: 350,
       layout: {
         background: { color: "#FFFFFF" },
-        textColor: "#718096",
+        textColor: "#64748B",
         fontFamily: "'Geist Mono', monospace",
         fontSize: 11,
       },

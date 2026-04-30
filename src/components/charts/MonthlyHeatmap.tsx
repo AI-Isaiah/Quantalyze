@@ -1,5 +1,18 @@
 import { Fragment } from "react";
-import { CHART_AXIS_TICK } from "./chart-tokens";
+import {
+  CHART_AXIS_TICK,
+  CHART_NEGATIVE_100,
+  CHART_NEGATIVE_300,
+  CHART_NEGATIVE_700,
+  CHART_NEGATIVE_800,
+  CHART_NEUTRAL,
+  CHART_POSITIVE_100,
+  CHART_POSITIVE_300,
+  CHART_POSITIVE_700,
+  CHART_POSITIVE_800,
+  CHART_TEXT_ON_LIGHT_NEGATIVE,
+  CHART_TEXT_ON_LIGHT_POSITIVE,
+} from "./chart-tokens";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -13,27 +26,37 @@ interface CellStyle {
 }
 
 /**
- * MonthlyHeatmap diverging color cells.
- *
- * Uses explicit hex colors instead of Tailwind palette indices. Positive
- * scale anchored at the green-100/300/700/800 ramp; negative scale at
- * red-100/300/700/800. Tints are baked into the hex (no container opacity)
- * because container `opacity` alpha-blends BOTH the foreground text and
- * the background, collapsing contrast to ~1:1 for the lighter steps —
- * caught by axe with 138 color-contrast violations on the 365d fixture
- * (PR #108 review). Each (bg, text) pair below clears WCAG AA 4.5:1 small
- * text vs the white surface beneath; verified during PR #108 fix.
+ * MonthlyHeatmap diverging color cells. Tints are baked into the hex (no
+ * container opacity) because container `opacity` alpha-blends BOTH the
+ * foreground text and the background, collapsing contrast to ~1:1 for the
+ * lighter steps — caught by axe with 138 color-contrast violations on the
+ * 365d fixture (PR #108 review). Each (bg, text) pair below clears WCAG
+ * AA 4.5:1 small text vs the white surface beneath. Colors come from
+ * chart-tokens.ts so DailyHeatmap and any future heatmap consume the
+ * same scale.
  */
+const STYLE_BUCKETS = {
+  posSaturated: { backgroundColor: CHART_POSITIVE_800, color: "#FFFFFF" },
+  posStrong: { backgroundColor: CHART_POSITIVE_700, color: "#FFFFFF" },
+  posMid: { backgroundColor: CHART_POSITIVE_300, color: CHART_TEXT_ON_LIGHT_POSITIVE },
+  posLight: { backgroundColor: CHART_POSITIVE_100, color: CHART_TEXT_ON_LIGHT_POSITIVE },
+  zero: { backgroundColor: CHART_NEUTRAL, color: CHART_AXIS_TICK },
+  negLight: { backgroundColor: CHART_NEGATIVE_100, color: CHART_TEXT_ON_LIGHT_NEGATIVE },
+  negMid: { backgroundColor: CHART_NEGATIVE_300, color: CHART_TEXT_ON_LIGHT_NEGATIVE },
+  negStrong: { backgroundColor: CHART_NEGATIVE_700, color: "#FFFFFF" },
+  negSaturated: { backgroundColor: CHART_NEGATIVE_800, color: "#FFFFFF" },
+} as const;
+
 function cellStyle(value: number): CellStyle {
-  if (value > 0.10) return { backgroundColor: "#166534", color: "#FFFFFF" };
-  if (value > 0.05) return { backgroundColor: "#15803D", color: "#FFFFFF" };
-  if (value > 0.02) return { backgroundColor: "#86EFAC", color: "#0F3D2D" };
-  if (value > 0) return { backgroundColor: "#DCFCE7", color: "#0F3D2D" };
-  if (value === 0) return { backgroundColor: "#FFFFFF", color: CHART_AXIS_TICK };
-  if (value > -0.02) return { backgroundColor: "#FEE2E2", color: "#7F1D1D" };
-  if (value > -0.05) return { backgroundColor: "#FCA5A5", color: "#7F1D1D" };
-  if (value > -0.10) return { backgroundColor: "#B91C1C", color: "#FFFFFF" };
-  return { backgroundColor: "#991B1B", color: "#FFFFFF" };
+  if (value > 0.10) return STYLE_BUCKETS.posSaturated;
+  if (value > 0.05) return STYLE_BUCKETS.posStrong;
+  if (value > 0.02) return STYLE_BUCKETS.posMid;
+  if (value > 0) return STYLE_BUCKETS.posLight;
+  if (value === 0) return STYLE_BUCKETS.zero;
+  if (value > -0.02) return STYLE_BUCKETS.negLight;
+  if (value > -0.05) return STYLE_BUCKETS.negMid;
+  if (value > -0.10) return STYLE_BUCKETS.negStrong;
+  return STYLE_BUCKETS.negSaturated;
 }
 
 export function MonthlyHeatmap({ data }: MonthlyHeatmapProps) {

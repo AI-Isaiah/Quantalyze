@@ -242,7 +242,7 @@ function KpiCell({
 }) {
   const valueColor =
     tone === "positive"
-      ? "#16A34A"
+      ? "#15803D"
       : tone === "negative"
         ? "#DC2626"
         : "#1A1A2E";
@@ -263,7 +263,7 @@ function KpiCell({
         className="mt-1 font-mono text-[22px] font-medium tabular-nums"
         // Route the color through a CSS custom property so the literal hex
         // survives JSDOM style-attribute normalization in tests (which
-        // otherwise rewrites `#16A34A` -> `rgb(22, 163, 74)`). Tests at
+        // otherwise rewrites `#15803D` -> `rgb(22, 163, 74)`). Tests at
         // outcomes.test.tsx:245/256 assert the hex literally, so valueColor
         // stays as a hex literal and the swap to var() tokens stops at the
         // surrounding chrome (border, label, sub).
@@ -530,9 +530,9 @@ function TimelineRow({
     }
     // Route the color through a CSS custom property so the literal hex
     // survives JSDOM style-attribute normalization in tests (which would
-    // otherwise rewrite `#16A34A` -> `rgb(22, 163, 74)`). The visual
+    // otherwise rewrite `#15803D` -> `rgb(22, 163, 74)`). The visual
     // result is identical in a real browser.
-    const cellColor = v >= 0 ? "#16A34A" : "#DC2626";
+    const cellColor = v >= 0 ? "#15803D" : "#DC2626";
     return (
       <span
         className="font-mono text-[13px] font-medium tabular-nums"

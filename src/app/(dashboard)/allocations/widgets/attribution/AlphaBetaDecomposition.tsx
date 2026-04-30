@@ -158,7 +158,7 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
               type="number"
               tick={{
                 fontSize: 11,
-                fill: "#718096",
+                fill: "#64748B",
                 fontFamily: "var(--font-geist-mono), monospace",
               }}
               tickLine={false}
@@ -168,7 +168,7 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
             <YAxis
               type="category"
               dataKey="name"
-              tick={{ fontSize: 11, fill: "#718096" }}
+              tick={{ fontSize: 11, fill: "#64748B" }}
               tickLine={false}
               axisLine={false}
               width={0}
@@ -183,7 +183,7 @@ export default function AlphaBetaDecomposition({ data }: WidgetProps) {
               iconSize={10}
             />
             <Bar dataKey="Beta" stackId="decomp" fill="#94A3B8" radius={[0, 0, 0, 0]} />
-            <Bar dataKey="Alpha" stackId="decomp" fill="#16A34A" radius={[0, 0, 0, 0]} />
+            <Bar dataKey="Alpha" stackId="decomp" fill="#15803D" radius={[0, 0, 0, 0]} />
             <Bar dataKey="Residual" stackId="decomp" fill="#E2E8F0" radius={[2, 2, 2, 2]} />
           </BarChart>
         </ResponsiveContainer>

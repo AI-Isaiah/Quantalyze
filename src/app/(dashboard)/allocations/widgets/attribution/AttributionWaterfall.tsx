@@ -46,7 +46,7 @@ export default function AttributionWaterfall({ data }: WidgetProps) {
         name: row.strategy_name,
         value: contrib,
         start: running,
-        fill: contrib >= 0 ? "#16A34A" : "#DC2626",
+        fill: contrib >= 0 ? "#15803D" : "#DC2626",
       });
       running += contrib;
     }
@@ -102,7 +102,7 @@ export default function AttributionWaterfall({ data }: WidgetProps) {
       >
         <XAxis
           dataKey="name"
-          tick={{ fontSize: 11, fill: "#718096" }}
+          tick={{ fontSize: 11, fill: "#64748B" }}
           tickLine={false}
           axisLine={{ stroke: "#E2E8F0" }}
           interval={0}
@@ -113,7 +113,7 @@ export default function AttributionWaterfall({ data }: WidgetProps) {
         <YAxis
           tick={{
             fontSize: 11,
-            fill: "#718096",
+            fill: "#64748B",
             fontFamily: "var(--font-geist-mono), monospace",
           }}
           tickLine={false}

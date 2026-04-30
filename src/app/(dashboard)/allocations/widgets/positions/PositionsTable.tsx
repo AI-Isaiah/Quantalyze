@@ -96,7 +96,7 @@ const ALL_COLUMNS: ColumnDef<PositionRow, unknown>[] = [
     header: "CAGR",
     cell: (info) => {
       const v = info.getValue();
-      const color = v == null ? "#718096" : v >= 0 ? "#16A34A" : "#DC2626";
+      const color = v == null ? "#64748B" : v >= 0 ? "#15803D" : "#DC2626";
       return <span className="font-metric tabular-nums text-sm" style={{ color }}>{fmtPct(v)}</span>;
     },
     size: 80,
@@ -112,7 +112,7 @@ const ALL_COLUMNS: ColumnDef<PositionRow, unknown>[] = [
     header: "Max DD",
     cell: (info) => {
       const v = info.getValue();
-      return <span className="font-metric tabular-nums text-sm" style={{ color: v != null ? "#DC2626" : "#718096" }}>{fmtPct(v)}</span>;
+      return <span className="font-metric tabular-nums text-sm" style={{ color: v != null ? "#DC2626" : "#64748B" }}>{fmtPct(v)}</span>;
     },
     size: 80,
     minSize: 60,
@@ -145,7 +145,7 @@ const ALL_COLUMNS: ColumnDef<PositionRow, unknown>[] = [
     header: "Alpha",
     cell: (info) => {
       const v = info.getValue();
-      const color = v == null ? "#718096" : v >= 0 ? "#16A34A" : "#DC2626";
+      const color = v == null ? "#64748B" : v >= 0 ? "#15803D" : "#DC2626";
       return <span className="font-metric tabular-nums text-sm" style={{ color }}>{fmtPct(v)}</span>;
     },
     size: 72,
@@ -237,7 +237,7 @@ function ColumnVisibilityDropdown({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center justify-center w-7 h-7 rounded border border-[#E2E8F0] bg-white text-[#718096] hover:text-[#1A1A2E] hover:bg-[#F8F9FA] transition-colors"
+        className="flex items-center justify-center w-7 h-7 rounded border border-[#E2E8F0] bg-white text-[#64748B] hover:text-[#1A1A2E] hover:bg-[#F8F9FA] transition-colors"
         aria-label="Toggle columns"
         data-testid="column-visibility-toggle"
       >
@@ -445,7 +445,7 @@ export default function PositionsTable({ data, width }: WidgetProps) {
 
   if (rows.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-[#718096]">
+      <div className="flex h-full items-center justify-center text-sm text-[#64748B]">
         No positions data available
       </div>
     );
@@ -476,7 +476,7 @@ export default function PositionsTable({ data, width }: WidgetProps) {
                 {hg.headers.map((header) => (
                   <th
                     key={header.id}
-                    className="relative select-none whitespace-nowrap border-b border-[#E2E8F0] bg-[#F8F9FA] px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-[#718096]"
+                    className="relative select-none whitespace-nowrap border-b border-[#E2E8F0] bg-[#F8F9FA] px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider text-[#64748B]"
                     style={{ width: header.getSize() }}
                   >
                     {header.isPlaceholder ? null : (

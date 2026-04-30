@@ -60,7 +60,7 @@ export default function TradeVolume({ data }: WidgetProps) {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center text-xs" style={{ color: "#718096" }}>
+      <div className="flex h-full items-center justify-center text-xs" style={{ color: "#64748B" }}>
         Loading...
       </div>
     );
@@ -68,7 +68,7 @@ export default function TradeVolume({ data }: WidgetProps) {
 
   if (volumeByDay.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-sm" style={{ color: "#718096" }}>
+      <div className="flex h-full items-center justify-center text-sm" style={{ color: "#64748B" }}>
         No trade volume data yet.
       </div>
     );
@@ -106,7 +106,7 @@ export default function TradeVolume({ data }: WidgetProps) {
               {volumeByDay.map((entry, index) => (
                 <Cell
                   key={`cell-${index}`}
-                  fill={entry.pnlUsd >= 0 ? "#16A34A" : "#DC2626"}
+                  fill={entry.pnlUsd >= 0 ? "#15803D" : "#DC2626"}
                 />
               ))}
             </Bar>
@@ -114,7 +114,7 @@ export default function TradeVolume({ data }: WidgetProps) {
         </ResponsiveContainer>
       </div>
       {!hasFills && (
-        <p className="px-3 py-1 text-xs" style={{ color: "#718096", fontSize: 12 }}>
+        <p className="px-3 py-1 text-xs" style={{ color: "#64748B", fontSize: 12 }}>
           Daily P&amp;L aggregated from exchange account history. Trade-level granularity coming in a future sprint.
         </p>
       )}

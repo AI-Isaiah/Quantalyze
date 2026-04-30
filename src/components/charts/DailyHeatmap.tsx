@@ -6,9 +6,15 @@ import {
   CHART_AXIS_TICK,
   CHART_TEXT_MUTED,
   CHART_FONT_MONO,
-  CHART_POSITIVE,
-  CHART_NEGATIVE,
+  CHART_NEGATIVE_100,
+  CHART_NEGATIVE_300,
+  CHART_NEGATIVE_700,
+  CHART_NEGATIVE_800,
   CHART_NEUTRAL,
+  CHART_POSITIVE_100,
+  CHART_POSITIVE_300,
+  CHART_POSITIVE_700,
+  CHART_POSITIVE_800,
 } from "./chart-tokens";
 
 /**
@@ -55,17 +61,23 @@ const MONTHS = [
   "Dec",
 ];
 
-/** 9-step diverging color scale anchored at 0. */
-function cellFill(v: number): { fill: string; opacity: number } {
-  if (v >= 0.1) return { fill: CHART_POSITIVE, opacity: 1 };
-  if (v >= 0.05) return { fill: CHART_POSITIVE, opacity: 0.7 };
-  if (v >= 0.02) return { fill: CHART_POSITIVE, opacity: 0.4 };
-  if (v > 0) return { fill: CHART_POSITIVE, opacity: 0.15 };
-  if (v === 0) return { fill: CHART_NEUTRAL, opacity: 1 };
-  if (v > -0.02) return { fill: CHART_NEGATIVE, opacity: 0.15 };
-  if (v > -0.05) return { fill: CHART_NEGATIVE, opacity: 0.4 };
-  if (v > -0.1) return { fill: CHART_NEGATIVE, opacity: 0.7 };
-  return { fill: CHART_NEGATIVE, opacity: 1 };
+/**
+ * 9-step diverging color scale anchored at 0. Tints are baked into the hex
+ * (no `fillOpacity` / `globalAlpha`) because per-shape alpha blends through
+ * to the surface beneath, collapsing contrast far below WCAG AA — the same
+ * regression PR #108 fixed in MonthlyHeatmap. Colors mirror the canonical
+ * ramp in chart-tokens.ts.
+ */
+function cellFill(v: number): string {
+  if (v >= 0.1) return CHART_POSITIVE_800;
+  if (v >= 0.05) return CHART_POSITIVE_700;
+  if (v >= 0.02) return CHART_POSITIVE_300;
+  if (v > 0) return CHART_POSITIVE_100;
+  if (v === 0) return CHART_NEUTRAL;
+  if (v > -0.02) return CHART_NEGATIVE_100;
+  if (v > -0.05) return CHART_NEGATIVE_300;
+  if (v > -0.1) return CHART_NEGATIVE_700;
+  return CHART_NEGATIVE_800;
 }
 
 function isLeapYear(y: number): boolean {
@@ -164,7 +176,7 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
               {row.year}
             </text>
             {row.days.map((d) => {
-              const { fill, opacity } = cellFill(d.value);
+              const fill = cellFill(d.value);
               // Use day-of-year for x — consistent with Canvas branch.
               const x = SVG_LEFT_GUTTER + dayOfYear(d.date) * SVG_DOY_CELL_W;
               const y = SVG_TOP_GUTTER + rowIdx * SVG_CELL_H;
@@ -177,7 +189,6 @@ const SvgRenderer = memo(function SvgRenderer({ data }: { data: DailyHeatmapData
                   width={SVG_DOY_CELL_W}
                   height={SVG_CELL_H}
                   fill={fill}
-                  fillOpacity={opacity}
                   stroke={CHART_BORDER}
                   strokeWidth={0.5}
                 >
@@ -233,9 +244,9 @@ const CanvasRenderer = memo(function CanvasRenderer({
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       if (ctx) {
-        // Isolate per-cell globalAlpha mutations so the final cell's alpha
-        // does not leak into any subsequent draw on this context — defensive
-        // against future shared-canvas use; near-zero cost per paint.
+        // Save/restore wraps the paint as defensive insulation against any
+        // future code that mutates context state (alpha, transform, filter)
+        // and forgets to reset it. Near-zero cost per paint.
         ctx.save();
         // Clear before paint — the canvas auto-clears when width/height attrs
         // change, but `canvasHeight` only changes on year-count change. When
@@ -249,9 +260,7 @@ const CanvasRenderer = memo(function CanvasRenderer({
           const doy = dayOfYear(point.date);
           const x = doy * CELL_W;
           const y = yearIdx * CELL_H;
-          const { fill, opacity } = cellFill(point.value);
-          ctx.fillStyle = fill;
-          ctx.globalAlpha = opacity;
+          ctx.fillStyle = cellFill(point.value);
           ctx.fillRect(x, y, CELL_W, CELL_H);
         }
         ctx.restore();

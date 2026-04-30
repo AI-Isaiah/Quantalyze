@@ -144,7 +144,7 @@ export function CorrelationOverTime({ data }: WidgetProps) {
     return (
       <div
         className="flex h-full items-center justify-center text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         Insufficient data for rolling correlation (need {ROLLING_WINDOW}+ days,
         2+ strategies)
@@ -162,7 +162,7 @@ export function CorrelationOverTime({ data }: WidgetProps) {
         >
           <XAxis
             dataKey="date"
-            tick={{ fontSize: 10, fill: "#718096" }}
+            tick={{ fontSize: 10, fill: "#64748B" }}
             tickLine={false}
             axisLine={{ stroke: "#E2E8F0" }}
             interval="preserveStartEnd"
@@ -170,7 +170,7 @@ export function CorrelationOverTime({ data }: WidgetProps) {
           />
           <YAxis
             domain={[-1, 1]}
-            tick={{ fontSize: 10, fill: "#718096" }}
+            tick={{ fontSize: 10, fill: "#64748B" }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v: number) => v.toFixed(1)}

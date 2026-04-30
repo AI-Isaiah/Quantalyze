@@ -24,7 +24,7 @@ export function PortfolioAlerts({ data }: WidgetProps) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
         <span style={{ fontSize: 20 }}>&#9673;</span>
-        <span className="text-sm" style={{ color: "#718096" }}>
+        <span className="text-sm" style={{ color: "#64748B" }}>
           No active alerts
         </span>
       </div>
@@ -45,7 +45,7 @@ export function PortfolioAlerts({ data }: WidgetProps) {
         >
           {alertCount.total}
         </span>
-        <span className="text-xs" style={{ color: "#718096" }}>
+        <span className="text-xs" style={{ color: "#64748B" }}>
           active {alertCount.total === 1 ? "alert" : "alerts"}
         </span>
       </div>

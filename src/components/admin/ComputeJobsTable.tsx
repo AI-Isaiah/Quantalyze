@@ -11,14 +11,14 @@ import type { ComputeJobAdminRow } from "@/lib/types";
 function statusColor(status: string): { bg: string; text: string } {
   switch (status) {
     case "done":
-      return { bg: "rgba(22,163,74,0.1)", text: "#16A34A" };
+      return { bg: "rgba(21,128,61,0.1)", text: "#15803D" };
     case "failed_final":
       return { bg: "rgba(220,38,38,0.1)", text: "#DC2626" };
     case "failed_retry":
       return { bg: "rgba(217,119,6,0.1)", text: "#D97706" };
     default:
       // pending, running, done_pending_children
-      return { bg: "rgba(113,128,150,0.1)", text: "#718096" };
+      return { bg: "rgba(113,128,150,0.1)", text: "#64748B" };
   }
 }
 
@@ -150,7 +150,7 @@ export function ComputeJobsTable() {
           ))}
         </select>
 
-        <label className="flex items-center gap-1.5 text-xs" style={{ color: "#718096" }}>
+        <label className="flex items-center gap-1.5 text-xs" style={{ color: "#64748B" }}>
           <input
             type="checkbox"
             checked={autoRefresh}
@@ -161,7 +161,7 @@ export function ComputeJobsTable() {
         </label>
 
         {loading && (
-          <span className="text-[10px]" style={{ color: "#718096" }}>
+          <span className="text-[10px]" style={{ color: "#64748B" }}>
             Loading...
           </span>
         )}
@@ -183,7 +183,7 @@ export function ComputeJobsTable() {
                   <th
                     key={h}
                     className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-                    style={{ color: "#718096" }}
+                    style={{ color: "#64748B" }}
                   >
                     {h}
                   </th>
@@ -235,12 +235,12 @@ export function ComputeJobsTable() {
                   <td className="px-3 py-2 font-metric tabular-nums text-xs" style={{ color: "#1A1A2E" }}>
                     {job.attempts}/{job.max_attempts}
                   </td>
-                  <td className="px-3 py-2 text-xs" style={{ color: "#718096" }}>
+                  <td className="px-3 py-2 text-xs" style={{ color: "#64748B" }}>
                     {formatRelativeTime(job.created_at, now)}
                   </td>
                   <td
                     className="px-3 py-2 text-xs truncate max-w-[240px]"
-                    style={{ color: job.last_error ? "#DC2626" : "#718096" }}
+                    style={{ color: job.last_error ? "#DC2626" : "#64748B" }}
                     title={job.last_error ?? undefined}
                   >
                     {errorText}
@@ -251,7 +251,7 @@ export function ComputeJobsTable() {
 
             {jobs.length === 0 && !loading && (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-sm" style={{ color: "#718096" }}>
+                <td colSpan={6} className="px-3 py-8 text-center text-sm" style={{ color: "#64748B" }}>
                   No compute jobs found.
                 </td>
               </tr>
