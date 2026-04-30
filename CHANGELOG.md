@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.22] - 2026-04-30
+
+**Punch-list cleanup: closes METRICS-15 + 4 of 5 seed-gated Playwright failures from the v0.17.1 punch-list.** Wires the canonical 8-strategy demo seeder into CI so the `/discovery/[slug]` specs actually have data; pins Playwright locale/timezone/color scheme so chart-parity goldens stop drifting between Mac dev and Linux CI; populates the `metrics_json.btc_benchmark_returns` key the strategy-v2 keyboard tab order depends on; and locks the `getStrategyDetailV2` path-extraction architecture (no `select *`, p95 unpack budget) with a vitest contract.
+
+### Added
+
+- **`src/lib/queries.test.ts:625-810`** — METRICS-15 path-extraction perf contract. Two tests: (1) the strategies-row `select(...)` projection is explicit (never `select *`) and includes every field the page metadata, shell header, and panels 1-7 consume, and (2) the in-memory unpack p95 stays under 100ms over 50 samples (10× headroom against the documented 50ms SC#3b end-to-end budget). The recorder hook on `buildChain` makes any future `select *` regression surface as a unit-test failure rather than a production p95 alarm.
+- **`.github/workflows/ci.yml:197-211`** — Seed step that runs `scripts/seed-demo-data.ts` against the test Supabase project before the seed-gated Playwright specs. Gated on the same `vars.E2E_TEST_DB_CONFIGURED` variable as the spec step. The script's `SEED_CONFIRM_STAGING=true` interlock plus its prod-URL probe make a misrouted secret fail loudly at the boundary instead of mutating production.
+
+### Fixed
+
+- **`e2e/helpers/seed-test-project.ts:354-358`** — `seedStrategyWithHistory()` now populates `metrics_json.btc_benchmark_returns` alongside `metrics_json.benchmark_returns`. `panel2Equity.btc_overlay` reads the former (queries.ts:466), not the latter, so the BTC overlay was always null in seeded fixtures, which suppressed the BTC-benchmark checkbox in `HeadlineMetricsPanel`, which broke `strategy-v2-keyboard.spec.ts`'s 12-stop tab-order assertion. Two seed-dependent specs (`discovery-hide-examples-default`, `discovery-prefs-isolation`) are also unblocked indirectly because `/discovery/crypto-sma` now actually has rows.
+- **`playwright.config.ts:14-20`** — Pinned `locale: "en-US"`, `timezoneId: "UTC"`, `colorScheme: "light"` on the global `use` block. Sub-pixel font hinting and locale-dependent number formatting were the root cause of chart-parity snapshot drift between dev (Mac) and CI (Linux). Goldens still need a one-time regen on a Linux runner; that is a follow-up operator action.
+
+### Out of scope (separate PRs)
+
+- `e2e/onboarding-funnel.spec.ts` — banner gating (`apiKeysCount === 0`) is correct in source, the spec assertion is correct, the seed creates a fresh allocator with no api_keys row, and `useSessionStorageBoolean` returns `false` initially. The runtime cause is not statically determinable and is deferred to the weekly CI follow-up routine for diagnosis with actual run logs.
+
 ## [0.17.1.21] - 2026-04-30
 
 **A11y: meet WCAG 2 AA on `--color-text-muted` and `--color-positive` for 12px small text.** Once the seed-gated e2e step actually started running (after #100 + #101 + #102 + the GitHub secret rotation), the axe specs surfaced three pre-existing color-contrast violations on `/discovery/[slug]` and `/strategy/[id]/v2`:

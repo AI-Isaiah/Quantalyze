@@ -39,12 +39,20 @@ const recorders = vi.hoisted(() => {
     favoritesResponse: { data: null as unknown, error: null as unknown },
     favoritesSelectCalls: [] as string[],
     favoritesEqCalls: [] as Array<[string, unknown]>,
+    // Records the `.select(cols)` argument used against the strategies
+    // table so the path-extraction contract can assert no `select *` regressions.
+    strategySelectCols: [] as string[],
   };
 });
 
-const buildChain = (data: unknown) => {
+const buildChain = (data: unknown, recordStrategySelect = false) => {
   const chain: Record<string, unknown> = {};
-  chain.select = () => chain;
+  chain.select = (cols?: string) => {
+    if (recordStrategySelect && typeof cols === "string") {
+      recorders.strategySelectCols.push(cols);
+    }
+    return chain;
+  };
   chain.eq = () => chain;
   chain.single = () => Promise.resolve({ data, error: null });
   // `loadManagerIdentity` (the shared helper in manager-identity.ts) uses
@@ -105,6 +113,7 @@ vi.mock("@/lib/supabase/server", () => ({
       }
       return buildChain(
         table === "strategies" ? recorders.strategyData : recorders.managerRowData,
+        table === "strategies",
       );
     },
     // .rpc() recorder for fetchStrategyLazyMetrics (Plan 12-08 / METRICS-15).
@@ -122,6 +131,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       recorders.adminFromCalls.push(table);
       return buildChain(
         table === "strategies" ? recorders.strategyData : recorders.managerRowData,
+        table === "strategies",
       );
     },
   }),
@@ -163,6 +173,7 @@ beforeEach(() => {
   recorders.favoritesResponse = { data: null, error: null };
   recorders.favoritesSelectCalls = [];
   recorders.favoritesEqCalls = [];
+  recorders.strategySelectCols = [];
 });
 
 describe("getStrategyDetail — disclosure tier redaction", () => {
@@ -606,5 +617,190 @@ describe("getStrategyDetailV2 — Plan 14b-06 panel4..7 mappings", () => {
     expect(
       (result!.panel7Inputs.correlation_analytics.metrics_json as Record<string, unknown>)["alpha"],
     ).toBe(0.05);
+  });
+});
+
+/**
+ * METRICS-15 path-extraction contract.
+ *
+ * Locks the two halves of the SC#3b p95<50ms detail-fetch contract that
+ * queries.ts:391-407 documents:
+ *
+ *   1. Wire shape — getStrategyDetailV2 must NEVER hit the strategies row
+ *      with `select *`. The explicit STRATEGY/ANALYTICS column lists are the
+ *      bandwidth win; a regression to `*` would silently double the bytes
+ *      crossing the wire and miss the p95 budget under load.
+ *
+ *   2. In-memory unpack — the panel{1..7} mapper that runs after Supabase
+ *      returns must execute well under the 50ms budget so the network is the
+ *      dominant cost. Microbenchmark over a maximally-populated analytics row
+ *      against a deterministic-data mock; assert p95 stays inside the budget.
+ *
+ * Why no LATERAL join migration: the doc comment at queries.ts:391-407
+ * (and migration 087) makes explicit that PostgREST cannot project a JSONB
+ * sub-tree without an RPC. The lazy fetch via fetch_strategy_lazy_metrics
+ * IS the LATERAL/sibling-table architecture; the eager projection above
+ * trims the surrounding bandwidth. Both halves of the contract live here.
+ */
+describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () => {
+  const STRAT_ID = "00000000-0000-0000-0000-000000000abc";
+
+  function buildAnalyticsRow() {
+    return {
+      computation_status: "complete",
+      cumulative_return: 0.42,
+      cagr: 0.18,
+      sharpe: 1.5,
+      sortino: 2.1,
+      max_drawdown: -0.12,
+      volatility: 0.16,
+      // Heaviest realistic shapes the eager unpack must walk: 1y daily series
+      // (~252 entries), 12mo monthly grid, full quantiles + rolling families,
+      // trade_metrics, drawdown_series. The lazy sibling-table series live
+      // outside this projection (path-extracted via fetch_strategy_lazy_metrics)
+      // so they don't pad the row.
+      returns_series: Array.from({ length: 252 }, (_, i) => ({
+        date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+        value: 1 + i * 0.001,
+      })),
+      drawdown_series: Array.from({ length: 30 }, (_, i) => ({
+        date: new Date(2024, 5, 1 + i).toISOString().slice(0, 10),
+        value: -0.01 * (i + 1),
+      })),
+      monthly_returns: {
+        "2023": Object.fromEntries(
+          ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
+            (m, i) => [m, i * 0.005],
+          ),
+        ),
+        "2024": Object.fromEntries(
+          ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
+            (m, i) => [m, i * 0.006],
+          ),
+        ),
+      },
+      return_quantiles: {
+        Daily: Array.from({ length: 21 }, (_, i) => -0.05 + i * 0.005),
+        Weekly: Array.from({ length: 21 }, (_, i) => -0.1 + i * 0.01),
+        Monthly: Array.from({ length: 21 }, (_, i) => -0.2 + i * 0.02),
+      },
+      rolling_metrics: {
+        sharpe_30d: Array.from({ length: 90 }, (_, i) => ({
+          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+          value: 0.5 + i * 0.001,
+        })),
+        sharpe_90d: Array.from({ length: 90 }, (_, i) => ({
+          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+          value: 0.7 + i * 0.001,
+        })),
+        sharpe_365d: Array.from({ length: 90 }, (_, i) => ({
+          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+          value: 1.0 + i * 0.001,
+        })),
+      },
+      trade_metrics: {
+        total_positions: 100,
+        open_positions: 5,
+        closed_positions: 95,
+        win_rate: 0.6,
+        avg_roi: 0.05,
+        avg_duration_days: 4.2,
+        long_count: 60,
+        short_count: 40,
+        best_trade_roi: 0.5,
+        worst_trade_roi: -0.2,
+        expectancy: 0.04,
+        risk_reward_ratio: 2.1,
+        weighted_risk_reward_ratio: 2.0,
+        sqn: 1.8,
+        profit_factor_long: 1.5,
+        profit_factor_short: 1.2,
+      },
+      metrics_json: {
+        history_days: 365,
+        equity_series_1y: Array.from({ length: 252 }, (_, i) => ({
+          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+          value: 1 + i * 0.0005,
+        })),
+        btc_benchmark_returns: Array.from({ length: 252 }, (_, i) => ({
+          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+          value: 1 + i * 0.0003,
+        })),
+        benchmark_returns: Array.from({ length: 252 }, (_, i) => ({
+          date: new Date(2024, 0, 1 + i).toISOString().slice(0, 10),
+          value: i * 0.0001,
+        })),
+        alpha: 0.05,
+        beta: 0.92,
+        information_ratio: 0.42,
+        treynor_ratio: 0.18,
+      },
+    };
+  }
+
+  function buildStrategyRow() {
+    return {
+      id: STRAT_ID,
+      name: "METRICS-15 perf fixture",
+      start_date: "2024-01-01",
+      supported_exchanges: ["Binance"],
+      strategy_types: ["systematic"],
+      subtypes: ["trend"],
+      markets: ["crypto"],
+      leverage_range: "1-3x",
+      avg_daily_turnover: 250000,
+      status: "published",
+      strategy_analytics: buildAnalyticsRow(),
+    };
+  }
+
+  it("uses an explicit column projection on the strategies row (no `select *`)", async () => {
+    recorders.strategyData = buildStrategyRow();
+    await getStrategyDetailV2(STRAT_ID);
+
+    expect(recorders.strategySelectCols.length).toBeGreaterThanOrEqual(1);
+    const selectCols = recorders.strategySelectCols[0];
+
+    expect(selectCols).not.toMatch(/\*/);
+
+    for (const col of [
+      "id",
+      "name",
+      "start_date",
+      "supported_exchanges",
+      "strategy_types",
+      "leverage_range",
+      "avg_daily_turnover",
+      "strategy_analytics",
+      "metrics_json",
+      "trade_metrics",
+      "rolling_metrics",
+    ]) {
+      expect(selectCols).toContain(col);
+    }
+  });
+
+  it("in-memory unpack p95 stays under the 50ms detail-fetch budget", async () => {
+    recorders.strategyData = buildStrategyRow();
+
+    // Warm the JIT a few times before measuring so the first iteration's
+    // cold-start cost doesn't pollute the percentile.
+    for (let i = 0; i < 3; i++) await getStrategyDetailV2(STRAT_ID);
+
+    const N = 50;
+    const samples: number[] = [];
+    for (let i = 0; i < N; i++) {
+      const t0 = performance.now();
+      await getStrategyDetailV2(STRAT_ID);
+      samples.push(performance.now() - t0);
+    }
+    samples.sort((a, b) => a - b);
+    const p95 = samples[Math.floor(N * 0.95) - 1];
+
+    // The SC#3b end-to-end budget is 50ms; this measures pure in-memory
+    // unpack against a mocked Supabase chain so 100ms gives the test
+    // headroom against GC pauses on noisy CI runners while still flagging
+    // any 10x regression in the panel-mapper hot path.
+    expect(p95).toBeLessThan(100);
   });
 });

@@ -1086,6 +1086,12 @@ async function main() {
     const { error: dErr } = await supabase.from("match_decisions").insert({
       allocator_id: ALLOCATOR_ACTIVE,
       strategy_id: STRATEGY_UUIDS[0],
+      // Migration 080 added a per-kind CHECK requiring `bridge_recommended`
+      // rows (the default kind) to carry one of original_strategy_id /
+      // original_holding_ref. The seed semantically models "we bridged the
+      // active allocator from strategy[1] to strategy[0]", so populate
+      // original_strategy_id with strategy[1].
+      original_strategy_id: STRATEGY_UUIDS[1],
       decision: "sent_as_intro",
       founder_note: "Historical demo intro (seeded).",
       contact_request_id: contactRequestId,

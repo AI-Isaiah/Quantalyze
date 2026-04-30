@@ -11,6 +11,11 @@ export default defineConfig({
     baseURL: process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    // Pinned for snapshot determinism — number formatting and sub-pixel
+    // font hinting shift between Mac dev runners and Linux CI runners.
+    locale: "en-US",
+    timezoneId: "UTC",
+    colorScheme: "light",
   },
   projects: [
     {
