@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.18] - 2026-04-30
+
+**CI port-cleanup harder — pkill by name + fuser + 10s ss/lsof poll.** v0.17.1.15's `lsof -ti:3000 + xargs -r kill -9 + 5s poll` failed in production (PR #98 run #320 — user-confirmed). The seed-gated step's WR-04 guard kept tripping because the next-server grandchild was still binding the socket past the cleanup window. Layered multiple methods so any single failure mode is caught:
+
+### Fixed
+
+- **`.github/workflows/ci.yml`** — after `npm run start &` cleanup:
+  1. `kill -TERM $SERVER_PID` + `pkill -TERM -P $SERVER_PID` (parent + children)
+  2. `wait $SERVER_PID` (reap)
+  3. `pkill -KILL -f "next-server"` + `pkill -KILL -f "next start"` (catches the grandchild whose parent reparented to init)
+  4. `lsof -ti:3000 | xargs -r kill -9` (anything still on the port)
+  5. `fuser -k 3000/tcp` (kernel-level kill on the listening socket)
+  6. 10-second poll loop checking BOTH `ss -ltn | grep ':3000'` AND `lsof -nP -iTCP:3000 -sTCP:LISTEN` — re-nukes each iteration in case a respawn loop is active.
+  7. Debug echoes before + after print which PIDs were on the port (surfaces "lsof returned no PIDs but port still bound" if it happens again).
+
+The WR-04 guard at line 174-178 of the seed-gated step checks BOTH `ss` AND `lsof`. The prior cleanup only used `lsof`. The new poll matches the guard's logic.
+
 ## [0.17.1.17] - 2026-04-30
 
 **KPI-17 follow-up — fix three pre-existing analytics bugs surfaced while debugging the 4-bucket flip.** Investigation chain: `avg_losing_trade=0` cascading to null R:R / SQN / weighted R:R was the most user-visible; `long_volume_pct == buy_volume_pct` was an explicit code "approximation" with a misleading field name; `avg_duration_days=0` was an int-truncation bug for sub-day position holds. All three rooted in `position_reconstruction.py` + `analytics_runner.py` and ship together because they all need a re-run of compute_analytics for OKX strategies to refresh production values.

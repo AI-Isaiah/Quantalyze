@@ -130,24 +130,40 @@ jobs:
             sleep 1
           done
           npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts
-          # Kill the npm parent then nuke the next-server grandchild that
-          # actually binds port 3000. `npm run start` is a 3-level tree
-          # (npm -> next start -> node next-server); SIGTERM on the npm
-          # parent doesn't propagate, so the grandchild gets reparented to
-          # init and keeps the port. lsof -ti returns the PIDs holding the
-          # listening socket regardless of process tree, then xargs -r
-          # avoids invoking kill on an empty list when nothing's there.
-          kill $SERVER_PID 2>/dev/null || true
+          # v0.17.1.18: belt + suspenders + nuclear port-3000 cleanup.
+          # The v0.17.1.15 attempt (lsof + 5s poll) was insufficient — CI
+          # confirmed (PR #98 run #320) that the next-server grandchild
+          # was still binding port 3000 when the seed-gated step's WR-04
+          # guard ran. Layer multiple methods so any one of them catches
+          # the listener regardless of process model.
+          echo "[port-cleanup] before: $(lsof -ti:3000 2>/dev/null | tr '\n' ' ')"
+          kill -TERM $SERVER_PID 2>/dev/null || true
+          # Kill the children of the npm parent (catches the next start
+          # intermediary that npm spawns).
+          pkill -TERM -P $SERVER_PID 2>/dev/null || true
           wait $SERVER_PID 2>/dev/null || true
+          # Kill anything matching next-server (catches the grandchild
+          # whose parent is now init, not visible from $SERVER_PID tree).
+          pkill -KILL -f "next-server" 2>/dev/null || true
+          pkill -KILL -f "next start" 2>/dev/null || true
+          # Final fallback: kill anything bound to port 3000.
           lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-          # Poll until port is released (max 5s) so the next step's
-          # WR-04 guard sees a clean socket.
-          for i in $(seq 1 5); do
-            if ! lsof -nP -iTCP:3000 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+          # Kernel-level port nuke (works even when no PID is visible).
+          fuser -k 3000/tcp 2>/dev/null || true
+          # Poll up to 10s for both ss and lsof to agree port is free.
+          # The WR-04 guard checks BOTH so the cleanup must satisfy both.
+          for i in $(seq 1 10); do
+            ss_bound=$(ss -ltn 2>/dev/null | grep -q ':3000\b' && echo y || echo n)
+            lsof_bound=$(lsof -nP -iTCP:3000 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN && echo y || echo n)
+            if [ "$ss_bound" = n ] && [ "$lsof_bound" = n ]; then
+              echo "[port-cleanup] released after ${i}s"
               break
             fi
+            # Re-nuke each iteration in case a respawn loop is active.
+            lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
             sleep 1
           done
+          echo "[port-cleanup] after: $(lsof -ti:3000 2>/dev/null | tr '\n' ' '),ss:$(ss -ltn 2>/dev/null | grep ':3000\b' || echo none)"
         env:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
