@@ -127,6 +127,7 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
           key={strategy.id}
           strategyId={strategy.id}
           trade_metrics={panel6Inputs.trade_metrics}
+          data_quality_flags={panel6Inputs.data_quality_flags}
         />
 
         <ExposureAndGreeksPanel

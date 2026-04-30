@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.20] - 2026-04-30
+
+**v0.17.1 KPI-17 saga follow-up — eight findings from cross-agent review of PRs #95–#100.** Closes the four CRITICAL issues that surfaced once the saga reached production, plus four HIGH-severity hardening items. Source: 5 review agents (code-reviewer, silent-failure-hunter, type-design-analyzer, comment-analyzer, pr-test-analyzer) ran on the saga, then a /simplify pass (reuse, quality, efficiency) added the cross-checks. Cross-corroboration matters: items 1 + 4 below were independently flagged by three agents each.
+
+### Fixed (correctness)
+
+- **`src/components/strategy/PositionsTab.tsx:273`** — Top-5 Best/Worst Trades cells rendered raw NUMERIC `duration_days` as `${t.duration_days}d`, so post-migration-092 intraday positions showed `"0.4167d"` / `"0.0833d"` in the user-facing table. Now formats sub-day holds as `"10.0h"` and full-day holds as `"1.0d"`, matching the `TradeAndPositionPanel.tsx:175` `toFixed(1)` convention.
+
+- **`analytics-service/services/analytics_runner.py:415-494`** — `_compute_trade_mix` carried an `avg_holding_period_hours` field that was always `0.0` because PR #96's narrowed `trades.select()` doesn't fetch `holding_period_hours` (the column doesn't exist in the schema). The empty-bucket factory + the `holding_sums` summation + the finalize loop were dead code that lied to consumers via JSONB. Dropped the field from the bucket dict, the `TradeMixBucket` TS type, the test fixtures (Python + TS + e2e seed), and the false-positive test that reconstructed the lie locally.
+
+- **`analytics-service/services/analytics_runner.py:704-740`** — Position-side volume attribution failures wrote `position_side_pcts={}`, then the spread-merge into `merged_trade_metrics` left `long_volume_pct` / `short_volume_pct` undefined, so the frontend's `?? 0` rendered a confident `"0.0% long / 0.0% short"` indistinguishable from a real flat strategy. Same shape for the fills fetch failure. Both paths now emit `data_quality_flags.fills_fetch_failed` / `position_side_volume_failed`. `VolumeExposureTab.tsx` reads the flags and renders an "Approximate — attribution unavailable" chip on the Long/Short bar; the existing top-of-tab warning banner now triggers for either failure mode.
+
+- **`analytics-service/services/analytics_runner.py:_compute_trade_mix` + `TradeMixSubPanel.tsx`** — Trade Mix maps fill-side `buy→long` / `sell→short`, which mis-attributes "buy to close short" as a long entry. Accurate for long-only strategies, an approximation for any strategy that ever shorts. New `data_quality_flags.trade_mix_approximation` flag set when ANY position has `side="short"`. Threaded through `panel6Inputs` → `TradeAndPositionPanel` → `TradeMixSubPanel` which renders an "Approximate — close-shorts bucketed by fill side" chip in the panel header. The full position-aware Trade Mix attribution is its own follow-up; this surface fix makes the existing approximation honest at the operator level.
+
+### Fixed (silent-failure)
+
+- **`analytics-service/services/analytics_runner.py:550-580`** — `account_balance` fetch failure silently downgraded the turnover-series denominator from "constant balance" to "gross-exposure proxy" (different scale; cross-strategy comparison breaks). Now sets `data_quality_flags.account_balance_unavailable=true`.
+
+- **`analytics-service/services/analytics_runner.py:931`** — Sibling-table flag-write failure was swallowed by `except Exception: pass` — operators had zero signal that panels 4-7 were blank. Now logs at ERROR level with the strategy_id and exception so production monitoring picks it up.
+
+### Fixed (type leak)
+
+- **`src/lib/types.ts:137`** — Extended `TradeMetrics` with the eight volume-aggregator fields the panel was reading (`gross_volume_usd`, `mean_trade_size_usd`, `daily_turnover_usd`, `monthly_turnover_usd`, `payoff_ratio`, `profit_factor`, `winners_count`, `losers_count`). All optional with `| null` semantics matching the JSONB shape.
+- **`src/components/strategy-v2/TradeAndPositionPanel.tsx:17,143`** + **`src/lib/queries.ts`** — Dropped the `(TradeMetrics & Record<string, unknown>) | null` widening + the `tm["key"] as number` bracket-access casts. The widening defeated the type system at the consumer boundary; field access is now type-safe.
+
+### Fixed (CI)
+
+- **`.github/workflows/ci.yml:147-148`** — `pkill -KILL -f "next-server"` matched processes host-wide, which would target sibling jobs on shared/self-hosted runners. Scoped to `pkill -u "$_RUNNER_UID" -f ...` so cleanup only ever kills processes owned by the current job's runner.
+
+### Tests
+
+- **`analytics-service/tests/test_analytics_runner.py`** — Added `test_run_strategy_analytics_pins_fills_select_column_list`. Captures the actual column-list arg passed to `trades.select(...)` and asserts it equals the narrowed projection (`side, cost, is_maker, timestamp`) and does NOT include any of the four columns the prior PostgREST 42703 was triggered by (`notional_usd, holding_period_hours, filled_at, created_at`). The v0.17.1.14 bug went latent for ~3 versions because the fills-fetch try/except swallowed the error; this test pins the projection so any future drift surfaces in CI.
+
+- **`src/__tests__/positions-duration-days-numeric-schema.test.ts`** — New live-DB integration test pinning `information_schema.columns.data_type='numeric'` for `positions.duration_days`. Trips CI if a future migration narrows the column back to INTEGER (which would re-introduce the original sub-day-truncation bug). Mirrors the pattern in `bridge-outcomes-voluntary-schema.test.ts`.
+
+- Golden fixture (`analytics-service/tests/fixtures/golden_252d_expected.json`) regenerated for the field removal.
+
+### Operational notes (separate PRs)
+
+The full position-aware Trade Mix (use `position.side` instead of fill-side mapping), the `TradeMixBuckets` discriminated-union refactor, and the per-strategy 4-bucket gate integration test are tracked as follow-ups. Migration 092's after-the-fact `lock_timeout` is doc-only since the migration has already applied — the lesson belongs in a future-migration template.
+
 ## [0.17.1.19] - 2026-04-30
 
 **E2E seed-helper: convert gotrue's "User not allowed" into an actionable "wrong-key-pasted" diagnostic.** PR #100 unblocked the seed-gated step and exposed that all 11 seed-gated specs failed at `seedStrategyWithHistory (owner) failed: User not allowed`. Root cause: the GitHub secret `TEST_SUPABASE_SERVICE_ROLE_KEY` was set today (10:11:57Z) and almost certainly carries the anon key instead of the service-role key — gotrue rejects `auth.admin.*` calls under the anon role with that exact message. The cryptic Supabase response travels through three layers (helper → @supabase/supabase-js → gotrue HTTP) before a developer sees it, with no hint that the cause is a wrong-key paste. This patch decodes the JWT payload (no signature verification — pure config-error catcher) at the helper boundary and refuses with a clear "paste the service_role from Settings → API → service_role" message. Forward-compatible: non-JWT keys and missing role claims both pass through to the existing downstream behavior.

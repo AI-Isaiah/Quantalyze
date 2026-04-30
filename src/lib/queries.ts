@@ -363,7 +363,14 @@ export interface StrategyV2Detail {
      * intersection type matches what `TradeAndPositionPanel` expects so
      * the shell can pass through unchanged.
      */
-    trade_metrics: (TradeMetrics & Record<string, unknown>) | null;
+    trade_metrics: TradeMetrics | null;
+    /**
+     * Subset of analytics.data_quality_flags relevant to this panel —
+     * trade_mix_approximation tells the panel whether the buy→long fill-side
+     * Trade Mix bucketing is exact (long-only strategy) or approximate
+     * (any short positions present).
+     */
+    data_quality_flags: { trade_mix_approximation?: boolean } | null;
   };
   panel7Inputs: {
     benchmark_greeks: {
@@ -494,7 +501,12 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
 
   const panel6Inputs: StrategyV2Detail["panel6Inputs"] = {
     trade_metrics: isComplete
-      ? ((a?.trade_metrics ?? null) as (TradeMetrics & Record<string, unknown>) | null)
+      ? ((a?.trade_metrics ?? null) as TradeMetrics | null)
+      : null,
+    data_quality_flags: isComplete
+      ? ((a?.data_quality_flags ?? null) as
+          | { trade_mix_approximation?: boolean }
+          | null)
       : null,
   };
 

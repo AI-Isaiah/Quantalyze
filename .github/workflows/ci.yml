@@ -144,8 +144,13 @@ jobs:
           wait $SERVER_PID 2>/dev/null || true
           # Kill anything matching next-server (catches the grandchild
           # whose parent is now init, not visible from $SERVER_PID tree).
-          pkill -KILL -f "next-server" 2>/dev/null || true
-          pkill -KILL -f "next start" 2>/dev/null || true
+          # Scope to current user — `pkill -f` is otherwise host-wide and
+          # would target sibling jobs on shared/self-hosted runners. The
+          # `id -u` resolves at runtime in the runner shell; no external
+          # input flows in here.
+          _RUNNER_UID=$(id -u)
+          pkill -KILL -u "$_RUNNER_UID" -f "next-server" 2>/dev/null || true
+          pkill -KILL -u "$_RUNNER_UID" -f "next start" 2>/dev/null || true
           # Final fallback: kill anything bound to port 3000.
           lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
           # Kernel-level port nuke (works even when no PID is visible).

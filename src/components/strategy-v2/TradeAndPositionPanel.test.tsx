@@ -79,8 +79,8 @@ const TM_FULL: TradeMetrics & Record<string, unknown> = {
   profit_factor_long: 1.62,
   profit_factor_short: 1.04,
   trade_mix: {
-    long: { count: 1247, total_notional: 1, avg_holding_period_hours: 0 },
-    short: { count: 701, total_notional: 1, avg_holding_period_hours: 0 },
+    long: { count: 1247, total_notional: 1 },
+    short: { count: 701, total_notional: 1 },
   },
   // Volume aggregator extras (Phase 12 Plan 12-05 SUMMARY)
   gross_volume_usd: 12_500_000,

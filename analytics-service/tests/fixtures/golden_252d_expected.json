@@ -5795,12 +5795,10 @@
       "total_volume_usd": 0.0,
       "trade_mix": {
         "long": {
-          "avg_holding_period_hours": 12.8,
           "count": 125,
           "total_notional": 175000.0
         },
         "short": {
-          "avg_holding_period_hours": 13.8,
           "count": 125,
           "total_notional": 187500.0
         }

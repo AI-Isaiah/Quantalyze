@@ -5,6 +5,13 @@ import { CHART_ACCENT, CHART_TEXT_MUTED } from "@/components/charts/chart-tokens
 
 interface TradeMixSubPanelProps {
   buckets?: TradeMixBuckets;
+  /**
+   * True when the strategy has any short positions. Trade Mix maps
+   * fill-side buy→long / sell→short, which mis-attributes "buy to close
+   * short" as a long entry — accurate for long-only strategies, an
+   * approximation for anything that ever shorts.
+   */
+  approximate?: boolean;
 }
 
 /**
@@ -25,7 +32,7 @@ interface TradeMixSubPanelProps {
  *   - Raw count "(1,247 fills)" 12px regular muted next to percent label.
  *   - Empty state: "Trade mix unavailable for this strategy."
  */
-export function TradeMixSubPanel({ buckets }: TradeMixSubPanelProps) {
+export function TradeMixSubPanel({ buckets, approximate }: TradeMixSubPanelProps) {
   const has4Bucket = !!(
     buckets?.long_maker ||
     buckets?.long_taker ||
@@ -35,9 +42,16 @@ export function TradeMixSubPanel({ buckets }: TradeMixSubPanelProps) {
 
   return (
     <div className="mt-8 border-t border-border pt-6">
-      <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
-        Trade mix
-      </h3>
+      <div className="mb-4 flex items-center justify-between">
+        <h3 className="text-xs font-normal uppercase tracking-wider text-text-secondary">
+          Trade mix
+        </h3>
+        {approximate && (
+          <span className="text-xs font-normal text-warning">
+            Approximate — close-shorts bucketed by fill side
+          </span>
+        )}
+      </div>
       {has4Bucket ? (
         <FourBucketBars buckets={buckets!} />
       ) : (
