@@ -857,114 +857,293 @@ def test_is_trade_mix_approximate_empty_positions_does_not_fire():
 # Account-balance flag-split contract: account_balance_unavailable vs
 # no_linked_api_key. The runner emits these as INDEPENDENT booleans into
 # data_quality_flags but the writer's control flow guarantees mutual
-# exclusion. These tests pin the emission contract — a regression that
-# flips the if/else (e.g., setting no_linked_api_key on the exception path)
-# would silently mis-classify real failures as demo state. The TS-side
-# tests in TradeAndPositionPanel.test.tsx + VolumeExposureTab.test.tsx
-# only lock UI rendering given an input flag — they don't lock the
-# Python emission decision.
+# exclusion. These tests pin the emission contract by exercising
+# `run_strategy_analytics` end-to-end and inspecting the persisted
+# strategy_analytics upsert payload — a regression that flips the if/else
+# (e.g., setting no_linked_api_key on the exception path) would silently
+# mis-classify real failures as demo state. The TS-side tests in
+# TradeAndPositionPanel.test.tsx + VolumeExposureTab.test.tsx only lock UI
+# rendering given an input flag; they do not lock the Python emission
+# decision. Earlier versions of these tests duplicated the if/else
+# locally — a tautology that passed against a broken implementation
+# (pr-test-analyzer Finding 6 / Task #19).
 # ---------------------------------------------------------------------------
 
 
-def test_balance_flag_routing_no_api_key_id_emits_no_linked_api_key():
-    """Strategy with api_key_id=None should set ONLY no_linked_api_key,
-    NOT account_balance_unavailable. The 2026-04-30 split was added so
-    demo strategies don't render the 'Approximate' degraded-state chip."""
-    # Mirror the exact branch shape in run_strategy_analytics.
-    api_key_id: str | None = None
-    account_balance_unavailable = False
-    no_linked_api_key = False
-
-    if api_key_id:
-        # would fetch — not exercised
-        pass
-    else:
-        no_linked_api_key = True
-
-    assert no_linked_api_key is True
-    assert account_balance_unavailable is False
-
-
-def test_balance_flag_routing_balance_None_emits_account_balance_unavailable():
-    """Strategy with api_key_id set BUT balance fetch returns None should
-    set ONLY account_balance_unavailable. This is the genuine degraded
-    state — the operator should configure the balance."""
-    api_key_id = "00000000-0000-0000-0000-000000000001"
-    account_balance_unavailable = False
-    no_linked_api_key = False
-
-    # Mirror the lookup shape: balance_raw is None ⇒ degraded.
-    balance_raw = None
-    if api_key_id:
-        if balance_raw is not None:
-            pass  # got a balance, no flag
-        else:
-            account_balance_unavailable = True
-    else:
-        no_linked_api_key = True
-
-    assert account_balance_unavailable is True
-    assert no_linked_api_key is False
+def _minimal_daily_rows(n: int = 15) -> list[dict]:
+    """Daily PnL rows shaped for analytics_runner — ≥2 rows so the runner
+    does not 400 on insufficient history."""
+    return [
+        {
+            "id": f"trade-{i}",
+            "strategy_id": "strat-test",
+            "symbol": "PORTFOLIO",
+            "side": "buy" if i % 2 == 0 else "sell",
+            "price": 100 + i,
+            "quantity": 1,
+            "fee": 0,
+            "timestamp": f"2024-01-{i+1:02d}T00:00:00+00:00",
+            "is_fill": False,
+        }
+        for i in range(n)
+    ]
 
 
-def test_balance_flag_routing_balance_zero_does_NOT_emit_unavailable():
-    """A literal 0.0 balance (drained account, or operator zeroed it)
-    must NOT trigger account_balance_unavailable — the prior truthy-check
-    conflated 0 with NULL and silently marked drained accounts as
-    degraded forever. Use `is not None` to keep the cases distinct."""
-    api_key_id = "00000000-0000-0000-0000-000000000001"
-    account_balance_unavailable = False
+def _build_balance_flag_mock_supabase(
+    *,
+    daily_pnl_rows: list[dict],
+    sa_upsert_calls: list[dict],
+    strategy_api_key_id: str | None,
+    api_key_balance: float | int | None = 10000.0,
+    api_keys_raises: bool = False,
+    strategies_data_raises_on_get: bool = False,
+):
+    """Mock factory for balance flag-routing integration tests.
 
-    balance_raw = 0.0  # legitimate zero, not "missing"
-    if api_key_id:
-        if balance_raw is not None:
-            account_balance = float(balance_raw)
-        else:
-            account_balance_unavailable = True
+    Each parameter targets one branch in the runner's flag-routing logic:
+      - strategy_api_key_id: value returned for strategies.data["api_key_id"]
+        (None for demo / paper, a UUID-shaped string for linked exchanges).
+      - api_key_balance: value at api_keys.data["account_balance_usdt"].
+        Pass None to model "no balance configured" (column null).
+      - api_keys_raises: when True, the api_keys lookup raises mid-flight
+        (simulates a genuine fetch failure with api_key_id already
+        resolved — the path that must emit account_balance_unavailable).
+      - strategies_data_raises_on_get: when True, .get("api_key_id") on the
+        strategies row throws — covers the rare path where api_key_id
+        stays None and an exception fires before resolution can complete,
+        which must emit no_linked_api_key (NOT account_balance_unavailable).
+    """
+    mock = MagicMock()
 
-    assert account_balance == 0.0
-    assert account_balance_unavailable is False
+    def _table(name):
+        t = MagicMock()
+        if name == "strategies":
+            base_data: dict = {
+                "id": "strat-test",
+                "user_id": "user-1",
+                "api_key_id": strategy_api_key_id,
+            }
+            if strategies_data_raises_on_get:
+                # ThrowingDict only overrides .get — __bool__ stays default
+                # (truthy for non-empty dict) so the runner's earlier
+                # `if not strategy_result.data:` 404 guard is unaffected.
+                class _ThrowingDict(dict):
+                    def get(self, key, default=None):
+                        if key == "api_key_id":
+                            raise RuntimeError(
+                                "simulated lookup failure before api_key_id resolved"
+                            )
+                        return super().get(key, default)
+                base_data = _ThrowingDict(base_data)
+            chain = MagicMock()
+            chain.execute.return_value = MagicMock(data=base_data)
+            single = MagicMock(return_value=chain)
+            eq = MagicMock()
+            eq.single = single
+            sel = MagicMock()
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        elif name == "strategy_analytics":
+            def _upsert(data, on_conflict=None):
+                sa_upsert_calls.append(data)
+                r = MagicMock()
+                r.execute.return_value = MagicMock(data=[])
+                return r
+            t.upsert = _upsert
+        elif name == "trades":
+            sel = MagicMock()
+            eq_strat = MagicMock()
+
+            def _neq(field, value):
+                r = MagicMock()
+                order = MagicMock()
+                order.execute.return_value = MagicMock(data=daily_pnl_rows)
+                r.order.return_value = order
+                return r
+
+            def _eq_fill(field, value):
+                r = MagicMock()
+                r.execute.return_value = MagicMock(data=[])
+                return r
+
+            eq_strat.neq = _neq
+            eq_strat.eq = _eq_fill
+            sel.eq.return_value = eq_strat
+            t.select = MagicMock(return_value=sel)
+        elif name == "api_keys":
+            sel = MagicMock()
+            eq = MagicMock()
+            single = MagicMock()
+            if api_keys_raises:
+                single.execute.side_effect = RuntimeError(
+                    "simulated db_execute failure"
+                )
+            else:
+                single.execute.return_value = MagicMock(
+                    data={"account_balance_usdt": api_key_balance}
+                )
+            eq.single.return_value = single
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        elif name == "position_snapshots":
+            sel = MagicMock()
+            eq = MagicMock()
+            order = MagicMock()
+            order.execute.return_value = MagicMock(data=[])
+            eq.order = MagicMock(return_value=order)
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        elif name == "positions":
+            # Runner queries `positions` at analytics_runner.py:781 inside
+            # `if fills_data:`. Tests seed empty fills so the guard is False
+            # and we never reach this query — but stubbing the handler
+            # avoids a default MagicMock if a future runner refactor moves
+            # the query out of the guard. Returning data=[] keeps the
+            # downstream _compute_position_side_volume_pcts happy.
+            sel = MagicMock()
+            eq = MagicMock()
+            eq.execute.return_value = MagicMock(data=[])
+            sel.eq.return_value = eq
+            t.select.return_value = sel
+        return t
+
+    mock.table = _table
+
+    def _rpc(name, params):
+        r = MagicMock()
+        r.execute.return_value = MagicMock(data=None)
+        return r
+
+    mock.rpc = _rpc
+    return mock
 
 
-def test_balance_flag_routing_exception_with_known_api_key_emits_unavailable():
-    """Genuine fetch failure with a known api_key_id should set
-    account_balance_unavailable (degraded), NOT no_linked_api_key
-    (which would silently mis-label a real outage as 'Demo')."""
-    api_key_id = "00000000-0000-0000-0000-000000000001"
-    account_balance_unavailable = False
-    no_linked_api_key = False
+async def _run_and_get_data_quality_flags(
+    mock_supabase, sa_upsert_calls: list[dict], *, daily_rows_count: int = 15,
+) -> dict:
+    """Invoke run_strategy_analytics with the standard patches and return
+    data_quality_flags from the success-path upsert
+    (computation_status='complete'). Raises if the runner did not reach
+    the success-path upsert.
 
-    try:
-        raise RuntimeError("simulated db_execute failure")
-    except Exception:
-        if api_key_id:
-            account_balance_unavailable = True
-        else:
-            no_linked_api_key = True
+    `daily_rows_count` keeps the patched returns series the same length
+    as the seeded daily rows so a future test that varies the row count
+    doesn't silently get a 15-day returns series capping rolling helpers.
+    """
+    from services.analytics_runner import run_strategy_analytics
 
-    assert account_balance_unavailable is True
-    assert no_linked_api_key is False
+    async def _mock_db_execute(fn):
+        return await asyncio.to_thread(fn)
+
+    dates = pd.bdate_range("2024-01-01", periods=daily_rows_count)
+    mock_returns = pd.Series([0.001] * daily_rows_count, index=dates)
+
+    with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+         patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
+         patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
+         patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
+        result = await run_strategy_analytics("strat-test")
+
+    assert result["status"] == "complete", (
+        f"Runner did not finish: {result}. Upserts: {sa_upsert_calls}"
+    )
+
+    completes = [
+        u for u in sa_upsert_calls
+        if u.get("computation_status") == "complete"
+    ]
+    assert completes, (
+        f"No success-path upsert captured. All upserts: {sa_upsert_calls!r}"
+    )
+    return completes[-1].get("data_quality_flags") or {}
 
 
-def test_balance_flag_routing_exception_with_no_api_key_emits_no_linked():
+@pytest.mark.asyncio
+async def test_balance_flag_routing_no_api_key_id_emits_no_linked_api_key():
+    """api_key_id=None on strategies → only no_linked_api_key=True in
+    persisted data_quality_flags. Demo / paper strategies must not be
+    classified as degraded — the 2026-04-30 split was added precisely
+    so they don't render the 'Approximate' degraded-state chip."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id=None,
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert flags.get("no_linked_api_key") is True
+    assert "account_balance_unavailable" not in flags
+
+
+@pytest.mark.asyncio
+async def test_balance_flag_routing_balance_None_emits_account_balance_unavailable():
+    """api_key_id set + balance lookup returns None → only
+    account_balance_unavailable=True. Genuine degraded state — operator
+    needs to configure balance."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=None,
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert flags.get("account_balance_unavailable") is True
+    assert "no_linked_api_key" not in flags
+
+
+@pytest.mark.asyncio
+async def test_balance_flag_routing_balance_zero_does_NOT_emit_unavailable():
+    """A literal 0.0 balance (drained / operator zeroed) must NOT
+    trigger account_balance_unavailable — `is not None` keeps the cases
+    distinct. A truthy check would silently mark drained accounts as
+    degraded forever."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=0.0,
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert "account_balance_unavailable" not in flags
+    assert "no_linked_api_key" not in flags
+
+
+@pytest.mark.asyncio
+async def test_balance_flag_routing_exception_with_known_api_key_emits_unavailable():
+    """Genuine api_keys fetch failure with a known api_key_id → emit
+    account_balance_unavailable, NOT no_linked_api_key. A real outage
+    must not be mis-labeled as 'Demo'."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_keys_raises=True,
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert flags.get("account_balance_unavailable") is True
+    assert "no_linked_api_key" not in flags
+
+
+@pytest.mark.asyncio
+async def test_balance_flag_routing_exception_with_no_api_key_emits_no_linked():
     """Throw before/during api_key_id resolution (api_key_id stays None)
-    should fall to no_linked_api_key, NOT account_balance_unavailable.
-    Otherwise a transient lookup fail on a demo strategy would be
-    mis-classified as a degraded state."""
-    api_key_id: str | None = None
-    account_balance_unavailable = False
-    no_linked_api_key = False
-
-    try:
-        raise RuntimeError("simulated lookup failure before api_key_id resolved")
-    except Exception:
-        if api_key_id:
-            account_balance_unavailable = True
-        else:
-            no_linked_api_key = True
-
-    assert no_linked_api_key is True
-    assert account_balance_unavailable is False
+    → emit no_linked_api_key. A transient lookup failure on a demo
+    strategy must not be mis-classified as degraded."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id=None,
+        strategies_data_raises_on_get=True,
+    )
+    flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
+    assert flags.get("no_linked_api_key") is True
+    assert "account_balance_unavailable" not in flags
 
 
 def test_volume_metrics_no_longer_aliases_long_to_buy():
