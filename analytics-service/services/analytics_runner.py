@@ -492,6 +492,25 @@ def _has_maker_taker_coverage(fills: list[dict]) -> bool:
     return populated / len(fills) >= _MAKER_TAKER_COVERAGE_THRESHOLD
 
 
+def _is_trade_mix_approximate(positions: list[dict]) -> bool:
+    """Trade Mix panel buckets fills by side (buy→long, sell→short).
+
+    A *closed* short has a buy-to-close fill that gets mis-bucketed as
+    a long entry, which is what makes the panel an approximation. An
+    *open-only* short has no closing buy yet — the sell that opened it
+    is bucketed correctly as "short", so the panel remains exact until
+    the position closes.
+
+    The flag therefore only fires when at least one closed short exists
+    in the dataset; over-firing on open-only shorts would surface the
+    chip even though no fills are mis-attributed.
+    """
+    return any(
+        p.get("side") == "short" and p.get("closed_at") is not None
+        for p in positions
+    )
+
+
 async def run_strategy_analytics(strategy_id: str) -> dict:
     """Run the full analytics pipeline for a single strategy.
 
@@ -549,8 +568,19 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # Fetch account balance for accurate capital estimation.
         # Link: strategies.api_key_id -> api_keys.id (api_keys has no
         # strategy_id column).
+        #
+        # Two separate failure modes feed the turnover-denominator chip:
+        #   - no_linked_api_key: strategy has no api_key_id (demo / paper).
+        #     Inherent state, not a degraded computation. UI surfaces it
+        #     differently from a real failure so allocators don't read
+        #     "approximate" as a problem to fix on a demo strategy.
+        #   - account_balance_unavailable: api_key_id IS set but the
+        #     balance lookup didn't return a usable value (no balance
+        #     configured, or fetch threw). True degraded state — operator
+        #     should resolve.
         account_balance = None
         account_balance_unavailable = False
+        no_linked_api_key = False
         try:
             api_key_id = (
                 strategy_result.data.get("api_key_id")
@@ -570,12 +600,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                         key_result.data["account_balance_usdt"]
                     )
                 else:
-                    # No balance configured for this api_key — turnover series
-                    # falls back to the gross-exposure NAV proxy. Different
-                    # denominator means cross-strategy comparison is off-scale.
+                    # api_key exists but no balance configured — turnover
+                    # falls back to gross-exposure NAV proxy. Genuine
+                    # degraded state.
                     account_balance_unavailable = True
             else:
-                account_balance_unavailable = True
+                # No api_key linked at all — common for demo / paper
+                # strategies. Same fallback denominator, but distinct flag
+                # so the UI text doesn't imply something needs fixing.
+                no_linked_api_key = True
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Could not fetch account balance for %s: %s", strategy_id, str(e)
@@ -731,11 +764,11 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 )
                 # Trade Mix maps buy→long / sell→short on raw fills, which
                 # mis-attributes "buy to close short" as a long entry. The
-                # bucketing matches the panel labels for long-only strategies;
-                # for any strategy with shorts the breakdown is an approximation.
-                trade_mix_approximate = any(
-                    p.get("side") == "short" for p in positions_list
-                )
+                # contract is narrower than "any short": it fires only on
+                # closed shorts, because an open-only short has no closing
+                # buy yet (its sell is bucketed correctly). See
+                # _is_trade_mix_approximate.
+                trade_mix_approximate = _is_trade_mix_approximate(positions_list)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Position-side volume attribution failed for %s: %s",
@@ -868,6 +901,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         if account_balance_unavailable:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["account_balance_unavailable"] = True
+        if no_linked_api_key:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["no_linked_api_key"] = True
 
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure

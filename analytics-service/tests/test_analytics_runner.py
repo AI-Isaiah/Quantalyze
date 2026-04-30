@@ -810,6 +810,49 @@ def test_position_side_volume_pcts_empty_inputs_return_zero():
     ) == {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
 
 
+def test_is_trade_mix_approximate_open_only_short_does_not_fire():
+    """Open-only short (closed_at is None) does NOT trigger the chip — its
+    sell fill is bucketed correctly as 'short' and there's no closing buy
+    in the dataset yet to mis-attribute as 'long'."""
+    from services.analytics_runner import _is_trade_mix_approximate
+
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01", "closed_at": "2024-01-02"},
+        {"side": "short", "opened_at": "2024-01-03", "closed_at": None},
+    ]
+    assert _is_trade_mix_approximate(positions) is False
+
+
+def test_is_trade_mix_approximate_closed_short_fires():
+    """Closed short means a buy-to-close fill exists in the dataset and
+    will be mis-bucketed as a long entry — chip should fire."""
+    from services.analytics_runner import _is_trade_mix_approximate
+
+    positions = [
+        {"side": "short", "opened_at": "2024-01-01", "closed_at": "2024-01-02"},
+    ]
+    assert _is_trade_mix_approximate(positions) is True
+
+
+def test_is_trade_mix_approximate_long_only_does_not_fire():
+    """Long-only strategy: the panel labels match fill bucketing for longs
+    (buy=long entry). No mis-attribution, so no chip."""
+    from services.analytics_runner import _is_trade_mix_approximate
+
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01", "closed_at": "2024-01-02"},
+        {"side": "long", "opened_at": "2024-01-03", "closed_at": None},
+    ]
+    assert _is_trade_mix_approximate(positions) is False
+
+
+def test_is_trade_mix_approximate_empty_positions_does_not_fire():
+    """No positions = no mis-attribution risk, no chip."""
+    from services.analytics_runner import _is_trade_mix_approximate
+
+    assert _is_trade_mix_approximate([]) is False
+
+
 def test_volume_metrics_no_longer_aliases_long_to_buy():
     """_compute_volume_metrics dropped the misleading long_volume_pct /
     short_volume_pct aliases that copied buy/sell percentages. Those

@@ -216,6 +216,10 @@ function Body({
             <span className="text-xs font-semibold text-warning">
               Approximate — turnover denominated against gross exposure
             </span>
+          ) : data_quality_flags?.no_linked_api_key ? (
+            <span className="text-xs font-semibold text-text-secondary">
+              Demo — turnover scaled against gross exposure
+            </span>
           ) : null
         }
       >

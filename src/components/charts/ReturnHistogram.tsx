@@ -69,7 +69,7 @@ export function ReturnHistogram({ returns, benchmarkReturns, bins = 20 }: Return
 
   return (
     <ResponsiveContainer width="100%" height={250}>
-      <BarChart data={histogram} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+      <BarChart accessibilityLayer={false} data={histogram} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="label"
           tick={CHART_TICK_STYLE}

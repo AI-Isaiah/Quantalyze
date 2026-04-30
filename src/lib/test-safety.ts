@@ -64,6 +64,17 @@ export function assertNotProductionSupabaseUrl(
 }
 
 /**
+ * Branded type carrying the contract that the value passed
+ * `assertSupabaseServiceRoleKey`. The brand is purely a compile-time
+ * marker — at runtime the value is still a plain string. Functions
+ * that mutate prod-shaped data should accept `ServiceRoleKey` instead
+ * of `string` so the type checker rejects raw env access at call
+ * sites that skipped the probe.
+ */
+declare const ServiceRoleKeyBrand: unique symbol;
+export type ServiceRoleKey = string & { readonly [ServiceRoleKeyBrand]: true };
+
+/**
  * Catch the anon-key-pasted-as-service-role mistake at the helper
  * boundary. Without this probe, gotrue's "User not allowed" travels
  * through helper → @supabase/supabase-js → HTTP before a developer
@@ -71,20 +82,33 @@ export function assertNotProductionSupabaseUrl(
  *
  * The JWT payload is decoded WITHOUT signature verification — this is
  * a configuration probe, not an authentication step. Non-JWT inputs
- * pass through so future Supabase key formats keep working.
+ * (≠ 3 dot-separated parts) pass through so future Supabase key
+ * formats keep working. A JWT-SHAPED string whose middle part fails
+ * to base64-decode or JSON-parse is a corruption signal and throws —
+ * silently degrading there hides "the secret got truncated in CI"
+ * mistakes behind the same downstream "User not allowed" message
+ * that the probe was added to surface.
+ *
+ * Asserts `key is ServiceRoleKey` so callers can pass the validated
+ * value into typed sinks without re-checking.
  */
 export function assertSupabaseServiceRoleKey(
   key: string,
   caller: string,
-): void {
+): asserts key is ServiceRoleKey {
   const parts = key.split(".");
   if (parts.length !== 3) return;
   let payload: { role?: unknown };
   try {
     const json = Buffer.from(parts[1], "base64url").toString("utf8");
     payload = JSON.parse(json) as { role?: unknown };
-  } catch {
-    return;
+  } catch (cause) {
+    throw new Error(
+      `[${caller}] TEST_SUPABASE_SERVICE_ROLE_KEY looks like a JWT (3 dot-separated parts) but its ` +
+        `payload doesn't decode — the secret is corrupted or truncated. Re-copy it from Supabase ` +
+        `project Settings → API → "service_role" and update the GitHub secret.`,
+      { cause: cause instanceof Error ? cause : new Error(String(cause)) },
+    );
   }
   const role = typeof payload.role === "string" ? payload.role : undefined;
   if (role && role !== "service_role") {

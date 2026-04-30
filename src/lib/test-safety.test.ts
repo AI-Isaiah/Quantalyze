@@ -4,6 +4,7 @@ import {
   assertSupabaseServiceRoleKey,
   PROD_PROJECT_REFS,
   PROD_NAME_SUBSTRINGS,
+  type ServiceRoleKey,
 } from "./test-safety";
 
 function makeJwt(payload: Record<string, unknown>): string {
@@ -141,9 +142,31 @@ describe("assertSupabaseServiceRoleKey", () => {
     expect(() => assertSupabaseServiceRoleKey("placeholder_service_role", "test")).not.toThrow();
   });
 
-  it("does NOT throw when the JWT payload is unparsable (graceful degradation)", () => {
-    const garbageJwt = "header.not-base64-or-json.signature";
-    expect(() => assertSupabaseServiceRoleKey(garbageJwt, "test")).not.toThrow();
+  it("THROWS when the input is JWT-shaped but the payload is unparsable (corruption signal)", () => {
+    // 3 dot-separated parts → JWT-shaped. Middle is plain text, not
+    // base64url-encoded JSON, so JSON.parse fails. Treat as corruption
+    // (truncated secret in CI, etc.) instead of silently degrading —
+    // the latter would hide the mistake behind a downstream gotrue
+    // error and re-create the bug this probe was added to fix.
+    const corruptedJwt = "header.not-base64-or-json.signature";
+    expect(() => assertSupabaseServiceRoleKey(corruptedJwt, "test")).toThrow(
+      /looks like a JWT.*payload doesn't decode/,
+    );
+  });
+
+  it("does NOT throw on non-JWT inputs (≠ 3 parts) — forward-compat with future key formats", () => {
+    // 1 part: opaque key format
+    expect(() =>
+      assertSupabaseServiceRoleKey("opaque_future_format_key", "test"),
+    ).not.toThrow();
+    // 2 parts: not a JWT shape, treat as opaque
+    expect(() =>
+      assertSupabaseServiceRoleKey("two.parts", "test"),
+    ).not.toThrow();
+    // 5 parts: also not a JWT, opaque
+    expect(() =>
+      assertSupabaseServiceRoleKey("a.b.c.d.e", "test"),
+    ).not.toThrow();
   });
 
   it("does NOT throw when the JWT has no role claim (lets the API decide)", () => {
@@ -159,5 +182,19 @@ describe("assertSupabaseServiceRoleKey", () => {
     expect(() =>
       assertSupabaseServiceRoleKey(anonKey, "cleanup-test-project"),
     ).toThrow(/\[cleanup-test-project\]/);
+  });
+
+  it("narrows the input type to ServiceRoleKey after a successful assertion", () => {
+    // Compile-time check: after the assertion, `key` is `ServiceRoleKey`,
+    // not just `string`. A function that requires the brand should now
+    // accept it without an `as` cast.
+    function consume(_validated: ServiceRoleKey): void {
+      // body intentionally empty — type-only check
+    }
+
+    const serviceKey: string = makeJwt({ role: "service_role" });
+    assertSupabaseServiceRoleKey(serviceKey, "test");
+    consume(serviceKey); // tsc passes because of `asserts key is ServiceRoleKey`
+    expect(true).toBe(true);
   });
 });

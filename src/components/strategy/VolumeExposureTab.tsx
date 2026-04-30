@@ -14,6 +14,7 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
   const fillsFetchFailed = !!dqf?.fills_fetch_failed;
   const positionSideVolumeFailed = !!dqf?.position_side_volume_failed;
   const accountBalanceUnavailable = !!dqf?.account_balance_unavailable;
+  const noLinkedApiKey = !!dqf?.no_linked_api_key;
 
   const vm = analytics.volume_metrics as {
     buy_volume_pct?: number;
@@ -167,15 +168,21 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
             <div className="px-4 py-3">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="text-sm font-semibold text-text-primary">Turnover</h4>
-                {accountBalanceUnavailable && (
+                {accountBalanceUnavailable ? (
                   <span className="text-xs font-medium text-warning">
                     Approximate denominator
                   </span>
-                )}
+                ) : noLinkedApiKey ? (
+                  <span className="text-xs font-medium text-text-secondary">
+                    Demo strategy
+                  </span>
+                ) : null}
               </div>
               <p className="text-xs text-text-muted">
                 {accountBalanceUnavailable
                   ? "Account balance was unavailable when this strategy was synced — turnover is denominated against gross exposure rather than the configured account balance, so cross-strategy comparison is approximate."
+                  : noLinkedApiKey
+                  ? "This strategy has no linked exchange API key, so account balance is unknown. Turnover is scaled against gross exposure instead — expected behavior for demo / paper strategies."
                   : "Turnover analysis coming soon."}
               </p>
             </div>

@@ -142,7 +142,20 @@ export interface AnalyticsDataQualityFlags {
   position_side_volume_failed?: boolean;
   position_side_volume_error?: string;
   trade_mix_approximation?: boolean;
+  /**
+   * api_key_id IS set on the strategy but the balance lookup didn't
+   * return a usable value (no balance configured, or fetch threw).
+   * Distinct from `no_linked_api_key`: this is a real degraded state
+   * an operator should resolve.
+   */
   account_balance_unavailable?: boolean;
+  /**
+   * Strategy has no linked api_key_id (demo/paper). Same fallback
+   * denominator as `account_balance_unavailable` but inherent state,
+   * not a degraded computation — the UI surfaces it differently so
+   * allocators don't read "approximate" as a problem on a demo.
+   */
+  no_linked_api_key?: boolean;
   sibling_kinds_failed?: boolean;
 }
 

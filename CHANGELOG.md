@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.24] - 2026-04-30
+
+**Closes TIER 2 + TIER 3 + standalone audit findings from PR #106 + 5 of 7 seed-gated Playwright spec failures.** The audit's three deferred follow-ups land alongside fixes for the discovery + strategy-v2 axe specs (color contrast on the warning token), both DISCO specs that timed out at the login form (missing `name` attributes), and the strategy-v2 keyboard tab order (recharts 3.x `accessibilityLayer` defaulting to `true` injects `tabIndex=0` SVGs into the tab order). `onboarding-funnel` and `strategy-v2-chart-parity` remain known-deferred — they need server-side state investigation and a one-time `--update-snapshots` on the Linux runner respectively, both out of scope for this round.
+
+### Fixed
+
+- **`analytics-service/services/analytics_runner.py:495`** — Extracted `_is_trade_mix_approximate(positions)` helper. The contract is now narrower than "any short position": it fires only when at least one short position has `closed_at IS NOT NULL`, because an open-only short has no closing buy yet — its sell is bucketed correctly as "short" and the panel remains exact. Open-only-short strategies no longer see the chip when no fills are mis-attributed (TIER 2 audit follow-up, 3 of 5 reviewers).
+
+- **`src/lib/test-safety.ts:76`** — `assertSupabaseServiceRoleKey` now declares `asserts key is ServiceRoleKey` so callers carry the validated brand into typed sinks. Branded type `ServiceRoleKey = string & { readonly [ServiceRoleKeyBrand]: true }` is exported. A JWT-shaped string (3 dot-separated parts) whose middle part fails to base64-decode or JSON-parse now THROWS instead of silently degrading — a corruption signal we should not hide behind the same downstream "User not allowed" message the probe was added to surface (TIER 3 audit follow-up, 2-3 of 5 reviewers).
+
+- **`analytics-service/services/analytics_runner.py:552-590`** — Split `account_balance_unavailable` (api_key linked but balance fetch failed — genuine degraded state) from new `no_linked_api_key` (demo / paper strategy with no api_key_id at all — inherent state). Both fall back to the gross-exposure NAV proxy, but the UI now surfaces them with distinct chip text so allocators don't read "Approximate" as a problem to fix on a demo strategy (standalone audit follow-up).
+
+- **`src/components/strategy-v2/TradeAndPositionPanel.tsx:215-222`** — The Volume-metrics chip now branches on the new flag pair: `text-warning` "Approximate — turnover denominated against gross exposure" for `account_balance_unavailable`, `text-text-secondary` "Demo — turnover scaled against gross exposure" for `no_linked_api_key`. The audit's TIER 2 chip-render contract is locked by Tests 13-16.
+
+- **`src/components/strategy/VolumeExposureTab.tsx:170-185`** — Same split: `Approximate denominator` (warning amber) for the failure mode, `Demo strategy` (secondary grey) for the no-linked-key mode, with full explanatory paragraphs differentiating the two cases.
+
+- **`src/app/globals.css:27`** — `--color-warning` shifted #D97706 → #B45309 (Tailwind amber-700, 5.05:1 on white, 4.56:1 on `bg-warning/5` fills, 4.85:1 on `bg-page` — AA pass for normal text vs the 3.94:1 the prior token measured). Closes the `discovery-axe` + `strategy-v2-axe` specs that surfaced the contrast violation after PR #103 fixed the muted/positive tokens. `DESIGN.md` decision-log entry recorded with the corrected math + supersession note on the 2026-04-11 row whose stated 4.6:1 was a memory error.
+
+- **`src/components/auth/LoginForm.tsx` + `src/components/auth/SignupForm.tsx`** — Inputs now carry `name="email"`, `name="password"`, and (signup only) `name="display_name"`. 8 e2e specs select the email field via `input[name="email"], input[placeholder*="email" i]` — neither matched (the placeholder `you@example.com` has no "email" substring), so `page.fill` was timing out at 60s. Fixes `discovery-hide-examples-default` and `discovery-prefs-isolation` end-to-end and unblocks every other spec that uses the same canonical login fixture.
+
+- **`src/components/charts/*.tsx` (12 files)** — Every recharts top-level chart (`AreaChart`, `LineChart`, `BarChart`, `ComposedChart`) now sets `accessibilityLayer={false}`. Recharts 3.x defaults the layer to `true`, which adds `tabIndex={0}` and `role="application"` to the chart's root SVG. With no accessible name on a static visual chart, the SVG ends up in the keyboard tab order as an "empty focus" stop — exactly what `e2e/strategy-v2-keyboard.spec.ts` was hitting at Tab #13 instead of Panel 5's "3M" rolling-window button. The chart data is also surfaced in each panel's KPI cells, so disabling the layer keeps tab order clean without removing data access for screen readers. Affects: `DrawdownChart`, `RollingMetrics`, `RollingVolatilityChart`, `RollingSortinoChart`, `RollingAlphaBetaChart`, `ReturnHistogram`, `YearlyReturns`, `MonthlyReturnsBar`, `NetGrossExposureChart`, `TurnoverChart`, `CorrelationWithBenchmark`, `RiskOfRuin`.
+
+### Added
+
+- **`src/lib/types.ts:144-159`** — `AnalyticsDataQualityFlags.no_linked_api_key?: boolean` with inline docs explaining the demo-vs-failure distinction.
+
+- **`analytics-service/tests/test_analytics_runner.py:813-852`** — Four pinning tests for `_is_trade_mix_approximate`: open-only-short does NOT fire, closed-short does fire, long-only does NOT fire, empty positions returns False.
+
+- **`src/components/strategy-v2/TradeMixSubPanel.test.tsx:168-204`** — Tests 13 + 14: chip renders with `approximate={true}`; chip suppressed when `approximate` is omitted or `false`. Locks the audit's TIER 2 chip-render contract.
+
+- **`src/components/strategy-v2/TradeAndPositionPanel.test.tsx:340-381`** — Tests 15 + 16: `no_linked_api_key=true` shows the Demo chip without the Approximate chip; both flags simultaneously gives Approximate priority (real failure ranks above inherent demo state).
+
+- **`src/lib/test-safety.test.ts`** — Test contract flipped: the prior "graceful degradation on unparsable JWT payload" test is replaced with one asserting the function throws on a JWT-shaped corrupted secret. New "non-JWT inputs (≠ 3 parts)" test pins forward-compat with future opaque key formats. New compile-time test calls a `ServiceRoleKey`-typed function to lock the brand contract.
+
+- **`src/components/auth/AuthForms.test.tsx`** — 6 tests pinning the `name="email"`, `name="password"`, `name="display_name"` attributes on LoginForm + SignupForm. A refactor that removes them now fails locally instead of waiting for an e2e CI run to catch the 60s timeouts.
+
+- **`tests/visual/chart-accessibility-layer.test.ts`** — Source-level grep over every `src/components/charts/*.tsx` non-test file: every `<AreaChart|LineChart|BarChart|ComposedChart|ScatterChart>` opening tag must carry `accessibilityLayer={false}`. A new chart that forgets the prop fails the test before it can land.
+
+### Known deferred
+
+- `e2e/onboarding-funnel.spec.ts` — banner gate condition `apiKeysCount === 0` looks correct on inspection (fresh seeded user has zero api_keys); the failure likely needs a live CI repro to trace whether the auth/onboarding redirect or sessionStorage timing is masking the banner. Spec-level investigation, not a code fix.
+- `e2e/strategy-v2-chart-parity.spec.ts` — needs a one-time `npx playwright test --update-snapshots` against the Linux CI runner. The Mac-generated goldens drift sub-pixel under Linux font hinting + AA. CI workflow change, not a code fix.
+
 ## [0.17.1.23] - 2026-04-30
 
 **Closes the 5/5-reviewer consensus finding from the cross-agent audit of PRs #100-#105 + the wizard "Verify data" hang root cause.** The five review subagents (code-reviewer, silent-failure-hunter, type-design-analyzer, comment-analyzer, pr-test-analyzer) all independently flagged the same surface gap: `strategy_analytics.data_quality_flags` had `account_balance_unavailable` written by Python but no UI consumer reading it, plus the TS type was narrowed to a single key while Python writes nine. Allocators were comparing turnover figures across strategies with mixed denominator semantics (configured account balance vs gross-exposure NAV proxy) with no visible warning.

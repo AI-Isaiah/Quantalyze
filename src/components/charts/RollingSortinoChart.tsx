@@ -25,7 +25,7 @@ export function RollingSortinoChart({ data }: RollingSortinoChartProps) {
   return (
     <div role="img" aria-label="Rolling Sortino">
       <ResponsiveContainer width="100%" height={250}>
-        <LineChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+        <LineChart accessibilityLayer={false} data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
           <XAxis
             dataKey="date"
             tick={CHART_TICK_STYLE}

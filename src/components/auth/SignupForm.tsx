@@ -48,6 +48,7 @@ export function SignupForm() {
     <form onSubmit={handleSubmit} className="space-y-4">
       <Input
         label="Display name"
+        name="display_name"
         value={displayName}
         onChange={(e) => setDisplayName(e.target.value)}
         placeholder="Your name"
@@ -57,6 +58,7 @@ export function SignupForm() {
       <Input
         label="Email"
         type="email"
+        name="email"
         value={email}
         onChange={(e) => setEmail(e.target.value)}
         placeholder="you@example.com"
@@ -66,6 +68,7 @@ export function SignupForm() {
       <Input
         label="Password"
         type="password"
+        name="password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         placeholder="At least 6 characters"

@@ -69,6 +69,7 @@ export function RollingAlphaBetaChart({
     <div role="img" aria-label="Rolling alpha and beta">
       <ResponsiveContainer width="100%" height={250}>
         <LineChart
+          accessibilityLayer={false}
           data={merged}
           margin={{ top: 5, right: 5, bottom: 5, left: 5 }}
         >

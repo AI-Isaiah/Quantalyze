@@ -172,7 +172,7 @@ export function CorrelationWithBenchmark({
 
   return (
     <ResponsiveContainer width="100%" height={240}>
-      <LineChart data={series} margin={{ top: 5, right: 30, bottom: 5, left: 5 }}>
+      <LineChart accessibilityLayer={false} data={series} margin={{ top: 5, right: 30, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="date"
           tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
