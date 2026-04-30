@@ -33,7 +33,7 @@ export function TurnoverChart({ data }: TurnoverChartProps) {
   return (
     <div role="img" aria-label="Daily turnover as percent of NAV">
       <ResponsiveContainer width="100%" height={200}>
-        <LineChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+        <LineChart accessibilityLayer={false} data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
           <XAxis
             dataKey="date"
             tick={CHART_TICK_STYLE}

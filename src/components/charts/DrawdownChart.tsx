@@ -52,7 +52,17 @@ export function DrawdownChart({ data, benchmarkSeries }: DrawdownChartProps) {
 
   return (
     <ResponsiveContainer width="100%" height={250}>
-      <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+      {/* Recharts 3.x defaults `accessibilityLayer={true}` which adds
+          tabIndex={0}+role="application" to the chart's root SVG. With
+          no accessible name on a static visual chart, the SVG ends up
+          in the keyboard tab order as an "empty focus" stop — which
+          breaks the v2 page's documented tab order (UI-SPEC §7.3) and
+          the e2e/strategy-v2-keyboard.spec.ts assertion. The chart's
+          data is also surfaced in the panel's KPI cells, so disabling
+          the layer keeps the tab order clean without removing data
+          access for screen readers. Same rationale across every
+          recharts chart on the v2 page. */}
+      <AreaChart accessibilityLayer={false} data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <defs>
           <linearGradient id="drawdown-fill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={CHART_ACCENT} stopOpacity={0.2} />

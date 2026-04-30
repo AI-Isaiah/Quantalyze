@@ -17,7 +17,7 @@ export function MonthlyReturnsBar({ data }: MonthlyReturnsBarProps) {
 
   return (
     <ResponsiveContainer width="100%" height={250}>
-      <BarChart data={flat} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+      <BarChart accessibilityLayer={false} data={flat} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="label"
           tick={CHART_TICK_STYLE}

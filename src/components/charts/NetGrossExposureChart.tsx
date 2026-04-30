@@ -44,7 +44,7 @@ export function NetGrossExposureChart({ data }: NetGrossExposureChartProps) {
   return (
     <div role="img" aria-label="Net and gross exposure over time">
       <ResponsiveContainer width="100%" height={240}>
-        <ComposedChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+        <ComposedChart accessibilityLayer={false} data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
           <XAxis
             dataKey="date"
             tick={CHART_TICK_STYLE}

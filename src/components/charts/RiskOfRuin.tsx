@@ -23,7 +23,7 @@ export function RiskOfRuin({ data }: RiskOfRuinProps) {
 
   return (
     <ResponsiveContainer width="100%" height={250}>
-      <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+      <AreaChart accessibilityLayer={false} data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <defs>
           <linearGradient id="risk-of-ruin-fill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={CHART_ACCENT} stopOpacity={0.2} />

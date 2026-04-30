@@ -26,7 +26,7 @@ export function YearlyReturns({ monthlyReturns }: YearlyReturnsProps) {
 
   return (
     <ResponsiveContainer width="100%" height={200}>
-      <BarChart data={yearly} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+      <BarChart accessibilityLayer={false} data={yearly} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="year"
           tick={CHART_TICK_STYLE}
