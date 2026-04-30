@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.30] - 2026-04-30
+
+**Test quality + non-breaking security upgrade.** Replaces 5 tautology unit tests that passed against any implementation with real integration tests, and bumps 4 transitive dependencies to close known advisories.
+
+### Fixed
+
+- **`analytics-service/tests/test_analytics_runner.py`** — Replaced 5 `test_balance_flag_routing_*` tests that built local if/else copies of `run_strategy_analytics`'s flag routing and verified the local copy. They passed against any implementation, including a broken one (pr-test-analyzer Finding 6 / Task #19). New tests invoke `run_strategy_analytics` end-to-end with a `_build_balance_flag_mock_supabase` factory and assert on the persisted `data_quality_flags` payload from the success-path upsert. Mutation-tested: flipping the runner's except-handler if/else (`analytics_runner.py:638-641`) breaks tests #4 and #5 as expected; the try-block tests #1-3 stay green because they exercise a separate branch — the suite partitions cleanly across both routing sites. Factory also stubs the `positions` table handler defensively so a future refactor moving the positions query out of the `if fills_data:` guard doesn't silently get a default `MagicMock`.
+
+### Security
+
+- **`package-lock.json`** — `npm audit fix` (no flags) — bumped within existing semver only:
+  - `basic-ftp` 5.2.0 → 5.3.1 (high)
+  - `dompurify` 3.3.3 → 3.4.2 (moderate)
+  - `follow-redirects` 1.15.11 → 1.16.0 (moderate)
+  - `vite` 8.0.3 → 8.0.10 (high), drags `vitest` 4.1.2 → 4.1.5
+  - Transitive within-semver moves: `next` 16.2.3 → 16.2.4, `postcss` 8.5.8 → 8.5.12, `resend` 6.10.0 → 6.12.2, `svix` 1.88.0 → 1.90.0
+  - Advisory count: 9 → 5. The remaining 5 are deferred breaking chains (`postcss` <8.5.10 vendored inside `next`, `uuid` <14 transitive via `svix` → `resend`). `--force` would downgrade `next` → 9.3.3 and `resend` → 6.1.3 — harmful, do not run. Real-world exposure is zero in this app: the postcss XSS requires processing untrusted CSS (we don't); the uuid bounds-check requires caller-supplied buffer mode (svix uses uuid only for ID generation).
+  - Verified clean: 2665 frontend tests pass, 625 python tests pass, `tsc --noEmit` clean, lint 0 errors, production build green, coverage 79.49% statements / 70.71% branches / 74.93% functions / 81.42% lines.
+
 ## [0.17.1.29] - 2026-04-30
 
 **Closes the last `discovery-axe` axe violations.** After .28 unblocked the spec to actually scan the page (login + role + gate cleared), axe surfaced two more pre-existing a11y bugs.
