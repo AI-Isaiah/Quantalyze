@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.17] - 2026-04-30
+
+**KPI-17 follow-up — fix three pre-existing analytics bugs surfaced while debugging the 4-bucket flip.** Investigation chain: `avg_losing_trade=0` cascading to null R:R / SQN / weighted R:R was the most user-visible; `long_volume_pct == buy_volume_pct` was an explicit code "approximation" with a misleading field name; `avg_duration_days=0` was an int-truncation bug for sub-day position holds. All three rooted in `position_reconstruction.py` + `analytics_runner.py` and ship together because they all need a re-run of compute_analytics for OKX strategies to refresh production values.
+
+### Fixed
+
+- **Bug 1 — ROI net of fees (`analytics-service/services/position_reconstruction.py:374-388`).** Prior formula `(exit-entry)/entry` computed gross price change, ignoring fees. A position with flat price + small fee loss had ROI=0 and was classified a loser at the boundary; a position with +0.01 price move + larger fee loss had ROI>0 and was classified a winner despite negative net P&L. New formula `realized_pnl / (entry_avg * total_entry_qty)` is the standard return-on-capital-deployed: net of fees. Cascade unblocks: `avg_losing_trade` becomes non-zero for fee-only-losers → `risk_reward_ratio` / `weighted_risk_reward_ratio` / `sqn` / `profit_factor_long` / `profit_factor_short` all start computing real values instead of null.
+- **Bug 2 — position-side volume attribution (`analytics-service/services/analytics_runner.py`).** Dropped the misleading `long_volume_pct: round(buy_pct, 4)` aliases from `_compute_volume_metrics`. Added new helper `_compute_position_side_volume_pcts(fills, positions)` that attributes each fill to a position by timestamp window and reports long/short as a fraction of the total attributed volume. `run_strategy_analytics` queries the strategy's positions row alongside the fills query and merges the corrected percentages into `trade_metrics`. A "buy to close short" now correctly counts as short-side volume (it lands inside the short position's window), not long.
+- **Bug 3 — sub-day duration (`analytics-service/services/position_reconstruction.py:392`, migration 092).** `int((close_dt - open_dt).total_seconds() / 86400)` truncated any sub-day duration to 0. A strategy that opens 8am and closes 6pm reported `duration_days=0`. Migration 092 widens `positions.duration_days` from `INTEGER` to `NUMERIC` so fractional days survive the upsert; Python switches from `int(_)` to `round(_, 4)`. Existing INT consumers continue to work (NUMERIC is a super-type).
+
+### Added
+
+- **`supabase/migrations/092_positions_duration_days_numeric.sql`** — applied to prod (`khslejtfbuezsmvmtsdn`) and the test E2E project (`qmnijlgmdhviwzwfyzlc`) via Supabase MCP before the code change ships, so the new fractional `duration_days` writes don't fail against an unmigrated INT column.
+- **7 regression tests** (5 in `test_analytics_runner.py` for position-side volume attribution + alias removal; 2 in `test_position_reconstruction.py` for ROI net-of-fees fee-only-loser classification + sub-day duration fractional). 48 tests pass total across the two suites (was 41).
+
+### Why these were latent
+
+The trio shipped with the volume-aggregator + position-reconstruction work in v0.16.x. Production rendered "—" / 0 / null for the affected metrics throughout but nobody noticed because no production strategy had real OKX fills to drive the code path until v0.17.1.x. KPI-17's 4-bucket flip pulled the thread: the user-visible 4-bucket panel rendered with all-zero counts (fixed in v0.17.1.16), and triaging that exposed the ROI / volume / duration trio.
+
 ## [0.17.1.16] - 2026-04-30
 
 **KPI-17 finalization — map raw-fill `buy/sell` side to `long/short` so the 4-bucket render shows real data, not zero bars.** v0.17.1.14 unblocked the fills query and produced the 4-bucket trade_mix shape, but every count was 0. Live data inspection: 200 OKX fills carry `side=buy` (108) or `side=sell` (292), but `_compute_trade_mix` filtered for `side in ("long","short")` and dropped every fill silently. The 4-bucket panel rendered all 4 bars at 0% and the frontend's `total === 0` guard fell through to "Trade mix unavailable for this strategy." instead of showing the actual maker/taker breakdown.
@@ -17,12 +36,6 @@ can bump without ambiguity.
 ### Added
 
 - **`analytics-service/tests/test_analytics_runner.py`** — 2 regression tests: `test_trade_mix_buy_sell_side_normalized_to_long_short` (4-bucket mode, asserts each bucket gets count=1 from a 4-fill payload with mixed buy/sell × maker/taker) and `test_trade_mix_2_bucket_buy_sell_normalized` (2-bucket fallback, asserts 2 buys land in `long` and 1 sell lands in `short`). 12 trade-mix tests pass total.
-
-### Known follow-ups (out of scope, surfaced while debugging)
-
-- `avg_losing_trade` rounds to 0 for low-ROI strategies (rounding to 6 decimals against tiny ROI values). Cascades to null `risk_reward_ratio`, null `weighted_risk_reward_ratio`, null `sqn`, `0.0 profit_factor_long`. Root cause is upstream: `position_reconstruction.py` computes `roi` as a fraction of notional rather than margin — fix needs the strategy's leverage / margin context, separate ticket.
-- `long_volume_pct` / `short_volume_pct` are aliases of `buy_volume_pct` / `sell_volume_pct` (`analytics_runner.py:170`) — explicitly labeled "approximation from fill sides". Misleading field names; correct values would require sum over position-side fills, not buy/sell fills.
-- `avg_duration_days = 0` because positions opened and closed within the same calendar day; `int((close_dt - open_dt).total_seconds() / 86400)` truncates sub-day durations to 0. Should switch to a float in hours or days.
 
 ## [0.17.1.15] - 2026-04-30
 

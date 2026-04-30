@@ -747,6 +747,105 @@ def test_trade_mix_2_bucket_buy_sell_normalized():
 
 
 # ---------------------------------------------------------------------------
+# KPI-17 follow-up: position-side volume attribution
+# ---------------------------------------------------------------------------
+
+
+def test_position_side_volume_pcts_attributes_via_timestamp_window():
+    """Fills inside a long-side position's window count as long volume; same
+    for short. The classic v0.16.x bug aliased buy_volume_pct as
+    long_volume_pct, which double-counted "buy to close short" as long
+    volume — this test pins the corrected attribution."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": "2024-01-02T00:00:00+00:00"},
+        {"side": "short", "opened_at": "2024-01-03T00:00:00+00:00",
+         "closed_at": "2024-01-04T00:00:00+00:00"},
+    ]
+    fills = [
+        {"side": "buy", "cost": 100.0, "timestamp": "2024-01-01T06:00:00+00:00"},
+        {"side": "sell", "cost": 100.0, "timestamp": "2024-01-01T18:00:00+00:00"},
+        {"side": "sell", "cost": 50.0, "timestamp": "2024-01-03T06:00:00+00:00"},
+        {"side": "buy", "cost": 50.0, "timestamp": "2024-01-03T18:00:00+00:00"},
+    ]
+    result = _compute_position_side_volume_pcts(fills, positions)
+    # long_volume = 200, short_volume = 100, total = 300 -> 0.6667 / 0.3333
+    assert abs(result["long_volume_pct"] - 0.6667) < 0.001
+    assert abs(result["short_volume_pct"] - 0.3333) < 0.001
+
+
+def test_position_side_volume_pcts_open_position_no_close():
+    """Open position (closed_at=None) attributes everything from opened_at
+    onward — fills after the open should land in that side."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": None},
+    ]
+    fills = [
+        {"side": "buy", "cost": 100.0, "timestamp": "2024-01-02T00:00:00+00:00"},
+        {"side": "sell", "cost": 50.0, "timestamp": "2024-01-03T00:00:00+00:00"},
+    ]
+    result = _compute_position_side_volume_pcts(fills, positions)
+    assert result["long_volume_pct"] == 1.0
+    assert result["short_volume_pct"] == 0.0
+
+
+def test_position_side_volume_pcts_skips_unattributable_fills():
+    """A fill whose timestamp falls outside every position window doesn't
+    inflate either side."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    positions = [
+        {"side": "long", "opened_at": "2024-01-01T00:00:00+00:00",
+         "closed_at": "2024-01-02T00:00:00+00:00"},
+    ]
+    fills = [
+        {"side": "buy", "cost": 100.0, "timestamp": "2024-01-01T12:00:00+00:00"},  # in window
+        {"side": "sell", "cost": 999.0, "timestamp": "2024-01-10T00:00:00+00:00"},  # outside
+    ]
+    result = _compute_position_side_volume_pcts(fills, positions)
+    # Only the in-window fill is attributed; pct over attributed_total = 100%
+    assert result["long_volume_pct"] == 1.0
+    assert result["short_volume_pct"] == 0.0
+
+
+def test_position_side_volume_pcts_empty_inputs_return_zero():
+    """No fills or no positions returns 0/0 (frontend renders '—')."""
+    from services.analytics_runner import _compute_position_side_volume_pcts
+
+    assert _compute_position_side_volume_pcts([], []) == {
+        "long_volume_pct": 0.0, "short_volume_pct": 0.0,
+    }
+    assert _compute_position_side_volume_pcts(
+        [{"side": "buy", "cost": 100.0, "timestamp": "2024-01-01T00:00:00+00:00"}],
+        [],
+    ) == {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
+
+
+def test_volume_metrics_no_longer_aliases_long_to_buy():
+    """_compute_volume_metrics dropped the misleading long_volume_pct /
+    short_volume_pct aliases that copied buy/sell percentages. Those
+    fields now come from _compute_position_side_volume_pcts so the field
+    name reflects the actual computation."""
+    from services.analytics_runner import _compute_volume_metrics
+
+    fills = [
+        {"side": "buy", "cost": 100.0},
+        {"side": "sell", "cost": 200.0},
+    ]
+    result = _compute_volume_metrics(fills)
+    assert "buy_volume_pct" in result
+    assert "sell_volume_pct" in result
+    # Misleading aliases gone
+    assert "long_volume_pct" not in result
+    assert "short_volume_pct" not in result
+
+
+# ---------------------------------------------------------------------------
 # Phase 12 Plan 06 / METRICS-15 / METRICS-17 — runner integration smoke tests
 # ---------------------------------------------------------------------------
 # These verify the full B-01 + H-A1 + M-Grok-1 wiring inside

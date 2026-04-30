@@ -213,6 +213,44 @@ class TestMatchPositionsFIFO:
         # ROI when entry_avg is 0: the code returns 0 (guards against division by zero)
         assert positions[0]["roi"] == 0
 
+    def test_roi_net_of_fees_classifies_fee_only_loser_as_loser(self) -> None:
+        """KPI-17 follow-up regression. The prior ROI formula was
+        `(exit-entry)/entry` (gross price change), which classified a
+        flat-price + fees-eat-everything position as a winner because
+        ROI=0 and the winner test was `roi > 0`. The new formula is
+        `realized_pnl / notional` (net return), so the same position
+        registers ROI < 0 and is correctly bucketed as a loser. Confirmed
+        in production against OKX strategy 07c14340 where 2 closed
+        positions had price exit==entry but realized_pnl=-fees."""
+        fills = [
+            _make_fill(side="buy", price=1991.69, quantity=1.0, fee=11.16,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=1991.69, quantity=1.0, fee=0.0,
+                       timestamp="2024-01-01T00:00:01+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        pos = positions[0]
+        assert pos["realized_pnl"] < 0
+        # ROI is now NET of fees -> negative for fee-only-loser position
+        assert pos["roi"] < 0
+
+    def test_duration_days_fractional_for_sub_day_holds(self) -> None:
+        """KPI-17 follow-up: positions held for hours within a single day
+        produce fractional duration_days (round to 4 decimals) instead of
+        int-truncating to 0. Migration 092 widened the column from
+        INTEGER to NUMERIC."""
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T08:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-01T18:00:00+00:00"),  # 10h later
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        # 10 hours of 24 = 0.4167 days
+        assert abs(positions[0]["duration_days"] - 10 / 24) < 0.001
+
 
 # ---------------------------------------------------------------------------
 # reconstruct_positions (async, requires DB mocking)
