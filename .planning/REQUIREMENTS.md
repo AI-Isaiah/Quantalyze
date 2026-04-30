@@ -64,7 +64,7 @@
 - [x] **KPI-16
 **: Panel 6 — Volume metrics row: gross volume, mean trade size, mean daily turnover, mean monthly turnover (aggregator over `raw_fills`)
 - [x] **KPI-17
-**: Panel 6 — Trade Mix maker/taker breakdown: long-entry maker/taker, short-entry maker/taker — **gated on Phase 12 `is_maker` flag audit on `raw_fills` across exchange handlers (Binance / OKX / Bybit — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit)**; if absent on any of the three, descope to v0.17.1 and document in TODOS
+**: Panel 6 — Trade Mix maker/taker breakdown: long-entry maker/taker, short-entry maker/taker — **gated on Phase 12 `is_maker` flag audit on `raw_fills` across exchange handlers (Binance / OKX / Bybit — Deribit excluded by design: `analytics-service/services/exchange.py:325-334` confirms `fetch_raw_trades` does not dispatch to Deribit)**. v0.17.1 (2026-04-30): per-strategy data-driven gate shipped — `_has_maker_taker_coverage(fills)` returns True at ≥99% is_maker population and `TradeMixSubPanel` auto-detects 4-bucket from buckets shape. OKX confirmed at 100% coverage (400/400 fills); Binance/Bybit qualify automatically when their venues ingest with the flag populated.
 - [x] **KPI-18
 **: Panel 7 — Net + Gross Exposure series (intraday → daily); persists per-date arrays from `position_reconstruction.compute_exposure_metrics()`
 - [x] **KPI-19
@@ -186,7 +186,7 @@ Coverage: **53 / 53** v0.17.0.0 requirements mapped (filled by gsd-roadmapper 20
 | KPI-14 | KPI | Phase 14b | Pending |
 | KPI-15 | KPI | Phase 14b | Pending |
 | KPI-16 | KPI | Phase 14b | Pending |
-| KPI-17 | KPI | Phase 14b | Pending (gated on is_maker audit Binance/OKX/Bybit; Deribit excluded) |
+| KPI-17 | KPI | Phase 14b | ✅ Complete v0.17.1.13 (2026-04-30) — per-strategy ≥99% is_maker coverage gate; OKX confirmed at 100%; Binance/Bybit auto-qualify when ingestion lands |
 | KPI-18 | KPI | Phase 14b | Pending |
 | KPI-19 | KPI | Phase 14b | Pending |
 | KPI-20 | KPI | Phase 14b | Pending |
