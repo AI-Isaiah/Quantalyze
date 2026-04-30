@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.10] - 2026-04-30
+
+**v0.17.1 audit follow-up — delete the dead `isStrategyUiV2Enabled` flag.** The 2026-04-29 milestone audit's "v1 → v2 cutover" deferral was based on a wrong premise. v1 (`/strategy/[id]`) and v2 (`/strategy/[id]/v2`) serve different audiences (public marketing factsheet vs allocator detail surface) and should both stay. The `isStrategyUiV2Enabled` flag had zero non-test consumers in `src/` — it was scaffolding the 14b flag-flip plan left behind. Removing it stops future contributors from wondering what it does.
+
+### Removed
+
+- **`src/lib/strategy-ui-v2-flag.ts` (99 LOC)** — flag reader (URL param + localStorage v17 key + legacy key handling). Unused.
+- **`src/lib/strategy-ui-v2-flag.test.tsx` (300+ LOC)** — unit tests for the unused flag. 13 cases across 3 describe blocks: legacy key retirement, query-param resolution, browser-only client wrapper.
+
+No production behavior changes. v1 and v2 routes both continue to render exactly as before — they always did, since neither route ever called the flag.
+
 ## [0.17.1.9] - 2026-04-30
 
 **v0.17.1 audit follow-up — close METRICS-15 in the planning record.** The 2026-04-29 milestone audit listed METRICS-15 path-extraction as the lone outstanding item (effective score 52/53), but PR #86 (squash-merge `642a589`, feature-branch `b2cd33b perf(queries/MA-1): getStrategyDetailV2 path-extraction`) shipped the rewrite the same day the audit was filed. The planning docs hadn't caught up. This patch fixes that, and inventories the remaining "v0.17.1 outstanding items" against current code so the next audit run reads true.
