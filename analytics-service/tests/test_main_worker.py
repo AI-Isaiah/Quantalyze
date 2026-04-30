@@ -488,6 +488,8 @@ class TestWatchdogInvariant:
     Strategy Wizard) hangs without ever seeing 'failed' or 'complete'."""
 
     def test_watchdog_threshold_exceeds_handler_timeout(self) -> None:
+        """The original test scoped to declared overrides — kept for
+        coverage of every override's correctness."""
         from main_worker import WATCHDOG_PER_KIND_OVERRIDES
         from services.job_worker import TIMEOUT_PER_KIND
 
@@ -503,5 +505,38 @@ class TestWatchdogInvariant:
                 f"greater than its handler timeout ({handler_minutes:.1f}m). "
                 "The handler must have a chance to fail-classify itself before "
                 "the watchdog yanks the row — otherwise the job loops forever "
+                "and any caller polling for terminal status hangs."
+            )
+
+    def test_every_kind_has_watchdog_headroom(self) -> None:
+        """The override-only test above missed kinds that fall through to
+        the global default. PR #106's `compute_analytics` watchdog fix
+        only covered kinds with explicit overrides — `reconstruct_allocator_history`
+        had a 30-minute handler timeout and inherited the 10-minute
+        default, reproducing the wizard-hang for allocator equity
+        backfill. This test iterates TIMEOUT_PER_KIND (source of truth)
+        and asserts every kind has watchdog headroom, including ones
+        that take the default."""
+        from main_worker import WATCHDOG_PER_KIND_OVERRIDES
+        from services.job_worker import TIMEOUT_PER_KIND
+
+        # Mirror of main_worker.watchdog_tick `p_stale_threshold` default.
+        # Keep in lock-step with that literal — a future change to that
+        # default is a breaking contract change for every kind without
+        # an explicit override and must update this constant too.
+        DEFAULT_WATCHDOG_MINUTES = 10
+
+        for kind, handler_seconds in TIMEOUT_PER_KIND.items():
+            handler_minutes = handler_seconds / 60
+            override = WATCHDOG_PER_KIND_OVERRIDES.get(kind)
+            watchdog_minutes = (
+                _parse_minutes(override) if override else DEFAULT_WATCHDOG_MINUTES
+            )
+            assert watchdog_minutes > handler_minutes, (
+                f"Kind {kind!r}: handler timeout {handler_minutes:.1f}m "
+                f"exceeds watchdog threshold {watchdog_minutes}m. "
+                f"Add an entry to WATCHDOG_PER_KIND_OVERRIDES with a "
+                f"value greater than {handler_minutes:.1f} minutes — "
+                "otherwise the watchdog reclaims the still-running job "
                 "and any caller polling for terminal status hangs."
             )
