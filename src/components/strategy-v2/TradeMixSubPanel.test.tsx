@@ -3,14 +3,14 @@ import { render, screen } from "@testing-library/react";
 import { TradeMixSubPanel } from "./TradeMixSubPanel";
 
 /**
- * Phase 14b-04 Task 1 — TradeMixSubPanel tests.
+ * TradeMixSubPanel tests.
  *
- * Tests 6–12 cover 2-bucket horizontal-bar render, percent + raw count
- * label-OUTSIDE-bar layout, default `mode='2-bucket'`, the descoped
- * 4-bucket fallback message (KPI-17 partial — v0.17.1 flip), the empty
- * state, the section break/border classes, and the H3 styling.
+ * Covers 2-bucket horizontal-bar render, percent + raw count
+ * label-OUTSIDE-bar layout, auto-detection of 4-bucket from buckets
+ * shape (KPI-17 v0.17.1 flip), the empty state, the section
+ * break/border classes, and the H3 styling.
  */
-describe("TradeMixSubPanel — Phase 14b-04 Task 1", () => {
+describe("TradeMixSubPanel", () => {
   it("Test 6: 2-bucket render — Long 64% / Short 36% bars with #1B6B5A and #94A3B8 fills", () => {
     const { container } = render(
       <TradeMixSubPanel
@@ -55,7 +55,7 @@ describe("TradeMixSubPanel — Phase 14b-04 Task 1", () => {
     expect(screen.getByText("(701 fills)")).not.toBeNull();
   });
 
-  it("Test 8: mode prop defaults to '2-bucket' (no explicit mode)", () => {
+  it("Test 8: 2-bucket buckets shape renders 2 bars", () => {
     const { container } = render(
       <TradeMixSubPanel
         buckets={{
@@ -64,27 +64,83 @@ describe("TradeMixSubPanel — Phase 14b-04 Task 1", () => {
         }}
       />,
     );
-    // Default mode renders 2 bars (not the 4-bucket fallback message)
     const bars = container.querySelectorAll("[data-trade-mix-bar]");
     expect(bars.length).toBe(2);
   });
 
-  it("Test 9: mode='4-bucket' renders fallback message — NOT 4 bars (KPI-17 partial; v0.17.1)", () => {
+  it("Test 9: 4-bucket buckets shape renders 4 bars (KPI-17 v0.17.1 flip)", () => {
     const { container } = render(
       <TradeMixSubPanel
-        mode="4-bucket"
         buckets={{
           long_maker: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
-          long_taker: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
-          short_maker: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
-          short_taker: { count: 100, total_notional: 1, avg_holding_period_hours: 0 },
+          long_taker: { count: 200, total_notional: 1, avg_holding_period_hours: 0 },
+          short_maker: { count: 50, total_notional: 1, avg_holding_period_hours: 0 },
+          short_taker: { count: 150, total_notional: 1, avg_holding_period_hours: 0 },
+        }}
+      />,
+    );
+    const bars = container.querySelectorAll("[data-trade-mix-bar]");
+    expect(bars.length).toBe(4);
+
+    // total = 500. Bars: 20%, 40%, 10%, 30%.
+    expect((bars[0] as HTMLElement).style.width).toBe("20%");
+    expect((bars[1] as HTMLElement).style.width).toBe("40%");
+    expect((bars[2] as HTMLElement).style.width).toBe("10%");
+    expect((bars[3] as HTMLElement).style.width).toBe("30%");
+
+    // Long maker = solid CHART_ACCENT (#1B6B5A); long taker = same color, 0.6 opacity.
+    expect((bars[0] as HTMLElement).style.backgroundColor).toBe("rgb(27, 107, 90)");
+    expect((bars[0] as HTMLElement).style.opacity).toBe("1");
+    expect((bars[1] as HTMLElement).style.backgroundColor).toBe("rgb(27, 107, 90)");
+    expect((bars[1] as HTMLElement).style.opacity).toBe("0.6");
+
+    // Short maker = solid CHART_TEXT_MUTED (#94A3B8); short taker = same, 0.6 opacity.
+    expect((bars[2] as HTMLElement).style.backgroundColor).toBe("rgb(148, 163, 184)");
+    expect((bars[2] as HTMLElement).style.opacity).toBe("1");
+    expect((bars[3] as HTMLElement).style.backgroundColor).toBe("rgb(148, 163, 184)");
+    expect((bars[3] as HTMLElement).style.opacity).toBe("0.6");
+
+    // All 4 labels render
+    expect(screen.getByText("Long maker")).not.toBeNull();
+    expect(screen.getByText("Long taker")).not.toBeNull();
+    expect(screen.getByText("Short maker")).not.toBeNull();
+    expect(screen.getByText("Short taker")).not.toBeNull();
+  });
+
+  it("Test 9b: 4-bucket render with all-taker fills (OKX prod shape) — maker bars at 0%", () => {
+    const { container } = render(
+      <TradeMixSubPanel
+        buckets={{
+          long_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
+          long_taker: { count: 120, total_notional: 1, avg_holding_period_hours: 0 },
+          short_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
+          short_taker: { count: 80, total_notional: 1, avg_holding_period_hours: 0 },
+        }}
+      />,
+    );
+    const bars = container.querySelectorAll("[data-trade-mix-bar]");
+    expect(bars.length).toBe(4);
+    expect((bars[0] as HTMLElement).style.width).toBe("0%");
+    expect((bars[1] as HTMLElement).style.width).toBe("60%");
+    expect((bars[2] as HTMLElement).style.width).toBe("0%");
+    expect((bars[3] as HTMLElement).style.width).toBe("40%");
+  });
+
+  it("Test 9c: 4-bucket buckets with total=0 falls back to empty-state message", () => {
+    const { container } = render(
+      <TradeMixSubPanel
+        buckets={{
+          long_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
+          long_taker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
+          short_maker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
+          short_taker: { count: 0, total_notional: 0, avg_holding_period_hours: 0 },
         }}
       />,
     );
     const bars = container.querySelectorAll("[data-trade-mix-bar]");
     expect(bars.length).toBe(0);
     expect(
-      screen.getByText("4-bucket maker/taker mode is reserved for v0.17.1."),
+      screen.getByText("Trade mix unavailable for this strategy."),
     ).not.toBeNull();
   });
 

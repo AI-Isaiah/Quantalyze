@@ -663,6 +663,52 @@ def test_trade_mix_avg_holding_period_computed(sample_fills):
 
 
 # ---------------------------------------------------------------------------
+# KPI-17: per-strategy is_maker coverage gate (_has_maker_taker_coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_has_maker_taker_coverage_empty_fills_returns_false():
+    """No fills → cannot satisfy the audit gate; returns False."""
+    from services.analytics_runner import _has_maker_taker_coverage
+
+    assert _has_maker_taker_coverage([]) is False
+
+
+def test_has_maker_taker_coverage_full_population_returns_true():
+    """100% is_maker coverage (typical OKX prod shape) clears the gate."""
+    from services.analytics_runner import _has_maker_taker_coverage
+
+    fills = [{"is_maker": True}, {"is_maker": False}, {"is_maker": False}]
+    assert _has_maker_taker_coverage(fills) is True
+
+
+def test_has_maker_taker_coverage_below_threshold_returns_false():
+    """Below 99% → falls back to 2-bucket so partial Binance/Bybit ingestion
+    can't silently null out a strategy's Trade Mix."""
+    from services.analytics_runner import _has_maker_taker_coverage
+
+    # 98 of 100 populated = 98% coverage, below the 99% threshold.
+    fills = [{"is_maker": True}] * 98 + [{"is_maker": None}, {}]
+    assert _has_maker_taker_coverage(fills) is False
+
+
+def test_has_maker_taker_coverage_threshold_inclusive():
+    """Exactly 99% clears the gate (≥99%, not >99%)."""
+    from services.analytics_runner import _has_maker_taker_coverage
+
+    fills = [{"is_maker": True}] * 99 + [{"is_maker": None}]
+    assert _has_maker_taker_coverage(fills) is True
+
+
+def test_has_maker_taker_coverage_handles_missing_key():
+    """Fills without an is_maker key count as unpopulated (same as None)."""
+    from services.analytics_runner import _has_maker_taker_coverage
+
+    fills = [{"side": "long"}, {"side": "short"}]  # no is_maker key at all
+    assert _has_maker_taker_coverage(fills) is False
+
+
+# ---------------------------------------------------------------------------
 # Phase 12 Plan 06 / METRICS-15 / METRICS-17 — runner integration smoke tests
 # ---------------------------------------------------------------------------
 # These verify the full B-01 + H-A1 + M-Grok-1 wiring inside

@@ -84,9 +84,9 @@ function fmtCount(v: number | null | undefined): string | null {
  * Eager partial-data gate looks at props.trade_metrics ONLY — independent
  * of `status` so a transient lazy lifecycle hiccup cannot hide valid data.
  *
- * Trade Mix is rendered as 2-bucket only. The 4-bucket maker/taker
- * dimension is gated on the `is_maker` ingestion fix in
- * analytics-service/services/exchange.py for Binance/OKX/Bybit.
+ * Trade Mix renders 2-bucket or 4-bucket based on buckets shape. The
+ * 4-bucket maker/taker render is driven by the analytics worker's
+ * TRADE_MIX_HAS_MAKER_TAKER env flag.
  */
 export function TradeAndPositionPanel({
   strategyId,
@@ -219,8 +219,8 @@ function Body({
         </Grid>
       </Section>
 
-      {/* Trade Mix sub-panel (2-bucket only; 4-bucket gated on is_maker ingestion fix) */}
-      <TradeMixSubPanel buckets={tm.trade_mix} mode="2-bucket" />
+      {/* Trade Mix sub-panel — 2-bucket / 4-bucket auto-detected from buckets shape */}
+      <TradeMixSubPanel buckets={tm.trade_mix} />
     </div>
   );
 }
