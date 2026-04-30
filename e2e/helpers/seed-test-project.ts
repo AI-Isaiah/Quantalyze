@@ -42,12 +42,9 @@ function getAdmin(): SupabaseClient {
         "spec must skip when secrets absent (D-16 / BLOCK-3 vars.E2E_TEST_DB_CONFIGURED).",
     );
   }
-  // Phase 11 WR-05 defense-in-depth: refuse known prod URL patterns
-  // before any service-role mutation happens.
+  // WR-05 defense-in-depth: prod-URL + service-role-key probes before
+  // any mutation, so misconfiguration fails loudly at the boundary.
   assertNotProductionSupabaseUrl(url, "seed-test-project");
-  // Catch the anon-key-in-service-role-slot setup mistake at the helper
-  // boundary, so the failure surface is "paste the right key" rather than
-  // gotrue's downstream "User not allowed".
   assertSupabaseServiceRoleKey(key, "seed-test-project");
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },

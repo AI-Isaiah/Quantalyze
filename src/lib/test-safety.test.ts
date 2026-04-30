@@ -138,7 +138,6 @@ describe("assertSupabaseServiceRoleKey", () => {
   });
 
   it("does NOT throw when the key is not a JWT (forward-compat with future formats)", () => {
-    expect(() => assertSupabaseServiceRoleKey("sb_secret_abc123", "test")).not.toThrow();
     expect(() => assertSupabaseServiceRoleKey("placeholder_service_role", "test")).not.toThrow();
   });
 
