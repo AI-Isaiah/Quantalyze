@@ -146,6 +146,7 @@ export function RiskDecomposition({ data }: WidgetProps) {
     <div data-testid="risk-decomposition" className="h-full">
       <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
         <BarChart
+          accessibilityLayer={false}
           data={chartData}
           layout="vertical"
           margin={{ top: 5, right: 20, bottom: 5, left: 5 }}

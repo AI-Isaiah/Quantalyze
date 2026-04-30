@@ -30,7 +30,7 @@ export function CompositionDonut({ strategies }: CompositionDonutProps) {
     <div className="space-y-4">
       <div className="relative">
         <ResponsiveContainer width="100%" height={220}>
-          <PieChart>
+          <PieChart accessibilityLayer={false}>
             <Pie
               data={chartData}
               dataKey="value"

@@ -32,7 +32,7 @@ export function RiskAttribution({ data }: RiskAttributionProps) {
   return (
     <div className="space-y-4">
       <ResponsiveContainer width="100%" height={48}>
-        <BarChart data={chartData} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 8 }}>
+        <BarChart accessibilityLayer={false} data={chartData} layout="vertical" margin={{ top: 0, right: 8, bottom: 0, left: 8 }}>
           <XAxis type="number" hide domain={[0, 1]} />
           <YAxis type="category" dataKey="label" hide />
           <Tooltip

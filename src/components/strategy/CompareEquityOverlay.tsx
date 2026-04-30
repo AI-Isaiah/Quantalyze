@@ -113,7 +113,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
 
       {/* Chart */}
       <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={data}>
+        <LineChart accessibilityLayer={false} data={data}>
           <CartesianGrid
             strokeDasharray="3 3"
             stroke={CHART_BORDER}

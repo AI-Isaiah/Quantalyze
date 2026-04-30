@@ -19,7 +19,7 @@ export function AttributionBar({ data }: AttributionBarProps) {
 
   return (
     <ResponsiveContainer width="100%" height={Math.max(180, sorted.length * 36)}>
-      <BarChart data={sorted} layout="vertical" margin={{ top: 4, right: 24, bottom: 4, left: 4 }}>
+      <BarChart accessibilityLayer={false} data={sorted} layout="vertical" margin={{ top: 4, right: 24, bottom: 4, left: 4 }}>
         <XAxis
           type="number"
           tick={{ fontSize: 11, fill: "#718096", fontFamily: "'Geist Mono', monospace" }}
