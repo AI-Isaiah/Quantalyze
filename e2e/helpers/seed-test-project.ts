@@ -82,10 +82,17 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
   // this, but tests should not race the trigger — make the dependency
   // explicit so the spec is rerun-safe even if the trigger is dropped
   // in a future migration.
+  //
+  // role='allocator' so the Profile > Security tab actually renders
+  // (ProfileTabs.tsx:114 gates `activeTab === "security" && isAllocator`,
+  // and `isAllocator = role === 'allocator' || role === 'both'`). Without
+  // this, the audit-log download CTA the onboarding-funnel spec clicks
+  // never mounts. The migration 001 default is `manager`, so the upsert
+  // must be explicit.
   const { error: profileError } = await admin
     .from("profiles")
     .upsert(
-      { id: data.user.id, display_name: email },
+      { id: data.user.id, display_name: email, role: "allocator" },
       { onConflict: "id" },
     );
   if (profileError) {

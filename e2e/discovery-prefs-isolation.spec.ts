@@ -60,9 +60,18 @@ async function signOut(page: import("@playwright/test").Page) {
     }
   }
   // Fallback per RESEARCH.md Pitfall 8 — clear sb-* localStorage + cookies.
+  // PR #108: also clear `discovery_view_preferences:*` to mirror what
+  // SignOutButton.tsx does on the production path. The user-menu path
+  // above already triggers SignOutButton; this fallback runs when the
+  // menu isn't visible (e.g., the seeded test user doesn't render the
+  // header) and must keep the same isolation contract.
   await page.evaluate(() => {
     Object.keys(localStorage)
-      .filter((k) => k.startsWith("sb-"))
+      .filter(
+        (k) =>
+          k.startsWith("sb-") ||
+          k.startsWith("discovery_view_preferences:"),
+      )
       .forEach((k) => localStorage.removeItem(k));
   });
   await page.context().clearCookies();

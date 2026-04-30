@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.28] - 2026-04-30
+
+**Closes the last 3 seed-gated specs that were still red after .26 + .27.** Round 2 of post-merge e2e fixes — the seed-step fix in .27 unblocked the actual specs, which then surfaced three further bugs.
+
+### Fixed
+
+- **`src/components/layout/Sidebar.tsx:158, 177`** — Sidebar section headings ("MY WORKSPACE", "DISCOVERY") and sub-group labels ("Digital Assets") used `text-sidebar-text/50` and `text-sidebar-text/35` Tailwind opacity modifiers. Same alpha-collapse bug as MonthlyHeatmap (.26 fix): the opacity blends `#94A3B8` foreground onto `bg-sidebar` (#0F172A), giving effective `#525D71` (2.68:1) and `#3E485C` (1.94:1) — both fail WCAG AA. Five `color-contrast` violations on every dashboard route. Removed the opacity modifiers; full `text-sidebar-text` (#94A3B8) gives 6.75:1 against the navy bg. Visual hierarchy preserved by the existing `font-semibold` (parent) vs `font-medium` (sub-group) + tracking differences.
+
+- **`src/components/auth/SignOutButton.tsx`** — Now purges `discovery_view_preferences:*` localStorage keys before calling `supabase.auth.signOut()`. Threat model T-13-02-01 (cross-account isolation) requires that A's discovery prefs do NOT remain readable from B's session on a shared device; `supabase.auth.signOut()` clears `sb-*` auth keys but doesn't touch app-namespaced storage. The `discovery-prefs-isolation` spec was failing this contract — `bKeysWithAUid` was non-empty after signOut/signIn cycle.
+
+- **`e2e/discovery-prefs-isolation.spec.ts`** — Updated the spec's signOut helper FALLBACK path (when the user-menu isn't visible) to mirror the new SignOutButton behaviour: clear both `sb-*` and `discovery_view_preferences:*`. The user-menu path already inherits the production fix.
+
+- **`e2e/helpers/seed-test-project.ts`** — `seedTestAllocator()` now sets `role: 'allocator'` on the profile upsert (was relying on the `'manager'` default from migration 001). The Profile > Security tab in `ProfileTabs.tsx:114` is gated on `isAllocator = role === 'allocator' || role === 'both'`; without this, the audit-log download CTA never mounts and `onboarding-funnel.spec.ts:194` times out waiting for the download event.
+
 ## [0.17.1.27] - 2026-04-30
 
 **Unblocks the seed step that gates every seed-gated e2e spec.**
