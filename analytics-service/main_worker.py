@@ -83,11 +83,25 @@ SHUTDOWN = asyncio.Event()
 # while the row bounces between pending and running. The
 # `test_watchdog_threshold_exceeds_handler_timeout` test in
 # tests/test_main_worker.py pins this invariant.
+# IMPORTANT: every kind in services.job_worker.TIMEOUT_PER_KIND whose
+# handler timeout EXCEEDS the global watchdog default (10 minutes —
+# `watchdog_tick.p_stale_threshold` below) MUST have an entry here, or
+# the watchdog will reclaim still-running jobs and re-create the
+# wizard-hang condition this map was added to fix.
+# `tests/test_main_worker.py::TestWatchdogInvariant::test_every_kind_has_watchdog_headroom`
+# iterates TIMEOUT_PER_KIND (the source of truth) — adding a new long
+# handler without an override fails CI.
 WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     "sync_trades": "20 minutes",       # handler timeout = 15 minutes
     "compute_analytics": "20 minutes", # handler timeout = 15 minutes
     "poll_positions": "5 minutes",     # handler timeout = 3 minutes
     "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
+    # Equity-history backfill is the longest-running kind in the system —
+    # without this override, the global 10-minute default reclaims the
+    # job 20+ minutes before the handler can fail-classify itself,
+    # reproducing the wizard-hang failure mode for allocator equity
+    # reconstruction. Caught by /review cross-PR audit, 2026-04-30.
+    "reconstruct_allocator_history": "35 minutes",  # handler timeout = 30 minutes
 }
 
 

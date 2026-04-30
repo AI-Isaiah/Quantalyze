@@ -581,6 +581,12 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         account_balance = None
         account_balance_unavailable = False
         no_linked_api_key = False
+        # Hoisted out of the try so the except handler can route based on
+        # whether api_key_id was set BEFORE the throw — otherwise a fetch
+        # failure would always set account_balance_unavailable, even for
+        # demo strategies, re-introducing the demo-vs-failure conflation
+        # the flag split was meant to eliminate.
+        api_key_id: str | None = None
         try:
             api_key_id = (
                 strategy_result.data.get("api_key_id")
@@ -595,10 +601,18 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     .single()
                     .execute()
                 )
-                if key_result.data and key_result.data.get("account_balance_usdt"):
-                    account_balance = float(
-                        key_result.data["account_balance_usdt"]
-                    )
+                # Use `is not None` so a literal 0 / 0.0 (drained
+                # account, or operator zeroed it) is distinguishable from
+                # NULL. A truthy check would conflate "real zero" with
+                # "no balance configured" and silently mark the strategy
+                # as degraded forever.
+                balance_raw = (
+                    key_result.data.get("account_balance_usdt")
+                    if key_result.data
+                    else None
+                )
+                if balance_raw is not None:
+                    account_balance = float(balance_raw)
                 else:
                     # api_key exists but no balance configured — turnover
                     # falls back to gross-exposure NAV proxy. Genuine
@@ -609,11 +623,22 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 # strategies. Same fallback denominator, but distinct flag
                 # so the UI text doesn't imply something needs fixing.
                 no_linked_api_key = True
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "Could not fetch account balance for %s: %s", strategy_id, str(e)
+        except Exception:  # noqa: BLE001
+            # Use exception() to capture the full traceback in logs;
+            # warning(str(e)) loses the stack and obscures whether the
+            # error came from db_execute, the float() cast, or
+            # something else.
+            logger.exception(
+                "Could not fetch account balance for %s", strategy_id
             )
-            account_balance_unavailable = True
+            # Route based on whether api_key_id was actually resolved.
+            # If the throw happened before/during api_key_id resolution
+            # OR with no key linked, it's the demo path; only a real
+            # fetch failure with a known api_key_id is the degraded path.
+            if api_key_id:
+                account_balance_unavailable = True
+            else:
+                no_linked_api_key = True
 
         # Transform trades to daily returns
         returns = trades_to_daily_returns(

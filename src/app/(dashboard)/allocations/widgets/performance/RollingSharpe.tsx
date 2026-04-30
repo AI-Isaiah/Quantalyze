@@ -56,7 +56,7 @@ export default function RollingSharpe({ data }: WidgetProps) {
 
   return (
     <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
-      <LineChart data={merged} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
+      <LineChart accessibilityLayer={false} data={merged} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="date"
           tick={{ fontSize: 11, fill: "#718096" }}

@@ -32,7 +32,7 @@ export default function AnnualReturns({ data }: WidgetProps) {
 
   return (
     <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
-      <BarChart data={annualData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
+      <BarChart accessibilityLayer={false} data={annualData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="date"
           tick={{ fontSize: 11, fill: "#718096" }}

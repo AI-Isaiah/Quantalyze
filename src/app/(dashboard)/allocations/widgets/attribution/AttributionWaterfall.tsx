@@ -96,6 +96,7 @@ export default function AttributionWaterfall({ data }: WidgetProps) {
   return (
     <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
       <BarChart
+        accessibilityLayer={false}
         data={chartData}
         margin={{ top: 8, right: 8, bottom: 20, left: 8 }}
       >

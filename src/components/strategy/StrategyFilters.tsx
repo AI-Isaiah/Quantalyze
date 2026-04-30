@@ -344,6 +344,7 @@ export function StrategyFilters({
           <select
             value={sortKey}
             onChange={(e) => onSortKeyChange(e.target.value as SortKey)}
+            aria-label="Sort by"
             className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-text-primary"
           >
             {SORT_OPTIONS.map((o) => (
@@ -355,6 +356,7 @@ export function StrategyFilters({
           <select
             value={sortDir}
             onChange={(e) => onSortDirChange(e.target.value as SortDir)}
+            aria-label="Sort direction"
             className="rounded-lg border border-border bg-surface px-2 py-1.5 text-sm text-text-primary"
           >
             {SORT_DIR_OPTIONS.map((o) => (

@@ -195,7 +195,7 @@ export default function DrawdownChart({
       )}
       <div style={{ flex: 1, minHeight: 0 }}>
         <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 100, height: 100 }}>
-          <AreaChart data={chartData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
+          <AreaChart accessibilityLayer={false} data={chartData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
             <defs>
               <linearGradient id="dd-fill" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="#DC2626" stopOpacity={0.3} />

@@ -115,13 +115,16 @@ test.describe(
         .click();
       await page.waitForURL(/\/profile.*tab=exchanges/, { timeout: 10_000 });
 
-      // 4. Verify the wizard hardening strips render (S5 + S7 from Plan 06).
-      await expect(page.getByText(/READ ONLY ONLY/)).toBeVisible({
-        timeout: 10_000,
-      });
-      await expect(
-        page.getByText(/Locking your exchange key to an IP allowlist/),
-      ).toBeVisible();
+      // 4. (Removed PR #108 review.) The two wizard hardening strips
+      //    (`WithdrawalWarningStrip`, `WizardIpAllowlistHint`) are mounted
+      //    inside `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx`,
+      //    NOT on /profile?tab=exchanges (which is where the
+      //    "Connect Exchange" CTA at OnboardingBanner.tsx:64 hard-codes its
+      //    href). The earlier visibility assertions here scanned the
+      //    profile/exchanges tab for wizard-only copy and timed out. Strip
+      //    rendering is covered by the WithdrawalWarningStrip.test.tsx /
+      //    WizardIpAllowlistHint.test.tsx unit tests; this spec's contract
+      //    (preamble lines 17-22) is marker presence, asserted at step 7.
 
       // 5. Service-role bridge between the UI checkpoints and the marker
       //    contract. The wizard's full sync path needs the Python

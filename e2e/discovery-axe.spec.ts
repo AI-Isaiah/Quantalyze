@@ -19,12 +19,27 @@
  */
 import { test, expect } from "@playwright/test";
 import { buildAxe } from "./helpers/axe";
+import { seedTestAllocator } from "./helpers/seed-test-project";
 
 const DISCOVERY_SLUG = process.env.DISCOVERY_SLUG ?? "";
 const HAS_SEED_ENV =
   !!process.env.TEST_SUPABASE_URL &&
   !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 const SLUG = DISCOVERY_SLUG || (HAS_SEED_ENV ? "crypto-sma" : "");
+
+async function loginViaForm(
+  page: import("@playwright/test").Page,
+  email: string,
+  password: string,
+) {
+  await page.goto("/login");
+  await page.fill('input[name="email"], input[placeholder*="email" i]', email);
+  await page.fill('input[type="password"]', password);
+  await page.click('button:has-text("Sign in")');
+  await page.waitForURL(/\/(discovery|strategies|allocations|dashboard)/, {
+    timeout: 10000,
+  });
+}
 
 test.describe("Phase 14b — discovery axe (A11Y-02)", () => {
   test.skip(
@@ -37,6 +52,19 @@ test.describe("Phase 14b — discovery axe (A11Y-02)", () => {
   test(`zero axe violations on /discovery/${SLUG || "<slug>"}`, async ({
     page,
   }) => {
+    // /discovery/* is auth-gated by middleware AND by an accredited-investor
+    // gate inside src/app/(dashboard)/discovery/layout.tsx. Without an
+    // attested session the route renders the AccreditedInvestorGate (or
+    // redirects to /login). PR #108 review flagged this — the spec was
+    // silently scanning login-page chrome (or the gate) and reporting
+    // landmark-one-main / region violations from those screens, not from
+    // discovery itself. seedTestAllocator() now stamps an
+    // investor_attestations row so the seeded user clears the gate.
+    if (HAS_SEED_ENV) {
+      const allocator = await seedTestAllocator();
+      await loginViaForm(page, allocator.email, allocator.password);
+    }
+
     await page.goto(`/discovery/${SLUG}`);
     await page.waitForLoadState("networkidle");
 

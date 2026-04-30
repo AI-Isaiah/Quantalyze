@@ -124,6 +124,12 @@ export interface StrategyAnalytics {
  * condition fires (no `false` writes), so consumers should treat absence
  * as "fine" and presence-with-truthy-value as "degraded".
  *
+ * Most flags signal a degraded computation (presence ⇒ warn the
+ * operator). One flag — `no_linked_api_key` — signals INHERENT
+ * demo/paper state, not degradation. The UI surfaces it with neutral
+ * copy ("Demo strategy") rather than the warning amber chip used for
+ * the others.
+ *
  * Adding a new flag here without a matching consumer surface is a smell —
  * unread flags hide degraded states from allocators. See
  * src/components/strategy/VolumeExposureTab.tsx and
@@ -131,6 +137,9 @@ export interface StrategyAnalytics {
  */
 export interface AnalyticsDataQualityFlags {
   benchmark_unavailable?: boolean;
+  /** Human-readable note paired with `benchmark_unavailable`. Emitted by
+   *  analytics_runner.py:868 when benchmark_returns is None or stale. */
+  benchmark_note?: string;
   position_reconstruction_failed?: boolean;
   position_reconstruction_error?: string;
   position_snapshots_unavailable?: boolean;
@@ -157,6 +166,10 @@ export interface AnalyticsDataQualityFlags {
    */
   no_linked_api_key?: boolean;
   sibling_kinds_failed?: boolean;
+  /** 200-char truncated error tail paired with `sibling_kinds_failed`.
+   *  Emitted by analytics_runner.py:980 when the sibling-table batch
+   *  upsert RPC fails. Surfaced on the admin compute-jobs page. */
+  sibling_kinds_error?: string;
 }
 
 export interface VolumeMetrics {

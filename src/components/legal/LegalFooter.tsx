@@ -15,7 +15,7 @@ export function LegalFooter() {
         <p>
           © {new Date().getFullYear()} {PLATFORM_NAME}. All rights reserved.
         </p>
-        <nav className="flex items-center gap-1">
+        <nav aria-label="Legal" className="flex items-center gap-1">
           <Link
             href="/security"
             className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"

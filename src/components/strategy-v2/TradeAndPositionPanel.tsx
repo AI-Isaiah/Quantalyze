@@ -233,7 +233,12 @@ function Body({
 
       <TradeMixSubPanel
         buckets={tm.trade_mix}
-        approximate={data_quality_flags?.trade_mix_approximation === true}
+        // Truthy check (NOT === true) — same defensive pattern documented
+        // at VolumeExposureTab.tsx:8-12. The Python writer only emits
+        // booleans today, but the === true form silently broke once on
+        // account_balance-class flags and the regression-test budget
+        // doesn't cover Python type-coercion edge cases.
+        approximate={!!data_quality_flags?.trade_mix_approximation}
       />
     </div>
   );

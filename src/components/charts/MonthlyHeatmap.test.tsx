@@ -8,20 +8,21 @@ import { MonthlyHeatmap } from "./MonthlyHeatmap";
  * Phase 14b-02 / DESIGN-01 — MonthlyHeatmap identity audit.
  *
  * Tests:
- *   8. For value 0.07, rendered cell has style.backgroundColor='#16A34A',
- *      style.opacity≈0.7 (NOT bg-emerald-400). For value -0.07,
- *      backgroundColor='#DC2626', opacity≈0.7. NO bg-emerald-* / bg-red-*
- *      Tailwind class anywhere.
+ *   8. For value 0.07, rendered cell has the saturated-positive bg
+ *      (#15803D, green-700) AND no inline opacity (PR #108: opacity was
+ *      collapsing fg/bg contrast to ~1:1, axe flagged 138 violations).
+ *      For value -0.07, the saturated-negative bg (#B91C1C, red-700).
+ *      NO bg-emerald-* / bg-red-* Tailwind class anywhere.
  *   9. font-medium scan: file source contains zero `font-medium` matches.
  */
 
 describe("MonthlyHeatmap — DESIGN-01 identity (14b-02)", () => {
-  it("Test 8: cell uses inline-style hex + opacity; no bg-emerald/red Tailwind classes", () => {
+  it("Test 8: cell uses inline-style hex + zero opacity; no bg-emerald/red Tailwind classes", () => {
     const data = {
       "2024": {
-        Jan: 0.07,   // expect #16A34A @ 0.7
-        Feb: -0.07,  // expect #DC2626 @ 0.7
-        Mar: 0.0,    // expect #FFFFFF @ 1.0
+        Jan: 0.07,   // expect #15803D (green-700, was 0.7 opacity)
+        Feb: -0.07,  // expect #B91C1C (red-700, was 0.7 opacity)
+        Mar: 0.0,    // expect #FFFFFF
       },
     };
     const { container } = render(<MonthlyHeatmap data={data} />);
@@ -33,14 +34,19 @@ describe("MonthlyHeatmap — DESIGN-01 identity (14b-02)", () => {
     // Find the Jan cell (positive 0.07) and assert its style.
     const janCell = Array.from(container.querySelectorAll('div[title="7.0%"]'))[0] as HTMLElement | undefined;
     expect(janCell).toBeDefined();
-    expect(janCell?.style.backgroundColor).toMatch(/#16A34A|rgb\(22,\s*163,\s*74\)/i);
-    expect(parseFloat(janCell?.style.opacity ?? "1")).toBeCloseTo(0.7, 2);
+    expect(janCell?.style.backgroundColor).toMatch(
+      /#15803D|rgb\(21,\s*128,\s*61\)/i,
+    );
+    // Opacity must be unset (inline style empty) — see PR #108 contrast fix.
+    expect(janCell?.style.opacity).toBe("");
 
     // Find the Feb cell (negative -0.07).
     const febCell = Array.from(container.querySelectorAll('div[title="-7.0%"]'))[0] as HTMLElement | undefined;
     expect(febCell).toBeDefined();
-    expect(febCell?.style.backgroundColor).toMatch(/#DC2626|rgb\(220,\s*38,\s*38\)/i);
-    expect(parseFloat(febCell?.style.opacity ?? "1")).toBeCloseTo(0.7, 2);
+    expect(febCell?.style.backgroundColor).toMatch(
+      /#B91C1C|rgb\(185,\s*28,\s*28\)/i,
+    );
+    expect(febCell?.style.opacity).toBe("");
   });
 
   it("Test 9: zero `font-medium` instances in MonthlyHeatmap.tsx source (DESIGN-02 type contract)", () => {

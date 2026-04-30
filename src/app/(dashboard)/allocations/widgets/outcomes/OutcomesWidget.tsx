@@ -289,6 +289,7 @@ function Sparkline({ points }: { points: SparklinePoint[] }) {
   return (
     <ResponsiveContainer width="100%" height={48}>
       <LineChart
+        accessibilityLayer={false}
         data={points}
         margin={{ top: 2, right: 0, bottom: 2, left: 0 }}
       >

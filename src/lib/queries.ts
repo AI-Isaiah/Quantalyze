@@ -401,8 +401,16 @@ export interface StrategyV2Detail {
 const STRATEGY_V2_STRATEGY_COLUMNS =
   "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";
 
+// CRITICAL: data_quality_flags MUST stay in this projection. PR #106
+// added the typed AnalyticsDataQualityFlags interface and PR #107 added
+// the no_linked_api_key flag, but the v2 SELECT was never updated to
+// pull the column — so PostgREST silently returned rows without it,
+// the cast on line ~500 narrowed `undefined` to `null`, and every chip
+// PR #106/#107 added (Approximate / Demo / Trade-Mix-Approximate) was
+// silently dead in production on /strategy/{id}/v2. Caught by /review
+// cross-PR audit, 2026-04-30. Pinned by queries.test.ts.
 const STRATEGY_V2_ANALYTICS_COLUMNS =
-  "computation_status, metrics_json, cumulative_return, cagr, sharpe, sortino, max_drawdown, volatility, returns_series, drawdown_series, monthly_returns, return_quantiles, rolling_metrics, trade_metrics";
+  "computation_status, metrics_json, cumulative_return, cagr, sharpe, sortino, max_drawdown, volatility, returns_series, drawdown_series, monthly_returns, return_quantiles, rolling_metrics, trade_metrics, data_quality_flags";
 
 export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
   strategyId: string,

@@ -152,10 +152,15 @@ export function Sidebar({
         </Link>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-4">
+      <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
         {sections.map((section) => (
           <div key={section.heading} className="mt-6 first:mt-2">
-            <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-sidebar-text/50">
+            {/* PR #108 review: removed `text-sidebar-text/50` — Tailwind opacity
+                modifier collapses fg+bg through to the parent (#0F172A), giving
+                effective `#525D71 on #0F172A = 2.68:1` (axe color-contrast,
+                serious). Use full sidebar-text (#94A3B8) which gives 6.75:1 on
+                the same bg. Hierarchy preserved by font-semibold + tracking. */}
+            <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-sidebar-text">
               {section.heading}
             </p>
             {section.items.length > 0 && (
@@ -174,7 +179,12 @@ export function Sidebar({
                 key={group.label}
                 className={idx === 0 ? "" : "mt-3"}
               >
-                <p className="mb-1 px-3 text-[10px] font-medium uppercase tracking-wider text-sidebar-text/35">
+                {/* PR #108 review: removed `text-sidebar-text/35` — same
+                    alpha-collapse issue as the parent heading (1.94:1 on
+                    #0F172A, axe-flagged). Sub-group labels use full
+                    sidebar-text and rely on font-medium (vs the parent's
+                    semibold) + smaller tracking for hierarchy. */}
+                <p className="mb-1 px-3 text-[10px] font-medium uppercase tracking-wider text-sidebar-text">
                   {group.label}
                 </p>
                 <ul className="space-y-0.5">
