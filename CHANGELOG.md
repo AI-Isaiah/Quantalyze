@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.9] - 2026-04-30
+
+**v0.17.1 audit follow-up — close METRICS-15 in the planning record.** The 2026-04-29 milestone audit listed METRICS-15 path-extraction as the lone outstanding item (effective score 52/53), but PR #86 (squash-merge `642a589`, feature-branch `b2cd33b perf(queries/MA-1): getStrategyDetailV2 path-extraction`) shipped the rewrite the same day the audit was filed. The planning docs hadn't caught up. This patch fixes that, and inventories the remaining "v0.17.1 outstanding items" against current code so the next audit run reads true.
+
+### Changed
+
+- **`.planning/REQUIREMENTS.md` — METRICS-15 ticked.** Line 95 checkbox flipped from `[ ]` → `[x]`; status row updated from "Partial" to "✅ Complete" with the PR #86 merge SHA (`642a589`) and pointers to `STRATEGY_V2_STRATEGY_COLUMNS` (9 fields) + `STRATEGY_V2_ANALYTICS_COLUMNS` (14 fields) at `src/lib/queries.ts:407`.
+- **`.planning/STATE.md` — stale claim corrected.** The Phase 12 Plan 08 entry on line 135 said "REQUIREMENTS.md checkbox stays unchecked until that ships." A 2026-04-30 update inline notes the path-extraction half shipped and the checkbox is now ticked.
+
 ## [0.17.1.8] - 2026-04-29
 
 **Long-tail tech-debt safe batch.** Eight low-regression-surface items pulled from the cross-PR specialist tech-debt list and shipped together. Riskier items (chromium 15-majors, ts5→6, queries.ts split, TabPanel as-any refactor, EquityChart split, full knip widget removal) explicitly DEFERRED.
