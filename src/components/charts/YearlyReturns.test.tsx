@@ -7,7 +7,7 @@ import { YearlyReturns } from "./YearlyReturns";
  * Phase 14b-02 / DESIGN-01 — YearlyReturns identity audit.
  *
  * Tests:
- *   4. Positive-bar Cell fill="#16A34A" (replacing legacy #059669)
+ *   4. Positive-bar Cell fill="#15803D" (replacing legacy #059669)
  *   5. XAxis + YAxis tick spreads CHART_TICK_STYLE — no inline {fontSize, fill, fontFamily} literal
  */
 
@@ -41,7 +41,7 @@ vi.mock("recharts", async () => {
 });
 
 describe("YearlyReturns — DESIGN-01 identity (14b-02)", () => {
-  it("Test 4: positive Cell fill='#16A34A', negative '#DC2626' — no #059669", () => {
+  it("Test 4: positive Cell fill='#15803D', negative '#DC2626' — no #059669", () => {
     captured.length = 0;
     const monthlyReturns = {
       "2023": { Jan: 0.02, Feb: 0.03, Mar: 0.01 }, // positive year
@@ -50,7 +50,7 @@ describe("YearlyReturns — DESIGN-01 identity (14b-02)", () => {
     render(<YearlyReturns monthlyReturns={monthlyReturns} />);
     const cells = captured.filter((c) => c.type === "Cell");
     const fills = new Set(cells.map((c) => c.props.fill as string));
-    expect(fills.has("#16A34A")).toBe(true);
+    expect(fills.has("#15803D")).toBe(true);
     expect(fills.has("#DC2626")).toBe(true);
     expect(fills.has("#059669")).toBe(false);
   });

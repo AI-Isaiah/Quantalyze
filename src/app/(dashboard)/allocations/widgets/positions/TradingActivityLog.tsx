@@ -40,7 +40,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center text-xs" style={{ color: "#718096" }}>
+      <div className="flex h-full items-center justify-center text-xs" style={{ color: "#64748B" }}>
         Loading activity...
       </div>
     );
@@ -48,7 +48,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
 
   if (activity.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-sm" style={{ color: "#718096" }}>
+      <div className="flex h-full items-center justify-center text-sm" style={{ color: "#64748B" }}>
         No trading activity yet.
       </div>
     );
@@ -64,7 +64,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
                 <th
                   key={h}
                   className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-                  style={{ color: "#718096" }}
+                  style={{ color: "#64748B" }}
                 >
                   {h}
                 </th>
@@ -95,7 +95,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
                 </td>
                 <td
                   className="px-3 py-2 font-metric tabular-nums text-xs"
-                  style={{ color: row.pnl_usd >= 0 ? "#16A34A" : "#DC2626" }}
+                  style={{ color: row.pnl_usd >= 0 ? "#15803D" : "#DC2626" }}
                 >
                   {row.pnl_usd >= 0 ? "+" : ""}
                   {row.pnl_usd.toLocaleString("en-US", {
@@ -103,7 +103,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
                     maximumFractionDigits: 2,
                   })}
                 </td>
-                <td className="px-3 py-2 text-xs" style={{ color: "#718096" }}>
+                <td className="px-3 py-2 text-xs" style={{ color: "#64748B" }}>
                   {row.exchange}
                 </td>
               </tr>
@@ -112,7 +112,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
         </table>
       </div>
       {!hasFills && (
-        <p className="px-3 py-2 text-xs" style={{ color: "#718096", fontSize: 12 }}>
+        <p className="px-3 py-2 text-xs" style={{ color: "#64748B", fontSize: 12 }}>
           Daily P&amp;L aggregated from exchange account history. Trade-level granularity coming in a future sprint.
         </p>
       )}

@@ -51,7 +51,7 @@ export function SizeStepper({ current, onChange }: Props) {
             border: "none",
             borderRadius: 2,
             background: s === current ? "var(--accent, #1B6B5A)" : "transparent",
-            color: s === current ? "#fff" : "var(--text-muted, #718096)",
+            color: s === current ? "#fff" : "var(--text-muted, #64748B)",
             fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
             fontSize: 9.5,
             fontWeight: 600,

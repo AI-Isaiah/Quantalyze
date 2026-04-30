@@ -123,7 +123,7 @@ export function textColor(v: number): string {
 // Cell fallback colors for diagonal / missing-data cells.
 const DIAG_BG = "#F1F5F9";
 const MISSING_BG = "#F8F9FA";
-const MUTED_FG = "#718096";
+const MUTED_FG = "#64748B";
 
 function pickTopTenByAvgCorr(
   matrix: Record<string, Record<string, number>>,

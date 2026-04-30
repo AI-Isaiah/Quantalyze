@@ -40,7 +40,7 @@ export function DataFreshness({ data }: WidgetProps) {
           >
             <span
               className="inline-block h-2 w-2 rounded-full flex-shrink-0"
-              style={{ backgroundColor: available ? "#16A34A" : "#DC2626" }}
+              style={{ backgroundColor: available ? "#15803D" : "#DC2626" }}
               aria-hidden="true"
             />
             <div className="flex flex-col min-w-0">
@@ -52,7 +52,7 @@ export function DataFreshness({ data }: WidgetProps) {
               </span>
               <span
                 className="text-[10px]"
-                style={{ color: available ? "#16A34A" : "#DC2626" }}
+                style={{ color: available ? "#15803D" : "#DC2626" }}
               >
                 {available ? "Available" : "No data"}
               </span>

@@ -69,12 +69,12 @@ export function MorningBriefing({ data }: WidgetProps) {
           >
             Morning Briefing
           </h3>
-          <span className="text-xs" style={{ color: "#718096" }}>
+          <span className="text-xs" style={{ color: "#64748B" }}>
             {today}
           </span>
         </div>
         <div className="flex-1">
-          <p className="text-sm" style={{ color: "#718096" }}>
+          <p className="text-sm" style={{ color: "#64748B" }}>
             Portfolio briefing not yet generated.
           </p>
         </div>
@@ -94,7 +94,7 @@ export function MorningBriefing({ data }: WidgetProps) {
         >
           Morning Briefing
         </h3>
-        <span className="text-xs" style={{ color: "#718096" }}>
+        <span className="text-xs" style={{ color: "#64748B" }}>
           {today}
         </span>
       </div>
@@ -125,7 +125,7 @@ export function MorningBriefing({ data }: WidgetProps) {
           <div>
             <p
               className="mb-1.5 text-[10px] uppercase tracking-wider font-semibold"
-              style={{ color: "#718096" }}
+              style={{ color: "#64748B" }}
             >
               Monthly breakdown
             </p>

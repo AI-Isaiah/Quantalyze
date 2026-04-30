@@ -16,7 +16,7 @@ import { formatPercent } from "@/lib/utils";
 
 function teInterpretation(te: number): { label: string; color: string } {
   const pct = te * 100;
-  if (pct < 2) return { label: "Low", color: "#16A34A" };
+  if (pct < 2) return { label: "Low", color: "#15803D" };
   if (pct < 5) return { label: "Moderate", color: "#CA8A04" };
   return { label: "High", color: "#DC2626" };
 }
@@ -107,7 +107,7 @@ export function TrackingError({ data }: WidgetProps) {
     return (
       <div
         className="flex h-full items-center justify-center text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         Insufficient data for tracking error (need 2+ strategies)
       </div>
@@ -129,7 +129,7 @@ export function TrackingError({ data }: WidgetProps) {
         </div>
         <div
           className="mt-1 font-sans text-xs font-semibold uppercase tracking-wider"
-          style={{ color: "#718096" }}
+          style={{ color: "#64748B" }}
         >
           Annualized Tracking Error
         </div>
@@ -149,7 +149,7 @@ export function TrackingError({ data }: WidgetProps) {
       {/* Note */}
       <div
         className="text-center font-sans text-[10px] leading-relaxed"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         vs. equal-weight benchmark
         <br />

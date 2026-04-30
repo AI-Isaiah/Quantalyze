@@ -77,7 +77,7 @@ export function TailRisk({ data }: WidgetProps) {
     return (
       <div
         className="flex h-full items-center justify-center text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         No extreme loss events detected (below -2%)
       </div>
@@ -110,13 +110,13 @@ export function TailRisk({ data }: WidgetProps) {
           >
             <XAxis
               dataKey="label"
-              tick={{ fontSize: 9, fill: "#718096" }}
+              tick={{ fontSize: 9, fill: "#64748B" }}
               tickLine={false}
               axisLine={{ stroke: "#E2E8F0" }}
               interval={2}
             />
             <YAxis
-              tick={{ fontSize: 10, fill: "#718096" }}
+              tick={{ fontSize: 10, fill: "#64748B" }}
               tickLine={false}
               axisLine={false}
             />

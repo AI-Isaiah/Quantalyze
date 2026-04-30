@@ -24,7 +24,7 @@ function riskZone(var95: number): "green" | "yellow" | "red" {
 }
 
 const ZONE_COLORS = {
-  green: "#16A34A",
+  green: "#15803D",
   yellow: "#CA8A04",
   red: "#DC2626",
 } as const;
@@ -50,7 +50,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
     return (
       <div
         className="flex h-full items-center justify-center text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         Insufficient return data for VaR calculation
       </div>
@@ -73,7 +73,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
           </div>
           <div
             className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
-            style={{ color: "#718096" }}
+            style={{ color: "#64748B" }}
           >
             VaR 95%
           </div>
@@ -87,7 +87,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
           </div>
           <div
             className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
-            style={{ color: "#718096" }}
+            style={{ color: "#64748B" }}
           >
             VaR 99%
           </div>
@@ -101,7 +101,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
           </div>
           <div
             className="mt-1 font-sans text-[11px] font-medium uppercase tracking-wider"
-            style={{ color: "#718096" }}
+            style={{ color: "#64748B" }}
           >
             CVaR 95%
           </div>
@@ -111,12 +111,12 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
       {/* Risk zone bar */}
       <div className="px-1">
         <div className="flex gap-0.5 overflow-hidden rounded" style={{ height: 8 }}>
-          <div className="flex-1" style={{ backgroundColor: "#16A34A" }} />
+          <div className="flex-1" style={{ backgroundColor: "#15803D" }} />
           <div className="flex-1" style={{ backgroundColor: "#CA8A04" }} />
           <div className="flex-1" style={{ backgroundColor: "#DC2626" }} />
         </div>
         <div className="mt-1.5 flex items-center justify-between">
-          <span className="font-sans text-[10px]" style={{ color: "#718096" }}>
+          <span className="font-sans text-[10px]" style={{ color: "#64748B" }}>
             Low risk
           </span>
           <span
@@ -128,7 +128,7 @@ export function VarExpectedShortfall({ data }: WidgetProps) {
           >
             {zone}
           </span>
-          <span className="font-sans text-[10px]" style={{ color: "#718096" }}>
+          <span className="font-sans text-[10px]" style={{ color: "#64748B" }}>
             High risk
           </span>
         </div>

@@ -33,7 +33,7 @@ export function CustomKpiStrip({ data }: WidgetProps) {
           <div key={kpi.key} className="flex flex-col items-center px-3 py-1">
             <span
               className="text-[10px] uppercase tracking-wider font-semibold"
-              style={{ color: "#718096" }}
+              style={{ color: "#64748B" }}
             >
               {kpi.label}
             </span>
@@ -42,9 +42,9 @@ export function CustomKpiStrip({ data }: WidgetProps) {
               style={{
                 color:
                   raw == null
-                    ? "#718096"
+                    ? "#64748B"
                     : raw > 0
-                      ? "#16A34A"
+                      ? "#15803D"
                       : raw < 0
                         ? "#DC2626"
                         : "#1A1A2E",

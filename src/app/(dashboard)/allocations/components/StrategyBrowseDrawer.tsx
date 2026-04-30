@@ -83,7 +83,7 @@ const TIER_CLASS: Record<MandateFitTier, string> = {
 };
 
 const TIER_BG: Record<MandateFitTier, string> = {
-  green: "rgba(22,163,74,0.10)",
+  green: "rgba(21,128,61,0.10)",
   yellow: "rgba(217,119,6,0.10)",
   red: "rgba(220,38,38,0.10)",
 };

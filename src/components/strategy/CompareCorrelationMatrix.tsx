@@ -15,7 +15,7 @@ const TRAILING_DAYS = 365;
 function cellBg(val: number | null): string {
   if (val === null) return "transparent";
   if (val > 0.7) return "rgba(220,38,38,0.1)";
-  if (val < 0.2) return "rgba(22,163,74,0.1)";
+  if (val < 0.2) return "rgba(21,128,61,0.1)";
   return "transparent";
 }
 
@@ -68,7 +68,7 @@ export function CompareCorrelationMatrix({ items }: { items: CompareItem[] }) {
     return (
       <div
         className="flex items-center justify-center py-8 text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         Select at least 2 strategies to see correlation.
       </div>
@@ -82,7 +82,7 @@ export function CompareCorrelationMatrix({ items }: { items: CompareItem[] }) {
           <tr className="border-b" style={{ borderColor: "#E2E8F0" }}>
             <th
               className="px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wider"
-              style={{ color: "#718096" }}
+              style={{ color: "#64748B" }}
             />
             {items.map((item) => (
               <th
@@ -125,7 +125,7 @@ export function CompareCorrelationMatrix({ items }: { items: CompareItem[] }) {
                     key={items[j].strategy.id}
                     className="px-3 py-2 text-right font-metric tabular-nums text-xs"
                     style={{
-                      color: isDiag ? "#718096" : "#1A1A2E",
+                      color: isDiag ? "#64748B" : "#1A1A2E",
                       backgroundColor: isDiag ? "transparent" : cellBg(val),
                     }}
                     title={

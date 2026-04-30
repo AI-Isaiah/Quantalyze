@@ -59,14 +59,14 @@ export default function RollingSharpe({ data }: WidgetProps) {
       <LineChart accessibilityLayer={false} data={merged} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: "#718096" }}
+          tick={{ fontSize: 11, fill: "#64748B" }}
           tickLine={false}
           axisLine={{ stroke: "#E2E8F0" }}
           tickFormatter={(d: string) => d.slice(5)}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fontSize: 11, fill: "#718096", fontFamily: "var(--font-geist-mono), monospace" }}
+          tick={{ fontSize: 11, fill: "#64748B", fontFamily: "var(--font-geist-mono), monospace" }}
           tickLine={false}
           axisLine={false}
           tickFormatter={(v: number) => v.toFixed(1)}
@@ -78,8 +78,8 @@ export default function RollingSharpe({ data }: WidgetProps) {
             return [Number(v).toFixed(2), label];
           }}
         />
-        <ReferenceLine y={1} stroke="#E2E8F0" strokeDasharray="4 4" label={{ value: "1.0", fontSize: 10, fill: "#718096", position: "right" }} />
-        <ReferenceLine y={2} stroke="#E2E8F0" strokeDasharray="4 4" label={{ value: "2.0", fontSize: 10, fill: "#718096", position: "right" }} />
+        <ReferenceLine y={1} stroke="#E2E8F0" strokeDasharray="4 4" label={{ value: "1.0", fontSize: 10, fill: "#64748B", position: "right" }} />
+        <ReferenceLine y={2} stroke="#E2E8F0" strokeDasharray="4 4" label={{ value: "2.0", fontSize: 10, fill: "#64748B", position: "right" }} />
         {WINDOWS.map((w) => (
           <Line
             key={w.key}

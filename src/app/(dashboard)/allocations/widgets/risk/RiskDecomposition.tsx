@@ -135,7 +135,7 @@ export function RiskDecomposition({ data }: WidgetProps) {
     return (
       <div
         className="flex h-full items-center justify-center text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         No strategy data for risk decomposition
       </div>
@@ -153,7 +153,7 @@ export function RiskDecomposition({ data }: WidgetProps) {
         >
           <XAxis
             type="number"
-            tick={{ fontSize: 10, fill: "#718096" }}
+            tick={{ fontSize: 10, fill: "#64748B" }}
             tickLine={false}
             axisLine={{ stroke: "#E2E8F0" }}
             tickFormatter={(v: number) => `${v}%`}

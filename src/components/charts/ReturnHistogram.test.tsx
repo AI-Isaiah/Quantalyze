@@ -7,7 +7,7 @@ import { ReturnHistogram } from "./ReturnHistogram";
  * Phase 14b-02 / DESIGN-01 — ReturnHistogram identity audit.
  *
  * Tests:
- *   1. Positive-value bin Cell uses fill="#16A34A" (NOT legacy emerald #059669)
+ *   1. Positive-value bin Cell uses fill="#15803D" (NOT legacy emerald #059669)
  *   2. Negative-value bin Cell uses fill="#DC2626"
  *   3. XAxis + YAxis tick prop spreads CHART_TICK_STYLE (no inline {fontSize, fill} literal)
  *   4. benchmarkReturns overlay renders a SECOND Bar series with CHART_TEXT_MUTED + 0.4 opacity
@@ -55,7 +55,7 @@ function makeReturns(n: number, fn: (i: number) => number): { date: string; valu
 }
 
 describe("ReturnHistogram — DESIGN-01 identity (14b-02)", () => {
-  it("Test 1+2: positive bin Cell fill='#16A34A', negative bin Cell fill='#DC2626'", () => {
+  it("Test 1+2: positive bin Cell fill='#15803D', negative bin Cell fill='#DC2626'", () => {
     captured.length = 0;
     // Build cumulative equity that produces both positive and negative
     // daily returns: 1.0 → 1.05 → 0.95 → 1.10 → ... over 30 points.
@@ -63,7 +63,7 @@ describe("ReturnHistogram — DESIGN-01 identity (14b-02)", () => {
     render(<ReturnHistogram returns={series} />);
     const cells = captured.filter((c) => c.type === "Cell");
     const fills = new Set(cells.map((c) => c.props.fill as string));
-    expect(fills.has("#16A34A")).toBe(true);
+    expect(fills.has("#15803D")).toBe(true);
     expect(fills.has("#DC2626")).toBe(true);
     // Negative legacy hex must NOT appear.
     expect(fills.has("#059669")).toBe(false);

@@ -10,7 +10,7 @@ interface StrategyRow {
 }
 
 function herfindahlColor(hhi: number): { color: string; label: string } {
-  if (hhi < 0.15) return { color: "#16A34A", label: "Diversified" };
+  if (hhi < 0.15) return { color: "#15803D", label: "Diversified" };
   if (hhi <= 0.25) return { color: "#D97706", label: "Moderate" };
   return { color: "#DC2626", label: "Concentrated" };
 }
@@ -38,7 +38,7 @@ export function ConcentrationRisk({ data }: WidgetProps) {
   if (!result) {
     return (
       <div className="flex h-full items-center justify-center">
-        <span className="text-sm" style={{ color: "#718096" }}>
+        <span className="text-sm" style={{ color: "#64748B" }}>
           No allocation data
         </span>
       </div>
@@ -67,7 +67,7 @@ export function ConcentrationRisk({ data }: WidgetProps) {
         </div>
       </div>
 
-      <span className="text-xs text-center" style={{ color: "#718096" }}>
+      <span className="text-xs text-center" style={{ color: "#64748B" }}>
         Top 2 strategies hold{" "}
         <span className="font-mono tabular-nums font-medium" style={{ color: "#1A1A2E" }}>
           {top2Pct.toFixed(1)}%

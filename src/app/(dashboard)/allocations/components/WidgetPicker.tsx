@@ -138,7 +138,7 @@ export function WidgetPicker({ isOpen, onClose, anchorRef, activeKeys, onPick }:
             padding: "16px 8px",
             textAlign: "center",
             fontSize: 12,
-            color: "var(--text-muted, #718096)",
+            color: "var(--text-muted, #64748B)",
           }}
         >
           No widgets match &ldquo;{query}&rdquo;
@@ -151,7 +151,7 @@ export function WidgetPicker({ isOpen, onClose, anchorRef, activeKeys, onPick }:
               fontSize: 11,
               textTransform: "uppercase",
               letterSpacing: "0.08em",
-              color: "var(--text-muted, #718096)",
+              color: "var(--text-muted, #64748B)",
               margin: "12px 0 4px",
             }}
           >
@@ -192,7 +192,7 @@ export function WidgetPicker({ isOpen, onClose, anchorRef, activeKeys, onPick }:
                 <strong style={{ fontWeight: 500 }}>{w.name}</strong>
                 <span
                   style={{
-                    color: "var(--text-muted, #718096)",
+                    color: "var(--text-muted, #64748B)",
                     fontSize: 10,
                     marginLeft: 6,
                   }}

@@ -29,7 +29,7 @@ export function QuickActions({ data }: WidgetProps) {
         className={buttonClass}
         style={{
           borderColor: "#E2E8F0",
-          color: "#718096",
+          color: "#64748B",
           cursor: "not-allowed",
           opacity: 0.6,
         }}
@@ -57,7 +57,7 @@ export function QuickActions({ data }: WidgetProps) {
         className={buttonClass}
         style={{
           borderColor: "#E2E8F0",
-          color: copied ? "#16A34A" : "#1B6B5A",
+          color: copied ? "#15803D" : "#1B6B5A",
         }}
       >
         {copied ? "Copied!" : "Share"}

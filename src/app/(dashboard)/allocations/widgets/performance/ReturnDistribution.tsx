@@ -46,13 +46,13 @@ export default function ReturnDistribution({ data }: WidgetProps) {
       <BarChart accessibilityLayer={false} data={histogramData} margin={{ top: 8, right: 8, bottom: 20, left: 8 }}>
         <XAxis
           dataKey="label"
-          tick={{ fontSize: 10, fill: "#718096" }}
+          tick={{ fontSize: 10, fill: "#64748B" }}
           tickLine={false}
           axisLine={{ stroke: "#E2E8F0" }}
           interval="preserveStartEnd"
         />
         <YAxis
-          tick={{ fontSize: 11, fill: "#718096", fontFamily: "var(--font-geist-mono), monospace" }}
+          tick={{ fontSize: 11, fill: "#64748B", fontFamily: "var(--font-geist-mono), monospace" }}
           tickLine={false}
           axisLine={false}
         />

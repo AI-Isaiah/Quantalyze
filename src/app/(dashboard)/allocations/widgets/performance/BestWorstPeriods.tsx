@@ -50,7 +50,7 @@ export default function BestWorstPeriods({ data }: WidgetProps) {
   }
 
   const fmt = (v: number) => `${(v * 100).toFixed(2)}%`;
-  const color = (v: number) => (v >= 0 ? "#16A34A" : "#DC2626");
+  const color = (v: number) => (v >= 0 ? "#15803D" : "#DC2626");
 
   return (
     <div className="overflow-auto h-full">

@@ -38,7 +38,7 @@ function computeHealth(analytics: StrategyRow["strategy"]["strategy_analytics"])
     }
   }
 
-  return { score: 80, color: "#16A34A", label: "Healthy" };
+  return { score: 80, color: "#15803D", label: "Healthy" };
 }
 
 export function StrategyHealth({ data }: WidgetProps) {
@@ -47,7 +47,7 @@ export function StrategyHealth({ data }: WidgetProps) {
   if (strategies.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
-        <span className="text-sm" style={{ color: "#718096" }}>
+        <span className="text-sm" style={{ color: "#64748B" }}>
           No strategies to monitor
         </span>
       </div>

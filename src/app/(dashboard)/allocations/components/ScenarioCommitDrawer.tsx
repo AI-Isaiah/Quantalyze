@@ -294,7 +294,7 @@ export function ScenarioCommitDrawer({
         {state === "success" && response && (
           <div
             role="status"
-            className="mt-6 rounded-lg border border-positive bg-[rgba(22,163,74,0.08)] p-4 text-sm text-text-primary"
+            className="mt-6 rounded-lg border border-positive bg-[rgba(21,128,61,0.08)] p-4 text-sm text-text-primary"
             data-testid="commit-drawer-success"
           >
             <strong>{response.recorded} decisions recorded.</strong> Scenario

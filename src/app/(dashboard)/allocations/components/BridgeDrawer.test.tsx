@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 /**
  * Phase 09.1 Plan 09 Task 3 — BridgeDrawer state-machine test.
@@ -196,10 +196,13 @@ describe("BridgeDrawer — Phase 09.1 Plan 09 / D-15 / D-16", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Send intro/ }));
 
-    await new Promise((r) => setTimeout(r, 0));
+    // setTimeout(r, 0) was racing the React state flush under CI load —
+    // waitFor polls until the alert mounts, deterministic on slow runners.
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("server fell over");
+    });
 
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert")).toHaveTextContent("server fell over");
     // Still on confirm stage
     expect(screen.getByText("Confirm intro")).toBeInTheDocument();
   });

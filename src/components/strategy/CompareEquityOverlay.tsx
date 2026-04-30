@@ -87,7 +87,7 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
     return (
       <div
         className="flex items-center justify-center py-12 text-sm"
-        style={{ color: "#718096" }}
+        style={{ color: "#64748B" }}
       >
         No return series data available for overlay.
       </div>

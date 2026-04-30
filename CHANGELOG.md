@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.31] - 2026-04-30
+
+**PR #108 follow-up.** Closes the security hole + design-system drift the cross-agent retroactive review surfaced. Five concerns landing as one bundle because they share a theme (PR #108 partial fixes that needed completion).
+
+### Security
+
+- **`src/components/auth/SignOutButton.tsx`** + new **`src/lib/storage-namespaces.ts`** — Closes T-13-02-01 cross-account isolation. PR #108's localStorage purge only covered `discovery_view_preferences:*`, leaking 8 other user-scoped or device-shared keys across accounts on shared devices: `quantalyze-dashboard-config` (no user-scoping at all), `allocations.scenario_v0_15.{allocatorId}` (full scenario draft including strategy weights — keyname embeds A's UUID readable from B's tab), `allocations.tweaks`, `quantalyze-timeframe`, `quantalyze_wizard_state_v1` (leaks A's draft strategy UUID), `widget_state_v2`, `discovery.uiV2`, `admin-compute-jobs-auto-refresh`. New registry `APP_NAMESPACED_PREFIXES` is now the single source of truth (consumed by SignOutButton via `purgeAppNamespacedStorage()`). Adding a new app-namespaced key without a registered prefix fails `SignOutButton.test.tsx`'s `registry covers every concrete app key surveyed at write time` test in CI before it can ship to a shared device. Mutation-tested: reverting to the old single-prefix list breaks the registry-coverage test.
+
+### Fixed
+
+- **`src/components/charts/chart-tokens.ts`** — Token drift fix. `CHART_POSITIVE` was stuck at `#16A34A` while DESIGN.md and `--color-positive` moved to `#15803D` (PR #103 WCAG AA fix). Synchronized + propagated: 23 widget files swept for the literal `#16A34A` (and `rgba(22,163,74,…)` form). Adds named ramp tokens `CHART_POSITIVE_100/300/700/800` + `CHART_NEGATIVE_100/300/700/800` + `CHART_TEXT_ON_LIGHT_POSITIVE/NEGATIVE` so heatmaps share one diverging scale.
+
+- **`src/components/charts/DailyHeatmap.tsx`** — Bakes the diverging tints into hex (drops `fillOpacity` / `globalAlpha`). PR #108 fixed this in `MonthlyHeatmap`; `DailyHeatmap` carried the same alpha-collapse bug — per-shape opacity blends through the surface and crushes contrast for the lighter steps. Now consumes `CHART_POSITIVE_*` / `CHART_NEGATIVE_*` tokens and matches the `MonthlyHeatmap` ramp.
+
+- **`src/components/charts/MonthlyHeatmap.tsx`** — Refactors the 9 inline hex literals introduced in PR #108 to consume the new chart-tokens ramp. No visual change; design-system drift closed.
+
+- **23 widget files in `src/app/(dashboard)/allocations/widgets/`** — Bulk `#718096` → `#64748B` axis-tick swap (DESIGN.md retired `#718096` 2026-04-30 — 3.8:1 → 4.85:1 AA-pass).
+
+- **`src/components/strategy/StrategyFilters.tsx:477`** — Adds `aria-label="Minimum track record"` to the third `<select>` in the customize-drawer. PR #108 fixed the two Sort selects but missed this one — same pattern (sibling `<p>` label, not a wrapping `<label>`), would axe-fail `select-name` the moment a future spec scans the customize-drawer tab.
+
+### Performance
+
+- **`e2e/helpers/seed-test-project.ts`** — Parallelizes the `profiles` and `investor_attestations` upserts via `Promise.all` (independent tables, no cross-dependency). Saves ~80ms per spec setup × 6 seed-gated specs ≈ 480ms per CI run.
+
+### Tests
+
+- New **`src/components/auth/SignOutButton.test.tsx`** — Two tests: a behavioral test that seeds one key per registered prefix plus an `sb-*` Supabase auth key plus a foreign extension key, and asserts the purge removes only app keys; and a registry-coverage test that walks an inventory of every concrete localStorage key the app writes today and asserts each maps to a registered prefix.
+
+- **`src/components/charts/DailyHeatmap.test.tsx`** — Updates Tests 3, 4, and 10 to assert the new baked-tint colors and the absence of `fill-opacity`.
+
 ## [0.17.1.30] - 2026-04-30
 
 **Test quality + non-breaking security upgrade.** Replaces 5 tautology unit tests that passed against any implementation with real integration tests, and bumps 4 transitive dependencies to close known advisories.

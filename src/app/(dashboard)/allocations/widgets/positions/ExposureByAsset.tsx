@@ -60,7 +60,7 @@ export default function ExposureByAsset({ data }: WidgetProps) {
 
   if (rows.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-sm" style={{ color: "#718096" }}>
+      <div className="flex h-full items-center justify-center text-sm" style={{ color: "#64748B" }}>
         No position data available.
       </div>
     );

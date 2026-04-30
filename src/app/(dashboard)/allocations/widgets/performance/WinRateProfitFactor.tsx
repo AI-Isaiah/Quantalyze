@@ -91,7 +91,7 @@ export default function WinRateProfitFactor({ data }: WidgetProps) {
             className="text-sm"
             style={{
               fontFamily: "var(--font-geist-mono), monospace",
-              color: "#16A34A",
+              color: "#15803D",
             }}
           >
             {(metrics.avgWin * 100).toFixed(2)}%
@@ -115,7 +115,7 @@ export default function WinRateProfitFactor({ data }: WidgetProps) {
             className="text-sm"
             style={{
               fontFamily: "var(--font-geist-mono), monospace",
-              color: metrics.expectancy >= 0 ? "#16A34A" : "#DC2626",
+              color: metrics.expectancy >= 0 ? "#15803D" : "#DC2626",
             }}
           >
             {(metrics.expectancy * 100).toFixed(3)}%
