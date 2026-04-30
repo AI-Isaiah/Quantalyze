@@ -24,13 +24,17 @@
      green-700, 5.12:1 on white and 4.91:1 on bg-page. */
   --color-positive: #15803D;
   --color-negative: #DC2626;
-  /* WCAG 2 AA: was #D97706 (3.94:1 on bg-surface, ~3.78:1 on bg-page —
+  /* WCAG 2 AA: was #D97706 (3.19:1 on bg-surface, 3.06:1 on bg-page —
      fails for 12px small text like the chip labels in TradeAndPositionPanel
      "Approximate — turnover denominated against gross exposure" and the
      warning banners in VolumeExposureTab / PositionsTab). #B45309 is
      Tailwind amber-700, 5.05:1 on white and 4.85:1 on bg-page (AA pass for
      normal text, well above the 4.5 threshold). 2026-04-30 follow-up to #103
-     after axe surfaced the warning-token contrast violations next. */
+     after axe surfaced the warning-token contrast violations next.
+     The 4.6:1 figure quoted in the 2026-04-11 DESIGN.md decision-log row
+     was a memory error; actual measured contrast against #FFFFFF was
+     3.19:1 (WCAG sRGB-relative-luminance formula).
+     Pinned by tests/a11y/chart-contrast.test.ts. */
   --color-warning: #B45309;
 
   --color-border: #E2E8F0;
