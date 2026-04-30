@@ -593,25 +593,31 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             )
             position_snapshots_error = str(exc)[:200]
 
-        # B-01: fetch fills once, feed both volume helpers + trade_mix.
-        # `cost` is needed by _compute_volume_metrics; `notional_usd`,
-        # `is_maker`, `holding_period_hours`, `filled_at`, `side` are needed by
-        # _compute_volume_aggregator + _compute_trade_mix (per migration 039
-        # column shape). Selecting columns explicitly to keep payload bounded.
+        # Fetch fills once, feed volume helpers + trade_mix. The trades
+        # table only stores side / cost / is_maker / timestamp; the prior
+        # `notional_usd, holding_period_hours, filled_at, created_at`
+        # column list 400'd because those columns don't exist (migration
+        # 039 was never landed). Project `cost` -> `notional_usd` and
+        # `timestamp` -> `filled_at` so downstream helpers see the keys
+        # they expect; missing keys still fall through `.get(..., default)`.
         fills_data: list[dict] = []
         try:
             fills_result = await db_execute(
                 lambda: supabase.table("trades")
-                .select(
-                    "side, cost, is_maker, notional_usd, "
-                    "holding_period_hours, filled_at, created_at"
-                )
+                .select("side, cost, is_maker, timestamp")
                 .eq("strategy_id", strategy_id)
                 .eq("is_fill", True)
                 .execute()
             )
-            fills_data = fills_result.data if fills_result else []
-            fills_data = fills_data or []
+            raw_fills = (fills_result.data if fills_result else []) or []
+            fills_data = [
+                {
+                    **row,
+                    "notional_usd": abs(float(row.get("cost") or 0.0)),
+                    "filled_at": row.get("timestamp"),
+                }
+                for row in raw_fills
+            ]
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Fills fetch failed for %s: %s", strategy_id, str(exc)
