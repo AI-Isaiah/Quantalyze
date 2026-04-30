@@ -5,9 +5,15 @@ import type { StrategyAnalytics } from "@/lib/types";
 
 export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics }) {
   const dqf = analytics.data_quality_flags ?? null;
-  const positionMetricsFailed = dqf?.position_metrics_failed === true;
-  const fillsFetchFailed = dqf?.fills_fetch_failed === true;
-  const positionSideVolumeFailed = dqf?.position_side_volume_failed === true;
+  // Truthy checks (NOT `=== true`) so a Python writer that emits the flag as
+  // a string (`"true"`) or any other non-false value still trips the warning.
+  // The Python source-of-truth in analytics_runner.py only writes booleans
+  // today, but the `=== true` form silently broke once on `account_balance`-
+  // class flags and we don't want this surface to follow.
+  const positionMetricsFailed = !!dqf?.position_metrics_failed;
+  const fillsFetchFailed = !!dqf?.fills_fetch_failed;
+  const positionSideVolumeFailed = !!dqf?.position_side_volume_failed;
+  const accountBalanceUnavailable = !!dqf?.account_balance_unavailable;
 
   const vm = analytics.volume_metrics as {
     buy_volume_pct?: number;
@@ -159,8 +165,19 @@ export function VolumeExposureTab({ analytics }: { analytics: StrategyAnalytics 
             {/* Turnover placeholder */}
             <div className="border-t border-border" />
             <div className="px-4 py-3">
-              <h4 className="text-sm font-semibold text-text-primary mb-2">Turnover</h4>
-              <p className="text-xs text-text-muted">Turnover analysis coming soon.</p>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-sm font-semibold text-text-primary">Turnover</h4>
+                {accountBalanceUnavailable && (
+                  <span className="text-xs font-medium text-warning">
+                    Approximate denominator
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-text-muted">
+                {accountBalanceUnavailable
+                  ? "Account balance was unavailable when this strategy was synced — turnover is denominated against gross exposure rather than the configured account balance, so cross-strategy comparison is approximate."
+                  : "Turnover analysis coming soon."}
+              </p>
             </div>
           </div>
         </div>

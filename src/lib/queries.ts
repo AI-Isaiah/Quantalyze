@@ -28,6 +28,7 @@ import type {
   ManagerIdentity,
   LazyMetricsPayload,
   TradeMetrics,
+  AnalyticsDataQualityFlags,
 } from "./types";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 
@@ -355,22 +356,14 @@ export interface StrategyV2Detail {
     sharpe: number | null;
   };
   panel6Inputs: {
-    /**
-     * The trade_metrics JSONB blob carries volume-aggregator extras BEYOND
-     * the frozen TradeMetrics interface (gross_volume_usd,
-     * mean_trade_size_usd, daily_turnover_usd, monthly_turnover_usd,
-     * payoff_ratio, profit_factor, winners_count, losers_count). The wider
-     * intersection type matches what `TradeAndPositionPanel` expects so
-     * the shell can pass through unchanged.
-     */
     trade_metrics: TradeMetrics | null;
     /**
-     * Subset of analytics.data_quality_flags relevant to this panel —
-     * trade_mix_approximation tells the panel whether the buy→long fill-side
-     * Trade Mix bucketing is exact (long-only strategy) or approximate
-     * (any short positions present).
+     * Full analytics.data_quality_flags blob, narrowed to the typed
+     * AnalyticsDataQualityFlags interface so a future degraded-state writer
+     * on the Python side surfaces in TS autocomplete instead of going
+     * silently ignored.
      */
-    data_quality_flags: { trade_mix_approximation?: boolean } | null;
+    data_quality_flags: AnalyticsDataQualityFlags | null;
   };
   panel7Inputs: {
     benchmark_greeks: {
@@ -504,9 +497,7 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
       ? ((a?.trade_metrics ?? null) as TradeMetrics | null)
       : null,
     data_quality_flags: isComplete
-      ? ((a?.data_quality_flags ?? null) as
-          | { trade_mix_approximation?: boolean }
-          | null)
+      ? ((a?.data_quality_flags ?? null) as AnalyticsDataQualityFlags | null)
       : null,
   };
 
