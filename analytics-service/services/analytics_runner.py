@@ -411,6 +411,25 @@ def _compute_trade_mix(
     return buckets
 
 
+# KPI-17: per-strategy gate threshold for switching to 4-bucket Trade Mix.
+# Matches D-15 audit gate (≥99% is_maker population on the strategy's fills).
+_MAKER_TAKER_COVERAGE_THRESHOLD = 0.99
+
+
+def _has_maker_taker_coverage(fills: list[dict]) -> bool:
+    """Return True when ≥99% of this strategy's fills carry is_maker.
+
+    Per-strategy data-driven gate: a venue that populates is_maker
+    reliably (current: OKX) auto-qualifies; a venue that doesn't keeps
+    the strategy on the 2-bucket render. No exchange allowlist needed —
+    the data answers for each strategy.
+    """
+    if not fills:
+        return False
+    populated = sum(1 for f in fills if f.get("is_maker") is not None)
+    return populated / len(fills) >= _MAKER_TAKER_COVERAGE_THRESHOLD
+
+
 async def run_strategy_analytics(strategy_id: str) -> dict:
     """Run the full analytics pipeline for a single strategy.
 
@@ -608,13 +627,31 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         derived = _compute_derived_trade_metrics(
             volume_metrics, trade_metrics_from_positions
         )
-        # M-01: TRADE_MIX_HAS_MAKER_TAKER comes from CI / .env.test; deploy
-        # script (Plan 12-10) writes it. False today (D-15 audit fail);
-        # 4-bucket reachable via flag flip in v0.17.1.
-        has_maker_taker = (
+        # KPI-17: 4-bucket Trade Mix gated on (env flag) AND (per-strategy
+        # is_maker coverage ≥99% on this strategy's actual fills). The
+        # env flag is the global kill switch; the per-strategy coverage
+        # check is the audit. Works for all exchanges — when a venue
+        # populates is_maker reliably it auto-qualifies; when it doesn't,
+        # the strategy falls back to 2-bucket. v0.17.1: OKX confirmed
+        # at 100% coverage. Binance/Bybit qualify automatically once
+        # they ingest fills with is_maker populated.
+        env_flag = (
             os.getenv("TRADE_MIX_HAS_MAKER_TAKER", "false").lower() == "true"
         )
+        has_maker_taker = env_flag and _has_maker_taker_coverage(fills_data)
         trade_mix = _compute_trade_mix(fills_data, has_maker_taker=has_maker_taker)
+
+        # Observability: when 4-bucket mode is on, _compute_trade_mix silently
+        # skips fills missing is_maker. The coverage gate caps that at <1% by
+        # design, but log when it happens so operators see the count instead
+        # of a quiet panel-vs-volume discrepancy.
+        if has_maker_taker and fills_data:
+            dropped = sum(1 for f in fills_data if f.get("is_maker") is None)
+            if dropped > 0:
+                logger.info(
+                    "Trade Mix 4-bucket dropped %d/%d fills missing is_maker for strategy %s",
+                    dropped, len(fills_data), strategy_id,
+                )
 
         merged_trade_metrics = {
             **(trade_metrics_from_positions or {}),

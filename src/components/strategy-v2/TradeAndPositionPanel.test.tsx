@@ -237,13 +237,12 @@ describe("TradeAndPositionPanel — Phase 14b-04 Task 2", () => {
     expect(screen.getByText("$9.7M")).not.toBeNull();
   });
 
-  it("Test 7: TradeMixSubPanel mounted with mode='2-bucket' and trade_mix buckets", () => {
+  it("Test 7: TradeMixSubPanel mounted with trade_mix buckets (KPI-17 v0.17.1 — mode auto-detected from shape)", () => {
     render(<TradeAndPositionPanel strategyId="s1" trade_metrics={TM_FULL} />);
-    expect(screen.getByTestId("trade-mix-subpanel").getAttribute("data-mode")).toBe(
-      "2-bucket",
-    );
-    expect(lastTradeMixProps.mode).toBe("2-bucket");
+    expect(screen.getByTestId("trade-mix-subpanel")).not.toBeNull();
     expect(lastTradeMixProps.buckets).toEqual(TM_FULL.trade_mix);
+    // mode prop dropped in v0.17.1.13 — sub-panel auto-detects from buckets shape
+    expect(lastTradeMixProps.mode).toBeUndefined();
   });
 
   it("Test 8: Grok B-04 — useLazyPanelMetrics called with fetchOnIntersect: false; fetch never fires", () => {

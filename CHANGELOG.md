@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.13] - 2026-04-30
+
+**KPI-17 — flip the 4-bucket Trade Mix render with a per-strategy is_maker coverage gate.** v0.17.1's `is_maker` audit is now confirmed for OKX (400/400 prod fills with the flag populated, 100% coverage). Rather than hardcode an OKX-only allowlist, the gate runs per strategy against the strategy's own fills: ≥99% population → 4-bucket (long_maker / long_taker / short_maker / short_taker), below that → 2-bucket fallback. Binance/Bybit auto-qualify the moment their fills ingest with the flag populated — no code change needed when those audits land.
+
+### Added
+
+- **`analytics-service/services/analytics_runner.py`** — `_has_maker_taker_coverage(fills) -> bool` with `_MAKER_TAKER_COVERAGE_THRESHOLD = 0.99`. Returns True when ≥99% of the strategy's fills carry `is_maker`. The runner now gates `_compute_trade_mix(has_maker_taker=...)` on `env_flag AND _has_maker_taker_coverage(fills)` instead of the previous global env-only check, so a strategy on a venue with partial ingestion silently falls back to 2-bucket instead of nulling out its Trade Mix.
+- **`analytics-service/tests/test_analytics_runner.py`** — 5 new tests for the coverage helper: empty-fills returns False, 100%-population returns True (OKX prod shape), below-threshold (98%) returns False, exactly-99% threshold inclusive, missing `is_maker` key counts as unpopulated. 10 trade-mix tests pass total.
+- **`src/components/strategy-v2/TradeMixSubPanel.test.tsx`** — 4-bar render assertion (Test 9) flipped from "renders fallback message" to assert all 4 bars present with correct widths (20/40/10/30%), maker bars at full opacity, taker bars at 0.6 opacity. Test 9b covers OKX prod's all-taker shape (maker bars at 0%, taker bars carry the percentages). Test 9c covers the all-zeros 4-bucket fallback to the empty-state message. 9 frontend tests pass.
+
+### Changed
+
+- **`src/components/strategy-v2/TradeMixSubPanel.tsx`** — drops the `mode` prop. Render mode auto-detects from buckets shape: any of `long_maker / long_taker / short_maker / short_taker` present → 4-bucket; only `long / short` → 2-bucket. Taker bars render at 0.6 opacity to differentiate visually from maker bars while keeping the 2-color (CHART_ACCENT / CHART_TEXT_MUTED) palette. The 4-bucket fallback message ("4-bucket maker/taker mode is reserved for v0.17.1.") is gone.
+- **`src/components/strategy-v2/TradeAndPositionPanel.tsx`** — drops the explicit `mode="2-bucket"` prop on the `TradeMixSubPanel` call. Sub-panel now auto-detects.
+- **Railway env (production)** — `TRADE_MIX_HAS_MAKER_TAKER=true` set on the `quantalyze-analytics` service. The analytics worker reads it on the next compute_analytics job.
+
 ## [0.17.1.12] - 2026-04-30
 
 **Wizard SyncPreview — fix `sync_trades` RPC JSONB shape error and don't let Phase 1 abort Phase 2.** Live evidence from production: the worker successfully pulled 10,000 OKX SWAP fills via `fetch_raw_trades`, but the subsequent `sync_trades` RPC call threw `22023 cannot extract elements from a scalar`, killing the job before Phase 2 could persist the raw fills. Net effect: no rows landed in `trades` and the wizard polled forever.
