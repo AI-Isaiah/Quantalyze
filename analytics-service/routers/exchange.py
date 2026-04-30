@@ -113,14 +113,16 @@ async def fetch_trades(request: Request, req: FetchTradesRequest):
     finally:
         await exchange.close()
 
-    # Store trades atomically with advisory lock (prevents concurrent sync race)
+    # Store trades atomically with advisory lock (prevents concurrent sync race).
+    # Pass `trades` (list[dict]) directly — pre-serializing via json.dumps causes
+    # PostgREST to cast the JSON string into a JSONB scalar string instead of a
+    # JSONB array, which trips migration 007's `jsonb_array_elements(p_trades)`
+    # with 22023 "cannot extract elements from a scalar". The supabase Python
+    # client does the JSON serialization once on the request body.
     if trades:
-        import json as _json
-        trades_json = _json.dumps(trades, default=str)
-
         result = supabase.rpc("sync_trades", {
             "p_strategy_id": req.strategy_id,
-            "p_trades": trades_json,
+            "p_trades": trades,
         }).execute()
         logger.info("Synced %s trades for strategy %s (atomic)", result.data, req.strategy_id)
 

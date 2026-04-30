@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.12] - 2026-04-30
+
+**Wizard SyncPreview — fix `sync_trades` RPC JSONB shape error and don't let Phase 1 abort Phase 2.** Live evidence from production: the worker successfully pulled 10,000 OKX SWAP fills via `fetch_raw_trades`, but the subsequent `sync_trades` RPC call threw `22023 cannot extract elements from a scalar`, killing the job before Phase 2 could persist the raw fills. Net effect: no rows landed in `trades` and the wizard polled forever.
+
+### Fixed
+
+- **`analytics-service/services/job_worker.py:540`** — `run_sync_trades_job` was pre-serializing `trades` via `json.dumps(trades, default=str)` and passing the resulting STRING to `supabase.rpc("sync_trades", {"p_trades": trades_json})`. The supabase Python client serializes the params dict via its own `json.dumps` internally, so PostgREST received the JSON-encoded string as a JSONB scalar string (not a JSONB array). Migration 007's `sync_trades(p_strategy_id, p_trades)` then ran `jsonb_array_elements(p_trades)` against a scalar and threw 22023. Fix: pass `trades` (the raw `list[dict]`) directly. Same pattern + same fix applied to **`analytics-service/routers/exchange.py:117-124`**.
+- **`analytics-service/services/job_worker.py:538-563`** — Phase 1 (daily-PnL `sync_trades` RPC) now runs inside a `try/except` so a failure on that path does NOT abort Phase 2 raw-fill ingestion. Raw fills are the canonical fill-level data the wizard's verify-data gate counts, plus what every downstream analytics consumer reads. A 22023 (or any other transient persist failure) on the lighter-weight daily-PnL path must not destroy the full-fidelity raw-fill payload sitting in memory.
+
+### Why this was latent until now
+
+The sync_trades RPC has been broken on this exact shape since migration 007 (Phase 1 / Sprint 1, v0.5.x). Wizard end-to-end completion never previously hit production because the route 502'd on encryption shape (fixed in PR #93, v0.17.1.11) before the sync layer was reached. The `funding_fetch` path bypasses `sync_trades` entirely — it does direct `.upsert()` on `funding_fees` — which is why funding sync has been quietly succeeding for the same strategies whose `sync_trades` jobs were failing.
+
 ## [0.17.1.11] - 2026-04-30
 
 **Wizard ConnectKeyStep — fix latent envelope-encryption shape check that 502'd every submission.** The `/api/strategies/create-with-key` route's response-shape gate at line 168 required both `api_key_encrypted` and `api_secret_encrypted` to be truthy. But the Python analytics service at `analytics-service/services/encryption.py:80-82` deliberately stores all credentials inside a single `api_key_encrypted` blob (envelope encryption) and intentionally returns `api_secret_encrypted: null`. Migration 031 made the matching DB column nullable to accept this. The TS check has been wrong since the wizard shipped in v0.6.0.0 (Sprint 1). Latent because nobody had successfully connected a key through the wizard in production until this week — the allocator-side `/exchanges` flow uses a different route (`/api/keys/validate-and-encrypt`) that doesn't have the bug. Fix drops the `api_secret_encrypted` requirement from the check and adds an explanatory comment naming the contract.
