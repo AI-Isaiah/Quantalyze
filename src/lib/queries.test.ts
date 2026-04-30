@@ -775,9 +775,32 @@ describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () 
       "metrics_json",
       "trade_metrics",
       "rolling_metrics",
+      // CRITICAL: data_quality_flags MUST be in the projection. PR #106
+      // added the typed AnalyticsDataQualityFlags interface and PR #107
+      // added the no_linked_api_key flag, but the v2 SELECT was never
+      // updated to pull the column — so PostgREST silently returned
+      // rows without it and every chip both PRs added was dead in
+      // production. See queries.ts:404 + the integration test below.
+      "data_quality_flags",
     ]) {
       expect(selectCols).toContain(col);
     }
+  });
+
+  it("panel6Inputs.data_quality_flags maps from analytics.data_quality_flags (no chip is dead-on-arrival)", async () => {
+    const strategyRow = buildStrategyRow();
+    (strategyRow.strategy_analytics as Record<string, unknown>).data_quality_flags = {
+      account_balance_unavailable: true,
+      no_linked_api_key: false,
+      trade_mix_approximation: true,
+    };
+    recorders.strategyData = strategyRow;
+
+    const result = await getStrategyDetailV2(STRAT_ID);
+    expect(result).not.toBeNull();
+    expect(result!.panel6Inputs.data_quality_flags).not.toBeNull();
+    expect(result!.panel6Inputs.data_quality_flags?.account_balance_unavailable).toBe(true);
+    expect(result!.panel6Inputs.data_quality_flags?.trade_mix_approximation).toBe(true);
   });
 
   it("in-memory unpack p95 stays under the 50ms detail-fetch budget", async () => {
