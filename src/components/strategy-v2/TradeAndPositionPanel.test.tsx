@@ -308,4 +308,32 @@ describe("TradeAndPositionPanel — Phase 14b-04 Task 2", () => {
     expect(html).not.toMatch(/\btext-2xl\b/);
     expect(html).not.toMatch(/text-\[14px\]/);
   });
+
+  it("Test 13: account_balance_unavailable surfaces an Approximate chip on the Volume row", () => {
+    render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={TM_FULL}
+        data_quality_flags={{ account_balance_unavailable: true }}
+      />,
+    );
+    expect(
+      screen.getByText(
+        /Approximate.*denominated against gross exposure/i,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("Test 14: chip is suppressed when account_balance_unavailable is absent", () => {
+    render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={TM_FULL}
+        data_quality_flags={{}}
+      />,
+    );
+    expect(
+      screen.queryByText(/Approximate.*denominated against gross exposure/i),
+    ).toBeNull();
+  });
 });

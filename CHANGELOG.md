@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.23] - 2026-04-30
+
+**Closes the 5/5-reviewer consensus finding from the cross-agent audit of PRs #100-#105 + the wizard "Verify data" hang root cause.** The five review subagents (code-reviewer, silent-failure-hunter, type-design-analyzer, comment-analyzer, pr-test-analyzer) all independently flagged the same surface gap: `strategy_analytics.data_quality_flags` had `account_balance_unavailable` written by Python but no UI consumer reading it, plus the TS type was narrowed to a single key while Python writes nine. Allocators were comparing turnover figures across strategies with mixed denominator semantics (configured account balance vs gross-exposure NAV proxy) with no visible warning.
+
+Separately, the Strategy Wizard's "Verify data" step was hanging at 2674 seconds because the `sync_trades` watchdog threshold (10 min) was set lower than the handler timeout (15 min). The watchdog reclaimed still-running jobs back to `pending` before the handler could fail-classify itself, which kicked off an infinite retry loop that never wrote a terminal `computation_status` for the wizard to read. The watchdog was running its safety net BELOW the safety net it was supposed to back up.
+
+### Fixed
+
+- **`analytics-service/main_worker.py:79-90`** — `WATCHDOG_PER_KIND_OVERRIDES["sync_trades"]` 10 min → 20 min, and `compute_portfolio` 10 min → 15 min, restoring the documented invariant that watchdog thresholds exceed handler timeouts. The matching `tests/test_main_worker.py::TestWatchdogTick::test_calls_rpc_with_overrides` assertion was updated. New `TestWatchdogInvariant::test_watchdog_threshold_exceeds_handler_timeout` test pins the relationship for every kind so a future addition can't regress this silently.
+
+- **`src/lib/types.ts:113-145`** — Added `AnalyticsDataQualityFlags` interface mirroring the nine keys `analytics-service/services/analytics_runner.py` writes (benchmark_unavailable, position_reconstruction_failed, position_snapshots_unavailable, position_metrics_failed, fills_fetch_failed, position_side_volume_failed, trade_mix_approximation, account_balance_unavailable, sibling_kinds_failed, plus the five `_error` companion strings). `StrategyAnalytics.data_quality_flags` and `StrategyV2Detail["panel6Inputs"].data_quality_flags` now use the typed interface so a future drift surfaces in TS autocomplete instead of going silently ignored.
+
+- **`src/components/strategy-v2/TradeAndPositionPanel.tsx`** — Volume-metrics section now renders an "Approximate — turnover denominated against gross exposure" warning chip on the right of the section header when `account_balance_unavailable` is set. Section helper extended with an optional `rightSlot` prop.
+
+- **`src/components/strategy/VolumeExposureTab.tsx`** — Turnover sub-card surfaces the same `account_balance_unavailable` flag with an "Approximate denominator" chip + an explanatory paragraph that names the cross-strategy comparison hazard. The three existing flag checks (`positionMetricsFailed`, `fillsFetchFailed`, `positionSideVolumeFailed`) tightened from `=== true` to truthy so a future Python writer that emits a non-boolean value still trips the warning.
+
+### Added
+
+- **`src/components/strategy-v2/TradeAndPositionPanel.test.tsx`** — Tests 13 + 14: render with `data_quality_flags={{ account_balance_unavailable: true }}` asserts the chip; render with empty flags asserts the chip is suppressed.
+
+- **`analytics-service/tests/test_main_worker.py::TestWatchdogInvariant`** — Iterates every entry in `WATCHDOG_PER_KIND_OVERRIDES`, asserts `watchdog_minutes > handler_minutes`. Fails immediately if a future change re-introduces the wizard-hang condition.
+
 ## [0.17.1.22] - 2026-04-30
 
 **Punch-list cleanup: closes METRICS-15 + 4 of 5 seed-gated Playwright failures from the v0.17.1 punch-list.** Wires the canonical 8-strategy demo seeder into CI so the `/discovery/[slug]` specs actually have data; pins Playwright locale/timezone/color scheme so chart-parity goldens stop drifting between Mac dev and Linux CI; populates the `metrics_json.btc_benchmark_returns` key the strategy-v2 keyboard tab order depends on; and locks the `getStrategyDetailV2` path-extraction architecture (no `select *`, p95 unpack budget) with a vitest contract.

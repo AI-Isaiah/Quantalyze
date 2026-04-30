@@ -113,7 +113,37 @@ export interface StrategyAnalytics {
   trade_metrics: TradeMetrics | null;
   volume_metrics: VolumeMetrics | null;
   exposure_metrics: ExposureMetrics | null;
-  data_quality_flags: Record<string, unknown> | null;
+  data_quality_flags: AnalyticsDataQualityFlags | null;
+}
+
+/**
+ * Mirrors the keys that `analytics-service/services/analytics_runner.py`
+ * writes into `strategy_analytics.data_quality_flags`. Every key is optional
+ * because each flag is independent: a strategy can have any subset of these
+ * conditions, or none. The Python writer ONLY sets a flag when its
+ * condition fires (no `false` writes), so consumers should treat absence
+ * as "fine" and presence-with-truthy-value as "degraded".
+ *
+ * Adding a new flag here without a matching consumer surface is a smell —
+ * unread flags hide degraded states from allocators. See
+ * src/components/strategy/VolumeExposureTab.tsx and
+ * src/components/strategy-v2/TradeAndPositionPanel.tsx for current surfaces.
+ */
+export interface AnalyticsDataQualityFlags {
+  benchmark_unavailable?: boolean;
+  position_reconstruction_failed?: boolean;
+  position_reconstruction_error?: string;
+  position_snapshots_unavailable?: boolean;
+  position_snapshots_error?: string;
+  position_metrics_failed?: boolean;
+  position_metrics_error?: string;
+  fills_fetch_failed?: boolean;
+  fills_fetch_error?: string;
+  position_side_volume_failed?: boolean;
+  position_side_volume_error?: string;
+  trade_mix_approximation?: boolean;
+  account_balance_unavailable?: boolean;
+  sibling_kinds_failed?: boolean;
 }
 
 export interface VolumeMetrics {

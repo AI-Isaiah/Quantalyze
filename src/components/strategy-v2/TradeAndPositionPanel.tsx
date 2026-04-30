@@ -4,24 +4,12 @@ import { useLazyPanelMetrics } from "@/hooks/useLazyPanelMetrics";
 import { PartialDataBanner } from "./PartialDataBanner";
 import { MetricCell } from "./MetricCell";
 import { TradeMixSubPanel } from "./TradeMixSubPanel";
-import type { TradeMetrics } from "@/lib/types";
+import type { TradeMetrics, AnalyticsDataQualityFlags } from "@/lib/types";
 
 interface TradeAndPositionPanelProps {
   strategyId: string;
-  /**
-   * From getStrategyDetailV2 — the trade_metrics JSONB blob carries
-   * volume-aggregator extras (gross/mean/daily/monthly volume, payoff,
-   * profit_factor, winners/losers counts). All are declared optional on
-   * `TradeMetrics` so consumers must null-check; no `Record<string,unknown>`
-   * widening is needed.
-   */
   trade_metrics: TradeMetrics | null;
-  /**
-   * data_quality_flags subset relevant to this panel. trade_mix_approximation
-   * is true when the strategy has any short positions — the buy→long fill-side
-   * bucketing mis-attributes "buy to close short" as a long entry.
-   */
-  data_quality_flags?: { trade_mix_approximation?: boolean } | null;
+  data_quality_flags?: AnalyticsDataQualityFlags | null;
 }
 
 /**
@@ -146,7 +134,7 @@ function Body({
   data_quality_flags,
 }: {
   trade_metrics: TradeMetrics;
-  data_quality_flags?: { trade_mix_approximation?: boolean } | null;
+  data_quality_flags?: AnalyticsDataQualityFlags | null;
 }) {
   const grossVolume = tm.gross_volume_usd;
   const meanTradeSize = tm.mean_trade_size_usd;
@@ -221,7 +209,16 @@ function Body({
       </Section>
 
       {/* Volume row */}
-      <Section title="Volume metrics">
+      <Section
+        title="Volume metrics"
+        rightSlot={
+          data_quality_flags?.account_balance_unavailable ? (
+            <span className="text-xs font-semibold text-warning">
+              Approximate — turnover denominated against gross exposure
+            </span>
+          ) : null
+        }
+      >
         <Grid cols={4}>
           <MetricCell label="Gross volume" value={fmtUsdCompact(grossVolume)} />
           <MetricCell label="Mean trade size" value={fmtUsdCompact(meanTradeSize)} />
@@ -241,15 +238,20 @@ function Body({
 function Section({
   title,
   children,
+  rightSlot,
 }: {
   title: string;
   children: React.ReactNode;
+  rightSlot?: React.ReactNode;
 }) {
   return (
     <div className="border-t border-border pt-4">
-      <h3 className="mb-4 text-xs font-normal uppercase tracking-wider text-text-secondary">
-        {title}
-      </h3>
+      <div className="mb-4 flex items-center justify-between">
+        <h3 className="text-xs font-normal uppercase tracking-wider text-text-secondary">
+          {title}
+        </h3>
+        {rightSlot}
+      </div>
       {children}
     </div>
   );
