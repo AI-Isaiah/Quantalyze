@@ -81,49 +81,52 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
   // Ensure the profile row exists. The signup trigger normally handles
   // this, but tests should not race the trigger — make the dependency
   // explicit so the spec is rerun-safe even if the trigger is dropped
-  // in a future migration.
+  // in a future migration. role='allocator' so the Profile > Security
+  // tab actually renders (ProfileTabs.tsx:114 gates
+  // `activeTab === "security" && isAllocator` where
+  // `isAllocator = role === 'allocator' || role === 'both'`). Migration
+  // 001 default is `manager`, so the upsert must be explicit.
   //
-  // role='allocator' so the Profile > Security tab actually renders
-  // (ProfileTabs.tsx:114 gates `activeTab === "security" && isAllocator`,
-  // and `isAllocator = role === 'allocator' || role === 'both'`). Without
-  // this, the audit-log download CTA the onboarding-funnel spec clicks
-  // never mounts. The migration 001 default is `manager`, so the upsert
-  // must be explicit.
-  const { error: profileError } = await admin
-    .from("profiles")
-    .upsert(
-      { id: data.user.id, display_name: email, role: "allocator" },
-      { onConflict: "id" },
-    );
-  if (profileError) {
+  // profiles + investor_attestations are independent (different tables,
+  // no cross-dependency). Run in parallel so each seeded test setup costs
+  // one round-trip instead of two — saves ~80ms per spec × 6 seed-gated
+  // specs ≈ 480ms per CI run.
+  const [profileRes, attestationRes] = await Promise.all([
+    admin
+      .from("profiles")
+      .upsert(
+        { id: data.user.id, display_name: email, role: "allocator" },
+        { onConflict: "id" },
+      ),
+    // Stamp an investor_attestations row so the seeded user clears the
+    // accredited-investor gate at src/app/(dashboard)/discovery/layout.tsx
+    // (and any sibling gate that checks the same table). Without this,
+    // every seeded user lands on the gate component instead of the
+    // requested page — discovery-axe + discovery-prefs-isolation specs
+    // both regressed on this in PR #108 review.
+    admin
+      .from("investor_attestations")
+      .upsert(
+        {
+          user_id: data.user.id,
+          attested_at: new Date().toISOString(),
+          version: "e2e-seed",
+          ip_address: null,
+        },
+        { onConflict: "user_id" },
+      ),
+  ]);
+  if (profileRes.error) {
     // Don't crash the seed — the trigger may have already created the row,
     // in which case the upsert with the new display_name is a non-issue.
     // Log loudly so a real RLS/grant problem surfaces in CI.
     console.warn(
-      `[seed-test-project] profile upsert warning: ${profileError.message}`,
+      `[seed-test-project] profile upsert warning: ${profileRes.error.message}`,
     );
   }
-
-  // Stamp an investor_attestations row so the seeded user clears the
-  // accredited-investor gate at src/app/(dashboard)/discovery/layout.tsx
-  // (and any sibling gate that checks the same table). Without this,
-  // every seeded user lands on the gate component instead of the
-  // requested page — discovery-axe + discovery-prefs-isolation specs
-  // both regressed on this in PR #108 review.
-  const { error: attestationError } = await admin
-    .from("investor_attestations")
-    .upsert(
-      {
-        user_id: data.user.id,
-        attested_at: new Date().toISOString(),
-        version: "e2e-seed",
-        ip_address: null,
-      },
-      { onConflict: "user_id" },
-    );
-  if (attestationError) {
+  if (attestationRes.error) {
     console.warn(
-      `[seed-test-project] attestation upsert warning: ${attestationError.message}`,
+      `[seed-test-project] attestation upsert warning: ${attestationRes.error.message}`,
     );
   }
 
