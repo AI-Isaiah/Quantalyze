@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.19] - 2026-04-30
+
+**E2E seed-helper: convert gotrue's "User not allowed" into an actionable "wrong-key-pasted" diagnostic.** PR #100 unblocked the seed-gated step and exposed that all 11 seed-gated specs failed at `seedStrategyWithHistory (owner) failed: User not allowed`. Root cause: the GitHub secret `TEST_SUPABASE_SERVICE_ROLE_KEY` was set today (10:11:57Z) and almost certainly carries the anon key instead of the service-role key — gotrue rejects `auth.admin.*` calls under the anon role with that exact message. The cryptic Supabase response travels through three layers (helper → @supabase/supabase-js → gotrue HTTP) before a developer sees it, with no hint that the cause is a wrong-key paste. This patch decodes the JWT payload (no signature verification — pure config-error catcher) at the helper boundary and refuses with a clear "paste the service_role from Settings → API → service_role" message. Forward-compatible: non-JWT keys and missing role claims both pass through to the existing downstream behavior.
+
+### Fixed
+
+- **`src/lib/test-safety.ts`** — new `assertSupabaseServiceRoleKey(key, caller)` probe (sibling to `assertNotProductionSupabaseUrl`); decodes the JWT payload, throws when `role !== "service_role"`, no-op for non-JWT inputs.
+- **`e2e/helpers/seed-test-project.ts`** — `getAdmin()` calls the new probe before constructing the Supabase client, so the next CI failure (if any) names the misconfigured secret instead of bouncing off gotrue.
+
+### Tests
+
+- **`src/lib/test-safety.test.ts`** — 8 new tests cover: anon → throws, authenticated → throws, service_role → passes, non-JWT input → passes, unparsable payload → passes, missing role claim → passes, error message names the caller, error message tells the user where to paste the right key.
+
+### Operational follow-up (user action required)
+
+- Open Supabase project `qmnijlgmdhviwzwfyzlc` → Settings → API. Copy the value labelled **"service_role"** (NOT "anon public"). Update the GitHub secret `TEST_SUPABASE_SERVICE_ROLE_KEY` to that value. Re-run CI on main; the seed-gated step should turn green. If it still fails, the new probe message will name the actual `role` claim it found.
+
 ## [0.17.1.18] - 2026-04-30
 
 **CI port-cleanup harder — pkill by name + fuser + 10s ss/lsof poll.** v0.17.1.15's `lsof -ti:3000 + xargs -r kill -9 + 5s poll` failed in production (PR #98 run #320 — user-confirmed). The seed-gated step's WR-04 guard kept tripping because the next-server grandchild was still binding the socket past the cleanup window. Layered multiple methods so any single failure mode is caught:

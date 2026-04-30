@@ -28,7 +28,10 @@
  *   checkpoint is still authoritative — this is just belt-and-braces.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { assertNotProductionSupabaseUrl } from "../../src/lib/test-safety";
+import {
+  assertNotProductionSupabaseUrl,
+  assertSupabaseServiceRoleKey,
+} from "../../src/lib/test-safety";
 
 function getAdmin(): SupabaseClient {
   const url = process.env.TEST_SUPABASE_URL;
@@ -42,6 +45,10 @@ function getAdmin(): SupabaseClient {
   // Phase 11 WR-05 defense-in-depth: refuse known prod URL patterns
   // before any service-role mutation happens.
   assertNotProductionSupabaseUrl(url, "seed-test-project");
+  // Catch the anon-key-in-service-role-slot setup mistake at the helper
+  // boundary, so the failure surface is "paste the right key" rather than
+  // gotrue's downstream "User not allowed".
+  assertSupabaseServiceRoleKey(key, "seed-test-project");
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
   });

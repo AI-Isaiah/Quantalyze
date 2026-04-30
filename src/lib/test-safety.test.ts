@@ -1,9 +1,18 @@
 import { describe, it, expect } from "vitest";
 import {
   assertNotProductionSupabaseUrl,
+  assertSupabaseServiceRoleKey,
   PROD_PROJECT_REFS,
   PROD_NAME_SUBSTRINGS,
 } from "./test-safety";
+
+function makeJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT" }),
+  ).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.fake-signature`;
+}
 
 /**
  * Phase 11 review fix WR-05 — production-URL safety guard tests.
@@ -88,5 +97,68 @@ describe("assertNotProductionSupabaseUrl", () => {
     for (const ref of PROD_PROJECT_REFS) {
       expect(ref).toMatch(/^[a-z0-9]{20}$/);
     }
+  });
+});
+
+/**
+ * Regression coverage for the gotrue "User not allowed" mystery that bit
+ * us once: the TEST_SUPABASE_SERVICE_ROLE_KEY GitHub secret was set to
+ * the anon key by mistake, and every seed-gated e2e spec failed with a
+ * cryptic message that travelled through three layers before hitting
+ * the developer's eyes. The probe converts that into a clear "you
+ * pasted the wrong key" error at the helper boundary.
+ */
+describe("assertSupabaseServiceRoleKey", () => {
+  it("throws with an actionable message when the JWT role is 'anon'", () => {
+    const anonKey = makeJwt({ role: "anon", iss: "supabase" });
+    expect(() =>
+      assertSupabaseServiceRoleKey(anonKey, "seed-test-project"),
+    ).toThrow(
+      /TEST_SUPABASE_SERVICE_ROLE_KEY has role="anon" but service_role is required/,
+    );
+  });
+
+  it("error message tells the user where to paste the right key", () => {
+    const anonKey = makeJwt({ role: "anon" });
+    expect(() => assertSupabaseServiceRoleKey(anonKey, "test")).toThrow(
+      /Settings → API → "service_role"/,
+    );
+  });
+
+  it("throws on any non-service_role role claim, not just 'anon'", () => {
+    const authenticatedKey = makeJwt({ role: "authenticated" });
+    expect(() => assertSupabaseServiceRoleKey(authenticatedKey, "test")).toThrow(
+      /role="authenticated"/,
+    );
+  });
+
+  it("does NOT throw when the JWT carries role: 'service_role'", () => {
+    const serviceKey = makeJwt({ role: "service_role", iss: "supabase" });
+    expect(() => assertSupabaseServiceRoleKey(serviceKey, "test")).not.toThrow();
+  });
+
+  it("does NOT throw when the key is not a JWT (forward-compat with future formats)", () => {
+    expect(() => assertSupabaseServiceRoleKey("sb_secret_abc123", "test")).not.toThrow();
+    expect(() => assertSupabaseServiceRoleKey("placeholder_service_role", "test")).not.toThrow();
+  });
+
+  it("does NOT throw when the JWT payload is unparsable (graceful degradation)", () => {
+    const garbageJwt = "header.not-base64-or-json.signature";
+    expect(() => assertSupabaseServiceRoleKey(garbageJwt, "test")).not.toThrow();
+  });
+
+  it("does NOT throw when the JWT has no role claim (lets the API decide)", () => {
+    const noRoleKey = makeJwt({ iss: "supabase", sub: "anon" });
+    expect(() => assertSupabaseServiceRoleKey(noRoleKey, "test")).not.toThrow();
+  });
+
+  it("error message names the caller for debuggability", () => {
+    const anonKey = makeJwt({ role: "anon" });
+    expect(() =>
+      assertSupabaseServiceRoleKey(anonKey, "seed-test-project"),
+    ).toThrow(/\[seed-test-project\]/);
+    expect(() =>
+      assertSupabaseServiceRoleKey(anonKey, "cleanup-test-project"),
+    ).toThrow(/\[cleanup-test-project\]/);
   });
 });
