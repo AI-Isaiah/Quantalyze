@@ -165,7 +165,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         ? encrypted.kek_version
         : 1;
 
-    if (!api_key_encrypted || !api_secret_encrypted) {
+    // Envelope-encryption contract: the Python service stores all credentials
+    // (api_key + api_secret + passphrase) inside `api_key_encrypted` as a single
+    // ciphertext blob, and intentionally returns `api_secret_encrypted: null`
+    // (analytics-service/services/encryption.py:80-82). Migration 031 makes the
+    // matching DB column nullable to accept this. Only `api_key_encrypted` is
+    // required here.
+    if (!api_key_encrypted) {
       console.error(
         "[strategies/create-with-key] Railway returned unexpected encrypted payload shape",
         Object.keys(encrypted),

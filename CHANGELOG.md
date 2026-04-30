@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.11] - 2026-04-30
+
+**Wizard ConnectKeyStep — fix latent envelope-encryption shape check that 502'd every submission.** The `/api/strategies/create-with-key` route's response-shape gate at line 168 required both `api_key_encrypted` and `api_secret_encrypted` to be truthy. But the Python analytics service at `analytics-service/services/encryption.py:80-82` deliberately stores all credentials inside a single `api_key_encrypted` blob (envelope encryption) and intentionally returns `api_secret_encrypted: null`. Migration 031 made the matching DB column nullable to accept this. The TS check has been wrong since the wizard shipped in v0.6.0.0 (Sprint 1). Latent because nobody had successfully connected a key through the wizard in production until this week — the allocator-side `/exchanges` flow uses a different route (`/api/keys/validate-and-encrypt`) that doesn't have the bug. Fix drops the `api_secret_encrypted` requirement from the check and adds an explanatory comment naming the contract.
+
+### Fixed
+
+- **`src/app/api/strategies/create-with-key/route.ts`** — boolean check at line 168 narrowed from `if (!api_key_encrypted || !api_secret_encrypted)` to `if (!api_key_encrypted)`. Comment block above the check now documents the envelope-encryption contract and points to `analytics-service/services/encryption.py:80-82` and migration 031 so future contributors don't reintroduce the redundant gate.
+
+### Added
+
+- **`src/app/api/strategies/create-with-key/route.test.ts`** — regression test pair (~140 LOC). Test 1 asserts an envelope-shaped response (`api_secret_encrypted: null`) round-trips to a 200 with `{strategy_id, api_key_id}`, and that the SECURITY DEFINER RPC `create_wizard_strategy` is invoked with `p_api_secret_encrypted=null`. Test 2 asserts the route still 502s when `api_key_encrypted` itself is missing (the genuine "encryption returned nothing" case).
+
+Note: this is the surgical fix. The broader unification of `/api/keys/validate-and-encrypt` (used by AllocatorExchangeManager / ApiKeyManager / StrategyForm) and `/api/strategies/create-with-key` (used by the wizard) into a shared validate+encrypt helper is tracked separately and will go through `/office-hours` planning before any caller migration.
+
 ## [0.17.1.10] - 2026-04-30
 
 **v0.17.1 audit follow-up — delete the dead `isStrategyUiV2Enabled` flag.** The 2026-04-29 milestone audit's "v1 → v2 cutover" deferral was based on a wrong premise. v1 (`/strategy/[id]`) and v2 (`/strategy/[id]/v2`) serve different audiences (public marketing factsheet vs allocator detail surface) and should both stay. The `isStrategyUiV2Enabled` flag had zero non-test consumers in `src/` — it was scaffolding the 14b flag-flip plan left behind. Removing it stops future contributors from wondering what it does.
