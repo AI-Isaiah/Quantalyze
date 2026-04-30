@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.0.0
 milestone_name: "API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs"
-status: defining_requirements
-stopped_at: Milestone v1.0.0 started 2026-04-30. PROJECT.md updated, STATE.md reset, requirements/roadmap pending.
-last_updated: "2026-04-30T19:45:00.000Z"
-last_activity: 2026-04-30 — Milestone v1.0.0 started (/gsd-new-milestone "Moving to v1")
+status: ready_to_plan
+stopped_at: Roadmap created 2026-04-30. ROADMAP.md + REQUIREMENTS.md (traceability) finalized; ready for /gsd-plan-phase 15.
+last_updated: "2026-04-30T22:30:00.000Z"
+last_activity: 2026-04-30 — Roadmap created (gsd-roadmapper); 5 phases (15-19) with conditional Phase 19; 39/39 REQs mapped.
 progress:
-  total_phases: 0
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -21,61 +21,80 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Defining v1.0.0 requirements + roadmap (API-Key Rewrite — the version Quantalyze can credibly put in front of LPs and managers)
-**Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29). v0.17.1.x cleanup landed at v0.17.1.31 on 2026-04-30, all 5 carryover items closed (METRICS-15, KPI-17 4-bucket, DISCO-05 migration push, v1→v2 cutover, 9 Playwright specs in CI).
+**Current focus:** Ready to plan Phase 15 (CSV Unblock) — first phase of v1.0.0 API-Key Rewrite.
+**Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29). v0.17.1.x cleanup landed at v0.17.1.31 on 2026-04-30, all 5 carryover items closed.
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-04-30 — Milestone v1.0.0 started
+Phase: 15 of 19 (CSV Unblock — first phase of v1.0.0)
+Plan: — (ready to plan)
+Status: Ready to plan
+Last activity: 2026-04-30 — Roadmap created via gsd-roadmapper
+
+Progress: [░░░░░░░░░░] 0% (0 of TBD plans across Phases 15-19)
 
 ## Milestone Summary (v1.0.0)
 
-**Plan source:** `~/.gstack/projects/AI-Isaiah-Quantalyze/helios-mammut-main-design-20260429-225031.md` (1495 lines). Cross-AI dual-voice review across CEO + Design + Eng phases (Claude subagents + Grok 4.2 multi-agent via `/v1/messages` Anthropic-compat). 11 User Challenges resolved 2026-04-30 (10 accepted, 1 modified, 0 rejected). 6/6 CEO + 7/7 Design dimensions originally CONFIRMED-AGAINST plan; restructure addresses all critical findings. APPROVED at Phase 4 Final Approval Gate. Verbatim restructure section runs lines 1209-1438 of the plan file.
+**Plan source:** `~/.gstack/projects/AI-Isaiah-Quantalyze/helios-mammut-main-design-20260429-225031.md` (1495 lines). Cross-AI dual-voice review across CEO + Design + Eng phases. 11 User Challenges resolved 2026-04-30 (10 accepted, 1 modified). APPROVED at Phase 4 Final Approval Gate.
 
-**Headline:** v1.0.0 = the version the founder shows LPs and managers. Fix recurring API-key wizard failure at the root, unify three divergent code paths into one observable backbone, unblock 10 quant teams in pipeline, establish dogfood loop with founder's own LP report.
+**Headline:** v1.0.0 = the version the founder shows LPs and managers. Fix recurring API-key wizard failure at the root, unify divergent code paths into one observable backbone, unblock 10 quant teams in pipeline, establish dogfood loop with founder's own LP report.
 
-**Net session estimate:** ~17 CC days (range 17-22). If Day-2 decision gate skips Phase 2: ~10 CC days total.
+**Net session estimate:** ~17 CC days (range 17-22). If Day-2 decision gate skips Phase 19: ~10 CC days total.
 
-**Coverage (preliminary, before requirements step finalizes):** ~40-50 REQs across categories CSV / OBSERV / DESIGN / FIX / BACKBONE / LP / FINGERPRINT.
+**Coverage:** 39 v1 REQs across 7 categories (3 CSV + 12 OBSERV + 5 DESIGN + 4 FIX + 3 LP + 10 BACKBONE + 2 FINGERPRINT). 39/39 mapped to phases (no orphans).
 
-**Wave structure (proposed; roadmapper will confirm):**
+**Wave structure (sequential — real dependencies enforce ordering):**
 
-- Wave 1 (sequential gate): Phase 15 (CSV unblock) → 10/10 teams have working onboarding path within 48h
-- Wave 2 (sequential): Phase 16 (Diagnostic spike + observability) → Day-2 decision gate (commit Phase 19 or skip)
-- Wave 3 (sequential): Phase 17 (Design contract in DESIGN.md) → must lock trust-tier badges + error envelope + broker selector + mobile fallback before Phase 19 backend work
-- Wave 4 (sequential): Phase 18 (Root-cause fix + founder LP skeleton) — exits with all 10 teams reaching `validated`
-- Wave 5 (conditional, sequential): Phase 19 (Unified backbone) — only runs if Day-2 gate committed Phase 2
+- **Wave 1** — Phase 15 alone (CSV unblock; operationally urgent; PR #22 path promoted to first-class)
+- **Wave 2** — Phase 16 alone (must wait for Phase 15 `csv_uploaded` placeholder + restore-e2e-fixtures pre-PR + DISCO-05 migration drift resolution + Day-0.5 Vault-from-Railway pre-flight)
+- **Wave 3** — Phase 17 alone (depends on Phase 16 PostHog mobile audit count + correlation_id seam stable; envelope shape produced by Phase 16 is the surface the wireframe describes)
+- **Wave 4** — Phase 18 alone (depends on Phase 16 root cause surfaced via Day-2 decision document + Phase 17 `wizardErrors.ts` source-of-truth declaration)
+- **Wave 5** — Phase 19 alone, *conditional* (depends on Phase 18 verified-working foundation + Day-2 gate = COMMIT)
 
-| Phase | Goal | Days | Depends on | Complexity |
-|-------|------|------|------------|------------|
-| 15. CSV Unblock | Extend PR #22's CSV path so all 10 teams have a working onboarding path within 48h. `csv_uploaded` trust-tier placeholder. Per-team status tracking via `strategy_verifications` rows reaching `validated`. | 1-2 | Nothing | Low |
-| 16. Diagnostic Spike + Observability | correlation_id end-to-end (Next → FastAPI → Supabase → Resend). Sentry wiring (`error.tsx` + `global-error.tsx` + `sentry-sdk[fastapi]`). `/api/debug-key-flow` SSE/poll endpoint. Deterministic local-repro harness (VCR fixtures + `scripts/repro-key-flow.sh`). PostHog mobile audit. Migrations 084/085/086 trigger audit. **restore-e2e-fixtures pre-PR** (api-key-flow.spec.ts + observability.ts wiped by PR #90). | 3-4 | Phase 15 | Medium |
-| **Day-2 decision gate** | Founder reviews `/api/debug-key-flow` output. Decides: COMMIT Phase 19 unification, OR apply 1-line fix and skip Phase 19 (closes milestone at ~10 CC days). | 4 | Phase 16 | — |
-| 17. Design Contract | DESIGN.md additions: trust-tier badges (api_verified / csv_uploaded / self_reported), error envelope render wireframe, broker selector 2×3 card grid, CSV escape-hatch full-width card, mobile-readable wizard fallback (conditional on Phase 16 mobile audit), a11y minimums (4.5:1 contrast, ARIA live, keyboard nav), 9-state matrix per surface, `wizardErrors.ts` source-of-truth declaration. | 5-7 | Phase 16 | Medium |
-| 18. Root-Cause Fix + Founder LP | Fix whatever Phase 16 surfaced (regression test per fix). PII redaction utility (`src/lib/redact.ts` + `analytics-service/services/redact.py`). Founder LP report cron (reuses existing factsheet PDF endpoints). | 8-10 | Phase 17 | Medium |
-| 19. Unified Backbone *(conditional on Day-2 gate)* | FastAPI `POST /process-key` + adapter pattern (OKX/Binance/Bybit/CSV — NO MT5/IBKR per UC-B). `strategy_verifications` schema state-machine. VIEW-shim migration. Thin Next.js adapters (`/api/keys/sync` subsumed as `flow_type='resync'`). Feature flag + cron-based rollback monitor (Sentry events API + Vercel REST API, 0.5%/15-min threshold). `wizard_session_id` idempotency key. perp-correctness via `reconstruct_positions()`. JSONB fingerprint column + `compute_similarity()` SQL function (pgvector deferred to v2 per UC-C). | 11-17 | Phase 18 + Day-2 commit | High |
+| Phase | Goal (one line) | CC Days | Depends on | Complexity |
+|-------|-----------------|---------|------------|------------|
+| 15. CSV Unblock | All 10 onboarding teams have working CSV path within 48h; `csv_uploaded` trust-tier placeholder. | 1-2 | Theme 4 ≥3 team replies | LOW |
+| 16. Diagnostic Spike + Observability | correlation_id end-to-end + Sentry both halves + `/api/debug-key-flow` SSE + VCR cassettes + trigger audit + Resend tag round-trip + restore-e2e-fixtures + PostHog mobile audit. | 3-4 | Phase 15 + restore-e2e-fixtures + drift resolution + Vault pre-flight | MEDIUM-HIGH |
+| **Day-2 decision gate** | Founder reviews `/api/debug-key-flow` output. SKIP / COMMIT / HOLD with falsifiable criteria. | Day 4 | Phase 16 | — |
+| 17. Design Contract | DESIGN.md trust-tier + error envelope + broker selector + CSV escape-hatch + mobile fallback + a11y + 9-state matrix. Trust-tier tokens as code regex-asserted against DESIGN.md. | 5-7 | Phase 16 audit | MEDIUM |
+| 18. Root-Cause Fix + Founder LP | Fix Phase 16 surfaced bug (regression test that fails without fix) + Python `redact.py` mirror + founder LP report cron + dogfood-loop commitment. | 8-10 | Phase 16 root cause + Phase 17 | MEDIUM |
+| 19. Unified Backbone *(conditional)* | `POST /process-key` + adapter Protocol + state machine + 4-PR VIEW-shim + flag + flag-monitor cron + perp correctness + JSONB fingerprint + idempotency. | 11-17 | Phase 18 + Day-2 = COMMIT | HIGH |
 
 **Phase numbering:** continues from Phase 14b (no `--reset-phase-numbers`). Old phase dirs (12, 13, 14a, 14b) already archived to `.planning/milestones/v0.17.0.0-phases/`.
 
-**Plan-as-drafted vs codebase reality reconciliations** (defer to codebase reality — ratified during research/requirements phase):
+**Plan-as-drafted vs codebase reality reconciliations** (research-ratified — see ARCHITECTURE.md anti-patterns):
 
-- Plan says "two divergent code paths"; audit found THREE (verify-strategy + validate-and-encrypt + keys/sync) plus finalize-wizard. Phase 19 unifies all four.
-- Plan says inject correlation_id in `src/proxy.ts`; audit found `proxy.ts` is auth-only with zero outbound fetches. Correct seam is `src/lib/analytics-client.ts:66`.
-- Plan says Sentry wiring greenfield in Phase 0; audit found framework-level Sentry already wired in `src/instrumentation.ts` + `onRequestError`. Phase 16 narrows to (a) wire `error.tsx` + `global-error.tsx`, (b) add `sentry-sdk[fastapi]` to `analytics-service/requirements.txt`.
-- Plan says `WizardClient.tsx` lives in `src/components/wizard/`; actual path is `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx`.
-- Plan says migration 084 + 085 trigger audit; audit found 086 (`compute_jobs_priority`) is in the same surface and must be audited too.
-- Plan recommends pgvector + HNSW for fingerprints; UC-C accepted defer to v2 — JSONB column + `compute_similarity(a, b)` SQL function ships in v1.
+- Plan said "two divergent code paths"; audit found THREE (verify-strategy + validate-and-encrypt + keys/sync) plus finalize-wizard. Phase 19 unifies all four (4th orphan path = `/api/keys/sync`).
+- Plan said inject correlation_id in `src/proxy.ts`; audit found `proxy.ts` is auth-only with zero outbound fetches. Correct seam is `src/lib/analytics-client.ts:66`.
+- Plan said Sentry wiring greenfield in Phase 0; framework-level Sentry already wired in `src/instrumentation.ts`. Phase 16 narrows to `error.tsx` + `global-error.tsx` + `sentry-sdk[fastapi]==2.58.0` in analytics-service.
+- Plan said new `src/lib/redact.ts`; audit found `src/lib/admin/pii-scrub.ts` already exists with tested denylist. Phase 18 ships ONLY the Python mirror.
+- Plan recommended pgvector + HNSW; UC-C accepted defer to v2 — JSONB column + `compute_similarity()` SQL function ships in v1.
 
-**Cross-phase risk themes (from autoplan dual-voice review, must not regress during execution):**
+**Cross-phase risk themes (must not regress during execution):**
 
-- **Theme 1: PLAN IS DEVELOPER-FIRST, NOT USER-FIRST** — flagged by all 4 voices across CEO + Design phases. Mitigation: Phase 17 Design Contract before Phase 19 backend rewrite.
-- **Theme 2: SCOPE EXPANSION IS UNDER-SIZED** — original 25-day estimate dishonest given MT5/IBKR + perps + fingerprint scaffold. Mitigation: UC-B drops MT5/IBKR; UC-C drops pgvector; honest 17-22 days.
-- **Theme 3: FINGERPRINT MOAT UNVALIDATED + STATISTICALLY MEANINGLESS AT N=10** — Mitigation: UC-C JSONB placeholder; pgvector deferred until N≥1000.
-- **Theme 4: AI VOICES RATIFYING AI VOICES** — premises P1'-P7 generated by 3 Grok personas + ratified by autoplan reviewers; no real customer (10 teams or Metaworld) was asked which onboarding path they'd use. Mitigation: This-week action item — founder-interview pass with 1-2 of the 10 teams + Metaworld before committing Phase 19.
-- **Theme 5: RECURRENCE PATTERN IS A TOOLING FAILURE** — 5 fix attempts in 19 days isn't observability gap, it's absence of deterministic local-repro harness. Mitigation: E-8 — Phase 16 ships VCR-style HTTP fixtures + `scripts/repro-key-flow.sh`.
+- **Theme 1**: PLAN IS DEVELOPER-FIRST, NOT USER-FIRST — Mitigation: Phase 17 hard exit gate before Phase 19 backend rewrite.
+- **Theme 2**: SCOPE EXPANSION UNDER-SIZED — Mitigation: UC-B drops MT5/IBKR; UC-C drops pgvector; honest 17-22 days; Phase 19 conditional.
+- **Theme 3**: FINGERPRINT MOAT UNVALIDATED + STATISTICALLY MEANINGLESS AT N=10 — Mitigation: UC-C JSONB placeholder; pgvector deferred until N≥1000.
+- **Theme 4**: AI VOICES RATIFYING AI VOICES — Mitigation: Phase 15 entry blocker (≥3 written replies); Phase 18 entry gate (≥1 Metaworld verbal-in-writing); Phase 19 exit interview (1-2 teams demo).
+- **Theme 5**: RECURRENCE PATTERN IS A TOOLING FAILURE — Mitigation: Phase 16 ships `vcrpy==8.1.1` cassettes + `scripts/repro-key-flow.sh`; runs daily during Phase 19 stability window.
+- **Theme 6**: MIGRATION DRIFT + 4TH ORPHAN PATH — Mitigation: Phase 16 prerequisite drift resolution; Phase 19 route-inventory + migration-plan entry gates.
+
+## Phase-Internal Gates (operational blockers — NOT requirements; encoded as phase entry/exit conditions)
+
+| Gate | Phase | Resolution |
+|------|-------|------------|
+| Theme 4 founder pings 10 teams (≥3 reply threshold) | Phase 15 entry | Founder emails 10 teams BEFORE execution starts. <3 ships anyway but logs gap to `.planning/phase-15/customer-signal-gap.md`. |
+| `restore-e2e-fixtures` PR merged FIRST (UC-E modified) | Phase 16 prep | Bit-for-bit pre-PR-#90 restore of `e2e/api-key-flow.spec.ts` (-242 LOC) + `scripts/seed-full-app-demo.ts` (-1721 LOC) + `src/lib/observability.ts` (-28 LOC). Plan-checker rejects Phase 16 Day 1 commit without file presence check on all three. |
+| Migration drift resolution | Phase 16 prep | Path A/B/C decision in TODOS.md from v0.17 carryover (DISCO-05 push pending). Resolved BEFORE any v1 migration files (093-097) land. Convergence documented in `.planning/phase-16/migration-drift-resolution.md`. |
+| Day-0.5 Vault-from-Railway pre-flight | Phase 16 prep | Read known KEK row from Supabase Vault and decrypt test ciphertext. If access denied: skip ahead to Phase 18 with "fix Vault access" as first task (highest-probability root cause per Skeptic voice). |
+| 10/10 teams onboarded via CSV by Day 2 | Phase 15 exit | Per-team `strategy_verifications.status='validated'` row check. Below ≥3-of-10 reply threshold logs gap to `.planning/phase-15/customer-signal-gap.md` and ships anyway. |
+| Day-2 decision gate (Day 4) | Phase 16 → Phase 19 | Founder reviews `/api/debug-key-flow` output with 2-hour minimum deliberation floor. Decision document `.planning/phase-16/day-2-decision.md` lands BEFORE any Phase 18/19 code, MUST contain (a) candidate root causes ranked by evidence weight, (b) regression test snippet for chosen fix, (c) explicit refutation of each Phase 19 task NOT needed if SKIP path chosen, (d) `correlation_id` evidence chain. SKIP if single chain → ONE bug + regression test + no other unexplained failure mode; COMMIT if 2+ root causes OR ≥3 files OR no clean unit test possible; HOLD (24h) if surfaced cause unfamiliar. |
+| Phase 17 zero-TBD gate (DESIGN.md 9-state matrix) | Phase 17 → Phase 19 | Hard gate. `gsd-sdk validate phase-17-exit` greps `.planning/phase-17/*` and DESIGN.md additions for `TBD | TODO | TKTK`; FAILS if any remain in 9-state matrix, trust-tier table, broker selector spec, or error envelope wireframe. Plan-checker rejects Phase 19 entry without DESIGN.md grep showing zero TBDs. |
+| Theme 4 ≥1 Metaworld verbal-in-writing | Phase 18 entry | Text logged in `.planning/phase-18/metaworld-commitment.md` before Phase 18 starts. Without commitment, log gap and reduce Phase 19 scope to "internal infrastructure only" (no marketplace credibility claim). |
+| Phase 19 route inventory | Phase 19 entry | `.planning/phase-19/route-inventory.md` greps every Next.js route exporting non-GET handlers touching `api_keys | strategies | strategy_analytics | verification_requests | strategy_verifications | compute_jobs`. Every row maps to a `flow_type` OR carries explicit "out of scope, rationale: …" (Pitfall 1 mitigation). |
+| Phase 19 migration plan | Phase 19 entry | Migration numbers 093-097 reserved upfront in `.planning/phase-19/migration-plan.md` (093 strategy_verifications + status enum; 094 VIEW shim with `INSTEAD OF` triggers; 095 wait period; 096 fingerprint JSONB + `compute_similarity()`; 097 wizard_session_id idempotency UNIQUE INDEX + `process_key_long` registry insert). Plan-checker rejects Phase 19 entry without document. |
+| Phase 19 4-PR VIEW-shim sequence | Phase 19 exit | Plan-checker rejects exit if any single PR combines adjacent steps (a) repoint `verify-strategy/route.ts:115` → `strategy_verifications` + flag flip + (c) verify zero writes ≥24h + 7 calendar days at 100% rollout + (d) rename + `INSTEAD OF` triggers + 90-day legacy retention. |
+| Phase 19 customer-feedback document | Phase 19 exit | `.planning/phase-19/customer-feedback.md` captures verbatim feedback from 1-2 of the 10 teams running a real key submission via the unified flow (NOT a screenshot demo). |
 
 ## Deferred Items
 
@@ -86,65 +105,50 @@ Last activity: 2026-04-30 — Milestone v1.0.0 started
 | analytics | Stress testing engine | Deferred past v1 |
 | analytics | Monthly performance commentary (deterministic, no LLM) | Deferred past v1 |
 | analytics | Drawdown story card | Deferred past v1 |
-| analytics | Advanced portfolio optimizer (risk parity + explicit constraints) | Deferred past v1 |
+| analytics | Advanced portfolio optimizer | Deferred past v1 |
 | peer | Peer benchmarking foundation | Sprint 13+ (gated on 5+ connected allocators) |
-| benchmark | Multi-benchmark correlation matrix (ETH/SOL ingestion) | Sprint 13+ (UC#6 descope from v0.17) |
-| team | Manager Workspace, Inbox, Threads, Mandate, Activity log | Reconsidered post-v1.0 (formerly v0.18.0.0 candidate; v1 picked API-key rewrite over manager workspace breadth) |
+| benchmark | Multi-benchmark correlation matrix (ETH/SOL ingestion) | Sprint 13+ |
+| team | Manager Workspace, Inbox, Threads, Mandate, Activity log | Reconsidered post-v1.0 |
 | moat | Match-flag UX, FoF-specific landing surface, pgvector + HNSW migration | v2 design doc (opens after v1.0 stability window passes) |
 | broker | MT5 + IBKR API adapters | v2 (CSV-bridged in v1 per UC-B) |
-| concerns | `compute_jobs` RLS wide-open (USING true) | Sprint 2 deferral, still open — flag for Phase 16 security audit |
-| concerns | Wizard-draft cleanup cron | Resolved 2026-04-29 via PR #88 (cleanup-wizard-drafts route handler tests) |
-| concerns | Dual cron path (Railway + shim routes) | Vercel Pro upgrade lifted 2-cron limit; decision deferred |
-| concerns | Phase 01 VALIDATION.md retroactive scaffold (Nyquist backfill) | Non-blocking |
-| follow-up | Sprint 8 follow-ups (Voice-D8 dashboard-reset trigger, Phase 02 rate-limit decision) | Live-feedback decisions |
-
-### v1.0.0 phase-internal gates (proposed; roadmapper will confirm)
-
-| Gate | Phase | Resolution |
-|------|-------|------------|
-| Vault-from-Railway pre-flight (Day 0.5) | Phase 16 | Read known KEK row from Supabase Vault and decrypt test ciphertext. If access denied: skip ahead to Phase 18 with "fix Vault access" as first task. Highest-probability root cause per Skeptic voice. |
-| 10/10 teams onboarded via CSV by Day 2 | Phase 15 | Per-team `strategy_verifications.status='validated'` row check. If any team blocked by CSV format/upload bug, Phase 16 adds CSV-side observability sweep before progressing. |
-| Day-2 decision gate (Day 4) | Phase 16 → Phase 19 | Founder reviews `/api/debug-key-flow` output. If root cause is single config fix, skip Phase 19 (close milestone at ~10 CC days). Document decision in plan. |
-| Phase 17 Design Contract complete (no TBD cells in 9-state matrix) | Phase 17 → Phase 19 | Hard gate — Phase 19 cannot start while any per-surface state is "TBD" in DESIGN.md additions. |
-| restore-e2e-fixtures PR merged | Phase 16 prep | UC-E modified — let PR #90 merge but pin a `restore-e2e-fixtures` PR FIRST putting back api-key-flow.spec.ts + seed scripts + observability.ts before any Phase 16 instrumentation work. |
+| concerns | `compute_jobs` RLS wide-open (`USING (true)`) | Flag for Phase 16 security audit |
+| concerns | Wizard-draft cleanup cron | Resolved 2026-04-29 via PR #88 |
+| concerns | Dual cron path (Railway + shim routes) | Vercel Pro lifted 2-cron limit; deferred |
+| concerns | Phase 01 VALIDATION.md retroactive scaffold | Non-blocking |
 
 ## Decisions
 
 ### v1.0.0 milestone planning (2026-04-30)
 
-- v1.0.0 = "the version I show LPs and managers" (founder direct quote, 2026-04-30). Headline: API-Key Rewrite. Manager Workspace IA (formerly v0.18.0.0 candidate) deferred — re-evaluate post-v1 once paid pilots validate FoF/manager demand.
-- Plan source: `~/.gstack/projects/AI-Isaiah-Quantalyze/helios-mammut-main-design-20260429-225031.md` — 1495-line design doc with autoplan dual-voice review. Treated as research input; gsd workflow re-derives REQ-IDs and phase boundaries.
-- Phase numbering continues from Phase 14b (no `--reset-phase-numbers`): v1.0.0 starts at Phase 15. Old phase dirs already archived to `.planning/milestones/v0.17.0.0-phases/`.
-- Research enabled: 4 parallel researchers (STACK / FEATURES / ARCHITECTURE / PITFALLS) ran before requirements gathering, cross-referencing the autoplan doc and codebase audit findings.
-- v0.17.1.x cleanup line closed at v0.17.1.31 (2026-04-30) — all 5 carryover items shipped before v1.0 setup began (per user instruction "I will now fix [carryover] only then we continue here"). Carryover work: METRICS-15 path-extraction (PR #91 + #104), KPI-17 4-bucket Trade Mix saga (PRs #95/96/98/99/102), DISCO-05 migration 091 push, v1→v2 strategy page cutover via flag deletion (PR #92), 9 Playwright specs CI wiring (PRs #107/108).
-- Bonus v0.17.1.x cleanup landed alongside carryover (not on original list, valuable): WCAG 2 AA color contrast fixes (PR #103), unified app-namespaced localStorage purge registry, ARIA-label fixes, parallelized seed-test-project upserts, 4 npm audit advisories closed, accent color #16A34A→#15803D sweep across 4 files, atomic dual-write RPC for kill-switch cutover (migration 088).
-- 11 User Challenges from autoplan accepted: UC-A (CSV-first Phase -1), UC-B (drop MT5/IBKR API adapters; CSV-bridge), UC-C (defer pgvector to v2), UC-D (Phase 0.5 Design Contract before Phase 2), UC-E modified (let PR #90 merge but pin restore-e2e-fixtures FIRST), UC-F (founder LP skeleton in Phase 1 exit), UC-G subsumed by UC-D (trust-tier in DESIGN.md), UC-H (PostHog mobile audit), UC-I (Phase 0 spike + Day-2 decision gate), UC-J (4-hour competitive teardown), UC-K (cron-based rollback monitor).
-- Out of scope for v1: match-flag UX, FoF landing surface, pgvector+HNSW migration, MT5+IBKR API adapters, pricing experiment, IC-handoff PDF (Eltican Positron Dashboard reference template), branded LP design — all deferred to v2 design doc, opened only after Phase 19 stability window (7 days at 100% flag, zero error-envelope regressions) passes.
-- Cross-AI review consensus: 6/6 CEO + 7/7 Design dimensions originally CONFIRMED-AGAINST plan as written; restructure addresses all critical findings. APPROVED at Phase 4 Final Approval Gate.
+- v1.0.0 = "the version I show LPs and managers" (founder direct quote, 2026-04-30). Headline: API-Key Rewrite. Manager Workspace IA deferred — re-evaluate post-v1 once paid pilots validate FoF/manager demand.
+- Plan source: `~/.gstack/projects/AI-Isaiah-Quantalyze/helios-mammut-main-design-20260429-225031.md` — 1495-line autoplan with cross-AI dual-voice review. Treated as research input; gsd workflow re-derived REQ-IDs and phase boundaries.
+- Phase numbering continues from Phase 14b (no `--reset-phase-numbers`): v1.0.0 starts at Phase 15. Old phase dirs already archived.
+- Research enabled: 4 parallel researchers (STACK / FEATURES / ARCHITECTURE / PITFALLS) ran before requirements gathering.
+- v0.17.1.x cleanup line closed at v0.17.1.31 (2026-04-30) — all 5 carryover items shipped before v1.0 setup began.
+- 11 User Challenges from autoplan accepted: UC-A (CSV-first Phase 15), UC-B (drop MT5/IBKR API adapters), UC-C (defer pgvector to v2), UC-D (Phase 17 Design Contract before Phase 19), UC-E modified (let PR #90 merge but pin restore-e2e-fixtures FIRST), UC-F (founder LP skeleton in Phase 18), UC-G subsumed by UC-D, UC-H (PostHog mobile audit), UC-I (Phase 16 spike + Day-2 decision gate), UC-J (4-hour competitive teardown), UC-K (cron-based rollback monitor).
+- Out of scope for v1: match-flag UX, FoF landing surface, pgvector+HNSW migration, MT5+IBKR API adapters, pricing experiment, IC-handoff PDF (Eltican Positron Dashboard reference template), branded LP design — deferred to v2 design doc, opened only after Phase 19 stability window passes.
+- Roadmap created 2026-04-30: 5 phases (15-19), conditional Phase 19 gated on Day-2 decision, 39/39 REQs mapped, wave structure ratified, 11 phase-internal gates encoded.
 
 ## Accumulated Context
 
 ### Roadmap Evolution
 
-- Phase 09.1 inserted after Phase 9 (2026-04-24): Allocator Dashboard UI refresh — implement designer-provided Allocator Dashboard.html reference (URGENT). Reason: designer shipped a full UI refresh bundle and the work must land before Phase 10 Scenario Builder adds a tab to `/allocations`, so the new Scenario tab builds on the updated dashboard instead of being retrofitted later.
-- Phase 11 (v0.15.0.0) re-versioned as v0.16.0.0 (2026-04-26): Onboarding + Security Readiness work continues on `main` as its own minor-version release rather than completing v0.15.0.0 directly. v0.15.x absorbed dashboard-parity iteration (PR3 — `#77`, PR4 — `#80`) and Scenario Builder polish (`#78`, `#79`). v0.17.0.0 (next milestone) starts fresh on KPI parity and Discovery v2 ahead of the team-workspace milestone v0.18.0.0.
-- v0.17.0.0 roadmap drafted 2026-04-26: 3 phases (12, 13, 14) covering 50 REQs across 6 categories. Wave structure compresses 6.5-session estimate to 2 phase cycles via Phase 12 ‖ Phase 13 parallel execution.
-- v0.17.0.0 roadmap revised 2026-04-26 post cross-AI review: 4 phases (12, 13, 14a, 14b) covering 53 REQs across 7 categories (KPI now split via KPI-23a/b, METRICS-16/17 added). 6 convergent fixes from review applied: Phase 14 split, is_maker audit rescoped to 3 exchanges, METRICS-16 (priority enum migration 086) + METRICS-17 (sibling table migration 087) promoted to hard deliverables, automated parity checks (qstats fixture + Playwright pixel-diff), conditional migration 088 organizations.is_public for DISCO-03 privacy gate. Net session estimate moves from 6.5 to 8.0 sessions.
 - v1.0.0 (this milestone) re-prioritized over v0.18.0.0 Manager Workspace IA on 2026-04-30: founder's #1 operational pain is API-key wizard recurrence + 10 blocked teams + own-fund LP report. Manager Workspace breadth deferred until reliability + dogfood loop are proven.
-- v1.0.0 plan = autoplan-restructured "API-Key Rewrite" with 5 phases (15-19) and conditional Day-2 decision gate. Phase 19 (Unified Backbone) only runs if Phase 16 diagnostic finds the root cause requires architectural rewrite vs single-config-fix.
+- v1.0.0 plan = autoplan-restructured "API-Key Rewrite" with 5 phases (15-19) and conditional Day-2 decision gate. Phase 19 only runs if Phase 16 diagnostic finds the root cause requires architectural rewrite vs single-config fix.
+- Roadmap (2026-04-30) ratified 5-phase structure with explicit wave dependencies + 11 phase-internal gates. Conditional Phase 19 modeled in `.planning/ROADMAP.md` "Conditional Execution Logic" diagram.
 
 ### Cross-AI dual-voice review conventions (from v0.17.0.0 onward)
 
-- Cross-AI review is now standard practice for milestone plans. v0.17.0.0 used Grok-4-1-fast-reasoning + fresh Claude subagent. v1.0.0 used Grok 4.2 multi-agent (`grok-4.20-multi-agent-0309` via `/v1/messages` Anthropic-compat) across 3 personas (Architecture / Product / Skeptic) + Claude subagents on CEO + Design + Eng phases.
+- Cross-AI review is now standard practice for milestone plans. v1.0.0 used Grok 4.2 multi-agent (`grok-4.20-multi-agent-0309` via `/v1/messages` Anthropic-compat) across 3 personas (Architecture / Product / Skeptic) + Claude subagents on CEO + Design + Eng phases.
 - Dual-voice review consensus surfaces concerns where BOTH models independently agree the plan should change. These become "User Challenges" presented at the final approval gate for explicit user decision rather than auto-applied.
-- v0.17.0.0 had 8 User Challenges resolved 2026-04-26; v1.0.0 had 11 User Challenges resolved 2026-04-30 (10 accepted, 1 modified).
+- v1.0.0 had 11 User Challenges resolved 2026-04-30 (10 accepted, 1 modified).
 - 6/6 CEO + 7/7 Design dimensions originally CONFIRMED-AGAINST v1.0.0 plan signals genuine architectural concerns rather than superficial nits. Restructure section in plan file addresses all critical findings.
 
 ## Session Continuity
 
-Last session: 2026-04-30T19:45:00.000Z
-Stopped at: Milestone v1.0.0 metadata setup complete (PROJECT.md updated, STATE.md reset). Next: cleanup leftover phase dirs (`gsd-sdk query phases.clear --confirm` to clear active dirs 12/13/14a/14b — already mirrored to `.planning/milestones/v0.17.0.0-phases/`), commit, then run 4 parallel researchers (gsd-project-researcher × Stack/Features/Architecture/Pitfalls) with the autoplan plan as research input, then synthesizer, then requirements step (REQ-IDs across CSV/OBSERV/DESIGN/FIX/BACKBONE/LP/FINGERPRINT categories), then roadmap step.
+Last session: 2026-04-30T22:30:00.000Z
+Stopped at: Roadmap created via gsd-roadmapper. ROADMAP.md and STATE.md updated. REQUIREMENTS.md traceability table verified (all 39 REQs mapped). Ready for `/gsd-plan-phase 15` (Phase 15 CSV Unblock — first phase of v1.0.0).
 
-**Planned milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30T19:45:00.000Z
+**Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 
-**Planned Phase:** 15 (CSV Unblock) — first phase after requirements/roadmap finalize
+**Next phase:** Phase 15 (CSV Unblock) — Wave 1 entry condition: Theme 4 founder pings 10 teams, ≥3 reply threshold (≥3 unlocks; <3 ships anyway with logged gap).
