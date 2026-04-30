@@ -100,7 +100,13 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   2. Uploaded CSV passes `pandera` row-schema validation (max 10MB, monotonic dates, NAV non-zero, daily return > -100% impossible, daily Sharpe > 10 sentinel suspicious, trading-window check, USD-or-blank currency)
   3. Strategies onboarded via CSV display `csv_uploaded` trust-tier placeholder text on factsheet + marketplace tile (badge component polish lives in Phase 17; CSV-03 ships only the data-model wiring)
   4. Per-team onboarding status surfaces via `strategy_verifications.status='validated'` rows queryable by founder for each of the 10 teams
-**Plans**: TBD
+**Plans**: 6 plans
+- [ ] 15-01-PLAN.md — Migration 093 (strategy_verifications table + RLS + finalize_csv_strategy RPC + apply to test Supabase)
+- [ ] 15-02-PLAN.md — Python csv_validator (3 pandera schemas + 7 CSV-02 rules) + FastAPI csv router + requirements pin
+- [ ] 15-03-PLAN.md — TrustTierLabel component + Strategy.trust_tier projection + StrategyHeader/StrategyGrid wiring
+- [ ] 15-04-PLAN.md — CSV wizard step components (CsvValidationEnvelope, CsvUploadStep, CsvPreviewStep, CsvSubmitStep)
+- [ ] 15-05-PLAN.md — WizardStepKey union extension + analytics-client multipart helper + Next.js proxy routes (csv-validate/csv-finalize) + WizardClient ?source=csv branching
+- [ ] 15-06-PLAN.md — Integration tests (RPC, route, RLS) + Playwright E2E happy path with TrustTierLabel assertion
 **Complexity**: LOW (operational unblock; PR #22 path already exists; 1 new Python dep `python-multipart==0.0.27`).
 **UI hint**: yes
 **Exit gate**: 10/10 teams reach `strategy_verifications.status='validated'` via CSV path (≥3-of-10 reply threshold from entry gate is informational; ship anyway). Per-team status logged in TODOS.md.
@@ -238,7 +244,7 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 | 13. Discovery v2 Polish | v0.17.0.0 | 4/4 | Complete | 2026-04-29 |
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 6/6 | Complete | 2026-04-29 |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 8/8 | Complete | 2026-04-29 |
-| 15. CSV Unblock | v1.0.0 | 0/TBD | Not started | - |
+| 15. CSV Unblock | v1.0.0 | 0/6 | Not started | - |
 | 16. Diagnostic Spike + Observability | v1.0.0 | 0/TBD | Not started | - |
 | 17. Design Contract | v1.0.0 | 0/TBD | Not started | - |
 | 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/TBD | Not started | - |
