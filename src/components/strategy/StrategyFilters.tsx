@@ -475,6 +475,7 @@ export function StrategyFilters({
                   Min Track Record
                 </p>
                 <select
+                  aria-label="Minimum track record"
                   value={draft.minTrackRecord}
                   onChange={(e) => setDraft({ ...draft, minTrackRecord: e.target.value })}
                   className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-primary w-full"
