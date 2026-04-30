@@ -346,6 +346,13 @@ export async function seedStrategyWithHistory(opts: {
         opts.days >= 30
           ? series.map((p) => ({ date: p.date, value: p.value * 0.95 }))
           : null,
+      // panel2Equity.btc_overlay reads metrics_json.btc_benchmark_returns,
+      // not metrics_json.benchmark_returns — both keys must be populated or
+      // the BTC overlay (and its associated checkbox) is suppressed.
+      btc_benchmark_returns:
+        opts.days >= 30
+          ? series.map((p) => ({ date: p.date, value: p.value * 0.95 }))
+          : null,
       alpha: 0.03,
       beta: 0.85,
       information_ratio: 0.7,

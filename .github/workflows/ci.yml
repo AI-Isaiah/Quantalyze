@@ -194,6 +194,16 @@ jobs:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+      - name: Seed demo data into test Supabase (gated on vars.E2E_TEST_DB_CONFIGURED)
+        # Populates the 8-strategy demo set the seed-gated specs require.
+        # Defense-in-depth against running this against prod by accident:
+        # the SEED_CONFIRM_STAGING interlock + the script's prod-URL probe
+        # both fail loudly if a secret is misrouted.
+        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+        run: SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
       - name: Run seed-gated specs (MA-8 / BLOCK-3 gated on vars.E2E_TEST_DB_CONFIGURED)
         if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
         run: |
