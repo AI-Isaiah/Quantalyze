@@ -26,6 +26,7 @@ from typing import Any
 
 from services.analytics_runner import (
     _compute_derived_trade_metrics,  # B-01 — extracted in Plan 12-05
+    _compute_position_side_volume_pcts,
     _compute_trade_mix,
     _compute_volume_aggregator,
     _compute_volume_metrics,
@@ -245,10 +246,15 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     derived = _compute_derived_trade_metrics(volume_metrics, trade_metrics_from_positions)
     has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER") == "true"
     trade_mix = _compute_trade_mix(fills, has_maker_taker=has_maker_taker)
+    # KPI-17 follow-up: position-side volume pcts. Fixture has no
+    # positions list so the helper returns 0/0 — preserves the prior
+    # `long_volume_pct: 0.0 / short_volume_pct: 0.0` shape.
+    position_side_pcts = _compute_position_side_volume_pcts(fills, [])
 
     merged_trade_metrics = {
         **trade_metrics_from_positions,
         **volume_metrics,
+        **position_side_pcts,
         **volume_aggregator,
         **derived,
         "trade_mix": trade_mix,
