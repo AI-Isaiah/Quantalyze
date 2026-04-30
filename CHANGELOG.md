@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.16] - 2026-04-30
+
+**KPI-17 finalization — map raw-fill `buy/sell` side to `long/short` so the 4-bucket render shows real data, not zero bars.** v0.17.1.14 unblocked the fills query and produced the 4-bucket trade_mix shape, but every count was 0. Live data inspection: 200 OKX fills carry `side=buy` (108) or `side=sell` (292), but `_compute_trade_mix` filtered for `side in ("long","short")` and dropped every fill silently. The 4-bucket panel rendered all 4 bars at 0% and the frontend's `total === 0` guard fell through to "Trade mix unavailable for this strategy." instead of showing the actual maker/taker breakdown.
+
+### Fixed
+
+- **`analytics-service/services/analytics_runner.py:386-394`** — `_compute_trade_mix` now normalizes `side`: `buy -> long`, `sell -> short`, others passthrough. The fills are an aggregate of venue executions; mapping buy-as-long-entry / sell-as-short-entry matches what the panel labels promise. A "buy to close short" gets bucketed as a long entry — an approximation, but the use-case (read maker/taker fee-tier exposure against entry direction) is what the panel labels say.
+
+### Added
+
+- **`analytics-service/tests/test_analytics_runner.py`** — 2 regression tests: `test_trade_mix_buy_sell_side_normalized_to_long_short` (4-bucket mode, asserts each bucket gets count=1 from a 4-fill payload with mixed buy/sell × maker/taker) and `test_trade_mix_2_bucket_buy_sell_normalized` (2-bucket fallback, asserts 2 buys land in `long` and 1 sell lands in `short`). 12 trade-mix tests pass total.
+
+### Known follow-ups (out of scope, surfaced while debugging)
+
+- `avg_losing_trade` rounds to 0 for low-ROI strategies (rounding to 6 decimals against tiny ROI values). Cascades to null `risk_reward_ratio`, null `weighted_risk_reward_ratio`, null `sqn`, `0.0 profit_factor_long`. Root cause is upstream: `position_reconstruction.py` computes `roi` as a fraction of notional rather than margin — fix needs the strategy's leverage / margin context, separate ticket.
+- `long_volume_pct` / `short_volume_pct` are aliases of `buy_volume_pct` / `sell_volume_pct` (`analytics_runner.py:170`) — explicitly labeled "approximation from fill sides". Misleading field names; correct values would require sum over position-side fills, not buy/sell fills.
+- `avg_duration_days = 0` because positions opened and closed within the same calendar day; `int((close_dt - open_dt).total_seconds() / 86400)` truncates sub-day durations to 0. Should switch to a float in hours or days.
+
 ## [0.17.1.15] - 2026-04-30
 
 **Fix CI seed-gated step — kill the next-server grandchild, not just the npm parent.** Setting `E2E_TEST_DB_CONFIGURED=true` (Issue 5 wiring) immediately surfaced a latent bug in `.github/workflows/ci.yml`: the unconditional smoke step kills `$SERVER_PID` (npm) and `wait`s on it, but `npm run start` is a 3-level tree (npm → `next start` → node `next-server`) and SIGTERM doesn't propagate to the grandchild. The grandchild gets reparented to init and keeps holding port 3000. The seed-gated step's WR-04 port-bind guard correctly detects the still-listening socket and exits 1.
