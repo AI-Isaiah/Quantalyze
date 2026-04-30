@@ -30,6 +30,7 @@ import pandas as pd
 
 from services.analytics_runner import (
     _compute_derived_trade_metrics,  # B-01 — extracted in Plan 12-05
+    _compute_position_side_volume_pcts,
     _compute_trade_mix,
     _compute_volume_aggregator,
     _compute_volume_metrics,
@@ -254,9 +255,21 @@ def main() -> None:
     has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER") == "true"
     trade_mix = _compute_trade_mix(inp["fills"], has_maker_taker=has_maker_taker)
 
+    # KPI-17 follow-up: position-side volume attribution. The fixture has
+    # no `positions` list (only `trade_metrics_from_positions` aggregates),
+    # so the helper returns 0/0 — matches the prior `long_volume_pct: 0.0
+    # / short_volume_pct: 0.0` shape under `_compute_volume_metrics`'s
+    # legacy alias. Real strategies attribute via timestamp window in
+    # run_strategy_analytics; the fixture pipeline preserves the shape
+    # only.
+    position_side_pcts = _compute_position_side_volume_pcts(
+        inp["fills"], []
+    )
+
     merged_trade_metrics = {
         **inp["trade_metrics_from_positions"],
         **volume_metrics,
+        **position_side_pcts,
         **volume_aggregator,
         **derived,
         "trade_mix": trade_mix,

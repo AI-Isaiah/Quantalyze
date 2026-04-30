@@ -38,6 +38,7 @@ import logging
 import math
 import os
 from collections import defaultdict
+from datetime import datetime
 
 from fastapi import HTTPException
 
@@ -144,9 +145,15 @@ async def _load_position_time_series(
 
 
 def _compute_volume_metrics(fills: list[dict]) -> dict:
-    """Compute volume metrics from raw fill data.
+    """Compute fill-level volume metrics.
 
     fills: list of dicts with 'side' and 'cost' keys.
+
+    Emits buy/sell percentages (fill-side aggregates). The position-side
+    percentages (long_volume_pct / short_volume_pct) live in
+    `_compute_position_side_volume_pcts` so they reflect what the field
+    name promises (volume attributed to long-side vs short-side positions
+    via timestamp window), not a buy/sell alias.
     """
     total_cost = 0.0
     buy_cost = 0.0
@@ -167,10 +174,74 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
     return {
         "buy_volume_pct": round(buy_pct, 4),
         "sell_volume_pct": round(sell_pct, 4),
-        "long_volume_pct": round(buy_pct, 4),  # approximation from fill sides
-        "short_volume_pct": round(sell_pct, 4),
         "total_fills": len(fills),
         "total_volume_usd": round(total_cost, 2),
+    }
+
+
+def _compute_position_side_volume_pcts(
+    fills: list[dict], positions: list[dict]
+) -> dict:
+    """Attribute fill volume to positions by timestamp window.
+
+    A fill belongs to position P if its timestamp falls within
+    [P.opened_at, P.closed_at] (closed_at=None for open positions means
+    "until now"). Sums cost across long-side positions vs short-side,
+    expresses each as a percentage of total volume across all attributed
+    fills.
+
+    Replaces v0.16.x's buy/sell alias for long_volume_pct / short_volume_
+    pct, which double-counted "buy to close short" as long-side volume.
+
+    Returns {"long_volume_pct", "short_volume_pct"}. When fills can't be
+    attributed (positions list empty, missing timestamps, etc.), returns
+    both as 0.0 — frontend renders "—" for that range.
+    """
+    if not fills or not positions:
+        return {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
+
+    def _parse(ts: str | None) -> datetime | None:
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    windows: list[tuple[datetime, datetime | None, str]] = []
+    for p in positions:
+        opened = _parse(p.get("opened_at"))
+        closed = _parse(p.get("closed_at"))  # None for open positions
+        side = p.get("side")
+        if not opened or side not in ("long", "short"):
+            continue
+        windows.append((opened, closed, side))
+
+    long_volume = 0.0
+    short_volume = 0.0
+    attributed_total = 0.0
+    for f in fills:
+        ts = _parse(f.get("timestamp") or f.get("filled_at"))
+        if not ts:
+            continue
+        cost = abs(float(f.get("cost") or 0.0))
+        for opened, closed, side in windows:
+            if ts < opened:
+                continue
+            if closed is not None and ts > closed:
+                continue
+            attributed_total += cost
+            if side == "long":
+                long_volume += cost
+            else:
+                short_volume += cost
+            break  # first matching window wins; positions don't overlap by design
+
+    if attributed_total <= 0:
+        return {"long_volume_pct": 0.0, "short_volume_pct": 0.0}
+    return {
+        "long_volume_pct": round(long_volume / attributed_total, 4),
+        "short_volume_pct": round(short_volume / attributed_total, 4),
     }
 
 
@@ -645,6 +716,29 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         derived = _compute_derived_trade_metrics(
             volume_metrics, trade_metrics_from_positions
         )
+
+        # Position-side volume attribution. The reconstructed positions live
+        # in `public.positions`; fetch each position's side + window so the
+        # helper can attribute fills by timestamp instead of pretending
+        # buy_volume_pct equals long_volume_pct.
+        position_side_pcts: dict = {}
+        if fills_data:
+            try:
+                pos_result = await db_execute(
+                    lambda: supabase.table("positions")
+                    .select("side, opened_at, closed_at")
+                    .eq("strategy_id", strategy_id)
+                    .execute()
+                )
+                positions_list = (pos_result.data if pos_result else []) or []
+                position_side_pcts = _compute_position_side_volume_pcts(
+                    fills_data, positions_list
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Position-side volume attribution failed for %s: %s",
+                    strategy_id, str(exc),
+                )
         # KPI-17: 4-bucket Trade Mix gated on (env flag) AND (per-strategy
         # is_maker coverage ≥99% on this strategy's actual fills). The
         # env flag is the global kill switch; the per-strategy coverage
@@ -674,6 +768,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         merged_trade_metrics = {
             **(trade_metrics_from_positions or {}),
             **volume_metrics,
+            **position_side_pcts,
             **volume_aggregator,
             **derived,
             "trade_mix": trade_mix,

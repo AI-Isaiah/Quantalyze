@@ -373,12 +373,19 @@ def _match_positions_fifo(
 
             if position_side == "long":
                 realized_pnl = (exit_avg - entry_avg) * total_entry_qty - total_fees
-                roi = (exit_avg - entry_avg) / entry_avg if entry_avg > 0 else 0
             else:
                 realized_pnl = (entry_avg - exit_avg) * total_entry_qty - total_fees
-                roi = (entry_avg - exit_avg) / entry_avg if entry_avg > 0 else 0
+            # KPI-17 follow-up: ROI is net-of-fees return on capital deployed.
+            # Prior formula computed gross price change `(exit-entry)/entry`,
+            # which classified fee-only-losers as winners (price flat, fees
+            # negative net). The new formula tracks realized_pnl / notional;
+            # winners/losers stays aligned with positive/negative net P&L.
+            notional = entry_avg * total_entry_qty
+            roi = realized_pnl / notional if notional > 0 else 0
 
-            # Compute duration in days (INTEGER column)
+            # Sub-day-aware duration. The DB column is NUMERIC (migration
+            # 092) so fractional days express positions held for hours
+            # instead of int-truncating to 0.
             duration_days = None
             close_time = fill.get("timestamp")
             if position_open_time and close_time:
@@ -389,7 +396,9 @@ def _match_positions_fifo(
                     close_dt = datetime.fromisoformat(
                         close_time.replace("Z", "+00:00")
                     )
-                    duration_days = int((close_dt - open_dt).total_seconds() / 86400)
+                    duration_days = round(
+                        (close_dt - open_dt).total_seconds() / 86400, 4
+                    )
                 except (ValueError, TypeError):
                     pass
 
