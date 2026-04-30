@@ -12,7 +12,10 @@
  * loudly so persistent leaks surface in CI logs.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { assertNotProductionSupabaseUrl } from "../../src/lib/test-safety";
+import {
+  assertNotProductionSupabaseUrl,
+  assertSupabaseServiceRoleKey,
+} from "../../src/lib/test-safety";
 
 function getAdmin(): SupabaseClient {
   const url = process.env.TEST_SUPABASE_URL;
@@ -27,6 +30,13 @@ function getAdmin(): SupabaseClient {
   // seed-test-project getAdmin() — a teardown-side mistake is just as
   // damaging as a seed-side one (deleteUser cascades irreversibly).
   assertNotProductionSupabaseUrl(url, "cleanup-test-project");
+  // Symmetric brand probe with seed-test-project. PR #107 added the
+  // assertion + ServiceRoleKey brand on the seed side but the cleanup
+  // helper kept passing the raw env var into createClient — same blast
+  // radius (deleteUser cascades irreversibly), same wrong-key-paste
+  // failure mode the probe was added to surface. Caught by /review
+  // cross-PR audit, 2026-04-30.
+  assertSupabaseServiceRoleKey(key, "cleanup-test-project");
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
