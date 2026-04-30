@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.15] - 2026-04-30
+
+**Fix CI seed-gated step — kill the next-server grandchild, not just the npm parent.** Setting `E2E_TEST_DB_CONFIGURED=true` (Issue 5 wiring) immediately surfaced a latent bug in `.github/workflows/ci.yml`: the unconditional smoke step kills `$SERVER_PID` (npm) and `wait`s on it, but `npm run start` is a 3-level tree (npm → `next start` → node `next-server`) and SIGTERM doesn't propagate to the grandchild. The grandchild gets reparented to init and keeps holding port 3000. The seed-gated step's WR-04 port-bind guard correctly detects the still-listening socket and exits 1.
+
+### Fixed
+
+- **`.github/workflows/ci.yml`** — after `kill $SERVER_PID + wait` in both the unconditional and seed-gated steps, run `lsof -ti:3000 | xargs -r kill -9` to nuke any process still holding port 3000 regardless of process tree, plus a 5-second poll loop in the unconditional step to confirm the port is released before the next step's guard runs. `xargs -r` skips the kill when nothing is listening so the step stays green when the parent SIGTERM did propagate cleanly (e.g., when next-server is upgraded to a single-process runner).
+
+### Why this was latent
+
+The seed-gated step only runs when `vars.E2E_TEST_DB_CONFIGURED == 'true'`. Until 10:05Z 2026-04-30 that variable was unset, so the gated step was always skipped and the WR-04 guard never executed against a real CI run. Wiring the variable for the test-Supabase E2E setup activated the guard, which immediately fired on the very first run.
+
 ## [0.17.1.14] - 2026-04-30
 
 **KPI-17 follow-up — fix the analytics fills query so 4-bucket can actually fire.** v0.17.1.13 shipped the per-strategy gate, but production runs still produced 2-bucket Trade Mix. Live evidence from Railway logs: the fills query at `analytics_runner.run_strategy_analytics` was selecting `notional_usd, holding_period_hours, filled_at, created_at` — none of which exist on the `trades` table (migration 039 was never landed). PostgREST returned `42703 column trades.notional_usd does not exist`, the `try/except` swallowed it as a warning, `fills_data = []`, the coverage gate evaluated `False` on an empty list, and `_compute_trade_mix(fills=[], has_maker_taker=False)` produced the empty 2-bucket fallback.

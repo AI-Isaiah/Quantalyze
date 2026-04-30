@@ -130,12 +130,24 @@ jobs:
             sleep 1
           done
           npx playwright test e2e/auth.spec.ts e2e/smoke.spec.ts e2e/demo-public.spec.ts e2e/demo-founder-view.spec.ts e2e/onboarding-banner-smoke.spec.ts
-          # Phase 11 review fix WR-04: kill THEN wait so the next gated step
-          # doesn't race port 3000. `wait` reaps the process and blocks until
-          # exit; `|| true` keeps the step green if the server already crashed
-          # (we already ran the spec, so a dead server here is just noise).
+          # Kill the npm parent then nuke the next-server grandchild that
+          # actually binds port 3000. `npm run start` is a 3-level tree
+          # (npm -> next start -> node next-server); SIGTERM on the npm
+          # parent doesn't propagate, so the grandchild gets reparented to
+          # init and keeps the port. lsof -ti returns the PIDs holding the
+          # listening socket regardless of process tree, then xargs -r
+          # avoids invoking kill on an empty list when nothing's there.
           kill $SERVER_PID 2>/dev/null || true
           wait $SERVER_PID 2>/dev/null || true
+          lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+          # Poll until port is released (max 5s) so the next step's
+          # WR-04 guard sees a clean socket.
+          for i in $(seq 1 5); do
+            if ! lsof -nP -iTCP:3000 -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then
+              break
+            fi
+            sleep 1
+          done
         env:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
@@ -201,10 +213,11 @@ jobs:
             e2e/strategy-v2-keyboard.spec.ts \
             e2e/strategy-v2-axe.spec.ts \
             --timeout 60000
-          # Same kill+wait pattern as the unconditional step above so any
+          # Same kill+wait+nuke pattern as the unconditional step above so any
           # follow-up runner work (artifact upload) doesn't race on resources.
           kill $SERVER_PID 2>/dev/null || true
           wait $SERVER_PID 2>/dev/null || true
+          lsof -ti:3000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
