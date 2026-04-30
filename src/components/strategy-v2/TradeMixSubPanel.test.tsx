@@ -177,4 +177,42 @@ describe("TradeMixSubPanel", () => {
     expect(cls).toContain("tracking-wider");
     expect(cls).toContain("text-text-secondary");
   });
+
+  it("Test 13: approximate=true renders the 'Approximate — close-shorts bucketed by fill side' chip", () => {
+    render(
+      <TradeMixSubPanel
+        buckets={{
+          long: { count: 100, total_notional: 1 },
+          short: { count: 50, total_notional: 1 },
+        }}
+        approximate={true}
+      />,
+    );
+    expect(
+      screen.getByText("Approximate — close-shorts bucketed by fill side"),
+    ).not.toBeNull();
+  });
+
+  it("Test 14: approximate omitted/false suppresses the chip", () => {
+    const { rerender } = render(
+      <TradeMixSubPanel
+        buckets={{
+          long: { count: 100, total_notional: 1 },
+          short: { count: 50, total_notional: 1 },
+        }}
+      />,
+    );
+    expect(screen.queryByText(/Approximate/)).toBeNull();
+
+    rerender(
+      <TradeMixSubPanel
+        buckets={{
+          long: { count: 100, total_notional: 1 },
+          short: { count: 50, total_notional: 1 },
+        }}
+        approximate={false}
+      />,
+    );
+    expect(screen.queryByText(/Approximate/)).toBeNull();
+  });
 });

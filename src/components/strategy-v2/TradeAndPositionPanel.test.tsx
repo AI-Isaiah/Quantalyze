@@ -336,4 +336,39 @@ describe("TradeAndPositionPanel — Phase 14b-04 Task 2", () => {
       screen.queryByText(/Approximate.*denominated against gross exposure/i),
     ).toBeNull();
   });
+
+  it("Test 15: no_linked_api_key surfaces a Demo chip distinct from Approximate (no degraded-state implication)", () => {
+    render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={TM_FULL}
+        data_quality_flags={{ no_linked_api_key: true }}
+      />,
+    );
+    expect(
+      screen.getByText(/Demo.*scaled against gross exposure/i),
+    ).not.toBeNull();
+    // The "Approximate" chip is reserved for genuine degradation; demo
+    // strategies should not see it.
+    expect(
+      screen.queryByText(/Approximate.*denominated against gross exposure/i),
+    ).toBeNull();
+  });
+
+  it("Test 16: account_balance_unavailable wins when both flags are set (real failure ranks above demo)", () => {
+    render(
+      <TradeAndPositionPanel
+        strategyId="s1"
+        trade_metrics={TM_FULL}
+        data_quality_flags={{
+          account_balance_unavailable: true,
+          no_linked_api_key: true,
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/Approximate.*denominated against gross exposure/i),
+    ).not.toBeNull();
+    expect(screen.queryByText(/Demo/i)).toBeNull();
+  });
 });
