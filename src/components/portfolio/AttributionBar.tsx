@@ -22,7 +22,7 @@ export function AttributionBar({ data }: AttributionBarProps) {
       <BarChart accessibilityLayer={false} data={sorted} layout="vertical" margin={{ top: 4, right: 24, bottom: 4, left: 4 }}>
         <XAxis
           type="number"
-          tick={{ fontSize: 11, fill: "#718096", fontFamily: "'Geist Mono', monospace" }}
+          tick={{ fontSize: 11, fill: "#64748B", fontFamily: "'Geist Mono', monospace" }}
           tickFormatter={(v: number) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`}
           tickLine={false}
           axisLine={{ stroke: "#E2E8F0" }}
@@ -41,7 +41,7 @@ export function AttributionBar({ data }: AttributionBarProps) {
         />
         <Bar dataKey="contribution" radius={[0, 3, 3, 0]} barSize={20}>
           {sorted.map((entry) => (
-            <Cell key={entry.strategy_id} fill={entry.contribution >= 0 ? "#16A34A" : "#DC2626"} />
+            <Cell key={entry.strategy_id} fill={entry.contribution >= 0 ? "#15803D" : "#DC2626"} />
           ))}
         </Bar>
       </BarChart>
