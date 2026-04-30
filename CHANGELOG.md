@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.14] - 2026-04-30
+
+**KPI-17 follow-up — fix the analytics fills query so 4-bucket can actually fire.** v0.17.1.13 shipped the per-strategy gate, but production runs still produced 2-bucket Trade Mix. Live evidence from Railway logs: the fills query at `analytics_runner.run_strategy_analytics` was selecting `notional_usd, holding_period_hours, filled_at, created_at` — none of which exist on the `trades` table (migration 039 was never landed). PostgREST returned `42703 column trades.notional_usd does not exist`, the `try/except` swallowed it as a warning, `fills_data = []`, the coverage gate evaluated `False` on an empty list, and `_compute_trade_mix(fills=[], has_maker_taker=False)` produced the empty 2-bucket fallback.
+
+### Fixed
+
+- **`analytics-service/services/analytics_runner.py`** — narrowed the fills `select()` to columns that actually exist (`side, cost, is_maker, timestamp`) and projected `cost -> notional_usd` + `timestamp -> filled_at` in the row dicts so downstream helpers (`_compute_volume_metrics`, `_compute_volume_aggregator`, `_compute_trade_mix`) see the keys they expect. Volume metrics now compute against `cost` (which the OKX exchange handler already populates as `price * amount` per `analytics-service/services/exchange.py:483`); the prior all-zero volume output was a side effect of the same broken select. 4-bucket Trade Mix now fires for the 2 OKX strategies (200/200 fills with `is_maker` populated → 100% coverage → gate passes).
+
+### Why this was latent
+
+The fills query has been broken since the volume-aggregator + trade-mix work landed in v0.16.x. Volume metrics rendered as 0 / "—" everywhere and nobody noticed because the PR shipped against a Supabase that didn't yet have any production fills (only synthetic test data ran the full code path locally). KPI-17 surfaced it because v0.17.1.13's per-strategy gate is the first downstream consumer that depends on `fills_data` being non-empty to actually flip behavior; up until this version, an empty `fills_data` produced the same 2-bucket result whether the query worked or not.
+
 ## [0.17.1.13] - 2026-04-30
 
 **KPI-17 — flip the 4-bucket Trade Mix render with a per-strategy is_maker coverage gate.** v0.17.1's `is_maker` audit is now confirmed for OKX (400/400 prod fills with the flag populated, 100% coverage). Rather than hardcode an OKX-only allowlist, the gate runs per strategy against the strategy's own fills: ≥99% population → 4-bucket (long_maker / long_taker / short_maker / short_taker), below that → 2-bucket fallback. Binance/Bybit auto-qualify the moment their fills ingest with the flag populated — no code change needed when those audits land.
