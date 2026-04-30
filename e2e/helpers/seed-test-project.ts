@@ -28,7 +28,10 @@
  *   checkpoint is still authoritative — this is just belt-and-braces.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { assertNotProductionSupabaseUrl } from "../../src/lib/test-safety";
+import {
+  assertNotProductionSupabaseUrl,
+  assertSupabaseServiceRoleKey,
+} from "../../src/lib/test-safety";
 
 function getAdmin(): SupabaseClient {
   const url = process.env.TEST_SUPABASE_URL;
@@ -39,9 +42,10 @@ function getAdmin(): SupabaseClient {
         "spec must skip when secrets absent (D-16 / BLOCK-3 vars.E2E_TEST_DB_CONFIGURED).",
     );
   }
-  // Phase 11 WR-05 defense-in-depth: refuse known prod URL patterns
-  // before any service-role mutation happens.
+  // WR-05 defense-in-depth: prod-URL + service-role-key probes before
+  // any mutation, so misconfiguration fails loudly at the boundary.
   assertNotProductionSupabaseUrl(url, "seed-test-project");
+  assertSupabaseServiceRoleKey(key, "seed-test-project");
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
   });

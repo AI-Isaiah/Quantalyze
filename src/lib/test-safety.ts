@@ -62,3 +62,36 @@ export function assertNotProductionSupabaseUrl(
     }
   }
 }
+
+/**
+ * Catch the anon-key-pasted-as-service-role mistake at the helper
+ * boundary. Without this probe, gotrue's "User not allowed" travels
+ * through helper → @supabase/supabase-js → HTTP before a developer
+ * sees it, with no hint that the cause is a wrong-key paste.
+ *
+ * The JWT payload is decoded WITHOUT signature verification — this is
+ * a configuration probe, not an authentication step. Non-JWT inputs
+ * pass through so future Supabase key formats keep working.
+ */
+export function assertSupabaseServiceRoleKey(
+  key: string,
+  caller: string,
+): void {
+  const parts = key.split(".");
+  if (parts.length !== 3) return;
+  let payload: { role?: unknown };
+  try {
+    const json = Buffer.from(parts[1], "base64url").toString("utf8");
+    payload = JSON.parse(json) as { role?: unknown };
+  } catch {
+    return;
+  }
+  const role = typeof payload.role === "string" ? payload.role : undefined;
+  if (role && role !== "service_role") {
+    throw new Error(
+      `[${caller}] TEST_SUPABASE_SERVICE_ROLE_KEY has role="${role}" but service_role is required. ` +
+        `Open the Supabase project Settings → API → "service_role" (NOT "anon public") and paste THAT value ` +
+        `into the GitHub secret TEST_SUPABASE_SERVICE_ROLE_KEY.`,
+    );
+  }
+}
