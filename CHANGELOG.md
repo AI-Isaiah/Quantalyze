@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.17.1.29] - 2026-04-30
+
+**Closes the last `discovery-axe` axe violations.** After .28 unblocked the spec to actually scan the page (login + role + gate cleared), axe surfaced two more pre-existing a11y bugs.
+
+### Fixed
+
+- **`src/components/layout/Breadcrumb.tsx`** + **`src/components/layout/Sidebar.tsx`** + **`src/components/legal/LegalFooter.tsx`** — Added `aria-label` to all three `<nav>` landmarks rendered on every dashboard route. Axe `landmark-unique` rule (moderate) requires multiple `<nav>` siblings to have distinguishable accessible names: `Breadcrumb` → `aria-label="Breadcrumb"`, `Sidebar` → `aria-label="Primary"`, `LegalFooter` → `aria-label="Legal"`.
+
+- **`src/components/strategy/StrategyFilters.tsx:344, 355`** — Added `aria-label="Sort by"` and `aria-label="Sort direction"` to the two `<select>` controls in the discovery sort UI. Axe `select-name` rule (critical) — selects without a label are unreachable for screen-reader users. Visible label was a sibling `<span>Sort:</span>`, not a wrapping `<label>`, so axe couldn't bind it.
+
 ## [0.17.1.28] - 2026-04-30
 
 **Closes the last 3 seed-gated specs that were still red after .26 + .27.** Round 2 of post-merge e2e fixes — the seed-step fix in .27 unblocked the actual specs, which then surfaced three further bugs.

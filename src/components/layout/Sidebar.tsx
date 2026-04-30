@@ -152,7 +152,7 @@ export function Sidebar({
         </Link>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-4">
+      <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
         {sections.map((section) => (
           <div key={section.heading} className="mt-6 first:mt-2">
             {/* PR #108 review: removed `text-sidebar-text/50` — Tailwind opacity
