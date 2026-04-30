@@ -76,11 +76,18 @@ SHUTDOWN = asyncio.Event()
 # so the handler has a chance to timeout-classify itself before the
 # watchdog yanks the row. Example: compute_analytics handler timeout is
 # 15 min, watchdog threshold is 20 min.
+# Each value MUST be greater than services.job_worker.TIMEOUT_PER_KIND[kind].
+# A watchdog threshold below the handler timeout requeues the job before the
+# handler can fail-classify itself, leaving callers (the wizard polls
+# strategy_analytics.computation_status for terminal state) to spin forever
+# while the row bounces between pending and running. The
+# `test_watchdog_threshold_exceeds_handler_timeout` test in
+# tests/test_main_worker.py pins this invariant.
 WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
-    "sync_trades": "10 minutes",
-    "compute_analytics": "20 minutes",
-    "poll_positions": "5 minutes",
-    "compute_portfolio": "10 minutes",
+    "sync_trades": "20 minutes",       # handler timeout = 15 minutes
+    "compute_analytics": "20 minutes", # handler timeout = 15 minutes
+    "poll_positions": "5 minutes",     # handler timeout = 3 minutes
+    "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
 }
 
 

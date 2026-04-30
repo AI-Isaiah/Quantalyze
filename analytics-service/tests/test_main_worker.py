@@ -307,10 +307,14 @@ class TestWatchdogTick:
         assert isinstance(overrides, dict), (
             f"overrides must be dict (not str) to coerce to JSONB object; got {type(overrides).__name__}"
         )
-        assert overrides["sync_trades"] == "10 minutes"
+        # Watchdog thresholds must EXCEED the corresponding handler timeout —
+        # see TestWatchdogInvariant for the source-of-truth invariant. Bumped
+        # sync_trades 10→20m and compute_portfolio 10→15m after a wizard hang
+        # caused by sync_trades retrying past the watchdog instead of failing.
+        assert overrides["sync_trades"] == "20 minutes"
         assert overrides["compute_analytics"] == "20 minutes"
         assert overrides["poll_positions"] == "5 minutes"
-        assert overrides["compute_portfolio"] == "10 minutes"
+        assert overrides["compute_portfolio"] == "15 minutes"
 
 
 # ---------------------------------------------------------------------------
@@ -457,3 +461,47 @@ class TestClaimDedupe:
         mock_dispatch.assert_not_awaited()
         rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
         assert rpc_names == ["claim_compute_jobs_with_priority"]
+
+
+# ---------------------------------------------------------------------------
+# Watchdog-vs-handler-timeout invariant (regression for /investigate root
+# cause: the wizard's "Verify data" step hung at 2674s because the
+# sync_trades watchdog yanked the still-running job back to 'pending' before
+# the handler could fail-classify itself, looping forever and never writing
+# strategy_analytics.computation_status to a terminal state).
+# ---------------------------------------------------------------------------
+
+
+def _parse_minutes(s: str) -> int:
+    """'10 minutes' -> 10. Tolerant of singular/plural for forward compat."""
+    parts = s.strip().split()
+    assert len(parts) == 2 and parts[1] in ("minute", "minutes"), (
+        f"Unexpected watchdog threshold format: {s!r}"
+    )
+    return int(parts[0])
+
+
+class TestWatchdogInvariant:
+    """The watchdog reset threshold for every kind MUST exceed that kind's
+    handler timeout. If it doesn't, the watchdog reclaims still-running jobs,
+    they retry forever, and any caller polling for terminal status (e.g. the
+    Strategy Wizard) hangs without ever seeing 'failed' or 'complete'."""
+
+    def test_watchdog_threshold_exceeds_handler_timeout(self) -> None:
+        from main_worker import WATCHDOG_PER_KIND_OVERRIDES
+        from services.job_worker import TIMEOUT_PER_KIND
+
+        for kind, watchdog_str in WATCHDOG_PER_KIND_OVERRIDES.items():
+            handler_seconds = TIMEOUT_PER_KIND.get(kind)
+            assert handler_seconds is not None, (
+                f"Watchdog override declared for unknown kind {kind!r}"
+            )
+            handler_minutes = handler_seconds / 60
+            watchdog_minutes = _parse_minutes(watchdog_str)
+            assert watchdog_minutes > handler_minutes, (
+                f"Watchdog threshold for {kind!r} ({watchdog_minutes}m) is not "
+                f"greater than its handler timeout ({handler_minutes:.1f}m). "
+                "The handler must have a chance to fail-classify itself before "
+                "the watchdog yanks the row — otherwise the job loops forever "
+                "and any caller polling for terminal status hangs."
+            )
