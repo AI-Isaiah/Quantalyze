@@ -65,7 +65,6 @@ Phase 17 introduces **zero new sizes or weights**. The contract enumerates how e
 | Body | 14px | 400 | DM Sans | 1.5 | `human_message` paragraph in `ErrorEnvelope`, broker-card caption sub-text (when expanded), CSV escape-hatch card subtitle copy |
 | Caption / micro | 12px | 400 | DM Sans | 1.5 | Helper copy under broker cards, per-source field labels, per-source IP-allowlist hint, error-envelope `debug_context` `<ul>` items, trust-tier pill text |
 | Tabular caption | 12px | 400 | Geist Mono `font-metric tabular-nums` | 1.5 | `correlation_id` value inside collapsed `<details>`, ISO timestamp in copy-diagnostics payload, `code` value rendered as `<code>` |
-| Micro caps | 10–11px | 600 (uppercase tracking-wider) | DM Sans | 1.2 | Trust-tier pill variant label IF Phase 17 chooses uppercase treatment — **rejected** for v1; pill text stays normal-case 12px (per DESIGN-01 minimal-decoration rule) |
 
 **Trust-tier pill typography lock (DESIGN-01):**
 
@@ -105,10 +104,10 @@ Phase 17 introduces **zero new sizes or weights**. The contract enumerates how e
 | Slot | Size / weight | Class |
 |------|---------------|-------|
 | Card name (`Binance` / `OKX` / `Bybit`) | 14px / 600 | `text-sm font-semibold text-text-primary` |
-| Card caption (`Spot + USDⓈ-M Futures…`) | 11px / 400 | `text-[11px] text-text-muted` |
+| Card caption (`Spot + USDⓈ-M Futures…`) | 12px / 400 | `text-xs text-text-muted` |
 | Field legend (`Exchange`) | 12px / 500 (medium permitted by existing `Input`/`fieldset` precedent — this is the only case Phase 17 sees a non-400/600 weight, and it is INHERITED, not added) | `text-xs font-medium text-text-primary` |
 | Per-source field label (`API Key`, `OKX Passphrase`) | 12px / 500 | `text-xs font-medium text-text-primary` (mirrors existing `Input.tsx` label slot) |
-| IP-allowlist helper hint | 11px / 400 | `text-[11px] text-text-muted` |
+| IP-allowlist helper hint | 12px / 400 | `text-xs text-text-muted` |
 
 **CSV escape-hatch card typography lock (DESIGN-03):**
 
@@ -256,7 +255,7 @@ DESIGN-03 grey-area resolution: DESIGN.md stays narrow (tokens, typography, visu
 | Slot | Spec |
 |------|------|
 | `<Input label="API Key" required autoComplete="off">` | 1px `border-border`, 6px radius, `focus:border-accent focus:ring-1 focus:ring-accent/20`. `data-testid="wizard-api-key"`. |
-| `<Input label="API Secret" type="password" required autoComplete="off">` with show/hide toggle | Toggle is `<button type="button">` text "Show"/"Hide", 11px `text-text-muted`. `data-testid="wizard-api-secret"`. Toggle behavior INHERITED from existing `ConnectKeyStep.tsx:273-280`. |
+| `<Input label="API Secret" type="password" required autoComplete="off">` with show/hide toggle | Toggle is `<button type="button">` text "Show"/"Hide", 12px `text-text-muted`. `data-testid="wizard-api-secret"`. Toggle behavior INHERITED from existing `ConnectKeyStep.tsx:273-280`. |
 | `<Input label="Key nickname (optional)">` | Optional. `data-testid="wizard-key-nickname"`. Helper hint: `For your own reference inside Quantalyze. Never shown to allocators.` |
 
 **Per-source overrides:**
@@ -437,8 +436,8 @@ See §5.2 table. Three locked strings (one per source).
 | ARIA-live confirmation slot | `Copied to clipboard` (only during the 2s flash window) |
 | `code:` label | `code:` |
 | `correlation_id:` label | `correlation_id:` |
-| `Retry` CTA | `Retry` |
-| `Cancel` CTA (only when `onCancel` passed) | `Cancel` |
+| `Retry` CTA | `Retry` (visible label); `aria-label="Retry {operation}"` (e.g. `Retry validating key`, `Retry sync`, `Retry submit`) for screen-reader announcement — visible button text remains the single word `Retry`. |
+| `Cancel` CTA (only when `onCancel` passed) | `Cancel` (visible label); `aria-label="Cancel and return"` for screen-reader announcement — visible button text remains the single word `Cancel`. |
 
 `human_message` and `debug_context` strings come from `wizardErrors.ts` per code — never inline.
 
@@ -487,6 +486,7 @@ Phase 17 honors DESIGN.md fully. The five new sub-sections Phase 17 ADDS to DESI
 | DM Sans for body/UI | PASS — all new copy uses `font-sans` (DM Sans) via Tailwind defaults. |
 | Geist Mono for tabular numbers | PASS — `font-metric tabular-nums` on `code`/`correlation_id`/ISO timestamp inside `<details>`. |
 | Instrument Serif for display only | PASS — Phase 17 surfaces use NO `font-display`. |
+| 4-size typography ladder | PASS — 4 sizes (24/16/14/12). All Phase 17 surface text maps onto these four sizes; zero new sizes introduced. |
 | 1px borders | PASS — broker cards, CSV escape-hatch card, error envelope shell, trust-tier pill all use `border` (1px). |
 | 8px radius for cards | PASS — `rounded-lg` on broker cards + CSV escape-hatch card. |
 | 6px radius for buttons + inputs | PASS — `rounded-md` on `Retry`/`Copy diagnostics` (Button primitive default). 4px (`rounded-sm`) on trust-tier pill (matches DESIGN.md badge ladder: `sm: 4px`). |
@@ -536,7 +536,7 @@ Phase 17 honors DESIGN.md fully. The five new sub-sections Phase 17 ADDS to DESI
 | Empty | n/a — broker grid is never empty in v1 (3 cards always present). Reduces to "Success". (Documented as "n/a — never empty in v1".) |
 | Error | n/a at the grid level (validation errors render at ConnectKeyStep). Reduces to "Success". (Documented as "n/a — error surfaces at ConnectKeyStep, not at grid".) |
 | Partial | n/a — no async enrichment on the grid. (Documented as "n/a — no secondary enrichment".) |
-| Success | 3 cards rendered in `grid grid-cols-3 gap-2`. Default selection = `binance` (`aria-pressed="true"`, `border-accent bg-accent/5`). Other 2 inactive (`aria-pressed="false"`, `border-border bg-white hover:border-accent/50`). Below grid: "Need help creating a read-only key? {Source} setup guide →" link (text-[11px] text-text-muted). CSV escape-hatch card 24px below. |
+| Success | 3 cards rendered in `grid grid-cols-3 gap-2`. Default selection = `binance` (`aria-pressed="true"`, `border-accent bg-accent/5`). Other 2 inactive (`aria-pressed="false"`, `border-border bg-white hover:border-accent/50`). Below grid: "Need help creating a read-only key? {Source} setup guide →" link (text-xs text-text-muted). CSV escape-hatch card 24px below. |
 | Retry-in-flight | n/a — no fetch on this surface. |
 | Stale | n/a — static. |
 | Optimistic | On click of an inactive card, `aria-pressed` flips instantly to the clicked card; the previously-active card flips to inactive. No server call (selection is client-state only). 150ms `transition-colors` per DESIGN.md motion section. |
@@ -928,7 +928,7 @@ Pairs asserted:
 | 3 | `#4A5568` | `#F8F9FA` | `csv_uploaded` pill text on page bg context | ≥ 4.5:1 | 7.68:1 | `TRUST_TIER_TOKENS.csv_uploaded.text` on resolved page bg |
 | 4 | `#B45309` | `#FFFFFF` | `self_reported` pill text on white surface | ≥ 4.5:1 | 5.05:1 | `TRUST_TIER_TOKENS.self_reported.text` on `.fill` |
 | 5 | `#B45309` | `#F8F9FA` | `self_reported` pill text on page bg context | ≥ 4.5:1 | 4.85:1 | `TRUST_TIER_TOKENS.self_reported.text` on resolved page bg |
-| 6 | `#B45309` | `#FEF1E5` | `self_reported` text against bg-warning/5 fallback (defense-in-depth — NOT the rendering context, but pinned for regression safety) | ≥ 4.5:1 | 4.56:1 | reuse of existing `chart-contrast.test.ts` assertion |
+| 6 | `#B45309` | `#FEF1E5` | `self_reported` text against bg-negative/5 resolved surface (defense-in-depth — NOT the canonical rendering context for `self_reported` (which is `bg-page #F8F9FA`, row 5 above); pinned only for regression safety. The DESIGN.md `--color-warning-bg` canonical hex is `#FEF3C7`; this row uses the resolved-over-white approximation for the `bg-negative/5` shell context, NOT the warning-bg token.) | ≥ 4.5:1 | 4.56:1 | reuse of existing `chart-contrast.test.ts` assertion |
 | 7 | `#1A1A2E` | `#FFFFFF` | `ErrorEnvelope` `human_message` on white (the surface inside the `bg-negative/5` shell resolves close to white at the title position) | ≥ 4.5:1 | 17.78:1 | DESIGN-02 title slot |
 | 8 | `#4A5568` | `#FFF5F5` | `ErrorEnvelope` `debug_context` text on `bg-negative/5` resolved (≈ #FFF5F5) | ≥ 4.5:1 | 7.81:1 | DESIGN-02 body slot |
 | 9 | `#64748B` | `#FFF5F5` | `ErrorEnvelope` `correlation_id:` muted text on `bg-negative/5` | ≥ 4.5:1 | 4.71:1 | DESIGN-02 muted slot |
@@ -1044,7 +1044,7 @@ no inline-string error envelopes. Code-review block enforced by grep at PR-time.
 
 Visual: `<button>` cards with white surface, 1px `#E2E8F0` border, 8px radius.
 Active state: `border-accent bg-accent/5`. Hover (inactive): `hover:border-accent/50`.
-Card copy: 14px DM Sans semibold (name) + 11px DM Sans regular (caption).
+Card copy: 14px DM Sans semibold (name) + 12px DM Sans regular (caption).
 
 Per-source field schema lives in UI-SPEC.md §per-source-fields (DESIGN.md stays
 narrow on tokens + visual contracts). OKX requires a passphrase field; Binance
