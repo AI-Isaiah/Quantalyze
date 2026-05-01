@@ -45,6 +45,14 @@ export interface WizardChromeProps {
    * stepper.
    */
   steps?: { key: WizardStepKey; label: string; number: string }[];
+  /**
+   * Phase 15 follow-up: branch which static chrome copy renders. The
+   * default subtitle is API-specific ("Paste a read-only API key …") —
+   * pass `"csv"` on the `?source=csv` branch to render CSV-appropriate
+   * copy. Absent ⇒ "api" (back-compat). The H1 is intentionally neutral
+   * across both branches.
+   */
+  source?: "api" | "csv";
   children: React.ReactNode;
 }
 
@@ -56,12 +64,14 @@ export function WizardChrome({
   onRequestCall,
   toastKey,
   steps,
+  source,
   children,
 }: WizardChromeProps) {
   const activeSteps = steps ?? DEFAULT_STEPS;
   const totalCount = activeSteps.length;
   const totalLabel = String(totalCount).padStart(2, "0");
   const gridColsClass = totalCount === 3 ? "grid-cols-3" : "grid-cols-4";
+  const isCsv = source === "csv";
   const [showToast, setShowToast] = useState(false);
 
   // Defer both state writes into setTimeout callbacks so no setState
@@ -83,7 +93,9 @@ export function WizardChrome({
           Connect Your Strategy
         </h1>
         <p className="mt-2 text-sm text-text-secondary">
-          Paste a read-only API key. We will compute your verified factsheet in the next screen.
+          {isCsv
+            ? "Upload a daily-returns, NAV, or trades CSV. We validate every row before computing your factsheet."
+            : "Paste a read-only API key. We will compute your verified factsheet in the next screen."}
         </p>
       </header>
 

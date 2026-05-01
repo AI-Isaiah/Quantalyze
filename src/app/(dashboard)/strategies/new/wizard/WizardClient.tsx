@@ -365,6 +365,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         onRequestCall={handleOpenRequestCall}
         toastKey={toastKey}
         steps={source === "csv" ? WIZARD_STEPS_CSV : undefined}
+        source={source}
       >
         {sessionExpired && (
           <div className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-xs text-text-secondary">
@@ -385,8 +386,9 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
               We saved your progress.
             </p>
             <p className="mt-1 text-xs text-text-muted">
-              A draft from an earlier session is ready. Secrets are never stored in
-              your browser, so you will need to paste your API secret again.
+              {source === "csv"
+                ? "A CSV upload draft from an earlier session is ready. Re-select the file and continue."
+                : "A draft from an earlier session is ready. Secrets are never stored in your browser, so you will need to paste your API secret again."}
             </p>
             <div className="mt-3 flex gap-2">
               <Button size="sm" onClick={handleResume} data-testid="wizard-resume">
@@ -408,11 +410,18 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
             wizard steps. Mounted in the parent layout (NOT per-step) so the
             warnings cannot drift out of any single step's render path. Two
             single-purpose components rendered adjacently per CONTEXT D-07
-            and D-08 — DO NOT merge into a 2-line strip. */}
-        <div className="mb-4">
-          <WithdrawalWarningStrip />
-          <WizardIpAllowlistHint />
-        </div>
+            and D-08 — DO NOT merge into a 2-line strip.
+
+            Phase 15 follow-up: both strips are API-path specific (READ ONLY
+            key requirement, exchange IP allowlist). The CSV branch has no
+            API key + no exchange linkage, so neither strip applies — hide
+            both when source === "csv". */}
+        {source === "api" && (
+          <div className="mb-4">
+            <WithdrawalWarningStrip />
+            <WizardIpAllowlistHint />
+          </div>
+        )}
 
         {source === "api" ? (
           <>
