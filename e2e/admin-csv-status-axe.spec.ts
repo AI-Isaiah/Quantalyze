@@ -55,13 +55,20 @@ test.describe("Phase 17 — admin CSV-status axe (DESIGN-05)", () => {
 
     await page.goto("/admin/csv-status");
 
+    // ME-02 (Phase 17 review): the wait-for-h1 expectation alone passes
+    // even when /admin/csv-status redirects non-admin users to
+    // /discovery/crypto-sma (the discovery page also renders an <h1>).
+    // That meant a CI environment with the Supabase env vars wired but
+    // no admin-user seed would scan the wrong DOM and report a false
+    // green. The URL assertion below pins the expected route — if the
+    // seed helper only minted a regular allocator the redirect fires
+    // and this fails loudly, surfacing the admin-seed gap.
+    await expect(page).toHaveURL(/\/admin\/csv-status/, { timeout: 10_000 });
+
     // The admin csv-status page renders an <h1> via PageHeader (see
     // src/components/layout/PageHeader.tsx:15) and a <table> (page.tsx:79).
-    // For non-admin users the route redirects to /discovery/crypto-sma; if
-    // the seed helper has not yet been extended to mint an admin user this
-    // expectation will time out and surface the admin-seed gap loudly
-    // rather than scanning the wrong DOM (Grok W-02 false-green guard,
-    // mirrors discovery-axe.spec.ts:71-77).
+    // Belt-and-braces with the URL assertion above (Grok W-02 false-green
+    // guard, mirrors discovery-axe.spec.ts:71-77).
     const heading = page.locator("h1");
     await expect(heading).toBeVisible({ timeout: 10_000 });
 
