@@ -99,6 +99,102 @@
 - **Inputs:** 6px radius, 1px border, accent border on focus
 - **Modals:** White surface, subtle shadow, slide-out panels from right edge
 
+## Trust-Tier Badges
+Three-variant pill component lives at `src/components/strategy/TrustTierLabel.tsx`.
+Tokens live at `src/lib/design-tokens/trust-tier.ts` (single nested
+`TRUST_TIER_TOKENS as const`). DESIGN.md ↔ token consistency asserted by
+`tests/a11y/trust-tier-tokens.test.ts`.
+
+| Variant | Fill | Text | Border | Label |
+|---------|------|------|--------|-------|
+| `api_verified` | #1B6B5A | #FFFFFF | #1B6B5A | API verified |
+| `csv_uploaded` | #FFFFFF | #4A5568 | #4A5568 | CSV uploaded — verification pending |
+| `self_reported` | #FFFFFF | #B45309 | #B45309 | Self-reported |
+
+Visual: `inline-flex items-center rounded-sm border px-2 py-0.5 text-xs font-medium`.
+4px radius (`rounded-sm` per badge ladder), 1px border, 12px DM Sans regular.
+Inserted next to the strategy name on factsheet H1, marketplace tile, admin
+CSV-status row. No icons; identity carried by border + text colour only.
+
+## Error Envelope
+Canonical error renderer lives at `src/components/error/ErrorEnvelope.tsx`.
+Used by every error surface (wizard, CSV upload, factsheet load failure, admin
+status page, future `error.tsx` route boundaries). Sources human copy from
+`src/lib/wizardErrors.ts` via `buildEnvelope()` in `src/lib/envelope.ts`.
+
+Visual contract:
+- Shell: `role="alert"` + `rounded-md border border-negative/30 bg-negative/5 px-4 py-3`.
+- Title: `text-base font-semibold text-text-primary` — 16px DM Sans semibold #1A1A2E (REQ DESIGN-02).
+- Body: optional numbered `<ul>` of `debug_context` lines (12px DM Sans regular #4A5568).
+- Retry CTA: `Button size="sm"`, BELOW the body and ABOVE the `<details>` accordion.
+  Renders iff `envelope.recoverable && onRetry`.
+- Diagnostics: always-collapsed `<details>` with `code` + `correlation_id` (Geist
+  Mono 12px) + ghost-button "Copy diagnostics".
+- Copy-diagnostics payload: newline-delimited text block prefixed `QUANTALYZE_DIAG`
+  + code + correlation_id + ISO timestamp + user_agent + debug_context lines +
+  trailer `--- pii-scrubbed ---`. Runs through `pii-scrub.ts` before clipboard write.
+
+Authoring rule: every error path MUST call `buildEnvelope(code, correlation_id, ctx)`;
+no inline-string error envelopes. Code-review block enforced by grep at PR-time.
+
+## Broker Selector Grid
+3-cols × 1-row card grid at the top of the API path on `/strategies/new/wizard`.
+3 active cards (Binance, OKX, Bybit) per UC-B v1 source scope. Drops the literal
+"2×3" interpretation from REQ DESIGN-03; v2 may revisit when MT5/IBKR ship.
+
+Visual: `<button>` cards with white surface, 1px `#E2E8F0` border, 8px radius.
+Active state: `border-accent bg-accent/5`. Hover (inactive): `hover:border-accent/50`.
+Card copy: 14px DM Sans semibold (name) + 12px DM Sans regular (caption).
+
+Per-source field schema lives in UI-SPEC.md §per-source-fields (DESIGN.md stays
+narrow on tokens + visual contracts). OKX requires a passphrase field; Binance
+and Bybit do not. IP-allowlist hint copy is per-source.
+
+## CSV Escape-Hatch Card
+Full-width card BELOW the broker selector grid. White surface, 1px `#E2E8F0`
+border, 8px radius. Same visual weight as the broker cards — directs users
+without an API key into the CSV branch (`?source=csv`).
+
+Title (verbatim): "Don't have an API key? Upload CSV instead". Body:
+"Upload daily returns, NAV, or trades. We validate every row before creating
+your strategy. Max 10 MB." CTA: `Button variant="secondary"` "Upload CSV →"
+(secondary variant intentionally avoids competing with the API path's
+`bg-accent` primary CTA on the same screen).
+
+3 accepted formats live as a segmented control on the CSV branch landing step:
+`daily_returns` / `daily_nav` / `trades`. Format selector is part of Phase 15
+CSV branch — see Phase 15 UI-SPEC §8.3.
+
+## 9-State Matrix
+Every API-key-flow surface declares behavior across 9 states: loading, empty,
+error, partial, success, retry-in-flight, stale, optimistic, offline. Concrete
+DOM/copy specs per cell live in UI-SPEC.md §9-state-matrix. Hard exit gate
+before Phase 19: `gsd-sdk validate phase-17-exit` greps for `TBD | TODO | TKTK`
+in the matrix; FAILS on any unresolved cell.
+
+A11y minimums (DESIGN-05):
+- Trust-tier pill text ≥ 4.5:1 against rendering context (page bg #F8F9FA or
+  surface bg #FFFFFF). Asserted by `tests/a11y/wizard-contrast.test.ts`.
+- ARIA live regions: `role="alert"` on blocking errors; `role="status"` +
+  `aria-live="polite"` on non-blocking state changes.
+- Keyboard navigation: stepper Tab/Shift+Tab in DOM order; Enter activates;
+  `aria-current="step"` on active step.
+- Focus management: on step transition, focus moves to the first interactive
+  control of the new step.
+
+axe-core CI scans `/strategies/new/wizard` (both `?source=` branches) and
+`/admin/csv-status` with `wcag2a + wcag2aa + best-practice` rule sets. Zero
+violations required for green CI.
+
+Mobile fallback (DESIGN-04): deferred to v2. Trigger condition: PostHog
+`wizard_start` event with `device_type='mobile'` count > 0 over a rolling
+7-day window in production. Audit cron logs the count weekly to
+`.planning/audits/wizard-mobile-count.md`. When trigger fires, build the
+read-only review state spec (single column, 16px base, no chrome reflow,
+copy-only — full mobile-responsive polish remains v2 scope per PROJECT.md).
+v1 ships the 640px `DesktopGate.tsx` as-is per the Phase 16 OBSERV-11 audit
+(mobile-start count = 0).
+
 ## Data density principle
 Data density > card density. Prefer tables and shared-axis panels over stacks of
 rounded cards. Reference: Bloomberg Terminal, FactSet.
