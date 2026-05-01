@@ -22,6 +22,33 @@ logger = logging.getLogger("quantalyze.analytics")
 limiter = Limiter(key_func=get_remote_address)
 
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB per CSV-02 rule 1
+_READ_CHUNK_BYTES = 64 * 1024  # 64 KiB per await — bounded heap growth
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """Stream-read an UploadFile with an early abort once `cap` bytes are
+    exceeded. Phase 15 / WR-01 fix: the prior implementation called
+    `await file.read()` unbounded, which would fully realise hundreds of
+    MB / GBs into memory before the size guard fired. A direct caller
+    holding the analytics-service `SERVICE_KEY` could exploit that to
+    DoS the pod regardless of the Next.js front-line cap. The streaming
+    loop here aborts at the first 64 KiB chunk that pushes the running
+    total past `cap`, so worst-case heap is `cap + chunk_size` bytes."""
+    buf = bytearray()
+    while True:
+        chunk = await file.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise HTTPException(status_code=400, detail={
+                "ok": False,
+                "code": "CSV_FILE_TOO_LARGE",
+                "human_message": "Maximum file size is 10 MB.",
+                "debug_context": {"size_bytes": len(buf)},
+                "correlation_id": None,
+            })
+    return bytes(buf)
 
 
 @router.post("/csv/validate")
@@ -37,15 +64,7 @@ async def csv_validate(
     Thin HTTP wrapper. All work lives in services.csv_validator.validate_csv
     so a future worker tick (Phase 19) can reuse the same implementation.
     """
-    raw = await file.read()
-    if len(raw) > MAX_BYTES:
-        raise HTTPException(status_code=400, detail={
-            "ok": False,
-            "code": "CSV_FILE_TOO_LARGE",
-            "human_message": "Maximum file size is 10 MB.",
-            "debug_context": {"size_bytes": len(raw)},
-            "correlation_id": None,
-        })
+    raw = await _read_capped(file, MAX_BYTES)
 
     if fmt not in ("daily_returns", "daily_nav", "trades"):
         raise HTTPException(status_code=400, detail={
