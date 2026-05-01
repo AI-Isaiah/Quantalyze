@@ -38,8 +38,8 @@ export interface TrustTierTokenSlot {
 export const TRUST_TIER_TOKENS = {
   api_verified: {
     fill: "#1B6B5A",
-    text: "#FFFFFF",
-    border: "#1B6B5A",
+    text: "#FFFFFF", // white on accent — 6.37:1 (AA pass; does NOT hit AAA 7:1)
+    border: "#1B6B5A", // accent on white — 6.37:1
     label: "API verified",
   },
   csv_uploaded: {

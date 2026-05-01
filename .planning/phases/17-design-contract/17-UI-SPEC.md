@@ -171,8 +171,8 @@ export interface TrustTierBadgeShape {
 export const TRUST_TIER_TOKENS: Readonly<Record<TrustTierVariant, TrustTierBadgeShape>> = {
   api_verified: {
     fill: "#1B6B5A",   // --color-accent
-    text: "#FFFFFF",   // white on accent — 6.95:1 (AA pass for 12px text)
-    border: "#1B6B5A", // accent on white — 6.95:1
+    text: "#FFFFFF",   // white on accent — 6.37:1 (AA pass; does NOT hit AAA 7:1)
+    border: "#1B6B5A", // accent on white — 6.37:1
   },
   csv_uploaded: {
     fill: "#FFFFFF",   // --color-surface (outline pill)
@@ -923,7 +923,7 @@ Pairs asserted:
 
 | # | Foreground | Background | Slot context | Required ratio | Computed ratio | Token slot covered |
 |---|------------|-----------|--------------|----------------|----------------|--------------------|
-| 1 | `#FFFFFF` | `#1B6B5A` | `api_verified` pill text on accent fill | ≥ 4.5:1 | 6.95:1 | `TRUST_TIER_TOKENS.api_verified.text` on `.fill` |
+| 1 | `#FFFFFF` | `#1B6B5A` | `api_verified` pill text on accent fill | ≥ 4.5:1 | 6.37:1 | `TRUST_TIER_TOKENS.api_verified.text` on `.fill` |
 | 2 | `#4A5568` | `#FFFFFF` | `csv_uploaded` pill text on white surface | ≥ 4.5:1 | 8.06:1 | `TRUST_TIER_TOKENS.csv_uploaded.text` on `.fill` |
 | 3 | `#4A5568` | `#F8F9FA` | `csv_uploaded` pill text on page bg context | ≥ 4.5:1 | 7.68:1 | `TRUST_TIER_TOKENS.csv_uploaded.text` on resolved page bg |
 | 4 | `#B45309` | `#FFFFFF` | `self_reported` pill text on white surface | ≥ 4.5:1 | 5.05:1 | `TRUST_TIER_TOKENS.self_reported.text` on `.fill` |
