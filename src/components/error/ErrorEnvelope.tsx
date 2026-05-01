@@ -63,6 +63,25 @@ function redactSensitiveSubstrings(value: string): string {
   });
 }
 
+// CR-01 fix: catch JWT-shaped tokens embedded inside larger strings (e.g.
+// `Authorization: Bearer eyJ...`). The `scrubPii` JWT detector is anchored
+// (^...$) and only matches whole-string JWTs, so a header-formatted line
+// like `Authorization: Bearer <JWT>` slips through pass 1 (which only
+// redacts `Bearer` as the value capture, stopping at the space before the
+// token) AND pass 2 (which doesn't fire because the input starts with
+// `Authorization:` so the ^anchor fails).
+//
+// This third pass scans for JWT-shaped substrings ANYWHERE in the line —
+// three base64url segments of ≥10 chars each, separated by dots — and
+// replaces each match with `[REDACTED_JWT]`. The 10-char minimum keeps the
+// false-positive rate low (e.g., `a.b.c` is not a JWT shape).
+const JWT_WORD =
+  /[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
+
+function redactJwtSubstrings(value: string): string {
+  return value.replace(JWT_WORD, "[REDACTED_JWT]");
+}
+
 export function buildDiagBlock(envelope: ErrorEnvelopeType): string {
   const lines = [
     "QUANTALYZE_DIAG",
@@ -71,13 +90,17 @@ export function buildDiagBlock(envelope: ErrorEnvelopeType): string {
     new Date().toISOString(),
     typeof navigator !== "undefined" ? navigator.userAgent : "unknown-ua",
     ...envelope.debug_context.map((step) => {
-      // Two-pass scrub: first redact key:value substring patterns
-      // (apikey/secret/etc.), then run scrubPii() to catch JWT-shape tokens.
+      // Three-pass scrub:
+      //   1. redactSensitiveSubstrings — key:value patterns (apikey/secret/etc.)
+      //   2. scrubPii — whole-string JWTs (anchored regex) + key-based object scrub
+      //   3. redactJwtSubstrings — JWT-shaped tokens embedded anywhere in
+      //      the (possibly partially-redacted) string. Catches the
+      //      `Authorization: Bearer <JWT>` case the first two passes miss.
       const subRedacted = redactSensitiveSubstrings(step);
       const scrubbed = scrubPii(subRedacted);
       const asString =
         typeof scrubbed === "string" ? scrubbed : String(scrubbed ?? "");
-      return ` - ${asString}`;
+      return ` - ${redactJwtSubstrings(asString)}`;
     }),
     "--- pii-scrubbed ---",
   ];

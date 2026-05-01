@@ -178,6 +178,32 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(written).not.toContain(jwt);
   });
 
+  // Regression: CR-01 (Phase 17 code review).
+  // Before the fix, the two-pass scrub did NOT redact JWT tokens embedded
+  // in `Authorization: Bearer <JWT>` debug_context lines:
+  //   - pass 1 (redactSensitiveSubstrings) captured `Bearer` (not the JWT)
+  //     as the value group because the regex stopped at the space before
+  //     the token, leaving the JWT intact in the suffix.
+  //   - pass 2 (scrubPii → scrubString) used an anchored ^...$ JWT regex
+  //     which did not match because the string had a non-JWT prefix.
+  // The third pass (redactJwtSubstrings) scans for JWT-shaped substrings
+  // anywhere in the line and is the load-bearing fix.
+  it("pii-scrub redacts Authorization: Bearer JWT before clipboard write (CR-01)", async () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const env = makeEnvelope({
+      debug_context: [`Authorization: Bearer ${jwt}`],
+    });
+    render(<ErrorEnvelope envelope={env} />);
+    fireEvent.click(screen.getByText("Copy diagnostics"));
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+    });
+    const written = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>)
+      .mock.calls[0][0] as string;
+    expect(written).not.toContain(jwt);
+  });
+
   it("renders correlation_id inside the diagnostics accordion", () => {
     const env = makeEnvelope();
     render(<ErrorEnvelope envelope={env} />);
