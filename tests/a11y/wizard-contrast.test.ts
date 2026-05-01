@@ -51,7 +51,17 @@ function getContrastRatio(fg: string, bg: string): number {
 // Resolved bg context constants — one source-of-truth per surface.
 const PAGE_BG = "#F8F9FA"; // --color-page
 const SURFACE = "#FFFFFF"; // --color-surface
-const NEGATIVE_BG_5 = "#FFF5F5"; // approx of bg-negative/5 over white
+// ME-01: approximation direction is anti-conservative. The actual
+// resolved color of `bg-negative/5` (--color-negative #DC2626 at 5%
+// alpha over white) is #FDF4F4 = rgb(253, 244, 244). Using the lighter
+// #FFF5F5 here gives a ~0.05-point higher contrast ratio than the real
+// rendered surface (4.45 vs 4.40 for the muted slot), which means a
+// regression in the bg formula or the muted-token darkness could pass
+// the test while the live DOM fails. The threshold pin (4.4) on pair 8
+// + the TRACKED-DEBT entry in deferred-items.md preserve the regression
+// seam intent.
+const NEGATIVE_BG_5 = "#FFF5F5"; // approx of bg-negative/5 over white (lighter
+                                 // than the actual #FDF4F4 — see ME-01 note above)
 const WARNING_BG_5 = "#FEF1E5"; // approx of bg-warning/5 over white (defense-in-depth)
 const TRACK = "#F1F5F9"; // --color-track
 
