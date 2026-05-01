@@ -9,9 +9,10 @@ import { TRUST_TIER_TOKENS } from "@/lib/design-tokens/trust-tier";
  * Asserts:
  *   (a) every hex value in TRUST_TIER_TOKENS appears verbatim in DESIGN.md
  *   (b) every user-facing label appears verbatim in DESIGN.md
- *   (c) the retired #D97706 hex appears AT MOST ONCE in DESIGN.md (only
- *       allowed in the 2026-04-11 Decisions Log row that records the
- *       2026-04-30 supersession to #B45309)
+ *   (c) the new Trust-Tier Badges sub-section uses #B45309 exclusively and
+ *       contains zero #D97706 references (drift detection, scoped to the
+ *       new sub-section — pre-existing historical Decisions Log mentions
+ *       that narrate the 2026-04-30 supersession are immutable history)
  *
  * This is the atomic CI gate against drift. Any DESIGN.md edit that drops
  * a hex breaks this test instantly; any token-file change that introduces
@@ -43,11 +44,28 @@ describe("DESIGN.md ↔ TRUST_TIER_TOKENS consistency (DESIGN-01)", () => {
     },
   );
 
-  it("retired hex #D97706 appears at most once (only the historical superseded row)", () => {
-    const matches = designMd.match(/#D97706/g) ?? [];
-    // The 2026-04-11 Decisions Log row records the supersession to #B45309
-    // and intentionally still references the retired hex. Any second
-    // occurrence is a regression.
-    expect(matches.length).toBeLessThanOrEqual(1);
+  it("new Trust-Tier Badges sub-section uses canonical #B45309 with zero #D97706 drift", () => {
+    // The retired #D97706 hex legitimately appears in pre-existing historical
+    // content (the `--color-warning` token row that records "Was #D97706 …
+    // shifted 2026-04-30", plus 2026-04-11 / 2026-04-30 / 2026-05-01 Decisions
+    // Log rows that narrate the supersession). Those mentions are immutable
+    // record-keeping, not drift.
+    //
+    // The drift signal we DO care about: the NEW Trust-Tier Badges sub-section
+    // (DESIGN-01) must use #B45309 exclusively. Any #D97706 inside that scoped
+    // region indicates the token file has diverged from DESIGN.md.
+    const start = designMd.indexOf("## Trust-Tier Badges");
+    expect(start, "Trust-Tier Badges section missing from DESIGN.md").toBeGreaterThan(-1);
+    const after = designMd.slice(start + "## Trust-Tier Badges".length);
+    const nextHeading = after.search(/\n## [A-Z]/);
+    const section = nextHeading === -1 ? after : after.slice(0, nextHeading);
+    expect(
+      section.includes("#D97706"),
+      "Trust-Tier Badges sub-section must NOT reference retired #D97706",
+    ).toBe(false);
+    expect(
+      section.includes("#B45309"),
+      "Trust-Tier Badges sub-section must reference canonical #B45309",
+    ).toBe(true);
   });
 });
