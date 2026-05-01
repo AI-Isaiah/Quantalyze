@@ -275,7 +275,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // ============================================================
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   // Source-of-truth for the 17 CSV-branch error codes Phase 15 left
-  // as `// TODO(phase-17): hoist into wizardErrors` markers in:
+  // as hoist markers (the `phase-17 hoist` TODO comments) across:
   //   - CsvUploadStep.tsx
   //   - CsvPreviewStep.tsx
   //   - CsvSubmitStep.tsx

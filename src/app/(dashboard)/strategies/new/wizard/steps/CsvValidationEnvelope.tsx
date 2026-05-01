@@ -1,5 +1,10 @@
 "use client";
 
+import {
+  CSV_RULE_LABELS,
+  formatCsvRuleCauseSingle,
+} from "@/lib/wizardErrors";
+
 /**
  * Phase 15 / CSV-01..CSV-02 — server validation error envelope for the
  * CSV branch of the strategy onboarding wizard.
@@ -10,6 +15,9 @@
  * The correlation_id null slot is rendered as a dash in Phase 15. Phase
  * 16 / OBSERV-06 wires real values via analytics-client.ts:66 without
  * changing the DOM shape.
+ *
+ * Phase 17 / DESIGN-05: rule-label map and cause-string templates live
+ * in @/lib/wizardErrors as the canonical source of truth.
  */
 
 interface CsvValidationEnvelopeProps {
@@ -23,19 +31,6 @@ interface CsvValidationEnvelopeProps {
   };
 }
 
-// TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
-// UI-SPEC §8.8 rule-name human mapping (locked).
-// Cross-AI revision 2026-04-30: 6 entries (was 7); the weekend-window
-// rule was removed because crypto markets trade 24/7.
-const RULE_LABELS: Record<string, string> = {
-  monotonic_dates: "Dates must be strictly increasing",
-  nav_non_zero: "NAV cannot be zero",
-  daily_return_lower_bound: "Daily return cannot be ≤ -100%",
-  daily_sharpe_sentinel: "Daily Sharpe > 10 looks unrealistic",
-  currency_usd_or_blank: "Currency must be USD or left blank",
-  qty_price_positive: "Quantity and price must be positive",
-};
-
 export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) {
   const errors = envelope.debug_context?.pandera_errors ?? [];
   const byRule = errors.reduce<Record<string, typeof errors>>((acc, e) => {
@@ -45,16 +40,18 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
   const ruleKeys = Object.keys(byRule);
   const ruleCount = ruleKeys.length;
 
-  // TODO(phase-17): hoist these literal strings into wizardErrors.ts.
   let causeText: string;
   if (ruleCount > 1) {
-    causeText = `Across ${ruleCount} rule categories: ${ruleKeys
-      .map((r) => RULE_LABELS[r] ?? r)
-      .join(", ")}.`;
+    // Phase 17 / DESIGN-05: matches `formatCsvRuleCauseMulti` shape but
+    // humanizes each key via CSV_RULE_LABELS first (the helper takes raw
+    // keys; this surface joins human-readable labels for byte-identical
+    // DOM).
+    const humanizedKeys = ruleKeys.map((r) => CSV_RULE_LABELS[r] ?? r);
+    causeText = `Across ${ruleCount} rule categories: ${humanizedKeys.join(", ")}.`;
   } else if (ruleCount === 1 && errors.length > 0) {
     const onlyRule = ruleKeys[0];
-    const human = RULE_LABELS[onlyRule] ?? onlyRule;
-    causeText = `Rule violated: ${human}. Expand below for the row-level breakdown.`;
+    const human = CSV_RULE_LABELS[onlyRule] ?? onlyRule;
+    causeText = formatCsvRuleCauseSingle(human);
   } else {
     causeText = envelope.human_message;
   }
@@ -75,7 +72,7 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-xs">
           <summary className="cursor-pointer text-text-secondary">
-            {RULE_LABELS[rule] ?? rule} ({list.length} rows)
+            {CSV_RULE_LABELS[rule] ?? rule} ({list.length} rows)
           </summary>
           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-text-muted">
             {list.map((e, i) => (

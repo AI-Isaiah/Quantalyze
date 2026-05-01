@@ -3,6 +3,10 @@
 import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import {
+  CSV_SUBMIT_STEP_HEADINGS,
+  WIZARD_ERROR_COPY,
+} from "@/lib/wizardErrors";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
 
 /**
@@ -48,7 +52,9 @@ export interface CsvSubmitStepProps {
   onBack: () => void;
 }
 
-// TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05 — copy locked by UI-SPEC §8.5.
+// Format-picker labels are component-local UI taxonomy (read-only summary
+// row), not error/heading copy — they stay inline. wizardErrors.ts owns
+// user-visible CSV error / heading strings only.
 const FMT_LABEL: Record<Fmt, string> = {
   daily_returns: "Daily returns",
   daily_nav: "Daily NAV",
@@ -95,13 +101,12 @@ export function CsvSubmitStep({
       };
 
       if (!res.ok) {
-        // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
         const errEnvelope: ValidationEnvelope = {
           code: data.code ?? "CSV_SUBMIT_FAILED",
           human_message:
             data.human_message ??
             data.error ??
-            "Your file validated cleanly, but saving the strategy hit an error. Click Submit strategy again to retry — your data is unchanged.",
+            WIZARD_ERROR_COPY.CSV_SUBMIT_FAILED.title,
           debug_context: data.debug_context ?? {},
           correlation_id: data.correlation_id ?? null,
         };
@@ -117,11 +122,9 @@ export function CsvSubmitStep({
 
       // Defensive: route returned 200 but missing strategy_id.
       if (typeof data.strategy_id !== "string" || data.strategy_id.length === 0) {
-        // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
         const errEnvelope: ValidationEnvelope = {
           code: "CSV_SUBMIT_NO_STRATEGY_ID",
-          human_message:
-            "Submission succeeded but the server did not return a strategy id. Retry to confirm.",
+          human_message: WIZARD_ERROR_COPY.CSV_SUBMIT_NO_STRATEGY_ID.title,
           debug_context: {},
           correlation_id: data.correlation_id ?? null,
         };
@@ -142,11 +145,12 @@ export function CsvSubmitStep({
       onSubmitted(data.strategy_id);
     } catch (err) {
       console.error("[wizard:CsvSubmitStep] threw:", err);
-      // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
+      // Phase 17 / DESIGN-05: unified with CsvUploadStep variant. UI-SPEC §14.1
+      // row 7 declares the canonical text as "click Retry to try again" — both
+      // step files now share the same single-source-of-truth title.
       const errEnvelope: ValidationEnvelope = {
         code: "CSV_NETWORK_TIMEOUT",
-        human_message:
-          "The server did not respond within 30 seconds. Your file is preserved — click Submit strategy to try again.",
+        human_message: WIZARD_ERROR_COPY.CSV_NETWORK_TIMEOUT.title,
         debug_context: {},
         correlation_id: null,
       };
@@ -166,13 +170,10 @@ export function CsvSubmitStep({
         id="wizard-csv-submit-heading"
         className="font-sans text-2xl font-semibold text-text-primary"
       >
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-        Review and submit
+        {CSV_SUBMIT_STEP_HEADINGS.title}
       </h2>
       <p className="mt-2 text-sm text-text-secondary">
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-        The founder reviews CSV-uploaded strategies within 48 hours. You will
-        receive an email when your listing is approved.
+        {CSV_SUBMIT_STEP_HEADINGS.subtitle}
       </p>
 
       {/* Read-only summary — Strategy name is the FIRST row (cross-AI revision 2026-04-30). */}
@@ -222,8 +223,9 @@ export function CsvSubmitStep({
           disabled={submitting}
           data-testid="wizard-csv-submit-cta"
         >
-          {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-          {submitting ? "Submitting…" : "Submit strategy"}
+          {submitting
+            ? CSV_SUBMIT_STEP_HEADINGS.submittingCtaLabel
+            : CSV_SUBMIT_STEP_HEADINGS.submitCtaLabel}
         </Button>
       </div>
     </section>

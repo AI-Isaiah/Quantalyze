@@ -3,6 +3,11 @@
 import { useCallback, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import {
+  CSV_UPLOAD_STEP_HEADINGS,
+  WIZARD_ERROR_COPY,
+  formatKeyError,
+} from "@/lib/wizardErrors";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
 
 /**
@@ -31,7 +36,9 @@ interface FormatOption {
   testId: string;
 }
 
-// TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05 — copy locked by UI-SPEC §8.3.
+// Format-picker labels are component-local UI taxonomy (segmented control
+// captions), not error/heading copy — they stay inline. wizardErrors.ts
+// owns user-visible CSV error / heading strings only.
 const FORMATS: FormatOption[] = [
   {
     id: "daily_returns",
@@ -127,11 +134,10 @@ export function CsvUploadStep({
       // Defense-in-depth: 10 MB cap fires on selection (NOT on submit).
       // Server (Next route + analytics service) re-checks.
       if (f.size > MAX_FILE_BYTES) {
-        // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
         const sizeMb = (f.size / (1024 * 1024)).toFixed(1);
         setEnvelope({
           code: "CSV_FILE_TOO_LARGE",
-          human_message: `Maximum file size is 10 MB. Your file is ${sizeMb} MB. Trim it or split it before retrying.`,
+          human_message: formatKeyError("CSV_FILE_TOO_LARGE", { sizeMb }).title,
           debug_context: {},
           correlation_id: null,
         });
@@ -141,10 +147,9 @@ export function CsvUploadStep({
       }
 
       if (!f.name.toLowerCase().endsWith(".csv")) {
-        // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
         setEnvelope({
           code: "CSV_INVALID_EXTENSION",
-          human_message: "Only .csv files are accepted. Convert your file and try again.",
+          human_message: WIZARD_ERROR_COPY.CSV_INVALID_EXTENSION.title,
           debug_context: {},
           correlation_id: null,
         });
@@ -191,13 +196,11 @@ export function CsvUploadStep({
     // Validate strategy name BEFORE any network work.
     const trimmedName = strategyName.trim();
     if (trimmedName.length === 0) {
-      // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
-      setNameError("Strategy name is required.");
+      setNameError(WIZARD_ERROR_COPY.CSV_STRATEGY_NAME_REQUIRED.title);
       return;
     }
     if (strategyName.length > MAX_NAME_CHARS) {
-      // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
-      setNameError("Strategy name must be 80 characters or fewer.");
+      setNameError(WIZARD_ERROR_COPY.CSV_STRATEGY_NAME_TOO_LONG.title);
       return;
     }
     if (!file) return;
@@ -223,7 +226,7 @@ export function CsvUploadStep({
         const errEnvelope: ValidationEnvelope = {
           code: data.code ?? "CSV_VALIDATION_FAILED",
           human_message:
-            data.human_message ?? "Validation failed. See per-row breakdown below.",
+            data.human_message ?? WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED.title,
           debug_context: data.debug_context ?? {
             pandera_errors: data.errors ?? [],
           },
@@ -243,8 +246,7 @@ export function CsvUploadStep({
         // Defensive: route returned ok but no preview — treat as upstream fail.
         const errEnvelope: ValidationEnvelope = {
           code: "CSV_UPSTREAM_FAIL",
-          human_message:
-            "Validation service returned an unexpected response. Retry shortly.",
+          human_message: WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title,
           debug_context: {},
           correlation_id: data.correlation_id ?? null,
         };
@@ -266,11 +268,9 @@ export function CsvUploadStep({
       });
     } catch (err) {
       console.error("[wizard:CsvUploadStep] submit threw:", err);
-      // TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05.
       const errEnvelope: ValidationEnvelope = {
         code: "CSV_NETWORK_TIMEOUT",
-        human_message:
-          "The server did not respond within 30 seconds. Your file is preserved — click Retry to try again.",
+        human_message: WIZARD_ERROR_COPY.CSV_NETWORK_TIMEOUT.title,
         debug_context: {},
         correlation_id: null,
       };
@@ -299,13 +299,10 @@ export function CsvUploadStep({
         id="wizard-csv-upload-heading"
         className="font-sans text-2xl font-semibold text-text-primary"
       >
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-        Upload your track record
+        {CSV_UPLOAD_STEP_HEADINGS.title}
       </h2>
       <p className="mt-2 text-sm text-text-secondary">
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-        Name your strategy, pick a format, and drop your CSV. We validate every
-        row before creating your strategy. Max 10 MB.
+        {CSV_UPLOAD_STEP_HEADINGS.subtitle}
       </p>
 
       <form onSubmit={handleSubmit} className="mt-8 space-y-5">
@@ -348,9 +345,7 @@ export function CsvUploadStep({
             </p>
           ) : (
             <p className="mt-1 text-xs text-text-muted">
-              {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-              1–80 characters. This is the public name on your factsheet — pick
-              something your LPs will recognize.
+              {CSV_UPLOAD_STEP_HEADINGS.nameHelper}
             </p>
           )}
         </div>
@@ -400,8 +395,10 @@ export function CsvUploadStep({
             {file ? (
               <>
                 <p className="text-sm text-text-primary font-medium">
-                  {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-                  {file.name} · {fileSizeMb} MB
+                  {CSV_UPLOAD_STEP_HEADINGS.fileLabel(
+                    file.name,
+                    fileSizeMb ?? "0",
+                  )}
                 </p>
                 <p className="mt-1 text-xs text-text-muted">
                   Drop a different file to replace, or use the button below.
@@ -410,8 +407,7 @@ export function CsvUploadStep({
             ) : (
               <>
                 <p className="text-sm text-text-muted mb-1">
-                  {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-                  Drop a CSV file here, or click to browse
+                  {CSV_UPLOAD_STEP_HEADINGS.dropzoneIdle}
                 </p>
                 <p className="text-xs text-text-muted">
                   Required columns shown above. Max 10 MB.

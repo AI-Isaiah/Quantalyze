@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/Button";
+import { CSV_PREVIEW_STEP_HEADINGS } from "@/lib/wizardErrors";
 
 /**
  * Phase 15 / CSV-01..CSV-02 — sub-step 2 of the CSV branch.
@@ -37,7 +38,9 @@ export interface CsvPreviewStepProps {
   onContinue: () => void;
 }
 
-// TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05 — copy locked by UI-SPEC §8.5.
+// Format-picker labels are component-local UI taxonomy (read-only summary
+// row), not error/heading copy — they stay inline. wizardErrors.ts owns
+// user-visible CSV error / heading strings only.
 const FMT_LABEL: Record<Fmt, string> = {
   daily_returns: "Daily returns",
   daily_nav: "Daily NAV",
@@ -70,13 +73,10 @@ export function CsvPreviewStep({
         id="wizard-csv-preview-heading"
         className="font-sans text-2xl font-semibold text-text-primary"
       >
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-        Preview your data
+        {CSV_PREVIEW_STEP_HEADINGS.title}
       </h2>
       <p className="mt-2 text-sm text-text-secondary">
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-        Confirm we parsed your file correctly. Validation runs across every row
-        in your file before you can continue.
+        {CSV_PREVIEW_STEP_HEADINGS.subtitle}
       </p>
 
       {/* 5-row metadata <dl> — Strategy name FIRST (cross-AI revision 2026-04-30). */}
@@ -131,7 +131,8 @@ export function CsvPreviewStep({
         </table>
       </div>
       <p className="mt-2 text-xs text-text-muted">
-        {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
+        {/* Per-render row-count helper — not enumerated in UI-SPEC §14.1; */}
+        {/* component-local dynamic template stays inline. */}
         Showing {firstCount} of {preview.row_count} rows from the start, and{" "}
         {lastCount} from the end.
       </p>
@@ -150,8 +151,7 @@ export function CsvPreviewStep({
           disabled={!validationPassed}
           data-testid="wizard-csv-preview-continue"
         >
-          {/* TODO(phase-17): hoist into wizardErrors.ts per DESIGN-05. */}
-          Submit strategy
+          {CSV_PREVIEW_STEP_HEADINGS.continueLabel}
         </Button>
       </div>
     </section>
