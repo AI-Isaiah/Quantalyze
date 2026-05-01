@@ -48,11 +48,11 @@
 
 ### DESIGN — Design contract (Phase 17, hard exit gate before Phase 19)
 
-- [ ] **DESIGN-01**: DESIGN.md gains trust-tier badge component variants — `api_verified` filled accent #1B6B5A pill, `csv_uploaded` neutral #4A5568 outline pill, `self_reported` warning amber #B45309 outline pill — with typed token constants in `src/lib/design-tokens/trust-tier.ts`; regex test asserts DESIGN.md ↔ token file consistency (corrected 2026-05-01: REQ literal was #D97706, retired 2026-04-30 for AA failure; #B45309 aligns with canonical --color-warning).
-- [ ] **DESIGN-02**: DESIGN.md gains error envelope render wireframe — title=`human_message` (16px DM Sans semibold #1A1A2E), CTA derived from `recoverable` boolean (Retry true / Contact support false), collapsed `<details>` with code + correlation_id in Geist Mono 12px #718096, copy-diagnostics ghost button inline with `QUANTALYZE_DIAG` payload format
-- [ ] **DESIGN-03**: DESIGN.md gains broker selector 2×3 card grid (white surface, 1px #E2E8F0 border, 8px radius) + per-source field schema enumerated; CSV escape-hatch full-width card BELOW the broker grid titled "Don't have an API key? Upload CSV instead" (3 accepted formats as segmented control: daily_nav / daily_returns / trades; max 10MB)
-- [ ] **DESIGN-04**: DESIGN.md gains mobile-readable wizard fallback specification (read-only review state for < 640px viewports) — conditional on OBSERV-11 mobile-start audit count > 0; if count = 0, ship 640px gate as today
-- [ ] **DESIGN-05**: DESIGN.md gains 9-state matrix per surface (loading / empty / error / partial / success / retry-in-flight / stale / optimistic / offline) with zero TBD cells; a11y minimums published (4.5:1 contrast on trust badges, ARIA live regions on state changes, keyboard-nav stepper, focus management between wizard steps); `wizardErrors.ts` declared source-of-truth for `human_message` strings (envelope's `human_message` = existing `title`; `debug_context` carries existing `fix[]` array as expandable list)
+- [x] **DESIGN-01**: DESIGN.md gains trust-tier badge component variants — `api_verified` filled accent #1B6B5A pill, `csv_uploaded` neutral #4A5568 outline pill, `self_reported` warning amber #B45309 outline pill — with typed token constants in `src/lib/design-tokens/trust-tier.ts`; regex test asserts DESIGN.md ↔ token file consistency (corrected 2026-05-01: REQ literal was #D97706, retired 2026-04-30 for AA failure; #B45309 aligns with canonical --color-warning).
+- [x] **DESIGN-02**: DESIGN.md gains error envelope render wireframe — title=`human_message` (16px DM Sans semibold #1A1A2E), CTA derived from `recoverable` boolean (Retry true / Contact support false), collapsed `<details>` with code + correlation_id in Geist Mono 12px #718096, copy-diagnostics ghost button inline with `QUANTALYZE_DIAG` payload format
+- [x] **DESIGN-03**: DESIGN.md gains broker selector 2×3 card grid (white surface, 1px #E2E8F0 border, 8px radius) + per-source field schema enumerated; CSV escape-hatch full-width card BELOW the broker grid titled "Don't have an API key? Upload CSV instead" (3 accepted formats as segmented control: daily_nav / daily_returns / trades; max 10MB)
+- [x] **DESIGN-04**: DESIGN.md gains mobile-readable wizard fallback specification (read-only review state for < 640px viewports) — conditional on OBSERV-11 mobile-start audit count > 0; if count = 0, ship 640px gate as today
+- [x] **DESIGN-05**: DESIGN.md gains 9-state matrix per surface (loading / empty / error / partial / success / retry-in-flight / stale / optimistic / offline) with zero TBD cells; a11y minimums published (4.5:1 contrast on trust badges, ARIA live regions on state changes, keyboard-nav stepper, focus management between wizard steps); `wizardErrors.ts` declared source-of-truth for `human_message` strings (envelope's `human_message` = existing `title`; `debug_context` carries existing `fix[]` array as expandable list)
 
 ### FIX — Root-cause fix (Phase 18)
 
@@ -196,11 +196,11 @@ Phase mapping (v1.0 phase numbers continue from v0.17 — Phase 14b → Phase 15
 | OBSERV-10 | Phase 16 | Complete |
 | OBSERV-11 | Phase 16 | Complete |
 | OBSERV-12 | Phase 16 | Complete |
-| DESIGN-01 | Phase 17 | Pending |
-| DESIGN-02 | Phase 17 | Pending |
-| DESIGN-03 | Phase 17 | Pending |
-| DESIGN-04 | Phase 17 | Pending |
-| DESIGN-05 | Phase 17 | Pending |
+| DESIGN-01 | Phase 17 | Complete |
+| DESIGN-02 | Phase 17 | Complete |
+| DESIGN-03 | Phase 17 | Complete |
+| DESIGN-04 | Phase 17 | Complete |
+| DESIGN-05 | Phase 17 | Complete |
 | FIX-01 | Phase 18 | Pending |
 | FIX-02 | Phase 18 | Pending |
 | FIX-03 | Phase 18 | Pending |

@@ -74,7 +74,7 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
 
 - [ ] **Phase 15: CSV Unblock** — Promote PR #22's CSV path to first-class so all 10 onboarding teams have a working ingestion route within 48h; ships `csv_uploaded` trust-tier placeholder + per-team `strategy_verifications` status visibility.
 - [x] **Phase 16: Diagnostic Spike + Observability** — Wire correlation_id end-to-end (Next.js → FastAPI → Supabase → Resend), add Sentry on both halves of the stack, ship `/api/debug-key-flow` SSE endpoint + VCR-replay harness, audit migration triggers + PostHog mobile starts; closes with the Day-2 decision gate. (completed 2026-05-01)
-- [ ] **Phase 17: Design Contract** — Lock DESIGN.md additions (trust-tier badges, error envelope wireframe, broker selector grid, CSV escape-hatch card, mobile fallback, a11y minimums, 9-state matrix) BEFORE backend rewrite; trust-tier tokens land as typed code constants regex-asserted against DESIGN.md.
+- [x] **Phase 17: Design Contract** — Lock DESIGN.md additions (trust-tier badges, error envelope wireframe, broker selector grid, CSV escape-hatch card, mobile fallback, a11y minimums, 9-state matrix) BEFORE backend rewrite; trust-tier tokens land as typed code constants regex-asserted against DESIGN.md. (completed 2026-05-01)
 - [ ] **Phase 18: Root-Cause Fix + Founder LP Skeleton** — Fix whatever Phase 16 surfaced with a regression test that fails without the fix; ship Python `redact.py` mirror of existing `pii-scrub.ts`; cron-emit a monthly LP report PDF reusing the existing factsheet endpoint; close the dogfood loop in writing.
 - [ ] **Phase 19: Unified Backbone** *(conditional on Day-2 gate = COMMIT)* — Replace 5 divergent entry routes with one `POST /process-key` FastAPI RPC + adapter Protocol (OKX / Binance / Bybit / CSV — no MT5 / IBKR per UC-B); ship `strategy_verifications` state machine, 4-PR VIEW-shim migration sequence, feature flag + cron-based rollback monitor, perp correctness, JSONB fingerprint, idempotency.
 
@@ -149,12 +149,12 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   4. DESIGN.md gains 9-state matrix per surface (loading / empty / error / partial / success / retry-in-flight / stale / optimistic / offline) with ZERO TBD cells; a11y minimums published (4.5:1 contrast on trust badges, ARIA live regions on state changes, keyboard-nav stepper, focus management); `wizardErrors.ts` declared source-of-truth (envelope's `human_message` = existing `title`; `debug_context` carries existing `fix[]` array)
   5. Mobile-readable wizard fallback specification lands IF Phase 16 OBSERV-11 mobile-start count > 0; if count = 0, ship 640px gate as today
 **Plans**: 6 plans (Wave 1: 17-01, 17-02, 17-03, 17-04 parallel; Wave 2: 17-05, 17-06 parallel — depend on Wave 1 token file + ErrorEnvelope component + DESIGN.md additions)
-- [ ] 17-01-PLAN.md — Trust-tier design tokens (src/lib/design-tokens/trust-tier.ts) + DESIGN.md ↔ tokens consistency Vitest test (DESIGN-01 code-side)
-- [ ] 17-02-PLAN.md — DESIGN.md additions (5 sub-sections + 5 Decisions Log rows) + REQUIREMENTS.md DESIGN-01 hex correction #D97706 → #B45309 (DESIGN-01..05 doc-side)
-- [ ] 17-03-PLAN.md — wizardErrors.ts CSV absorption (17 new error codes + 3 heading-const exports + CSV_RULE_LABELS + 2 helper fns) + 4 CSV step file refactors; zero hoist markers remain (DESIGN-05 source-of-truth)
-- [ ] 17-04-PLAN.md — ErrorEnvelope rebrand to src/components/error/ErrorEnvelope.tsx + 1-line shim at old wizard path + newline-delimited QUANTALYZE_DIAG copy-diagnostics + pii-scrub pass + always-collapsed details + Retry-above-details + aria-labels (DESIGN-02)
-- [ ] 17-05-PLAN.md — TrustTierLabel internals upgrade to outline pill from TRUST_TIER_TOKENS; call signature unchanged (DESIGN-01 component-side)
-- [ ] 17-06-PLAN.md — Vitest wizard-contrast test (16 fg/bg pairs + 3 border slots) + axe-core CI extension (e2e/wizard-axe.spec.ts + e2e/admin-csv-status-axe.spec.ts) using shared buildAxe factory (DESIGN-05 a11y test scaffolding)
+- [x] 17-01-PLAN.md — Trust-tier design tokens (src/lib/design-tokens/trust-tier.ts) + DESIGN.md ↔ tokens consistency Vitest test (DESIGN-01 code-side)
+- [x] 17-02-PLAN.md — DESIGN.md additions (5 sub-sections + 5 Decisions Log rows) + REQUIREMENTS.md DESIGN-01 hex correction #D97706 → #B45309 (DESIGN-01..05 doc-side)
+- [x] 17-03-PLAN.md — wizardErrors.ts CSV absorption (17 new error codes + 3 heading-const exports + CSV_RULE_LABELS + 2 helper fns) + 4 CSV step file refactors; zero hoist markers remain (DESIGN-05 source-of-truth)
+- [x] 17-04-PLAN.md — ErrorEnvelope rebrand to src/components/error/ErrorEnvelope.tsx + 1-line shim at old wizard path + newline-delimited QUANTALYZE_DIAG copy-diagnostics + pii-scrub pass + always-collapsed details + Retry-above-details + aria-labels (DESIGN-02)
+- [x] 17-05-PLAN.md — TrustTierLabel internals upgrade to outline pill from TRUST_TIER_TOKENS; call signature unchanged (DESIGN-01 component-side)
+- [x] 17-06-PLAN.md — Vitest wizard-contrast test (16 fg/bg pairs + 3 border slots) + axe-core CI extension (e2e/wizard-axe.spec.ts + e2e/admin-csv-status-axe.spec.ts) using shared buildAxe factory (DESIGN-05 a11y test scaffolding)
 **Complexity**: MEDIUM (design contract is the gated exit before Phase 19; trust-tier tokens land as code regex-asserted against DESIGN.md; per-source field schemas for OKX / Binance / Bybit / CSV).
 **UI hint**: yes
 **Exit gate** *(hard gate before Phase 19)*: `gsd-sdk validate phase-17-exit` greps `.planning/phase-17/*` and DESIGN.md additions for `TBD | TODO | TKTK` and FAILS if any remain in 9-state matrix, trust-tier table, broker selector spec, or error envelope wireframe. Plan-checker rejects Phase 19 entry without DESIGN.md grep showing zero TBDs.
@@ -263,6 +263,6 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 8/8 | Complete | 2026-04-29 |
 | 15. CSV Unblock | v1.0.0 | 0/6 | Not started | - |
 | 16. Diagnostic Spike + Observability | v1.0.0 | 9/10 | Complete    | 2026-05-01 |
-| 17. Design Contract | v1.0.0 | 0/6 | Not started | - |
+| 17. Design Contract | v1.0.0 | 6/6 | Complete    | 2026-05-01 |
 | 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/TBD | Not started | - |
 | 19. Unified Backbone (conditional) | v1.0.0 | 0/TBD | Not started | - |
