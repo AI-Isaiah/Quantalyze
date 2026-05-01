@@ -169,10 +169,15 @@ export { extractAnalytics, EMPTY_ANALYTICS };
 export async function getStrategiesByCategory(categorySlug: string): Promise<StrategyWithAnalytics[]> {
   const supabase = await createClient();
 
-  // Single query: join strategies with category filter + analytics
+  // Single query: join strategies with category filter + analytics +
+  // strategy_verifications (Phase 15 / CSV-03). The verifications join is
+  // a left-join (table embed without `!inner`) so strategies without a
+  // verification row keep showing up. trust_tier projection happens below
+  // in the .map(); locked decision D-04 forbids denormalising onto the
+  // strategies row.
   const { data: strategies, error } = await supabase
     .from("strategies")
-    .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
+    .select(`*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)`)
     .eq("discovery_categories.slug", categorySlug)
     .eq("status", "published");
 
@@ -183,10 +188,19 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
 
   if (!strategies || strategies.length === 0) return [];
 
-  return strategies.map((s) => ({
-    ...s,
-    analytics: extractAnalytics(s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
-  }));
+  return strategies.map((s) => {
+    const verifications =
+      (s as unknown as { strategy_verifications?: { trust_tier: string; status: string; created_at: string }[] })
+        .strategy_verifications ?? [];
+    const latest = verifications
+      .slice()
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    return {
+      ...(s as unknown as Strategy),
+      trust_tier: (latest?.trust_tier ?? null) as Strategy["trust_tier"],
+      analytics: extractAnalytics(s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
+    };
+  });
 }
 
 export async function getPopulatedCategorySlugs(): Promise<string[]> {
@@ -282,20 +296,40 @@ export async function getStrategyDetail(strategyId: string): Promise<{
 } | null> {
   const supabase = await createClient();
 
+  // Phase 15 / CSV-03: left-join strategy_verifications so we can project
+  // the most-recent verification row's trust_tier onto Strategy.trust_tier.
+  // Locked decision D-04 — trust_tier lives ONLY on strategy_verifications;
+  // no `strategies.trust_tier` column exists or will be added.
   const { data: strategy, error } = await supabase
     .from("strategies")
-    .select("*, strategy_analytics (*)")
+    .select("*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)")
     .eq("id", strategyId)
     .single();
 
   if (error || !strategy) return null;
 
-  const disclosureTier = readDisclosureTier(strategy);
-  const manager = await loadManagerIdentity(strategy, disclosureTier);
+  // Phase 15 / CSV-03: pick the most-recent verification row's trust_tier.
+  // In Phase 15 there's at most ONE row per strategy_id (finalize_csv_strategy
+  // inserts exactly one row). Phase 19 may add multiple — pick most-recent
+  // by created_at for forward-compat. Hoist the value onto the typed
+  // Strategy field so consumers read it as `strategy.trust_tier`.
+  const verifications =
+    (strategy as unknown as { strategy_verifications?: { trust_tier: string; status: string; created_at: string }[] })
+      .strategy_verifications ?? [];
+  const latestVerification = verifications
+    .slice()
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const strategyWithTier: Strategy = {
+    ...(strategy as unknown as Strategy),
+    trust_tier: (latestVerification?.trust_tier ?? null) as Strategy["trust_tier"],
+  };
+
+  const disclosureTier = readDisclosureTier(strategyWithTier);
+  const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
   return {
-    strategy,
-    analytics: extractAnalytics(strategy.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
+    strategy: strategyWithTier,
+    analytics: extractAnalytics((strategy as unknown as { strategy_analytics?: unknown }).strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
     manager,
     disclosureTier,
   };

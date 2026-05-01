@@ -69,6 +69,15 @@ export interface Strategy {
    * pilot. Set by /api/admin/partner-import.
    */
   partner_tag?: string | null;
+  /**
+   * Phase 15 / CSV-03: trust-tier label for the strategy. Joined from
+   * strategy_verifications.trust_tier in getStrategyDetail() and
+   * getStrategiesByCategory(); NOT a column on the strategies table per
+   * locked decision D-04 (no denormalization). Optional/nullable because
+   * a strategy without any verification row has no trust tier.
+   * Phase 17 / DESIGN-01 polishes the visual; the data wiring is final here.
+   */
+  trust_tier?: "api_verified" | "csv_uploaded" | "self_reported" | null;
 }
 
 /**
