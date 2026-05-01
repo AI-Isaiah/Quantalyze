@@ -54,6 +54,11 @@ const buildChain = (data: unknown, recordStrategySelect = false) => {
     return chain;
   };
   chain.eq = () => chain;
+  // Phase 15 (WR-04 fix) added `.order()` + `.limit()` to bound the embedded
+  // strategy_verifications join to the latest row only. Both must return the
+  // chain so the existing `.single()` / `.maybeSingle()` resolution still works.
+  chain.order = () => chain;
+  chain.limit = () => chain;
   chain.single = () => Promise.resolve({ data, error: null });
   // `loadManagerIdentity` (the shared helper in manager-identity.ts) uses
   // `.maybeSingle()` — less fragile than `.single()` because it returns
