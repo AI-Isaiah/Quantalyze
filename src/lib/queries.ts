@@ -175,11 +175,24 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   // verification row keep showing up. trust_tier projection happens below
   // in the .map(); locked decision D-04 forbids denormalising onto the
   // strategies row.
+  //
+  // Phase 15 / WR-04: scope the embed to the most-recent verification row
+  // via PostgREST's referencedTable order+limit modifiers. In Phase 15 the
+  // RPC inserts exactly one row per strategy_id so this is a no-op today,
+  // but Phase 19 reserves the freedom to add multiple rows (flow_type
+  // admits 'resync' + 'onboard'). Without these modifiers a future second
+  // insert would pull the entire history per strategy and force the
+  // JS-side .sort()+[0] pick to discard all but one row per response.
   const { data: strategies, error } = await supabase
     .from("strategies")
     .select(`*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)`)
     .eq("discovery_categories.slug", categorySlug)
-    .eq("status", "published");
+    .eq("status", "published")
+    .order("created_at", {
+      referencedTable: "strategy_verifications",
+      ascending: false,
+    })
+    .limit(1, { referencedTable: "strategy_verifications" });
 
   if (error) {
     console.error("Strategy query failed:", error.message);
@@ -300,10 +313,22 @@ export async function getStrategyDetail(strategyId: string): Promise<{
   // the most-recent verification row's trust_tier onto Strategy.trust_tier.
   // Locked decision D-04 — trust_tier lives ONLY on strategy_verifications;
   // no `strategies.trust_tier` column exists or will be added.
+  //
+  // Phase 15 / WR-04: scope the embed to the most-recent verification row
+  // via PostgREST's referencedTable order+limit modifiers. In Phase 15 the
+  // RPC inserts exactly one row per strategy_id; Phase 19 may add more
+  // (flow_type admits 'resync' + 'onboard'). Encoding "latest only" at
+  // the DB layer rather than relying on JS-side sort+[0] keeps the
+  // factsheet read O(1) once the second insert lands.
   const { data: strategy, error } = await supabase
     .from("strategies")
     .select("*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)")
     .eq("id", strategyId)
+    .order("created_at", {
+      referencedTable: "strategy_verifications",
+      ascending: false,
+    })
+    .limit(1, { referencedTable: "strategy_verifications" })
     .single();
 
   if (error || !strategy) return null;
