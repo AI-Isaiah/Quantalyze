@@ -1,0 +1,57 @@
+/**
+ * Phase 17 / DESIGN-01 — Trust-tier badge design tokens.
+ *
+ * Single source-of-truth for the three pill variants used across
+ * factsheet headers, marketplace tiles, and the admin /admin/csv-status
+ * surface. Framework-neutral (no React import) so this file loads cleanly
+ * from Vitest tests, server components, and any future Storybook.
+ *
+ * Consistency with DESIGN.md is asserted by
+ * `tests/a11y/trust-tier-tokens.test.ts` — every hex below MUST appear
+ * verbatim in DESIGN.md or that test fails on CI.
+ *
+ * Self-reported uses #B45309 (canonical `--color-warning` since
+ * 2026-04-30 amber-700 shift; 5.05:1 on white = AA pass). REQ DESIGN-01
+ * named the retired #D97706 hex; REQUIREMENTS.md is corrected in the
+ * same wave (see Plan 17-02 of Phase 17).
+ */
+
+// Re-export the existing TrustTier union from the legacy v0 location so
+// future consumers import from the canonical token file. The type itself
+// stays declared at TrustTierLabel.tsx:11 to avoid duplicate-source drift.
+export type { TrustTier } from "@/components/strategy/TrustTierLabel";
+
+import type { TrustTier } from "@/components/strategy/TrustTierLabel";
+
+/**
+ * Per-variant slot palette. `fill` is the inner background (or `#FFFFFF`
+ * for outline variants), `text` is the label colour, `border` is the
+ * 1px border colour, `label` is the user-facing pill text.
+ */
+export interface TrustTierTokenSlot {
+  readonly fill: string;
+  readonly text: string;
+  readonly border: string;
+  readonly label: string;
+}
+
+export const TRUST_TIER_TOKENS = {
+  api_verified: {
+    fill: "#1B6B5A",
+    text: "#FFFFFF",
+    border: "#1B6B5A",
+    label: "API verified",
+  },
+  csv_uploaded: {
+    fill: "#FFFFFF",
+    text: "#4A5568",
+    border: "#4A5568",
+    label: "CSV uploaded — verification pending",
+  },
+  self_reported: {
+    fill: "#FFFFFF",
+    text: "#B45309",
+    border: "#B45309",
+    label: "Self-reported",
+  },
+} as const satisfies Record<TrustTier, TrustTierTokenSlot>;
