@@ -39,6 +39,18 @@ export interface ErrorEnvelopeProps {
   envelope: ErrorEnvelopeType;
   onRetry?: () => void;
   onCancel?: () => void;
+  /**
+   * Short label for the operation being retried, e.g. `"validating key"`,
+   * `"sync"`, `"submit"`. Used to build `aria-label="Retry {operation}"` per
+   * UI-SPEC §8.4 (the screen-reader announcement contract). The visible
+   * Retry button text remains the single word `Retry` regardless.
+   *
+   * When `operation` is omitted (existing wizard step consumers don't pass
+   * it yet) the aria-label falls back to `"Retry"` — i.e. previous
+   * behavior, no churn at the call sites. Once Phase 18/19 rewrites the
+   * step components they should pass an operation string per UI-SPEC §13.
+   */
+  operation?: string;
 }
 
 // Sensitive substring patterns to redact in freeform debug_context lines BEFORE
@@ -111,6 +123,7 @@ export function ErrorEnvelope({
   envelope,
   onRetry,
   onCancel,
+  operation,
 }: ErrorEnvelopeProps) {
   const [copied, setCopied] = useState(false);
 
@@ -153,7 +166,7 @@ export function ErrorEnvelope({
               type="button"
               size="sm"
               onClick={onRetry}
-              aria-label="Retry"
+              aria-label={operation ? `Retry ${operation}` : "Retry"}
             >
               Retry
             </Button>
@@ -164,7 +177,7 @@ export function ErrorEnvelope({
               variant="ghost"
               size="sm"
               onClick={onCancel}
-              aria-label="Cancel"
+              aria-label="Cancel and return"
             >
               Cancel
             </Button>

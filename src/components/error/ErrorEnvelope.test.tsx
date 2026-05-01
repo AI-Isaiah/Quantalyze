@@ -8,7 +8,9 @@
  *   - <details> default state: always-collapsed
  *   - Copy-diagnostics: newline-delimited QUANTALYZE_DIAG block (NOT JSON)
  *   - pii-scrub.ts pass on every debug_context line BEFORE clipboard write
- *   - aria-label="Retry" on Retry button, aria-label="Cancel" on Cancel button
+ *   - aria-label="Retry" on Retry button when no `operation` prop is passed;
+ *     aria-label="Retry {operation}" when it is (UI-SPEC §8.4, HI-01 fix)
+ *   - aria-label="Cancel and return" on Cancel button (UI-SPEC §8.4, HI-01)
  *   - role="alert" + data-testid="error-envelope" + data-testid-legacy="wizard-error-envelope"
  */
 
@@ -87,19 +89,42 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(details!.hasAttribute("open")).toBe(false);
   });
 
-  it("Retry button has aria-label='Retry'", () => {
+  it("Retry button has aria-label='Retry' when no operation prop is passed (default fallback)", () => {
     render(<ErrorEnvelope envelope={makeEnvelope()} onRetry={() => {}} />);
     expect(screen.getByLabelText("Retry")).toBeInTheDocument();
   });
 
-  it("Cancel button has aria-label='Cancel'", () => {
+  // HI-01: aria-label contract is `Retry {operation}` per UI-SPEC §8.4.
+  // When the surface specifies an operation string, the aria-label MUST
+  // include it so screen-reader users tabbing through multiple error
+  // regions can distinguish which retry-button retries which operation.
+  // Visible button text remains the single word `Retry`.
+  it("Retry button has aria-label='Retry {operation}' when operation is provided (UI-SPEC §8.4)", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope()}
+        onRetry={() => {}}
+        operation="validating key"
+      />,
+    );
+    expect(screen.getByLabelText("Retry validating key")).toBeInTheDocument();
+    // Visible label remains the bare word "Retry"
+    expect(screen.getByRole("button", { name: "Retry validating key" }))
+      .toHaveTextContent(/^Retry$/);
+  });
+
+  // HI-01: Cancel CTA aria-label is `Cancel and return` per UI-SPEC §8.4.
+  // The visible button text remains the single word `Cancel`.
+  it("Cancel button has aria-label='Cancel and return' (UI-SPEC §8.4)", () => {
     render(
       <ErrorEnvelope
         envelope={makeEnvelope({ recoverable: false })}
         onCancel={() => {}}
       />,
     );
-    expect(screen.getByLabelText("Cancel")).toBeInTheDocument();
+    expect(screen.getByLabelText("Cancel and return")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel and return" }))
+      .toHaveTextContent(/^Cancel$/);
   });
 
   it("does not render Retry when recoverable=false", () => {
