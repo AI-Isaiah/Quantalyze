@@ -90,6 +90,19 @@ export const bridgeOutcomeCurvesLimiter = makeLimiter(60, "60 s");
 // stays well under abuse thresholds for the auth-only PUT path.
 export const mandateAutoSaveLimiter = makeLimiter(30, "60 s");
 
+// 20/minute per authenticated user — Phase 15 / CSV-01..CSV-02 (WR-02).
+// CSV iteration realistically spends 3-5 validations per minute as the
+// user fixes monotonic_dates / nav_non_zero errors and re-uploads. The
+// shared userActionLimiter (5/min) collides with attestation + deletion
+// budgets: a user iterating on a CSV burns the bucket and 429s their
+// next sensitive POST with no visible link between the surfaces. The
+// upstream Python service has its own 30/hour cap (routers/csv.py:28),
+// so 20/min on the Next.js edge is aligned with both end-user iteration
+// and the upstream budget. Used by /api/strategies/csv-validate AND
+// /api/strategies/csv-finalize so the wizard's validate→submit cycle
+// rides the same dedicated bucket.
+export const csvValidateLimiter = makeLimiter(20, "60 s");
+
 // 10/hour per authenticated user — Phase 11 review fix IN-03 audit-log
 // CSV export. The endpoint caps the SELECT at 10K rows so a single
 // response is bounded at ~2 MB, but a malicious authenticated user

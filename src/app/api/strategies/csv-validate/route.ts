@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { validateCsv } from "@/lib/analytics-client";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -25,7 +25,7 @@ const MAX_BYTES = 10 * 1024 * 1024;
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(
-    userActionLimiter,
+    csvValidateLimiter,
     `strategies-csv-validate:${user.id}`,
   );
   if (!rl.success) {

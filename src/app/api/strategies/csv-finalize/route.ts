@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 
 /**
@@ -32,7 +32,7 @@ const MAX_NAME_CHARS = 80;
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(
-    userActionLimiter,
+    csvValidateLimiter,
     `strategies-csv-finalize:${user.id}`,
   );
   if (!rl.success) {
