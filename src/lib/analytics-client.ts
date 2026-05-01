@@ -9,6 +9,8 @@ import {
   VerifyStrategyResponseSchema,
   RecomputeMatchResponseSchema,
   BridgeResponseSchema,
+  CsvValidateResponseSchema,
+  type CsvValidateResponse,
 } from "./analytics-schemas";
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
 
@@ -256,4 +258,69 @@ export async function evalMatch(params: {
   return analyticsRequest(`/api/match/eval?${qs.toString()}`, null, {
     method: "GET",
   });
+}
+
+/**
+ * Phase 15 / CSV-01..CSV-02: multipart proxy for the CSV row-schema validator.
+ *
+ * Cross-AI revision 2026-04-30: throws when ANALYTICS_SERVICE_URL is not
+ * configured. The prior `?? "http://localhost:8002"` fallback was a foot-gun
+ * — production deployments missing the env var would silently call localhost
+ * and fail in confusing ways. Throwing here surfaces the misconfig at the
+ * first request and lets the route layer translate to a CSV_UPSTREAM_FAIL
+ * envelope.
+ *
+ * Multipart-specific: do NOT set Content-Type. The browser/Node `fetch` sets
+ * the correct `multipart/form-data; boundary=...` when given a `FormData`
+ * body. Adding our own Content-Type would strip the boundary and FastAPI
+ * would 422 the request.
+ */
+export async function validateCsv(formData: FormData): Promise<CsvValidateResponse> {
+  const url = process.env.ANALYTICS_SERVICE_URL;
+  if (!url) {
+    throw new Error("ANALYTICS_SERVICE_URL not configured");
+  }
+  const serviceKey = process.env.ANALYTICS_SERVICE_KEY ?? "";
+  let res: Response;
+  try {
+    res = await fetch(`${url}/api/csv/validate`, {
+      method: "POST",
+      headers: {
+        "X-Api-Version": ANALYTICS_API_VERSION,
+        ...(serviceKey && { "X-Service-Key": serviceKey }),
+        // No Content-Type — fetch sets the multipart boundary automatically.
+      },
+      body: formData,
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      throw new AnalyticsTimeoutError("/api/csv/validate", DEFAULT_TIMEOUT_MS);
+    }
+    throw new Error("Analytics service is not reachable. Please ensure it is running.");
+  }
+
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const error = await res.json().catch(() => ({ detail: res.statusText }));
+      const detail = (error as { detail?: { code?: string; human_message?: string } | string })
+        .detail;
+      const message =
+        typeof detail === "object" && detail !== null
+          ? detail.human_message ?? "CSV validation failed"
+          : typeof detail === "string"
+            ? detail
+            : (res.statusText || "CSV validation failed");
+      throw new AnalyticsUpstreamError(message, res.status);
+    }
+    const text = await res.text().catch(() => res.statusText);
+    throw new AnalyticsUpstreamError(
+      text || `CSV validation failed (${res.status})`,
+      res.status,
+    );
+  }
+
+  const data = await res.json();
+  return parseResponse(CsvValidateResponseSchema, data, "/api/csv/validate");
 }
