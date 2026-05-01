@@ -97,16 +97,17 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
 **Requirements**: CSV-01, CSV-02, CSV-03
 **Success Criteria** (what must be TRUE):
   1. User uploads daily-returns / NAV / trades CSV via first-class `flow_type='csv'` adapter (replaces PR #22 partner-pilot side-branch as canonical entry path)
-  2. Uploaded CSV passes `pandera` row-schema validation (max 10MB, monotonic dates, NAV non-zero, daily return > -100% impossible, daily Sharpe > 10 sentinel suspicious, trading-window check, USD-or-blank currency)
+  2. Uploaded CSV passes `pandera` row-schema validation (max 10MB, monotonic dates, NAV non-zero, daily return > -100% impossible, daily Sharpe > 10 sentinel suspicious, USD-or-blank currency) — `_check_trading_window` rule DROPPED 2026-04-30 cross-AI revision (crypto markets trade 24/7)
   3. Strategies onboarded via CSV display `csv_uploaded` trust-tier placeholder text on factsheet + marketplace tile (badge component polish lives in Phase 17; CSV-03 ships only the data-model wiring)
-  4. Per-team onboarding status surfaces via `strategy_verifications.status='validated'` rows queryable by founder for each of the 10 teams
-**Plans**: 6 plans
+  4. Per-team onboarding status surfaces via the new `/admin/csv-status` admin page (locked 2026-04-30 cross-AI revision; ships in plan 15-07) — admin-gated, 6-column table joined to auth.users.email + strategies.name. Replaces prior "queryable rows only" scope.
+**Plans**: 7 plans (cross-AI revision 2026-04-30 added 15-07 admin status page)
 - [ ] 15-01-PLAN.md — Migration 093 (strategy_verifications table + RLS + finalize_csv_strategy RPC + apply to test Supabase)
-- [ ] 15-02-PLAN.md — Python csv_validator (3 pandera schemas + 7 CSV-02 rules) + FastAPI csv router + requirements pin
+- [ ] 15-02-PLAN.md — Python csv_validator (3 pandera schemas + 6 CSV-02 rules; trading_window dropped) + FastAPI csv router (validate-only; finalize endpoint removed) + requirements pin + inline _redact_preview helper
 - [ ] 15-03-PLAN.md — TrustTierLabel component + Strategy.trust_tier projection + StrategyHeader/StrategyGrid wiring
 - [ ] 15-04-PLAN.md — CSV wizard step components (CsvValidationEnvelope, CsvUploadStep, CsvPreviewStep, CsvSubmitStep)
-- [ ] 15-05-PLAN.md — WizardStepKey union extension + analytics-client multipart helper + Next.js proxy routes (csv-validate/csv-finalize) + WizardClient ?source=csv branching
-- [ ] 15-06-PLAN.md — Integration tests (RPC, route, RLS) + Playwright E2E happy path with TrustTierLabel assertion
+- [ ] 15-05-PLAN.md — WizardStepKey union + WizardLocalState (source + strategyName) + analytics-client multipart helper (throws on missing ANALYTICS_SERVICE_URL) + Next.js proxy routes (csv-validate + csv-finalize accepts user-typed strategy_name; STRATEGY_NAMES NOT imported) + WizardClient ?source=csv branching with strategyName state
+- [ ] 15-06-PLAN.md — Integration tests (RPC + route + RLS + 3 SQLSTATE 22023 guards distinguished by message content) + Playwright E2E happy path (auth.users SELECT-by-email user-id resolution + cleanup) with TrustTierLabel + user-typed name assertions
+- [ ] 15-07-PLAN.md — Admin /admin/csv-status server-component page (founder per-team status surface; admin-gated; DESIGN.md compliant single-table render)
 **Complexity**: LOW (operational unblock; PR #22 path already exists; 1 new Python dep `python-multipart==0.0.27`).
 **UI hint**: yes
 **Exit gate**: 10/10 teams reach `strategy_verifications.status='validated'` via CSV path (≥3-of-10 reply threshold from entry gate is informational; ship anyway). Per-team status logged in TODOS.md.
