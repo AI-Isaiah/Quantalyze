@@ -27,6 +27,24 @@ export type WizardErrorCode =
   // Wizard lifecycle
   | "SESSION_EXPIRED"
   | "SUBMIT_NOTIFY_FAILED"
+  // Phase 17 NEW — CSV branch absorption (DESIGN-05).
+  | "CSV_PARSE_FAILED"
+  | "CSV_SCHEMA_VIOLATION"
+  | "CSV_FILE_TOO_LARGE"
+  | "CSV_INVALID_EXTENSION"
+  | "CSV_NON_MONOTONIC_DATES"
+  | "CSV_NAV_ZERO"
+  | "CSV_RETURN_OUT_OF_RANGE"
+  | "CSV_SHARPE_SUSPICIOUS"
+  | "CSV_CURRENCY_INVALID"
+  | "CSV_QTY_PRICE_INVALID"
+  | "CSV_STRATEGY_NAME_REQUIRED"
+  | "CSV_STRATEGY_NAME_TOO_LONG"
+  | "CSV_VALIDATION_FAILED"
+  | "CSV_UPSTREAM_FAIL"
+  | "CSV_NETWORK_TIMEOUT"
+  | "CSV_SUBMIT_FAILED"
+  | "CSV_SUBMIT_NO_STRATEGY_ID"
   // Fallback
   | "UNKNOWN";
 
@@ -254,6 +272,219 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call"],
   },
 
+  // ============================================================
+  // Phase 17 NEW — CSV branch absorption (DESIGN-05).
+  // Source-of-truth for the 17 CSV-branch error codes Phase 15 left
+  // as `// TODO(phase-17): hoist into wizardErrors` markers in:
+  //   - CsvUploadStep.tsx
+  //   - CsvPreviewStep.tsx
+  //   - CsvSubmitStep.tsx
+  //   - CsvValidationEnvelope.tsx
+  // Mapping table: 17-UI-SPEC.md §14.1.
+  // ============================================================
+
+  CSV_PARSE_FAILED: {
+    title: "We could not parse your CSV file.",
+    cause:
+      "The file is not valid UTF-8 CSV — required columns are missing, quoting is broken, or the encoding is wrong.",
+    fix: [
+      "Re-export your file as CSV (UTF-8) from your spreadsheet tool.",
+      "Make sure the required columns for your selected format are present in the header row.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_SCHEMA_VIOLATION: {
+    title: "Your file does not match the selected format.",
+    cause:
+      "The columns or column types in your CSV do not match the format you selected on the previous step.",
+    fix: [
+      "Confirm the format selector matches your file (Daily returns, Daily NAV, or Trade list).",
+      "Open your CSV and verify the column headers exactly match the format spec.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_FILE_TOO_LARGE: {
+    title:
+      "Maximum file size is 10 MB. Your file is {sizeMb} MB. Trim it or split it before retrying.",
+    cause: "We cap CSV uploads at 10 MB to keep validation fast.",
+    fix: [
+      "Trim or split your file so it stays under 10 MB.",
+      "If you must upload a larger file, contact support.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_INVALID_EXTENSION: {
+    title: "Only .csv files are accepted. Convert your file and try again.",
+    cause: "Files must have a `.csv` extension.",
+    fix: [
+      "Save your spreadsheet as CSV (UTF-8) and re-upload.",
+      "Excel: File → Save As → CSV (Comma delimited).",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_NON_MONOTONIC_DATES: {
+    title:
+      "Dates must be strictly increasing — fix the offending rows and re-upload.",
+    cause:
+      "Dates must be strictly increasing. We found at least one row whose date is equal to or earlier than the previous row.",
+    fix: [
+      "Sort your file by date ascending.",
+      "Remove any duplicate-date rows.",
+      "Re-upload the corrected CSV.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_NAV_ZERO: {
+    title: "NAV cannot be zero — fix the offending rows and re-upload.",
+    cause:
+      "NAV cannot be zero. A zero NAV breaks the daily-return computation.",
+    fix: [
+      "Replace zero-NAV rows with the correct end-of-day value.",
+      "If a real zero-NAV day exists, omit it from the file.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_RETURN_OUT_OF_RANGE: {
+    title:
+      "Daily return cannot be ≤ -100% — fix the offending rows and re-upload.",
+    cause:
+      "Daily return cannot be ≤ -100%. Returns at or below -100% imply a fully-blown account, which we treat as a data-entry error.",
+    fix: [
+      "Re-check the offending row(s) — a value below -100% is almost always a typo or unit error.",
+      "Express returns as decimals (0.05 for 5%, not 5).",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_SHARPE_SUSPICIOUS: {
+    title:
+      "Daily Sharpe > 10 looks unrealistic — fix the offending rows and re-upload.",
+    cause:
+      "Daily Sharpe > 10 looks unrealistic. We block obviously-fabricated track records at the gate.",
+    fix: [
+      "Double-check whether your returns column is actually decimals (0.01) and not percent (1.0).",
+      "If your strategy genuinely produces this Sharpe, contact us — we will verify it manually.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_CURRENCY_INVALID: {
+    title:
+      "Currency must be USD or left blank — fix the offending rows and re-upload.",
+    cause:
+      "Currency must be USD or left blank. Multi-currency CSVs are not supported in this release.",
+    fix: [
+      "Convert all rows to USD before uploading, or leave the currency column blank.",
+      "If your fund reports natively in a non-USD currency, contact us.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_QTY_PRICE_INVALID: {
+    title:
+      "Quantity and price must be positive — fix the offending rows and re-upload.",
+    cause:
+      "Quantity and price must be positive. Trade-list rows with non-positive qty or price cannot be priced.",
+    fix: [
+      "Re-check the offending rows — qty and price must both be > 0.",
+      "Use the side column ('buy'/'sell') to express direction, not signed quantity.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_STRATEGY_NAME_REQUIRED: {
+    title: "Strategy name is required.",
+    cause: "We need a strategy name to publish a factsheet.",
+    fix: ["Type a strategy name (1–80 characters)."],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_STRATEGY_NAME_TOO_LONG: {
+    title: "Strategy name must be 80 characters or fewer.",
+    cause:
+      "Strategy names render in marketplace tiles and factsheet headers; longer names truncate.",
+    fix: ["Shorten your name to 80 characters or fewer."],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_VALIDATION_FAILED: {
+    title: "Validation failed. See per-row breakdown below.",
+    cause:
+      "One or more rows in your file failed schema or business-rule checks.",
+    fix: [
+      "Expand each rule below to see the row-level breakdown.",
+      "Fix the offending rows and re-upload.",
+    ],
+    docsHref: "/security#csv-format",
+    actions: ["clear_and_retry"],
+  },
+
+  CSV_UPSTREAM_FAIL: {
+    title: "Validation service returned an unexpected response. Retry shortly.",
+    cause: "Our analytics service returned an envelope without preview data.",
+    fix: [
+      "Wait 30 seconds and click Retry.",
+      "If it persists, contact security@quantalyze.com.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_NETWORK_TIMEOUT: {
+    title:
+      "The server did not respond within 30 seconds. Your file is preserved — click Retry to try again.",
+    cause: "The validation request did not complete in time.",
+    fix: [
+      "Retry — your file is preserved.",
+      "If it keeps failing, contact security@quantalyze.com.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_SUBMIT_FAILED: {
+    title:
+      "Your file validated cleanly, but saving the strategy hit an error. Click Submit strategy again to retry — your data is unchanged.",
+    cause:
+      "We validated your CSV but the strategy-creation RPC errored.",
+    fix: [
+      "Click Submit strategy again — your data is unchanged.",
+      "If it keeps failing, contact security@quantalyze.com with your wizard session id.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  CSV_SUBMIT_NO_STRATEGY_ID: {
+    title:
+      "Submission succeeded but the server did not return a strategy id. Retry to confirm.",
+    cause: "The finalize RPC returned 200 but no strategy_id.",
+    fix: [
+      "Click Submit strategy again to confirm — duplicates are prevented by wizard_session_id idempotency.",
+      "If it persists, contact security@quantalyze.com.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -280,6 +511,8 @@ export interface WizardErrorContext {
   draftId?: string;
   /** Raw computation error to include under SYNC_FAILED / GATE_ANALYTICS_FAILED. */
   computationError?: string | null;
+  /** File size in MB, formatted as a string with 1 decimal (for CSV_FILE_TOO_LARGE). */
+  sizeMb?: string;
 }
 
 /**
@@ -324,6 +557,13 @@ export function formatKeyError(
     };
   }
 
+  if (code === "CSV_FILE_TOO_LARGE" && context?.sizeMb !== undefined) {
+    return {
+      ...base,
+      title: base.title.replace("{sizeMb}", context.sizeMb),
+    };
+  }
+
   return base;
 }
 
@@ -358,3 +598,94 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
  * runs through a single code path.
  */
 export { WIZARD_ERROR_COPY };
+
+// ============================================================
+// Phase 17 — CSV branch absorption (DESIGN-05).
+// Heading / helper / dropzone strings hoisted from the four CSV
+// step files. These are NOT error codes — they are user-visible
+// surface chrome strings. Mapping table: 17-UI-SPEC.md §14.1.
+// ============================================================
+
+/**
+ * CsvUploadStep.tsx user-visible chrome strings (heading, subtitle,
+ * field helper, file label template, dropzone idle copy). Hoisted
+ * verbatim from CsvUploadStep.tsx lines 303 / 307 / 352 / 404 / 414.
+ */
+export const CSV_UPLOAD_STEP_HEADINGS = {
+  title: "Upload your track record",
+  subtitle:
+    "Name your strategy, pick a format, and drop your CSV. We validate every row before creating your strategy. Max 10 MB.",
+  nameHelper:
+    "1–80 characters. This is the public name on your factsheet — pick something your LPs will recognize.",
+  fileLabel: (fileName: string, fileSizeMb: string) =>
+    `${fileName} · ${fileSizeMb} MB`,
+  dropzoneIdle: "Drop a CSV file here, or click to browse",
+} as const;
+
+/**
+ * CsvPreviewStep.tsx user-visible chrome strings (heading, subtitle,
+ * continue-CTA label). Hoisted verbatim from CsvPreviewStep.tsx
+ * lines 74 / 78 / 154.
+ */
+export const CSV_PREVIEW_STEP_HEADINGS = {
+  title: "Preview your data",
+  subtitle:
+    "Confirm we parsed your file correctly. Validation runs across every row in your file before you can continue.",
+  continueLabel: "Submit strategy",
+} as const;
+
+/**
+ * CsvSubmitStep.tsx user-visible chrome strings (heading, subtitle,
+ * submit CTA). Hoisted verbatim from CsvSubmitStep.tsx lines
+ * 170 / 174 / 226.
+ */
+export const CSV_SUBMIT_STEP_HEADINGS = {
+  title: "Review and submit",
+  subtitle:
+    "The founder reviews CSV-uploaded strategies within 48 hours. You will receive an email when your listing is approved.",
+  submitCtaLabel: "Submit strategy",
+  submittingCtaLabel: "Submitting…",
+} as const;
+
+/**
+ * Pandera rule labels surfaced by `CsvValidationEnvelope` per-rule
+ * `<details>` summaries. Locked verbatim by 15-UI-SPEC §8.8 +
+ * 17-UI-SPEC §14.3. Phase 17 relocates them from
+ * `CsvValidationEnvelope.tsx:30-37` so wizardErrors.ts owns every
+ * user-visible CSV-branch string.
+ */
+export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
+  monotonic_dates: "Dates must be strictly increasing",
+  nav_non_zero: "NAV cannot be zero",
+  daily_return_lower_bound: "Daily return cannot be ≤ -100%",
+  daily_sharpe_sentinel: "Daily Sharpe > 10 looks unrealistic",
+  currency_usd_or_blank: "Currency must be USD or left blank",
+  qty_price_positive: "Quantity and price must be positive",
+} as const;
+
+/**
+ * Format the multi-rule cause sentence emitted by
+ * `CsvValidationEnvelope` when more than one rule failed. Mirrors
+ * the original literal `"Across {n} rule categories: {keys}."`.
+ *
+ * The keys are the raw pandera rule keys (e.g. `monotonic_dates`).
+ * Caller is responsible for pre-mapping to human labels via
+ * `CSV_RULE_LABELS` if it wants the human-readable variant.
+ */
+export function formatCsvRuleCauseMulti(
+  byRule: Record<string, unknown>,
+): string {
+  const ruleKeys = Object.keys(byRule);
+  return `Across ${ruleKeys.length} rule categories: ${ruleKeys.join(", ")}.`;
+}
+
+/**
+ * Format the single-rule cause sentence emitted by
+ * `CsvValidationEnvelope` when exactly one rule failed. Mirrors the
+ * original literal `"Rule violated: {human}. Expand below for the
+ * row-level breakdown."`. Caller passes the already-resolved human
+ * label (via `CSV_RULE_LABELS`).
+ */
+export function formatCsvRuleCauseSingle(humanLabel: string): string {
+  return `Rule violated: ${humanLabel}. Expand below for the row-level breakdown.`;
+}
