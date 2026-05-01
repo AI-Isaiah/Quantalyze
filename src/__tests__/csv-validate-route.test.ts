@@ -86,11 +86,12 @@ import { NextRequest } from "next/server";
 function makeMultipartRequest(
   file: File | null,
   fmt: string | null,
+  sessionId: string | null = "00000000-0000-0000-0000-000000000001",
 ): NextRequest {
   const form = new FormData();
   if (file) form.append("file", file);
   if (fmt) form.append("fmt", fmt);
-  form.append("wizard_session_id", "00000000-0000-0000-0000-000000000001");
+  if (sessionId !== null) form.append("wizard_session_id", sessionId);
   return new NextRequest("http://localhost:3000/api/strategies/csv-validate", {
     method: "POST",
     body: form,
@@ -224,6 +225,36 @@ describe("/api/strategies/csv-validate", () => {
     // Cross-AI revision 2026-04-30: throw message surfaces verbatim.
     expect(json.human_message).toContain("ANALYTICS_SERVICE_URL not configured");
     expect(json.correlation_id).toBeNull();
+  });
+
+  // Phase 15 / WR-03: defense-in-depth UUID gate. The Python router
+  // declares wizard_session_id: str = Form(...) with no shape check;
+  // a missing/malformed value would surface as a FastAPI 422 wrapped
+  // as a CSV_UPSTREAM_FAIL 502. The route now rejects at the edge.
+  it("missing wizard_session_id → 400 CSV_INVALID_FORMAT without calling validateCsv", async () => {
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns", null);
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toContain("wizard_session_id");
+    expect(json.correlation_id).toBeNull();
+    expect(validateCsvMock).not.toHaveBeenCalled();
+  });
+
+  it("malformed wizard_session_id → 400 CSV_INVALID_FORMAT without calling validateCsv", async () => {
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns", "not-a-uuid");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("CSV_INVALID_FORMAT");
+    expect(json.human_message).toContain("wizard_session_id");
+    expect(json.correlation_id).toBeNull();
+    expect(validateCsvMock).not.toHaveBeenCalled();
   });
 
   it("rate limit exceeded → 429 with Retry-After header and CSV_RATE_LIMIT envelope", async () => {

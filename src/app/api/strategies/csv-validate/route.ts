@@ -3,6 +3,7 @@ import type { User } from "@supabase/supabase-js";
 import { validateCsv } from "@/lib/analytics-client";
 import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
+import { isUuid } from "@/lib/utils";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -95,6 +96,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         debug_context: {
           fmt_received: typeof fmt === "string" ? fmt : "(missing)",
         },
+        correlation_id: null,
+      },
+      { status: 400 },
+    );
+  }
+
+  // Phase 15 / WR-03: validate the wizard_session_id UUID shape at the
+  // edge so a missing/malformed value returns a clean 400 envelope
+  // instead of a FastAPI 422 wrapped as a CSV_UPSTREAM_FAIL 502 (the
+  // Python router declares wizard_session_id: str = Form(...) with no
+  // shape check). Mirrors the defense-in-depth check the csv-finalize
+  // route already performs.
+  const sessionId = formData.get("wizard_session_id");
+  if (typeof sessionId !== "string" || !isUuid(sessionId)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        human_message: "wizard_session_id must be a valid UUID.",
+        debug_context: {},
         correlation_id: null,
       },
       { status: 400 },
