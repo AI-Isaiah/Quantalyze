@@ -29,6 +29,20 @@ export const metadata: Metadata = {
 
 const plausibleDomain = process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN;
 
+// Phase 16 / OBSERV-01 — defense-in-depth.
+//
+// The layout MUST render per-request so the <meta name="x-correlation-id">
+// is fresh on every page load. Today this is forced by `await headers()`
+// inside getCorrelationId() — Next.js 16 auto-detects routes that touch
+// runtime APIs and renders them dynamically.
+//
+// `force-dynamic` here is belt-and-braces: if a future config enables
+// `cacheComponents: true` (Next.js 16 PPR), the migration guide says to
+// REMOVE this line and refactor the meta tag into a Suspense-wrapped
+// per-request component (see https://nextjs.org/docs/app/getting-started/cache-components).
+// Until then this guarantees the cid is never cached across requests.
+export const dynamic = "force-dynamic";
+
 export default async function RootLayout({
   children,
 }: Readonly<{

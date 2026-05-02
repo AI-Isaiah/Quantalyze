@@ -109,23 +109,48 @@ class TestResendCorrelationRls:
         #   (a) anon has NO GRANT on the table -> InsufficientPrivilege error.
         #   (b) RLS-enabled with no anon policy -> zero rows even if (a) bypassed.
         # Accept either outcome as a pass — both encode the same isolation property.
-        with service_role_conn.cursor() as cur:
-            cur.execute("SET LOCAL request.jwt.claim.role TO 'anon'")
-            try:
-                cur.execute("SET LOCAL ROLE anon")
-                cur.execute(
-                    "SELECT * FROM public.resend_message_correlation "
-                    "WHERE resend_message_id = %s",
-                    (rmid,),
-                )
-                rows = cur.fetchall()
-                assert rows == [], (
-                    f"anon role read {len(rows)} rows from "
-                    "resend_message_correlation — RLS / GRANT layer failed"
-                )
-            except psycopg.errors.InsufficientPrivilege:
-                # GRANT layer denied first — also a pass.
-                pass
-            finally:
-                # Restore service_role for fixture teardown.
-                cur.execute("RESET ROLE")
+        #
+        # Phase 16 fix: SET LOCAL is scoped to the current transaction. The
+        # connection fixture uses autocommit=True so each execute() is its
+        # own implicit transaction — SET LOCAL would be rolled back before
+        # the SELECT runs, silently leaving the role at service_role and
+        # masking the RLS deny path. Open an explicit transaction with
+        # `conn.transaction()` so SET LOCAL takes effect for the SELECT.
+        with service_role_conn.transaction():
+            with service_role_conn.cursor() as cur:
+                cur.execute("SET LOCAL request.jwt.claim.role TO 'anon'")
+                try:
+                    cur.execute("SET LOCAL ROLE anon")
+                    # Sentinel — prove the role switch actually took effect
+                    # before we trust the SELECT result. Under autocommit
+                    # this assertion would fail (current_user stays
+                    # service_role), surfacing the silent regression.
+                    cur.execute("SELECT current_user AS who")
+                    who = cur.fetchone()
+                    assert who is not None and who["who"] == "anon", (
+                        f"SET LOCAL ROLE anon did not take effect; "
+                        f"current_user={who['who'] if who else None!r}. "
+                        "Likely cause: missing transaction wrapper under "
+                        "autocommit=True."
+                    )
+                    cur.execute(
+                        "SELECT * FROM public.resend_message_correlation "
+                        "WHERE resend_message_id = %s",
+                        (rmid,),
+                    )
+                    rows = cur.fetchall()
+                    assert rows == [], (
+                        f"anon role read {len(rows)} rows from "
+                        "resend_message_correlation — RLS / GRANT layer failed"
+                    )
+                except psycopg.errors.InsufficientPrivilege:
+                    # GRANT layer denied first — also a pass.
+                    pass
+                # Note: NO `RESET ROLE` in finally. Inside `with conn.transaction()`,
+                # SET LOCAL is transaction-scoped and reverts automatically on
+                # COMMIT/ROLLBACK. Adding RESET ROLE here would itself raise
+                # InFailedSqlTransaction whenever the SELECT raised
+                # InsufficientPrivilege (the GRANT-deny production path) because
+                # the transaction enters aborted state — and that exception is a
+                # different class than the one the except clause catches, so it
+                # would escape and fail the test on the very deny path it accepts.

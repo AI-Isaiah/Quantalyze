@@ -41,12 +41,22 @@ _PII_KEYS: frozenset[str] = frozenset({
     # --- Plan 3 / pii-scrub.ts L16-25 (8 exact keys) ---
     "apikey",
     "apisecret",
+    # --- Phase 16 / OBSERV-04 — snake_case wire forms posted by
+    # ConnectKeyStep / SubmitStep wizard endpoints. FastAPIIntegration
+    # auto-captures POST body into event.request.data; without these
+    # entries on the denylist the raw broker creds land at Sentry.
+    "api_key",
+    "api_secret",
     "secret",
     "signature",
     "passphrase",
     "authorization",
     "x-mbx-apikey",
     "ok-access-sign",
+    # --- Phase 16 / OBSERV-07 — INTERNAL_API_TOKEN forwarded on the
+    # Next.js → FastAPI seam; redact in case it surfaces in HTTP
+    # breadcrumbs or response-context dicts.
+    "x-internal-token",
     # --- Bybit v5 signing scheme (FIX 7) ---
     "x-bapi-api-key",
     "x-bapi-sign",
@@ -108,7 +118,16 @@ def _scrub(value: Any) -> Any:
 
 
 def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> dict[str, Any]:
-    """Sentry before_send hook. NEVER raises — Pitfall 6: a crash here drops the event silently."""
+    """Sentry before_send hook. NEVER raises — Pitfall 6: a crash here drops the event silently.
+
+    Phase 16 / OBSERV-04 scrub surfaces (must cover every place FastApiIntegration +
+    StarletteIntegration auto-capture user data):
+      - event['request']['headers' | 'cookies' | 'query_string' | 'data' | 'json']
+      - event['breadcrumbs'][*]['data'] (esp. http-category capturing fetch headers/body)
+      - event['exception']['values'][*]['stacktrace']['frames'][*]['vars'] (local
+        variables in the failing frame — wizard creds may live here as Pydantic
+        model fields or local 'creds' dicts).
+    """
     try:
         if isinstance(event.get("request"), dict):
             req = event["request"]
@@ -120,10 +139,44 @@ def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> d
                 # query_string is a single concatenated string; we can't structurally
                 # parse without loss, so just JWT-scan it.
                 req["query_string"] = _scrub_value(req["query_string"])
+            # POST/PUT body — FastApiIntegration captures parsed JSON into 'data'
+            # (and sometimes 'json' depending on integration version). Walk both.
+            if "data" in req:
+                req["data"] = _scrub(req["data"]) if isinstance(req["data"], (dict, list)) else _scrub_value(req["data"])
+            if "json" in req:
+                req["json"] = _scrub(req["json"]) if isinstance(req["json"], (dict, list)) else _scrub_value(req["json"])
         if isinstance(event.get("extra"), dict):
             event["extra"] = _scrub(event["extra"])
         if isinstance(event.get("contexts"), dict):
             event["contexts"] = _scrub(event["contexts"])
+        # Breadcrumbs — every category may carry data. http breadcrumbs from
+        # outbound fetch() include headers + body; user breadcrumbs include
+        # form values. Scrub all of them.
+        if isinstance(event.get("breadcrumbs"), dict):
+            crumbs = event["breadcrumbs"].get("values")
+            if isinstance(crumbs, list):
+                for crumb in crumbs:
+                    if isinstance(crumb, dict) and isinstance(crumb.get("data"), dict):
+                        crumb["data"] = _scrub(crumb["data"])
+        # Exception locals — Sentry default with_locals=True attaches frame
+        # vars on every captured exception. Wizard endpoints define `creds`,
+        # `api_key`, `api_secret` in the failing scope; without this walker
+        # they ride the exception report verbatim.
+        if isinstance(event.get("exception"), dict):
+            values = event["exception"].get("values")
+            if isinstance(values, list):
+                for exc in values:
+                    if not isinstance(exc, dict):
+                        continue
+                    stacktrace = exc.get("stacktrace")
+                    if not isinstance(stacktrace, dict):
+                        continue
+                    frames = stacktrace.get("frames")
+                    if not isinstance(frames, list):
+                        continue
+                    for frame in frames:
+                        if isinstance(frame, dict) and isinstance(frame.get("vars"), dict):
+                            frame["vars"] = _scrub(frame["vars"])
         return event
     except Exception:  # pragma: no cover — defensive; Test 10 exercises the wrap
         return event

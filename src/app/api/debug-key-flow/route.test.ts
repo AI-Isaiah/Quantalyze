@@ -221,6 +221,56 @@ describe("[OBSERV-07] /api/debug-key-flow SSE", () => {
     });
   });
 
+  // Regression: WR-03 cancel-path — the cancel() handler must reuse the
+  // synthetic sessionId UUID minted at request entry. A prior version used
+  // the raw inbound correlationId here, which would silently fail the
+  // migration 049 uuid-typed entity_id insert when the inbound cid was
+  // non-UUID (attacker-controlled). The fix swaps to sessionId; this test
+  // locks the behavior in by asserting the cancel-path audit row's
+  // entity_id is the SAME UUID as the initial audit row.
+  it("[WR-03 cancel] non-UUID inbound cid still produces UUID entity_id on cancel audit", async () => {
+    mockGetCorrelationId.mockResolvedValueOnce(
+      "not-a-uuid; DROP TABLE users;--",
+    );
+    // Make fetch hang so the stream stays open until we cancel it.
+    FETCH.mockImplementation(() => new Promise(() => {}));
+    const res = await POST(makeReq({ broker: "okx" }) as never);
+    expect(res.body).not.toBeNull();
+    const reader = res.body!.getReader();
+    // Drain at least the first frame so the stream is actively running
+    // (heartbeat interval armed) before we cancel.
+    await reader.read();
+    await reader.cancel();
+    // Drain microtasks: cancel() schedules logAuditEvent fire-and-forget.
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockLogAuditEvent).toHaveBeenCalledTimes(2);
+    const initialCall = mockLogAuditEvent.mock.calls[0][1];
+    const cancelCall = mockLogAuditEvent.mock.calls[1][1];
+
+    // Both audit rows must share the same UUID anchor (the sessionId).
+    expect(initialCall.entity_id).toBe(cancelCall.entity_id);
+    expect(cancelCall.entity_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    // entity_id must NOT be the attacker-supplied raw cid.
+    expect(cancelCall.entity_id).not.toBe(
+      "not-a-uuid; DROP TABLE users;--",
+    );
+    // Cancel-path metadata must include correlation_id (the raw inbound
+    // cid) for forensic linkage AND the closed-loop status marker.
+    expect(cancelCall).toMatchObject({
+      action: "debug_key_flow.invoke",
+      entity_type: "debug_session",
+      metadata: expect.objectContaining({
+        correlation_id: "not-a-uuid; DROP TABLE users;--",
+        status: "client_aborted",
+        broker: "okx",
+        admin_user_id: "admin-1",
+      }),
+    });
+  });
+
   it("heartbeat interval is set up (clears in finally)", async () => {
     const setSpy = vi.spyOn(globalThis, "setInterval");
     const clearSpy = vi.spyOn(globalThis, "clearInterval");

@@ -28,9 +28,21 @@ import vcr
 # Plan 3 _PII_KEYS denylist + broker-specific signing variants.
 # ----------------------------------------------------------------------------
 _FILTER_HEADERS: list[str] = [
-    # --- Plan 3 / pii-scrub.ts denylist (8 keys) ---
+    # --- Plan 3 / pii-scrub.ts denylist (the actual exact keys, NOT
+    # fictional `x-api-key`/`x-passphrase` that no real exchange uses) ---
     "authorization",
-    "x-api-key",
+    "apikey",
+    "apisecret",
+    "secret",
+    "signature",
+    "passphrase",
+
+    # --- Phase 16 / OBSERV-07 — internal-seam token forwarded by
+    # debug-key-flow route.ts; redact in case any cassette ever
+    # records that hop. Also the SDK-side broker key/secret variants
+    # different exchanges send under different header names.
+    "x-internal-token",
+    "x-api-key",      # generic vendor variant kept for defensive coverage
     "x-api-signature",
     "x-passphrase",
 

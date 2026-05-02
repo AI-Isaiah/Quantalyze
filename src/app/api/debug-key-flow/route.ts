@@ -305,13 +305,19 @@ export async function POST(req: NextRequest) {
       }
       try {
         // Fire-and-forget; do NOT block cancel() on the audit write.
+        // entity_id MUST be the synthetic sessionId UUID (declared above) —
+        // migration 049 declares p_entity_id uuid. The inbound `correlationId`
+        // can be a non-UUID string (WR-03 attacker-controllable header), and
+        // the initial audit row at L109 already mints + uses sessionId for
+        // exactly this reason. The cancel-path row must join the same anchor.
         logAuditEvent(supabase, {
           action: "debug_key_flow.invoke",
           entity_type: "debug_session",
-          entity_id: correlationId,
+          entity_id: sessionId,
           metadata: {
             broker,
             admin_user_id: user.id,
+            correlation_id: correlationId,
             status: "client_aborted",
           },
         });

@@ -48,10 +48,28 @@ def service_role_conn() -> Iterator[psycopg.Connection]:
     """Connection using the test-project DSN (auth.uid() returns NULL inside this context).
 
     DSN must point at the test Supabase project (qmnijlgmdhviwzwfyzlc); never production.
+
+    Phase 16 fix: assert the load-bearing precondition before yielding. The
+    suite below asserts that triggers use NEW.user_id (NOT auth.uid()) by
+    verifying the trigger fires under a context where auth.uid() returns
+    NULL. If TEST_SUPABASE_DB_URL ever points at a non-service-role DSN
+    (e.g., a future authenticated-context test fixture), the SAME test
+    code would still pass via auth.uid() — masking a regression. Sentinel
+    here makes the assumption explicit and surfaces the misconfig at
+    fixture-setup time, not at assertion time.
     """
     dsn = os.environ["TEST_SUPABASE_DB_URL"]
     conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT auth.uid() AS uid")
+            row = cur.fetchone()
+            assert row is not None and row["uid"] is None, (
+                f"Test precondition failed: auth.uid()={row['uid'] if row else None!r}. "
+                "Trigger audit suite REQUIRES service-role context where "
+                "auth.uid() returns NULL — otherwise a regression to "
+                "auth.uid() in the trigger body would silently pass."
+            )
         yield conn
     finally:
         conn.close()

@@ -50,6 +50,14 @@ GRANT USAGE ON SEQUENCE public.resend_message_correlation_id_seq TO service_role
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+        -- Idempotency guard: re-running this migration (fresh branch DB
+        -- rebuild, partial-rollback recovery) on pg_cron <1.6 would raise
+        -- duplicate-job-name; on >=1.6 silently overwrites. Mirror migration
+        -- 056's unschedule-then-schedule pattern so behavior is identical
+        -- across pg_cron versions.
+        IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'resend_message_correlation_retention_90d') THEN
+            PERFORM cron.unschedule('resend_message_correlation_retention_90d');
+        END IF;
         PERFORM cron.schedule(
             'resend_message_correlation_retention_90d',
             '15 3 * * *',  -- daily at 03:15 UTC
@@ -58,5 +66,9 @@ BEGIN
     END IF;
 END $$;
 
--- Optional rollback (commented for safety):
+-- Optional rollback (commented for safety). NOTE: drop also unschedules the
+-- pg_cron retention job — otherwise the cron entry tries daily DELETEs
+-- against a missing table and floods the cron log.
+-- SELECT cron.unschedule('resend_message_correlation_retention_90d')
+--   WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'resend_message_correlation_retention_90d');
 -- DROP TABLE IF EXISTS public.resend_message_correlation;
