@@ -1,7 +1,7 @@
-# ADR-0010: Observability -- no Sentry, console-only logging, Plausible for client analytics
+# ADR-0010: Observability -- Sentry (frontend + analytics service), structlog, end-to-end correlation_id
 
 ## Status
-Proposed (decision needed before shipping to real pilot allocators)
+Accepted — realized in Phase 16 (v0.19.0.0, 2026-05-02). See `## Resolution` below.
 
 ## Context
 The application has a stated intent to use Sentry (declared in
@@ -23,7 +23,22 @@ Critical gaps:
 - **Python service has conditional Sentry**: `analytics-service/main.py`
   (lines 14-26) initializes Sentry only if `SENTRY_DSN` is set.
 
-## Decision
+## Resolution (Phase 16, v0.19.0.0)
+Option A shipped. Frontend uses `@sentry/nextjs` initialized in
+`src/instrumentation.ts`; analytics service uses `sentry-sdk[fastapi]`
+initialized in `analytics-service/sentry_init.py` with PII scrubbing across
+`request.data` (wizard POST body), `breadcrumbs[*].data`, and
+`exception.values[*].stacktrace.frames[*].vars`. Logger abstraction is
+`structlog` 25.5.0 in `analytics-service/services/logging_config.py` with
+ContextVar-based `correlation_id` binding. Route boundaries
+(`src/app/error.tsx`, `src/app/global-error.tsx`) tag every Sentry capture
+with the cid read from a `<meta name="x-correlation-id">` set in
+`src/app/layout.tsx`. PII denylist single source of truth is
+`src/lib/admin/pii-scrub.ts`, mirrored in `sentry_init.py::_PII_KEYS`. See
+CHANGELOG `[0.19.0.0]` and `.planning/phases/16-diagnostic-spike-observability/`
+for the full implementation record.
+
+## Decision (original — preserved for history)
 **Open question -- one of the following options must be chosen:**
 
 ### Option A: Adopt `@sentry/nextjs`
