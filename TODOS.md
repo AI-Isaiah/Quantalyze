@@ -39,6 +39,155 @@ historical record but its operator decision is overridden here for v1.0.0.
 
 ---
 
+## Phase 16 review-fix follow-ups (deferred from /ship pre-landing review, 2026-05-02)
+
+The /ship Step 9.1 specialists + red-team flagged 16 critical findings on
+the Phase 16 diff. Seven were fixed inline before the v0.19.0.0 cut (see
+CHANGELOG.md ### Fixed). The remaining nine are deferred here as P1
+follow-ups — non-blocking but should land before the milestone closes.
+Three INFORMATIONAL findings from the Claude adversarial pass on the
+fixes themselves are also tracked.
+
+### P1: Email cron-context chain fragmentation (`src/lib/email.ts`)
+**Skill/Component:** observability / email
+**Found:** red-team review-pass on Phase 16 diff
+**Description:** `resolveCorrelationId()` falls back to `crypto.randomUUID()`
+when called outside request scope. Cron-triggered batches (alert digests,
+notification fan-out) currently produce a unique cid per email, so the
+webhook recovery side sees N unrelated audit chains for what conceptually
+should be one event. Fix: thread an optional `correlationId` parameter
+through `send()` / `sendAlertDigest()` / `notify*` so cron callers can
+pass one cid for the whole batch.
+**Confidence:** 8/10. **Severity downgraded:** real but defensive — the
+cid still propagates per-email, just doesn't aggregate.
+
+### P1: Email retry false-alarm on UNIQUE violation (`src/lib/email.ts`)
+**Skill/Component:** observability / email
+**Found:** red-team review-pass on Phase 16 diff
+**Description:** `insertCorrelationMapping` retries on transient client error
+after the first insert may have committed at the DB level. The retry then
+hits migration 098's `UNIQUE (resend_message_id)` constraint and logs
+`correlation_chain_broken` even though the row IS present. Fix: detect
+`err.code === '23505'` (Postgres unique_violation) on retry and treat as
+success. **Confidence:** 7/10.
+
+### P1: VCR cassette substring over-redaction (`analytics-service/tests/conftest_vcr.py`)
+**Skill/Component:** observability / testing
+**Found:** red-team review-pass
+**Description:** `_REDACT_BODY_SUBSTRINGS = ('sign', 'key', 'pass', 'secret')`
+matches legitimate non-secret broker fields (`signal`, `signedAt`, `pubkey`,
+`keyid`, `passport`, `keyspace`) AND misses real secrets in fields named
+`token` / `hmac` / `digest` / `nonce`. Fix: replace substring match with
+an allowlist of exact secret-bearing field names per broker, AND extend the
+substring set with `token` / `hmac` / `digest` / `nonce` for defense-in-depth.
+**Confidence:** 7/10.
+
+### P1: Diagnostic placeholder always returns green (`analytics-service/routers/debug_key_flow.py`)
+**Skill/Component:** observability / diagnostics
+**Found:** red-team review-pass; also flagged in STATE.md as founder gate
+**Description:** Step handlers hard-code `valid: True` and `fetched: 0` —
+the placeholder unconditionally returns `status: ok` regardless of actual
+broker behavior. If invoked before founder-gate wiring, the diagnostic
+tool reports green for all brokers even when test creds are missing or
+the broker is down. Fix when 16-07 Task 5 lands: gate router behind an
+env flag (e.g., `DEBUG_KEY_FLOW_PLACEHOLDER_OK!=true → 503`) so a green
+diagnostic is impossible until real wiring is connected.
+**Confidence:** 8/10.
+
+### P1: SSE cancel-path audit-row reliability (`src/app/api/debug-key-flow/route.ts`)
+**Skill/Component:** observability / diagnostics
+**Found:** red-team review-pass
+**Description:** `cancel()` calls `logAuditEvent` after the response has
+flushed; the `after()` primitive inside `logAuditEvent` may throw or drop
+on Vercel cold-finish because request scope is gone. The closed-loop
+client_aborted audit row can be silently lossy under exactly the abort
+scenarios the docstring promises to cover. Fix: move the cancel-path
+emission into `start()`'s `finally`, gated by a sentinel set by `cancel()`,
+so `logAuditEvent` runs while the request scope is still alive.
+**Confidence:** 8/10.
+
+### P1: Resend webhook svix-id idempotency (`src/app/api/webhooks/resend/route.ts`)
+**Skill/Component:** observability / webhooks
+**Found:** api-contract specialist + red-team
+**Description:** Webhook handler returns 200 on every event without
+storing svix-id for replay protection. Resend retries on >=500 and
+receiver timeouts. Path A/Path B are read-only today, but any future
+mutation (notification_dispatches.delivered_at, metric counters) becomes
+silently double-firing on retry. Fix: add a `webhook_idempotency` table
+keyed on svix-id with UNIQUE constraint; INSERT ... ON CONFLICT DO NOTHING
+and short-circuit on conflict.
+**Confidence:** 6/10.
+
+### P1: API status-code drift between sibling internal routes (`analytics-service/routers/`)
+**Skill/Component:** observability / api-contract
+**Found:** api-contract specialist
+**Description:** New `debug_key_flow.py` returns 401 for bad token and 503
+for missing token; sibling `internal.py` returns 403 for both. Operators
+relying on status-code conventions get inconsistent behavior across
+sibling endpoints. Fix: align both files on 403 (with `detail: "Forbidden"`)
+and document the sibling-route contract once.
+**Confidence:** 7-8/10.
+
+### P1: repro-key-flow.sh CI Layer A no-op (`scripts/repro-key-flow.sh`)
+**Skill/Component:** observability / ci
+**Found:** security specialist + maintainability
+**Description:** Layer A leak gate reads `DEBUG_KEY_FLOW_*` env vars from
+the runner shell; CI doesn't set them, so every loop iteration short-circuits
+with `[ -z "$val" ]` and `leak_count` stays 0 regardless of cassette
+contents. Fix: replace Layer A with a static known-bad-prefix scan
+(e.g. `grep -rE '(whsec_|sk_live_|sk_test_)' tests/cassettes/`) that does
+not depend on env presence.
+**Confidence:** 7-8/10.
+
+### P1: Wizard fetch missing X-Correlation-Id header
+**Skill/Component:** observability / wizard
+**Found:** red-team review-pass
+**Files:** `src/app/(dashboard)/strategies/new/wizard/steps/{ConnectKeyStep,SyncPreviewStep,SubmitStep}.tsx`
+**Description:** Wizard steps display correlationId from `<meta>` in the
+error envelope, but the fetch to /api/strategies/create-with-key omits
+`X-Correlation-Id` header. Server-side `getCorrelationId()` mints a fresh
+cid via crypto.randomUUID(); the cid the user copies from the error
+envelope NEVER matches the server's cid. Fix: add `headers: { 'X-Correlation-Id': correlationId }` to the wizard fetch calls so server and client agree.
+**Confidence:** 6/10.
+
+### P2: Adversarial-pass INFORMATIONAL findings on the inline fixes
+
+Three findings from the post-fix Claude adversarial pass that did not
+warrant an immediate re-fix but should be tracked:
+
+- **`src/app/layout.tsx` `force-dynamic` is redundant** with the existing
+  `await headers()` call (Next.js 16 auto-detects). Comment in the file
+  documents the migration step when cacheComponents lands. Defensive flag
+  is acceptable — drop when migrating to cacheComponents.
+- **`src/lib/admin/pii-scrub.test.ts` BAD_SAMPLES not updated** to cover
+  the three new denylist entries (`api_key`, `api_secret`, `x-internal-token`).
+  Python `test_sentry_init.py` covers the equivalent paths. Add TS samples
+  next maintenance pass.
+- **`analytics-service/sentry_init.py` frame-vars walker perf** — recursive
+  scrub on every captured exception's frame locals can dominate `before_send`
+  latency under exception storms with deep middleware stacks. Defer until
+  observed perf signal; cap iteration at top-N frames if it ever shows up.
+
+### P2: Python regression tests for new Sentry scrub paths
+
+The TypeScript regression test for the WR-03 cancel-path UUID fix landed
+in `route.test.ts` (`[WR-03 cancel] non-UUID inbound cid still produces
+UUID entity_id on cancel audit`). Python regression tests for the new
+`before_send` walk paths (request.data, request.json, breadcrumbs[*].data,
+exception.values[*].stacktrace.frames[*].vars) were added to
+`test_sentry_init.py` but **not run locally** because the phase-16 worktree
+has no `.venv`. CI pytest run on push will exercise them. If CI fails any
+of those new tests, treat as P0.
+
+### P3: pii-scrub.ts test coverage drift
+
+The TS-side `pii-scrub.test.ts` BAD_SAMPLES list (asserted `toHaveLength(20)`)
+was not updated when three new denylist entries were added. Add corresponding
+positive samples + bump the length assertion. Low priority — Python tests
+exercise the parallel paths.
+
+---
+
 ## 🔴 HIGHEST PRIORITY
 
 (Previous HIGHEST PRIORITY entry — the "Multistrategy Dashboard (allocator
