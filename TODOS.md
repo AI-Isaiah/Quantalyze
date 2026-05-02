@@ -12,6 +12,33 @@
 
 ---
 
+## DISCO-05 migration drift — Path C ratified (2026-05-01, v1.0.0 Phase 16 prep)
+
+**Decision:** Path C — accept the local-only state for migrations 091 (DISCO-05
+seed `is_example` backfill) + 092 (positions duration NUMERIC) + 093 + 094
+(Phase 15 strategy_verifications + RLS polish), and defer the coordinated
+remote push to v1.0.0 ship time via CI workflow #71's production-approval gate.
+Phase 15 already operated this way de-facto by shipping 093 + 094 local-only;
+this entry ratifies that policy for the rest of v1.0.0.
+
+**Why not Path A/B:** workflow #71 makes `supabase db push` a CI-only operation
+behind manual approval, so local pushes are wrong by policy regardless of
+drift state. The 8 unknown remote timestamps (`20260424012820` …
+`20260428190907`) span the Sprint-13 window and need provenance audit before
+`supabase migration repair` can be run safely — that audit is owned by the
+v1.0.0 release operator at ship time, not by individual phase work.
+
+**Convergence document:** `.planning/phase-16/migration-drift-resolution.md`
+holds the full reasoning + ship-time playbook. Phase 16 prep gate 2 of 3 is
+closed by this decision.
+
+**Supersedes:** Phase 13 TODOS.md DISCO-05 backfill section
+(`.planning/milestones/v0.17.0.0-phases/13-discovery-v2-polish/TODOS.md` lines
+45–93). That document's Path A/B/C analysis remains the authoritative
+historical record but its operator decision is overridden here for v1.0.0.
+
+---
+
 ## 🔴 HIGHEST PRIORITY
 
 (Previous HIGHEST PRIORITY entry — the "Multistrategy Dashboard (allocator

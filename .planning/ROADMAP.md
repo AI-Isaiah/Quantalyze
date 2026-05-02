@@ -73,7 +73,7 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
 #### Phase Summary
 
 - [ ] **Phase 15: CSV Unblock** — Promote PR #22's CSV path to first-class so all 10 onboarding teams have a working ingestion route within 48h; ships `csv_uploaded` trust-tier placeholder + per-team `strategy_verifications` status visibility.
-- [ ] **Phase 16: Diagnostic Spike + Observability** — Wire correlation_id end-to-end (Next.js → FastAPI → Supabase → Resend), add Sentry on both halves of the stack, ship `/api/debug-key-flow` SSE endpoint + VCR-replay harness, audit migration triggers + PostHog mobile starts; closes with the Day-2 decision gate.
+- [x] **Phase 16: Diagnostic Spike + Observability** — Wire correlation_id end-to-end (Next.js → FastAPI → Supabase → Resend), add Sentry on both halves of the stack, ship `/api/debug-key-flow` SSE endpoint + VCR-replay harness, audit migration triggers + PostHog mobile starts; closes with the Day-2 decision gate. (completed 2026-05-01)
 - [ ] **Phase 17: Design Contract** — Lock DESIGN.md additions (trust-tier badges, error envelope wireframe, broker selector grid, CSV escape-hatch card, mobile fallback, a11y minimums, 9-state matrix) BEFORE backend rewrite; trust-tier tokens land as typed code constants regex-asserted against DESIGN.md.
 - [ ] **Phase 18: Root-Cause Fix + Founder LP Skeleton** — Fix whatever Phase 16 surfaced with a regression test that fails without the fix; ship Python `redact.py` mirror of existing `pii-scrub.ts`; cron-emit a monthly LP report PDF reusing the existing factsheet endpoint; close the dogfood loop in writing.
 - [ ] **Phase 19: Unified Backbone** *(conditional on Day-2 gate = COMMIT)* — Replace 5 divergent entry routes with one `POST /process-key` FastAPI RPC + adapter Protocol (OKX / Binance / Bybit / CSV — no MT5 / IBKR per UC-B); ship `strategy_verifications` state machine, 4-PR VIEW-shim migration sequence, feature flag + cron-based rollback monitor, perp correctness, JSONB fingerprint, idempotency.
@@ -123,7 +123,17 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   3. Founder runs `scripts/repro-key-flow.sh` against checked-in `vcrpy==8.1.1` cassettes (OKX / Binance / Bybit happy + failure paths) and reproduces Path 1 + Path 2 + sync deterministically with no network access
   4. Admin-gated `/api/debug-key-flow` SSE endpoint runs Path 1 + Path 2 + sync sequentially against test credentials, never persists submitted credentials, audit-logs every invocation, and streams structured diagnostic JSON to caller
   5. Migration 084 / 085 / 086 trigger paths audited under unified-pipeline RLS context (service-role from Railway → `auth.uid()` returns NULL); integration tests assert each `stamp_first_*` RPC fires correctly via `NEW.user_id` not `auth.uid()`; PostHog `wizard_start` mobile-device count documented in TODOS.md (gates DESIGN-04)
-**Plans**: TBD
+**Plans**: 10 plans (Wave 1: 1, 2, 4, 9, 10 parallel; Wave 2: 3, 5, 6 parallel — depends on Wave 1; Wave 3: 7, 8 parallel — depends on Waves 1+2). Note: CONTEXT.md ratified a 2-wave structure but file-modified overlaps on analytics-service/main.py + requirements.txt force a 3-wave execution order — same total parallelism, just sequential between waves.
+- [x] 16-01-PLAN.md — OBSERV-12 Vitest fixture-presence regression test (Wave 1) — completed 2026-05-01
+- [x] 16-02-PLAN.md — correlation_id seam at analytics-client.ts:66 + structlog 25.5.0 + CorrelationMiddleware (Wave 1) — completed 2026-05-01
+- [x] 16-03-PLAN.md — Sentry boundaries: error.tsx + global-error.tsx + sentry-sdk[fastapi]==2.58.0 with PII before_send (Wave 2; depends 16-02) — completed 2026-05-01
+- [x] 16-04-PLAN.md — Trigger/RLS audit (migrations 084/085/086) via pytest+psycopg under service-role (Wave 1) — completed 2026-05-01
+- [x] 16-05-PLAN.md — Resend tag round-trip + resend_message_correlation mapping table migration 098 + webhook receiver (Wave 2; depends 16-02) — completed 2026-05-01 (Task 5 `supabase db push` applied via Supabase MCP to qmnijlgmdhviwzwfyzlc; RLS contract verified live: anon=0 rows, service_role=full access)
+- [x] 16-06-PLAN.md — WizardErrorEnvelope component + envelope builder + 3 wizard step rewires (Wave 2; depends 16-02) — completed 2026-05-01
+- [~] 16-07-PLAN.md — /api/debug-key-flow SSE endpoint + FastAPI internal router + audit-union extension (Wave 3; depends 16-02, 16-03, 16-06) — Tasks 1–4 shipped 2026-05-01 (13 vitest + 7 pytest = 20 tests green); Task 5 founder Railway env-staging (DEBUG_KEY_FLOW_* + INTERNAL_API_TOKEN parity + smoke test) pending human action
+- [~] 16-08-PLAN.md — vcrpy 8.1.1 cassettes (12 files) + scripts/repro-key-flow.sh + README troubleshooting edit (Wave 3; depends 16-03, 16-05, 16-06) — Tasks 1, 2, 4 shipped 2026-05-01 (vcrpy pin + 3-layer PII filter + 12-case scaffolding + repro harness + README); Task 3 founder cassette recording (12 YAMLs against test broker creds) pending human action
+- [x] 16-09-PLAN.md — PostHog wizard_start mobile audit (gates DESIGN-04 in Phase 17) (Wave 1) — completed 2026-05-01
+- [x] 16-10-PLAN.md — Day-2 decision document scaffold (template only; founder fills at gate) (Wave 1) — completed 2026-05-01
 **Complexity**: MEDIUM-HIGH (six concurrent workstreams: correlation_id seam @ `analytics-client.ts:66` + Sentry framework→boundary wiring + SSE endpoint + VCR cassettes + trigger audit + Resend tag round-trip verification + restore-e2e-fixtures pre-PR + PostHog mobile audit).
 **UI hint**: yes
 **Exit gate** *(Day-2 decision gate, Day 4)*: Founder reviews `/api/debug-key-flow` output with a 2-hour minimum deliberation floor. Decision document `.planning/phase-16/day-2-decision.md` lands BEFORE any Phase 18/19 code, and MUST contain (a) candidate root causes ranked by evidence weight, (b) regression test snippet for chosen fix, (c) explicit refutation of each Phase 19 task NOT needed if SKIP path chosen, (d) `correlation_id` evidence chain. Falsifiable criteria — SKIP if single `correlation_id` chain points to ONE config or ONE single-LOC bug AND fix has regression test that fails without it AND no other failure mode unexplained; COMMIT if 2+ root causes OR fix touches ≥3 files in divergent paths OR no clean unit test possible; HOLD (24h) if surfaced cause is unfamiliar.
@@ -246,7 +256,7 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 | 14a. Single-Strategy v2 — Eager Panels + Identity | v0.17.0.0 | 6/6 | Complete | 2026-04-29 |
 | 14b. Single-Strategy v2 — Lazy Panels + Trade & Exposure | v0.17.0.0 | 8/8 | Complete | 2026-04-29 |
 | 15. CSV Unblock | v1.0.0 | 0/6 | Not started | - |
-| 16. Diagnostic Spike + Observability | v1.0.0 | 0/TBD | Not started | - |
+| 16. Diagnostic Spike + Observability | v1.0.0 | 9/10 | Complete    | 2026-05-01 |
 | 17. Design Contract | v1.0.0 | 0/TBD | Not started | - |
 | 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/TBD | Not started | - |
 | 19. Unified Backbone (conditional) | v1.0.0 | 0/TBD | Not started | - |
