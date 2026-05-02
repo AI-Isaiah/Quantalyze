@@ -229,14 +229,18 @@ def test_weekend_dates_pass_regression():
 # Test 11 — PII redaction in preview.first_rows + preview.last_rows
 # ---------------------------------------------------------------------------
 
-def test_pii_redaction_masks_sensitive_columns():
-    """Preview rows must mask values whose column names match the PII pattern.
+def test_pii_undeclared_columns_dropped_from_preview():
+    """Undeclared columns (potentially PII) must be DROPPED from the preview.
 
-    Column names matching /^.*(account|email|user|customer|wallet|address).*$/i
-    are masked to '***'. Numeric and date columns pass through unchanged.
+    Adversarial-review fix 2026-05-02: schema.strict='filter' drops undeclared
+    columns from the validated DataFrame. Defense-in-depth: the preview
+    projection is also restricted to declared schema columns so undeclared
+    columns the redact regex does NOT match (e.g. 'ssn', 'phone_number') can
+    never reach the UI either. The earlier behavior masked recognized PII
+    column names in place but leaked unrecognized ones.
 
-    Underlying validation runs on the unredacted DataFrame; only the preview
-    serialization gets masked.
+    Underlying validation still runs on the original DataFrame; only the
+    preview serialization is filtered.
     """
     df = pd.DataFrame({
         "date": pd.date_range("2024-01-02", periods=5, freq="D").strftime("%Y-%m-%d"),
@@ -244,6 +248,7 @@ def test_pii_redaction_masks_sensitive_columns():
         "account": ["acct-12345", "acct-67890", "acct-abcde", "acct-fghij", "acct-klmno"],
         "customer_email": ["a@x.com", "b@x.com", "c@x.com", "d@x.com", "e@x.com"],
         "wallet_address": ["0xabc", "0xdef", "0x111", "0x222", "0x333"],
+        "ssn": ["111-22-3333"] * 5,  # NOT matched by PII regex; pre-fix would leak.
     })
     result = validate_csv(_csv_bytes(df), "daily_returns")
     assert result["ok"] is True, f"Expected ok=True, got errors: {result.get('errors')}"
@@ -251,11 +256,54 @@ def test_pii_redaction_masks_sensitive_columns():
     preview = result["preview"]
     assert preview is not None
 
-    # Every row in first_rows + last_rows must have masked PII columns
+    # `columns_detected` and preview rows must contain ONLY declared columns.
+    declared = {"date", "daily_return", "currency"}
+    assert set(preview["columns_detected"]).issubset(declared), (
+        f"Preview leaked undeclared columns: {preview['columns_detected']!r}"
+    )
     for row in [*preview["first_rows"], *preview["last_rows"]]:
-        assert row["account"] == "***", f"account not masked: {row['account']!r}"
-        assert row["customer_email"] == "***", f"customer_email not masked: {row['customer_email']!r}"
-        assert row["wallet_address"] == "***", f"wallet_address not masked: {row['wallet_address']!r}"
-        # Numeric / date columns pass through unchanged
+        assert "account" not in row, "account leaked into preview row"
+        assert "customer_email" not in row, "customer_email leaked into preview row"
+        assert "wallet_address" not in row, "wallet_address leaked into preview row"
+        assert "ssn" not in row, "ssn leaked into preview row"
+        # Declared columns pass through unchanged
         assert row["daily_return"] == 0.001
         assert row["date"]  # non-empty
+
+
+def test_redact_preview_masks_declared_pii_named_column():
+    """If a declared schema column happens to match the PII regex, its values
+    are still masked at the preview layer (defense in depth).
+
+    The existing schema declares only date / daily_return / currency / nav /
+    qty / price / symbol / side, none of which match the PII regex. This test
+    exercises the `_redact_preview` helper directly to verify the masking
+    contract has not regressed.
+    """
+    from services.csv_validator import _redact_preview
+
+    rows = [{"date": "2024-01-02", "user_id": "u-123", "daily_return": 0.01}]
+    masked = _redact_preview(rows)
+    assert masked[0]["user_id"] == "***"
+    assert masked[0]["date"] == "2024-01-02"
+    assert masked[0]["daily_return"] == 0.01
+
+
+# ---------------------------------------------------------------------------
+# Test 13 — duplicate consecutive dates fail strict-monotonic check
+# (regression for adversarial-review fix 2026-05-02; pandas
+# `is_monotonic_increasing` accepts equal consecutive values which would
+# silently double-count days downstream).
+# ---------------------------------------------------------------------------
+
+def test_strictly_increasing_rejects_duplicate_dates():
+    df = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03", "2024-01-03", "2024-01-04"],
+        "daily_return": [0.01, 0.02, 0.03, 0.04],
+    })
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    assert result["ok"] is False, "Duplicate dates must fail validation"
+    rules = {e["rule"] for e in result["errors"]}
+    assert "monotonic_dates" in rules, (
+        f"Expected monotonic_dates violation, got rules: {rules}"
+    )

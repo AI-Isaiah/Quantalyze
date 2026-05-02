@@ -57,13 +57,21 @@ _PII_COLUMN_PATTERN = re.compile(
 # <CsvValidationEnvelope> in plan 15-04 maps to human labels.
 # ---------------------------------------------------------------------------
 
+# Date check: strictly increasing (monotonic AND no duplicates).
+# UI label says "Dates must be strictly increasing"; the prior
+# `is_monotonic_increasing`-only check accepted equal consecutive
+# dates which would silently double-count days downstream.
+def _strictly_increasing(s: pd.Series) -> bool:
+    return bool(s.is_monotonic_increasing and s.is_unique)
+
+
 SCHEMAS: dict[str, pa.DataFrameSchema] = {
     "daily_returns": pa.DataFrameSchema(
         columns={
             "date": pa.Column(
                 pa.DateTime,
                 checks=pa.Check(
-                    lambda s: s.is_monotonic_increasing,
+                    _strictly_increasing,
                     error="monotonic_dates",
                 ),
             ),
@@ -84,7 +92,10 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
                 required=False,
             ),
         },
-        strict=False,
+        # `strict="filter"` drops undeclared columns from the validated
+        # DataFrame so unexpected PII columns (ones the redact regex does
+        # not match) cannot reach the preview output.
+        strict="filter",
         coerce=True,
     ),
     "daily_nav": pa.DataFrameSchema(
@@ -92,7 +103,7 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
             "date": pa.Column(
                 pa.DateTime,
                 checks=pa.Check(
-                    lambda s: s.is_monotonic_increasing,
+                    _strictly_increasing,
                     error="monotonic_dates",
                 ),
             ),
@@ -113,7 +124,7 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
                 required=False,
             ),
         },
-        strict=False,
+        strict="filter",
         coerce=True,
     ),
     "trades": pa.DataFrameSchema(
@@ -121,7 +132,7 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
             "date": pa.Column(
                 pa.DateTime,
                 checks=pa.Check(
-                    lambda s: s.is_monotonic_increasing,
+                    _strictly_increasing,
                     error="monotonic_dates",
                 ),
             ),
@@ -143,7 +154,7 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
                 ),
             ),
         },
-        strict=False,
+        strict="filter",
         coerce=True,
     ),
 }
@@ -302,12 +313,20 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # Cross-AI revision 2026-04-30: redact preview rows. Underlying
     # validation already ran on the unredacted df; only the preview
     # serialization gets masked.
-    first_raw = df.head(3).to_dict(orient="records")
-    last_raw = df.tail(3).to_dict(orient="records")
+    #
+    # Adversarial-review fix 2026-05-02: project the preview to declared
+    # schema columns only (mirrors `strict="filter"`) so undeclared
+    # columns that the redact regex does not match cannot reach the UI
+    # — even on the SchemaErrors fallback path where df_validated = df.
+    declared_cols = set(SCHEMAS[fmt].columns.keys())
+    present_declared = [c for c in df.columns if c in declared_cols]
+    df_preview = df[present_declared] if present_declared else df.iloc[:, :0]
+    first_raw = df_preview.head(3).to_dict(orient="records")
+    last_raw = df_preview.tail(3).to_dict(orient="records")
     preview = {
         "row_count": int(len(df)),
         "date_range": [date_min, date_max],
-        "columns_detected": list(df.columns),
+        "columns_detected": list(df_preview.columns),
         "first_rows": _redact_preview(first_raw),
         "last_rows": _redact_preview(last_raw),
     }

@@ -42,6 +42,29 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // Adversarial-review fix 2026-05-02: short-circuit oversize uploads on
+  // Content-Length BEFORE req.formData() buffers the entire body. The
+  // file.size check at line 73 fires only after the multipart parser
+  // has already read the request, so the prior 10 MB cap was cosmetic.
+  // The header is advisory (clients can lie or omit it), so the
+  // post-parse file.size check stays as defense-in-depth.
+  const contentLengthHeader = req.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength > MAX_BYTES) {
+      return NextResponse.json(
+        {
+          ok: false,
+          code: "CSV_FILE_TOO_LARGE",
+          human_message: `Maximum file size is 10 MB. Your upload is ${(contentLength / 1024 / 1024).toFixed(1)} MB.`,
+          debug_context: { content_length: contentLength },
+          correlation_id: null,
+        },
+        { status: 400 },
+      );
+    }
+  }
+
   const formData = await req.formData().catch(() => null);
   if (!formData) {
     return NextResponse.json(
