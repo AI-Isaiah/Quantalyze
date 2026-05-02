@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.18.0.0] - 2026-05-02
+
+**Phase 15 — CSV Unblock.** First-class CSV onboarding for the 10 founder LP teams. Strategies can now arrive via daily-returns / daily-NAV / trades upload instead of only the API-key wizard. The wizard branches on `?source=csv`, the analytics service validates row schemas before anything reaches the database, and a new `csv_uploaded` trust-tier badge tells viewers exactly how the track record arrived. Admins get a dedicated `/admin/csv-status` page to triage submissions before promotion.
+
+First milestone of the v1.0.0 release. Phases 16 (Diagnostic Spike + Observability) and 17 (Design Contract) ship next.
+
+### Added
+
+- **CSV onboarding wizard.** A teams-can-upload entry path on `/strategies/new/wizard?source=csv` with three steps — Upload, Preview, Submit — that share the existing wizard chrome. Users type the strategy name (1–80 chars), pick a format (daily_returns / daily_nav / trades), drop a file ≤ 10 MB, see a 6-row preview + row count + date range before committing, then click Submit to create the strategy. New components: `CsvUploadStep`, `CsvPreviewStep`, `CsvSubmitStep`, `CsvValidationEnvelope` under `src/app/(dashboard)/strategies/new/wizard/steps/`. Wizard chrome (`WizardChrome`, `WizardClient`) now branches on `source` for copy and step ordering; resume from localStorage works across the CSV path with the new `source` + `strategyName` discriminators in `WizardLocalState`.
+
+- **Pandera CSV row-schema validator** at `analytics-service/services/csv_validator.py`. Six rules collect ALL violations at once (lazy mode) so the user fixes once instead of iteratively: monotonic strictly-increasing dates, NAV non-zero, daily return > -100%, daily Sharpe ≤ 10 (sentinel for look-ahead bias), currency USD-or-blank, qty/price > 0 on trades. Three pandera schemas (one per format), each `strict="filter"` to drop undeclared columns from the validated frame. Inline `_redact_preview` helper masks values whose column names match a PII pattern (account / email / user / customer / wallet / address) before serialization to the UI.
+
+- **`POST /api/csv/validate`** FastAPI multipart endpoint at `analytics-service/routers/csv.py`. Streams the upload through a 64 KiB-chunked `_read_capped` helper (worst-case heap = cap + chunk size regardless of caller payload). Returns the v0 envelope `{ok, preview | None, errors[], correlation_id: None}`. Pinned `pandera==0.20.4` + `python-multipart==0.0.27` in `analytics-service/requirements.txt`.
+
+- **`POST /api/strategies/csv-validate` and `POST /api/strategies/csv-finalize`** Next.js routes proxying the analytics service. The validate route reads multipart `file` + `fmt` + `wizard_session_id`, enforces the 10 MB cap (Content-Length pre-check + post-parse `file.size` defense-in-depth), validates the wizard_session_id UUID shape at the edge, and forwards to the Python service. The finalize route accepts a typed strategy name, validates length 1-80, and calls `finalize_csv_strategy(p_user_id, p_wizard_session_id, p_fmt, p_strategy_name)` to atomically create the strategy + verification rows.
+
+- **`finalize_csv_strategy` Postgres RPC** in migration `093_strategy_verifications.sql` — `SECURITY DEFINER` with manual `auth.uid() <> p_user_id` guard, distinct SQLSTATE 22023 messages for fmt/empty-name/oversized-name violations, and a self-verifying DO block at apply time that asserts each constraint individually with `RAISE NOTICE` on success. Migration 094 follows up with the `owner_select` RLS rebuild in EXISTS form.
+
+- **`strategy_verifications` table.** New row per CSV submission tracking flow_type, status (`pending_review` → `validated`), trust_tier (`csv_uploaded`), and an optional correlation_id slot for Phase 16. Three RLS policies — owner can SELECT their own row, admins can SELECT all, service-role bypasses for admin tooling.
+
+- **`TrustTierLabel` component** at `src/components/strategy/TrustTierLabel.tsx`. Renders the locked "CSV uploaded — verification pending" copy for `csv_uploaded` strategies; renders nothing for `api_verified` / `self_reported` / null. Wired into `StrategyHeader` and `StrategyGrid` so the badge appears on factsheets and discovery cards. `Strategy.trust_tier` is projected via a left-join on `strategy_verifications` (latest row only) in both `getStrategyDetail` and `getStrategiesByCategory`.
+
+- **`/admin/csv-status` page** at `src/app/(dashboard)/admin/csv-status/page.tsx`. Admin-gated server component (redirects non-admins to the public discovery view) that surfaces a 6-column table of every CSV submission — team email, strategy name, status, trust tier, submitted-at, action — joined across `strategy_verifications`, `strategies`, and `auth.users`. Service-role read; the founder uses this to triage which submissions to promote to `published`.
+
+- **Test coverage.** New unit tests for the validator (12 cases incl. PII-leak prevention + duplicate-date regression), the validate route (13 cases incl. rate-limit + UUID + size cap + upstream-fail envelope), the finalize RPC (7 cases pinning each SQLSTATE 22023 message), the RLS contract (4 anti-leak cases + skip advertisement), the TrustTierLabel component (7 contract assertions), and a Playwright E2E happy path that resolves `auth.users.email` via `auth.admin.listUsers`, walks Upload → Preview → Submit, and asserts the typed strategy name appears as the factsheet H1.
+
+### Changed
+
+- **Wizard local-storage shape** (`src/lib/wizard/localStorage.ts`) extended with `source?: "api" | "csv"` and `strategyName?: string`. Resume logic respects `source` so a CSV draft never sends a user to the API-key wizard. Back-compat: API drafts persisted before this release continue to load.
+
+- **`StrategyHeader` and `StrategyGrid`** now consume `strategy.trust_tier` and render `TrustTierLabel` next to the existing status badge. No layout change for non-CSV strategies (the label renders nothing for `api_verified` / `self_reported`).
+
+- **`getStrategiesByCategory` and `getStrategyDetail`** in `src/lib/queries.ts` apply `.order("created_at")` + `.limit(1)` on the `strategy_verifications` join so the trust tier always reflects the most recent verification row. Defensive JS-side `.sort()+[0]` retained as a no-op safety net.
+
+### Security
+
+- **Dedicated `csvValidateLimiter`** (20 requests / 60 s, keyed by user id) in `src/lib/ratelimit.ts`. Decoupled from the shared `userActionLimiter` (5 / min) so CSV traffic cannot starve other user-action POSTs and vice versa.
+
+- **`wizard_session_id` UUID validation** at the validate route edge. A missing or malformed value returns a clean `CSV_INVALID_FORMAT` 400 envelope instead of a FastAPI 422 wrapped as a 502, matching the existing finalize route guard.
+
+- **Strict-monotonic date check.** The validator now rejects duplicate consecutive dates instead of admitting them; the prior `is_monotonic_increasing`-only check would silently pass duplicate days that double-count downstream metric math.
+
+- **Schema `strict="filter"` + projected preview.** Undeclared columns (e.g. `ssn`, `phone_number`) are dropped from the validated DataFrame and the preview output, so PII the redact regex does not match cannot reach the UI even on the SchemaErrors fallback path.
+
+- **`Content-Length` pre-check** on the validate route short-circuits oversize uploads before `req.formData()` buffers the body. The post-parse `file.size` check stays as defense-in-depth (the header is advisory).
+
+- **`owner_select` RLS rebuild** (migration 094). Replaced the IN-subquery form with an EXISTS form that joins on `strategy_verifications.strategy_id = s.id AND s.user_id = auth.uid()`, wrapped in `BEGIN/COMMIT` with a self-verifying DO block.
+
+### Fixed
+
+- **`is_monotonic_increasing` allowed duplicate dates** (`csv_validator.py`). Adversarial-review fix: tightened to require monotonic AND unique. UI label "Dates must be strictly increasing" now matches behavior.
+
+- **Pandera `strict=False` leaked undeclared columns** into preview rows. Adversarial-review fix: switched to `strict="filter"` and project the preview to declared columns only — defense even on the SchemaErrors fallback.
+
+- **`req.formData()` buffered the entire body before the size cap.** Adversarial-review fix: Content-Length header pre-check short-circuits oversize uploads before the multipart parser runs.
+
+- **Wizard chrome copy bled API-path strings into the CSV branch.** `WizardChrome` now accepts a `source` prop and renders CSV-specific subtitle copy + skips the `WithdrawalWarningStrip` / `WizardIpAllowlistHint` strips that don't apply when uploading a CSV.
+
+### Known follow-ups (deferred to Phase 16/17/18)
+
+- **Validate→finalize fingerprint linking.** Today a scripted client can POST to `/csv-finalize` without a prior `/csv-validate` call and earn the `csv_uploaded` tier. Mitigated by admin review before promotion to `status='published'`. Phase 18 / FIX-03 is tracked.
+
+- **`wizard_session_id` UNIQUE constraint.** Phase 15 explicitly does not enforce uniqueness; double-submit can create duplicate strategy + verification rows. The retry copy on CSV_FINALIZE_FAIL deliberately leaves recovery to the user. Phase 19 (Unified Backbone) adds the constraint.
+
+- **Coverage gaps tracked in TODOS.md** as P2: `admin/csv-status` page (founder-only surface), `CsvUploadStep` non-happy-path branches (drag-drop, keyboard, no-extension, network-timeout, defensive ok-but-no-preview), `CsvSubmitStep` `!res.ok` envelope path. AI-assessed coverage 78%; security-critical paths at 100%.
+
+- **Per-IP rate limit at the Next.js edge.** Today the 20/min budget keys on `user.id`, so unauthenticated traffic only hits `withAuth`'s 401 — Phase 16 will add an IP-keyed bucket as defense-in-depth.
+
 ## [0.17.1.31] - 2026-04-30
 
 **PR #108 follow-up.** Closes the security hole + design-system drift the cross-agent retroactive review surfaced. Five concerns landing as one bundle because they share a theme (PR #108 partial fixes that needed completion).
