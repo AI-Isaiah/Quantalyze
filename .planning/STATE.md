@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0.0
-milestone_name: "API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs"
+milestone_name: API-Key Rewrite
 status: ready_to_plan
-stopped_at: Roadmap created 2026-04-30. ROADMAP.md + REQUIREMENTS.md (traceability) finalized; ready for /gsd-plan-phase 15.
-last_updated: "2026-04-30T22:30:00.000Z"
-last_activity: 2026-04-30 — Roadmap created (gsd-roadmapper); 5 phases (15-19) with conditional Phase 19; 39/39 REQs mapped.
+stopped_at: Phase 16 Wave 3 merged — all 10 plans landed; 8 fully complete + 2 partial. Code+tests in repo for every plan. 16-05 Task 5 (migration 098) applied via Supabase MCP to qmnijlgmdhviwzwfyzlc with live RLS verification (anon=0 rows, service_role=visible). Two founder gates remain: 16-07 Task 5 (Railway DEBUG_KEY_FLOW_* env-staging + INTERNAL_API_TOKEN parity + smoke test) and 16-08 Task 3 (one-time recording of 12 VCR cassettes against real test broker creds). Post-merge tests 2731/2731 frontend + 653/653 analytics (excluding cassette-gated test_repro_key_flow.py). Code review + verification gates next.
+last_updated: "2026-05-01T12:38:00.000Z"
+last_activity: 2026-05-01 -- Phase 16 Wave 3 merged + tests pass; founder gates pending; verification next
 progress:
   total_phases: 5
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 2
+  total_plans: 17
+  completed_plans: 17
+  percent: 40
 ---
 
 # Project State
@@ -21,17 +21,29 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked.
-**Current focus:** Ready to plan Phase 15 (CSV Unblock) — first phase of v1.0.0 API-Key Rewrite.
+**Current focus:** Phase 16 — diagnostic-spike-observability
 **Last milestone:** v0.17.0.0 Sprint 12 — KPI Parity and Discovery v2 (shipped 2026-04-29). v0.17.1.x cleanup landed at v0.17.1.31 on 2026-04-30, all 5 carryover items closed.
 
 ## Current Position
 
-Phase: 15 of 19 (CSV Unblock — first phase of v1.0.0)
-Plan: — (ready to plan)
+Phase: 17
+Plan: Not started
 Status: Ready to plan
-Last activity: 2026-04-30 — Roadmap created via gsd-roadmapper
+Last activity: 2026-05-01
 
-Progress: [░░░░░░░░░░] 0% (0 of TBD plans across Phases 15-19)
+Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15 shipped local on v1.0.0-api-key-rewrite-15-16, awaiting milestone ship)
+
+## Phase 16 prep gate status (2026-05-01)
+
+| # | Gate | Artifact | Status |
+|---|------|----------|--------|
+| 1 | restore-e2e-fixtures PR merged FIRST | PR #111 (commit 8fb4159), merged into main 2026-05-01T06:25:59Z | ✓ closed |
+| 2 | DISCO-05 migration drift Path A/B/C decision | `.planning/phase-16/migration-drift-resolution.md` (Path C) + TODOS.md ratification | ✓ closed |
+| 3 | Day-0.5 Vault-from-Railway pre-flight | `.planning/phase-16/vault-from-railway-preflight.md` (PASS — architecture is Railway env-var, not Vault) | ✓ closed |
+
+**Phase 18 fallback NOT triggered** (gate 3 explicitly says "skip ahead to Phase 18 with 'fix Vault access' as first task" if pre-flight fails — pre-flight passed).
+
+**Plan terminology correction:** the milestone plan refers to "Vault" in several places (Phase 18 redact mirror context, Skeptic-voice root-cause table). The codebase has never used Supabase Vault — KEK is a Railway env-var. Future Phase 16/17/18/19 plans should rephrase any "Vault" reference to "KEK env-var" or "Railway secret". Convergence document: `.planning/phase-16/vault-from-railway-preflight.md`.
 
 ## Milestone Summary (v1.0.0)
 
@@ -93,6 +105,7 @@ Progress: [░░░░░░░░░░] 0% (0 of TBD plans across Phases 15-1
 | Theme 4 ≥1 Metaworld verbal-in-writing | Phase 18 entry | Text logged in `.planning/phase-18/metaworld-commitment.md` before Phase 18 starts. Without commitment, log gap and reduce Phase 19 scope to "internal infrastructure only" (no marketplace credibility claim). |
 | Phase 19 route inventory | Phase 19 entry | `.planning/phase-19/route-inventory.md` greps every Next.js route exporting non-GET handlers touching `api_keys | strategies | strategy_analytics | verification_requests | strategy_verifications | compute_jobs`. Every row maps to a `flow_type` OR carries explicit "out of scope, rationale: …" (Pitfall 1 mitigation). |
 | Phase 19 migration plan | Phase 19 entry | Migration numbers 093-097 reserved upfront in `.planning/phase-19/migration-plan.md` (093 strategy_verifications + status enum; 094 VIEW shim with `INSTEAD OF` triggers; 095 wait period; 096 fingerprint JSONB + `compute_similarity()`; 097 wizard_session_id idempotency UNIQUE INDEX + `process_key_long` registry insert). Plan-checker rejects Phase 19 entry without document. |
+| Phase 16 migration slot | Phase 16 Plan 5 | Migration `098_resend_message_correlation.sql` is reserved for Phase 16 Plan 5 (Resend tag round-trip fallback table). Lands AFTER the Phase 19 reserved 093-097 block. Do not reuse 098 from any other phase. Documented 2026-05-01 after Plan 5 originally targeted 095 (collision with Phase 19 wait-period reservation). |
 | Phase 19 4-PR VIEW-shim sequence | Phase 19 exit | Plan-checker rejects exit if any single PR combines adjacent steps (a) repoint `verify-strategy/route.ts:115` → `strategy_verifications` + flag flip + (c) verify zero writes ≥24h + 7 calendar days at 100% rollout + (d) rename + `INSTEAD OF` triggers + 90-day legacy retention. |
 | Phase 19 customer-feedback document | Phase 19 exit | `.planning/phase-19/customer-feedback.md` captures verbatim feedback from 1-2 of the 10 teams running a real key submission via the unified flow (NOT a screenshot demo). |
 
@@ -146,9 +159,11 @@ Progress: [░░░░░░░░░░] 0% (0 of TBD plans across Phases 15-1
 
 ## Session Continuity
 
-Last session: 2026-04-30T22:30:00.000Z
-Stopped at: Roadmap created via gsd-roadmapper. ROADMAP.md and STATE.md updated. REQUIREMENTS.md traceability table verified (all 39 REQs mapped). Ready for `/gsd-plan-phase 15` (Phase 15 CSV Unblock — first phase of v1.0.0).
+Last session: --stopped-at
+Stopped at: Phase 15 COMPLETE — 7 plans + 5 cross-AI fixes + 1 QA copy fix shipped on v1.0.0-api-key-rewrite-15-16. Autonomous run paused per user request before Phase 16.
 
 **Active milestone:** v1.0.0 — API-Key Rewrite — Diagnose → Fix → Unify → Ship to LPs — 2026-04-30
 
 **Next phase:** Phase 15 (CSV Unblock) — Wave 1 entry condition: Theme 4 founder pings 10 teams, ≥3 reply threshold (≥3 unlocks; <3 ships anyway with logged gap).
+
+**Planned Phase:** 16 (Diagnostic Spike + Observability) — 10 plans — 2026-05-01T08:29:28.242Z
