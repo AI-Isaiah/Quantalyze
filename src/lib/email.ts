@@ -1,5 +1,6 @@
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getCorrelationId } from "@/lib/correlation-id";
 import { SEVERITY_HEX, type AlertSeverity } from "./utils";
 import type { ManagerIdentity } from "@/lib/types";
 
@@ -57,6 +58,59 @@ const BRAND_COLOR = "#1B6B5A"; // muted teal, per DESIGN.md
 const SIGNATURE = `<p style="color:#666;font-size:13px;">— ${PLATFORM_NAME}</p>`;
 
 /**
+ * Resolve the correlation_id to attach to this send. Prefers the request-scoped
+ * `getCorrelationId()` (which reads the inbound x-correlation-id header) so the
+ * Resend boundary stays joined to the inbound request chain. If the helper
+ * throws (e.g., the call originates from a cron context where `headers()` is
+ * unavailable), fall back to a fresh UUID v4 — the absolute-last fallback per
+ * Plan 16-05. The cid still flows through Path A (tags array) and Path B
+ * (resend_message_correlation insert) so the webhook side can still recover
+ * it; only the inbound→send hop is lost in that branch.
+ */
+async function resolveCorrelationId(): Promise<string> {
+  try {
+    return await getCorrelationId();
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+
+/**
+ * Best-effort insert into resend_message_correlation with a single retry on
+ * transient failure. Failure is logged with the structured marker
+ * `correlation_chain_broken` (Sentry-pickup) but NEVER thrown — the email is
+ * already delivered. Cost: ~0ms in the happy path; ~150ms when the retry
+ * fires. Path B fallback per Pitfall 17 / RESEARCH Open Question 1.
+ */
+async function insertCorrelationMapping(
+  admin: ReturnType<typeof createAdminClient>,
+  correlation_id: string,
+  resend_message_id: string,
+): Promise<void> {
+  const payload = {
+    correlation_id,
+    resend_message_id,
+    sent_at: new Date().toISOString(),
+  };
+  // First attempt.
+  let { error } = await admin.from("resend_message_correlation").insert(payload);
+  if (!error) return;
+  const firstError = error;
+  // Backoff ~150ms then retry once. Single retry covers transient connection
+  // hiccups without blocking the send for more than a perceptible blink.
+  await new Promise((r) => setTimeout(r, 150));
+  ({ error } = await admin.from("resend_message_correlation").insert(payload));
+  if (!error) return;
+  // Both attempts failed — log a structured warning and move on.
+  console.warn("[email] correlation_chain_broken", {
+    resend_message_id,
+    correlation_id,
+    first_error: firstError.message,
+    retry_error: error.message,
+  });
+}
+
+/**
  * Low-level send primitive. Writes an audit row to `notification_dispatches`
  * (migration 018), calls Resend, and best-effort updates the row with the
  * outcome. Failures in either the audit write or the Resend call are
@@ -64,6 +118,11 @@ const SIGNATURE = `<p style="color:#666;font-size:13px;">— ${PLATFORM_NAME}</p
  *
  * The `notificationType` parameter is required so operators can filter the
  * audit trail by category (e.g., "manager_intro_request" vs "alert_digest").
+ *
+ * Phase 16 / OBSERV-03: every send carries a `correlation_id` tag (Path A)
+ * and, on success, attempts a best-effort row insert into
+ * `resend_message_correlation` with 1 retry (Path B). The webhook handler at
+ * /api/webhooks/resend uses both paths to recover the cid.
  */
 async function send(
   to: string,
@@ -118,6 +177,11 @@ async function send(
     return;
   }
 
+  // Phase 16 / OBSERV-03: resolve correlation_id BEFORE the retry loop so all
+  // attempts carry the same cid tag (the same logical email keeps the same
+  // chain id even on transient retries).
+  const correlationId = await resolveCorrelationId();
+
   // Retry with exponential backoff: 2 retries (3 total attempts).
   // Base delay 500ms, so attempts fire at ~0ms, ~500ms, ~1000ms.
   // A transient Resend 5xx or network blip is recovered silently;
@@ -125,6 +189,7 @@ async function send(
   const MAX_ATTEMPTS = 3;
   const BASE_DELAY_MS = 500;
   let sendError: unknown = null;
+  let resendMessageId: string | null = null;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     sendError = null;
@@ -135,9 +200,18 @@ async function send(
         cc,
         subject,
         html,
+        // Path A (Resend tag round-trip): the webhook handler reads
+        // correlation_id from `data.tags` first; the kind tag mirrors the
+        // notification_type for operator filtering.
+        tags: [
+          { name: "correlation_id", value: correlationId },
+          { name: "kind", value: notificationType },
+        ],
       });
       if (result.error) {
         sendError = result.error;
+      } else if (result.data?.id) {
+        resendMessageId = result.data.id;
       }
     } catch (err) {
       sendError = err;
@@ -163,6 +237,24 @@ async function send(
       error: errorMessage(sendError),
     });
     return;
+  }
+
+  // Path B (best-effort fallback per Pitfall 17): write the mapping row with
+  // 1 retry. Cost: ~0ms in the happy path; ~150ms when retry fires. Failure
+  // is logged via `correlation_chain_broken` so Sentry can flag chain breaks
+  // for triage — but NEVER blocks the send (the email is already accepted).
+  if (resendMessageId && admin) {
+    try {
+      await insertCorrelationMapping(admin, correlationId, resendMessageId);
+    } catch (err) {
+      // Defense-in-depth: insertCorrelationMapping already swallows all
+      // errors internally, but a future regression that re-throws must still
+      // not crash the send path.
+      console.warn(
+        "[email] correlation_chain_broken (helper threw, non-blocking):",
+        err,
+      );
+    }
   }
 
   // Happy path: Resend accepted the message. Fire-and-forget the update to

@@ -25,21 +25,27 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-# Sentry error tracking (optional, production only)
-SENTRY_DSN = os.getenv("SENTRY_DSN")
-if SENTRY_DSN:
-    try:
-        import sentry_sdk
-        sentry_sdk.init(
-            dsn=SENTRY_DSN,
-            traces_sample_rate=0.1,
-            send_default_pii=False,
-            before_send_transaction=lambda event, hint: event,
-        )
-    except ImportError:
-        logging.getLogger("quantalyze.analytics").warning("SENTRY_DSN set but sentry-sdk not installed")
-
 from routers import analytics, cron, exchange, internal, match, portfolio, simulator, csv
+from routers.debug_key_flow import router as debug_key_flow_router
+
+# Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
+# (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
+# CORSMiddleware below. structlog wraps stdlib logging — coexists with
+# logging.basicConfig() above; both can emit at the same time.
+from services.logging_config import CorrelationMiddleware, configure_logging
+
+configure_logging()
+
+# Phase 16 / OBSERV-04 + OBSERV-05 — initialize sentry-sdk[fastapi] AFTER
+# configure_logging() (so structlog is wired before any sentry import side
+# effects) and BEFORE app = FastAPI() (so the FastAPI/Starlette integrations
+# are registered before any router instantiation). Replaces the previous
+# inline minimal init block — sentry-sdk is now a hard requirement (pinned in
+# requirements.txt), not an optional ImportError fallback. PII redactor
+# mirrors src/lib/admin/pii-scrub.ts FULL surface (FIX 7).
+from sentry_init import init_sentry
+
+init_sentry()
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -164,13 +170,22 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Phase 16 / OBSERV-02 + plan acceptance: CorrelationMiddleware is registered
+# BEFORE CORSMiddleware in source order. In Starlette this means CORS wraps
+# correlation in the runtime middleware stack — CORS handles preflight and
+# error responses outermost, while correlation_id binding still wraps every
+# router/business-logic call (including verify_service_key below). The plan's
+# acceptance criterion explicitly requires this source-line ordering.
+
+app.add_middleware(CorrelationMiddleware)
+
 # CORS
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_methods=["POST", "GET"],
-    allow_headers=["Content-Type", "X-Service-Key"],
+    allow_headers=["Content-Type", "X-Service-Key", "X-Correlation-Id"],
 )
 
 # Service-to-service auth (no default, fail closed)
@@ -208,6 +223,8 @@ app.include_router(portfolio.router)
 app.include_router(simulator.router)
 app.include_router(internal.router)
 app.include_router(csv.router)
+# Phase 16 / OBSERV-07 — admin-gated diagnostic SSE backend (founder-only)
+app.include_router(debug_key_flow_router)
 
 
 @app.get("/health")

@@ -6,13 +6,32 @@ import {
   FactsheetPreview,
   type FactsheetPreviewMetric,
 } from "@/components/strategy/FactsheetPreview";
-import {
-  formatKeyError,
-  type WizardErrorCode,
-} from "@/lib/wizardErrors";
+import { type WizardErrorCode } from "@/lib/wizardErrors";
+import { buildEnvelope } from "@/lib/envelope";
+import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
 import type { MetadataDraft } from "./MetadataStep";
+
+/**
+ * Read the correlation_id from the <meta name="x-correlation-id"> tag the
+ * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
+ * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
+ * wave window when 16-02 has not yet merged into this branch).
+ */
+function readCorrelationId(): string {
+  if (typeof document !== "undefined") {
+    const meta = document.querySelector<HTMLMetaElement>(
+      'meta[name="x-correlation-id"]',
+    );
+    const value = meta?.getAttribute("content");
+    if (value && value.length > 0) return value;
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 /**
  * Step 4 of the wizard. Renders a read-only summary of the draft and
@@ -43,6 +62,8 @@ export function SubmitStep({
 }: SubmitStepProps) {
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
+  // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
+  const [correlationId] = useState<string>(() => readCorrelationId());
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
@@ -96,7 +117,9 @@ export function SubmitStep({
     }
   }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId]);
 
-  const errorCopy = errorCode ? formatKeyError(errorCode) : null;
+  const errorEnvelope = errorCode
+    ? buildEnvelope(errorCode, correlationId)
+    : null;
 
   const summaryMetrics: FactsheetPreviewMetric[] = snapshot.metrics;
 
@@ -168,13 +191,12 @@ export function SubmitStep({
         </dl>
       </div>
 
-      {errorCopy && (
-        <div
-          role="alert"
-          className="mt-4 rounded-md border border-negative/30 bg-negative/5 px-4 py-3"
-        >
-          <p className="text-sm font-semibold text-negative">{errorCopy.title}</p>
-          <p className="mt-1 text-xs text-text-secondary">{errorCopy.cause}</p>
+      {errorEnvelope && (
+        <div className="mt-4">
+          <WizardErrorEnvelope
+            envelope={errorEnvelope}
+            onRetry={() => setErrorCode(null)}
+          />
         </div>
       )}
 

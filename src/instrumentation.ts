@@ -21,6 +21,9 @@ export async function onRequestError(
         routerKind: context.routerKind,
         routePath: context.routePath,
         routeType: context.routeType,
+        // Phase 16 / OBSERV-04 — surface the request-scope correlation_id as
+        // a Sentry TAG (queryable in the UI; `extra` is metadata-only).
+        correlation_id: request.headers["x-correlation-id"] ?? null,
       },
       extra: {
         path: request.path,
