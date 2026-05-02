@@ -168,3 +168,51 @@ export const BridgeResponseSchema = z.object({
 }).passthrough();
 
 export type BridgeResponse = z.infer<typeof BridgeResponseSchema>;
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 15 / CSV-01..CSV-02 — CSV upload + finalize responses
+//
+// Loose `.passthrough()` style (matches the legacy analytics endpoints)
+// because the analytics-service envelope shape will pick up additional
+// metadata fields in Phase 16 / OBSERV-06 (`correlation_id` becomes a
+// real value rather than null). Strict `.strict()` here would force
+// every Phase 16 envelope expansion to bump the schema in lockstep.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Phase 15 / CSV-01..CSV-02 — analytics-service /api/csv/validate response. */
+export const CsvValidateResponseSchema = z.object({
+  ok: z.boolean(),
+  preview: z
+    .object({
+      row_count: z.number(),
+      date_range: z.tuple([z.string(), z.string()]),
+      columns_detected: z.array(z.string()),
+      first_rows: z.array(z.record(z.string(), z.unknown())),
+      last_rows: z.array(z.record(z.string(), z.unknown())),
+    })
+    .nullable(),
+  errors: z.array(
+    z.object({
+      rule: z.string(),
+      row: z.number(),
+      message: z.string(),
+    }),
+  ),
+  correlation_id: z.string().nullable(),
+}).passthrough();
+
+export type CsvValidateResponse = z.infer<typeof CsvValidateResponseSchema>;
+
+/**
+ * Phase 15 / CSV-01 — Next.js /api/strategies/csv-finalize response.
+ *
+ * Returned by the route after a successful `finalize_csv_strategy` RPC
+ * call. The `status` field is bound to the post-finalize value of the
+ * strategy_verifications row (typically `pending_review` / `validated`).
+ */
+export const CsvFinalizeResponseSchema = z.object({
+  strategy_id: z.string(),
+  status: z.string(),
+}).passthrough();
+
+export type CsvFinalizeResponse = z.infer<typeof CsvFinalizeResponseSchema>;

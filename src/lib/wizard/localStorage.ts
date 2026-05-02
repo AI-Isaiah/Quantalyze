@@ -12,10 +12,19 @@ export type WizardStepKey =
   | "connect_key"
   | "sync_preview"
   | "metadata"
-  | "submit";
+  | "submit"
+  | "csv_upload"
+  | "csv_preview"
+  | "csv_submit";
 
 export interface WizardLocalState {
-  /** The server-side strategies row id for the in-progress draft. */
+  /**
+   * API branch (`source === 'api'` or undefined): a real UUID — the
+   * server-side strategies row id for the in-progress draft.
+   * CSV branch (`source === 'csv'`): empty string `""` sentinel — the
+   * strategies row is NOT created until submit-time. Consumers MUST
+   * guard before constructing `/strategies/${strategyId}/...` URLs.
+   */
   strategyId: string;
   /** Client-generated UUID for funnel telemetry correlation. */
   wizardSessionId: string;
@@ -23,6 +32,18 @@ export interface WizardLocalState {
   step: WizardStepKey;
   /** Epoch millis of the last save. Used for the "N hours ago" banner. */
   savedAt: number;
+  /**
+   * Phase 15: discriminator for resume-banner branching. Absent ⇒ 'api'
+   * (back-compat with v1 payloads written before the CSV branch shipped).
+   */
+  source?: "api" | "csv";
+  /**
+   * Phase 15 cross-AI revision 2026-04-30: user-typed strategy name on the
+   * CSV branch — preserved across back-navigation and tab refresh. Absent
+   * on the API branch (the API path uses a different name-source: the
+   * metadata step). Bounded at 80 chars to match the UI input cap.
+   */
+  strategyName?: string;
 }
 
 /** Returns true when running in a browser with localStorage available. */
@@ -75,9 +96,31 @@ export function loadWizardState(): WizardLocalState | null {
       "sync_preview",
       "metadata",
       "submit",
+      "csv_upload",
+      "csv_preview",
+      "csv_submit",
     ];
     if (!validSteps.includes(parsed.step as WizardStepKey)) {
       return null;
+    }
+    // Phase 15: optional `source` discriminator. Absent ⇒ 'api'
+    // (back-compat). Anything else is a malformed payload.
+    if (
+      parsed.source !== undefined &&
+      parsed.source !== "api" &&
+      parsed.source !== "csv"
+    ) {
+      return null;
+    }
+    // Cross-AI revision 2026-04-30: optional `strategyName` must be a
+    // string ≤ 80 chars. Absent on the API branch.
+    if (parsed.strategyName !== undefined) {
+      if (
+        typeof parsed.strategyName !== "string" ||
+        parsed.strategyName.length > 80
+      ) {
+        return null;
+      }
     }
     return parsed as WizardLocalState;
   } catch {

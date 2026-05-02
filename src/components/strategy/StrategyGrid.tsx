@@ -7,6 +7,7 @@ import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { sparklineColor } from "@/lib/sparkline-color";
 import { SyncBadge } from "./SyncBadge";
+import { TrustTierLabel } from "./TrustTierLabel";
 import { HealthScore } from "./HealthScore";
 import { StarToggle } from "./StarToggle";
 import { formatPercent, formatCurrency, metricColor } from "@/lib/utils";
@@ -80,6 +81,14 @@ export function StrategyGrid({
                   ))}
                 </div>
               </div>
+
+              {/* Phase 15 / CSV-03: trust-tier placeholder. csv_uploaded
+                  renders muted text; api_verified / self_reported / null
+                  render nothing — Phase 17 / DESIGN-01 fills those in. */}
+              <TrustTierLabel
+                trustTier={s.trust_tier}
+                className="mb-1"
+              />
 
               {/* Sync freshness */}
               <SyncBadge

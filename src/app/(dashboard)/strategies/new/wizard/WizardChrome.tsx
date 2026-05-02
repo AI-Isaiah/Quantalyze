@@ -10,12 +10,22 @@ import type { WizardStepKey } from "@/lib/wizard/localStorage";
  * toast. All step state lives in WizardClient.
  */
 
-const STEPS: { key: WizardStepKey; label: string; number: string }[] = [
+const DEFAULT_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
   { key: "connect_key", label: "Connect key", number: "01" },
   { key: "sync_preview", label: "Verify data", number: "02" },
   { key: "metadata", label: "Strategy profile", number: "03" },
   { key: "submit", label: "Submit", number: "04" },
 ];
+
+/** Phase 15 / CSV-01..CSV-02 — 3-step CSV branch (locked decision D-03). */
+const CSV_STEPS: { key: WizardStepKey; label: string; number: string }[] = [
+  { key: "csv_upload", label: "Upload CSV", number: "01" },
+  { key: "csv_preview", label: "Preview", number: "02" },
+  { key: "csv_submit", label: "Submit", number: "03" },
+];
+
+/** Re-export of CSV_STEPS for the WizardClient ?source=csv branch. */
+export const WIZARD_STEPS_CSV = CSV_STEPS;
 
 export interface WizardChromeProps {
   currentStep: WizardStepKey;
@@ -29,6 +39,20 @@ export interface WizardChromeProps {
   onRequestCall: () => void;
   /** Optional: tick the "Progress saved" toast. Called after each step save. */
   toastKey?: number;
+  /**
+   * Phase 15: optional steps override. Absent ⇒ DEFAULT_STEPS (4-step API
+   * branch). Pass `WIZARD_STEPS_CSV` to render the 3-step CSV branch
+   * stepper.
+   */
+  steps?: { key: WizardStepKey; label: string; number: string }[];
+  /**
+   * Phase 15 follow-up: branch which static chrome copy renders. The
+   * default subtitle is API-specific ("Paste a read-only API key …") —
+   * pass `"csv"` on the `?source=csv` branch to render CSV-appropriate
+   * copy. Absent ⇒ "api" (back-compat). The H1 is intentionally neutral
+   * across both branches.
+   */
+  source?: "api" | "csv";
   children: React.ReactNode;
 }
 
@@ -39,8 +63,15 @@ export function WizardChrome({
   onDeleteDraft,
   onRequestCall,
   toastKey,
+  steps,
+  source,
   children,
 }: WizardChromeProps) {
+  const activeSteps = steps ?? DEFAULT_STEPS;
+  const totalCount = activeSteps.length;
+  const totalLabel = String(totalCount).padStart(2, "0");
+  const gridColsClass = totalCount === 3 ? "grid-cols-3" : "grid-cols-4";
+  const isCsv = source === "csv";
   const [showToast, setShowToast] = useState(false);
 
   // Defer both state writes into setTimeout callbacks so no setState
@@ -62,7 +93,9 @@ export function WizardChrome({
           Connect Your Strategy
         </h1>
         <p className="mt-2 text-sm text-text-secondary">
-          Paste a read-only API key. We will compute your verified factsheet in the next screen.
+          {isCsv
+            ? "Upload a daily-returns, NAV, or trades CSV. We validate every row before computing your factsheet."
+            : "Paste a read-only API key. We will compute your verified factsheet in the next screen."}
         </p>
       </header>
 
@@ -71,12 +104,12 @@ export function WizardChrome({
         role="navigation"
         aria-label="Wizard progress"
       >
-        <div className="grid grid-cols-4 border-b border-border">
-          {STEPS.map((step) => {
+        <div className={`grid ${gridColsClass} border-b border-border`}>
+          {activeSteps.map((step) => {
             const isActive = step.key === currentStep;
             const isPast =
-              STEPS.findIndex((s) => s.key === step.key) <
-              STEPS.findIndex((s) => s.key === currentStep);
+              activeSteps.findIndex((s) => s.key === step.key) <
+              activeSteps.findIndex((s) => s.key === currentStep);
             return (
               <div
                 key={step.key}
@@ -90,7 +123,7 @@ export function WizardChrome({
                 aria-current={isActive ? "step" : undefined}
               >
                 <p className="font-metric text-[10px] uppercase tracking-wider tabular-nums text-text-muted">
-                  {step.number} / 04
+                  {step.number} / {totalLabel}
                 </p>
                 <p
                   className={`mt-0.5 text-xs font-medium ${

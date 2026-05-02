@@ -39,7 +39,7 @@ if SENTRY_DSN:
     except ImportError:
         logging.getLogger("quantalyze.analytics").warning("SENTRY_DSN set but sentry-sdk not installed")
 
-from routers import analytics, cron, exchange, internal, match, portfolio, simulator
+from routers import analytics, cron, exchange, internal, match, portfolio, simulator, csv
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -207,6 +207,7 @@ app.include_router(match.router)
 app.include_router(portfolio.router)
 app.include_router(simulator.router)
 app.include_router(internal.router)
+app.include_router(csv.router)
 
 
 @app.get("/health")

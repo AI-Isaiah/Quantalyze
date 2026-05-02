@@ -28,7 +28,7 @@
 ### CSV — CSV unblock primitive (Phase 15)
 
 - [ ] **CSV-01**: User can upload daily-returns / NAV / trades CSV via first-class `flow_type='csv'` adapter (replaces PR #22 partner-pilot side-branch as canonical entry path)
-- [ ] **CSV-02**: Uploaded CSV passes `pandera` row-schema validation before downstream metrics computation — max file size 10MB, monotonic dates, NAV non-zero (no division-by-zero), daily return > -100% impossible, daily Sharpe > 10 sentinel suspicious, days-outside-trading-window check, currency = USD or blank
+- [ ] **CSV-02**: Uploaded CSV passes `pandera` row-schema validation before downstream metrics computation — max file size 10MB, monotonic dates, NAV non-zero (no division-by-zero), daily return > -100% impossible, daily Sharpe > 10 sentinel suspicious, currency = USD or blank
 - [ ] **CSV-03**: Strategies onboarded via CSV display `csv_uploaded` trust-tier placeholder on factsheet + marketplace tile (Phase 17 polishes the badge component; CSV-03 ships the data-model wiring + placeholder text)
 
 ### OBSERV — Diagnostic spike + observability (Phase 16)
@@ -153,6 +153,7 @@
 | LLM-generated financial commentary | Liability risk for institutional product; all commentary deterministic |
 | Real-time WebSocket data | Year 2 |
 | White-label partner portal | Year 3 |
+| `_check_trading_window` rule on CSV-02 | Crypto markets trade 24/7 — flagging weekend dates would fail every real customer CSV. Dropped 2026-04-30 during Phase 15 cross-AI revision pass. |
 
 ---
 
@@ -228,4 +229,4 @@ Phase mapping (v1.0 phase numbers continue from v0.17 — Phase 14b → Phase 15
 ---
 
 *Requirements defined: 2026-04-30*
-*Last updated: 2026-04-30 at v1.0.0 milestone start*
+*Last updated: 2026-04-30 — Phase 15 cross-AI revision pass: dropped `_check_trading_window` rule from CSV-02 (crypto trades 24/7).*
