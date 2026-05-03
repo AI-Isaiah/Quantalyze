@@ -39,6 +39,50 @@ historical record but its operator decision is overridden here for v1.0.0.
 
 ---
 
+## Phase 17 review-fix follow-ups (deferred from /ship pre-landing review, 2026-05-03)
+
+The /ship Step 9.1 specialists flagged 21 findings on the Phase 17 diff
+(1 CRITICAL design + 20 INFO across testing/maintainability). The CRITICAL
+(WCAG AA contrast in ErrorEnvelope debug_context) was fixed inline before
+the v0.20.0.0 cut. The architectural cleanups (operation prop drop,
+TrustTier type move, PII scrub consolidation, `{sizeMb}` const extraction)
+were also fixed inline. Eight new tests were generated for the testing
+specialist's gaps. The remaining items are deferred here.
+
+**P1 — formatCsvRuleCauseMulti — keep, re-evaluate after Phase 19**
+The helper is exported from `src/lib/wizardErrors.ts` and tested, but its
+only intended consumer (`CsvValidationEnvelope`) inlines its own multi-rule
+sentence with humanized labels because the helper signature takes raw rule
+keys. Maintainability specialist flagged it as dead surface. Decision (per
+/ship 2026-05-03): keep the helper through Phase 19 in case a future
+consumer arrives that DOES want raw-key joining. If no consumer appears
+by Phase 20+, delete the helper + its test.
+
+**P1 — `e2e/admin-csv-status-axe.spec.ts` admin-user seed**
+The spec is gated on `seedTestAllocator()` which mints a regular allocator.
+`/admin/csv-status` redirects non-admins to `/discovery/crypto-sma`, so
+even when the seed env vars are wired the spec test.skips with a clear
+message. The URL assertion (added per ME-02) prevents a false-green scan.
+Add `seedTestAdmin()` (parallel to `seedTestAllocator()`) so DESIGN-05's
+"axe-core CI scans /admin/csv-status" promise is fully enforced.
+
+**P2 — testing specialist gaps not yet covered**
+Several test gaps from the /ship review are intentionally not generated
+because the existing suite is already rich. If a regression appears, prefer
+adding the targeted assertion over expanding scope:
+- DOM-order tests in `ErrorEnvelope.test.tsx` use unscoped
+  `document.querySelector`; refactor to `within(getByRole('alert'))`
+  queries when next touched.
+- `buildDiagBlock` is exported but tested only through the React click
+  path. Direct unit tests would be cheaper than render + clipboard mocking.
+- `formatCsvRuleCauseMulti` empty-`byRule` edge case (`{}` input) is
+  unasserted; only the helper's eventual user can decide whether the
+  current "Across 0 rule categories" output is desired.
+- `buildEnvelope` recoverable-true path for `KEY_HAS_TRADING_PERMS` (the
+  `try_another_key` action) is unpinned in tests.
+
+---
+
 ## Phase 16 review-fix follow-ups (deferred from /ship pre-landing review, 2026-05-02)
 
 The /ship Step 9.1 specialists + red-team flagged 16 critical findings on
