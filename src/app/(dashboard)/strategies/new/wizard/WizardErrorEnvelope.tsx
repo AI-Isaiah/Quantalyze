@@ -4,5 +4,4 @@
 // Phase 19 may delete this file once those steps are rewritten by the
 // unified backbone.
 export { ErrorEnvelope as WizardErrorEnvelope } from "@/components/error/ErrorEnvelope";
-export type { ErrorEnvelopeProps as WizardErrorEnvelopeProps } from "@/components/error/ErrorEnvelope";
 export type { ErrorEnvelope } from "@/lib/envelope";

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { scrubPii } from "@/lib/admin/pii-scrub";
+import { scrubFreeformString } from "@/lib/admin/pii-scrub";
 import type { ErrorEnvelope as ErrorEnvelopeType } from "@/lib/envelope";
 
 // Phase 17 / DESIGN-02 — canonical surface-agnostic error envelope renderer.
@@ -39,59 +39,6 @@ export interface ErrorEnvelopeProps {
   envelope: ErrorEnvelopeType;
   onRetry?: () => void;
   onCancel?: () => void;
-  /**
-   * Short label for the operation being retried, e.g. `"validating key"`,
-   * `"sync"`, `"submit"`. Used to build `aria-label="Retry {operation}"` per
-   * UI-SPEC §8.4 (the screen-reader announcement contract). The visible
-   * Retry button text remains the single word `Retry` regardless.
-   *
-   * When `operation` is omitted (existing wizard step consumers don't pass
-   * it yet) the aria-label falls back to `"Retry"` — i.e. previous
-   * behavior, no churn at the call sites. Once Phase 18/19 rewrites the
-   * step components they should pass an operation string per UI-SPEC §13.
-   */
-  operation?: string;
-}
-
-// Sensitive substring patterns to redact in freeform debug_context lines BEFORE
-// clipboard write. The existing scrubPii() utility from src/lib/admin/pii-scrub
-// is object-key-name based + JWT-shape based for strings; freeform strings of
-// the form `apikey: VALUE` slip through. The following key-prefix patterns
-// match UI-SPEC §16.2's contract: "Masks values whose key matches
-// /^.*(key|secret|pass|token|credential|cookie|session|auth|bearer)$/i".
-//
-// The regex is anchored on a key-shaped substring (one of the listed words)
-// followed by `=`, `:`, `=>`, or whitespace, then captures the value up to
-// the next whitespace/quote/end-of-string.
-const SENSITIVE_KEY_VALUE = new RegExp(
-  // word boundary, key-shaped name, optional non-greedy suffix until separator
-  "\\b((?:api[-_]?key|api[-_]?secret|x-mbx-apikey|ok-access-sign|secret|passphrase|password|token|credential|cookie|session|authorization|bearer))\\s*[:=]+\\s*['\"]?([^\\s'\"]+)['\"]?",
-  "gi",
-);
-
-function redactSensitiveSubstrings(value: string): string {
-  return value.replace(SENSITIVE_KEY_VALUE, (_match, keyName) => {
-    return `${keyName}: [REDACTED]`;
-  });
-}
-
-// CR-01 fix: catch JWT-shaped tokens embedded inside larger strings (e.g.
-// `Authorization: Bearer eyJ...`). The `scrubPii` JWT detector is anchored
-// (^...$) and only matches whole-string JWTs, so a header-formatted line
-// like `Authorization: Bearer <JWT>` slips through pass 1 (which only
-// redacts `Bearer` as the value capture, stopping at the space before the
-// token) AND pass 2 (which doesn't fire because the input starts with
-// `Authorization:` so the ^anchor fails).
-//
-// This third pass scans for JWT-shaped substrings ANYWHERE in the line —
-// three base64url segments of ≥10 chars each, separated by dots — and
-// replaces each match with `[REDACTED_JWT]`. The 10-char minimum keeps the
-// false-positive rate low (e.g., `a.b.c` is not a JWT shape).
-const JWT_WORD =
-  /[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
-
-function redactJwtSubstrings(value: string): string {
-  return value.replace(JWT_WORD, "[REDACTED_JWT]");
 }
 
 export function buildDiagBlock(envelope: ErrorEnvelopeType): string {
@@ -101,19 +48,11 @@ export function buildDiagBlock(envelope: ErrorEnvelopeType): string {
     envelope.correlation_id,
     new Date().toISOString(),
     typeof navigator !== "undefined" ? navigator.userAgent : "unknown-ua",
-    ...envelope.debug_context.map((step) => {
-      // Three-pass scrub:
-      //   1. redactSensitiveSubstrings — key:value patterns (apikey/secret/etc.)
-      //   2. scrubPii — whole-string JWTs (anchored regex) + key-based object scrub
-      //   3. redactJwtSubstrings — JWT-shaped tokens embedded anywhere in
-      //      the (possibly partially-redacted) string. Catches the
-      //      `Authorization: Bearer <JWT>` case the first two passes miss.
-      const subRedacted = redactSensitiveSubstrings(step);
-      const scrubbed = scrubPii(subRedacted);
-      const asString =
-        typeof scrubbed === "string" ? scrubbed : String(scrubbed ?? "");
-      return ` - ${redactJwtSubstrings(asString)}`;
-    }),
+    // Three-pass scrub via the canonical helper at
+    // `@/lib/admin/pii-scrub` (CR-01 — Authorization: Bearer JWT regression).
+    // Adding a new denylist key requires editing one file (pii-scrub.ts),
+    // not two.
+    ...envelope.debug_context.map((step) => ` - ${scrubFreeformString(step)}`),
     "--- pii-scrubbed ---",
   ];
   return lines.join("\n");
@@ -123,7 +62,6 @@ export function ErrorEnvelope({
   envelope,
   onRetry,
   onCancel,
-  operation,
 }: ErrorEnvelopeProps) {
   const [copied, setCopied] = useState(false);
 
@@ -152,7 +90,13 @@ export function ErrorEnvelope({
         {envelope.human_message}
       </p>
       {envelope.debug_context.length > 0 && (
-        <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-text-muted">
+        // Phase 17 / DESIGN-05: text-text-secondary (#4A5568) on bg-negative/5
+        // (~#FDF4F4) yields ~7.81:1, comfortably above WCAG 2.0 AA (≥4.5:1).
+        // Earlier Phase 17 plans rendered text-text-muted (#64748B) here, which
+        // resolved to ~4.45:1 and was tracked as a deferred AA gap. Phase 17 is
+        // the a11y-minimums phase, so the gap is closed in-phase rather than
+        // deferred.
+        <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-text-secondary">
           {envelope.debug_context.map((step, i) => (
             <li key={i}>{step}</li>
           ))}
@@ -166,7 +110,7 @@ export function ErrorEnvelope({
               type="button"
               size="sm"
               onClick={onRetry}
-              aria-label={operation ? `Retry ${operation}` : "Retry"}
+              aria-label="Retry"
             >
               Retry
             </Button>

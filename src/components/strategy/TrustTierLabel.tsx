@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { TRUST_TIER_TOKENS } from "@/lib/design-tokens/trust-tier";
+import { TRUST_TIER_TOKENS, type TrustTier } from "@/lib/design-tokens/trust-tier";
 
 /**
  * Single source-of-truth string for the CSV-uploaded trust-tier label.
@@ -14,14 +14,11 @@ import { TRUST_TIER_TOKENS } from "@/lib/design-tokens/trust-tier";
 export const CSV_UPLOADED_LABEL = TRUST_TIER_TOKENS.csv_uploaded.label;
 
 /**
- * Trust-tier variant union. The token file
- * (src/lib/design-tokens/trust-tier.ts) re-exports this type from this
- * canonical location to avoid duplicate-source drift; existing imports
- * from `@/components/strategy/TrustTierLabel` continue to work. The
- * token file uses `import type {}` only, which is erased at compile
- * time, so there is no runtime circular import.
+ * Re-export the canonical TrustTier union from the design-tokens module
+ * for back-compat with existing imports. New code should import from
+ * `@/lib/design-tokens/trust-tier` directly.
  */
-export type TrustTier = "api_verified" | "csv_uploaded" | "self_reported";
+export type { TrustTier };
 
 interface TrustTierLabelProps {
   trustTier: TrustTier | null | undefined;

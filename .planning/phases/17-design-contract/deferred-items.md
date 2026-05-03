@@ -41,54 +41,24 @@ if (parsed.code !== undefined && parsed.human_message !== undefined) {
 
 ---
 
-## A11y gap: `text-text-muted` (#64748B) on `bg-negative/5` in `ErrorEnvelope`
+## A11y gap: `text-text-muted` (#64748B) on `bg-negative/5` in `ErrorEnvelope` — **RESOLVED in /ship 2026-05-03**
 
-Surfaced 2026-05-01 by Plan 17-06's new `tests/a11y/wizard-contrast.test.ts`
-during Task 1 verification.
+**Resolution:** During /ship of Phase 17 the design specialist correctly
+flagged that deferring an AA fail in the a11y-minimums phase contradicts
+the phase contract. Fix applied inline:
 
-`src/components/error/ErrorEnvelope.tsx:119` renders the `debug_context` `<ul>`
-with class `text-text-muted` (`#64748B`) on the `bg-negative/5` shell. The
-resolved background colour (computed from `--color-negative: #DC2626` at
-5% alpha over white) is approximately `#FDF4F4`. The hand-rolled WCAG
-sRGB-luminance ratio yields **~4.45:1**, below the 4.5:1 WCAG 2.0 AA
-threshold for normal-weight text.
+- `src/components/error/ErrorEnvelope.tsx` debug_context `<ul>` swapped from
+  `text-text-muted` (#64748B → ~4.45:1) to `text-text-secondary`
+  (#4A5568 → ~7.81:1 on resolved `bg-negative/5`). One-class change, no
+  consumer churn.
+- `tests/a11y/wizard-contrast.test.ts` threshold restored from 4.4 to 4.5
+  on the debug_context pair. Suite now uniformly enforces WCAG 2.0 AA
+  (≥4.5:1) across all 16 fg/bg pairs.
+- UI-SPEC §17 row 8 was originally correct in naming `text-text-secondary`
+  as the debug_context fg colour; the source code is now aligned.
+- Row 9 (correlation_id) already rendered through `text-text-secondary`
+  via the `<details>` inheritance — no change needed.
 
-**Discrepancy with UI-SPEC §17:**
-- Row 8 lists `#4A5568` (text-text-secondary) as the `debug_context` fg
-  with a computed 7.81:1. The ErrorEnvelope.tsx live DOM uses
-  `text-text-muted` (#64748B), not `text-text-secondary`. Row 8 names the
-  wrong fg colour.
-- Row 9 lists `#64748B` (text-text-muted) for `correlation_id` with a
-  computed 4.71:1. The ErrorEnvelope.tsx live DOM renders the
-  `correlation_id` `<code>` inside `<details className="...
-  text-text-secondary">`, i.e. `#4A5568`. Row 9 also names the wrong fg
-  colour. Row 9's stated 4.71:1 is independently inaccurate against
-  `#64748B` on `#FFF5F5` (true ratio 4.45:1).
-
-The Plan 17-06 contrast test pins the **actual rendered slots** (the
-ErrorEnvelope DOM is the canonical source-of-truth). Row 8's threshold
-is set to ≥4.4 (not the WCAG 4.5) so the regression seam survives — the
-test fails loudly if the bg lightens any further or if the muted token
-darkens insufficiently. UI-SPEC §17's prose stays authoritative for the
-intended target ratio, but the test pins reality.
-
-**Status:** Genuine a11y AA fail in the live ErrorEnvelope DOM, NOT
-introduced by Plan 17-06. The component shipped with this contrast in
-Plan 17-04 (Wave 1).
-
-**Disposition:** Out of Plan 17-06 scope (this plan ships test
-scaffolding only; no source edits). The fix belongs in either:
-- Plan 17-04 follow-up: change `text-text-muted` → `text-text-secondary`
-  on the ErrorEnvelope `<ul>` (single-class change; passes 7.81:1).
-- Or DESIGN system follow-up: deepen `--color-text-muted` from `#64748B`
-  to a darker hue (raises every `text-text-muted` rendered on a tinted
-  bg above WCAG AA).
-
-**Suggested handler:** Phase 18 root-cause fix (if ErrorEnvelope is
-touched there) or a dedicated a11y polish plan.
-
-**UI-SPEC §17 correction follow-up:** Rows 8 and 9 should be edited to
-reference the correct fg colours (debug_context = `#64748B`,
-correlation_id = `#4A5568`) and recompute their ratios. This is a doc
-edit, not a code edit. Plan 17-06's test file inline-comments the
-correction so any future spec rewrite has the source-of-truth pointer.
+**Original disposition** (kept for history): Out of Plan 17-06 scope
+(test-scaffolding plan, no source edits). Was suggested as Phase 18
+follow-up. /ship caught the contradiction at the gate.

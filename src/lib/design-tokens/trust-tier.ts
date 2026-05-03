@@ -16,12 +16,15 @@
  * same wave (see Plan 17-02 of Phase 17).
  */
 
-// Re-export the existing TrustTier union from the legacy v0 location so
-// future consumers import from the canonical token file. The type itself
-// stays declared at TrustTierLabel.tsx:11 to avoid duplicate-source drift.
-export type { TrustTier } from "@/components/strategy/TrustTierLabel";
-
-import type { TrustTier } from "@/components/strategy/TrustTierLabel";
+/**
+ * Trust-tier variant union — canonical declaration. The legacy
+ * `@/components/strategy/TrustTierLabel` location re-exports this type
+ * for back-compat with existing imports (Phase 15 callers, future
+ * Phase 18 consumers). Keep the data and the type co-located in the
+ * design-tokens module so any future variant addition is a single-file
+ * change.
+ */
+export type TrustTier = "api_verified" | "csv_uploaded" | "self_reported";
 
 /**
  * Per-variant slot palette. `fill` is the inner background (or `#FFFFFF`

@@ -57,6 +57,15 @@ export type WizardErrorAction =
   | "request_call"
   | "leave_and_return";
 
+/**
+ * Interpolation token for the CSV_FILE_TOO_LARGE title. Held in a const so
+ * the placeholder string in the title literal and the call-site replace
+ * cannot drift apart. Adding a second interpolation slot in the future
+ * should follow the same const-then-replace pattern (or graduate to a
+ * generic `interpolate(template, vars)` helper).
+ */
+const SIZE_MB_PLACEHOLDER = "{sizeMb}";
+
 export interface WizardErrorCopy {
   title: string;
   /** Single-sentence summary of WHY the error happened. */
@@ -309,7 +318,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
 
   CSV_FILE_TOO_LARGE: {
     title:
-      "Maximum file size is 10 MB. Your file is {sizeMb} MB. Trim it or split it before retrying.",
+      `Maximum file size is 10 MB. Your file is ${SIZE_MB_PLACEHOLDER} MB. Trim it or split it before retrying.`,
     cause: "We cap CSV uploads at 10 MB to keep validation fast.",
     fix: [
       "Trim or split your file so it stays under 10 MB.",
@@ -560,7 +569,7 @@ export function formatKeyError(
   if (code === "CSV_FILE_TOO_LARGE" && context?.sizeMb !== undefined) {
     return {
       ...base,
-      title: base.title.replace("{sizeMb}", context.sizeMb),
+      title: base.title.replace(SIZE_MB_PLACEHOLDER, context.sizeMb),
     };
   }
 

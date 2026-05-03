@@ -61,6 +61,15 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
 
     await page.goto("/strategies/new/wizard");
 
+    // ME-02 false-green guard (mirrors admin-csv-status-axe.spec.ts:66).
+    // The data-testid wait alone passes if some other authenticated route
+    // also happens to render the same testid. Pinning the URL ensures the
+    // axe scan runs on the Phase 17 wizard surface, not on whatever the
+    // login redirect lands on.
+    await expect(page).toHaveURL(/\/strategies\/new\/wizard(?!\/csv)/, {
+      timeout: 10_000,
+    });
+
     // Wait for the broker selector grid to render. The 3 active cards each
     // carry `data-testid="wizard-exchange-${id}"` per Phase 15 §6 row 8 (see
     // src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx:235).
@@ -83,6 +92,11 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     }
 
     await page.goto("/strategies/new/wizard?source=csv");
+
+    // ME-02 false-green guard (mirrors admin-csv-status-axe.spec.ts:66).
+    await expect(page).toHaveURL(/\/strategies\/new\/wizard\?source=csv/, {
+      timeout: 10_000,
+    });
 
     // Wait for the CSV upload step to render. The dropzone carries
     // `data-testid="wizard-csv-dropzone"` per Phase 15 §6 row 9 (see

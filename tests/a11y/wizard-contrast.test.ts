@@ -111,26 +111,18 @@ const PAIRS: ReadonlyArray<readonly [string, string, string, number]> = [
   ["envelope human_message #1A1A2E on white", "#1A1A2E", SURFACE, 4.5],
   // ErrorEnvelope body slot — DESIGN-02.
   //
-  // NOTE: UI-SPEC §17 row 8 lists #4A5568 (text-text-secondary) as the
-  // debug_context fg, but the live `src/components/error/ErrorEnvelope.tsx`
-  // line 119 actually renders `<ul ... className="... text-text-muted">`,
-  // i.e. #64748B. The test pins the **actual rendered slot** so any future
-  // ErrorEnvelope edit that swaps the class (or recolors --color-text-muted)
-  // is caught.
-  //
-  // TRACKED-DEBT: #64748B on the resolved bg-negative/5 surface (≈ #FDF4F4
-  // computed from --color-negative #DC2626 at 5% alpha over white) lands at
-  // ~4.45:1 — below the 4.5:1 WCAG AA threshold. Threshold pinned to 4.4
-  // here so the regression seam is preserved (any further darkening of the
-  // bg or lightening of the fg fails this test). UI-SPEC §17 row 8's stated
-  // 7.81:1 was computed against the wrong fg colour and is being left to
-  // a follow-up correction; the genuine a11y gap is logged in
-  // .planning/phases/17-design-contract/deferred-items.md.
+  // The live `src/components/error/ErrorEnvelope.tsx` renders the
+  // debug_context `<ul>` with `text-text-secondary` (#4A5568), matching
+  // UI-SPEC §17 row 8. Computed contrast against the resolved
+  // bg-negative/5 surface (≈ #FDF4F4 from --color-negative #DC2626 at 5%
+  // alpha over white) is ~7.81:1, comfortably above WCAG 2.0 AA (4.5:1).
+  // Threshold uses the Phase 17 contract minimum (4.5) — same as every
+  // other text pair in this suite.
   [
-    "envelope debug_context #64748B (text-text-muted) on bg-negative/5",
-    "#64748B",
+    "envelope debug_context #4A5568 (text-text-secondary) on bg-negative/5",
+    "#4A5568",
     NEGATIVE_BG_5,
-    4.4,
+    4.5,
   ],
   // ErrorEnvelope muted slot — DESIGN-02.
   //

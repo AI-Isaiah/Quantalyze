@@ -89,27 +89,11 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(details!.hasAttribute("open")).toBe(false);
   });
 
-  it("Retry button has aria-label='Retry' when no operation prop is passed (default fallback)", () => {
+  it("Retry button has aria-label='Retry' (UI-SPEC §8.4)", () => {
     render(<ErrorEnvelope envelope={makeEnvelope()} onRetry={() => {}} />);
     expect(screen.getByLabelText("Retry")).toBeInTheDocument();
-  });
-
-  // HI-01: aria-label contract is `Retry {operation}` per UI-SPEC §8.4.
-  // When the surface specifies an operation string, the aria-label MUST
-  // include it so screen-reader users tabbing through multiple error
-  // regions can distinguish which retry-button retries which operation.
-  // Visible button text remains the single word `Retry`.
-  it("Retry button has aria-label='Retry {operation}' when operation is provided (UI-SPEC §8.4)", () => {
-    render(
-      <ErrorEnvelope
-        envelope={makeEnvelope()}
-        onRetry={() => {}}
-        operation="validating key"
-      />,
-    );
-    expect(screen.getByLabelText("Retry validating key")).toBeInTheDocument();
-    // Visible label remains the bare word "Retry"
-    expect(screen.getByRole("button", { name: "Retry validating key" }))
+    // Visible label is the bare word "Retry".
+    expect(screen.getByRole("button", { name: "Retry" }))
       .toHaveTextContent(/^Retry$/);
   });
 
@@ -227,6 +211,11 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     const written = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>)
       .mock.calls[0][0] as string;
     expect(written).not.toContain(jwt);
+    // Pin the replacement marker so a future regression that strips the line
+    // entirely (or replaces the JWT with an empty string) fails loudly. The
+    // third-pass scrubber (`scrubFreeformString` / `JWT_SUBSTRING`) emits
+    // `[REDACTED_JWT]` exactly.
+    expect(written).toContain("[REDACTED_JWT]");
   });
 
   it("renders correlation_id inside the diagnostics accordion", () => {
@@ -255,5 +244,74 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     await waitFor(() => {
       expect(screen.getByText("Copied to clipboard")).toBeInTheDocument();
     });
+  });
+
+  // Negative path: writeText rejects (e.g. clipboard permission denied).
+  // Button must NOT show "Copied" and the ARIA-live status must NOT
+  // announce "Copied to clipboard". Surfaces a regression where a
+  // future caller forgets to await + catches the rejection.
+  it("does NOT announce 'Copied' when navigator.clipboard.writeText rejects", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<ErrorEnvelope envelope={makeEnvelope()} />);
+    fireEvent.click(screen.getByText("Copy diagnostics"));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledTimes(1);
+    });
+    // Allow the rejected promise + microtask flush so any state update would settle.
+    await Promise.resolve();
+    expect(screen.getByText("Copy diagnostics")).toBeInTheDocument();
+    expect(screen.queryByText("Copied")).toBeNull();
+    expect(screen.queryByText("Copied to clipboard")).toBeNull();
+  });
+
+  // Pin the auto-reset behavior so a regression that drops the setTimeout
+  // (or flips its sign) fails. Without this assertion, the suite checks
+  // that the badge appears after copy but never that it disappears.
+  //
+  // Real timers + waitFor with an extended ceiling. Fake timers don't mix
+  // cleanly with the real Promise returned by `navigator.clipboard.writeText`
+  // here — switching to fake timers after the resolved click leaves the
+  // already-queued setTimeout in real-time land. Real timers add ~2s to
+  // the suite, which is acceptable for one regression seam.
+  it("clears the 'Copied' state ~2s after a successful copy", async () => {
+    render(<ErrorEnvelope envelope={makeEnvelope()} />);
+    fireEvent.click(screen.getByText("Copy diagnostics"));
+    await waitFor(() => {
+      expect(screen.getByText("Copied")).toBeInTheDocument();
+    });
+    await waitFor(
+      () => {
+        expect(screen.getByText("Copy diagnostics")).toBeInTheDocument();
+      },
+      { timeout: 2_500 },
+    );
+    expect(screen.queryByText("Copied")).toBeNull();
+    expect(screen.queryByText("Copied to clipboard")).toBeNull();
+  });
+
+  // Empty debug_context → guard clause at line 154 in the component must
+  // suppress the <ul>. Without the guard, the surface renders an empty
+  // bullet list which is a screen-reader noise source.
+  it("does NOT render a body <ul> when debug_context is empty", () => {
+    render(<ErrorEnvelope envelope={makeEnvelope({ debug_context: [] })} />);
+    const alert = screen.getByRole("alert");
+    expect(alert.querySelector("ul")).toBeNull();
+  });
+
+  // Both Retry and Cancel render simultaneously when recoverable=true and
+  // both handlers are passed. Locks the showRetry/showCancel guards in
+  // place — flipping either to use the wrong handler reference would
+  // cause exactly one of these assertions to fail.
+  it("renders BOTH Retry and Cancel when recoverable=true and both handlers are passed", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope()}
+        onRetry={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText("Retry")).toBeInTheDocument();
+    expect(screen.getByLabelText("Cancel and return")).toBeInTheDocument();
   });
 });
