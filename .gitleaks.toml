@@ -28,6 +28,11 @@ description = "Known test fixtures and placeholder env samples"
 #   contains a canonical JWT fixture
 #   (eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMe...) used to
 #   verify the scrubber redacts JWT-shaped strings. Not a real token.
+# - src/components/error/ErrorEnvelope.test.tsx: Phase 17 component test
+#   exercising the same PII scrubber from the ErrorEnvelope copy-diagnostics
+#   path. Reuses the canonical jwt.io tutorial JWT fixture to assert
+#   redaction (plain JWT and Authorization: Bearer <jwt>, CR-01 regression).
+#   Not a real token.
 # - package-lock.json: integrity hashes trip gitleaks generic
 #   high-entropy detection; this is well-known noise to ignore.
 # - .planning/: gstack planning artifacts (plan markdowns, summaries,
@@ -48,6 +53,7 @@ description = "Known test fixtures and placeholder env samples"
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
+  '''(^|/)src/components/error/ErrorEnvelope\.test\.tsx$''',
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)package-lock\.json$''',
   '''(^|/)\.planning/''',

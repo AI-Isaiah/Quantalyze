@@ -41,6 +41,24 @@ const DENYLIST_PREFIX = ["sb-ec-"];
 // check — just pattern recognition for the shape we know is bearer-ish.
 const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
+// JWT-shaped substring detector for freeform strings. The 10-char minimum
+// per segment keeps the false-positive rate low (e.g., `a.b.c` is not a
+// JWT shape). Used by `scrubFreeformString` to catch JWTs embedded inside
+// larger strings (e.g. `Authorization: Bearer eyJ...`) where the anchored
+// `JWT_SHAPE` regex above would not match.
+const JWT_SUBSTRING =
+  /[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
+
+// Sensitive `key: value` / `key=value` substring detector. Anchored on a
+// key-shaped substring (one of the listed words) followed by `=`, `:`,
+// `=>`, or whitespace, then captures the value up to the next
+// whitespace/quote/end-of-string. Mirrors the DENYLIST_EXACT contract:
+// any future denylist key SHOULD be reflected here too.
+const SENSITIVE_KEY_VALUE = new RegExp(
+  "\\b((?:api[-_]?key|api[-_]?secret|x-mbx-apikey|ok-access-sign|secret|passphrase|password|token|credential|cookie|session|authorization|bearer))\\s*[:=]+\\s*['\"]?([^\\s'\"]+)['\"]?",
+  "gi",
+);
+
 const REDACTED = "[REDACTED]";
 const REDACTED_JWT = "[REDACTED_JWT]";
 
@@ -100,4 +118,44 @@ export function truncateAccountId(id: string): string {
   if (typeof id !== "string") return id;
   if (id.length < 8) return id;
   return `***${id.slice(-4)}`;
+}
+
+/**
+ * Three-pass redaction for freeform strings (e.g. wizard `debug_context`
+ * lines copied to clipboard via `<ErrorEnvelope>`). Use this for any
+ * user-visible exfiltration surface where the value is a free-form string
+ * that may contain `key: value` shapes, whole-string JWTs, or JWTs
+ * embedded in larger lines (`Authorization: Bearer <JWT>`).
+ *
+ * Pass 1 — `SENSITIVE_KEY_VALUE`: redacts `key: value` / `key=value`
+ *          shapes for the denylist of key-shaped names (apikey, secret,
+ *          passphrase, token, authorization, bearer, etc.). Replaces the
+ *          value with `[REDACTED]`, preserves the key for forensic context.
+ * Pass 2 — `scrubPii` (string path): catches whole-string JWTs (anchored
+ *          regex). The object-key-based denylist is irrelevant here since
+ *          the input is a string, not a record.
+ * Pass 3 — `JWT_SUBSTRING`: catches JWT-shaped substrings embedded
+ *          ANYWHERE in the line. Loads-bearing for `Authorization: Bearer
+ *          <JWT>` style payloads where Pass 1 captures only `Bearer` (the
+ *          key-shaped word) and Pass 2's anchored match fails.
+ *
+ * Together the three passes give the same coverage as the original
+ * inline implementation in `ErrorEnvelope.tsx` (Phase 17 / DESIGN-02 /
+ * CR-01) but lives in the canonical PII module so future denylist
+ * additions need only one edit.
+ */
+export function scrubFreeformString(value: string): string {
+  // Pass 1: key:value substring redaction.
+  const pass1 = value.replace(SENSITIVE_KEY_VALUE, (_match, keyName) => {
+    return `${keyName}: [REDACTED]`;
+  });
+  // Pass 2: scrubPii's whole-string JWT detector. scrubPii returns the
+  // input unchanged for non-JWT strings, so this is a no-op when the
+  // string isn't an anchored JWT. Coerce defensively in case a future
+  // scrubPii change widens the return type.
+  const pass2 = scrubPii(pass1);
+  const asString =
+    typeof pass2 === "string" ? pass2 : String(pass2 ?? "");
+  // Pass 3: substring JWT redaction (catches embedded JWTs).
+  return asString.replace(JWT_SUBSTRING, REDACTED_JWT);
 }

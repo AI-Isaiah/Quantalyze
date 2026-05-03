@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scrubPii, truncateAccountId } from "./pii-scrub";
+import { scrubPii, scrubFreeformString, truncateAccountId } from "./pii-scrub";
 
 /**
  * 20 known-bad samples that MUST be redacted. Mix of direct key hits,
@@ -153,6 +153,71 @@ describe("scrubPii — allowlist samples", () => {
   it("preserves null and undefined", () => {
     expect(scrubPii(null)).toBeNull();
     expect(scrubPii(undefined)).toBeUndefined();
+  });
+});
+
+describe("scrubFreeformString", () => {
+  // Multi-key shape coverage: every key-shape the SENSITIVE_KEY_VALUE
+  // regex names must redact its value. Previously only `apikey:` was
+  // exercised by ErrorEnvelope.test.tsx — testing specialist flagged the
+  // asymmetry.
+  const SECRET = "SECRET_VALUE_ABC123";
+  // The regex requires `key[:=]value` shape — `bearer X` (whitespace only)
+  // is intentionally not in this list because raw `Bearer <token>` lines
+  // are caught via the outer `authorization:` prefix or the JWT substring
+  // scrubber, not via a `bearer:` key match.
+  const KEY_SHAPES: Array<[label: string, line: string]> = [
+    ["apikey", `apikey: ${SECRET}`],
+    ["api-key dash", `api-key=${SECRET}`],
+    ["api_key snake", `api_key:${SECRET}`],
+    ["api_secret", `api_secret: ${SECRET}`],
+    ["x-mbx-apikey Binance", `x-mbx-apikey: ${SECRET}`],
+    ["ok-access-sign OKX", `ok-access-sign:${SECRET}`],
+    ["secret", `secret=${SECRET}`],
+    ["passphrase", `passphrase: ${SECRET}`],
+    ["password", `password=${SECRET}`],
+    ["token", `token: ${SECRET}`],
+    ["credential", `credential=${SECRET}`],
+    ["cookie", `cookie: ${SECRET}`],
+    ["session", `session: ${SECRET}`],
+    ["authorization", `authorization: ${SECRET}`],
+    ["bearer with separator", `bearer: ${SECRET}`],
+  ];
+
+  it.each(KEY_SHAPES)(
+    "redacts the value when the key shape is %s",
+    (_label, line) => {
+      const out = scrubFreeformString(line);
+      expect(out).not.toContain(SECRET);
+      expect(out).toContain("[REDACTED]");
+    },
+  );
+
+  it("redacts an embedded JWT inside an Authorization: Bearer line", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const out = scrubFreeformString(`Authorization: Bearer ${jwt}`);
+    expect(out).not.toContain(jwt);
+    expect(out).toContain("[REDACTED_JWT]");
+  });
+
+  it("redacts a whole-string JWT", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const out = scrubFreeformString(jwt);
+    expect(out).toBe("[REDACTED_JWT]");
+  });
+
+  it("preserves benign strings unchanged", () => {
+    expect(scrubFreeformString("Step one.")).toBe("Step one.");
+    expect(scrubFreeformString("Sharpe: 1.2 over 90d")).toBe(
+      "Sharpe: 1.2 over 90d",
+    );
+    expect(scrubFreeformString("")).toBe("");
+  });
+
+  it("does NOT flag two-segment dotted strings as JWTs", () => {
+    expect(scrubFreeformString("foo.bar")).toBe("foo.bar");
   });
 });
 

@@ -1,15 +1,20 @@
 // Phase 16 / OBSERV-06 — bridge from wizardErrors.ts source-of-truth into the
-// RFC-9457-style ErrorEnvelope rendered by WizardErrorEnvelope.tsx. Phase 17
-// declares wizardErrors.ts the canonical human_message source per DESIGN-05.
+// RFC-9457-style ErrorEnvelope rendered by `src/components/error/ErrorEnvelope.tsx`
+// (Phase 17 / DESIGN-02 canonical). The wizard import path
+// `@/...wizard/WizardErrorEnvelope` is now a shim re-export of the canonical
+// component so existing call-sites (ConnectKeyStep / SyncPreviewStep /
+// SubmitStep) keep working. Phase 17 declares wizardErrors.ts the canonical
+// human_message source per DESIGN-05.
 //
 // ISOMORPHIC: this module is pure TypeScript over wizardErrors.ts with no
 // server-side runtime dependencies. It is consumed by client components
-// (WizardErrorEnvelope.tsx + the three wizard step files). Do NOT add the
-// Next.js sentinel import (the one whose literal string is forbidden in this
-// file by acceptance gate) — Next.js will throw "Module not found" at build
-// time and block every wizard render. The literal symbol is intentionally
-// absent from this file (not even in prose) so the strict grep gate stays
-// loud against future regressions. See PLAN.md objective for full rationale.
+// (the canonical ErrorEnvelope + the three wizard step files via the shim).
+// Do NOT add the Next.js sentinel import (the one whose literal string is
+// forbidden in this file by acceptance gate) — Next.js will throw "Module
+// not found" at build time and block every wizard render. The literal
+// symbol is intentionally absent from this file (not even in prose) so the
+// strict grep gate stays loud against future regressions. See PLAN.md
+// objective for full rationale.
 import {
   formatKeyError,
   type WizardErrorCode,

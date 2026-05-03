@@ -3,6 +3,12 @@ import {
   formatKeyError,
   gateFailureToWizardError,
   WIZARD_ERROR_COPY,
+  CSV_RULE_LABELS,
+  CSV_UPLOAD_STEP_HEADINGS,
+  CSV_PREVIEW_STEP_HEADINGS,
+  CSV_SUBMIT_STEP_HEADINGS,
+  formatCsvRuleCauseMulti,
+  formatCsvRuleCauseSingle,
   type WizardErrorCode,
 } from "./wizardErrors";
 
@@ -102,6 +108,177 @@ describe("wizardErrors", () => {
       // Neither should have both.
       expect(first.cause).not.toContain("only 2 filled trade");
       expect(second.cause).not.toContain("only 1 filled trade");
+    });
+  });
+
+  describe("Phase 17 — CSV branch absorption (DESIGN-05)", () => {
+    const CSV_CODES: WizardErrorCode[] = [
+      "CSV_PARSE_FAILED",
+      "CSV_SCHEMA_VIOLATION",
+      "CSV_FILE_TOO_LARGE",
+      "CSV_INVALID_EXTENSION",
+      "CSV_NON_MONOTONIC_DATES",
+      "CSV_NAV_ZERO",
+      "CSV_RETURN_OUT_OF_RANGE",
+      "CSV_SHARPE_SUSPICIOUS",
+      "CSV_CURRENCY_INVALID",
+      "CSV_QTY_PRICE_INVALID",
+      "CSV_STRATEGY_NAME_REQUIRED",
+      "CSV_STRATEGY_NAME_TOO_LONG",
+      "CSV_VALIDATION_FAILED",
+      "CSV_UPSTREAM_FAIL",
+      "CSV_NETWORK_TIMEOUT",
+      "CSV_SUBMIT_FAILED",
+      "CSV_SUBMIT_NO_STRATEGY_ID",
+    ];
+
+    it("registers all 17 CSV_* codes in WIZARD_ERROR_COPY with full WizardErrorCopy shape", () => {
+      for (const code of CSV_CODES) {
+        const copy = WIZARD_ERROR_COPY[code];
+        expect(copy, `WIZARD_ERROR_COPY missing entry for ${code}`).toBeTruthy();
+        expect(copy.title.length).toBeGreaterThan(4);
+        expect(copy.cause.length).toBeGreaterThan(4);
+        expect(copy.fix.length).toBeGreaterThan(0);
+        expect(copy.docsHref).toMatch(/^\/security/);
+        expect(copy.actions.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("CSV_FILE_TOO_LARGE preserves the verbatim {sizeMb} interpolation contract", () => {
+      const copy = WIZARD_ERROR_COPY.CSV_FILE_TOO_LARGE;
+      expect(copy.title).toBe(
+        "Maximum file size is 10 MB. Your file is {sizeMb} MB. Trim it or split it before retrying.",
+      );
+    });
+
+    it("CSV_INVALID_EXTENSION preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_INVALID_EXTENSION.title).toBe(
+        "Only .csv files are accepted. Convert your file and try again.",
+      );
+    });
+
+    it("CSV_STRATEGY_NAME_REQUIRED preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_STRATEGY_NAME_REQUIRED.title).toBe(
+        "Strategy name is required.",
+      );
+    });
+
+    it("CSV_STRATEGY_NAME_TOO_LONG preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_STRATEGY_NAME_TOO_LONG.title).toBe(
+        "Strategy name must be 80 characters or fewer.",
+      );
+    });
+
+    it("CSV_VALIDATION_FAILED preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED.title).toBe(
+        "Validation failed. See per-row breakdown below.",
+      );
+    });
+
+    it("CSV_UPSTREAM_FAIL preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
+        "Validation service returned an unexpected response. Retry shortly.",
+      );
+    });
+
+    it("CSV_NETWORK_TIMEOUT preserves the verbatim user-visible title (CsvUploadStep variant)", () => {
+      expect(WIZARD_ERROR_COPY.CSV_NETWORK_TIMEOUT.title).toBe(
+        "The server did not respond within 30 seconds. Your file is preserved — click Retry to try again.",
+      );
+    });
+
+    it("CSV_SUBMIT_FAILED preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_SUBMIT_FAILED.title).toBe(
+        "Your file validated cleanly, but saving the strategy hit an error. Click Submit strategy again to retry — your data is unchanged.",
+      );
+    });
+
+    it("CSV_SUBMIT_NO_STRATEGY_ID preserves the verbatim user-visible title", () => {
+      expect(WIZARD_ERROR_COPY.CSV_SUBMIT_NO_STRATEGY_ID.title).toBe(
+        "Submission succeeded but the server did not return a strategy id. Retry to confirm.",
+      );
+    });
+
+    it("formatKeyError interpolates {sizeMb} into CSV_FILE_TOO_LARGE title", () => {
+      const result = formatKeyError("CSV_FILE_TOO_LARGE", { sizeMb: "12.5" });
+      expect(result.title).toBe(
+        "Maximum file size is 10 MB. Your file is 12.5 MB. Trim it or split it before retrying.",
+      );
+    });
+
+    it("CSV_RULE_LABELS exposes the 6 verbatim entries from UI-SPEC §14.3", () => {
+      expect(CSV_RULE_LABELS.monotonic_dates).toBe(
+        "Dates must be strictly increasing",
+      );
+      expect(CSV_RULE_LABELS.nav_non_zero).toBe("NAV cannot be zero");
+      expect(CSV_RULE_LABELS.daily_return_lower_bound).toBe(
+        "Daily return cannot be ≤ -100%",
+      );
+      expect(CSV_RULE_LABELS.daily_sharpe_sentinel).toBe(
+        "Daily Sharpe > 10 looks unrealistic",
+      );
+      expect(CSV_RULE_LABELS.currency_usd_or_blank).toBe(
+        "Currency must be USD or left blank",
+      );
+      expect(CSV_RULE_LABELS.qty_price_positive).toBe(
+        "Quantity and price must be positive",
+      );
+    });
+
+    it("CSV_UPLOAD_STEP_HEADINGS exposes the verbatim heading + helper + dropzone strings", () => {
+      expect(CSV_UPLOAD_STEP_HEADINGS.title).toBe("Upload your track record");
+      expect(CSV_UPLOAD_STEP_HEADINGS.subtitle).toBe(
+        "Name your strategy, pick a format, and drop your CSV. We validate every row before creating your strategy. Max 10 MB.",
+      );
+      expect(CSV_UPLOAD_STEP_HEADINGS.nameHelper).toBe(
+        "1–80 characters. This is the public name on your factsheet — pick something your LPs will recognize.",
+      );
+      expect(CSV_UPLOAD_STEP_HEADINGS.dropzoneIdle).toBe(
+        "Drop a CSV file here, or click to browse",
+      );
+      expect(CSV_UPLOAD_STEP_HEADINGS.fileLabel("foo.csv", "1.23")).toBe(
+        "foo.csv · 1.23 MB",
+      );
+    });
+
+    it("CSV_PREVIEW_STEP_HEADINGS exposes the verbatim title/subtitle/CTA", () => {
+      expect(CSV_PREVIEW_STEP_HEADINGS.title).toBe("Preview your data");
+      expect(CSV_PREVIEW_STEP_HEADINGS.subtitle).toBe(
+        "Confirm we parsed your file correctly. Validation runs across every row in your file before you can continue.",
+      );
+      expect(CSV_PREVIEW_STEP_HEADINGS.continueLabel).toBe("Submit strategy");
+    });
+
+    it("CSV_SUBMIT_STEP_HEADINGS exposes the heading, subtitle, and submit-CTA labels for CsvSubmitStep", () => {
+      expect(CSV_SUBMIT_STEP_HEADINGS.title).toBe("Review and submit");
+      expect(CSV_SUBMIT_STEP_HEADINGS.subtitle).toBe(
+        "The founder reviews CSV-uploaded strategies within 48 hours. You will receive an email when your listing is approved.",
+      );
+      expect(CSV_SUBMIT_STEP_HEADINGS.submitCtaLabel).toBe("Submit strategy");
+      expect(CSV_SUBMIT_STEP_HEADINGS.submittingCtaLabel).toBe("Submitting…");
+    });
+
+    it("formatCsvRuleCauseMulti formats the multi-rule cause sentence", () => {
+      expect(
+        formatCsvRuleCauseMulti({ rule_a: [], rule_b: [] }),
+      ).toBe("Across 2 rule categories: rule_a, rule_b.");
+    });
+
+    it("formatCsvRuleCauseSingle formats the single-rule cause sentence", () => {
+      expect(
+        formatCsvRuleCauseSingle("Dates must be strictly increasing"),
+      ).toBe(
+        "Rule violated: Dates must be strictly increasing. Expand below for the row-level breakdown.",
+      );
+    });
+
+    it("CsvSubmitStep variant of CSV_NETWORK_TIMEOUT uses the same title (single source of truth)", () => {
+      // Phase 17 collapses the two near-identical timeout strings (CsvUpload "click Retry"
+      // vs CsvSubmit "click Submit strategy") into ONE canonical CSV_NETWORK_TIMEOUT
+      // entry. Verbatim CsvUpload variant wins per UI-SPEC §14.1 row 7.
+      expect(WIZARD_ERROR_COPY.CSV_NETWORK_TIMEOUT.title).toContain(
+        "did not respond within 30 seconds",
+      );
     });
   });
 

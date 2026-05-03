@@ -99,6 +99,102 @@
 - **Inputs:** 6px radius, 1px border, accent border on focus
 - **Modals:** White surface, subtle shadow, slide-out panels from right edge
 
+## Trust-Tier Badges
+Three-variant pill component lives at `src/components/strategy/TrustTierLabel.tsx`.
+Tokens live at `src/lib/design-tokens/trust-tier.ts` (single nested
+`TRUST_TIER_TOKENS as const`). DESIGN.md ↔ token consistency asserted by
+`tests/a11y/trust-tier-tokens.test.ts`.
+
+| Variant | Fill | Text | Border | Label |
+|---------|------|------|--------|-------|
+| `api_verified` | #1B6B5A | #FFFFFF | #1B6B5A | API verified |
+| `csv_uploaded` | #FFFFFF | #4A5568 | #4A5568 | CSV uploaded — verification pending |
+| `self_reported` | #FFFFFF | #B45309 | #B45309 | Self-reported |
+
+Visual: `inline-flex items-center rounded-sm border px-2 py-0.5 text-xs font-medium`.
+4px radius (`rounded-sm` per badge ladder), 1px border, 12px DM Sans regular.
+Inserted next to the strategy name on factsheet H1, marketplace tile, admin
+CSV-status row. No icons; identity carried by border + text colour only.
+
+## Error Envelope
+Canonical error renderer lives at `src/components/error/ErrorEnvelope.tsx`.
+Used by every error surface (wizard, CSV upload, factsheet load failure, admin
+status page, future `error.tsx` route boundaries). Sources human copy from
+`src/lib/wizardErrors.ts` via `buildEnvelope()` in `src/lib/envelope.ts`.
+
+Visual contract:
+- Shell: `role="alert"` + `rounded-md border border-negative/30 bg-negative/5 px-4 py-3`.
+- Title: `text-base font-semibold text-text-primary` — 16px DM Sans semibold #1A1A2E (REQ DESIGN-02).
+- Body: optional numbered `<ul>` of `debug_context` lines (12px DM Sans regular #4A5568).
+- Retry CTA: `Button size="sm"`, BELOW the body and ABOVE the `<details>` accordion.
+  Renders iff `envelope.recoverable && onRetry`.
+- Diagnostics: always-collapsed `<details>` with `code` + `correlation_id` (Geist
+  Mono 12px) + ghost-button "Copy diagnostics".
+- Copy-diagnostics payload: newline-delimited text block prefixed `QUANTALYZE_DIAG`
+  + code + correlation_id + ISO timestamp + user_agent + debug_context lines +
+  trailer `--- pii-scrubbed ---`. Runs through `pii-scrub.ts` before clipboard write.
+
+Authoring rule: every error path MUST call `buildEnvelope(code, correlation_id, ctx)`;
+no inline-string error envelopes. Code-review block enforced by grep at PR-time.
+
+## Broker Selector Grid
+3-cols × 1-row card grid at the top of the API path on `/strategies/new/wizard`.
+3 active cards (Binance, OKX, Bybit) per UC-B v1 source scope. Drops the literal
+"2×3" interpretation from REQ DESIGN-03; v2 may revisit when MT5/IBKR ship.
+
+Visual: `<button>` cards with white surface, 1px `#E2E8F0` border, 8px radius.
+Active state: `border-accent bg-accent/5`. Hover (inactive): `hover:border-accent/50`.
+Card copy: 14px DM Sans semibold (name) + 12px DM Sans regular (caption).
+
+Per-source field schema lives in UI-SPEC.md §per-source-fields (DESIGN.md stays
+narrow on tokens + visual contracts). OKX requires a passphrase field; Binance
+and Bybit do not. IP-allowlist hint copy is per-source.
+
+## CSV Escape-Hatch Card
+Full-width card BELOW the broker selector grid. White surface, 1px `#E2E8F0`
+border, 8px radius. Same visual weight as the broker cards — directs users
+without an API key into the CSV branch (`?source=csv`).
+
+Title (verbatim): "Don't have an API key? Upload CSV instead". Body:
+"Upload daily returns, NAV, or trades. We validate every row before creating
+your strategy. Max 10 MB." CTA: `Button variant="secondary"` "Upload CSV →"
+(secondary variant intentionally avoids competing with the API path's
+`bg-accent` primary CTA on the same screen).
+
+3 accepted formats live as a segmented control on the CSV branch landing step:
+`daily_returns` / `daily_nav` / `trades`. Format selector is part of Phase 15
+CSV branch — see Phase 15 UI-SPEC §8.3.
+
+## 9-State Matrix
+Every API-key-flow surface declares behavior across 9 states: loading, empty,
+error, partial, success, retry-in-flight, stale, optimistic, offline. Concrete
+DOM/copy specs per cell live in UI-SPEC.md §9-state-matrix. Hard exit gate
+before Phase 19: `gsd-sdk validate phase-17-exit` greps for `TBD | TODO | TKTK`
+in the matrix; FAILS on any unresolved cell.
+
+A11y minimums (DESIGN-05):
+- Trust-tier pill text ≥ 4.5:1 against rendering context (page bg #F8F9FA or
+  surface bg #FFFFFF). Asserted by `tests/a11y/wizard-contrast.test.ts`.
+- ARIA live regions: `role="alert"` on blocking errors; `role="status"` +
+  `aria-live="polite"` on non-blocking state changes.
+- Keyboard navigation: stepper Tab/Shift+Tab in DOM order; Enter activates;
+  `aria-current="step"` on active step.
+- Focus management: on step transition, focus moves to the first interactive
+  control of the new step.
+
+axe-core CI scans `/strategies/new/wizard` (both `?source=` branches) and
+`/admin/csv-status` with `wcag2a + wcag2aa + best-practice` rule sets. Zero
+violations required for green CI.
+
+Mobile fallback (DESIGN-04): deferred to v2. Trigger condition: PostHog
+`wizard_start` event with `device_type='mobile'` count > 0 over a rolling
+7-day window in production. Audit cron logs the count weekly to
+`.planning/audits/wizard-mobile-count.md`. When trigger fires, build the
+read-only review state spec (single column, 16px base, no chrome reflow,
+copy-only — full mobile-responsive polish remains v2 scope per PROJECT.md).
+v1 ships the 640px `DesktopGate.tsx` as-is per the Phase 16 OBSERV-11 audit
+(mobile-start count = 0).
+
 ## Data density principle
 Data density > card density. Prefer tables and shared-axis panels over stacks of
 rounded cards. Reference: Bloomberg Terminal, FactSet.
@@ -139,3 +235,8 @@ Reference: FactSet quarterly factsheet pages.
 | 2026-04-29 | strategy.ui_v2 default flipped OFF→ON (browser-side; SSR-safe two-pass mount per Grok B-05) | Phase 14b shipped Panel 4-7 lazy bodies (Returns Distribution / Rolling / Trades & positions / Exposure & benchmark greeks), DailyHeatmap SVG/Canvas dual renderer (Pitfall 4 mitigation), axe-core CI on `/strategy/[id]/v2` + `/discovery/[slug]` (zero violations on `wcag2a` + `wcag2aa` + `best-practice`), full keyboard navigation with skip-link mechanism (UI-SPEC §7.3 focus order), and Playwright chart-snapshot parity (±2% per panel; ±5% full-page) — gating checklist in UI-SPEC §11 fully green before this flip. The Pitfall 17 partial-data matrix (4 history bands × 7 panels) is institutionalized in `.github/PULL_REQUEST_TEMPLATE.md` to keep KPI-23b coverage from regressing on future PRs. The v1 → v2 cutover (removing `src/app/strategy/[id]/page.tsx`) remains a v0.17.1 follow-up; this flip only changes the flag's default value, not the v1 route's existence. URL override `?strategy_v2=off` and localStorage `strategy.ui_v2='false'` continue to force v1 for any user. **Grok B-05 SSR-safety**: the SSR branch of `isStrategyUiV2Enabled()` keeps returning `false` (mirrors `src/lib/widget-state-flag.ts` Phase 11 pattern). Consumers do a two-pass mount via `useEffect` so initial server render uses v1, post-hydration upgrades to v2 if the flag resolves true. This prevents hydration mismatches for legacy users with `localStorage="strategy.ui_v2"="false"`. |
 | 2026-04-30 | Shifted `--color-warning` #D97706 → #B45309 (amber-700) | After PR #103 fixed `--color-text-muted` and `--color-positive` (both AA-failing), the next axe scan surfaced the warning token's contrast violations on the v2 strategy page (chip labels) and the v1 strategy tabs (warning banners). The 2026-04-11 entry recorded the contrast as ~4.6:1 from memory; an actual measure (WCAG sRGB-luminance formula) showed 3.19:1 on white and ~2.93:1 on `bg-warning/5` fills — both AA fails for 12px text. Amber-700 #B45309 lands at 5.05:1 on white and 4.56:1 on `bg-warning/5`, AA-pass for normal text and only mildly more saturated visually. Pinned by `tests/a11y/chart-contrast.test.ts`. |
 | 2026-04-30 | Recharts 3.x `accessibilityLayer` opt-out across the codebase | Recharts 3.x defaults `accessibilityLayer={true}` which adds `tabIndex=0` + `role="application"` to chart root SVGs. With no accessible name, those SVGs land in keyboard tab order as empty-focus stops (broke `e2e/strategy-v2-keyboard.spec.ts` — Tab #13 hit DrawdownChart instead of Panel 5's "3M" button). Initial fix scoped only to `src/components/charts/`; widened 2026-04-30 to every recharts chart (allocator dashboard widgets, portfolio components, strategy compare overlay) since the same bug class would re-fail on adjacent routes. Chart data is also surfaced via KPI cells in panel grids, so the layer's keyboard-nav features aren't load-bearing. Pinned by `tests/visual/chart-accessibility-layer.test.ts` (whole-codebase grep). |
+| 2026-05-01 | DESIGN-01 — Trust-tier badge variants + token file landed | Three pill variants (`api_verified` filled accent, `csv_uploaded` neutral grey outline, `self_reported` warning amber outline) shipped as `src/lib/design-tokens/trust-tier.ts` (`TRUST_TIER_TOKENS as const`). Self-reported hex aligned with canonical `--color-warning` (#B45309 — REQUIREMENTS.md DESIGN-01 row corrected from #D97706, which was retired 2026-04-30 for AA failure). Consistency Vitest test `tests/a11y/trust-tier-tokens.test.ts` reads DESIGN.md and asserts each hex appears verbatim. CI gate against drift. |
+| 2026-05-01 | DESIGN-02 — Error envelope wireframe codified + canonical component | Live `WizardErrorEnvelope.tsx` shape adopted as the wireframe (Retry CTA below body, above `<details>`; always-collapsed). Component rebranded → `src/components/error/ErrorEnvelope.tsx` (file move + 1-line re-export shim at old wizard path; zero call-site churn). Title typography upgraded `text-sm text-negative` → `text-base font-semibold text-text-primary` per REQ. Copy-diagnostics payload changed JSON.stringify → newline-delimited prefixed text block (`QUANTALYZE_DIAG\n{code}\n{correlation_id}\n{ISO ts}\n{user_agent}\n{debug_context lines}\n--- pii-scrubbed ---`) with `pii-scrub.ts` pass before clipboard. Surface scope: ALL error renderers (wizard, CSV upload, factsheet, admin status, future `error.tsx`). |
+| 2026-05-01 | DESIGN-03 — Broker selector grid + CSV escape-hatch card | 3-cols × 1-row grid with 3 active cards (OKX, Binance, Bybit) per UC-B; drops the literal "2×3" wording from REQ. Visual: white surface, 1px `#E2E8F0` border, 8px radius (matches `Card` primitive). Per-source field schema (passphrase required for OKX; IP-allowlist hint per source) lives in UI-SPEC.md §per-source-fields, NOT DESIGN.md (keeps DESIGN.md narrow on tokens). Full-width CSV escape-hatch card BELOW the grid with title "Don't have an API key? Upload CSV instead" — same border/radius/surface, secondary-variant CTA, no accent fill (avoids competing with `api_verified` accent identity). |
+| 2026-05-01 | DESIGN-04 — Mobile-readable wizard fallback deferred | Phase 16 / OBSERV-11 PostHog `wizard_start` mobile-device count audit returned 0 (with credential-gap caveat — `posthog-js` short-circuits in production). REQ DESIGN-04 conditional on count > 0; gate honored. Ship 640px `DesktopGate.tsx` as-is for v1. Trigger condition for v2 build: PostHog `wizard_start` event with `device_type='mobile'` count > 0 over a rolling 7-day window in production. Audit cron logs weekly to `.planning/audits/wizard-mobile-count.md`. When trigger fires, future phase builds read-only review state (single column, 16px base, no chrome reflow). Full mobile-responsive polish on strategy pages remains v2 per PROJECT.md. |
+| 2026-05-01 | DESIGN-05 — 9-state matrix + a11y minimums + wizardErrors.ts source-of-truth | 9 surfaces × 9 states (loading / empty / error / partial / success / retry-in-flight / stale / optimistic / offline) with concrete DOM/copy specs in UI-SPEC.md §9-state-matrix. Hard exit gate before Phase 19 — plan-checker rejects entry on any TBD cell. A11y: 4.5:1 contrast asserted by `tests/a11y/wizard-contrast.test.ts`; axe-core CI extended to `/strategies/new/wizard` + `/admin/csv-status`; ARIA live regions on state transitions; keyboard-nav stepper with `aria-current="step"`. `wizardErrors.ts` declared canonical source of `human_message` strings; envelope's `human_message` = wizardErrors `title`, `debug_context` = wizardErrors `fix[]`. Phase 17 absorbs the 19 CSV-branch literal strings Phase 15 left as `// TODO(phase-17): hoist into wizardErrors` (17 new error codes + 3 heading-constant exports + 1 rule-labels constant). |
