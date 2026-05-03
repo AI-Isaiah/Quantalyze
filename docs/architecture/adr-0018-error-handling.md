@@ -1,7 +1,7 @@
-# ADR-0018: Error handling -- no error boundaries, exceptions bubble to Next default
+# ADR-0018: Error handling -- root error boundaries + ErrorEnvelope contract with correlation_id
 
 ## Status
-Proposed (decision needed to establish error handling strategy)
+Accepted — realized in Phase 16 (v0.19.0.0, 2026-05-02). See `## Resolution` below.
 
 ## Context
 The application has no route-level error boundaries (`error.tsx`) and no
@@ -34,7 +34,25 @@ A single analytics DB hiccup during a dashboard page render crashes the
 entire route. No branded error UI exists -- users see Next's default
 error page or a white screen.
 
-## Decision
+## Resolution (Phase 16, v0.19.0.0)
+Root-level boundaries shipped: `src/app/error.tsx` + `src/app/global-error.tsx`,
+both Sentry-instrumented and tagging captures with the `correlation_id` read
+from `<meta name="x-correlation-id">` in `src/app/layout.tsx`. The
+`ErrorEnvelope` contract at `src/lib/envelope.ts` (with `WizardErrorEnvelope`
+UI) is the standard surface for user-facing errors — it carries the cid
+visibly, exposes copy-to-clipboard for the diagnostic JSON, and gates retry
+on a `recoverable` flag. Wired into the three wizard steps
+(`ConnectKeyStep`, `SubmitStep`, `SyncPreviewStep`). Pattern C (route handler
+log + 500) remains the standard for API routes; the new `/api/debug-key-flow`
+SSE endpoint at `src/app/api/debug-key-flow/route.ts` adds an audit-row-before-stream
+pattern so admin diagnostic sessions are forensically reconstructible even
+when the stream aborts. Segment-level boundaries
+(`(dashboard)/error.tsx`, `(auth)/error.tsx`) and the fail-closed-vs-fail-open
+policy table below remain open follow-ups for a later phase. See CHANGELOG
+`[0.19.0.0]` and `.planning/phases/16-diagnostic-spike-observability/` for
+the full implementation record.
+
+## Decision (original — preserved for history)
 **Open question -- the following elements must be decided:**
 
 ### 1. Route-level error boundaries

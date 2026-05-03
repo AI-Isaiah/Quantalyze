@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import {
@@ -14,10 +13,11 @@ import {
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
-  formatKeyError,
   gateFailureToWizardError,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
+import { buildEnvelope } from "@/lib/envelope";
+import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 
 /**
@@ -26,6 +26,26 @@ import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
  * FactsheetPreview on success or the scripted wizardErrors copy on
  * failure. Only reads strategy_analytics — writes happen server-side.
  */
+
+/**
+ * Read the correlation_id from the <meta name="x-correlation-id"> tag the
+ * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
+ * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
+ * wave window when 16-02 has not yet merged into this branch).
+ */
+function readCorrelationId(): string {
+  if (typeof document !== "undefined") {
+    const meta = document.querySelector<HTMLMetaElement>(
+      'meta[name="x-correlation-id"]',
+    );
+    const value = meta?.getAttribute("content");
+    if (value && value.length > 0) return value;
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 const POLL_INTERVAL_MS = 3000;
 const SLOW_HINT_MS = 15_000;
@@ -85,6 +105,8 @@ export function SyncPreviewStep({
   const [expandLog, setExpandLog] = useState(false);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
   const [computationError, setComputationError] = useState<string | null>(null);
+  // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
+  const [correlationId] = useState<string>(() => readCorrelationId());
   // useRef initializer must be a non-impure value for React Compiler's
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
@@ -283,8 +305,8 @@ export function SyncPreviewStep({
     if (snapshot) onComplete(snapshot);
   }, [snapshot, onComplete]);
 
-  const errorCopy = errorCode
-    ? formatKeyError(errorCode, {
+  const errorEnvelope = errorCode
+    ? buildEnvelope(errorCode, correlationId, {
         trades: gateResult?.detail?.trades as number | undefined,
         days: gateResult?.detail?.days as number | undefined,
         computationError: computationError,
@@ -293,7 +315,7 @@ export function SyncPreviewStep({
 
   // --- Rendering --------------------------------------------------------
 
-  if (phase === "gate_failed" && errorCopy) {
+  if (phase === "gate_failed" && errorEnvelope) {
     return (
       <section aria-labelledby="wizard-sync-heading">
         <h2
@@ -302,34 +324,15 @@ export function SyncPreviewStep({
         >
           We could not verify this strategy
         </h2>
-        <div
-          role="alert"
-          className="mt-4 rounded-md border border-negative/30 bg-negative/5 px-4 py-3"
-          data-testid="wizard-sync-error"
-          data-error-code={errorCode ?? undefined}
-        >
-          <p className="text-sm font-semibold text-negative">{errorCopy.title}</p>
-          <p className="mt-1 text-xs text-text-secondary">{errorCopy.cause}</p>
-          {errorCopy.fix.length > 0 && (
-            <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-text-secondary">
-              {errorCopy.fix.map((line, i) => (
-                <li key={i}>{line}</li>
-              ))}
-            </ol>
-          )}
-          <p className="mt-2 text-[11px]">
-            <Link
-              href={errorCopy.docsHref}
-              className="text-accent underline-offset-4 hover:underline"
-              target="_blank"
-              rel="noopener"
-            >
-              Read the full guide →
-            </Link>
-          </p>
+        <div className="mt-4">
+          <WizardErrorEnvelope envelope={errorEnvelope} />
         </div>
         <div className="mt-6 flex gap-3">
-          <Button onClick={onTryAnotherKey} data-testid="wizard-try-another-key">
+          <Button
+            type="button"
+            onClick={onTryAnotherKey}
+            data-testid="wizard-try-another-key"
+          >
             Try another key
           </Button>
         </div>

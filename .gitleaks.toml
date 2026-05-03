@@ -36,10 +36,21 @@ description = "Known test fixtures and placeholder env samples"
 #   detector mistakes for secrets. These files ship documentation, not
 #   credentials. The directory is force-added per the project's planning
 #   workflow.
+# - src/app/api/webhooks/resend/route.test.ts: Phase 16 OBSERV-03 webhook
+#   verification test. Defines a synthetic Svix secret prefixed `whsec_`
+#   (base64("test-secret-phase-16-observ-03")) used by the test signing helper
+#   to verify Svix.verify() rejects bad signatures and accepts good ones.
+#   Production secret is read from RESEND_WEBHOOK_SECRET env at request time;
+#   the test value is overridden via vi.stubEnv and never reaches a wire.
+# - analytics-service/tests/cassettes/: VCR-recorded HTTP fixtures. PII
+#   already scrubbed at record time via conftest_vcr.py three-layer filter;
+#   any high-entropy value remaining is a public response payload.
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)package-lock\.json$''',
   '''(^|/)\.planning/''',
+  '''(^|/)src/app/api/webhooks/resend/route\.test\.ts$''',
+  '''(^|/)analytics-service/tests/cassettes/''',
 ]

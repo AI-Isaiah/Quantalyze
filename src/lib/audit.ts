@@ -138,7 +138,9 @@ export type AuditAction =
   // --- Phase 06: allocator API ingestion (INGEST-05 / INGEST-06 / INGEST-07) — D-18
   | "allocator.holdings.sync_requested"
   | "allocator.holdings.sync_completed"
-  | "allocator.holdings.sync_failed";
+  | "allocator.holdings.sync_failed"
+  // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
+  | "debug_key_flow.invoke";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
@@ -181,7 +183,9 @@ export type AuditEntityType =
   // --- Sprint 8 Phase 2: Mandate profile builder ----------------------
   | "allocator_preference_mandate"
   // --- Sprint 8 Phase 4: Feedback loop ------------------------------------
-  | "allocator_preference_feedback";
+  | "allocator_preference_feedback"
+  // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
+  | "debug_session";
 
 export interface AuditEvent {
   action: AuditAction;

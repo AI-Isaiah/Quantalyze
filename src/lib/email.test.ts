@@ -1,3 +1,4 @@
+/** @vitest-environment node */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 /**
@@ -13,12 +14,32 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * block the actual email send, and a Resend failure must not crash the
  * caller — the dispatch row records the outcome regardless.
  *
+ * Phase 16 / OBSERV-03 (Plan 16-05): send() also threads a correlation_id
+ * tag through resend.emails.send() and writes a best-effort row to
+ * resend_message_correlation. The mocks below cover that table too.
+ *
  * These tests mock both the Supabase admin client chain and the Resend
  * constructor. Because `email.ts` captures `resend` at import time, we
  * set `RESEND_API_KEY` in `beforeEach`, reset modules between tests,
  * and dynamically re-import the module so each case sees a fresh,
  * fully-mocked world.
  */
+
+// `email.ts` (transitively via `@/lib/correlation-id`) imports
+// `server-only`, which throws when imported outside a Server Component.
+// Stub it to a no-op so the module evaluates under vitest. The same
+// pattern is used by route.test.ts files in this repo.
+vi.mock("server-only", () => ({}));
+
+// `correlation-id.ts` calls `headers()` from `next/headers`, which is
+// also unavailable outside a Next.js request scope. Stub it to a Map-like
+// shape that returns null for the `x-correlation-id` lookup so
+// getCorrelationId() falls through to crypto.randomUUID().
+vi.mock("next/headers", () => ({
+  headers: async () => ({
+    get: () => null,
+  }),
+}));
 
 type DispatchRow = {
   id: string;

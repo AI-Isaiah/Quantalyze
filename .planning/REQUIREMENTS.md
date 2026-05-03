@@ -33,18 +33,18 @@
 
 ### OBSERV — Diagnostic spike + observability (Phase 16)
 
-- [ ] **OBSERV-01**: `correlation_id` UUID injected at `src/lib/analytics-client.ts:66` (NOT `src/proxy.ts` per audit correction); propagates as `x-correlation-id` header through every outbound fetch to FastAPI
-- [ ] **OBSERV-02**: FastAPI receives `correlation_id` via Sentry CorrelationMiddleware + structlog contextvar; every exception log line + every outbound DB/Resend call carries the value
-- [ ] **OBSERV-03**: Resend `tags` array carries `correlation_id` on send; webhook handlers read it from inbound payload (with custom-header fallback if `tags` round-trip empirically fails — verified during Phase 16 instrumentation)
-- [ ] **OBSERV-04**: `@sentry/nextjs` framework hook (already in `src/instrumentation.ts`) extended into `src/app/error.tsx` + `src/app/global-error.tsx` route boundaries (replaces existing `// TODO: wire Sentry.captureException` markers); correlation_id surfaces as Sentry tag
-- [ ] **OBSERV-05**: `sentry-sdk[fastapi]==2.58.0` added to `analytics-service/requirements.txt`; init pattern mirrors `src/instrumentation.ts` (`SENTRY_DSN` gate, `traces_sample_rate=0.1`, `send_default_pii=False`, `before_send=_redact_before_send`)
-- [ ] **OBSERV-06**: User sees actionable structured error envelope (RFC 9457-style: `{ok, code, human_message, debug_context, correlation_id, recoverable}`) on every wizard error path — no "Something went wrong" generic; copy-diagnostics button included in `<details>`
-- [ ] **OBSERV-07**: Admin-gated `/api/debug-key-flow` SSE endpoint (separate token, never persists submitted credentials, short-TTL admin role, audit-log every invocation) runs Path 1 + Path 2 + sync sequentially against test credentials and streams structured diagnostic JSON to caller
-- [ ] **OBSERV-08**: `scripts/repro-key-flow.sh` runs the unified key flow against `vcrpy==8.1.1` cassettes for OKX/Binance/Bybit happy + failure paths without network access; cassettes scrub auth headers via PII filters before commit
-- [ ] **OBSERV-09**: `structlog==25.5.0` produces JSON-format logs from FastAPI with `correlation_id` in every record via contextvar
-- [ ] **OBSERV-10**: Migrations `084_first_api_key_added_trigger.sql` + `085_stamp_first_bridge_surfaced.sql` + `086_compute_jobs_priority.sql` audited under unified pipeline; integration tests assert each `stamp_first_*` RPC fires correctly; RLS context drift across Railway → Supabase boundary verified
-- [ ] **OBSERV-11**: PostHog `wizard_start` mobile-device audit completes with documented count (gates UC-H Phase 17 mobile-readable fallback build); count value committed to TODOS.md
-- [ ] **OBSERV-12**: `restore-e2e-fixtures` PR merged before any other Phase 16 instrumentation work begins — bit-for-bit pre-PR-#90 restore of `e2e/api-key-flow.spec.ts` (-242 LOC) + `scripts/seed-full-app-demo.ts` (-1721 LOC) + `src/lib/observability.ts` (-28 LOC); presence-check assertion in CI
+- [x] **OBSERV-01**: `correlation_id` UUID injected at `src/lib/analytics-client.ts:66` (NOT `src/proxy.ts` per audit correction); propagates as `x-correlation-id` header through every outbound fetch to FastAPI
+- [x] **OBSERV-02**: FastAPI receives `correlation_id` via Sentry CorrelationMiddleware + structlog contextvar; every exception log line + every outbound DB/Resend call carries the value
+- [x] **OBSERV-03**: Resend `tags` array carries `correlation_id` on send; webhook handlers read it from inbound payload (with custom-header fallback if `tags` round-trip empirically fails — verified during Phase 16 instrumentation)
+- [x] **OBSERV-04**: `@sentry/nextjs` framework hook (already in `src/instrumentation.ts`) extended into `src/app/error.tsx` + `src/app/global-error.tsx` route boundaries (replaces existing `// TODO: wire Sentry.captureException` markers); correlation_id surfaces as Sentry tag
+- [x] **OBSERV-05**: `sentry-sdk[fastapi]==2.58.0` added to `analytics-service/requirements.txt`; init pattern mirrors `src/instrumentation.ts` (`SENTRY_DSN` gate, `traces_sample_rate=0.1`, `send_default_pii=False`, `before_send=_redact_before_send`)
+- [x] **OBSERV-06**: User sees actionable structured error envelope (RFC 9457-style: `{ok, code, human_message, debug_context, correlation_id, recoverable}`) on every wizard error path — no "Something went wrong" generic; copy-diagnostics button included in `<details>`
+- [x] **OBSERV-07**: Admin-gated `/api/debug-key-flow` SSE endpoint (separate token, never persists submitted credentials, short-TTL admin role, audit-log every invocation) runs Path 1 + Path 2 + sync sequentially against test credentials and streams structured diagnostic JSON to caller
+- [x] **OBSERV-08**: `scripts/repro-key-flow.sh` runs the unified key flow against `vcrpy==8.1.1` cassettes for OKX/Binance/Bybit happy + failure paths without network access; cassettes scrub auth headers via PII filters before commit
+- [x] **OBSERV-09**: `structlog==25.5.0` produces JSON-format logs from FastAPI with `correlation_id` in every record via contextvar
+- [x] **OBSERV-10**: Migrations `084_first_api_key_added_trigger.sql` + `085_stamp_first_bridge_surfaced.sql` + `086_compute_jobs_priority.sql` audited under unified pipeline; integration tests assert each `stamp_first_*` RPC fires correctly; RLS context drift across Railway → Supabase boundary verified
+- [x] **OBSERV-11**: PostHog `wizard_start` mobile-device audit completes with documented count (gates UC-H Phase 17 mobile-readable fallback build); count value committed to TODOS.md
+- [x] **OBSERV-12**: `restore-e2e-fixtures` PR merged before any other Phase 16 instrumentation work begins — bit-for-bit pre-PR-#90 restore of `e2e/api-key-flow.spec.ts` (-242 LOC) + `scripts/seed-full-app-demo.ts` (-1721 LOC) + `src/lib/observability.ts` (-28 LOC); presence-check assertion in CI
 
 ### DESIGN — Design contract (Phase 17, hard exit gate before Phase 19)
 
@@ -184,18 +184,18 @@ Phase mapping (v1.0 phase numbers continue from v0.17 — Phase 14b → Phase 15
 | CSV-01 | Phase 15 | Pending |
 | CSV-02 | Phase 15 | Pending |
 | CSV-03 | Phase 15 | Pending |
-| OBSERV-01 | Phase 16 | Pending |
-| OBSERV-02 | Phase 16 | Pending |
-| OBSERV-03 | Phase 16 | Pending |
-| OBSERV-04 | Phase 16 | Pending |
-| OBSERV-05 | Phase 16 | Pending |
-| OBSERV-06 | Phase 16 | Pending |
-| OBSERV-07 | Phase 16 | Pending |
-| OBSERV-08 | Phase 16 | Pending |
-| OBSERV-09 | Phase 16 | Pending |
-| OBSERV-10 | Phase 16 | Pending |
-| OBSERV-11 | Phase 16 | Pending |
-| OBSERV-12 | Phase 16 | Pending |
+| OBSERV-01 | Phase 16 | Complete |
+| OBSERV-02 | Phase 16 | Complete |
+| OBSERV-03 | Phase 16 | Complete |
+| OBSERV-04 | Phase 16 | Complete |
+| OBSERV-05 | Phase 16 | Complete |
+| OBSERV-06 | Phase 16 | Complete |
+| OBSERV-07 | Phase 16 | Complete |
+| OBSERV-08 | Phase 16 | Complete |
+| OBSERV-09 | Phase 16 | Complete |
+| OBSERV-10 | Phase 16 | Complete |
+| OBSERV-11 | Phase 16 | Complete |
+| OBSERV-12 | Phase 16 | Complete |
 | DESIGN-01 | Phase 17 | Pending |
 | DESIGN-02 | Phase 17 | Pending |
 | DESIGN-03 | Phase 17 | Pending |

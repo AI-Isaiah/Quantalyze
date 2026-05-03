@@ -4,10 +4,9 @@ import { useCallback, useState } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
-import {
-  formatKeyError,
-  type WizardErrorCode,
-} from "@/lib/wizardErrors";
+import { type WizardErrorCode } from "@/lib/wizardErrors";
+import { buildEnvelope } from "@/lib/envelope";
+import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 
 /**
@@ -16,6 +15,30 @@ import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
  * /api/strategies/create-with-key. All error states render scripted
  * copy from wizardErrors.ts — never raw server strings.
  */
+
+/**
+ * Read the correlation_id from the <meta name="x-correlation-id"> tag the
+ * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
+ * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
+ * wave window when 16-02 has not yet merged into this branch). Once 16-02
+ * is fully integrated this helper will always read the meta tag and the
+ * fallback path becomes a defensive no-op.
+ */
+function readCorrelationId(): string {
+  if (typeof document !== "undefined") {
+    const meta = document.querySelector<HTMLMetaElement>(
+      'meta[name="x-correlation-id"]',
+    );
+    const value = meta?.getAttribute("content");
+    if (value && value.length > 0) return value;
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // Minimal fallback for non-secure contexts where crypto.randomUUID is
+  // unavailable. Rare in modern browsers; covered for completeness.
+  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 type ExchangeId = "binance" | "okx" | "bybit";
 
@@ -86,6 +109,12 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
   const [passphrase, setPassphrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
+  // Phase 16 Plan 06: correlation_id for the envelope. Reads the
+  // <meta name="x-correlation-id"> tag rendered by the root layout (Plan
+  // 16-02 / OBSERV-09); falls back to a fresh UUID v4 when the meta tag
+  // is not yet present (Plan 16-02 lands in a parallel wave; this step
+  // ships first to avoid blocking on cross-wave merge ordering).
+  const [correlationId] = useState<string>(() => readCorrelationId());
 
   const requiresPassphrase =
     EXCHANGES.find((e) => e.id === exchange)?.requiresPassphrase ?? false;
@@ -151,7 +180,9 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
     }
   }
 
-  const errorCopy = errorCode ? formatKeyError(errorCode) : null;
+  const errorEnvelope = errorCode
+    ? buildEnvelope(errorCode, correlationId)
+    : null;
 
   return (
     <section aria-labelledby="wizard-connect-key-heading">
@@ -290,33 +321,11 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
           </p>
         </div>
 
-        {errorCopy && (
-          <div
-            role="alert"
-            className="rounded-md border border-negative/30 bg-negative/5 px-4 py-3"
-            data-testid="wizard-connect-error"
-            data-error-code={errorCode ?? undefined}
-          >
-            <p className="text-sm font-semibold text-negative">{errorCopy.title}</p>
-            <p className="mt-1 text-xs text-text-secondary">{errorCopy.cause}</p>
-            {errorCopy.fix.length > 0 && (
-              <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-text-secondary">
-                {errorCopy.fix.map((line, i) => (
-                  <li key={i}>{line}</li>
-                ))}
-              </ol>
-            )}
-            <p className="mt-2 text-[11px]">
-              <Link
-                href={errorCopy.docsHref}
-                className="text-accent underline-offset-4 hover:underline"
-                target="_blank"
-                rel="noopener"
-              >
-                Read the full guide →
-              </Link>
-            </p>
-          </div>
+        {errorEnvelope && (
+          <WizardErrorEnvelope
+            envelope={errorEnvelope}
+            onRetry={() => setErrorCode(null)}
+          />
         )}
 
         <div className="flex gap-3">

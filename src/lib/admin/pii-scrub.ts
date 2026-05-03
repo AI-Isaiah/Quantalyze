@@ -16,12 +16,23 @@
 const DENYLIST_EXACT = new Set<string>([
   "apikey",
   "apisecret",
+  // Phase 16 / OBSERV-04 — snake_case wire forms used by ConnectKeyStep
+  // (api_key/api_secret) must be denied alongside their concatenated
+  // variants. Keep both: scrubPii is also applied to JSONB fields where
+  // legacy concatenated keys appear.
+  "api_key",
+  "api_secret",
   "secret",
   "signature",
   "passphrase",
   "authorization",
   "x-mbx-apikey",
   "ok-access-sign",
+  // Phase 16 / OBSERV-07 — internal API token must never land in admin
+  // JSONB blobs or Sentry breadcrumbs (route.ts forwards it as a header
+  // on the seam to FastAPI; outbound HTTP breadcrumbs would otherwise
+  // capture it).
+  "x-internal-token",
 ]);
 
 const DENYLIST_PREFIX = ["sb-ec-"];

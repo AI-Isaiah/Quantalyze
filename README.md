@@ -59,6 +59,7 @@ quantalyze/
   e2e/                # Playwright specs (auth, discovery, match-queue, demo-public, portfolio-pdf-demo, ...)
   .github/workflows/  # CI + nightly probes (demo PDF cold-start)
   docs/
+    architecture/     # ADRs (RLS authz, observability, error handling, secret handling, ...)
     runbooks/         # Operational runbooks (match-engine.md, bridge-outcome-cron.md, ...)
     superpowers/plans/ # Design + implementation plans from /autoplan
     pitch/            # Cap-intro partner pitch artifacts (qualification script, term sheet, one-pager)
@@ -78,6 +79,7 @@ Version and changelog live in `VERSION` (4-digit `MAJOR.MINOR.PATCH.MICRO`) and
 | Analytics | FastAPI + quantstats + numpy + pandas + scipy + CCXT |
 | Email | Resend |
 | PDF | Puppeteer |
+| Observability | Sentry (frontend + analytics service), structlog, end-to-end `correlation_id` |
 | Deploy | Vercel (frontend), Railway (analytics) |
 
 ## npm Scripts
@@ -109,6 +111,29 @@ export SUPABASE_SERVICE_KEY=your-service-role-key
 
 uvicorn main:app --reload
 ```
+
+## Troubleshooting
+
+### Local repro of the API-key flow
+
+If a customer reports a wizard failure (or you want to verify a fix), reproduce
+the flow locally without hitting any broker:
+
+```bash
+bash scripts/repro-key-flow.sh
+```
+
+This replays 12 pre-recorded `vcrpy` cassettes (`analytics-service/tests/cassettes/`)
+covering OKX / Binance / Bybit × happy / auth-fail / rate-limit / schema-drift.
+Replay is deterministic and offline.
+
+The script also greps the cassette files for any known `DEBUG_KEY_FLOW_*` env
+value AND scans for high-entropy literals in signing-key-named fields. Either
+hit exits 1 (do NOT commit the offending cassette).
+
+Cassette recording is a one-time founder operation (Phase 16 / OBSERV-08); see
+`.planning/phases/16-diagnostic-spike-observability/16-08-PLAN.md` Task 3
+checkpoint for the procedure.
 
 ## Environment Variables
 

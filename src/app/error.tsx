@@ -17,7 +17,23 @@ export default function Error({
 }) {
   useEffect(() => {
     console.error("[error-boundary]", error);
-    // TODO: wire Sentry.captureException(error) once observability is set up
+    if (typeof window === "undefined") return;
+    const cidMeta = document.querySelector('meta[name="x-correlation-id"]');
+    const correlation_id = cidMeta?.getAttribute("content") ?? null;
+    // Lazy import keeps @sentry/nextjs out of the static bundle for pages
+    // that never render this boundary (Phase 16 / OBSERV-04).
+    import("@sentry/nextjs")
+      .then((Sentry) => {
+        Sentry.captureException(error, {
+          tags: {
+            digest: error.digest,
+            correlation_id,
+          },
+        });
+      })
+      .catch(() => {
+        // Sentry import failed — never block error boundary rendering.
+      });
   }, [error]);
 
   return (
