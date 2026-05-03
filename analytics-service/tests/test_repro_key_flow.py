@@ -14,10 +14,32 @@ Test count: 12 (3 brokers × 4 scenarios).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import ccxt
 
 from tests.conftest_vcr import phase16_vcr
+
+# Cassette dir resolved relative to this test file. Phase 16 ships 4 OKX
+# cassettes (founder gate 16-08 Task 3 covers the other 8 — Binance + Bybit
+# recordings against real test broker creds). Without the existence check
+# below, vcrpy `record_mode='once'` would attempt to RECORD missing
+# cassettes, which means a live network call to the broker API. CI runners
+# are inside GitHub Actions IP ranges that Binance and Bybit block (Binance
+# 451 'restricted location', Bybit 403 CloudFront).
+_CASSETTE_DIR = Path(__file__).parent / "cassettes"
+
+
+def _skip_if_no_cassette(broker: str, scenario: str) -> None:
+    """Skip the parametrized case when its cassette is not yet recorded."""
+    cassette = _CASSETTE_DIR / broker / f"{scenario}.yaml"
+    if not cassette.exists():
+        pytest.skip(
+            f"cassette not yet recorded: {broker}/{scenario}.yaml "
+            f"(founder gate 16-08 Task 3)"
+        )
+
 
 # Per-broker test cred env-var names (decrypt happens in the SSE path; here we
 # pass cleartext from monkeypatched fixtures because we are NOT exercising the
@@ -50,6 +72,7 @@ def _make_exchange(broker: str, creds: dict) -> ccxt.Exchange:
 @pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
 def test_happy_path_replays_balance_fetch(broker):
     """Replay the canonical successful balance-fetch for each broker."""
+    _skip_if_no_cassette(broker, "happy")
     with phase16_vcr.use_cassette(f"{broker}/happy.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         result = ex.fetch_balance()
@@ -62,6 +85,7 @@ def test_happy_path_replays_balance_fetch(broker):
 @pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
 def test_auth_fail_raises_authentication_error(broker):
     """Replay the auth-fail (HTTP 401) path; assert ccxt.AuthenticationError raised."""
+    _skip_if_no_cassette(broker, "auth-fail")
     with phase16_vcr.use_cassette(f"{broker}/auth-fail.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         with pytest.raises((ccxt.AuthenticationError, ccxt.PermissionDenied)):
@@ -73,6 +97,7 @@ def test_auth_fail_raises_authentication_error(broker):
 @pytest.mark.parametrize("broker", ["okx", "binance", "bybit"])
 def test_rate_limit_raises_rate_limit_exceeded(broker):
     """Replay the rate-limit (HTTP 429) path; assert ccxt.RateLimitExceeded or DDoS raised."""
+    _skip_if_no_cassette(broker, "rate-limit")
     with phase16_vcr.use_cassette(f"{broker}/rate-limit.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         with pytest.raises((ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.ExchangeError)):
@@ -89,6 +114,7 @@ def test_schema_drift_raises_or_returns_partial(broker):
     a field is renamed. Accept any of: ccxt.ExchangeError raise, or a result dict
     where the canonical 'free'/'used' fields are missing.
     """
+    _skip_if_no_cassette(broker, "schema-drift")
     with phase16_vcr.use_cassette(f"{broker}/schema-drift.yaml"):
         ex = _make_exchange(broker, TEST_CREDS[broker])
         try:

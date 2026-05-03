@@ -254,11 +254,18 @@ export async function POST(req: NextRequest) {
               correlation_id: correlationId,
               started_at: new Date(t0).toISOString(),
               duration_ms: Date.now() - t0,
+              // Per-field coalesce: upstream `json?.error` is shaped
+              // `{code?: string; human_message?: string}` (both optional)
+              // because the analytics-service envelope can omit them; the
+              // outbound `frame()` contract requires both fields. Read
+              // each slot defensively so the SSE consumer always gets a
+              // complete `{code, human_message}` pair when ok=false.
               error: ok
                 ? undefined
-                : json?.error ?? {
-                    code: "UPSTREAM_NON_OK",
-                    human_message: `HTTP ${upstream.status}`,
+                : {
+                    code: json?.error?.code ?? "UPSTREAM_NON_OK",
+                    human_message:
+                      json?.error?.human_message ?? `HTTP ${upstream.status}`,
                   },
             }),
           );
