@@ -132,5 +132,68 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
       const mod = await import("./correlation-id");
       expect(mod.CORRELATION_HEADER).toBe("x-correlation-id");
     });
+
+    // Phase-16 IN-02 regression: an upstream proxy that strips the value
+    // (or a client that sends `X-Correlation-Id:` with an empty string)
+    // must NOT bypass the joinability invariant. The pre-fix `??` operator
+    // only fired on null/undefined, so an empty string passed through and
+    // re-broadcast to FastAPI as the empty header.
+    it("mints a fresh UUID when the inbound header is the empty string (IN-02)", async () => {
+      headersGetMock.mockImplementation((name: string) =>
+        name === "x-correlation-id" ? "" : null,
+      );
+      const mod = await import("./correlation-id");
+      const cid = await mod.getCorrelationId();
+      expect(cid).not.toBe("");
+      expect(cid).toMatch(UUID_V4_RE);
+    });
+
+    // Adversarial follow-up: whitespace-only and garbage-shaped inbound
+    // values must also re-mint. Without the shape allowlist, a hostile
+    // proxy could send `X-Correlation-Id: \r\nX-Forwarded-For: evil` and
+    // get the literal value re-broadcast into structlog records (header
+    // injection / log injection).
+    const HOSTILE_INPUTS = [
+      "   ",
+      "\t",
+      "\r\nX-Forwarded-For: evil",
+      "abc def",                       // space — legal in HTTP headers but rejected here
+      "<script>alert(1)</script>",
+      "a".repeat(129),                  // length cap
+      "no-control\x00chars",            // NUL embedded
+    ];
+    for (const hostile of HOSTILE_INPUTS) {
+      it(`rejects hostile inbound value (length=${hostile.length}, sample=${JSON.stringify(hostile.slice(0, 20))}) and mints UUID`, async () => {
+        headersGetMock.mockImplementation((name: string) =>
+          name === "x-correlation-id" ? hostile : null,
+        );
+        const mod = await import("./correlation-id");
+        const cid = await mod.getCorrelationId();
+        expect(cid).toMatch(UUID_V4_RE);
+        expect(cid).not.toBe(hostile);
+      });
+    }
+
+    // Positive: a well-formed broker-prefixed correlation_id must pass through.
+    it("accepts a broker-prefixed UUID like `okx:<uuid>` verbatim", async () => {
+      const valid = "okx:9b3a47de-8c12-4d75-a2e6-ff0e10b2c1d3";
+      headersGetMock.mockImplementation((name: string) =>
+        name === "x-correlation-id" ? valid : null,
+      );
+      const mod = await import("./correlation-id");
+      const cid = await mod.getCorrelationId();
+      expect(cid).toBe(valid);
+    });
+
+    // Positive: leading/trailing whitespace is trimmed but the value is preserved.
+    it("trims surrounding whitespace from a valid inbound value", async () => {
+      const inner = "9b3a47de-8c12-4d75-a2e6-ff0e10b2c1d3";
+      headersGetMock.mockImplementation((name: string) =>
+        name === "x-correlation-id" ? `  ${inner}  ` : null,
+      );
+      const mod = await import("./correlation-id");
+      const cid = await mod.getCorrelationId();
+      expect(cid).toBe(inner);
+    });
   });
 });

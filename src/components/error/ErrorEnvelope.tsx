@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { scrubFreeformString } from "@/lib/admin/pii-scrub";
 import type { ErrorEnvelope as ErrorEnvelopeType } from "@/lib/envelope";
@@ -64,13 +64,43 @@ export function ErrorEnvelope({
   onCancel,
 }: ErrorEnvelopeProps) {
   const [copied, setCopied] = useState(false);
+  // Phase-16 IN-01: track the 2s "Copied" flash so we can clear it if the
+  // component unmounts mid-flash (e.g. user navigates away after clicking
+  // Copy). Without this the timer fires on an unmounted tree and React 19
+  // tolerates it but holds the stale closure.
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Adversarial follow-up to IN-01: `navigator.clipboard.writeText` is async,
+  // so the resolution can land AFTER the cleanup effect has already run.
+  // Track mounted-ness so the post-await `setCopied`/`setTimeout` short-
+  // circuits when the tree is gone (otherwise the timer-cleanup guard above
+  // never sees the timer because it was registered post-unmount).
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (copiedTimerRef.current !== null) {
+        clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = null;
+      }
+    };
+  }, []);
 
   async function copyDiagnostics() {
     try {
       await navigator.clipboard.writeText(buildDiagBlock(envelope));
+      if (!isMountedRef.current) return;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      if (copiedTimerRef.current !== null) {
+        clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = setTimeout(() => {
+        setCopied(false);
+        copiedTimerRef.current = null;
+      }, 2000);
     } catch {
+      if (!isMountedRef.current) return;
       setCopied(false);
     }
   }
@@ -132,11 +162,11 @@ export function ErrorEnvelope({
       <details className="mt-3 text-xs text-text-secondary">
         <summary className="cursor-pointer">Diagnostics</summary>
         <p className="mt-2">
-          code: <code className="font-mono">{envelope.code}</code>
+          code: <code className="font-metric tabular-nums">{envelope.code}</code>
         </p>
         <p>
           correlation_id:{" "}
-          <code className="font-mono">{envelope.correlation_id}</code>
+          <code className="font-metric tabular-nums">{envelope.correlation_id}</code>
         </p>
         <Button
           type="button"
