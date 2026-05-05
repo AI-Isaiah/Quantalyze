@@ -241,18 +241,21 @@ class TestBybitParser:
     async def test_read_only_flag_supersedes_permissions_array(self):
         # Regression: 2026-05-05. A real Bybit V5 read-only key
         # (id=8qI8luq5LQeo023aDp, note="MWF-Read") returned
-        # readOnly=1 BUT also reported ContractTrade=[Order, Position],
+        # readOnly="1" BUT also reported ContractTrade=[Order, Position],
         # Spot=[SpotTrade], Options=[OptionsTrade], Derivatives=[
         # DerivativesTrade]. Pre-fix that tripped trade=True and the
         # wizard rejected the key with "Key has trading permissions."
-        # Post-fix: readOnly=1 is the authoritative flag and the key is
+        # Post-fix: readOnly="1" is the authoritative flag and the key is
         # accepted. The permissions arrays describe READ-side scopes
         # (which API areas are queryable), not write capability.
+        # NOTE: readOnly is "1" (STRING) in the live ccxt response. An
+        # earlier version of this test used the int 1 and the fix code
+        # used `== 1`, so the test passed but production failed.
         ex = AsyncMock()
         ex.id = "bybit"
         ex.private_get_v5_user_query_api = AsyncMock(return_value={
             "result": {
-                "readOnly": 1,
+                "readOnly": "1",  # STRING — matches live ccxt response shape
                 "permissions": {
                     "ContractTrade": ["Order", "Position"],
                     "Spot": ["SpotTrade"],
@@ -269,9 +272,28 @@ class TestBybitParser:
             "withdraw": False,
             "probe_error": False,
         }, (
-            "readOnly=1 must supersede the permissions array; the live "
-            "Bybit V5 key returned permission categories alongside "
-            "readOnly=1 and was incorrectly rejected as a trading key."
+            "readOnly=\"1\" (string) must supersede the permissions array; "
+            "the live Bybit V5 key returned permission categories alongside "
+            "readOnly=\"1\" and was incorrectly rejected as a trading key."
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_only_flag_accepts_int_one_too(self):
+        # Bybit V5 occasionally returns numeric fields as int (raw curl
+        # vs ccxt's string-coerced shape differ). The check must be
+        # robust against both wire shapes.
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {
+                "readOnly": 1,  # int — matches raw HTTP response
+                "permissions": {"Spot": ["SpotTrade"]},
+            },
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result["trade"] is False, (
+            "readOnly as int 1 must also be treated as read-only; "
+            "the check has to handle both str and int wire shapes."
         )
 
     @pytest.mark.asyncio
@@ -285,7 +307,7 @@ class TestBybitParser:
         ex.id = "bybit"
         ex.private_get_v5_user_query_api = AsyncMock(return_value={
             "result": {
-                "readOnly": 1,
+                "readOnly": "1",  # STRING (matches live ccxt response)
                 "permissions": {
                     "Wallet": ["AccountTransfer"],
                 },
@@ -307,7 +329,7 @@ class TestBybitParser:
         ex.id = "bybit"
         ex.private_get_v5_user_query_api = AsyncMock(return_value={
             "result": {
-                "readOnly": 0,
+                "readOnly": "0",  # STRING (matches live ccxt response)
                 "permissions": {"Spot": ["SpotTrade"]},
             },
         })

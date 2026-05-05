@@ -201,8 +201,13 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
     permissions = result.get("permissions", {})
 
     # Authoritative trade-capability flag. Bybit sets readOnly=1 only for
-    # keys created via the dashboard's "Read-only" toggle.
-    is_bybit_read_only = result.get("readOnly") == 1
+    # keys created via the dashboard's "Read-only" toggle. Bybit's V5 API
+    # (and ccxt's bybit module) returns numeric fields as STRINGS (e.g.
+    # readOnly: "1", retCode: "0"); a naive `== 1` check would silently
+    # always be False. Compare against str("1") to handle both wire shapes.
+    # Verified 2026-05-05 by direct call against a real read-only key
+    # (id 8qI8luq5LQeo023aDp): ccxt returned readOnly as Python `str`.
+    is_bybit_read_only = str(result.get("readOnly", "")) == "1"
 
     has_withdraw = bool(permissions.get("Wallet"))
 

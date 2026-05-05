@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.0.3] - 2026-05-05
+
+**Bybit `readOnly` flag is a STRING in ccxt — fix `==` comparison.**
+v0.21.0.2 added the readOnly fast-path but used `result.get("readOnly") == 1`. ccxt's bybit module returns Bybit V5 numeric fields as Python `str` (`readOnly: "1"`, `retCode: "0"`, etc.); the int comparison was always False, so the fix never fired in production. The unit test passed because it stubbed `readOnly: 1` (int), not the live `"1"` (str). Live key still rejected as `Key has trading permissions`.
+
+### Fixed
+
+- **`detect_bybit_permissions` now compares `str(readOnly) == "1"`** (`analytics-service/services/key_permissions.py`). Verified by direct ccxt call (`exchange.private_get_v5_user_query_api()`) against the same live key — every numeric field comes back as `str`. The comparison is robust to either `1` (raw HTTP / future ccxt versions) or `"1"` (current ccxt) on the wire.
+- **Tests updated to match the live wire shape.** The regression tests now assert `readOnly: "1"` (string), with a companion `test_read_only_flag_accepts_int_one_too` that pins int compatibility too.
+
+### Test coverage
+
+- `analytics-service/tests/test_key_permissions.py`:
+  - `test_read_only_flag_supersedes_permissions_array` — corrected to use `readOnly: "1"` (string), matching live ccxt response.
+  - `test_read_only_flag_one_with_wallet_perm_still_rejects_withdraw` — corrected to `readOnly: "1"`.
+  - `test_read_only_zero_falls_through_to_permissions` — corrected to `readOnly: "0"`.
+  - `test_read_only_flag_accepts_int_one_too` — NEW. Pins the str-or-int robustness so a future ccxt version that returns int can't quietly break detection.
+
+23/23 tests pass. The failure mode that produced this iteration (test using mock shape that doesn't match live wire shape) is now recorded and guarded.
+
 ## [0.21.0.2] - 2026-05-05
 
 **Bybit `readOnly` flag now authoritative + Railway service moved to `europe-west4`.**
