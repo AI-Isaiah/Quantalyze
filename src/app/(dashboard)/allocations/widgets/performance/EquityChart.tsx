@@ -811,10 +811,10 @@ export function EquityChart({
                   x2={width - pad.r}
                   y1={yPos}
                   y2={yPos}
-                  stroke={isBaseline ? CHART_AXIS_TICK : CHART_BORDER}
-                  strokeWidth={1}
-                  strokeOpacity={0.5}
-                  strokeDasharray={isBaseline ? "4 3" : "2 4"}
+                  stroke={isBaseline ? CHART_TEXT_SECONDARY : CHART_BORDER}
+                  strokeWidth={isBaseline ? 1.25 : 1}
+                  strokeOpacity={isBaseline ? 0.85 : 0.5}
+                  strokeDasharray={isBaseline ? undefined : "2 4"}
                 />
                 <text
                   x={width - pad.r + 4}
@@ -823,6 +823,7 @@ export function EquityChart({
                   fill={isBaseline ? CHART_TEXT_SECONDARY : CHART_AXIS_TICK}
                   fontFamily="var(--font-mono), monospace"
                   textAnchor="start"
+                  fontWeight={isBaseline ? 600 : 400}
                   style={{ fontVariantNumeric: "tabular-nums" }}
                 >
                   {label}
