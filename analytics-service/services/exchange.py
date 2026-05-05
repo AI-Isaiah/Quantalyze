@@ -30,7 +30,20 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
     if passphrase:
         config["password"] = passphrase
 
-    return cls(config)
+    exchange = cls(config)
+
+    if exchange_name == "bybit":
+        # ccxt's bybit `load_markets()` calls `fetch_currencies()`, which hits
+        # `GET /v5/asset/coin/query-info`. That endpoint requires the
+        # Wallet > Account Transfer scope; a pure read-only key gets 403,
+        # which ccxt re-raises as `RateLimitExceeded`. Currency precision
+        # data isn't used for validation OR trade fetching, so we disable
+        # the call. Confirmed 2026-05-05 against a live Bybit read-only key
+        # via Railway log archaeology (correlation_id
+        # 10792caf-1d0b-4ed1-8a30-8ac66e03bbf9).
+        exchange.has["fetchCurrencies"] = False
+
+    return exchange
 
 
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
@@ -47,7 +60,21 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     result: dict[str, Any] = {"valid": False, "read_only": False, "error": None}
 
     try:
-        await exchange.load_markets()
+        try:
+            await exchange.load_markets()
+        except Exception as load_exc:  # noqa: BLE001
+            # Defense in depth: a flaky `load_markets()` (geo-blocked
+            # endpoint, scope-restricted endpoint, transient network blip)
+            # must not reject an otherwise-valid key. The real validation
+            # is `fetch_balance()` plus the per-exchange permission probes
+            # in `services.key_permissions.detect_*_permissions`, neither
+            # of which depend on markets being loaded. Log + continue.
+            logger.warning(
+                "validate_key_permissions: load_markets failed on %s — %s: %s; continuing with fetch_balance",
+                exchange.id,
+                type(load_exc).__name__,
+                load_exc,
+            )
         await exchange.fetch_balance()
         result["valid"] = True
     except ccxt.AuthenticationError as exc:

@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.0.1] - 2026-05-05
+
+**Bybit wizard E2E fix + INTERNAL_API_TOKEN env wired across Vercel + Railway.**
+Real-key /qa pass after v0.21.0.0 surfaced two production issues that v0.21.0.0's `logger.exception` change made debuggable: (a) Bybit read-only keys 403 on `/v5/asset/coin/query-info` during ccxt's `load_markets()`, ccxt re-raises as `RateLimitExceeded`, wizard rejects an otherwise-valid key; (b) `/api/keys/{id}/permissions` returns 502 because `INTERNAL_API_TOKEN` is missing on both Vercel AND Railway (was never set after Sprint 5 Task 5.8 added the route). Both fixed.
+
+### Fixed
+
+- **Bybit `fetchCurrencies` 403 swallowed during `load_markets()`** (`analytics-service/services/exchange.py`). ccxt's `bybit.fetch_currencies()` calls `GET /v5/asset/coin/query-info`, which requires the `Wallet > Account Transfer` scope. A pure read-only key gets 403 Forbidden, which ccxt's bybit module re-raises as `RateLimitExceeded` (misclassification — it's a permission boundary, not a rate limit). The endpoint is also geo-blocked from Railway's egress IPs in some regions. Currency precision metadata is unused for both validation and trade fetching, so we set `exchange.has["fetchCurrencies"] = False` for Bybit in `create_exchange()`. Diagnosed via Railway log archaeology against a live Bybit read-only key on 2026-05-05 (correlation_id `10792caf-1d0b-4ed1-8a30-8ac66e03bbf9`).
+- **`validate_key_permissions` defense in depth.** The previous code rejected the key if either `load_markets()` OR `fetch_balance()` raised. `load_markets()` is a metadata prime that strict regulators (Bybit's wallet endpoint, OKX's region restrictions) can break for keys that are otherwise perfectly functional. The actual validation is `fetch_balance()` succeeding plus the per-exchange permission probes in `services.key_permissions.detect_*_permissions`, neither of which depend on markets. `load_markets()` is now wrapped in try/except — failures log a warning and continue.
+- **`INTERNAL_API_TOKEN` env var wired on Vercel (Production + Preview + Development) and Railway (production).** The `/api/keys/{id}/permissions` Next route forwards an `X-Internal-Token` header to the Railway analytics-service `/internal/keys/{key_id}/permissions` endpoint. Sprint 5 Task 5.8 introduced both ends but the env was never set on either side, so every wizard step-02 page load triggered an `INTERNAL_API_TOKEN is not configured on the Next layer.` alert + a 502 from `unstable_cache`. Same secret value on both sides, generated as 64 hex chars (256 bits).
+
+### Test coverage
+
+- `analytics-service/tests/test_exchange.py`:
+  - `test_bybit_disables_fetch_currencies` — pins the `exchange.has["fetchCurrencies"]` flag for Bybit so a future refactor can't reintroduce the 403.
+  - `test_other_exchanges_keep_fetch_currencies_default` — companion test guards against an over-broad fix that would also disable currency fetching for Binance / OKX (their endpoints don't have the same scope/region issue).
+  - `test_load_markets_failure_does_not_reject_valid_key` — async test that mocks `load_markets()` raising and confirms `validate_key_permissions` still returns `valid=True` from `fetch_balance()`. Pre-fix: returns `valid=False` with the captured exception; post-fix: passes.
+
+All 3 new tests confirmed to fail without the fix and pass with it (verified via `git stash`).
+
+### Verified end-to-end
+
+After the fix is deployed, both broker keys provided in the QA session must drive the full chain:
+
+- OKX (read-only with passphrase) — already verified pre-fix in v0.21.0.0; remains green.
+- Bybit (read-only) — was 400 / `code: UNKNOWN` pre-fix on the same Railway environment; should now sync trades and compute analytics end-to-end.
+
 ## [0.21.0.0] - 2026-05-05
 
 **Phase 18 — Root-cause fix for the recurring "wizard hangs at computing" bug.**
