@@ -222,12 +222,12 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   },
 
   GATE_INSUFFICIENT_DAYS: {
-    title: "This account needs at least 7 days of activity.",
+    title: "This account needs more trading history.",
     cause:
-      "Volatility and drawdown estimates become unstable below 7 days of trading history. We require 7 calendar days between the earliest and latest trade.",
+      "We measure trading history as calendar days between the earliest and latest trade, not by trade count. Volatility and drawdown estimates become unstable below 7 calendar days, so we require at least 7 calendar days of span before computing a verified factsheet.",
     fix: [
-      "Keep trading and come back once you have a full week of history. Your draft is saved for 30 days.",
-      "Or use a different key with longer history.",
+      "Keep trading and come back once your earliest and latest trades span at least 7 calendar days. Your draft is saved for 30 days.",
+      "Or use a different key whose trades span a longer time window.",
     ],
     docsHref: "/security#thresholds",
     actions: ["try_another_key", "request_call"],
@@ -552,7 +552,7 @@ export function formatKeyError(
     return {
       ...base,
       cause:
-        `We found ${context.days.toFixed(1)} days of trading history. ` + base.cause,
+        `Your trades span ${context.days.toFixed(1)} calendar day(s). ` + base.cause,
     };
   }
 

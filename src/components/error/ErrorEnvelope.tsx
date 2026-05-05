@@ -119,6 +119,14 @@ export function ErrorEnvelope({
       <p className="text-base font-semibold text-text-primary">
         {envelope.human_message}
       </p>
+      {envelope.cause && (
+        // Phase 21 — surface WizardErrorCopy.cause so the user sees WHY,
+        // not just WHAT. Was being silently dropped by buildEnvelope before
+        // this commit (only title/fix made it through). Same a11y-aware
+        // text-text-secondary token used for debug_context, so contrast
+        // ratios on bg-negative/5 stay above 4.5:1.
+        <p className="mt-1.5 text-sm text-text-secondary">{envelope.cause}</p>
+      )}
       {envelope.debug_context.length > 0 && (
         // Phase 17 / DESIGN-05: text-text-secondary (#4A5568) on bg-negative/5
         // (~#FDF4F4) yields ~7.81:1, comfortably above WCAG 2.0 AA (≥4.5:1).
