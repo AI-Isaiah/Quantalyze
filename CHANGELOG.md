@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.20.1.0] - 2026-05-05
+
+**Phase 17 post-ship hardening.** Closes three real defects flagged in the Phase 16 / Phase 17 review backlog plus three additional issues an adversarial pass surfaced during /ship.
+
+### Fixed
+
+- **Inbound `correlation_id` hardening (Phase-16 IN-02 + adversarial header-injection).** `getCorrelationId()` no longer re-broadcasts empty, whitespace-only, oversize, or CR-LF-poisoned values from the inbound `X-Correlation-Id` header. A conservative shape allowlist (`[A-Za-z0-9._:-]{1,128}`) is enforced after a `.trim()`; anything off-shape mints a fresh UUID. Previously a hostile upstream proxy could inject `\r\nX-Forwarded-For: evil` and have it land verbatim in structlog records.
+- **`ErrorEnvelope` 2s "Copied" flash leak (Phase-16 IN-01).** The flash timer is now tracked through `useRef` and cleared in the `useEffect` cleanup. An `isMountedRef` guard also prevents the post-`await` `setCopied(true)` from running if `navigator.clipboard.writeText` resolves after the component has unmounted.
+- **Diagnostics `<code>` typography drift (Phase-17 UI-REVIEW Pillar 4).** The `code:` and `correlation_id:` slots in `ErrorEnvelope`'s diagnostics accordion were rendering through Tailwind's default `font-mono` instead of the project's `font-metric tabular-nums` utility. Tabular numerals now render correctly during the 2s "Copied" flash so UUID digits don't jitter.
+
+### Changed
+
+- `analytics-service/main.py`: `_PROCESS_START_AT` is now defined at the top of the module alongside `WORKER_LAST_TICK_AT` so a top-down read of `/health` makes the lifetime obvious (Phase-16 IN-04).
+- `analytics-service/routers/debug_key_flow.py`: dropped three misleading `creds = None  # noqa: F841 — best-effort scrub` rebinds. Python `str` is immutable; the rebind achieved nothing measurable. The module docstring now documents the credential lifetime honestly (Phase-16 IN-05).
+- `src/app/layout.tsx`: replaced the in-JSX `(CORRELATION_HEADER satisfies "x-correlation-id") && null` drift sentinel with a module-scope `_CORRELATION_HEADER_DRIFT_GUARD: "x-correlation-id" = CORRELATION_HEADER`. Same compile-time guarantee, no runtime dead JSX (Phase-16 IN-06).
+- `tests/a11y/wizard-contrast.test.ts`: `WARNING_BG_5` comment now spells out which token it approximates (resolved `bg-warning/5` over `#FFFFFF`, not Tailwind amber-100) so a future maintainer doesn't switch the literal under the assumption it's the wrong colour (Phase-17 IN-03).
+- `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx`: comment now explains why the SSR-safe lazy ref-init pattern is preferred over `useState` lazy init (Phase-15 IN-05).
+
+### Test coverage
+
+- `src/components/error/ErrorEnvelope.test.tsx`: +3 regression tests (timer-cleared-on-unmount via setTimeout-ID assertion, post-await unmount with no React state-update warning, clean-unmount-without-copy companion).
+- `src/lib/analytics-client.test.ts`: +9 hostile-input cases (empty string, whitespace, CR-LF injection, embedded NUL, oversize, embedded space, embedded HTML) + 2 happy-path positives (broker-prefixed UUID, surrounding-whitespace trim) for the `getCorrelationId` allowlist.
+
+All 10 new regression tests confirmed to fail without the fix and pass with it.
+
 ## [0.20.0.0] - 2026-05-03
 
 **Phase 17 — Design Contract.** Lock the visual language and a11y minimums before Phase 18+ backend rewrites. The three trust-tier badges (`api_verified` / `csv_uploaded` / `self_reported`) now read their hexes and labels from a single `src/lib/design-tokens/trust-tier.ts` module. The `ErrorEnvelope` is a canonical surface-agnostic error renderer used across the wizard, CSV upload, factsheet, admin pages, and future `error.tsx` route boundaries — typography lock (`text-base font-semibold text-text-primary`), copy-to-clipboard `QUANTALYZE_DIAG` block with three-pass PII scrub (key:value redaction → anchored JWT → embedded JWT), `role="alert"` + `aria-live`. The wizard's CSV branch now sources every error string from the canonical `wizardErrors.ts` (17 new `CSV_*` codes, 3 step-heading bundles, rule label table, helpers). 16 fg/bg contrast pairs + 3 borders pinned in a vitest suite; two axe-core Playwright specs author the CI scan ahead of seed-env wiring.
