@@ -39,9 +39,26 @@ async function loginAsAllocator(page: import("@playwright/test").Page) {
   await page.fill('input[name="email"], input[type="email"]', "demo-allocator@quantalyze.test");
   await page.fill('input[name="password"], input[type="password"]', "DemoAlpha2026!");
   await page.click('button[type="submit"]');
-  await page.waitForURL((u) => !u.pathname.endsWith("/login"), {
-    timeout: 10_000,
-  });
+
+  // Race the form-error path against the success-redirect path. When 4
+  // Playwright workers all hit `signInWithPassword` with the same demo
+  // creds in parallel, Supabase's per-email rate limiter throttles some
+  // of them; the form re-renders with `text-negative` error copy and
+  // we never navigate. Without surfacing that, `waitForURL` times out
+  // with a useless "page didn't navigate" message.
+  await Promise.race([
+    page
+      .waitForURL((u) => !u.pathname.endsWith("/login"), { timeout: 12_000 })
+      .then(() => "navigated"),
+    page
+      .locator(".text-negative")
+      .first()
+      .waitFor({ timeout: 12_000 })
+      .then(async () => {
+        const msg = await page.locator(".text-negative").first().textContent();
+        throw new Error(`login form rejected: ${msg ?? "(no text captured)"}`);
+      }),
+  ]);
 }
 
 function attachConsoleCapture(page: import("@playwright/test").Page) {
@@ -97,6 +114,13 @@ function reportAndAssert(
     `[${label}] Hydration warnings/errors detected — see test output above for diff.`,
   ).toEqual([]);
 }
+
+// All scenarios share the demo-allocator credential. Running them in
+// parallel hammers Supabase's per-email rate limiter and produces
+// non-determinism unrelated to hydration. Serial mode keeps the probe
+// reliable; the run takes ~30s either way because each scenario
+// already loads two pages.
+test.describe.configure({ mode: "serial" });
 
 test.describe("wizard hydration probe", () => {
   test("API branch fresh load", async ({ page }) => {
