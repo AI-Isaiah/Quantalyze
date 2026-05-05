@@ -173,10 +173,23 @@ async def detect_okx_permissions(exchange: ccxt.Exchange) -> PermissionDict:
 
 
 async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
-    """Bybit: ``GET /v5/user/query-api`` returns a ``permissions`` object
-    keyed by category (``ContractTrade``, ``Spot``, ``Exchange``, ``Wallet``…).
-    Trade = any of the trading-category arrays is non-empty;
-    Withdraw = ``Wallet`` is non-empty.
+    """Bybit: ``GET /v5/user/query-api`` returns a ``readOnly`` integer
+    flag plus a ``permissions`` object.
+
+    Bybit V5 quirk (confirmed against a live read-only key, 2026-05-05):
+    the ``permissions`` arrays describe the SCOPE of read access (which
+    API categories the key can query) rather than active write capability.
+    A read-only key can show ``ContractTrade: ["Order", "Position"]`` and
+    ``Spot: ["SpotTrade"]`` while having ``readOnly: 1`` at the top level
+    — those entries indicate the key can READ orders/positions/spot data,
+    not that it can place trades. The authoritative trade-capability flag
+    is ``readOnly``: ``1`` means the key cannot trade or withdraw,
+    regardless of what's in the permissions object.
+
+    The ``Wallet`` permission array gates withdrawals specifically; a
+    read-only key returns ``Wallet: []``. We still inspect it for
+    defense in depth so a future Bybit API change that decouples
+    ``readOnly`` from ``Wallet`` doesn't silently grant withdrawal.
     """
     try:
         api_info = await exchange.private_get_v5_user_query_api()
@@ -184,13 +197,30 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
         logger.warning("Bybit permission probe failed: %s", exc)
         return dict(_FAIL_CLOSED)
 
-    permissions = api_info.get("result", {}).get("permissions", {})
+    result = api_info.get("result", {})
+    permissions = result.get("permissions", {})
+
+    # Authoritative trade-capability flag. Bybit sets readOnly=1 only for
+    # keys created via the dashboard's "Read-only" toggle.
+    is_bybit_read_only = result.get("readOnly") == 1
+
+    has_withdraw = bool(permissions.get("Wallet"))
+
+    if is_bybit_read_only:
+        # readOnly=1 supersedes the permissions arrays for trade detection.
+        # Withdraw stays from the Wallet array as a defense-in-depth check.
+        return {
+            "read": True,
+            "trade": False,
+            "withdraw": has_withdraw,
+            "probe_error": False,
+        }
+
     has_trade = bool(
         permissions.get("ContractTrade")
         or permissions.get("Spot")
         or permissions.get("Exchange")
     )
-    has_withdraw = bool(permissions.get("Wallet"))
     return {
         "read": True,
         "trade": has_trade,
