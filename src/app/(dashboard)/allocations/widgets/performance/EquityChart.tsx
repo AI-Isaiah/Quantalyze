@@ -7,6 +7,7 @@ import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
+import { formatRelativeTime } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -103,6 +104,15 @@ type Props = {
    * row so the layout collapses to a single header line.
    */
   hideLegend?: boolean;
+  /**
+   * ADVERSARIAL-EQ-6 — most recent successful API key sync timestamp.
+   * When `stale=true`, displayed inside the stale-dimmer overlay as
+   * "Last updated 2h ago" so the allocator knows how stale the data
+   * actually is. Null/undefined falls back to the previous "Data may
+   * be stale" copy (so older call sites that don't yet plumb this
+   * through don't regress). ISO-8601 string.
+   */
+  lastSyncAt?: string | null;
 };
 
 /**
@@ -216,6 +226,7 @@ export function EquityChart({
   onCustomRangeChange,
   hideHeader = false,
   hideLegend = false,
+  lastSyncAt = null,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(960);
@@ -777,8 +788,15 @@ export function EquityChart({
               color: "var(--color-text-muted)",
               fontFamily: "var(--font-sans)",
             }}
+            title={
+              lastSyncAt
+                ? new Date(lastSyncAt).toLocaleString()
+                : undefined
+            }
           >
-            sync just now
+            {lastSyncAt
+              ? `last sync ${formatRelativeTime(lastSyncAt, Date.now())}`
+              : "sync just now"}
           </div>
         </div>
       </div>
@@ -1083,7 +1101,11 @@ export function EquityChart({
 
         {/* Stale dimmer — Phase 07 / 07-05 / D-10 visual half of the
             stale gate. Only the chart tile carries this; non-chart
-            widgets are unaffected. */}
+            widgets are unaffected.
+            ADVERSARIAL-EQ-6 — when `lastSyncAt` is supplied, the copy
+            shifts from the static "Data may be stale" to a relative
+            "Last updated Xh ago" so the allocator can answer "how
+            stale?" without leaving the widget. */}
         {stale && (
           <div
             aria-hidden
@@ -1091,7 +1113,9 @@ export function EquityChart({
             className="absolute inset-0 flex items-center justify-center bg-page/40 pointer-events-none"
           >
             <span className="rounded-md bg-surface px-3 py-1 text-sm font-medium text-text-secondary shadow-sm">
-              Data may be stale
+              {lastSyncAt
+                ? `Last updated ${formatRelativeTime(lastSyncAt, Date.now())}`
+                : "Data may be stale"}
             </span>
           </div>
         )}
@@ -1209,6 +1233,15 @@ interface EquityChartWidgetData {
   btcBenchmark?: DailyPoint[];
   equityOverlays?: OverlaySeries[];
   allKeysStale?: boolean;
+  /**
+   * ADVERSARIAL-EQ-6 — most recent successful API key sync timestamp,
+   * forwarded from the dashboard payload (`MyAllocationDashboardPayload
+   * .lastSyncAt`). Surfaced in the stale-dimmer overlay copy and
+   * (when non-stale) in the card-header sync stamp so the allocator
+   * can answer "when did this last refresh?" without leaving the
+   * widget. ISO-8601 string or null when no successful sync exists.
+   */
+  lastSyncAt?: string | null;
 }
 
 export default function EquityChartWidget({ data }: WidgetProps) {
@@ -1219,7 +1252,23 @@ export default function EquityChartWidget({ data }: WidgetProps) {
   const benchmark = d.btcBenchmark;
   const overlays = d.equityOverlays ?? [];
   const stale = d.allKeysStale ?? false;
+  const lastSyncAt = d.lastSyncAt ?? null;
   const hasBenchmark = !!benchmark && benchmark.length > 0;
+
+  // ADVERSARIAL-EQ-6 — relative-time stamp for the card-header sync
+  // affordance. When `lastSyncAt` is present we surface "Updated 2h
+  // ago" / "Last sync 2h ago"; absent or pre-sync state falls back to
+  // the previous "sync just now" / "data stale" copy. The
+  // formatRelativeTime helper is the project-canonical formatter
+  // (used by MandateSaveStatus, ComputeJobsTable, AdminTabs) — same
+  // bucket idiom keeps the strings consistent across the app.
+  const syncStampCopy = (() => {
+    if (!lastSyncAt) {
+      return stale ? "data stale" : "sync just now";
+    }
+    const rel = formatRelativeTime(lastSyncAt, Date.now());
+    return stale ? `stale · last sync ${rel}` : `last sync ${rel}`;
+  })();
 
   const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
@@ -1467,8 +1516,13 @@ export default function EquityChartWidget({ data }: WidgetProps) {
               color: "var(--color-text-muted)",
               fontFamily: "var(--font-sans)",
             }}
+            title={
+              lastSyncAt
+                ? new Date(lastSyncAt).toLocaleString()
+                : undefined
+            }
           >
-            {stale ? "data stale" : "sync just now"}
+            {syncStampCopy}
           </div>
         </div>
       </div>
@@ -1482,6 +1536,7 @@ export default function EquityChartWidget({ data }: WidgetProps) {
           onPeriodChange={setPeriod}
           customRange={customRange}
           onCustomRangeChange={setCustomRange}
+          lastSyncAt={lastSyncAt}
           hideHeader
           hideLegend
         />

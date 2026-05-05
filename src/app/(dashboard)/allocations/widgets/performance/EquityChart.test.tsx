@@ -171,7 +171,56 @@ describe("EquityChart", () => {
     );
     const staleEl = container.querySelector('[data-testid="equity-chart-stale"]');
     expect(staleEl).not.toBeNull();
+    // Without `lastSyncAt`, copy falls back to the static "Data may be
+    // stale" so older call sites that don't yet plumb the timestamp
+    // through don't regress.
     expect(container.textContent).toMatch(/Data may be stale/i);
+  });
+
+  it("ADVERSARIAL-EQ-6 — stale overlay shows 'Last updated Nh ago' when lastSyncAt is supplied", () => {
+    // Pin a known ISO ~3 hours in the past relative to a test-controlled
+    // clock so the helper's bucket arithmetic is deterministic. Vitest's
+    // setSystemTime keeps Date.now() stable for the assertion.
+    const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
+    vi.setSystemTime(NOW);
+    try {
+      const lastSyncAt = new Date(NOW - 3 * 60 * 60 * 1000).toISOString();
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={makeSeries(60)}
+          stale
+          lastSyncAt={lastSyncAt}
+          initialPeriod="ALL"
+        />,
+      );
+      const staleEl = container.querySelector(
+        '[data-testid="equity-chart-stale"]',
+      );
+      expect(staleEl).not.toBeNull();
+      expect(staleEl?.textContent).toContain("Last updated 3h ago");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ADVERSARIAL-EQ-6 — header sync stamp uses relative time when lastSyncAt is supplied", () => {
+    const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
+    vi.setSystemTime(NOW);
+    try {
+      const lastSyncAt = new Date(NOW - 5 * 60 * 1000).toISOString();
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={makeSeries(60)}
+          lastSyncAt={lastSyncAt}
+          initialPeriod="ALL"
+        />,
+      );
+      // Header copy reads "last sync 5m ago" rather than "sync just now".
+      expect(container.textContent).toContain("last sync 5m ago");
+      expect(container.textContent).not.toContain("sync just now");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does NOT render 1D or 1W buttons (intraday deferred)", () => {
