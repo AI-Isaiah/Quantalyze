@@ -290,6 +290,76 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(screen.queryByText("Copied to clipboard")).toBeNull();
   });
 
+  // Phase-16 IN-01 regression: when the component unmounts inside the 2s
+  // "Copied" flash window, the timer must be cleared so it never fires on
+  // an unmounted tree. We capture the setTimeout return id from the
+  // component's call, spy on clearTimeout, and assert the spy is invoked
+  // with that exact id during unmount. Asserting on the id (not the call
+  // count) avoids the brittleness of counting all clearTimeout calls in
+  // the process — Testing-Library and jsdom may call clearTimeout
+  // internally, but they will not call it with our specific id.
+  it("clears the 'Copied' timer on unmount during flash (Phase-16 IN-01)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const { unmount } = render(<ErrorEnvelope envelope={makeEnvelope()} />);
+    fireEvent.click(screen.getByText("Copy diagnostics"));
+    await waitFor(() => {
+      expect(screen.getByText("Copied")).toBeInTheDocument();
+    });
+    // The component's 2s timer is the most recent setTimeout call with
+    // a 2000ms delay. Capture its return id.
+    const componentTimerCall = setTimeoutSpy.mock.results
+      .filter((_, i) => setTimeoutSpy.mock.calls[i][1] === 2000)
+      .pop();
+    expect(componentTimerCall).toBeDefined();
+    const componentTimerId = componentTimerCall!.value;
+    unmount();
+    // Cleanup must clear THAT specific id.
+    const clearedIds = clearTimeoutSpy.mock.calls.map((c) => c[0]);
+    expect(clearedIds).toContain(componentTimerId);
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+  });
+
+  // Adversarial follow-up to IN-01: navigator.clipboard.writeText is async,
+  // so the resolution can land AFTER unmount. Without an isMounted guard,
+  // the post-await `setCopied(true)` would queue a React state update on
+  // an unmounted tree (React 19 warns; React 18 logged loudly). The fix
+  // checks `isMountedRef.current` BEFORE touching state.
+  it("does not setCopied after unmount even if writeText resolves late", async () => {
+    let resolveWrite: () => void = () => {};
+    const writeText = vi.fn(
+      () => new Promise<void>((res) => { resolveWrite = res; }),
+    );
+    Object.assign(navigator, { clipboard: { writeText } });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { unmount } = render(<ErrorEnvelope envelope={makeEnvelope()} />);
+    fireEvent.click(screen.getByText("Copy diagnostics"));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    // Unmount BEFORE the clipboard promise resolves.
+    unmount();
+    // Now resolve. Without the isMounted guard, this would trigger a
+    // setState-on-unmounted-component warning. With the guard, it's a no-op.
+    resolveWrite();
+    await Promise.resolve();
+    await Promise.resolve();
+    // No React warnings about state updates on unmounted components.
+    const warningCalls = consoleErrorSpy.mock.calls.filter((args) =>
+      args.some((a) => typeof a === "string" && a.includes("unmounted")),
+    );
+    expect(warningCalls).toHaveLength(0);
+    consoleErrorSpy.mockRestore();
+  });
+
+  // Companion: when no copy click ever happens, the cleanup effect must
+  // not throw or interact with timers it never registered.
+  it("unmounts cleanly when no copy occurred (Phase-16 IN-01)", () => {
+    const { unmount } = render(<ErrorEnvelope envelope={makeEnvelope()} />);
+    expect(() => unmount()).not.toThrow();
+  });
+
   // Empty debug_context → guard clause at line 154 in the component must
   // suppress the <ul>. Without the guard, the surface renders an empty
   // bullet list which is a screen-reader noise source.

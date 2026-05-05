@@ -64,6 +64,12 @@ limiter = Limiter(key_func=get_remote_address)
 # worker-task crash cannot masquerade as a healthy API.
 WORKER_LAST_TICK_AT: float = 0.0
 WORKER_STALE_THRESHOLD_S = 90.0
+# Captured at module import so /health can grant a startup-grace window
+# before failing on a stale dispatch tick. Defined at the top of the module
+# alongside WORKER_LAST_TICK_AT (Phase-16 IN-04: previously assigned at the
+# bottom of the file, AFTER health() referenced it — worked at call-time
+# but mis-read on a top-down scan).
+_PROCESS_START_AT = time.time()
 
 
 @asynccontextmanager
@@ -251,6 +257,3 @@ async def health():
     if stale:
         return JSONResponse(body, status_code=503)
     return body
-
-
-_PROCESS_START_AT = time.time()

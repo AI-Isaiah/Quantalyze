@@ -6,6 +6,14 @@ import { DM_Sans, Instrument_Serif, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { getCorrelationId, CORRELATION_HEADER } from "@/lib/correlation-id";
 
+// Phase-16 IN-06: drift guard at module scope — fails the type-check if
+// CORRELATION_HEADER ever drifts from the literal string inlined into the
+// <meta name="x-correlation-id"> below. Replaces the prior
+// `(CORRELATION_HEADER satisfies "x-correlation-id") && null` JSX which had
+// a pointless runtime half (`false && null` → `false` → React renders nothing).
+const _CORRELATION_HEADER_DRIFT_GUARD: "x-correlation-id" = CORRELATION_HEADER;
+void _CORRELATION_HEADER_DRIFT_GUARD;
+
 const dmSans = DM_Sans({
   variable: "--font-dm-sans",
   subsets: ["latin"],
@@ -63,11 +71,10 @@ export default async function RootLayout({
         {/* Phase 16 / OBSERV-01: name="x-correlation-id" inlined as a literal
             so the OBSERV acceptance grep can confirm presence without resolving
             the imported `CORRELATION_HEADER` constant. The constant from
-            @/lib/correlation-id IS the source of truth — see assertion below. */}
+            @/lib/correlation-id IS the source of truth — drift is enforced by
+            the module-scope `_CORRELATION_HEADER_DRIFT_GUARD` above (Phase-16
+            IN-06; the prior in-JSX `&& null` half was runtime dead weight). */}
         <meta name="x-correlation-id" content={correlationId} />
-        {/* Sanity assertion — fails the type-check if the constant ever drifts
-            from the inlined string above. */}
-        {(CORRELATION_HEADER satisfies "x-correlation-id") && null}
       </head>
       <body className="h-full font-sans antialiased">
         {children}

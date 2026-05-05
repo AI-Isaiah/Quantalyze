@@ -62,7 +62,14 @@ const SURFACE = "#FFFFFF"; // --color-surface
 // seam intent.
 const NEGATIVE_BG_5 = "#FFF5F5"; // approx of bg-negative/5 over white (lighter
                                  // than the actual #FDF4F4 — see ME-01 note above)
-const WARNING_BG_5 = "#FEF1E5"; // approx of bg-warning/5 over white (defense-in-depth)
+// Phase-17 IN-03: WARNING_BG_5 approximates `bg-warning/5` rendered over
+// white (--color-warning #B45309 at 5% alpha over #FFFFFF, mathematically
+// resolves to #FEF1E5 ≈ rgb(254, 241, 229)). DESIGN.md does NOT publish a
+// pre-resolved hex for this surface; #FEF3C7 (Tailwind amber-100) is a
+// nearby colour but is NOT what `bg-warning/5` renders to. Both #B45309 on
+// #FEF1E5 (4.53:1) and on #FEF3C7 (4.51:1) pass ≥4.5, so the approximation
+// direction is functionally safe; pin is for documentation traceability.
+const WARNING_BG_5 = "#FEF1E5"; // resolved bg-warning/5 over #FFFFFF
 const TRACK = "#F1F5F9"; // --color-track
 
 // 16 (fg, bg) pairs from UI-SPEC §17 — every fg/bg combination Phase 17

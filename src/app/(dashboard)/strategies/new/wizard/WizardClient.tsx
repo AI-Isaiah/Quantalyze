@@ -84,6 +84,15 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
 
   // Read localStorage once on mount. Three useState initializers below
   // all consume this same snapshot so we don't re-parse JSON three times.
+  //
+  // Phase-15 IN-05: this is an SSR-safe lazy ref-init pattern. `useState`
+  // with a lazy initializer would also run only once but evaluates BEFORE
+  // the first render commits, which on SSR (no window) would fall through
+  // to the `null` branch and pin the ref to null forever even after
+  // hydration. The `if (typeof window !== "undefined" && ref.current ===
+  // null)` form runs at every render but the inner block fires at most
+  // once — first-client-render seeds the ref; subsequent renders short-
+  // circuit on `current === null` returning false.
   const initialLocalStateRef = useRef<ReturnType<typeof loadWizardState>>(null);
   if (typeof window !== "undefined" && initialLocalStateRef.current === null) {
     initialLocalStateRef.current = loadWizardState();

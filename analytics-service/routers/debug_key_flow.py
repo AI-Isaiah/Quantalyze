@@ -16,6 +16,14 @@ be developed in parallel. Wiring the real unified-pipeline calls
 (services.exchange.validate_key_permissions / fetch_raw_trades) happens at the
 [BLOCKING] founder checkpoint (Task 5) once DEBUG_KEY_FLOW_* env-blobs are staged
 in Railway. Test creds are SEPARATE blobs — NEVER user-real keys.
+
+CREDENTIAL LIFETIME: Python `str` is immutable, so we cannot zero the underlying
+bytes after use. The `creds` dict goes out of scope at function-return and the
+GC reclaims it; that is the only "scrub" the language permits. A real wipe would
+require pre-allocated bytearrays exchanged with the exchange client. We do NOT
+pretend to scrub by rebinding `creds = None` — that achieves nothing measurable.
+Phase-16 IN-05 dropped the misleading rebinds; the lifetime guarantee here is
+"function-scoped + GC", documented honestly.
 """
 
 from __future__ import annotations
@@ -102,7 +110,6 @@ async def validate_key(
         creds = _read_test_creds(body.broker)
         # Placeholder — preserves StepResponse shape. Real call wired at founder-gate.
         validation_result = {"valid": True, "broker": body.broker, "fields_decrypted": list(creds.keys())}
-        creds = None  # noqa: F841 — best-effort scrub before return
         return StepResponse(
             step="validate_key",
             status="ok",
@@ -135,7 +142,6 @@ async def encrypt_key(
             "broker": body.broker,
             "decrypted_field_lengths": {k: len(v) for k, v in creds.items()} if creds else {},
         }
-        creds = None  # noqa: F841 — best-effort scrub before return
         return StepResponse(
             step="encrypt_key",
             status="ok",
@@ -162,10 +168,12 @@ async def fetch_trades(
     _verify_internal_token(x_internal_token)
     t0 = time.monotonic()
     try:
-        creds = _read_test_creds(body.broker)
         # Single-page trades fetch placeholder — preserves StepResponse shape.
+        # _read_test_creds is invoked to prove the env-blob decrypt path is
+        # healthy; the result is intentionally unused until the real
+        # services.exchange.fetch_raw_trades wiring lands at founder-gate.
+        _read_test_creds(body.broker)
         trades_summary = {"broker": body.broker, "fetched": 0}
-        creds = None  # noqa: F841 — best-effort scrub before return
         return StepResponse(
             step="fetch_trades",
             status="ok",
