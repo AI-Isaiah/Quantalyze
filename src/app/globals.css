@@ -92,6 +92,16 @@
   /* --- Shadows --- */
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+
+  /* --- Border radius (DESIGN.md §Border radius ladder) ---
+     Was missing from @theme inline so widget call sites referencing
+     `var(--radius-{md,lg})` (KpiStripWidget, MandateSnapshotWidget)
+     silently fell back to border-radius:0. Surface as proper tokens
+     so the cards render their 6/8 px corners per DESIGN.md spec. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
 }
 
 /* Respect user motion preferences for the shared `animate-pulse` utility,
