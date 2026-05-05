@@ -257,7 +257,7 @@ describe("EquityChart", () => {
     expect(queryByLabelText("Return over ALL")).toBeNull();
   });
 
-  it("gradient uses the --chart-strategy design token (no hardcoded hex)", () => {
+  it("gradient uses the --color-chart-strategy design token (no hardcoded hex)", () => {
     const { container } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
@@ -266,13 +266,17 @@ describe("EquityChart", () => {
     const svg = container.querySelector("svg")!;
     const stops = Array.from(svg.getElementsByTagName("stop"));
     expect(stops.length).toBeGreaterThan(0);
+    // ADVERSARIAL-EQ-3 — switched from `var(--chart-strategy)` (an
+    // undefined CSS custom property — Tailwind v4 @theme inline only
+    // emits the prefixed `--color-*` names) to `var(--color-chart-strategy)`
+    // which actually resolves in browsers.
     for (const s of stops) {
       const color = s.getAttribute("stop-color") ?? "";
-      expect(color).toMatch(/var\(--chart-strategy\)/);
+      expect(color).toMatch(/var\(--color-chart-strategy\)/);
     }
   });
 
-  it("benchmark path uses the --chart-benchmark design token (no hardcoded hex)", () => {
+  it("benchmark path uses the --color-chart-benchmark design token (no hardcoded hex)", () => {
     const { container } = render(
       <EquityChart
         equityDailyPoints={makeSeries(60)}
@@ -284,7 +288,11 @@ describe("EquityChart", () => {
       'svg path[stroke-dasharray="3 3"]',
     ) as SVGPathElement | null;
     expect(dashed).not.toBeNull();
-    expect(dashed?.getAttribute("stroke")).toBe("var(--chart-benchmark)");
+    // ADVERSARIAL-EQ-3 — same fix as the gradient: switched from
+    // `var(--chart-benchmark)` (undefined) to `var(--color-chart-benchmark)`.
+    expect(dashed?.getAttribute("stroke")).toBe(
+      "var(--color-chart-benchmark)",
+    );
   });
 });
 

@@ -7,17 +7,6 @@ import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
-import {
-  CHART_ACCENT,
-  CHART_AXIS_TICK,
-  CHART_BORDER,
-  CHART_NEGATIVE,
-  CHART_POSITIVE,
-  CHART_SURFACE,
-  CHART_TEXT_MUTED,
-  CHART_TEXT_SECONDARY,
-} from "@/components/charts/chart-tokens";
-import { formatRelativeTime } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -739,7 +728,11 @@ export function EquityChart({
 
       {/* Always-visible legend strip — matches the paths rendered below.
           PR4 #1 — `hideLegend` collapses this row when the wrapper renders
-          the legend chips inline in the card-header row instead. */}
+          the legend chips inline in the card-header row instead. The
+          swatch colors are CSS-resolved (children's elements inherit
+          DOM color), so `var(--color-*)` works here. The chart-token
+          hex literals are used inside the SVG below where SVG props
+          do NOT resolve CSS vars. */}
       {!hideLegend && (
       <div
         aria-label="Series legend"
@@ -748,15 +741,19 @@ export function EquityChart({
           alignItems: "center",
           gap: 12,
           marginBottom: 6,
-          fontSize: 11,
-          fontFamily: "DM Sans",
-          color: "var(--text-muted)",
+          fontSize: 12,
+          fontFamily: "var(--font-sans)",
+          color: "var(--color-text-secondary)",
           flexWrap: "wrap",
         }}
       >
-        <LegendSwatch color="var(--chart-strategy)" label="Portfolio" />
+        <LegendSwatch color="var(--color-chart-strategy)" label="Portfolio" />
         {showBench && visibleBenchmarkNormalized && (
-          <LegendSwatch color="var(--chart-benchmark)" label="BTC" dashed />
+          <LegendSwatch
+            color="var(--color-chart-benchmark)"
+            label="BTC"
+            dashed
+          />
         )}
         {overlaySeries.map((o) => (
           <LegendSwatch key={o.id} color={o.color} label={o.label} />
@@ -774,18 +771,22 @@ export function EquityChart({
           onMouseMove={handleMove}
           onMouseLeave={() => setHoverIdx(null)}
         >
-          {/* Gradient fill — uses the chart-strategy token rather than a
-              hardcoded hex so it stays in sync with DESIGN.md. */}
+          {/* Gradient fill — uses the prefixed `--color-chart-strategy`
+              token (DESIGN.md institutional teal). The bare
+              `--chart-strategy` form previously here was an undefined
+              CSS custom property — Tailwind v4 `@theme inline` only
+              emits the prefixed `--color-*` names, so the gradient
+              rendered as the SVG `currentColor` fallback. */}
           <defs>
             <linearGradient id="eq-grad" x1="0" x2="0" y1="0" y2="1">
               <stop
                 offset="0%"
-                stopColor="var(--chart-strategy)"
+                stopColor="var(--color-chart-strategy)"
                 stopOpacity="0.22"
               />
               <stop
                 offset="100%"
-                stopColor="var(--chart-strategy)"
+                stopColor="var(--color-chart-strategy)"
                 stopOpacity="0"
               />
             </linearGradient>
@@ -811,7 +812,11 @@ export function EquityChart({
                   x2={width - pad.r}
                   y1={yPos}
                   y2={yPos}
-                  stroke={isBaseline ? CHART_TEXT_SECONDARY : CHART_BORDER}
+                  stroke={
+                    isBaseline
+                      ? "var(--color-text-secondary)"
+                      : "var(--color-border)"
+                  }
                   strokeWidth={isBaseline ? 1.25 : 1}
                   strokeOpacity={isBaseline ? 0.85 : 0.5}
                   strokeDasharray={isBaseline ? undefined : "2 4"}
@@ -820,7 +825,11 @@ export function EquityChart({
                   x={width - pad.r + 4}
                   y={yPos + 3}
                   fontSize={12}
-                  fill={isBaseline ? CHART_TEXT_SECONDARY : CHART_AXIS_TICK}
+                  fill={
+                    isBaseline
+                      ? "var(--color-text-secondary)"
+                      : "var(--color-text-muted)"
+                  }
                   fontFamily="var(--font-mono), monospace"
                   textAnchor="start"
                   fontWeight={isBaseline ? 600 : 400}
@@ -838,7 +847,7 @@ export function EquityChart({
             x2={width - pad.r}
             y1={pad.t + chartH}
             y2={pad.t + chartH}
-            stroke="var(--border)"
+            stroke="var(--color-border)"
             strokeWidth={1}
           />
           {ticks.map((t, i) => (
@@ -846,9 +855,9 @@ export function EquityChart({
               key={i}
               x={x(t.i)}
               y={height - 10}
-              fontSize={10.5}
-              fill="var(--text-muted)"
-              fontFamily="DM Sans"
+              fontSize={12}
+              fill="var(--color-text-muted)"
+              fontFamily="var(--font-sans)"
               textAnchor="middle"
             >
               {t.label}
@@ -862,7 +871,7 @@ export function EquityChart({
             <path
               d={toPath(visibleBenchmarkNormalized)}
               fill="none"
-              stroke="var(--chart-benchmark)"
+              stroke="var(--color-chart-benchmark)"
               strokeWidth={1.25}
               strokeDasharray="3 3"
             />
@@ -887,6 +896,9 @@ export function EquityChart({
                   stroke={o.color}
                   strokeWidth={isScenario ? 1.5 : 1.25}
                   strokeOpacity={isScenario ? 1 : 0.85}
+                  data-testid={
+                    isScenario ? "equity-chart-scenario-overlay" : undefined
+                  }
                 />
               );
             })}
@@ -905,7 +917,7 @@ export function EquityChart({
           <path
             d={toPath(visibleNormalized)}
             fill="none"
-            stroke="var(--chart-strategy)"
+            stroke="var(--color-chart-strategy)"
             strokeWidth={1.75}
             strokeOpacity={
               hasScenario && visibilityMode === "scenario" ? 0.3 : 1
@@ -920,7 +932,7 @@ export function EquityChart({
                 x2={x(hoverIdx)}
                 y1={pad.t}
                 y2={pad.t + chartH}
-                stroke="var(--chart-benchmark)"
+                stroke="var(--color-chart-benchmark)"
                 strokeWidth={1}
                 strokeDasharray="2 2"
               />
@@ -928,8 +940,8 @@ export function EquityChart({
                 cx={x(hoverIdx)}
                 cy={y(visibleNormalized[hoverIdx])}
                 r={3.5}
-                fill="var(--chart-strategy)"
-                stroke="var(--color-surface, #fff)"
+                fill="var(--color-chart-strategy)"
+                stroke="var(--color-surface)"
                 strokeWidth={1.5}
               />
             </g>
@@ -952,23 +964,23 @@ export function EquityChart({
                 position: "absolute",
                 top: 8,
                 left,
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
+                background: "var(--color-surface)",
+                border: "1px solid var(--color-border)",
                 borderRadius: 6,
                 padding: "8px 10px",
                 fontSize: 12,
                 boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
                 pointerEvents: "none",
                 minWidth: 190,
-                fontFamily: "DM Sans",
+                fontFamily: "var(--font-sans)",
               }}
             >
               <div
                 style={{
-                  color: "var(--text-muted)",
-                  fontSize: 11,
+                  color: "var(--color-text-muted)",
+                  fontSize: 12,
                   marginBottom: 4,
-                  fontFamily: "Geist Mono",
+                  fontFamily: "var(--font-mono)",
                 }}
               >
                 {new Date(parseISO(visible[i].date)).toLocaleDateString(
@@ -983,13 +995,13 @@ export function EquityChart({
               </div>
               <TooltipRow
                 label="Portfolio"
-                color="var(--chart-strategy)"
+                color="var(--color-chart-strategy)"
                 pct={portPct}
               />
               {benchPct != null && (
                 <TooltipRow
                   label="BTC"
-                  color="var(--chart-benchmark)"
+                  color="var(--color-chart-benchmark)"
                   pct={benchPct}
                   dashed
                 />
@@ -1050,7 +1062,7 @@ function LegendSwatch({
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        color: "var(--text-secondary)",
+        color: "var(--color-text-secondary)",
       }}
     >
       <span
@@ -1104,9 +1116,11 @@ function TooltipRow({
       </span>
       <span
         style={{
-          fontFamily: "Geist Mono, monospace",
+          fontFamily: "var(--font-mono), monospace",
           fontVariantNumeric: "tabular-nums",
-          color: positive ? "var(--positive)" : "var(--negative)",
+          color: positive
+            ? "var(--color-positive)"
+            : "var(--color-negative)",
           fontWeight: 500,
         }}
       >
