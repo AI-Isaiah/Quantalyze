@@ -245,16 +245,25 @@ describe("EquityChart", () => {
     expect(legend.textContent).toMatch(/BTC/);
   });
 
-  it("PR3 (dashboard parity) — renders 'sync just now' stamp instead of always-visible return summary", () => {
-    // PR3 dropped the right-side return-summary div ("ALL +1.23%") that
-    // collided with the prototype's "sync 2m ago" affordance. The Y-axis
-    // labels + hover crosshair already surface the period return; the
-    // sync stamp is the truth-screenshot's right-aligned chrome.
-    const { getByText, queryByLabelText } = render(
+  it("ADVERSARIAL-EQ-5 — renders both the sync stamp AND an always-visible period return summary", () => {
+    // PR3 had dropped the right-side return-summary div as a parity
+    // tradeoff for the truth screenshot's "sync 2m ago" stamp. The
+    // adversarial review re-introduces the summary because the y-axis
+    // labels alone don't give a glance-able answer to "what's my
+    // current return?" — the user still has to mentally interpolate
+    // the rightmost line endpoint against the tick scale.
+    //
+    // Both chrome elements now render: the sync stamp (truth-screenshot
+    // parity) AND the return summary (`aria-label="Return over {period}"`
+    // — the same naming convention used before PR3 removed it).
+    const { getByText, getByLabelText } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
     expect(getByText("sync just now")).toBeTruthy();
-    expect(queryByLabelText("Return over ALL")).toBeNull();
+    const summary = getByLabelText("Return over ALL");
+    expect(summary).toBeTruthy();
+    // Summary text matches "+x.xx%" / "-x.xx%" pattern.
+    expect(summary.textContent).toMatch(/^ALL[+-]?\d+(\.\d+)?%$/);
   });
 
   it("gradient uses the --color-chart-strategy design token (no hardcoded hex)", () => {

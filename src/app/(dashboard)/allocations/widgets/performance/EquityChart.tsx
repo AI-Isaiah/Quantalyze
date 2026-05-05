@@ -384,6 +384,19 @@ export function EquityChart({
   const basePort = visible[0]?.value ?? 1;
   const visibleNormalized = visible.map((p) => p.value / basePort);
 
+  // ADVERSARIAL-EQ-5 — period total return for the always-visible
+  // summary chip. The chip surfaces the end-of-window return for the
+  // selected period without requiring a hover, so the allocator can
+  // glance at the chart and immediately see "+12.4% over 6M". Equal
+  // to (last point / first point - 1), which is exactly the y-value
+  // of the rightmost line endpoint after period normalization.
+  const periodReturn =
+    visibleNormalized.length > 0
+      ? visibleNormalized[visibleNormalized.length - 1] - 1
+      : 0;
+  const periodReturnPositive = periodReturn >= 0;
+  const periodReturnLabel = `${periodReturnPositive ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`;
+
   const baseBench =
     visibleBenchmark
       ? visibleBenchmark.find((v): v is number => v != null) ?? null
@@ -716,12 +729,57 @@ export function EquityChart({
 
         <div
           style={{
-            fontSize: 11,
-            color: "var(--color-text-muted)",
-            fontFamily: "var(--font-sans)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
           }}
         >
-          sync just now
+          {/* ADVERSARIAL-EQ-5 — always-visible period return summary so
+              the allocator doesn't need to hover or read the y-axis to
+              know "where the line ends up". Sits at the right edge of
+              the header next to the sync stamp. */}
+          <div
+            aria-label={`Return over ${period}`}
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 4,
+              fontFamily: "var(--font-mono), monospace",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              {period}
+            </span>
+            <span
+              style={{
+                fontSize: 14,
+                fontWeight: 600,
+                color: periodReturnPositive
+                  ? "var(--color-positive)"
+                  : "var(--color-negative)",
+              }}
+            >
+              {periodReturnLabel}
+            </span>
+          </div>
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--color-text-muted)",
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            sync just now
+          </div>
         </div>
       </div>
       )}
@@ -1176,6 +1234,22 @@ export default function EquityChartWidget({ data }: WidgetProps) {
       : new Date();
   }, [equityDailyPoints]);
 
+  // ADVERSARIAL-EQ-5 — period total return for the always-visible
+  // summary chip in the card header. Mirrors the inner EquityChart's
+  // computation so the wrapper's chip and the inner chart's last
+  // y-coordinate report the same number. NULL when there's not
+  // enough data to draw a window (the chip simply doesn't render).
+  const periodReturn = useMemo<number | null>(() => {
+    const anchored = anchorFromFirstPositive(equityDailyPoints);
+    if (anchored.length === 0) return null;
+    const window = sliceByPeriod(anchored, period, customRange);
+    if (window.length === 0) return null;
+    const base = window[0].value;
+    const last = window[window.length - 1].value;
+    if (!Number.isFinite(base) || base <= 0) return null;
+    return last / base - 1;
+  }, [equityDailyPoints, period, customRange]);
+
   const handlePeriodClick = (p: Period) => {
     if (p === "CUSTOM") {
       setPickerOpen(true);
@@ -1339,12 +1413,63 @@ export default function EquityChartWidget({ data }: WidgetProps) {
         </div>
         <div
           style={{
-            fontSize: 11,
-            color: "var(--color-text-muted)",
-            fontFamily: "var(--font-sans)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
           }}
         >
-          {stale ? "data stale" : "sync just now"}
+          {/* ADVERSARIAL-EQ-5 — always-visible period return summary so
+              the allocator doesn't need to hover or read the y-axis to
+              know "where the line ends up". Sits at the right edge of
+              the card header next to the sync stamp. Hidden when the
+              equity series doesn't yet have enough data to compute a
+              window return (the chart itself still renders the
+              warm-up placeholder). */}
+          {periodReturn != null && (
+            <div
+              aria-label={`Return over ${period}`}
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 4,
+                fontFamily: "var(--font-mono), monospace",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 500,
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  color: "var(--color-text-muted)",
+                }}
+              >
+                {period}
+              </span>
+              <span
+                style={{
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color:
+                    periodReturn >= 0
+                      ? "var(--color-positive)"
+                      : "var(--color-negative)",
+                }}
+              >
+                {`${periodReturn >= 0 ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`}
+              </span>
+            </div>
+          )}
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--color-text-muted)",
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            {stale ? "data stale" : "sync just now"}
+          </div>
         </div>
       </div>
       <div style={{ padding: 10 }}>
