@@ -7,6 +7,17 @@ import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
+import {
+  CHART_ACCENT,
+  CHART_AXIS_TICK,
+  CHART_BORDER,
+  CHART_NEGATIVE,
+  CHART_POSITIVE,
+  CHART_SURFACE,
+  CHART_TEXT_MUTED,
+  CHART_TEXT_SECONDARY,
+} from "@/components/charts/chart-tokens";
+import { formatRelativeTime } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -367,8 +378,8 @@ export function EquityChart({
 
   // ── Projections ────────────────────────────────────────────────────
   // pad.r carries the Y-axis tick labels on the right edge. Sized for
-  // "+XX.X%" labels without clipping.
-  const pad = { t: 20, r: 56, b: 28, l: 8 };
+  // "+XX.X%" labels at 12px Geist Mono without clipping.
+  const pad = { t: 20, r: 64, b: 28, l: 8 };
   const height = 260;
   const chartW = Math.max(1, width - pad.l - pad.r);
   const chartH = Math.max(1, height - pad.t - pad.b);
@@ -781,7 +792,13 @@ export function EquityChart({
           </defs>
 
           {/* Y-axis gridlines + tick labels (right side). The 0% baseline
-              is rendered stronger so the reader has a visual anchor. */}
+              is rendered stronger so the reader has a visual anchor. SVG
+              `fill`/`stroke` props don't resolve CSS custom properties
+              reliably, so we read the literal hex tokens from
+              chart-tokens.ts (single source of truth, mirrored to
+              DESIGN.md). 12px Geist Mono tabular-nums matches the
+              v2-strategy chart axis-tick contract (DESIGN.md
+              2026-04-29 entry — 4.85:1 on white, AA pass). */}
           {yTicks.map((v, i) => {
             const isBaseline = Math.abs(v - 1) < 1e-9;
             const yPos = y(v);
@@ -794,17 +811,17 @@ export function EquityChart({
                   x2={width - pad.r}
                   y1={yPos}
                   y2={yPos}
-                  stroke={isBaseline ? "var(--text-muted)" : "var(--border)"}
-                  strokeWidth={isBaseline ? 1 : 1}
-                  strokeOpacity={isBaseline ? 0.5 : 0.5}
+                  stroke={isBaseline ? CHART_AXIS_TICK : CHART_BORDER}
+                  strokeWidth={1}
+                  strokeOpacity={0.5}
                   strokeDasharray={isBaseline ? "4 3" : "2 4"}
                 />
                 <text
                   x={width - pad.r + 4}
                   y={yPos + 3}
-                  fontSize={10.5}
-                  fill={isBaseline ? "var(--text-secondary)" : "var(--text-muted)"}
-                  fontFamily="Geist Mono"
+                  fontSize={12}
+                  fill={isBaseline ? CHART_TEXT_SECONDARY : CHART_AXIS_TICK}
+                  fontFamily="var(--font-mono), monospace"
                   textAnchor="start"
                   style={{ fontVariantNumeric: "tabular-nums" }}
                 >
