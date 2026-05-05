@@ -133,4 +133,65 @@ describe("KeyPermissionBadge", () => {
     );
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  // Phase 21 (ISSUE-002) — plain-English summary above the pills so a
+  // glancing user does not need to parse three independent chip states
+  // (color + glyph + strikethrough) to know whether the key is safe.
+  // /qa 2026-05-05 surfaced this on the OKX factsheet step.
+  describe("plain-English summary line (ISSUE-002)", () => {
+    it("renders read-only success summary in accent color", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: false,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "read-only");
+      expect(summary.textContent).toContain("Read-only key confirmed");
+      expect(summary.className).toMatch(/text-accent/);
+    });
+
+    it("renders wrong-scope warning when trade is granted", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: true,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "wrong-scope");
+      expect(summary.textContent).toContain("trade");
+      expect(summary.textContent).toContain("Re-key as read-only");
+      expect(summary.className).toMatch(/text-negative/);
+    });
+
+    it("renders combined warning when trade AND withdraw are granted", async () => {
+      mockFetchOnce({
+        read: true,
+        trade: true,
+        withdraw: true,
+        detected_at: new Date().toISOString(),
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "wrong-scope");
+      expect(summary.textContent).toContain("trade and withdraw");
+    });
+
+    it("renders revoked-key warning when read is missing", async () => {
+      mockFetchOnce({
+        read: false,
+        trade: false,
+        withdraw: false,
+        detected_at: new Date().toISOString(),
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "wrong-scope");
+      expect(summary.textContent).toContain("No read permission");
+    });
+  });
 });

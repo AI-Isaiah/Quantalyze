@@ -138,6 +138,37 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
 
       {perms && (
         <>
+          {/*
+            Phase 21 (ISSUE-002) — plain-English summary above the chips.
+            The chips alone (color + glyph + strikethrough) are accessible
+            to sighted users, but a glancing user has to parse three
+            independent visual cues to know whether the key is safe.
+            One sentence in either accent or negative spells it out.
+          */}
+          <p
+            className={`text-[13px] ${
+              perms.read && !perms.trade && !perms.withdraw
+                ? "text-accent"
+                : "text-negative"
+            }`}
+            data-testid="key-permission-summary"
+            data-state={
+              perms.read && !perms.trade && !perms.withdraw
+                ? "read-only"
+                : "wrong-scope"
+            }
+          >
+            {perms.read && !perms.trade && !perms.withdraw
+              ? "Read-only key confirmed — trading and withdrawals are blocked."
+              : perms.trade || perms.withdraw
+                ? `⚠ This key has ${[
+                    perms.trade ? "trade" : null,
+                    perms.withdraw ? "withdraw" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" and ")} permission. Re-key as read-only.`
+                : "⚠ No read permission detected on this key. The key may have been revoked or scoped wrong."}
+          </p>
           <div className="flex flex-wrap gap-2">
             <Pill label="Read" granted={perms.read} />
             <Pill label="Trade" granted={perms.trade} />
