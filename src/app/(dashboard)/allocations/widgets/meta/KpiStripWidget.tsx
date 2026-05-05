@@ -66,8 +66,8 @@ export function KpiStripWidget({ data }: WidgetProps) {
   const strip = (
     <div
       style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
         borderRadius: "var(--radius-lg)",
         boxShadow: "var(--shadow-card)",
         padding: 0,
@@ -99,7 +99,7 @@ export function KpiStripWidget({ data }: WidgetProps) {
             <div
               style={{
                 fontSize: 10,
-                color: "var(--text-muted)",
+                color: "var(--color-text-muted)",
                 textTransform: "uppercase",
                 letterSpacing: "0.08em",
                 fontWeight: 600,
@@ -127,10 +127,10 @@ export function KpiStripWidget({ data }: WidgetProps) {
                   lineHeight: 1.1,
                   color:
                     cell.color === "pos"
-                      ? "var(--positive)"
+                      ? "var(--color-positive)"
                       : cell.color === "neg"
-                        ? "var(--negative)"
-                        : "var(--text-primary)",
+                        ? "var(--color-negative)"
+                        : "var(--color-text-primary)",
                   letterSpacing: "-0.01em",
                   whiteSpace: "nowrap",
                 }}
@@ -141,7 +141,7 @@ export function KpiStripWidget({ data }: WidgetProps) {
                 className="font-mono"
                 style={{
                   fontSize: 11,
-                  color: "var(--text-muted)",
+                  color: "var(--color-text-muted)",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",

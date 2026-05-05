@@ -195,7 +195,7 @@ describe("KpiStripWidget — populated payload", () => {
     expect(within(ytd).getByText("+14.32%")).toBeInTheDocument();
     expect(within(ytd).getByText("MTD +2.17%")).toBeInTheDocument();
     expect(within(ytd).getByText("+14.32%")).toHaveStyle({
-      color: "var(--positive)",
+      color: "var(--color-positive)",
     });
   });
 
@@ -214,7 +214,7 @@ describe("KpiStripWidget — populated payload", () => {
     expect(within(dd).getByText("-6.83%")).toBeInTheDocument();
     expect(within(dd).getByText("vol 9.40%")).toBeInTheDocument();
     expect(within(dd).getByText("-6.83%")).toHaveStyle({
-      color: "var(--negative)",
+      color: "var(--color-negative)",
     });
   });
 
