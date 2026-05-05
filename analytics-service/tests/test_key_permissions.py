@@ -237,6 +237,88 @@ class TestBybitParser:
             "probe_error": True,
         }
 
+    @pytest.mark.asyncio
+    async def test_read_only_flag_supersedes_permissions_array(self):
+        # Regression: 2026-05-05. A real Bybit V5 read-only key
+        # (id=8qI8luq5LQeo023aDp, note="MWF-Read") returned
+        # readOnly=1 BUT also reported ContractTrade=[Order, Position],
+        # Spot=[SpotTrade], Options=[OptionsTrade], Derivatives=[
+        # DerivativesTrade]. Pre-fix that tripped trade=True and the
+        # wizard rejected the key with "Key has trading permissions."
+        # Post-fix: readOnly=1 is the authoritative flag and the key is
+        # accepted. The permissions arrays describe READ-side scopes
+        # (which API areas are queryable), not write capability.
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {
+                "readOnly": 1,
+                "permissions": {
+                    "ContractTrade": ["Order", "Position"],
+                    "Spot": ["SpotTrade"],
+                    "Options": ["OptionsTrade"],
+                    "Derivatives": ["DerivativesTrade"],
+                    "Wallet": [],
+                },
+            },
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result == {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        }, (
+            "readOnly=1 must supersede the permissions array; the live "
+            "Bybit V5 key returned permission categories alongside "
+            "readOnly=1 and was incorrectly rejected as a trading key."
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_only_flag_one_with_wallet_perm_still_rejects_withdraw(self):
+        # Defense in depth: even when Bybit reports readOnly=1, a
+        # populated Wallet permission array triggers withdraw=True so
+        # the wizard's withdrawal-scope rejection still fires. Bybit
+        # could theoretically decouple the flags in a future API
+        # version; this test pins the safe behavior.
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {
+                "readOnly": 1,
+                "permissions": {
+                    "Wallet": ["AccountTransfer"],
+                },
+            },
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result["read"] is True
+        assert result["trade"] is False, "readOnly=1 means no trade"
+        assert result["withdraw"] is True, (
+            "Wallet array is checked even when readOnly=1, so a future "
+            "Bybit API change can't quietly grant withdrawal."
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_only_zero_falls_through_to_permissions(self):
+        # Explicit readOnly=0 must NOT bypass the permissions check —
+        # the trading flag stays as detected from ContractTrade/Spot/Exchange.
+        ex = AsyncMock()
+        ex.id = "bybit"
+        ex.private_get_v5_user_query_api = AsyncMock(return_value={
+            "result": {
+                "readOnly": 0,
+                "permissions": {"Spot": ["SpotTrade"]},
+            },
+        })
+        result = await detect_bybit_permissions(ex)
+        assert result == {
+            "read": True,
+            "trade": True,
+            "withdraw": False,
+            "probe_error": False,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Dispatcher + cache

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.0.2] - 2026-05-05
+
+**Bybit `readOnly` flag now authoritative + Railway service moved to `europe-west4`.**
+Live-key /qa pass against v0.21.0.1 surfaced two more issues that only show up against a real Bybit read-only key.
+
+### Fixed
+
+- **Bybit V5 `readOnly` flag now supersedes the `permissions` arrays in `detect_bybit_permissions`** (`analytics-service/services/key_permissions.py`). A real Bybit V5 read-only key (queried via `GET /v5/user/query-api`) returns `readOnly: 1` AND populated permission arrays like `ContractTrade: [Order, Position]`, `Spot: [SpotTrade]`, `Options: [OptionsTrade]`, `Derivatives: [DerivativesTrade]`. Pre-fix the populated arrays tripped `has_trade=True` and the wizard rejected the key with "Key has trading permissions." Bybit's API design uses `readOnly` as the authoritative trade-capability flag; the `permissions` arrays describe READ-side scopes (which API areas the key can query), not write capability. The `Wallet` array is still inspected for defense in depth so a future Bybit API change can't quietly grant withdrawal permission. Diagnosed by direct call to Bybit's `/v5/user/query-api` against a live read-only key (id `8qI8luq5LQeo023aDp`, note "MWF-Read"), 2026-05-05.
+- **Railway analytics-service migrated from `us-west1` (default) to `europe-west4`** (no code change in this PR, but documented for the record). Bybit's CloudFront distribution country-blocks all US IPs from `/v5/asset/coin/query-info` and `/v5/market/instruments-info` — the geo-block surfaces as `RateLimitExceeded: 403 Forbidden` with the response body `The Amazon CloudFront distribution is configured to block access from your country`. Moving the service to EU resolves the network-layer block. ServiceInstance region set via the Railway GraphQL `serviceInstanceUpdate` mutation; verified live by `x-railway-edge: railway/europe-west4-drams3a` on `/health` responses.
+
+### Test coverage
+
+- `analytics-service/tests/test_key_permissions.py`: +3 regression tests on `TestBybitParser`:
+  - `test_read_only_flag_supersedes_permissions_array` — the live-key shape with `readOnly=1` + populated `ContractTrade`/`Spot`/`Options`/`Derivatives` arrays must pass `read=True, trade=False, withdraw=False`. Pre-fix this case returned `trade=True`; post-fix it returns `trade=False`.
+  - `test_read_only_flag_one_with_wallet_perm_still_rejects_withdraw` — even when `readOnly=1`, a populated `Wallet` array sets `withdraw=True` (defense in depth against a future Bybit API change).
+  - `test_read_only_zero_falls_through_to_permissions` — explicit `readOnly=0` falls through to the existing `ContractTrade`/`Spot`/`Exchange` check unchanged.
+
+All 3 new tests confirmed to fail without the fix and pass with it (verified via `git stash` against `analytics-service/services/key_permissions.py`).
+
+### Verified end-to-end
+
+After deploy, both broker keys provided in the QA session must drive the full chain on Railway's EU region:
+
+- OKX (read-only with passphrase) — already verified pre-fix in v0.21.0.0; remains green.
+- Bybit (read-only with `readOnly=1` flag) — was 400 / `Key has trading permissions` pre-fix; should now sync trades and compute analytics end-to-end.
+
 ## [0.21.0.1] - 2026-05-05
 
 **Bybit wizard E2E fix + INTERNAL_API_TOKEN env wired across Vercel + Railway.**
