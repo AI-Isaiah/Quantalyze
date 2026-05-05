@@ -83,8 +83,8 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
       aria-label="Allocation by style"
       data-testid="allocation-by-style"
       style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
         borderRadius: "var(--radius-lg, 8px)",
         overflow: "hidden",
       }}
@@ -92,7 +92,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
       <div
         style={{
           padding: "14px 20px",
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "1px solid var(--color-border)",
         }}
       >
         <h3
@@ -100,7 +100,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
             margin: 0,
             fontSize: 14,
             fontWeight: 600,
-            color: "var(--text-primary)",
+            color: "var(--color-text-primary)",
           }}
         >
           Allocation by style
@@ -108,7 +108,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
         <div
           style={{
             fontSize: 12,
-            color: "var(--text-muted)",
+            color: "var(--color-text-muted)",
             marginTop: 2,
           }}
         >
@@ -126,7 +126,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
               height: 10,
               borderRadius: 4,
               overflow: "hidden",
-              border: "1px solid var(--border)",
+              border: "1px solid var(--color-border)",
             }}
           >
             {entries.map(([tag, w]) => (
@@ -150,7 +150,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
                   alignItems: "center",
                   gap: "var(--space-grid-gap)",
                   padding: "6px 0",
-                  borderBottom: "1px solid var(--border)",
+                  borderBottom: "1px solid var(--color-border)",
                 }}
               >
                 <span
@@ -167,7 +167,7 @@ export default function AllocationByStyleWidget({ data }: WidgetProps) {
                 <span
                   style={{
                     fontSize: 13,
-                    color: "var(--text-secondary)",
+                    color: "var(--color-text-secondary)",
                     fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
                     fontVariantNumeric: "tabular-nums",
                   }}
