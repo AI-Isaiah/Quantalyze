@@ -23,6 +23,30 @@ class TestCreateExchange:
         exchange = create_exchange("binance", "key", "secret")
         assert not exchange.password  # empty string or None
 
+    def test_bybit_disables_fetch_currencies(self):
+        # Regression: PR following v0.21.0.0 — Bybit's read-only keys hit
+        # 403 on /v5/asset/coin/query-info during load_markets, which ccxt
+        # re-raises as RateLimitExceeded. We disable fetchCurrencies for
+        # Bybit so load_markets stays usable with a pure-read key.
+        # Found via Railway log archaeology (correlation_id
+        # 10792caf-1d0b-4ed1-8a30-8ac66e03bbf9, 2026-05-05).
+        exchange = create_exchange("bybit", "key", "secret")
+        assert exchange.has.get("fetchCurrencies") is False, (
+            "Bybit must disable fetchCurrencies; pure-read keys 403 on "
+            "/v5/asset/coin/query-info"
+        )
+
+    def test_other_exchanges_keep_fetch_currencies_default(self):
+        # Companion to test_bybit_disables_fetch_currencies — make sure
+        # we only flipped the flag for Bybit, not Binance / OKX. Their
+        # fetch_currencies endpoints are public-data and don't need
+        # elevated scopes.
+        for name in ["binance", "okx"]:
+            exchange = create_exchange(name, "key", "secret")
+            assert exchange.has.get("fetchCurrencies") is not False, (
+                f"{name} should NOT have fetchCurrencies disabled"
+            )
+
 
 class TestValidateKeyPermissions:
     @pytest.mark.asyncio
@@ -52,6 +76,41 @@ class TestValidateKeyPermissions:
             # Must not crash, must return error
             assert result["error"] is not None, f"{name} did not return error for bad keys"
             assert isinstance(result["error"], str)
+
+    @pytest.mark.asyncio
+    async def test_load_markets_failure_does_not_reject_valid_key(self):
+        # Regression: a flaky load_markets must NOT cause validate to
+        # reject an otherwise-valid key. Real-world trigger:
+        # Bybit's /v5/asset/coin/query-info returning 403 (permission /
+        # geo-block) — observed against a real read-only key on Railway,
+        # 2026-05-05. fetch_balance() is what truly validates; load_markets
+        # is only a metadata prime that a bad-network or scope-restricted
+        # key can survive without.
+        exchange = MagicMock()
+        exchange.id = "bybit"
+        exchange.load_markets = AsyncMock(side_effect=Exception("simulated load_markets failure (e.g. 403 fetch_currencies)"))
+        exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        # Patch detect_permissions so we don't touch the real CCXT methods
+        with patch("services.key_permissions.detect_permissions", new=AsyncMock(return_value={
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+        })):
+            result = await validate_key_permissions(exchange)
+
+        # validation should succeed — load_markets failure was logged + swallowed
+        assert result["valid"] is True, (
+            "validate_key_permissions must not reject a key when only "
+            "load_markets fails; fetch_balance is the real validator"
+        )
+        assert result["read_only"] is True
+        # error should be None / falsy because fetch_balance succeeded and
+        # detect_permissions returned read-only scopes
+        assert not result["error"]
+        exchange.load_markets.assert_awaited_once()
+        exchange.fetch_balance.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
