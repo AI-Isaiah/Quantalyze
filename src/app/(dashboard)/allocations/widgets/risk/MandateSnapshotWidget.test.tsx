@@ -242,14 +242,14 @@ describe("MandateSnapshotWidget — populated payload", () => {
     const failingCurrent = within(container).getByText("-9.1%");
     // CSS variables resolve at runtime in JSDOM only when the rule is
     // declared on the element — this widget uses inline styles so the
-    // computed style holds the literal `var(--negative)` reference.
-    expect(failingCurrent).toHaveStyle({ color: "var(--negative)" });
+    // computed style holds the literal `var(--color-negative)` reference.
+    expect(failingCurrent).toHaveStyle({ color: "var(--color-negative)" });
   });
 
-  it("Passing rows paint current value in primary color (var(--text-primary))", () => {
+  it("Passing rows paint current value in primary color (var(--color-text-primary))", () => {
     const { container } = renderWidget(PROTOTYPE_SCENARIO);
     const passingCurrent = within(container).getByText("18.5%");
-    expect(passingCurrent).toHaveStyle({ color: "var(--text-primary)" });
+    expect(passingCurrent).toHaveStyle({ color: "var(--color-text-primary)" });
   });
 });
 
