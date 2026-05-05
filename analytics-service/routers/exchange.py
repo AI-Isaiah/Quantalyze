@@ -24,18 +24,40 @@ class EncryptKeyRequest(BaseModel):
 @router.post("/validate-key")
 @limiter.limit("100/hour")
 async def validate_key(request: Request, req: ValidateKeyRequest):
-    """Validate that an API key is read-only and functional."""
+    """Validate that an API key is read-only and functional.
+
+    Phase 18 / observability: the swallowed ccxt exception classes are
+    now logged via `logger.exception` so Railway logs surface the actual
+    upstream error (e.g., `ccxt.PermissionDenied: 451 Unavailable`) with
+    full traceback. User-facing `detail` strings are unchanged so the
+    Next.js classifier in `/api/strategies/create-with-key` and the
+    wizard envelope wording remain stable. (Pre-fix: a bare `except
+    Exception:` discarded the ccxt class + message, leaving operators
+    debug-blind on the recurring "code: UNKNOWN" wizard fail. Found
+    2026-05-05 via Bybit E2E + Railway log archaeology.)
+    """
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "validate_key: create_exchange(%s) failed — %s: %s",
+            req.exchange,
+            type(e).__name__,
+            e,
+        )
         raise HTTPException(status_code=400, detail="Failed to initialize exchange connection")
 
     try:
         result = await validate_key_permissions(exchange)
-    except Exception as e:
-        logger.error("Key validation error: %s", str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.exception(
+            "validate_key: validate_key_permissions raised on %s — %s: %s",
+            req.exchange,
+            type(e).__name__,
+            e,
+        )
         raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
     finally:
         try:

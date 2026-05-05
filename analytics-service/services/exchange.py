@@ -50,10 +50,34 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
         await exchange.load_markets()
         await exchange.fetch_balance()
         result["valid"] = True
-    except ccxt.AuthenticationError:
+    except ccxt.AuthenticationError as exc:
+        # Phase 18 / observability: surface the upstream class + message
+        # in Railway logs so operators can tell genuine bad-key from
+        # "right key, wrong account region / IP allowlist". User-facing
+        # error copy unchanged.
+        logger.exception(
+            "validate_key_permissions: ccxt.AuthenticationError on %s — %s",
+            exchange.id,
+            exc,
+        )
         result["error"] = "Authentication failed. Check your API key and secret."
         return result
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # Phase 18 root-cause for the recurring "code: UNKNOWN, please
+        # verify your credentials" wizard fail (found 2026-05-05 via
+        # Bybit E2E + Railway log archaeology). Pre-fix the bare `except`
+        # lost the ccxt error class + body, so operators saw only a 400
+        # with no traceback. Same credentials succeeded against ccxt
+        # locally but failed on Railway — no log line told us why. The
+        # fix: `logger.exception` so the next failure is debuggable from
+        # logs alone, without changing the response shape (which would
+        # ripple through the Next.js classifier and the wizard envelope).
+        logger.exception(
+            "validate_key_permissions: unexpected ccxt error on %s — %s: %s",
+            exchange.id,
+            type(exc).__name__,
+            exc,
+        )
         result["error"] = "Key validation failed. Please verify your credentials."
         return result
 

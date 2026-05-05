@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.0.0] - 2026-05-05
+
+**Phase 18 — Root-cause fix for the recurring "wizard hangs at computing" bug.**
+After 5 customer-facing patches in 19 days that each addressed a downstream symptom, this PR closes the actual race-condition + missing-chain pair that has been in the codebase since Sprint 3 (v0.9.0.0, 2026-04-19). Discovery method: end-to-end Playwright run through the real production wizard with a live OKX read-only key, supplemented by Railway log timestamp archaeology and Supabase row inspection.
+
+### Fixed
+
+- **Bridge race in `mark_compute_job_done` / `mark_compute_job_failed`** (migration 099). The dispatch loop in `analytics-service/main_worker.py:155-165` ran `dispatch(job)` (which itself called `sync_strategy_analytics_status`) BEFORE `mark_compute_job_done`. The 50ms gap meant the UI bridge fired while `compute_jobs.status` was still `'running'`, so the 038 RPC's "any non-terminal → 'computing'" branch wrote `strategy_analytics.computation_status = 'computing'` and the bridge was never re-fired after the row reached `'done'`. The wizard polled forever. Migration 099 makes the bridge call atomic with the status flip via a tail call inside `mark_compute_job_done` (and its sibling `mark_compute_job_failed`), eliminating the race entirely. Defense in depth: any future caller of these RPCs (manual re-runs, watchdog, cron tick) gets correct UI status without remembering to call the bridge separately.
+- **Missing `compute_analytics` enqueue in `run_sync_trades_job`** (Python). `/api/keys/sync` only enqueues `sync_trades`. The chain `sync_trades` → `compute_analytics` was documented in migration 032 STEP 11/12 (fan-in + child advancement) but the enqueue half was never wired, so new wizard strategies finished `sync_trades` and then `strategy_analytics` stayed at `computation_status='computing'` with NULL metric columns indefinitely. The `run_sync_trades_job` worker now enqueues a follow-on `compute_analytics` job for the same strategy after successful trade persist. Best-effort — a transient enqueue failure logs a warning and lets the job complete (the next cron-driven sync will re-enqueue cleanly).
+- **Phase-16 observability gap at validate-key swallow sites** (`analytics-service/routers/exchange.py` + `analytics-service/services/exchange.py`). The bare `except Exception:` clauses inside the validate-key path discarded the upstream ccxt error class + body, so Railway logs only showed `POST /api/validate-key 400 Bad Request` with no traceback when a real broker key was rejected. The user-facing wizard envelope rendered `code: "UNKNOWN", error: "Please verify your credentials."` with no diagnostic. Replaced with `logger.exception(...)` at each swallow site so the next failure produces a full stack trace + ccxt class name in Railway logs. Response shapes are unchanged so the Next.js classifier and the wizard envelope wording remain stable.
+
+### Test coverage
+
+- `analytics-service/tests/test_job_worker.py`: +2 regression tests on `TestSyncTradesEnqueuesComputeAnalytics` — (a) successful `run_sync_trades_job` MUST call `enqueue_compute_job` with `kind='compute_analytics'` for the same strategy_id, asserted via the supabase RPC call signature; (b) a transient enqueue failure must NOT fail the job (verified by injecting a RuntimeError into the second `rpc(...)` call). Pre-fix run confirms the first test fails (`got 0 enqueue_compute_job calls, expected 1`).
+- Migration 099 ships with a `DO $$ ... $$` self-verifying invariant block that asserts both `mark_compute_job_done` and `mark_compute_job_failed` bodies contain `sync_strategy_analytics_status`. Live verified on the test Supabase project: the stuck OKX strategy (272 real trades, $196,868 USDT balance) advanced from `computation_status='computing'` → `'complete'` after the migration was applied, and metrics populated end-to-end after a manual `enqueue_compute_job(kind='compute_analytics')` call (CAGR -1.3%, Sharpe -0.23, Max DD -3.7%, Sortino -0.33, Vol 5.1%).
+
+### Verified end-to-end
+
+Production wizard at `https://quantalyze-rho.vercel.app/strategies/new/wizard` rendered the live OKX read-only key holder's verified factsheet ("272 trades detected across PORTFOLIO, ETHUSDTSWAP") with all metric tiles populated. The Bybit case still fails at validate-key — confirmed by direct ccxt call locally that the same credentials produce a $192,733 USDT balance, so the failure is Railway-environment-specific (likely region/IP allowlist). The `logger.exception` change in this PR will surface the actual ccxt class on the next attempt so we can disambiguate.
+
 ## [0.20.1.0] - 2026-05-05
 
 **Phase 17 post-ship hardening.** Closes three real defects flagged in the Phase 16 / Phase 17 review backlog plus three additional issues an adversarial pass surfaced during /ship.

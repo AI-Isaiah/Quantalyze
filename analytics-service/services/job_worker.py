@@ -616,6 +616,48 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
 
     await db_execute(_update_cursor)
 
+    # Phase 18 root-cause fix: enqueue the follow-on compute_analytics
+    # job for THIS strategy. Without it, sync_trades completes, the
+    # 099 atomic-bridge RPC sets strategy_analytics.computation_status
+    # to 'complete' (because all compute_jobs rows for the strategy are
+    # 'done'), the wizard advances — but the strategy_analytics row has
+    # NULL metrics because nobody actually computed them. The wizard
+    # then renders an empty factsheet.
+    #
+    # The chain compute_jobs → sync_trades → compute_analytics has been
+    # the documented design since Sprint 3 (migration 032 STEP 11
+    # check_fan_in_ready + STEP 12 mark_compute_job_done's children
+    # advancement loop) but the enqueue side was never wired. The
+    # /api/keys/sync route only enqueues sync_trades; daily crons only
+    # rescore existing strategies. New-strategy onboarding via the
+    # wizard was the only path that needed this and it has been broken
+    # since the queue substrate was introduced.
+    #
+    # Enqueue is best-effort: a transient failure here means the wizard
+    # hangs at 'computing', the same failure mode customers had before
+    # this fix, so we are not making things worse. The next sync_trades
+    # tick (cron-driven daily) will re-enqueue cleanly.
+    try:
+        def _enqueue_compute_analytics() -> None:
+            ctx.supabase.rpc(
+                "enqueue_compute_job",
+                {"p_strategy_id": strategy_id, "p_kind": "compute_analytics"},
+            ).execute()
+
+        await db_execute(_enqueue_compute_analytics)
+        logger.info(
+            "sync_trades: enqueued follow-on compute_analytics for strategy %s",
+            strategy_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sync_trades: failed to enqueue follow-on compute_analytics "
+            "for strategy %s — wizard will hang at 'computing' until next "
+            "scheduled sync re-enqueues. Error: %s",
+            strategy_id,
+            exc,
+        )
+
     return DispatchResult(
         outcome=DispatchOutcome.DONE, trade_count=len(trades)
     )
