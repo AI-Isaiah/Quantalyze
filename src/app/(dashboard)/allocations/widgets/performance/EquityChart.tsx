@@ -628,18 +628,18 @@ export function EquityChart({
                 aria-selected={active}
                 onClick={() => setPeriodChecked(p)}
                 style={{
-                  padding: "3px 8px",
-                  fontSize: 11,
+                  padding: "4px 10px",
+                  fontSize: 12,
                   fontWeight: 500,
-                  fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                  fontFamily: "var(--font-mono), monospace",
                   background: active
-                    ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                    ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
                     : "transparent",
                   color: active
                     ? "var(--color-accent)"
-                    : "var(--color-text-muted)",
+                    : "var(--color-text-secondary)",
                   border: "none",
-                  borderRadius: 3,
+                  borderRadius: 4,
                   cursor: "pointer",
                   fontVariantNumeric: "tabular-nums",
                   letterSpacing: "0.04em",
@@ -690,18 +690,18 @@ export function EquityChart({
                   aria-checked={active}
                   onClick={() => setVisibilityMode(m)}
                   style={{
-                    padding: "3px 8px",
-                    fontSize: 11,
+                    padding: "4px 10px",
+                    fontSize: 12,
                     fontWeight: 500,
-                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                    fontFamily: "var(--font-mono), monospace",
                     background: active
-                      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                      ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
                       : "transparent",
                     color: active
                       ? "var(--color-accent)"
-                      : "var(--color-text-muted)",
+                      : "var(--color-text-secondary)",
                     border: "none",
-                    borderRadius: 3,
+                    borderRadius: 4,
                     cursor: "pointer",
                     fontVariantNumeric: "tabular-nums",
                     letterSpacing: "0.04em",
@@ -1304,18 +1304,18 @@ export default function EquityChartWidget({ data }: WidgetProps) {
                   aria-selected={active}
                   onClick={() => handlePeriodClick(p)}
                   style={{
-                    padding: "3px 8px",
-                    fontSize: 11,
+                    padding: "4px 10px",
+                    fontSize: 12,
                     fontWeight: 500,
-                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                    fontFamily: "var(--font-mono), monospace",
                     background: active
-                      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                      ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
                       : "transparent",
                     color: active
                       ? "var(--color-accent)"
-                      : "var(--color-text-muted)",
+                      : "var(--color-text-secondary)",
                     border: "none",
-                    borderRadius: 3,
+                    borderRadius: 4,
                     cursor: "pointer",
                     fontVariantNumeric: "tabular-nums",
                     letterSpacing: "0.04em",
