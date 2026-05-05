@@ -547,6 +547,176 @@ class TestSyncTradesFeatureFlag:
 
 
 # ---------------------------------------------------------------------------
+# Phase 18 root-cause fix: sync_trades enqueues compute_analytics
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesEnqueuesComputeAnalytics:
+    """Phase 18 regression: after a successful sync_trades run, the worker
+    must enqueue a follow-on `compute_analytics` job for the same strategy.
+
+    Pre-fix history (root cause found 2026-05-05): /api/keys/sync only
+    enqueued sync_trades. The chain compute_jobs → sync_trades →
+    compute_analytics was documented in migration 032 STEP 11/12 (fan-in
+    + child advancement) but the enqueue half was never wired. New-
+    strategy onboarding via the wizard polled
+    strategy_analytics.computation_status='complete' that never arrived,
+    or arrived (post-099) with NULL metric columns. Five customer-facing
+    patches in 19 days addressed downstream symptoms without ever fixing
+    this enqueue gap.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_enqueues_compute_analytics_on_success(
+        self,
+    ) -> None:
+        """Successful run_sync_trades_job MUST call enqueue_compute_job
+        with kind='compute_analytics' for the same strategy. Asserted via
+        the supabase.rpc call signature so a future refactor that moves
+        the enqueue elsewhere still has to land the same RPC call."""
+        from services.job_worker import run_sync_trades_job
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-phase-18", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # Track every supabase.rpc call so we can assert the
+        # enqueue_compute_job call was made with the right shape.
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            rpc_calls.append((name, payload))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=5)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {
+            "id": "job-phase-18",
+            "kind": "sync_trades",
+            "strategy_id": "strat-phase-18",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        # The follow-on enqueue MUST be present, with the right strategy_id
+        # and the right kind. Order doesn't matter — there are several rpc
+        # calls during sync_trades (sync_trades data persist + the new
+        # enqueue) — but the enqueue MUST exist.
+        enqueue_calls = [
+            payload
+            for (name, payload) in rpc_calls
+            if name == "enqueue_compute_job"
+        ]
+        assert len(enqueue_calls) == 1, (
+            f"Expected exactly 1 enqueue_compute_job call after sync_trades; "
+            f"got {len(enqueue_calls)}. All RPC calls: {rpc_calls}"
+        )
+        payload = enqueue_calls[0]
+        assert payload["p_strategy_id"] == "strat-phase-18"
+        assert payload["p_kind"] == "compute_analytics"
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_enqueue_failure_does_not_fail_job(
+        self,
+    ) -> None:
+        """The enqueue is best-effort. If it raises (e.g., RPC unavailable),
+        run_sync_trades_job MUST still return DONE so the job doesn't
+        retry-loop on a transient infra issue. The cron-driven daily sync
+        will re-enqueue cleanly on the next tick."""
+        from services.job_worker import run_sync_trades_job
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-degraded", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # First rpc call (sync_trades persist) succeeds. Second
+        # (enqueue_compute_job) raises. Job must still complete.
+        call_count = {"n": 0}
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            call_count["n"] += 1
+            if name == "enqueue_compute_job":
+                raise RuntimeError("simulated transient enqueue failure")
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=5)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {
+            "id": "job-degraded",
+            "kind": "sync_trades",
+            "strategy_id": "strat-degraded",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        # Job must succeed — enqueue is best-effort.
+        assert result.outcome == DispatchOutcome.DONE
+
+
+# ---------------------------------------------------------------------------
 # compute_intro_snapshot handler
 # ---------------------------------------------------------------------------
 
