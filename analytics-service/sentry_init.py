@@ -162,6 +162,19 @@ def _scrub(value: Any) -> Any:
     JWT_SUBSTRING substring detection inside un-anchored strings is intentionally
     NOT applied here — the Sentry surface assumes structured headers/cookies/data
     where keys are dict keys, not embedded `key=value` substrings.
+
+    Phase 18 / WR-05 — note on (b): once stage (a) has redacted a key
+    that is ALSO in `_PII_KEYS`, stage (b) walks the redacted value
+    (already a `[REDACTED]` string) and is a structural no-op for that
+    branch. Stage (b) is only load-bearing for the 5 keys still in
+    `_BROKER_QUIRK_KEYS` (i.e. `_PII_KEYS - _CANONICAL_DENYLIST`):
+    `x-bapi-api-key` (hyphenated form), `x-bapi-timestamp`,
+    `x-bapi-recv-window`, `x-bapi-sign-type`, `x-mbx-time-unit`. These
+    haven't been promoted to the canonical denylist yet, so stage (b)
+    catches them as a forward-compat slot. Performance is negligible —
+    deepest observed Sentry event dict is 7 levels per Grok W3 — and
+    promoting any of these keys to the canonical denylist will simply
+    shift their handling from (b) to (a) with no behavior change.
     """
     canonical = _redact_scrub_pii(value)
     return _broker_quirk_sweep(canonical)
