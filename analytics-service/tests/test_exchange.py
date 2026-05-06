@@ -192,6 +192,84 @@ class TestValidateKeyPermissions:
         assert "verify your credentials" not in (result["error"] or "").lower()
 
     @pytest.mark.asyncio
+    async def test_load_markets_propagates_non_documented_exceptions(self):
+        """Finding 3 regression: load_markets must only swallow the two
+        documented ccxt classes (RateLimitExceeded for the Bybit 403
+        quirk; PermissionDenied for scope-restricted markets-meta).
+        Every other exception class — NetworkError, ExchangeNotAvailable,
+        AuthenticationError, ValueError, etc. — must propagate to the
+        outer classifier so the wizard gets a real error code.
+
+        Pre-fix: a bare `except Exception` swallowed everything and
+        continued to fetch_balance, which often cache-hit for transient
+        infra failures, so the key passed validation but trade-fetch
+        later collapsed with no breadcrumb.
+        """
+        exchange = MagicMock()
+        exchange.id = "bybit"
+        # Simulate a real network outage during load_markets — the post-
+        # Finding-3 contract says this MUST propagate, get caught by the
+        # outer NetworkError handler, and surface NETWORK_UNAVAILABLE.
+        exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.NetworkError(
+                "simulated TCP reset / DNS / TLS"
+            )
+        )
+        # fetch_balance must NOT be called — propagation should short-
+        # circuit before we reach it.
+        exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"USDT": 100}}
+        )
+
+        result = await validate_key_permissions(exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "NETWORK_UNAVAILABLE", (
+            "load_markets NetworkError must propagate to the outer "
+            "classifier, not be swallowed; got error_code="
+            f"{result['error_code']!r}"
+        )
+        # Critical: pre-fix bug had load_markets failures cache-hit
+        # fetch_balance and falsely validate. Post-fix, fetch_balance
+        # is unreachable when load_markets raises an undocumented class.
+        exchange.fetch_balance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_load_markets_permission_denied_is_swallowed(self):
+        """Finding 3: PermissionDenied is the second documented swallow-
+        path class (scope-restricted markets-meta endpoint). Verify it
+        joins RateLimitExceeded in the swallow set so a key without
+        markets-meta scope still validates if fetch_balance succeeds."""
+        exchange = MagicMock()
+        exchange.id = "bybit"
+        exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.PermissionDenied(
+                "simulated scope-restricted markets-meta"
+            )
+        )
+        exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"USDT": 100}}
+        )
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(
+                return_value={
+                    "read": True,
+                    "trade": False,
+                    "withdraw": False,
+                    "probe_error": False,
+                }
+            ),
+        ):
+            result = await validate_key_permissions(exchange)
+
+        assert result["valid"] is True
+        assert result["markets_loaded"] is False
+        assert result["markets_error"] is not None
+        assert "PermissionDenied" in result["markets_error"]
+
+    @pytest.mark.asyncio
     async def test_result_includes_error_code_field_on_success(self):
         """Public-shape pin: result dict must always include an
         ``error_code`` key (None on success). Callers (Next layer) rely
