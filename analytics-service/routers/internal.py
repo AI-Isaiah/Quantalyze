@@ -225,5 +225,10 @@ async def get_key_permissions(key_id: str, request: Request) -> dict:
         "read": bool(perms.get("read", False)),
         "trade": bool(perms.get("trade", False)),
         "withdraw": bool(perms.get("withdraw", False)),
+        # Forward probe_error so the Next layer (and downstream
+        # KeyPermissionBadge) can distinguish "exchange API down" from
+        # "key actually revoked / read missing". Defaults to False so a
+        # successful probe stays explicit. See key_permissions._FAIL_CLOSED.
+        "probe_error": bool(perms.get("probe_error", False)),
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }

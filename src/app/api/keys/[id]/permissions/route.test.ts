@@ -172,3 +172,45 @@ describe("GET /api/keys/[id]/permissions — audit-log emission (Task 7.1a)", ()
     ).toHaveLength(0);
   });
 });
+
+describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
+  // Regression: the TS PermissionPayload interface used to omit
+  // `probe_error`, so the cached fetcher implicitly stripped the
+  // field even though the Python service set it on the fail-CLOSED
+  // path. The frontend `KeyPermissionBadge` then mis-rendered "key
+  // may have been revoked" whenever the exchange API was just down.
+  // This test pins the forwarding contract so the field flows
+  // end-to-end on the success response.
+  it("forwards probe_error=true through to the response body", async () => {
+    STATE.fetcherImpl = async () => ({
+      read: true,
+      trade: true,
+      withdraw: true,
+      probe_error: true,
+      detected_at: "2026-04-16T00:00:00Z",
+    });
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.probe_error).toBe(true);
+    expect(body.read).toBe(true);
+    expect(body.trade).toBe(true);
+    expect(body.withdraw).toBe(true);
+  });
+
+  it("forwards probe_error=false on a clean probe", async () => {
+    STATE.fetcherImpl = async () => ({
+      read: true,
+      trade: false,
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-04-16T00:00:00Z",
+    });
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.probe_error).toBe(false);
+  });
+});

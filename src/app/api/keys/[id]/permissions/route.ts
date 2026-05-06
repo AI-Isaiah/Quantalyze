@@ -34,6 +34,17 @@ interface PermissionPayload {
   trade: boolean;
   withdraw: boolean;
   detected_at: string;
+  /**
+   * True when the Python service caught an exchange-side exception and
+   * returned the fail-CLOSED default ({read,trade,withdraw}=true). The
+   * field used to be silently stripped here because the interface did
+   * not include it, which made the frontend `KeyPermissionBadge` render
+   * the "No read permission detected — the key may have been revoked"
+   * warning whenever the exchange API was just temporarily down.
+   * Forwarding the flag lets the badge distinguish "exchange down" from
+   * "key actually revoked".
+   */
+  probe_error?: boolean;
 }
 
 /**
