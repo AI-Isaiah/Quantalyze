@@ -183,6 +183,15 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
                 }`}
                 data-testid="key-permission-summary"
                 data-state={summaryState}
+                // role="alert" only on the warning states. Read-only is
+                // informational ("here's the verified scope") — surfacing
+                // it as an alert would over-fire screen readers on the
+                // happy path.
+                role={
+                  summaryState === "wrong-scope" || summaryState === "probe-error"
+                    ? "alert"
+                    : undefined
+                }
               >
                 {summaryText}
               </p>

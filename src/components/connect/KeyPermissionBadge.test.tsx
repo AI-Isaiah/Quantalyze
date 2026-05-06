@@ -151,6 +151,8 @@ describe("KeyPermissionBadge", () => {
       expect(summary).toHaveAttribute("data-state", "read-only");
       expect(summary.textContent).toContain("Read-only key confirmed");
       expect(summary.className).toMatch(/text-accent/);
+      // Read-only is informational, not alarm — no role attr expected.
+      expect(summary).not.toHaveAttribute("role");
     });
 
     it("renders wrong-scope warning when trade is granted", async () => {
@@ -166,6 +168,7 @@ describe("KeyPermissionBadge", () => {
       expect(summary.textContent).toContain("trade");
       expect(summary.textContent).toContain("Re-key as read-only");
       expect(summary.className).toMatch(/text-negative/);
+      expect(summary).toHaveAttribute("role", "alert");
     });
 
     it("renders combined warning when trade AND withdraw are granted", async () => {
@@ -179,6 +182,7 @@ describe("KeyPermissionBadge", () => {
       const summary = await screen.findByTestId("key-permission-summary");
       expect(summary).toHaveAttribute("data-state", "wrong-scope");
       expect(summary.textContent).toContain("trade and withdraw");
+      expect(summary).toHaveAttribute("role", "alert");
     });
 
     it("renders revoked-key warning when read is missing", async () => {
@@ -192,6 +196,7 @@ describe("KeyPermissionBadge", () => {
       const summary = await screen.findByTestId("key-permission-summary");
       expect(summary).toHaveAttribute("data-state", "wrong-scope");
       expect(summary.textContent).toContain("No read permission");
+      expect(summary).toHaveAttribute("role", "alert");
     });
 
     // probe_error is set by the Python service's _FAIL_CLOSED payload
@@ -210,6 +215,7 @@ describe("KeyPermissionBadge", () => {
       const summary = await screen.findByTestId("key-permission-summary");
       expect(summary).toHaveAttribute("data-state", "probe-error");
       expect(summary.textContent).toContain("Could not contact the exchange");
+      expect(summary).toHaveAttribute("role", "alert");
     });
   });
 });
