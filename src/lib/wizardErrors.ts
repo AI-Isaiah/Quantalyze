@@ -16,6 +16,7 @@ export type WizardErrorCode =
   | "KEY_IP_ALLOWLIST"
   | "KEY_RATE_LIMIT"
   | "KEY_NETWORK_TIMEOUT"
+  | "KEY_SCOPE_BROADENED"
   | "DRAFT_ALREADY_EXISTS"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
@@ -172,6 +173,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  KEY_SCOPE_BROADENED: {
+    title: "Your key now has trading permissions.",
+    cause:
+      "When you connected this key it was read-only, but a fresh check at submit time shows it now has trade or withdraw scope on the exchange. Quantalyze accepts read-only keys only — we re-check just before publishing so a key edited in the exchange dashboard between Connect and Submit cannot slip through.",
+    fix: [
+      "Open your exchange API Management page and edit this key.",
+      "Uncheck every permission except Read, save, then come back here.",
+      "Or create a brand-new read-only key and re-key this draft from the start.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
   DRAFT_ALREADY_EXISTS: {
     title: "You already have a wizard session open for this key.",
     cause:
@@ -222,12 +236,12 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   },
 
   GATE_INSUFFICIENT_DAYS: {
-    title: "This account needs at least 7 days of activity.",
+    title: "This account needs more trading history.",
     cause:
-      "Volatility and drawdown estimates become unstable below 7 days of trading history. We require 7 calendar days between the earliest and latest trade.",
+      "We measure trading history as calendar days between the earliest and latest trade, not by trade count. Volatility and drawdown estimates become unstable below 7 calendar days, so we require at least 7 calendar days of span before computing a verified factsheet.",
     fix: [
-      "Keep trading and come back once you have a full week of history. Your draft is saved for 30 days.",
-      "Or use a different key with longer history.",
+      "Keep trading and come back once your earliest and latest trades span at least 7 calendar days. Your draft is saved for 30 days.",
+      "Or use a different key whose trades span a longer time window.",
     ],
     docsHref: "/security#thresholds",
     actions: ["try_another_key", "request_call"],
@@ -552,7 +566,7 @@ export function formatKeyError(
     return {
       ...base,
       cause:
-        `We found ${context.days.toFixed(1)} days of trading history. ` + base.cause,
+        `Your trades span ${context.days.toFixed(1)} calendar day(s). ` + base.cause,
     };
   }
 

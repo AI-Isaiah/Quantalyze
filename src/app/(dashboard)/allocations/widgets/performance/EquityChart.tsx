@@ -7,6 +7,7 @@ import { CustomRangePicker } from "../../components/CustomRangePicker";
 import { useTweakValue } from "../../context/TweaksContext";
 import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
+import { formatRelativeTime } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Phase 09.1 Plan 07 / D-10 — SVG EquityChart
@@ -103,6 +104,15 @@ type Props = {
    * row so the layout collapses to a single header line.
    */
   hideLegend?: boolean;
+  /**
+   * ADVERSARIAL-EQ-6 — most recent successful API key sync timestamp.
+   * When `stale=true`, displayed inside the stale-dimmer overlay as
+   * "Last updated 2h ago" so the allocator knows how stale the data
+   * actually is. Null/undefined falls back to the previous "Data may
+   * be stale" copy (so older call sites that don't yet plumb this
+   * through don't regress). ISO-8601 string.
+   */
+  lastSyncAt?: string | null;
 };
 
 /**
@@ -216,6 +226,7 @@ export function EquityChart({
   onCustomRangeChange,
   hideHeader = false,
   hideLegend = false,
+  lastSyncAt = null,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(960);
@@ -367,8 +378,8 @@ export function EquityChart({
 
   // ── Projections ────────────────────────────────────────────────────
   // pad.r carries the Y-axis tick labels on the right edge. Sized for
-  // "+XX.X%" labels without clipping.
-  const pad = { t: 20, r: 56, b: 28, l: 8 };
+  // "+XX.X%" labels at 12px Geist Mono without clipping.
+  const pad = { t: 20, r: 64, b: 28, l: 8 };
   const height = 260;
   const chartW = Math.max(1, width - pad.l - pad.r);
   const chartH = Math.max(1, height - pad.t - pad.b);
@@ -383,6 +394,19 @@ export function EquityChart({
   // since period start" — matching the tooltip arithmetic below.
   const basePort = visible[0]?.value ?? 1;
   const visibleNormalized = visible.map((p) => p.value / basePort);
+
+  // ADVERSARIAL-EQ-5 — period total return for the always-visible
+  // summary chip. The chip surfaces the end-of-window return for the
+  // selected period without requiring a hover, so the allocator can
+  // glance at the chart and immediately see "+12.4% over 6M". Equal
+  // to (last point / first point - 1), which is exactly the y-value
+  // of the rightmost line endpoint after period normalization.
+  const periodReturn =
+    visibleNormalized.length > 0
+      ? visibleNormalized[visibleNormalized.length - 1] - 1
+      : 0;
+  const periodReturnPositive = periodReturn >= 0;
+  const periodReturnLabel = `${periodReturnPositive ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`;
 
   const baseBench =
     visibleBenchmark
@@ -628,18 +652,18 @@ export function EquityChart({
                 aria-selected={active}
                 onClick={() => setPeriodChecked(p)}
                 style={{
-                  padding: "3px 8px",
-                  fontSize: 11,
+                  padding: "4px 10px",
+                  fontSize: 12,
                   fontWeight: 500,
-                  fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                  fontFamily: "var(--font-mono), monospace",
                   background: active
-                    ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                    ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
                     : "transparent",
                   color: active
                     ? "var(--color-accent)"
-                    : "var(--color-text-muted)",
+                    : "var(--color-text-secondary)",
                   border: "none",
-                  borderRadius: 3,
+                  borderRadius: 4,
                   cursor: "pointer",
                   fontVariantNumeric: "tabular-nums",
                   letterSpacing: "0.04em",
@@ -690,18 +714,18 @@ export function EquityChart({
                   aria-checked={active}
                   onClick={() => setVisibilityMode(m)}
                   style={{
-                    padding: "3px 8px",
-                    fontSize: 11,
+                    padding: "4px 10px",
+                    fontSize: 12,
                     fontWeight: 500,
-                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                    fontFamily: "var(--font-mono), monospace",
                     background: active
-                      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                      ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
                       : "transparent",
                     color: active
                       ? "var(--color-accent)"
-                      : "var(--color-text-muted)",
+                      : "var(--color-text-secondary)",
                     border: "none",
-                    borderRadius: 3,
+                    borderRadius: 4,
                     cursor: "pointer",
                     fontVariantNumeric: "tabular-nums",
                     letterSpacing: "0.04em",
@@ -716,19 +740,75 @@ export function EquityChart({
 
         <div
           style={{
-            fontSize: 11,
-            color: "var(--color-text-muted)",
-            fontFamily: "var(--font-sans)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
           }}
         >
-          sync just now
+          {/* ADVERSARIAL-EQ-5 — always-visible period return summary so
+              the allocator doesn't need to hover or read the y-axis to
+              know "where the line ends up". Sits at the right edge of
+              the header next to the sync stamp. */}
+          <div
+            aria-label={`Return over ${period}`}
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 4,
+              fontFamily: "var(--font-mono), monospace",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+                color: "var(--color-text-muted)",
+              }}
+            >
+              {period}
+            </span>
+            <span
+              style={{
+                fontSize: 14,
+                fontWeight: 600,
+                color: periodReturnPositive
+                  ? "var(--color-positive)"
+                  : "var(--color-negative)",
+              }}
+            >
+              {periodReturnLabel}
+            </span>
+          </div>
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--color-text-muted)",
+              fontFamily: "var(--font-sans)",
+            }}
+            title={
+              lastSyncAt
+                ? new Date(lastSyncAt).toLocaleString()
+                : undefined
+            }
+          >
+            {lastSyncAt
+              ? `last sync ${formatRelativeTime(lastSyncAt, Date.now())}`
+              : "sync just now"}
+          </div>
         </div>
       </div>
       )}
 
       {/* Always-visible legend strip — matches the paths rendered below.
           PR4 #1 — `hideLegend` collapses this row when the wrapper renders
-          the legend chips inline in the card-header row instead. */}
+          the legend chips inline in the card-header row instead. The
+          swatch colors are CSS-resolved (children's elements inherit
+          DOM color), so `var(--color-*)` works here. The chart-token
+          hex literals are used inside the SVG below where SVG props
+          do NOT resolve CSS vars. */}
       {!hideLegend && (
       <div
         aria-label="Series legend"
@@ -737,15 +817,19 @@ export function EquityChart({
           alignItems: "center",
           gap: 12,
           marginBottom: 6,
-          fontSize: 11,
-          fontFamily: "DM Sans",
-          color: "var(--text-muted)",
+          fontSize: 12,
+          fontFamily: "var(--font-sans)",
+          color: "var(--color-text-secondary)",
           flexWrap: "wrap",
         }}
       >
-        <LegendSwatch color="var(--chart-strategy)" label="Portfolio" />
+        <LegendSwatch color="var(--color-chart-strategy)" label="Portfolio" />
         {showBench && visibleBenchmarkNormalized && (
-          <LegendSwatch color="var(--chart-benchmark)" label="BTC" dashed />
+          <LegendSwatch
+            color="var(--color-chart-benchmark)"
+            label="BTC"
+            dashed
+          />
         )}
         {overlaySeries.map((o) => (
           <LegendSwatch key={o.id} color={o.color} label={o.label} />
@@ -763,25 +847,35 @@ export function EquityChart({
           onMouseMove={handleMove}
           onMouseLeave={() => setHoverIdx(null)}
         >
-          {/* Gradient fill — uses the chart-strategy token rather than a
-              hardcoded hex so it stays in sync with DESIGN.md. */}
+          {/* Gradient fill — uses the prefixed `--color-chart-strategy`
+              token (DESIGN.md institutional teal). The bare
+              `--chart-strategy` form previously here was an undefined
+              CSS custom property — Tailwind v4 `@theme inline` only
+              emits the prefixed `--color-*` names, so the gradient
+              rendered as the SVG `currentColor` fallback. */}
           <defs>
             <linearGradient id="eq-grad" x1="0" x2="0" y1="0" y2="1">
               <stop
                 offset="0%"
-                stopColor="var(--chart-strategy)"
+                stopColor="var(--color-chart-strategy)"
                 stopOpacity="0.22"
               />
               <stop
                 offset="100%"
-                stopColor="var(--chart-strategy)"
+                stopColor="var(--color-chart-strategy)"
                 stopOpacity="0"
               />
             </linearGradient>
           </defs>
 
           {/* Y-axis gridlines + tick labels (right side). The 0% baseline
-              is rendered stronger so the reader has a visual anchor. */}
+              is rendered stronger so the reader has a visual anchor. SVG
+              `fill`/`stroke` props don't resolve CSS custom properties
+              reliably, so we read the literal hex tokens from
+              chart-tokens.ts (single source of truth, mirrored to
+              DESIGN.md). 12px Geist Mono tabular-nums matches the
+              v2-strategy chart axis-tick contract (DESIGN.md
+              2026-04-29 entry — 4.85:1 on white, AA pass). */}
           {yTicks.map((v, i) => {
             const isBaseline = Math.abs(v - 1) < 1e-9;
             const yPos = y(v);
@@ -794,18 +888,27 @@ export function EquityChart({
                   x2={width - pad.r}
                   y1={yPos}
                   y2={yPos}
-                  stroke={isBaseline ? "var(--text-muted)" : "var(--border)"}
-                  strokeWidth={isBaseline ? 1 : 1}
-                  strokeOpacity={isBaseline ? 0.5 : 0.5}
-                  strokeDasharray={isBaseline ? "4 3" : "2 4"}
+                  stroke={
+                    isBaseline
+                      ? "var(--color-text-secondary)"
+                      : "var(--color-border)"
+                  }
+                  strokeWidth={isBaseline ? 1.25 : 1}
+                  strokeOpacity={isBaseline ? 0.85 : 0.5}
+                  strokeDasharray={isBaseline ? undefined : "2 4"}
                 />
                 <text
                   x={width - pad.r + 4}
                   y={yPos + 3}
-                  fontSize={10.5}
-                  fill={isBaseline ? "var(--text-secondary)" : "var(--text-muted)"}
-                  fontFamily="Geist Mono"
+                  fontSize={12}
+                  fill={
+                    isBaseline
+                      ? "var(--color-text-secondary)"
+                      : "var(--color-text-muted)"
+                  }
+                  fontFamily="var(--font-mono), monospace"
                   textAnchor="start"
+                  fontWeight={isBaseline ? 600 : 400}
                   style={{ fontVariantNumeric: "tabular-nums" }}
                 >
                   {label}
@@ -820,7 +923,7 @@ export function EquityChart({
             x2={width - pad.r}
             y1={pad.t + chartH}
             y2={pad.t + chartH}
-            stroke="var(--border)"
+            stroke="var(--color-border)"
             strokeWidth={1}
           />
           {ticks.map((t, i) => (
@@ -828,9 +931,9 @@ export function EquityChart({
               key={i}
               x={x(t.i)}
               y={height - 10}
-              fontSize={10.5}
-              fill="var(--text-muted)"
-              fontFamily="DM Sans"
+              fontSize={12}
+              fill="var(--color-text-muted)"
+              fontFamily="var(--font-sans)"
               textAnchor="middle"
             >
               {t.label}
@@ -844,7 +947,7 @@ export function EquityChart({
             <path
               d={toPath(visibleBenchmarkNormalized)}
               fill="none"
-              stroke="var(--chart-benchmark)"
+              stroke="var(--color-chart-benchmark)"
               strokeWidth={1.25}
               strokeDasharray="3 3"
             />
@@ -869,6 +972,9 @@ export function EquityChart({
                   stroke={o.color}
                   strokeWidth={isScenario ? 1.5 : 1.25}
                   strokeOpacity={isScenario ? 1 : 0.85}
+                  data-testid={
+                    isScenario ? "equity-chart-scenario-overlay" : undefined
+                  }
                 />
               );
             })}
@@ -887,7 +993,7 @@ export function EquityChart({
           <path
             d={toPath(visibleNormalized)}
             fill="none"
-            stroke="var(--chart-strategy)"
+            stroke="var(--color-chart-strategy)"
             strokeWidth={1.75}
             strokeOpacity={
               hasScenario && visibilityMode === "scenario" ? 0.3 : 1
@@ -902,7 +1008,7 @@ export function EquityChart({
                 x2={x(hoverIdx)}
                 y1={pad.t}
                 y2={pad.t + chartH}
-                stroke="var(--chart-benchmark)"
+                stroke="var(--color-chart-benchmark)"
                 strokeWidth={1}
                 strokeDasharray="2 2"
               />
@@ -910,8 +1016,8 @@ export function EquityChart({
                 cx={x(hoverIdx)}
                 cy={y(visibleNormalized[hoverIdx])}
                 r={3.5}
-                fill="var(--chart-strategy)"
-                stroke="var(--color-surface, #fff)"
+                fill="var(--color-chart-strategy)"
+                stroke="var(--color-surface)"
                 strokeWidth={1.5}
               />
             </g>
@@ -934,23 +1040,23 @@ export function EquityChart({
                 position: "absolute",
                 top: 8,
                 left,
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
+                background: "var(--color-surface)",
+                border: "1px solid var(--color-border)",
                 borderRadius: 6,
                 padding: "8px 10px",
                 fontSize: 12,
                 boxShadow: "0 4px 16px rgba(0,0,0,0.08)",
                 pointerEvents: "none",
                 minWidth: 190,
-                fontFamily: "DM Sans",
+                fontFamily: "var(--font-sans)",
               }}
             >
               <div
                 style={{
-                  color: "var(--text-muted)",
-                  fontSize: 11,
+                  color: "var(--color-text-muted)",
+                  fontSize: 12,
                   marginBottom: 4,
-                  fontFamily: "Geist Mono",
+                  fontFamily: "var(--font-mono)",
                 }}
               >
                 {new Date(parseISO(visible[i].date)).toLocaleDateString(
@@ -965,13 +1071,13 @@ export function EquityChart({
               </div>
               <TooltipRow
                 label="Portfolio"
-                color="var(--chart-strategy)"
+                color="var(--color-chart-strategy)"
                 pct={portPct}
               />
               {benchPct != null && (
                 <TooltipRow
                   label="BTC"
-                  color="var(--chart-benchmark)"
+                  color="var(--color-chart-benchmark)"
                   pct={benchPct}
                   dashed
                 />
@@ -995,7 +1101,11 @@ export function EquityChart({
 
         {/* Stale dimmer — Phase 07 / 07-05 / D-10 visual half of the
             stale gate. Only the chart tile carries this; non-chart
-            widgets are unaffected. */}
+            widgets are unaffected.
+            ADVERSARIAL-EQ-6 — when `lastSyncAt` is supplied, the copy
+            shifts from the static "Data may be stale" to a relative
+            "Last updated Xh ago" so the allocator can answer "how
+            stale?" without leaving the widget. */}
         {stale && (
           <div
             aria-hidden
@@ -1003,7 +1113,9 @@ export function EquityChart({
             className="absolute inset-0 flex items-center justify-center bg-page/40 pointer-events-none"
           >
             <span className="rounded-md bg-surface px-3 py-1 text-sm font-medium text-text-secondary shadow-sm">
-              Data may be stale
+              {lastSyncAt
+                ? `Last updated ${formatRelativeTime(lastSyncAt, Date.now())}`
+                : "Data may be stale"}
             </span>
           </div>
         )}
@@ -1032,7 +1144,7 @@ function LegendSwatch({
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        color: "var(--text-secondary)",
+        color: "var(--color-text-secondary)",
       }}
     >
       <span
@@ -1086,9 +1198,11 @@ function TooltipRow({
       </span>
       <span
         style={{
-          fontFamily: "Geist Mono, monospace",
+          fontFamily: "var(--font-mono), monospace",
           fontVariantNumeric: "tabular-nums",
-          color: positive ? "var(--positive)" : "var(--negative)",
+          color: positive
+            ? "var(--color-positive)"
+            : "var(--color-negative)",
           fontWeight: 500,
         }}
       >
@@ -1119,17 +1233,63 @@ interface EquityChartWidgetData {
   btcBenchmark?: DailyPoint[];
   equityOverlays?: OverlaySeries[];
   allKeysStale?: boolean;
+  /**
+   * ADVERSARIAL-EQ-6 — most recent successful API key sync timestamp,
+   * forwarded from the dashboard payload (`MyAllocationDashboardPayload
+   * .lastSyncAt`). Surfaced in the stale-dimmer overlay copy and
+   * (when non-stale) in the card-header sync stamp so the allocator
+   * can answer "when did this last refresh?" without leaving the
+   * widget. ISO-8601 string or null when no successful sync exists.
+   */
+  lastSyncAt?: string | null;
 }
 
 export default function EquityChartWidget({ data }: WidgetProps) {
   const d = (data ?? {}) as EquityChartWidgetData;
   const showBench = useTweakValue("showBench");
 
-  const equityDailyPoints = d.equityDailyPoints ?? [];
+  // Stabilize the array reference so downstream useMemo deps (minDate,
+  // periodReturn) don't churn on every render. The `?? []` literal
+  // would otherwise build a new empty array each call, defeating
+  // memoization and tripping react-hooks/preserve-manual-memoization.
+  const equityDailyPoints = useMemo(
+    () => d.equityDailyPoints ?? [],
+    [d.equityDailyPoints],
+  );
   const benchmark = d.btcBenchmark;
   const overlays = d.equityOverlays ?? [];
   const stale = d.allKeysStale ?? false;
+  const lastSyncAt = d.lastSyncAt ?? null;
   const hasBenchmark = !!benchmark && benchmark.length > 0;
+
+  // ADVERSARIAL-EQ-6 — relative-time stamp for the card-header sync
+  // affordance. When `lastSyncAt` is present we surface "Updated 2h
+  // ago" / "Last sync 2h ago"; absent or pre-sync state falls back to
+  // the previous "sync just now" / "data stale" copy. The
+  // formatRelativeTime helper is the project-canonical formatter
+  // (used by MandateSaveStatus, ComputeJobsTable, AdminTabs) — same
+  // bucket idiom keeps the strings consistent across the app.
+  // `now` is null on first render to keep SSR/CSR output identical
+  // (matches `useSharedMinuteClock` in ForQuantsLeadsTable); the
+  // effect ticks once on mount and every minute thereafter.
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    // Deferred via setTimeout(0) to satisfy react-hooks/set-state-in-effect
+    // (same idiom as useSharedMinuteClock in ForQuantsLeadsTable).
+    const tick = setTimeout(() => setNow(Date.now()), 0);
+    const interval = setInterval(() => setNow(Date.now()), 60_000);
+    return () => {
+      clearTimeout(tick);
+      clearInterval(interval);
+    };
+  }, []);
+  const syncStampCopy = (() => {
+    if (!lastSyncAt || now === null) {
+      return stale ? "data stale" : "sync just now";
+    }
+    const rel = formatRelativeTime(lastSyncAt, now);
+    return stale ? `stale · last sync ${rel}` : `last sync ${rel}`;
+  })();
 
   const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
@@ -1143,6 +1303,22 @@ export default function EquityChartWidget({ data }: WidgetProps) {
       ? new Date(parseISO(anchored[0].date))
       : new Date();
   }, [equityDailyPoints]);
+
+  // ADVERSARIAL-EQ-5 — period total return for the always-visible
+  // summary chip in the card header. Mirrors the inner EquityChart's
+  // computation so the wrapper's chip and the inner chart's last
+  // y-coordinate report the same number. NULL when there's not
+  // enough data to draw a window (the chip simply doesn't render).
+  const periodReturn = useMemo<number | null>(() => {
+    const anchored = anchorFromFirstPositive(equityDailyPoints);
+    if (anchored.length === 0) return null;
+    const window = sliceByPeriod(anchored, period, customRange);
+    if (window.length === 0) return null;
+    const base = window[0].value;
+    const last = window[window.length - 1].value;
+    if (!Number.isFinite(base) || base <= 0) return null;
+    return last / base - 1;
+  }, [equityDailyPoints, period, customRange]);
 
   const handlePeriodClick = (p: Period) => {
     if (p === "CUSTOM") {
@@ -1272,18 +1448,18 @@ export default function EquityChartWidget({ data }: WidgetProps) {
                   aria-selected={active}
                   onClick={() => handlePeriodClick(p)}
                   style={{
-                    padding: "3px 8px",
-                    fontSize: 11,
+                    padding: "4px 10px",
+                    fontSize: 12,
                     fontWeight: 500,
-                    fontFamily: "var(--font-mono, 'Geist Mono', monospace)",
+                    fontFamily: "var(--font-mono), monospace",
                     background: active
-                      ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
+                      ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
                       : "transparent",
                     color: active
                       ? "var(--color-accent)"
-                      : "var(--color-text-muted)",
+                      : "var(--color-text-secondary)",
                     border: "none",
-                    borderRadius: 3,
+                    borderRadius: 4,
                     cursor: "pointer",
                     fontVariantNumeric: "tabular-nums",
                     letterSpacing: "0.04em",
@@ -1307,12 +1483,68 @@ export default function EquityChartWidget({ data }: WidgetProps) {
         </div>
         <div
           style={{
-            fontSize: 11,
-            color: "var(--color-text-muted)",
-            fontFamily: "var(--font-sans)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
           }}
         >
-          {stale ? "data stale" : "sync just now"}
+          {/* ADVERSARIAL-EQ-5 — always-visible period return summary so
+              the allocator doesn't need to hover or read the y-axis to
+              know "where the line ends up". Sits at the right edge of
+              the card header next to the sync stamp. Hidden when the
+              equity series doesn't yet have enough data to compute a
+              window return (the chart itself still renders the
+              warm-up placeholder). */}
+          {periodReturn != null && (
+            <div
+              aria-label={`Return over ${period}`}
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 4,
+                fontFamily: "var(--font-mono), monospace",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 500,
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  color: "var(--color-text-muted)",
+                }}
+              >
+                {period}
+              </span>
+              <span
+                style={{
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color:
+                    periodReturn >= 0
+                      ? "var(--color-positive)"
+                      : "var(--color-negative)",
+                }}
+              >
+                {`${periodReturn >= 0 ? "+" : ""}${(periodReturn * 100).toFixed(2)}%`}
+              </span>
+            </div>
+          )}
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--color-text-muted)",
+              fontFamily: "var(--font-sans)",
+            }}
+            title={
+              lastSyncAt
+                ? new Date(lastSyncAt).toLocaleString()
+                : undefined
+            }
+          >
+            {syncStampCopy}
+          </div>
         </div>
       </div>
       <div style={{ padding: 10 }}>
@@ -1325,6 +1557,7 @@ export default function EquityChartWidget({ data }: WidgetProps) {
           onPeriodChange={setPeriod}
           customRange={customRange}
           onCustomRangeChange={setCustomRange}
+          lastSyncAt={lastSyncAt}
           hideHeader
           hideLegend
         />

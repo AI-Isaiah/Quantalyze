@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import ccxt.async_support as ccxt_async
+
 from services.exchange import create_exchange, validate_key_permissions
 
 
@@ -86,9 +88,18 @@ class TestValidateKeyPermissions:
         # 2026-05-05. fetch_balance() is what truly validates; load_markets
         # is only a metadata prime that a bad-network or scope-restricted
         # key can survive without.
+        # The post-Phase-18 contract: only ccxt.RateLimitExceeded and
+        # ccxt.PermissionDenied get the swallow path — every other class
+        # propagates so the outer error_code branches can fire. Use
+        # RateLimitExceeded here because that's the documented Bybit
+        # quirk this swallow-path was originally added for.
         exchange = MagicMock()
         exchange.id = "bybit"
-        exchange.load_markets = AsyncMock(side_effect=Exception("simulated load_markets failure (e.g. 403 fetch_currencies)"))
+        exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.RateLimitExceeded(
+                "simulated 403 -> RateLimitExceeded on fetch_currencies"
+            )
+        )
         exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
 
         # Patch detect_permissions so we don't touch the real CCXT methods
@@ -111,6 +122,182 @@ class TestValidateKeyPermissions:
         assert not result["error"]
         exchange.load_markets.assert_awaited_once()
         exchange.fetch_balance.assert_awaited_once()
+        # Defense-in-depth markers from Finding 3: callers can correlate
+        # later trade-fetch failures back to a markets-not-loaded state.
+        assert result["markets_loaded"] is False
+        assert result["markets_error"] is not None
+        assert "RateLimitExceeded" in result["markets_error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc_cls,expected_error_code,expected_substring",
+        [
+            (ccxt_async.AuthenticationError, "AUTH_FAILED", "Authentication"),
+            (ccxt_async.PermissionDenied, "PERMISSION_DENIED", "denied"),
+            (ccxt_async.RateLimitExceeded, "RATE_LIMITED", "rate-limited"),
+            (ccxt_async.DDoSProtection, "DDOS_PROTECTION", "edge"),
+            (ccxt_async.ExchangeNotAvailable, "EXCHANGE_UNAVAILABLE", "unavailable"),
+            (ccxt_async.NetworkError, "NETWORK_UNAVAILABLE", "Network"),
+        ],
+    )
+    async def test_classifies_ccxt_subclasses_to_distinct_error_codes(
+        self, exc_cls, expected_error_code, expected_substring
+    ):
+        """Finding 2 regression: validate_key_permissions must NOT collapse
+        every post-load_markets failure into a single 'verify credentials'
+        message. Each ccxt subclass maps to a distinct error_code +
+        clearer human-readable message so the Next layer can route the
+        right envelope and operators can tell genuine bad-key from
+        infra failures.
+        """
+        exchange = MagicMock()
+        exchange.id = "binance"
+        # load_markets succeeds; the failure happens on fetch_balance so
+        # the outer classification handlers fire.
+        exchange.load_markets = AsyncMock(return_value={})
+        exchange.fetch_balance = AsyncMock(side_effect=exc_cls("simulated"))
+
+        result = await validate_key_permissions(exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == expected_error_code, (
+            f"{exc_cls.__name__} must map to error_code={expected_error_code!r}; "
+            f"got {result['error_code']!r}"
+        )
+        assert result["error"] is not None
+        assert expected_substring.lower() in result["error"].lower(), (
+            f"{exc_cls.__name__} message must contain {expected_substring!r}; "
+            f"got {result['error']!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_uses_distinct_code(self):
+        """The bare-except backstop must use a distinct error_code so the
+        Next layer can render an 'unexpected' envelope rather than a
+        misleading 'verify credentials' message.
+        """
+        exchange = MagicMock()
+        exchange.id = "binance"
+        exchange.load_markets = AsyncMock(return_value={})
+        exchange.fetch_balance = AsyncMock(
+            side_effect=ValueError("malformed response from exchange")
+        )
+
+        result = await validate_key_permissions(exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "VALIDATION_UNEXPECTED"
+        # The "verify your credentials" string was the pre-fix
+        # misdiagnosis — it must not appear on a non-credential error.
+        assert "verify your credentials" not in (result["error"] or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_load_markets_propagates_non_documented_exceptions(self):
+        """Finding 3 regression: load_markets must only swallow the two
+        documented ccxt classes (RateLimitExceeded for the Bybit 403
+        quirk; PermissionDenied for scope-restricted markets-meta).
+        Every other exception class — NetworkError, ExchangeNotAvailable,
+        AuthenticationError, ValueError, etc. — must propagate to the
+        outer classifier so the wizard gets a real error code.
+
+        Pre-fix: a bare `except Exception` swallowed everything and
+        continued to fetch_balance, which often cache-hit for transient
+        infra failures, so the key passed validation but trade-fetch
+        later collapsed with no breadcrumb.
+        """
+        exchange = MagicMock()
+        exchange.id = "bybit"
+        # Simulate a real network outage during load_markets — the post-
+        # Finding-3 contract says this MUST propagate, get caught by the
+        # outer NetworkError handler, and surface NETWORK_UNAVAILABLE.
+        exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.NetworkError(
+                "simulated TCP reset / DNS / TLS"
+            )
+        )
+        # fetch_balance must NOT be called — propagation should short-
+        # circuit before we reach it.
+        exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"USDT": 100}}
+        )
+
+        result = await validate_key_permissions(exchange)
+
+        assert result["valid"] is False
+        assert result["error_code"] == "NETWORK_UNAVAILABLE", (
+            "load_markets NetworkError must propagate to the outer "
+            "classifier, not be swallowed; got error_code="
+            f"{result['error_code']!r}"
+        )
+        # Critical: pre-fix bug had load_markets failures cache-hit
+        # fetch_balance and falsely validate. Post-fix, fetch_balance
+        # is unreachable when load_markets raises an undocumented class.
+        exchange.fetch_balance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_load_markets_permission_denied_is_swallowed(self):
+        """Finding 3: PermissionDenied is the second documented swallow-
+        path class (scope-restricted markets-meta endpoint). Verify it
+        joins RateLimitExceeded in the swallow set so a key without
+        markets-meta scope still validates if fetch_balance succeeds."""
+        exchange = MagicMock()
+        exchange.id = "bybit"
+        exchange.load_markets = AsyncMock(
+            side_effect=ccxt_async.PermissionDenied(
+                "simulated scope-restricted markets-meta"
+            )
+        )
+        exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"USDT": 100}}
+        )
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(
+                return_value={
+                    "read": True,
+                    "trade": False,
+                    "withdraw": False,
+                    "probe_error": False,
+                }
+            ),
+        ):
+            result = await validate_key_permissions(exchange)
+
+        assert result["valid"] is True
+        assert result["markets_loaded"] is False
+        assert result["markets_error"] is not None
+        assert "PermissionDenied" in result["markets_error"]
+
+    @pytest.mark.asyncio
+    async def test_result_includes_error_code_field_on_success(self):
+        """Public-shape pin: result dict must always include an
+        ``error_code`` key (None on success). Callers (Next layer) rely
+        on key presence rather than a try/get."""
+        exchange = MagicMock()
+        exchange.id = "binance"
+        exchange.load_markets = AsyncMock(return_value={})
+        exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(
+                return_value={
+                    "read": True,
+                    "trade": False,
+                    "withdraw": False,
+                    "probe_error": False,
+                }
+            ),
+        ):
+            result = await validate_key_permissions(exchange)
+
+        assert "error_code" in result
+        assert result["error_code"] is None
+        assert result["valid"] is True
+        # Markets loaded successfully — defense-in-depth markers confirm.
+        assert result["markets_loaded"] is True
+        assert result["markets_error"] is None
 
 
 # ---------------------------------------------------------------------------

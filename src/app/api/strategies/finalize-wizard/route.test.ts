@@ -1,0 +1,337 @@
+/**
+ * Tests for POST /api/strategies/finalize-wizard — specifically the
+ * scope-broadening defense (KEY_SCOPE_BROADENED).
+ *
+ * Threat model
+ * ------------
+ * Connect-time validation only sees the scopes that existed when the
+ * user pasted their key. A user can:
+ *   1. Connect a read-only key (passes /api/keys/validate-and-encrypt).
+ *   2. Open the exchange dashboard and toggle Trade or Withdraw on.
+ *   3. Click Submit on the wizard's SubmitStep.
+ *
+ * Without a live re-check at finalize the now-trading key would
+ * silently get a published strategy in `pending_review`. The route
+ * mitigates this by force-refreshing both cache layers (Next 60s +
+ * Python 15min) and aborting with 403 + KEY_SCOPE_BROADENED if the
+ * live response shows `trade=true` or `withdraw=true`.
+ *
+ * The tests below mock the analytics-service fetch + the user-scoped
+ * Supabase client and assert:
+ *   - 403 KEY_SCOPE_BROADENED when live perms show trade=true.
+ *   - 403 KEY_SCOPE_BROADENED when live perms show withdraw=true.
+ *   - 502 KEY_NETWORK_TIMEOUT when the probe itself fails.
+ *   - 502 KEY_NETWORK_TIMEOUT when the probe returns probe_error=true.
+ *   - 200 happy-path when live perms remain read-only.
+ *   - The probe URL carries `force_refresh=true` and the request uses
+ *     `cache: 'no-store'` so the existing TTL caches cannot mask a
+ *     freshly-broadened key.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextRequest } from "next/server";
+
+vi.mock("server-only", () => ({}));
+
+const USER = {
+  id: "00000000-0000-0000-0000-000000000001",
+} as unknown as import("@supabase/supabase-js").User;
+
+vi.mock("@/lib/api/withAuth", () => ({
+  withAuth:
+    (h: (req: NextRequest, user: typeof USER) => unknown) =>
+    (req: NextRequest) =>
+      h(req, USER),
+}));
+
+vi.mock("@/lib/ratelimit", () => ({
+  userActionLimiter: {},
+  checkLimit: vi.fn(async () => ({ success: true })),
+}));
+
+const STATE = vi.hoisted(() => ({
+  // Strategy lookup result for the user-scoped client.
+  strategyRow: null as { api_key_id: string | null } | null,
+  strategyError: null as { message: string } | null,
+  // RPC call capture.
+  rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  rpcResult: { data: null as unknown, error: null as unknown },
+  // Admin client api_keys lookup (api_key_id) for the after() block.
+  adminApiKeyId: null as string | null,
+}));
+
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({
+    from: (table: string) => {
+      if (table !== "strategies") {
+        throw new Error(`unexpected user-scoped from(${table})`);
+      }
+      return {
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({
+              data: STATE.strategyRow,
+              error: STATE.strategyError,
+            }),
+          }),
+        }),
+      };
+    },
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      STATE.rpcCalls.push({ name, args });
+      return STATE.rpcResult;
+    },
+  }),
+}));
+
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: (table: string) => {
+      if (table === "strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              single: async () => ({
+                data: { api_key_id: STATE.adminApiKeyId },
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === "api_keys") {
+        return {
+          update: () => ({
+            eq: async () => ({ data: null, error: null }),
+          }),
+        };
+      }
+      throw new Error(`unexpected admin from(${table})`);
+    },
+  }),
+}));
+
+vi.mock("@/lib/email", () => ({
+  notifyFounderNewStrategy: async () => undefined,
+  resolveManagerName: async () => "Test Manager",
+}));
+
+// next/server's `after` keeps the after-callback running outside the
+// request lifetime; tests don't need to wait on it. Stub to a no-op.
+vi.mock("next/server", async () => {
+  const actual =
+    await vi.importActual<typeof import("next/server")>("next/server");
+  return {
+    ...actual,
+    after: (_fn: () => unknown) => {
+      // intentionally do not invoke — keeps fetch mocks below from
+      // bleeding into the after() block's analytics calls.
+    },
+  };
+});
+
+const STRATEGY_ID = "11111111-1111-4111-8111-111111111111";
+const API_KEY_ID = "22222222-2222-4222-8222-222222222222";
+const CATEGORY_ID = "33333333-3333-4333-8333-333333333333";
+
+const VALID_BODY = {
+  strategy_id: STRATEGY_ID,
+  // STRATEGY_NAMES exposes a curated list — pull the first entry at
+  // runtime so the body stays valid even as the list evolves.
+  name: "" as string,
+  description: "A descriptive blurb that exceeds ten chars and is plausible.",
+  category_id: CATEGORY_ID,
+  strategy_types: ["trend"],
+  subtypes: ["breakout"],
+  markets: ["BTC/USDT"],
+  supported_exchanges: ["binance"],
+  leverage_range: "1x-3x",
+  aum: 100_000,
+  max_capacity: 10_000_000,
+};
+
+function makeReq(body: unknown): NextRequest {
+  return new NextRequest("http://localhost/api/strategies/finalize-wizard", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "http://localhost:3000",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  STATE.strategyRow = { api_key_id: API_KEY_ID };
+  STATE.strategyError = null;
+  STATE.rpcCalls = [];
+  STATE.rpcResult = { data: STRATEGY_ID, error: null };
+  STATE.adminApiKeyId = API_KEY_ID;
+  process.env.INTERNAL_API_TOKEN = "test-internal-token";
+  process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+  // Resolve a real allowed name for the body.
+  const { STRATEGY_NAMES } = await import("@/lib/constants");
+  VALID_BODY.name = STRATEGY_NAMES[0];
+});
+
+async function importPost() {
+  const mod = await import("./route");
+  return mod.POST;
+}
+
+describe("POST /api/strategies/finalize-wizard — scope-broadening defense", () => {
+  it("returns 403 KEY_SCOPE_BROADENED when the live re-check shows trade=true", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: true,
+          withdraw: false,
+          probe_error: false,
+          detected_at: "2026-05-05T00:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe("KEY_SCOPE_BROADENED");
+    // The finalize RPC must NOT have been called — the broadened key
+    // must never reach pending_review.
+    expect(STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"))
+      .toBeUndefined();
+
+    // The probe URL must include force_refresh=true and the request
+    // must use cache: 'no-store' to bypass both cache layers.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchSpy.mock.calls[0];
+    expect(String(calledUrl)).toContain("force_refresh=true");
+    expect(String(calledUrl)).toContain(
+      `/internal/keys/${API_KEY_ID}/permissions`,
+    );
+    expect((calledInit as RequestInit | undefined)?.cache).toBe("no-store");
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 403 KEY_SCOPE_BROADENED when the live re-check shows withdraw=true", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: true,
+          probe_error: false,
+          detected_at: "2026-05-05T00:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe("KEY_SCOPE_BROADENED");
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 502 KEY_NETWORK_TIMEOUT when the probe itself fails", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("ECONNREFUSED"));
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("KEY_NETWORK_TIMEOUT");
+    // RPC must not have run — fail closed on probe errors.
+    expect(STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"))
+      .toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 502 KEY_NETWORK_TIMEOUT when the probe returns probe_error=true", async () => {
+    // probe_error=true is the Python fail-CLOSED default that fires
+    // when the live exchange call itself raised. We must NOT treat
+    // that as KEY_SCOPE_BROADENED — the user did nothing wrong.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: true,
+          withdraw: true,
+          probe_error: true,
+          detected_at: "2026-05-05T00:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("KEY_NETWORK_TIMEOUT");
+    fetchSpy.mockRestore();
+  });
+
+  it("calls the finalize RPC and returns 200 when the live re-check stays read-only", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+          detected_at: "2026-05-05T00:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategy_id).toBe(STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("skips the live probe when the strategy has no api_key_id (CSV branch)", async () => {
+    STATE.strategyRow = { api_key_id: null };
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 404 when the strategy lookup finds no row", async () => {
+    STATE.strategyRow = null;
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(404);
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+  });
+});

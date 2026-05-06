@@ -163,9 +163,16 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       : null,
   );
 
-  const [savedAt, setSavedAt] = useState<number | null>(
-    initialDraft ? Date.now() : null,
-  );
+  // savedAt must initialize to null synchronously: the value is rendered
+  // by WizardChrome as `new Date(savedAt).toLocaleTimeString(...)`, so a
+  // useState lazy initializer that calls Date.now() would resolve to
+  // different timestamps on SSR vs client first render and a minute-
+  // boundary or locale-format difference would trip React hydration
+  // mismatch. Backfill via useEffect post-mount instead.
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (initialDraft) setSavedAt(Date.now());
+  }, [initialDraft]);
   const [toastKey, setToastKey] = useState(0);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);

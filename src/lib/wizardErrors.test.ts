@@ -60,6 +60,20 @@ describe("wizardErrors", () => {
       expect(result.actions).toContain("try_another_key");
     });
 
+    it("KEY_SCOPE_BROADENED has the read-only re-key copy", () => {
+      // Surfaced when the wizard finalize re-check finds trade/withdraw
+      // scope on a key that passed the read-only validation at Connect.
+      // Title and cause must explicitly tell the user the key was
+      // broadened on the exchange between Connect and Submit so they
+      // know they need to re-key as read-only — not retry the same key.
+      const result = formatKeyError("KEY_SCOPE_BROADENED");
+      expect(result.title).toBe("Your key now has trading permissions.");
+      expect(result.cause).toMatch(/read-only/);
+      expect(result.cause).toMatch(/trade|withdraw/);
+      expect(result.actions).toContain("try_another_key");
+      expect(result.docsHref).toBe("/security#readonly-key");
+    });
+
     it("returns UNKNOWN when code is null", () => {
       const result = formatKeyError(null);
       expect(result.title).toBe("Something went wrong.");
@@ -83,7 +97,22 @@ describe("wizardErrors", () => {
 
     it("interpolates days into GATE_INSUFFICIENT_DAYS cause", () => {
       const result = formatKeyError("GATE_INSUFFICIENT_DAYS", { days: 4.2 });
-      expect(result.cause).toContain("4.2 days");
+      // Phase 21 — concrete span days are surfaced in the cause so the
+      // user immediately sees how short their actual history is.
+      expect(result.cause).toContain("4.2 calendar day");
+      expect(result.cause).toContain("Your trades span");
+    });
+
+    it("GATE_INSUFFICIENT_DAYS title talks about history, not activity", () => {
+      // Regression: the old wording "needs at least 7 days of activity"
+      // was misleading for high-frequency keys (3,842 fills in <7 days
+      // looks like plenty of "activity" to a user). The actual rule is a
+      // calendar-day span between earliest and latest trade. /qa
+      // 2026-05-05 — Bybit MWF-Read live key surfaced this on prod.
+      const result = formatKeyError("GATE_INSUFFICIENT_DAYS");
+      expect(result.title).not.toContain("activity");
+      expect(result.title).toContain("history");
+      expect(result.cause).toContain("calendar day");
     });
 
     it("appends computationError into GATE_ANALYTICS_FAILED cause", () => {

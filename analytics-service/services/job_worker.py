@@ -633,10 +633,19 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     # wizard was the only path that needed this and it has been broken
     # since the queue substrate was introduced.
     #
-    # Enqueue is best-effort: a transient failure here means the wizard
-    # hangs at 'computing', the same failure mode customers had before
-    # this fix, so we are not making things worse. The next sync_trades
-    # tick (cron-driven daily) will re-enqueue cleanly.
+    # Enqueue is best-effort *for the job retry loop* — a transient failure
+    # must not retry-loop sync_trades (the trades are already persisted and
+    # the next cron tick re-enqueues cleanly). However, the wizard polls
+    # strategy_analytics.computation_status and would otherwise spin for
+    # up to 24h with no error UI until the daily cron tick (regression
+    # of the same wizard-hang class PR #116 was meant to root-cause-fix).
+    #
+    # Fix: when the enqueue fails, write a `failed` row to strategy_analytics
+    # with a discriminating computation_error so the wizard's polling loop
+    # in SyncPreviewStep.tsx surfaces a GATE_ANALYTICS_FAILED envelope and
+    # the user sees a real error instead of an indefinite spinner. The
+    # daily cron will still re-enqueue and the next successful run will
+    # upsert computation_status back to 'computing' / 'complete'.
     try:
         def _enqueue_compute_analytics() -> None:
             ctx.supabase.rpc(
@@ -650,13 +659,47 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             strategy_id,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
+        # logger.exception (not warning) — operators must see the stack
+        # trace in Railway logs; previous WARNING-and-swallow hid the
+        # underlying cause for up to 24h.
+        logger.exception(
             "sync_trades: failed to enqueue follow-on compute_analytics "
-            "for strategy %s — wizard will hang at 'computing' until next "
-            "scheduled sync re-enqueues. Error: %s",
+            "for strategy %s — marking strategy_analytics as failed so "
+            "the wizard surfaces an error envelope instead of hanging. "
+            "Error: %s",
             strategy_id,
             exc,
         )
+
+        # Mark strategy_analytics.computation_status='failed' so the
+        # wizard's poller (SyncPreviewStep.tsx) breaks out of its
+        # waiting_for_complete state and renders an error envelope.
+        # Best-effort: if even this write fails, we log + swallow rather
+        # than fail the job (the trades are already persisted).
+        try:
+            def _mark_analytics_failed() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_error": (
+                            "Analytics enqueue failed during sync. "
+                            "The next scheduled sync will retry — "
+                            "contact support if this persists."
+                        ),
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_mark_analytics_failed)
+        except Exception as mark_exc:  # noqa: BLE001
+            logger.exception(
+                "sync_trades: failed to mark strategy_analytics as "
+                "failed for strategy %s after enqueue failure — wizard "
+                "may still hang. Error: %s",
+                strategy_id,
+                mark_exc,
+            )
 
     return DispatchResult(
         outcome=DispatchOutcome.DONE, trade_count=len(trades)

@@ -119,6 +119,11 @@ export function ErrorEnvelope({
       <p className="text-base font-semibold text-text-primary">
         {envelope.human_message}
       </p>
+      {envelope.cause && (
+        // Same secondary token as debug_context — keeps contrast ≥4.5:1
+        // on bg-negative/5.
+        <p className="mt-1.5 text-sm text-text-secondary">{envelope.cause}</p>
+      )}
       {envelope.debug_context.length > 0 && (
         // Phase 17 / DESIGN-05: text-text-secondary (#4A5568) on bg-negative/5
         // (~#FDF4F4) yields ~7.81:1, comfortably above WCAG 2.0 AA (≥4.5:1).

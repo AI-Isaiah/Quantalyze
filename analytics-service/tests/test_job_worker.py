@@ -715,6 +715,130 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         # Job must succeed — enqueue is best-effort.
         assert result.outcome == DispatchOutcome.DONE
 
+    @pytest.mark.asyncio
+    async def test_enqueue_failure_marks_strategy_analytics_failed(
+        self,
+    ) -> None:
+        """Wizard-hang regression: when the enqueue_compute_job RPC fails,
+        run_sync_trades_job MUST upsert strategy_analytics with
+        computation_status='failed' + a clear computation_error so the
+        wizard's poll loop (SyncPreviewStep.tsx) surfaces a
+        GATE_ANALYTICS_FAILED envelope instead of hanging at 'computing'
+        for up to 24h until the daily cron re-enqueues.
+
+        Pre-fix history (root cause found 2026-05-05): the previous
+        implementation logged at WARNING and silently swallowed the
+        enqueue failure with a "best-effort" comment. Daily cron means
+        the wizard user stares at the spinner indefinitely. Same wizard-
+        hang class as PR #116 was meant to fix.
+        """
+        from services.job_worker import run_sync_trades_job
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-hang", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # Make enqueue_compute_job raise; other RPCs succeed.
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            if name == "enqueue_compute_job":
+                raise RuntimeError("simulated enqueue infra failure")
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=5)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        # Track every supabase.table().upsert() call so we can assert the
+        # strategy_analytics 'failed' upsert was made with the right
+        # shape. The mock returns a chained builder so the production
+        # code's `.upsert(...).execute()` chain still works.
+        upsert_calls: list[tuple[str, dict, dict]] = []
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            def _upsert(payload: dict, **kwargs):
+                upsert_calls.append((name, dict(payload), dict(kwargs)))
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=[])
+                return stub
+
+            mock_t.upsert.side_effect = _upsert
+
+            # Keep the existing update().eq().execute() chain for the
+            # api_keys cursor advance — same as the other tests.
+            mock_update = MagicMock()
+            mock_eq = MagicMock()
+            mock_eq.execute.return_value = MagicMock(data=[])
+            mock_update.eq.return_value = mock_eq
+            mock_t.update.return_value = mock_update
+
+            return mock_t
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        job = {
+            "id": "job-hang",
+            "kind": "sync_trades",
+            "strategy_id": "strat-hang",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        # Job must still succeed — best-effort for the job, not for the UI.
+        assert result.outcome == DispatchOutcome.DONE
+
+        # Find the upsert into strategy_analytics with the failed status.
+        failed_upserts = [
+            payload
+            for (table_name, payload, _kwargs) in upsert_calls
+            if table_name == "strategy_analytics"
+            and payload.get("computation_status") == "failed"
+        ]
+        assert len(failed_upserts) == 1, (
+            f"Expected exactly 1 strategy_analytics 'failed' upsert "
+            f"after enqueue failure; got {len(failed_upserts)}. "
+            f"All upsert calls: {upsert_calls}"
+        )
+        payload = failed_upserts[0]
+        assert payload["strategy_id"] == "strat-hang"
+        assert payload["computation_status"] == "failed"
+        assert payload.get("computation_error"), (
+            "computation_error must be a non-empty string so the wizard "
+            "renders a meaningful GATE_ANALYTICS_FAILED envelope"
+        )
+        # The on_conflict kwarg must be present so this is an upsert,
+        # not an insert that crashes on PK conflict for re-runs.
+        on_conflict = next(
+            kwargs.get("on_conflict")
+            for (table_name, _payload, kwargs) in upsert_calls
+            if table_name == "strategy_analytics"
+        )
+        assert on_conflict == "strategy_id"
+
 
 # ---------------------------------------------------------------------------
 # compute_intro_snapshot handler

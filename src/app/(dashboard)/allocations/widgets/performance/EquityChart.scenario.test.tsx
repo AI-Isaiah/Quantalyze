@@ -37,7 +37,7 @@ function makeWealthSeries(n: number, start = 1.0, drift = 0.001): DailyPoint[] {
 }
 
 describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", () => {
-  it("T1: no scenarioSeries → no toggle present, no scenario stroke color in DOM", () => {
+  it("T1: no scenarioSeries → no toggle present, no scenario overlay path in DOM", () => {
     const { container, queryByRole } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
@@ -45,14 +45,19 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
       />,
     );
     expect(queryByRole("radiogroup", { name: "Equity series visibility" })).toBeNull();
-    // No path uses the canonical scenario accent token.
+    // ADVERSARIAL-EQ-3: query by data-testid (was: stroke attribute).
+    // The live baseline now correctly resolves to the chart-strategy
+    // token (was previously broken `var(--chart-strategy)`), so the
+    // stroke selector no longer differentiates live vs scenario. The
+    // scenario path carries `data-testid="equity-chart-scenario-overlay"`
+    // for unambiguous test discrimination.
     const scenarioPaths = container.querySelectorAll(
-      'svg path[stroke="var(--color-chart-strategy)"]',
+      '[data-testid="equity-chart-scenario-overlay"]',
     );
     expect(scenarioPaths.length).toBe(0);
   });
 
-  it("T2: with scenarioSeries → SVG contains a path with stroke var(--color-chart-strategy)", () => {
+  it("T2: with scenarioSeries → SVG contains the scenario overlay path", () => {
     const { container } = render(
       <EquityChart
         equityDailyPoints={makeWealthSeries(60)}
@@ -61,9 +66,14 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
       />,
     );
     const scenarioPaths = container.querySelectorAll(
-      'svg path[stroke="var(--color-chart-strategy)"]',
+      '[data-testid="equity-chart-scenario-overlay"]',
     );
     expect(scenarioPaths.length).toBeGreaterThanOrEqual(1);
+    // Sanity: the scenario overlay still uses the chart-strategy token
+    // for its stroke (visual identity unchanged from Phase 10).
+    expect(scenarioPaths[0].getAttribute("stroke")).toBe(
+      "var(--color-chart-strategy)",
+    );
   });
 
   it("T3: visibility toggle is a radiogroup of 3 radios (Live / Scenario / Both)", () => {
@@ -92,17 +102,24 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     );
     const both = getByRole("radio", { name: "Both" });
     expect(both.getAttribute("aria-checked")).toBe("true");
-    // Scenario path present
+    // Scenario overlay present.
     expect(
       container.querySelectorAll(
-        'svg path[stroke="var(--color-chart-strategy)"]',
+        '[data-testid="equity-chart-scenario-overlay"]',
       ).length,
     ).toBeGreaterThanOrEqual(1);
-    // Live baseline path also present (existing token chart-strategy without color- prefix)
-    expect(
-      container.querySelectorAll('svg path[stroke="var(--chart-strategy)"]')
-        .length,
-    ).toBeGreaterThanOrEqual(1);
+    // Live baseline is the non-overlay chart-strategy line — fill="none",
+    // strokeWidth=1.75, no scenario data-testid.
+    const liveLines = Array.from(
+      container.querySelectorAll(
+        'svg path[stroke="var(--color-chart-strategy)"]',
+      ),
+    ).filter(
+      (p) =>
+        p.getAttribute("fill") === "none" &&
+        !p.hasAttribute("data-testid"),
+    );
+    expect(liveLines.length).toBeGreaterThanOrEqual(1);
   });
 
   it("T5: toggle to 'Live' hides the scenario overlay path", () => {
@@ -117,7 +134,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     fireEvent.click(live);
     expect(live.getAttribute("aria-checked")).toBe("true");
     const scenarioPaths = container.querySelectorAll(
-      'svg path[stroke="var(--color-chart-strategy)"]',
+      '[data-testid="equity-chart-scenario-overlay"]',
     );
     expect(scenarioPaths.length).toBe(0);
   });
@@ -136,18 +153,21 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     // Scenario path still present
     expect(
       container.querySelectorAll(
-        'svg path[stroke="var(--color-chart-strategy)"]',
+        '[data-testid="equity-chart-scenario-overlay"]',
       ).length,
     ).toBeGreaterThanOrEqual(1);
-    // Live path either: (a) absent, or (b) rendered with reduced stroke-opacity (visually muted)
+    // Live path either: (a) absent, or (b) rendered with reduced stroke-opacity (visually muted).
+    // Live path = chart-strategy stroke, fill=none, no scenario data-testid.
     const liveLines = Array.from(
       container.querySelectorAll(
-        'svg path[stroke="var(--chart-strategy)"]',
+        'svg path[stroke="var(--color-chart-strategy)"]',
       ),
+    ).filter(
+      (p) =>
+        p.getAttribute("fill") === "none" &&
+        !p.hasAttribute("data-testid"),
     );
-    const lineOnly = liveLines.find(
-      (p) => p.getAttribute("fill") === "none",
-    );
+    const lineOnly = liveLines[0];
     if (lineOnly != null) {
       const op = lineOnly.getAttribute("stroke-opacity");
       expect(op).not.toBeNull();
@@ -171,7 +191,7 @@ describe("EquityChart — scenarioSeries overlay + visibility toggle (10-04)", (
     ).toBeNull();
     expect(
       container.querySelectorAll(
-        'svg path[stroke="var(--color-chart-strategy)"]',
+        '[data-testid="equity-chart-scenario-overlay"]',
       ).length,
     ).toBe(0);
   });

@@ -19,6 +19,13 @@ interface Permissions {
   trade: boolean;
   withdraw: boolean;
   detected_at: string;
+  /**
+   * Set by the Python service's _FAIL_CLOSED payload when the upstream
+   * exchange could not be contacted. Distinguishes "exchange unreachable"
+   * from "key revoked" — both surface as read=false/trade=false/withdraw=false
+   * otherwise, which would mislead users during outages.
+   */
+  probe_error?: boolean;
 }
 
 export interface KeyPermissionBadgeProps {
@@ -75,12 +82,32 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
         { method: "GET", cache: "no-store" },
       );
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Probe failed" }));
-        throw new Error(err.error ?? `HTTP ${res.status}`);
+        // Sentinel so we can distinguish a successful empty parse from a
+        // real JSON failure (HTML proxy error page, gzip corruption).
+        const PARSE_FAILED = Symbol("parse-failed");
+        const err = (await res.json().catch(() => PARSE_FAILED)) as
+          | { error?: string; code?: string }
+          | typeof PARSE_FAILED;
+        if (err === PARSE_FAILED) {
+          // Surface HTTP status + statusText so support has something to
+          // correlate against the proxy/CDN logs when no JSON body comes back.
+          throw new Error(
+            `HTTP ${res.status} (${res.statusText || "no body"})`,
+          );
+        }
+        const message = err.error ?? `HTTP ${res.status}`;
+        // Prepend the route's structured `code` (e.g. PROBE_BACKEND_UNAVAILABLE)
+        // so the displayed text is greppable in support tickets.
+        throw new Error(err.code ? `${err.code}: ${message}` : message);
       }
       const data = (await res.json()) as Permissions;
       if (mountedRef.current) setPerms(data);
     } catch (e) {
+      // Preserve the raw error for the browser console before we squash
+      // it to a user-facing string. Stack traces and non-Error throws
+      // disappear once we hit setError(); without this log, debugging a
+      // probe failure from a user-submitted screenshot is much harder.
+      console.error("[KeyPermissionBadge] probe failed:", e);
       if (mountedRef.current) {
         setError(e instanceof Error ? e.message : "Could not check permissions.");
       }
@@ -138,6 +165,58 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
 
       {perms && (
         <>
+          {/*
+            Phase 21 (ISSUE-002) — plain-English summary above the chips.
+            The chips alone (color + glyph + strikethrough) are accessible
+            to sighted users, but a glancing user has to parse three
+            independent visual cues to know whether the key is safe.
+            One sentence in either accent or negative spells it out.
+          */}
+          {(() => {
+            // Branches are ordered probe-error → read-only → wrong-scope.
+            // probe_error MUST come first so we don't mis-diagnose an
+            // exchange outage as "key revoked" — both look like
+            // read=false/trade=false/withdraw=false on the wire.
+            const summaryState: "probe-error" | "read-only" | "wrong-scope" =
+              perms.probe_error
+                ? "probe-error"
+                : perms.read && !perms.trade && !perms.withdraw
+                  ? "read-only"
+                  : "wrong-scope";
+            const summaryText =
+              summaryState === "probe-error"
+                ? "Could not contact the exchange to verify scopes. Try the Re-check button in a moment."
+                : summaryState === "read-only"
+                  ? "Read-only key confirmed — trading and withdrawals are blocked."
+                  : perms.trade || perms.withdraw
+                    ? `⚠ This key has ${[
+                        perms.trade ? "trade" : null,
+                        perms.withdraw ? "withdraw" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" and ")} permission. Re-key as read-only.`
+                    : "⚠ No read permission detected on this key. The key may have been revoked or scoped wrong.";
+            return (
+              <p
+                className={`text-[13px] ${
+                  summaryState === "read-only" ? "text-accent" : "text-negative"
+                }`}
+                data-testid="key-permission-summary"
+                data-state={summaryState}
+                // role="alert" only on the warning states. Read-only is
+                // informational ("here's the verified scope") — surfacing
+                // it as an alert would over-fire screen readers on the
+                // happy path.
+                role={
+                  summaryState === "wrong-scope" || summaryState === "probe-error"
+                    ? "alert"
+                    : undefined
+                }
+              >
+                {summaryText}
+              </p>
+            );
+          })()}
           <div className="flex flex-wrap gap-2">
             <Pill label="Read" granted={perms.read} />
             <Pill label="Trade" granted={perms.trade} />

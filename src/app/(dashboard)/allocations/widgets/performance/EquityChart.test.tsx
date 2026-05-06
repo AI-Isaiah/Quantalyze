@@ -171,7 +171,56 @@ describe("EquityChart", () => {
     );
     const staleEl = container.querySelector('[data-testid="equity-chart-stale"]');
     expect(staleEl).not.toBeNull();
+    // Without `lastSyncAt`, copy falls back to the static "Data may be
+    // stale" so older call sites that don't yet plumb the timestamp
+    // through don't regress.
     expect(container.textContent).toMatch(/Data may be stale/i);
+  });
+
+  it("ADVERSARIAL-EQ-6 — stale overlay shows 'Last updated Nh ago' when lastSyncAt is supplied", () => {
+    // Pin a known ISO ~3 hours in the past relative to a test-controlled
+    // clock so the helper's bucket arithmetic is deterministic. Vitest's
+    // setSystemTime keeps Date.now() stable for the assertion.
+    const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
+    vi.setSystemTime(NOW);
+    try {
+      const lastSyncAt = new Date(NOW - 3 * 60 * 60 * 1000).toISOString();
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={makeSeries(60)}
+          stale
+          lastSyncAt={lastSyncAt}
+          initialPeriod="ALL"
+        />,
+      );
+      const staleEl = container.querySelector(
+        '[data-testid="equity-chart-stale"]',
+      );
+      expect(staleEl).not.toBeNull();
+      expect(staleEl?.textContent).toContain("Last updated 3h ago");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ADVERSARIAL-EQ-6 — header sync stamp uses relative time when lastSyncAt is supplied", () => {
+    const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
+    vi.setSystemTime(NOW);
+    try {
+      const lastSyncAt = new Date(NOW - 5 * 60 * 1000).toISOString();
+      const { container } = render(
+        <EquityChart
+          equityDailyPoints={makeSeries(60)}
+          lastSyncAt={lastSyncAt}
+          initialPeriod="ALL"
+        />,
+      );
+      // Header copy reads "last sync 5m ago" rather than "sync just now".
+      expect(container.textContent).toContain("last sync 5m ago");
+      expect(container.textContent).not.toContain("sync just now");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does NOT render 1D or 1W buttons (intraday deferred)", () => {
@@ -245,19 +294,28 @@ describe("EquityChart", () => {
     expect(legend.textContent).toMatch(/BTC/);
   });
 
-  it("PR3 (dashboard parity) — renders 'sync just now' stamp instead of always-visible return summary", () => {
-    // PR3 dropped the right-side return-summary div ("ALL +1.23%") that
-    // collided with the prototype's "sync 2m ago" affordance. The Y-axis
-    // labels + hover crosshair already surface the period return; the
-    // sync stamp is the truth-screenshot's right-aligned chrome.
-    const { getByText, queryByLabelText } = render(
+  it("ADVERSARIAL-EQ-5 — renders both the sync stamp AND an always-visible period return summary", () => {
+    // PR3 had dropped the right-side return-summary div as a parity
+    // tradeoff for the truth screenshot's "sync 2m ago" stamp. The
+    // adversarial review re-introduces the summary because the y-axis
+    // labels alone don't give a glance-able answer to "what's my
+    // current return?" — the user still has to mentally interpolate
+    // the rightmost line endpoint against the tick scale.
+    //
+    // Both chrome elements now render: the sync stamp (truth-screenshot
+    // parity) AND the return summary (`aria-label="Return over {period}"`
+    // — the same naming convention used before PR3 removed it).
+    const { getByText, getByLabelText } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
     expect(getByText("sync just now")).toBeTruthy();
-    expect(queryByLabelText("Return over ALL")).toBeNull();
+    const summary = getByLabelText("Return over ALL");
+    expect(summary).toBeTruthy();
+    // Summary text matches "+x.xx%" / "-x.xx%" pattern.
+    expect(summary.textContent).toMatch(/^ALL[+-]?\d+(\.\d+)?%$/);
   });
 
-  it("gradient uses the --chart-strategy design token (no hardcoded hex)", () => {
+  it("gradient uses the --color-chart-strategy design token (no hardcoded hex)", () => {
     const { container } = render(
       <EquityChart equityDailyPoints={makeSeries(60)} initialPeriod="ALL" />,
     );
@@ -266,13 +324,17 @@ describe("EquityChart", () => {
     const svg = container.querySelector("svg")!;
     const stops = Array.from(svg.getElementsByTagName("stop"));
     expect(stops.length).toBeGreaterThan(0);
+    // ADVERSARIAL-EQ-3 — switched from `var(--chart-strategy)` (an
+    // undefined CSS custom property — Tailwind v4 @theme inline only
+    // emits the prefixed `--color-*` names) to `var(--color-chart-strategy)`
+    // which actually resolves in browsers.
     for (const s of stops) {
       const color = s.getAttribute("stop-color") ?? "";
-      expect(color).toMatch(/var\(--chart-strategy\)/);
+      expect(color).toMatch(/var\(--color-chart-strategy\)/);
     }
   });
 
-  it("benchmark path uses the --chart-benchmark design token (no hardcoded hex)", () => {
+  it("benchmark path uses the --color-chart-benchmark design token (no hardcoded hex)", () => {
     const { container } = render(
       <EquityChart
         equityDailyPoints={makeSeries(60)}
@@ -284,7 +346,11 @@ describe("EquityChart", () => {
       'svg path[stroke-dasharray="3 3"]',
     ) as SVGPathElement | null;
     expect(dashed).not.toBeNull();
-    expect(dashed?.getAttribute("stroke")).toBe("var(--chart-benchmark)");
+    // ADVERSARIAL-EQ-3 — same fix as the gradient: switched from
+    // `var(--chart-benchmark)` (undefined) to `var(--color-chart-benchmark)`.
+    expect(dashed?.getAttribute("stroke")).toBe(
+      "var(--color-chart-benchmark)",
+    );
   });
 });
 

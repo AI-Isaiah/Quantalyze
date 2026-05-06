@@ -26,6 +26,13 @@ export interface ErrorEnvelope {
   ok: false;
   code: string;
   human_message: string;
+  /**
+   * Optional explanatory subtitle rendered between the title and the
+   * fix-step list. Carries the WizardErrorCopy.cause field so the user
+   * sees the WHY, not just the WHAT. Older callers and consumers that
+   * predate this field continue to work — the renderer skips when absent.
+   */
+  cause?: string;
   debug_context: string[];
   correlation_id: string;
   recoverable: boolean;
@@ -41,6 +48,7 @@ const RECOVERABLE_ACTIONS: ReadonlySet<WizardErrorAction> = new Set([
  * WizardErrorCopy shape produced by formatKeyError(...) into the OBSERV-06
  * envelope shape:
  *   title → human_message
+ *   cause → cause          (Phase 21 — was being silently dropped)
  *   fix[] → debug_context
  *   recoverable = any action in RECOVERABLE_ACTIONS
  *
@@ -57,6 +65,7 @@ export function buildEnvelope(
     ok: false,
     code,
     human_message: copy.title,
+    cause: copy.cause,
     debug_context: copy.fix,
     correlation_id,
     recoverable: copy.actions.some((a) => RECOVERABLE_ACTIONS.has(a)),

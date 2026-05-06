@@ -60,8 +60,8 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
   const card = (
     <div
       style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
         borderRadius: "var(--radius-lg)",
         boxShadow: "var(--shadow-card)",
         height: "100%",
@@ -74,7 +74,7 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
       <div
         style={{
           padding: "14px 20px",
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "1px solid var(--color-border)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -85,7 +85,7 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
           <div
             style={{
               fontSize: 12,
-              color: "var(--text-muted)",
+              color: "var(--color-text-muted)",
               marginTop: 2,
             }}
           >
@@ -109,7 +109,7 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
             fontSize: 13,
             fontWeight: 500,
             borderRadius: "var(--radius-md)",
-            color: "var(--text-secondary)",
+            color: "var(--color-text-secondary)",
             background: "transparent",
             border: "1px solid transparent",
             textDecoration: "none",
@@ -139,19 +139,19 @@ export function MandateSnapshotWidget({ data }: WidgetProps) {
 function MandateGateLine({ row }: { row: GateRow }) {
   const dotColor =
     row.ok === true
-      ? "var(--positive)"
+      ? "var(--color-positive)"
       : row.ok === false
-        ? "var(--negative)"
-        : "var(--text-muted)";
+        ? "var(--color-negative)"
+        : "var(--color-text-muted)";
   const currentColor =
-    row.ok === false ? "var(--negative)" : "var(--text-primary)";
+    row.ok === false ? "var(--color-negative)" : "var(--color-text-primary)";
   return (
     <div
       style={{
         display: "flex",
         alignItems: "center",
         padding: "10px 20px",
-        borderBottom: "1px solid var(--border)",
+        borderBottom: "1px solid var(--color-border)",
         gap: "var(--space-grid-gap)",
       }}
     >
@@ -168,13 +168,13 @@ function MandateGateLine({ row }: { row: GateRow }) {
       <span style={{ flex: 1, fontSize: 13 }}>{row.label}</span>
       <span
         className="font-mono tnum"
-        style={{ fontSize: 12, color: "var(--text-muted)" }}
+        style={{ fontSize: 12, color: "var(--color-text-muted)" }}
       >
         {row.gate}
       </span>
       <span
         aria-hidden="true"
-        style={{ width: 1, height: 14, background: "var(--border)" }}
+        style={{ width: 1, height: 14, background: "var(--color-border)" }}
       />
       <span
         className="font-mono tnum"

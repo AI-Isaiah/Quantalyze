@@ -93,17 +93,33 @@ export function SubmitStep({
         strategy_id?: string;
         status?: string;
         error?: string;
+        code?: string;
       };
 
       if (!res.ok) {
         // The notify-submission email is fire-and-forget — if we get a
         // 2xx but that callback failed, the strategy is still saved.
         // Here we only surface actual finalize failures.
-        setErrorCode("UNKNOWN");
+        //
+        // The server tags actionable failures with a stable WizardErrorCode
+        // (e.g. KEY_SCOPE_BROADENED when the live exchange-key scope
+        // re-check at finalize finds the key broadened to trade/withdraw
+        // since Connect, or KEY_NETWORK_TIMEOUT when that probe itself
+        // fails). Trust the code only if it's a known wizard code so a
+        // garbled response can't poison the envelope copy.
+        const KNOWN_FINALIZE_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(
+          ["KEY_SCOPE_BROADENED", "KEY_NETWORK_TIMEOUT"],
+        );
+        const surfaced: WizardErrorCode =
+          data.code &&
+          KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
+            ? (data.code as WizardErrorCode)
+            : "UNKNOWN";
+        setErrorCode(surfaced);
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "submit",
-          code: "UNKNOWN",
+          code: surfaced,
         });
         setSubmitting(false);
         return;

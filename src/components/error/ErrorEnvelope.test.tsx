@@ -360,6 +360,52 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(() => unmount()).not.toThrow();
   });
 
+  // Phase 21 — `cause` field carries WizardErrorCopy.cause (the WHY)
+  // and was being silently dropped before. Regression: a Bybit live key
+  // with 3,842 fills in <7 calendar days hit GATE_INSUFFICIENT_DAYS in
+  // /qa 2026-05-05 — the title alone ("needs 7 days of activity") was
+  // misleading; the cause text says "calendar days" explicitly.
+  it("renders the cause subtitle between title and debug_context list", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({
+          human_message: "Title here.",
+          cause: "Specific calendar-day rule.",
+          debug_context: ["Step one."],
+        })}
+      />,
+    );
+    const causeP = screen.getByText("Specific calendar-day rule.");
+    const title = screen.getByText("Title here.");
+    const list = document.querySelector("ul");
+    expect(causeP).toBeInTheDocument();
+    // Cause must follow the title and precede the bullet list.
+    expect(title.compareDocumentPosition(causeP)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(causeP.compareDocumentPosition(list!)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("does NOT render a cause paragraph when envelope.cause is absent", () => {
+    render(<ErrorEnvelope envelope={makeEnvelope()} />);
+    const alert = screen.getByRole("alert");
+    // Only the title and the debug_context list; no extra <p> between them.
+    const ps = alert.querySelectorAll("p");
+    // The first <p> is the title. Any additional <p> before the <ul> would
+    // indicate a regression where an empty cause is being rendered.
+    expect(ps[0].textContent).toBe("Invalid signature.");
+    const list = alert.querySelector("ul");
+    expect(list).not.toBeNull();
+    // Walk DOM order from title to list — there should be NO <p> in between.
+    let n = ps[0].nextElementSibling;
+    while (n && n !== list) {
+      expect(n.tagName).not.toBe("P");
+      n = n.nextElementSibling;
+    }
+  });
+
   // Empty debug_context → guard clause at line 154 in the component must
   // suppress the <ul>. Without the guard, the surface renders an empty
   // bullet list which is a screen-reader noise source.

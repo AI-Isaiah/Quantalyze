@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.1.0] - 2026-05-06
+
+**Wizard polish + EquityChart polish + Tailwind v4 sweep + scope-escalation hardening + silent-failure cleanup.** A single rollup PR converging three /investigate cycles: live Bybit verification surfaced two wizard UX gaps, an EquityChart polish pass that uncovered a silent Tailwind v4 token drift across four widgets, and a 6-reviewer specialist + red team pass that found one CRITICAL scope-escalation bypass and several HIGH silent failures.
+
+### Added
+
+- **`KEY_SCOPE_BROADENED` defense in `/api/strategies/finalize-wizard`.** The wizard SubmitStep now re-validates the connected key's exchange-side scopes via a force-refresh path that bypasses both the Next `unstable_cache` (60s) and the Python in-memory cache (15min). If `trade=true` or `withdraw=true` came back, the finalize aborts with 403 `KEY_SCOPE_BROADENED` and a clear "your key now has trading permissions, re-key as read-only" envelope. Probe failure is treated as fail-CLOSED with 502 `KEY_NETWORK_TIMEOUT`. CSV-branch (no `api_key_id`) skips the probe. (Found by red-team adversarial pass; finalize-wizard previously had zero scope re-validation between Connect and Submit.)
+- **`force_refresh` param on `detect_*_permissions`** (`analytics-service/services/key_permissions.py`) and the `/internal/keys/{id}/permissions` route — skips the in-memory TTL cache AND drops any pre-existing entry, so a freshly-broadened key is detected immediately.
+- **Plain-English summary line above the `KeyPermissionBadge` chips** (`src/components/connect/KeyPermissionBadge.tsx`). One sentence in either accent or negative explicitly states the key state ("Read-only key confirmed", "⚠ This key has trade and withdraw permission. Re-key as read-only.", or "⚠ Could not contact the exchange to verify scopes" for the new probe-error state) so a glancing user does not have to parse three independent chip cues (color + glyph + strikethrough). `data-state` exposes `read-only` / `wrong-scope` / `probe-error` for E2E selectors. `role="alert"` on the warning states.
+- **`probe_error` propagation** end-to-end. The Python `_FAIL_CLOSED` payload's `probe_error: true` field used to be silently stripped by the Next route's typed `PermissionPayload`. Now forwarded through, and the badge renders a dedicated probe-error state instead of mis-diagnosing exchange outages as "key revoked".
+- **EquityChart polish** (allocator dashboard): Y-axis tick labels, 0% baseline reference line, persistent legend (replaces hover-only labels), bumped period button readability and contrast, always-visible period return summary, and a "Last updated Nh ago" relative timestamp on the stale dimmer.
+- **`KEY_SCOPE_BROADENED` envelope** in `wizardErrors.ts` with explicit re-key copy.
+- **Hydration regression guard** at `e2e/wizard-hydration-probe.spec.ts` covering 4 entry paths (fresh API, fresh CSV, API + localStorage seeded, post-login redirect chain). Verified clean against `npm run dev` AND `npm run build && npm start`.
+- **Bisectable test pin** for the `savedAt` SSR-safety pattern in `WizardChrome.test.tsx`. SSR `renderToString` with `savedAt=null` must match client first render markup.
+
+### Changed
+
+- **GATE_INSUFFICIENT_DAYS wizard error reworded.** Title was "This account needs at least 7 days of activity." which misled users with high-fill / short-span keys (3,842 fills in <7 calendar days reads as "plenty of activity"). Now: "This account needs more trading history." Cause prefix now starts with "Your trades span X.X calendar day(s)." so the user immediately sees the actual span versus the 7-day threshold. (`src/lib/wizardErrors.ts`)
+- **`WizardErrorCopy.cause` field is no longer dropped in transit.** `buildEnvelope` previously mapped only `title → human_message` and `fix → debug_context`; the `cause` body was silently discarded. Now forwarded through `ErrorEnvelope.cause` and rendered as a `text-text-secondary` subtitle between the title and the fix-step list.
+- **`WizardClient.savedAt`** initializes synchronously to `null` (SSR-safe) and backfills via `useEffect` instead of `useState(() => initialDraft ? Date.now() : null)`. Lazy initializers run on both server and client first render, so the previous code resolved to different timestamps that mismatched on minute boundary or locale-format differences and triggered React #418.
+- **Tailwind v4 token sweep** across four widgets (`EquityChart`, `KpiStripWidget`, `MandateSnapshotWidget`, `AllocationByStyleWidget`). Bare `var(--positive)` / `var(--text-muted)` / `var(--chart-strategy)` etc. silently resolved to `currentColor` / black under Tailwind v4 `@theme inline`, which only emits `--color-*`-prefixed tokens. All call sites moved to `var(--color-*)`.
+- **`--radius-{sm,md,lg,xl}` tokens added to `@theme inline`** (`src/app/globals.css`). Several widgets referenced `var(--radius-lg)` / `var(--radius-md)` against undeclared tokens, silently rendering 0px corners. Now declared per DESIGN.md §Border-radius ladder.
+- **`/api/keys/[id]/permissions` 502 response no longer leaks internal infra strings.** Pre-fix the catch block put the raw `Error.message` in the response body, surfacing literals like "INTERNAL_API_TOKEN is not configured on the Next layer." in the wizard alert. Now classified into stable codes (`PROBE_BACKEND_UNAVAILABLE` / `PROBE_TIMEOUT` / `PROBE_FAILED`) with generic copy; raw error stays in `console.error` server-side. Client-side parse-failure paths preserve the HTTP status.
+- **`enqueue_compute_analytics` failure now marks `strategy_analytics.computation_status='failed'`** (`analytics-service/services/job_worker.py`) and logs at `logger.exception`. Previously logged WARNING and silently relied on the daily cron tick to re-enqueue, which left the wizard polling loop stuck for up to 24h with no error UI — the same failure class PR #116 was supposed to root-cause-fix.
+- **`validate_key_permissions` classifies ccxt errors** (`analytics-service/services/exchange.py`) into `ccxt.PermissionDenied` / `AuthenticationError` / `DDoSProtection` / `RateLimitExceeded` / `ExchangeNotAvailable` / `NetworkError` branches with discriminating `error_code` values, instead of collapsing every failure into a single misleading "verify your credentials" message.
+- **`load_markets` defense now propagates non-documented exceptions.** Only `RateLimitExceeded` and `PermissionDenied` are swallowed; everything else re-raises into the outer classifier. Adds `markets_loaded` and `markets_error` markers to the result so a downstream trade-fetch failure can correlate back.
+- **Hydration probe seeds the correct localStorage key.** Previously seeded `quantalyze:wizard:state:v2` with `ts`; the app reads `quantalyze_wizard_state_v1` with `savedAt`. The seeded scenario was secretly identical to the fresh-load case before this fix.
+- **Hydration probe runs serial-mode.** Four scenarios share one demo-allocator credential; running them in parallel hammered Supabase's per-email rate limiter and produced flaky `waitForURL` timeouts. Login helper now races the form-error path against the navigation path so a rate-limit rejection surfaces with the actual reason instead of a useless timeout.
+
+### Fixed
+
+- **CRITICAL — Scope-escalation bypass closed.** A user could connect a read-only key, broaden it on the exchange dashboard, and submit the wizard before any re-check. See `## Added` for the defense.
+- **HIGH — Wizard hang up to 24h on `compute_analytics` enqueue failure.** Same class as PR #116. Worker now writes a failed `strategy_analytics` row so the wizard's `SyncPreviewStep` poller breaks out and surfaces a `GATE_ANALYTICS_FAILED` envelope.
+- **HIGH — Exchange-API outage was rendered as "key revoked"** in the `KeyPermissionBadge`. The new probe-error state corrects the diagnosis.
+- **MED — Pre-existing pre-Phase-21 `--radius-*` token drift.** Three widgets rendered with 0px corners.
+- **MED — `/api/keys/[id]/permissions` 502 info disclosure.** Now redacts internal infra strings.
+
+### Test coverage
+
+- **+16 new tests** across `WizardChrome.test.tsx` (3 SSR-safety asserts), `KeyPermissionBadge.test.tsx` (4 prose state asserts + probe-error + role parity), `envelope.test.ts` (3 buildEnvelope asserts), `wizardErrors.test.ts` (KEY_SCOPE_BROADENED + GATE_INSUFFICIENT_DAYS rewording asserts), and the analytics-service Python suite (force_refresh cache bypass, ccxt error classification, load_markets defense, enqueue-failure-marks-strategy-analytics-failed).
+- **Hydration probe** (`e2e/wizard-hydration-probe.spec.ts`) shipped as a permanent regression guard.
+- **Full suite: 2860/2860 vitest passes; 62/62 in changed Python files.**
+
+### Reviewer pass
+
+This rollup absorbed feedback from 6 reviewers (code-reviewer, silent-failure-hunter, type-design-analyzer, pr-test-analyzer, comment-analyzer + codex red team) dispatched in parallel during /investigate. All CRITICAL and HIGH findings are addressed in 14 follow-up commits. Two LOW gaps remain documented: `SubmitStep` client allowlist for response codes (no direct unit test; server allowlist exhaustively pinned), and `AllocationByStyleWidget` token-rewire (no co-located test file). Both fail safely.
+
 ## [0.21.0.3] - 2026-05-05
 
 **Bybit `readOnly` flag is a STRING in ccxt — fix `==` comparison.**

@@ -484,3 +484,70 @@ class TestDetectPermissionsCache:
         await detect_permissions(ex, api_key_id="key-1")
         await detect_permissions(ex, api_key_id="key-2")
         assert ex.sapi_get_account_apirestrictions.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_bypasses_cache(self, monkeypatch):
+        # Security regression: the wizard finalize-scope-recheck calls
+        # detect_permissions(..., force_refresh=True) right before
+        # promoting a wizard draft to pending_review. If the user
+        # broadens the key in their exchange dashboard between Connect
+        # and Submit, the 15-minute TTL cache must NOT mask the new
+        # scopes — otherwise a stale "trade=False" lets a now-trading
+        # key sail through finalize.
+        monkeypatch.setenv("KEY_PERMISSION_CACHE_TTL", "900")
+
+        # First, prime the cache with a read-only response.
+        ex = AsyncMock()
+        ex.id = "binance"
+        ex.sapi_get_account_apirestrictions = AsyncMock(return_value={
+            "enableSpotAndMarginTrading": False,
+            "enableFutures": False,
+            "enableWithdrawals": False,
+        })
+        first = await detect_permissions(ex, api_key_id="key-rotated")
+        assert first["trade"] is False
+        assert ex.sapi_get_account_apirestrictions.await_count == 1
+
+        # The exchange response now broadens to trade=True (user
+        # toggled the scope on the dashboard). Without force_refresh
+        # the cached read-only result would be returned.
+        ex.sapi_get_account_apirestrictions = AsyncMock(return_value={
+            "enableSpotAndMarginTrading": True,
+            "enableFutures": False,
+            "enableWithdrawals": False,
+        })
+
+        # Without force_refresh: cached value still wins → trade=False.
+        cached_again = await detect_permissions(ex, api_key_id="key-rotated")
+        assert cached_again["trade"] is False, (
+            "sanity: TTL cache normally hides newer permission state"
+        )
+        assert ex.sapi_get_account_apirestrictions.await_count == 0, (
+            "second call must hit the cache without force_refresh"
+        )
+
+        # With force_refresh=True: cache is bypassed, exchange is
+        # called, the live trade=True scope surfaces.
+        fresh = await detect_permissions(
+            ex, api_key_id="key-rotated", force_refresh=True,
+        )
+        assert fresh["trade"] is True, (
+            "force_refresh=True must skip the in-memory cache so a freshly "
+            "broadened key cannot be masked by the 15-minute TTL"
+        )
+        assert ex.sapi_get_account_apirestrictions.await_count == 1, (
+            "force_refresh=True must trigger a live exchange call"
+        )
+
+        # And the freshly-broadened result replaces the stale cache
+        # entry, so subsequent normal calls also see trade=True.
+        ex.sapi_get_account_apirestrictions = AsyncMock(return_value={
+            "enableSpotAndMarginTrading": True,
+            "enableFutures": False,
+            "enableWithdrawals": False,
+        })
+        post_refresh = await detect_permissions(ex, api_key_id="key-rotated")
+        assert post_refresh["trade"] is True
+        assert ex.sapi_get_account_apirestrictions.await_count == 0, (
+            "post-force_refresh entry must be cached normally"
+        )

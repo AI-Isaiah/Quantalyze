@@ -92,6 +92,17 @@
   /* --- Shadows --- */
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-elevated: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+
+  /* --- Border radius (DESIGN.md §Border radius ladder) ---
+     Tailwind v4 silently resolves `var(--radius-*)` to border-radius:0
+     when the token is undeclared, so missing entries here produced
+     square corners on cards that asked for them. Declared explicitly
+     so the spec is canonical and a future `rounded-md` / `rounded-lg`
+     utility resolves consistently. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
 }
 
 /* Respect user motion preferences for the shared `animate-pulse` utility,

@@ -49,67 +49,172 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     """Validate that the API key is functional using safe read-only operations.
 
-    Public shape preserved for backwards compat: ``{valid, read_only, error}``.
-    Sprint 5 Task 5.8 moved the per-exchange permission probes into
-    ``services.key_permissions`` so the new live viewer can reuse the same
-    parsers. ``read_only`` here is derived from the new triple as
-    ``read and not trade and not withdraw`` — same semantics as before.
+    Public shape: ``{valid, read_only, error, error_code, markets_loaded,
+    markets_error, probe_error}``. ``error_code`` is a stable discriminator
+    (e.g. ``"AUTH_FAILED"``, ``"PERMISSION_DENIED"``, ``"RATE_LIMITED"``,
+    ``"NETWORK_UNAVAILABLE"``, ``"VALIDATION_UNEXPECTED"``) so the Next layer
+    can route to a precise envelope without parsing the human-readable
+    ``error`` string. Sprint 5 Task 5.8 moved the per-exchange permission
+    probes into ``services.key_permissions``; ``read_only`` here is derived
+    from the triple as ``read and not trade and not withdraw``.
     """
     from services.key_permissions import detect_permissions
 
-    result: dict[str, Any] = {"valid": False, "read_only": False, "error": None}
+    result: dict[str, Any] = {
+        "valid": False,
+        "read_only": False,
+        "error": None,
+        "error_code": None,
+        # Defense-in-depth markers: callers (e.g. trade fetch) can correlate
+        # later failures back to a load_markets that didn't actually load.
+        "markets_loaded": False,
+        "markets_error": None,
+    }
 
     try:
         try:
             await exchange.load_markets()
-        except Exception as load_exc:  # noqa: BLE001
-            # Defense in depth: a flaky `load_markets()` (geo-blocked
-            # endpoint, scope-restricted endpoint, transient network blip)
-            # must not reject an otherwise-valid key. The real validation
-            # is `fetch_balance()` plus the per-exchange permission probes
-            # in `services.key_permissions.detect_*_permissions`, neither
-            # of which depend on markets being loaded. Log + continue.
+            result["markets_loaded"] = True
+        except (ccxt.RateLimitExceeded, ccxt.PermissionDenied) as load_exc:
+            # Documented swallow-path: Bybit's read-only key triggers
+            # /v5/asset/coin/query-info → 403, which ccxt re-raises as
+            # RateLimitExceeded. Also covers documented PermissionDenied
+            # for keys without scope on the markets-meta endpoint.
+            # `fetch_balance()` is the real validation, and per-exchange
+            # permission probes don't depend on markets being loaded.
             logger.warning(
-                "validate_key_permissions: load_markets failed on %s — %s: %s; continuing with fetch_balance",
+                "validate_key_permissions: load_markets failed on %s — %s: %s; "
+                "continuing with fetch_balance (markets_loaded=False)",
                 exchange.id,
                 type(load_exc).__name__,
                 load_exc,
             )
+            result["markets_error"] = (
+                f"{type(load_exc).__name__}: {load_exc}"
+            )
+        # Note: every other exception class (NetworkError, AuthenticationError,
+        # ExchangeNotAvailable, etc.) is intentionally allowed to propagate
+        # to the outer handler so it lands in the right error_code branch
+        # below — the outer handler is the single classification surface.
         await exchange.fetch_balance()
         result["valid"] = True
+    # IMPORTANT: order matters. ccxt's hierarchy is:
+    #   PermissionDenied ⊂ AuthenticationError ⊂ ExchangeError
+    #   RateLimitExceeded, DDoSProtection, ExchangeNotAvailable ⊂ NetworkError
+    # Subclasses MUST be checked before their superclasses or every
+    # PermissionDenied/RateLimit/DDoS will land on the wrong branch.
+    except ccxt.PermissionDenied as exc:
+        # Right credentials, wrong scope (or IP allowlist mismatch on
+        # exchanges that map IP-block to PermissionDenied). Must precede
+        # AuthenticationError because PermissionDenied subclasses it.
+        logger.exception(
+            "validate_key_permissions: ccxt.PermissionDenied on %s — %s",
+            exchange.id,
+            exc,
+        )
+        result["error"] = (
+            "Key denied permission. Confirm the key has read-only scope "
+            "and that your IP allowlist includes our service."
+        )
+        result["error_code"] = "PERMISSION_DENIED"
+        return result
     except ccxt.AuthenticationError as exc:
-        # Phase 18 / observability: surface the upstream class + message
-        # in Railway logs so operators can tell genuine bad-key from
-        # "right key, wrong account region / IP allowlist". User-facing
-        # error copy unchanged.
+        # Genuine bad credentials, signature mismatch, expired key.
         logger.exception(
             "validate_key_permissions: ccxt.AuthenticationError on %s — %s",
             exchange.id,
             exc,
         )
         result["error"] = "Authentication failed. Check your API key and secret."
+        result["error_code"] = "AUTH_FAILED"
+        return result
+    except ccxt.DDoSProtection as exc:
+        # Cloudflare / WAF block — distinct from a genuine rate-limit
+        # because retrying immediately won't help (typically a geo / ASN
+        # block on the egress IP). Must precede NetworkError /
+        # RateLimitExceeded since DDoSProtection subclasses NetworkError.
+        logger.exception(
+            "validate_key_permissions: ccxt.DDoSProtection on %s — %s",
+            exchange.id,
+            exc,
+        )
+        result["error"] = (
+            "Exchange blocked the validation request at the edge "
+            "(DDoS / WAF protection). Check region / IP allowlist."
+        )
+        result["error_code"] = "DDOS_PROTECTION"
+        return result
+    except ccxt.RateLimitExceeded as exc:
+        # Real rate-limit OR (per-exchange) the documented Bybit quirk
+        # where 403 on a scoped endpoint surfaces as RateLimitExceeded.
+        # Must precede NetworkError since RateLimitExceeded subclasses it.
+        logger.exception(
+            "validate_key_permissions: ccxt.RateLimitExceeded on %s — %s",
+            exchange.id,
+            exc,
+        )
+        result["error"] = (
+            "Exchange rate-limited the validation request. Wait a moment "
+            "and try again — repeated failures may indicate a missing "
+            "read scope."
+        )
+        result["error_code"] = "RATE_LIMITED"
+        return result
+    except ccxt.ExchangeNotAvailable as exc:
+        # Exchange is down (5xx, maintenance window, regional outage).
+        # Must precede NetworkError since ExchangeNotAvailable subclasses it.
+        logger.exception(
+            "validate_key_permissions: ccxt.ExchangeNotAvailable on %s — %s",
+            exchange.id,
+            exc,
+        )
+        result["error"] = (
+            "Exchange is currently unavailable. Try again in a few minutes."
+        )
+        result["error_code"] = "EXCHANGE_UNAVAILABLE"
+        return result
+    except ccxt.NetworkError as exc:
+        # Transport-level (timeout, DNS, TLS, connection reset). Not a
+        # credential problem. Backstop for the network family.
+        logger.exception(
+            "validate_key_permissions: ccxt.NetworkError on %s — %s",
+            exchange.id,
+            exc,
+        )
+        result["error"] = (
+            "Network error reaching the exchange. Check connectivity "
+            "and try again."
+        )
+        result["error_code"] = "NETWORK_UNAVAILABLE"
         return result
     except Exception as exc:  # noqa: BLE001
         # Phase 18 root-cause for the recurring "code: UNKNOWN, please
         # verify your credentials" wizard fail (found 2026-05-05 via
         # Bybit E2E + Railway log archaeology). Pre-fix the bare `except`
-        # lost the ccxt error class + body, so operators saw only a 400
-        # with no traceback. Same credentials succeeded against ccxt
-        # locally but failed on Railway — no log line told us why. The
-        # fix: `logger.exception` so the next failure is debuggable from
-        # logs alone, without changing the response shape (which would
-        # ripple through the Next.js classifier and the wizard envelope).
+        # lost the ccxt error class + body and misdiagnosed every infra
+        # failure as bad credentials. The discriminating ccxt branches
+        # above now route specific failures; this catch-all stays as a
+        # backstop for unexpected ccxt subclasses or stdlib exceptions
+        # (e.g. ValueError from a malformed response). It carries a
+        # distinct error_code so the Next layer can render an "unexpected"
+        # envelope rather than misleading the user with a "verify
+        # credentials" message.
         logger.exception(
-            "validate_key_permissions: unexpected ccxt error on %s — %s: %s",
+            "validate_key_permissions: unexpected error on %s — %s: %s",
             exchange.id,
             type(exc).__name__,
             exc,
         )
-        result["error"] = "Key validation failed. Please verify your credentials."
+        result["error"] = (
+            "Key validation failed unexpectedly. Contact support if this "
+            "persists."
+        )
+        result["error_code"] = "VALIDATION_UNEXPECTED"
         return result
 
     if exchange.id not in EXCHANGE_CLASSES:
         result["error"] = "Unsupported exchange for permission verification."
+        result["error_code"] = "UNSUPPORTED_EXCHANGE"
         return result
 
     # Pre-store path: no api_key_id yet, bypass cache.
@@ -126,8 +231,10 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
 
     if has_withdraw:
         result["error"] = "Key has withdrawal permissions. Please use a read-only key."
+        result["error_code"] = "WITHDRAW_SCOPE"
     elif has_trade:
         result["error"] = "Key has trading permissions. Please use a read-only key."
+        result["error_code"] = "TRADE_SCOPE"
 
     return result
 
