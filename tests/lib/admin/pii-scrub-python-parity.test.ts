@@ -30,6 +30,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { scrubFreeformString } from "@/lib/admin/pii-scrub";
 
 const TS_FILE = resolve(process.cwd(), "src/lib/admin/pii-scrub.ts");
 const PY_FILE = resolve(
@@ -90,6 +91,63 @@ describe("redact.py mirrors pii-scrub.ts denylist verbatim", () => {
     expect(py).toContain(
       "[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
     );
+  });
+
+  // Phase 18 / WR-01 fix — `scrubFreeformString` parity corpus. Earlier
+  // versions of this file only checked denylist key strings appeared in
+  // the Python text, which silently missed the TS↔Python 3-pass-vs-4-pass
+  // semantic drift. These cases assert the TS implementation now performs
+  // the same transitive re-walk that `redact.py::scrub_freeform_string`
+  // already runs as Pass 4 (Grok B1 secondary).
+  //
+  // Each case: input → expected post-redaction substring assertions.
+  // The Python side covers the same shape via
+  // `test_scrub_freeform_string_transitive_match` in test_redact.py.
+  describe("scrubFreeformString TS↔Python behavioral parity (WR-01)", () => {
+    it("redacts both api_key occurrences across newline (transitive shape)", () => {
+      const out = scrubFreeformString("api_key=abc123\napi_key=def456");
+      expect(out).not.toContain("abc123");
+      expect(out).not.toContain("def456");
+      // Both redactions visible — Pass 1 catches one, Pass 4 catches the
+      // other if Pass 1's lazy match left it (depends on the regex's
+      // global flag handling). Either way, no plaintext leaks.
+      const redactedCount = (out.match(/\[REDACTED\]/g) ?? []).length;
+      expect(redactedCount).toBeGreaterThanOrEqual(2);
+    });
+
+    it("redacts the value when key:value precedes a JWT shape", () => {
+      const jwt =
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+      const out = scrubFreeformString(`token=secretXYZ ${jwt}`);
+      expect(out).not.toContain("secretXYZ");
+      expect(out).not.toContain(jwt);
+      expect(out).toContain("[REDACTED]");
+      expect(out).toContain("[REDACTED_JWT]");
+    });
+
+    it("preserves benign multi-line strings unchanged", () => {
+      const benign = "Sharpe: 1.2\nMax DD: -8%\nstrategy_id=abc";
+      const out = scrubFreeformString(benign);
+      expect(out).toBe(benign);
+    });
+
+    it("redacts multiple distinct denylist key shapes on the same line", () => {
+      const out = scrubFreeformString(
+        "api_key=AAAA passphrase=BBBB ok-access-sign=CCCC",
+      );
+      expect(out).not.toContain("AAAA");
+      expect(out).not.toContain("BBBB");
+      expect(out).not.toContain("CCCC");
+      const redactedCount = (out.match(/\[REDACTED\]/g) ?? []).length;
+      expect(redactedCount).toBeGreaterThanOrEqual(3);
+    });
+
+    it("idempotent — running twice produces the same output", () => {
+      const input = "api_key=abc123\napi_key=def456";
+      const once = scrubFreeformString(input);
+      const twice = scrubFreeformString(once);
+      expect(once).toBe(twice);
+    });
   });
 
   it("redact.py is a leaf module (no sentry_sdk / structlog / services.* sibling imports)", () => {

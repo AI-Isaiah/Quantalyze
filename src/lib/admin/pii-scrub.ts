@@ -131,7 +131,7 @@ export function truncateAccountId(id: string): string {
 }
 
 /**
- * Three-pass redaction for freeform strings (e.g. wizard `debug_context`
+ * Four-pass redaction for freeform strings (e.g. wizard `debug_context`
  * lines copied to clipboard via `<ErrorEnvelope>`). Use this for any
  * user-visible exfiltration surface where the value is a free-form string
  * that may contain `key: value` shapes, whole-string JWTs, or JWTs
@@ -148,11 +148,17 @@ export function truncateAccountId(id: string): string {
  *          ANYWHERE in the line. Loads-bearing for `Authorization: Bearer
  *          <JWT>` style payloads where Pass 1 captures only `Bearer` (the
  *          key-shaped word) and Pass 2's anchored match fails.
+ * Pass 4 — `SENSITIVE_KEY_VALUE` (transitive re-walk): re-runs the
+ *          key-value sub on Pass 3's output to catch denylisted-key shapes
+ *          that an earlier redaction may have surfaced (Phase 18 / WR-01
+ *          parity with `redact.py` Grok B1 secondary pass). Cheap — `RegExp`
+ *          test is O(n) over an already-redacted line.
  *
- * Together the three passes give the same coverage as the original
+ * Together the four passes give the same coverage as the original
  * inline implementation in `ErrorEnvelope.tsx` (Phase 17 / DESIGN-02 /
- * CR-01) but lives in the canonical PII module so future denylist
- * additions need only one edit.
+ * CR-01) and BYTE-FOR-BYTE parity with `analytics-service/services/
+ * redact.py::scrub_freeform_string`. Future denylist additions need
+ * only one edit.
  */
 export function scrubFreeformString(value: string): string {
   // Pass 1: key:value substring redaction.
@@ -167,5 +173,12 @@ export function scrubFreeformString(value: string): string {
   const asString =
     typeof pass2 === "string" ? pass2 : String(pass2 ?? "");
   // Pass 3: substring JWT redaction (catches embedded JWTs).
-  return asString.replace(JWT_SUBSTRING, REDACTED_JWT);
+  const pass3 = asString.replace(JWT_SUBSTRING, REDACTED_JWT);
+  // Pass 4: transitive re-walk (Phase 18 / WR-01 — parity with
+  // redact.py Grok B1 secondary). Catches denylisted key:value shapes
+  // that survived Pass 1 because Pass 1 redaction or Pass 3 JWT
+  // substitution exposed a fresh `key: value` shape on the same line.
+  return pass3.replace(SENSITIVE_KEY_VALUE, (_match, keyName) => {
+    return `${keyName}: [REDACTED]`;
+  });
 }
