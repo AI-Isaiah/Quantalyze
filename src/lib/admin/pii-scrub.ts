@@ -33,6 +33,16 @@ const DENYLIST_EXACT = new Set<string>([
   // on the seam to FastAPI; outbound HTTP breadcrumbs would otherwise
   // capture it).
   "x-internal-token",
+  // Phase 18 / FIX-04 — Adversarial revision 2026-05-06 (Grok B1):
+  // Bybit v5 + OKX broker-quirk header keys promoted to the canonical
+  // denylist so both runtimes (TS + Python redact.py) share the same
+  // surface. Mirrors analytics-service/sentry_init.py _PII_KEYS subset.
+  "x-bapi-apikey",
+  "x-bapi-sign",
+  "x-bapi-signature",
+  "ok-access-passphrase",
+  "ok-access-key",
+  "ok-access-timestamp",
 ]);
 
 const DENYLIST_PREFIX = ["sb-ec-"];

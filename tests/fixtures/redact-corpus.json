@@ -1,0 +1,126 @@
+{
+  "bad": [
+    {
+      "name": "apiKey top-level",
+      "input": {"apiKey": "abc123fake"},
+      "expectRedactedKeys": ["apiKey"]
+    },
+    {
+      "name": "api_key snake_case",
+      "input": {"api_key": "abc"},
+      "expectRedactedKeys": ["api_key"]
+    },
+    {
+      "name": "API_KEY uppercase",
+      "input": {"API_KEY": "abc"},
+      "expectRedactedKeys": ["API_KEY"]
+    },
+    {
+      "name": "secret key",
+      "input": {"secret": "abc"},
+      "expectRedactedKeys": ["secret"]
+    },
+    {
+      "name": "signature",
+      "input": {"signature": "abc"},
+      "expectRedactedKeys": ["signature"]
+    },
+    {
+      "name": "passphrase",
+      "input": {"passphrase": "abc"},
+      "expectRedactedKeys": ["passphrase"]
+    },
+    {
+      "name": "Authorization mixed case",
+      "input": {"Authorization": "Bearer abc"},
+      "expectRedactedKeys": ["Authorization"]
+    },
+    {
+      "name": "x-mbx-apikey header",
+      "input": {"x-mbx-apikey": "abc"},
+      "expectRedactedKeys": ["x-mbx-apikey"]
+    },
+    {
+      "name": "ok-access-sign header",
+      "input": {"ok-access-sign": "abc"},
+      "expectRedactedKeys": ["ok-access-sign"]
+    },
+    {
+      "name": "x-internal-token header",
+      "input": {"x-internal-token": "abc"},
+      "expectRedactedKeys": ["x-internal-token"]
+    },
+    {
+      "name": "sb-ec-prefix cookie",
+      "input": {"sb-ec-cookie-1": "abc"},
+      "expectRedactedKeys": ["sb-ec-cookie-1"]
+    },
+    {
+      "name": "JWT whole string",
+      "input": "aaaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc",
+      "expectJwtRedacted": true
+    },
+    {
+      "name": "Bybit x-bapi-apikey nested in headers (Grok B1)",
+      "input": {"headers": {"x-bapi-apikey": "abc"}},
+      "expectRedactedKeys": ["x-bapi-apikey"]
+    },
+    {
+      "name": "Bybit x-bapi-sign + x-bapi-signature both (Grok B1)",
+      "input": {"headers": {"x-bapi-sign": "a", "x-bapi-signature": "b"}},
+      "expectRedactedKeys": ["x-bapi-sign", "x-bapi-signature"]
+    },
+    {
+      "name": "OKX ok-access-* trio (Grok B1)",
+      "input": {"headers": {"ok-access-passphrase": "p", "ok-access-key": "k", "ok-access-timestamp": "t"}},
+      "expectRedactedKeys": ["ok-access-passphrase", "ok-access-key", "ok-access-timestamp"]
+    },
+    {
+      "name": "deeply nested apikey",
+      "input": {"a": {"b": {"c": {"apikey": "x"}}}},
+      "expectRedactedKeys": ["apikey"]
+    },
+    {
+      "name": "list of secret objects",
+      "input": [{"secret": "x"}, {"secret": "y"}],
+      "expectRedactedKeys": ["secret"]
+    },
+    {
+      "name": "mixed denylist + safe",
+      "input": {"name": "Mary", "secret": "x"},
+      "expectRedactedKeys": ["secret"]
+    },
+    {
+      "name": "JWT in nested string-only field",
+      "input": {"freeform": "abcdefghij.klmnopqrst.uvwxyzabcd"},
+      "expectFreeformJwtRedacted": true
+    },
+    {
+      "name": "Authorization Bearer JWT",
+      "input": {"Authorization": "Bearer abc"},
+      "expectRedactedKeys": ["Authorization"]
+    }
+  ],
+  "good": [
+    {
+      "name": "allocator name",
+      "input": {"display_name": "Mary Smith"}
+    },
+    {
+      "name": "ISO timestamp",
+      "input": {"created_at": "2026-05-06T12:00:00Z"}
+    },
+    {
+      "name": "ratio",
+      "input": {"sharpe": 1.85, "ytd_return": 0.124}
+    },
+    {
+      "name": "list of safe strings",
+      "input": ["okx", "binance", "csv"]
+    },
+    {
+      "name": "ID-shape but safe field",
+      "input": {"strategy_id": "00000000-0000-0000-0000-000000000001"}
+    }
+  ]
+}
