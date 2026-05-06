@@ -60,6 +60,20 @@ describe("wizardErrors", () => {
       expect(result.actions).toContain("try_another_key");
     });
 
+    it("KEY_SCOPE_BROADENED has the read-only re-key copy", () => {
+      // Surfaced when the wizard finalize re-check finds trade/withdraw
+      // scope on a key that passed the read-only validation at Connect.
+      // Title and cause must explicitly tell the user the key was
+      // broadened on the exchange between Connect and Submit so they
+      // know they need to re-key as read-only — not retry the same key.
+      const result = formatKeyError("KEY_SCOPE_BROADENED");
+      expect(result.title).toBe("Your key now has trading permissions.");
+      expect(result.cause).toMatch(/read-only/);
+      expect(result.cause).toMatch(/trade|withdraw/);
+      expect(result.actions).toContain("try_another_key");
+      expect(result.docsHref).toBe("/security#readonly-key");
+    });
+
     it("returns UNKNOWN when code is null", () => {
       const result = formatKeyError(null);
       expect(result.title).toBe("Something went wrong.");

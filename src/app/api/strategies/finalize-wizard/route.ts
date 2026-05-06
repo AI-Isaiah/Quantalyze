@@ -10,14 +10,80 @@ import type { User } from "@supabase/supabase-js";
 
 /**
  * POST /api/strategies/finalize-wizard — wizard SubmitStep endpoint.
- * Validates metadata, calls the SECURITY DEFINER
- * `finalize_wizard_strategy` RPC to promote the draft to
- * `pending_review`, and kicks off the admin notification email via
- * `after()`. Migration 031's guard trigger enforces that the RPC is
- * the only promotion path for wizard drafts.
+ * Validates metadata, re-checks the strategy's exchange-key scopes
+ * against the live exchange (force-refreshing both cache layers),
+ * calls the SECURITY DEFINER `finalize_wizard_strategy` RPC to
+ * promote the draft to `pending_review`, and kicks off the admin
+ * notification email via `after()`. Migration 031's guard trigger
+ * enforces that the RPC is the only promotion path for wizard
+ * drafts.
+ *
+ * Scope-broadening defense
+ * ------------------------
+ * A user can connect a read-only key (which passes
+ * /api/keys/validate-and-encrypt), then broaden the same key to
+ * trade/withdraw on the exchange dashboard, then click Submit — the
+ * /api/keys/[id]/permissions cache (60s on the Next layer + 15min on
+ * the Python layer) would otherwise mask that broadening. Before
+ * calling the finalize RPC we issue a force-refresh probe that
+ * bypasses both caches; if the live response shows trade=true or
+ * withdraw=true we abort with 403 + KEY_SCOPE_BROADENED so the wizard
+ * surfaces the correct re-key copy.
  */
 
 const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
+
+const ANALYTICS_URL =
+  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
+
+interface LivePermissions {
+  read: boolean;
+  trade: boolean;
+  withdraw: boolean;
+  probe_error?: boolean;
+}
+
+/**
+ * Force-refresh the live `{read, trade, withdraw}` triple for an
+ * api_keys row. Bypasses BOTH cache layers:
+ *   - Next `unstable_cache` (60s) is sidestepped by NOT calling the
+ *     /api/keys/[id]/permissions route at all — we hit the internal
+ *     analytics endpoint directly with `cache: 'no-store'`.
+ *   - Python in-memory TTL (15min) is sidestepped by passing
+ *     `force_refresh=true` on the request URL, which makes the Python
+ *     layer skip its `_cache_get`/`_cache_set` entries for this key.
+ *
+ * Throws on any non-OK response so the caller can decide between
+ * fail-open and fail-closed (we fail-closed: a probe failure blocks
+ * finalize, see route handler).
+ */
+async function fetchLivePermissions(
+  keyId: string,
+): Promise<LivePermissions> {
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!internalToken) {
+    throw new Error("INTERNAL_API_TOKEN is not configured");
+  }
+  const res = await fetch(
+    `${ANALYTICS_URL}/internal/keys/${encodeURIComponent(keyId)}/permissions?force_refresh=true`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Token": internalToken,
+      },
+      // cache: 'no-store' belt-and-braces against any future Next
+      // fetch-level caching being introduced. The internal route is
+      // POST so it shouldn't be cacheable today, but routes can change.
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`permissions probe failed: ${res.status}`);
+  }
+  return (await res.json()) as LivePermissions;
+}
 
 function validateStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -99,6 +165,86 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       : null;
 
   const supabase = await createClient();
+
+  // Scope-broadening defense — re-check the live exchange permissions
+  // before calling the finalize RPC. The validation at Connect time
+  // (/api/keys/validate-and-encrypt) only sees the scopes that
+  // existed THEN; a user can broaden the key on the exchange
+  // dashboard between Connect and Submit. We force-refresh both
+  // caches (60s Next + 15min Python) so the check actually sees the
+  // current scopes.
+  //
+  // The lookup uses the user-scoped client so RLS rejects strategies
+  // the caller doesn't own. A "no api_key_id" row is the CSV branch
+  // (no exchange key linked) — we skip the probe because the CSV
+  // branch's data lives in csv_uploads, not api_keys.
+  const { data: strategyRow, error: strategyErr } = await supabase
+    .from("strategies")
+    .select("api_key_id")
+    .eq("id", strategy_id)
+    .maybeSingle();
+
+  if (strategyErr) {
+    console.error(
+      "[strategies/finalize-wizard] strategy lookup failed:",
+      strategyErr.message,
+    );
+    return NextResponse.json(
+      { error: "Could not load draft" },
+      { status: 500 },
+    );
+  }
+  if (!strategyRow) {
+    return NextResponse.json({ error: "Draft not found" }, { status: 404 });
+  }
+
+  const apiKeyId =
+    typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
+  if (apiKeyId) {
+    let livePerms: LivePermissions;
+    try {
+      livePerms = await fetchLivePermissions(apiKeyId);
+    } catch (probeErr) {
+      // Fail-CLOSED: if we cannot prove the key is still read-only,
+      // we cannot let it become a published strategy. The wizard
+      // surfaces this through KEY_NETWORK_TIMEOUT copy ("we could
+      // not reach the exchange") rather than a generic 500.
+      console.error(
+        "[strategies/finalize-wizard] live permissions probe failed:",
+        probeErr,
+      );
+      return NextResponse.json(
+        { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
+        { status: 502 },
+      );
+    }
+
+    // The Python layer returns the fail-CLOSED default
+    // ({read,trade,withdraw}=true, probe_error=true) when the
+    // exchange call itself raised. That looks identical to a
+    // genuinely-broadened key in trade/withdraw flags but the
+    // probe_error bit lets us distinguish the two. We treat
+    // probe_error as a transient failure (KEY_NETWORK_TIMEOUT)
+    // rather than KEY_SCOPE_BROADENED so the user sees the right
+    // copy.
+    if (livePerms.probe_error) {
+      return NextResponse.json(
+        { error: "Exchange permission probe failed", code: "KEY_NETWORK_TIMEOUT" },
+        { status: 502 },
+      );
+    }
+
+    if (livePerms.trade === true || livePerms.withdraw === true) {
+      return NextResponse.json(
+        {
+          error: "Key has been broadened beyond read-only on the exchange.",
+          code: "KEY_SCOPE_BROADENED",
+        },
+        { status: 403 },
+      );
+    }
+  }
+
   const { data: finalizedId, error } = await supabase.rpc(
     "finalize_wizard_strategy",
     {

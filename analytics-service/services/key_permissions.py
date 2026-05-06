@@ -249,6 +249,7 @@ _DISPATCH = {
 async def detect_permissions(
     exchange: ccxt.Exchange,
     api_key_id: Optional[str] = None,
+    force_refresh: bool = False,
 ) -> PermissionDict:
     """Detect ``{read, trade, withdraw, probe_error}`` for ``exchange``.
 
@@ -262,6 +263,15 @@ async def detect_permissions(
     detector returned the fail-CLOSED default (``probe_error=True``), we do
     NOT write that into the cache — otherwise a single transient blip
     would pin the UI to "all scopes on" for the full TTL.
+
+    ``force_refresh=True`` bypasses the in-memory cache entirely:
+    we skip the lookup AND drop any pre-existing entry so a stale
+    "trade=False" cannot survive the refresh. The fresh result is then
+    re-cached on the normal write path. This is the path the wizard
+    finalize-scope-recheck uses to defend against scope-broadening
+    after the read-only validation that gates wizard entry — a single
+    user re-keying through the exchange dashboard between "Connect"
+    and "Submit" must not be masked by either TTL layer.
     """
     detector = _DISPATCH.get(exchange.id)
     if detector is None:
@@ -277,10 +287,15 @@ async def detect_permissions(
         (api_key_id, exchange.id) if api_key_id else None
     )
 
-    if cache_key is not None:
+    if cache_key is not None and not force_refresh:
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
+
+    if cache_key is not None and force_refresh:
+        # Drop any pre-existing entry so a stale value can't survive the
+        # refresh on the off-chance that the new probe fails open.
+        _perm_cache.pop(cache_key, None)
 
     result = await detector(exchange)
 

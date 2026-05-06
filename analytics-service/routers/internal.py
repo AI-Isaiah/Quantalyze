@@ -38,7 +38,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from services.db import get_supabase
 from services.encryption import decrypt_credentials, get_kek
@@ -124,7 +124,19 @@ def _verify_internal_token(request: Request) -> None:
 
 
 @router.post("/keys/{key_id}/permissions")
-async def get_key_permissions(key_id: str, request: Request) -> dict:
+async def get_key_permissions(
+    key_id: str,
+    request: Request,
+    force_refresh: bool = Query(
+        False,
+        description=(
+            "When true, bypass the in-memory permission cache and re-probe "
+            "the exchange. Used by the wizard finalize-scope-recheck so a "
+            "user broadening their key in the exchange dashboard between "
+            "Connect and Submit cannot be masked by the 15-minute TTL."
+        ),
+    ),
+) -> dict:
     """Return live ``{read, trade, withdraw}`` scopes for an api_keys row.
 
     Flow:
@@ -208,7 +220,11 @@ async def get_key_permissions(key_id: str, request: Request) -> dict:
         raise HTTPException(status_code=502, detail="Failed to initialise exchange connection")
 
     try:
-        perms = await detect_permissions(exchange, api_key_id=key_id)
+        perms = await detect_permissions(
+            exchange,
+            api_key_id=key_id,
+            force_refresh=force_refresh,
+        )
     except Exception as exc:
         logger.error(
             "Permission detection failed for key=%s exchange=%s: %s",

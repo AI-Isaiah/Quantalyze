@@ -16,6 +16,7 @@ export type WizardErrorCode =
   | "KEY_IP_ALLOWLIST"
   | "KEY_RATE_LIMIT"
   | "KEY_NETWORK_TIMEOUT"
+  | "KEY_SCOPE_BROADENED"
   | "DRAFT_ALREADY_EXISTS"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
@@ -170,6 +171,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  KEY_SCOPE_BROADENED: {
+    title: "Your key now has trading permissions.",
+    cause:
+      "When you connected this key it was read-only, but a fresh check at submit time shows it now has trade or withdraw scope on the exchange. Quantalyze accepts read-only keys only — we re-check just before publishing so a key edited in the exchange dashboard between Connect and Submit cannot slip through.",
+    fix: [
+      "Open your exchange API Management page and edit this key.",
+      "Uncheck every permission except Read, save, then come back here.",
+      "Or create a brand-new read-only key and re-key this draft from the start.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
   },
 
   DRAFT_ALREADY_EXISTS: {
