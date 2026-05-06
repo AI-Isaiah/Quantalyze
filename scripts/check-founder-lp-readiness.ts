@@ -14,6 +14,7 @@
  *   FOUNDER_LP_STRATEGY_ID
  */
 import { createClient } from "@supabase/supabase-js";
+import { extractAnalytics } from "@/lib/utils";
 
 async function main() {
   // Accept either SUPABASE_URL (CI/Railway convention) or
@@ -42,11 +43,15 @@ async function main() {
     process.exit(1);
   }
   const status = (data as { status?: string }).status;
-  const analyticsRaw = (data as { strategy_analytics?: unknown })
-    .strategy_analytics;
-  const analytics = Array.isArray(analyticsRaw) ? analyticsRaw[0] : analyticsRaw;
-  const compStatus = (analytics as { computation_status?: string } | null | undefined)
-    ?.computation_status;
+  // Phase 18 / WR-04 — use canonical extractAnalytics() instead of an
+  // inline `Array.isArray(...) ? [0] : raw` shape-handler. Keeps this
+  // pre-flight script in lock-step with src/app/api/factsheet/[id]/pdf
+  // and src/app/api/cron/founder-lp-report which both consume the same
+  // Supabase embedded-relation shape.
+  const analytics = extractAnalytics(
+    (data as { strategy_analytics?: unknown }).strategy_analytics,
+  );
+  const compStatus = analytics?.computation_status;
   const failures: string[] = [];
   if (status !== "published") {
     failures.push(`strategies.status='${status}' (expected 'published')`);

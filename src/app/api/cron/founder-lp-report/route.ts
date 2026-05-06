@@ -52,6 +52,7 @@ import { Resend } from "resend";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { extractAnalytics } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 // Vercel Pro lambda ceiling for cron handlers is 60s. The internal fetch
@@ -155,10 +156,15 @@ async function checkStrategyReadiness(
     };
   }
   const status = (data as { status?: string }).status;
-  const analyticsRaw = (data as { strategy_analytics?: unknown }).strategy_analytics;
-  const analytics = Array.isArray(analyticsRaw) ? analyticsRaw[0] : analyticsRaw;
-  const compStatus = (analytics as { computation_status?: string } | null | undefined)
-    ?.computation_status;
+  // Phase 18 / WR-04 — use canonical extractAnalytics() instead of the
+  // inline `Array.isArray(...) ? [0] : raw` shape-handler. Supabase has
+  // changed its embedded-relation default from array to object (and back)
+  // in repo history; consolidating both call sites on extractAnalytics
+  // keeps the cron in lock-step with the factsheet endpoint.
+  const analytics = extractAnalytics(
+    (data as { strategy_analytics?: unknown }).strategy_analytics,
+  );
+  const compStatus = analytics?.computation_status;
   if (status !== "published") {
     return {
       ok: false,
