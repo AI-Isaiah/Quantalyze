@@ -94,11 +94,28 @@ def test_truncate_account_id_non_string():
 
 
 def test_scrub_freeform_string_key_value():
-    # Pass 1 — SENSITIVE_KEY_VALUE redacts the secret value.
-    out = scrub_freeform_string("Authorization: Bearer abc")
-    # Pass 1 catches `authorization: ...` and replaces value with [REDACTED].
-    assert "abc" not in out
+    # Pass 1 — SENSITIVE_KEY_VALUE captures `key: value` shapes. For
+    # `apikey: SECRET_VALUE_ABC`, the value is captured up to the next
+    # whitespace and replaced with [REDACTED].
+    secret = "SECRET_VALUE_ABC123"
+    out = scrub_freeform_string(f"apikey: {secret}")
+    assert secret not in out
     assert REDACTED in out
+
+    # Verify the same shape across multiple denylisted keys (parity with
+    # the TS test's KEY_SHAPES table at pii-scrub.test.ts L168-185).
+    for line in (
+        f"api_key: {secret}",
+        f"api_secret: {secret}",
+        f"x-mbx-apikey: {secret}",
+        f"ok-access-sign:{secret}",
+        f"passphrase={secret}",
+        f"token: {secret}",
+        f"authorization: {secret}",
+    ):
+        out = scrub_freeform_string(line)
+        assert secret not in out, f"line {line!r} leaked secret in {out!r}"
+        assert REDACTED in out
 
 
 def test_scrub_freeform_string_jwt_embedded():
@@ -117,31 +134,44 @@ def test_scrub_freeform_string_jwt_embedded():
 def test_no_external_imports():
     """redact.py must import ONLY from `__future__`, `re`, `typing`.
 
-    Adversarial revision 2026-05-06 (W4): use anchored regex (re.M, line-start)
-    so a comment like `# from services.foo` does not produce a false negative.
+    Adversarial revision 2026-05-06 (W4): use ast parsing so docstring prose
+    mentioning the words "import sentry_sdk" / "import this module" does NOT
+    produce false negatives. ast walks ONLY actual import statements.
     """
+    import ast
+
     text = (
         Path(__file__).resolve().parents[1] / "services" / "redact.py"
     ).read_text()
 
-    # Hard bans (anchored).
-    assert "import sentry_sdk" not in text
-    assert "import structlog" not in text
-    assert not re.search(r"^\s*from services\.", text, re.M), (
+    # Anchored regex sanity-check (W4) — line-start matches; prose in
+    # docstrings (e.g., "NEVER import sentry_sdk,") is filtered out by the
+    # `^\s*` anchor since docstring lines never start with `import ` at column 0.
+    assert not re.search(r"^import sentry_sdk\b", text, re.M)
+    assert not re.search(r"^from sentry_sdk\b", text, re.M)
+    assert not re.search(r"^import structlog\b", text, re.M)
+    assert not re.search(r"^from structlog\b", text, re.M)
+    assert not re.search(r"^from services\.", text, re.M), (
         "redact.py must not import any sibling services.* module (leaf-module invariant)"
     )
 
-    # Whitelist every actual `import ` / `from ` line.
-    allowed_prefixes = (
-        "from __future__",
-        "import re",
-        "from typing",
-    )
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("import ") or stripped.startswith("from "):
-            assert any(stripped.startswith(p) for p in allowed_prefixes), (
-                f"unexpected import in redact.py: {stripped!r}"
+    # AST-level whitelist — every actual import node is checked.
+    allowed_modules = {"__future__", "re", "typing"}
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                assert root in allowed_modules, (
+                    f"unexpected import: {alias.name!r} (allowed roots: {allowed_modules})"
+                )
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            assert root in allowed_modules, (
+                f"unexpected from-import: {node.module!r} (allowed roots: {allowed_modules})"
+            )
+            assert root != "services", (
+                "redact.py must not import sibling services.* module"
             )
 
 

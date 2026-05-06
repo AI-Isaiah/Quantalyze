@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { scrubPii, scrubFreeformString, truncateAccountId } from "./pii-scrub";
 
 /**
@@ -232,4 +234,74 @@ describe("truncateAccountId", () => {
     expect(truncateAccountId("abc")).toBe("abc");
     expect(truncateAccountId("")).toBe("");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Plan-checker fix 2026-05-06: blocker — corpus loading gap (TS side).
+//
+// The Python pytest TestSharedCorpus class loads tests/fixtures/redact-corpus.json
+// and asserts parity; this TS-side describe block does the same so the
+// "loaded by BOTH Vitest AND pytest" truth is backed by actual test code on
+// both sides. Both runtimes consume the same file — drift gets caught here.
+// ---------------------------------------------------------------------------
+
+type CorpusBad = {
+  name: string;
+  input: unknown;
+  expectRedactedKeys?: string[];
+  expectJwtRedacted?: boolean;
+  expectFreeformJwtRedacted?: boolean;
+};
+type CorpusGood = { name: string; input: unknown };
+type Corpus = { bad: CorpusBad[]; good: CorpusGood[] };
+
+const CORPUS: Corpus = JSON.parse(
+  readFileSync(
+    resolve(process.cwd(), "tests/fixtures/redact-corpus.json"),
+    "utf8",
+  ),
+);
+
+describe("Shared corpus — TS side (Plan-checker fix 2026-05-06)", () => {
+  it("loads the corpus and exposes 20 bad + 5 good", () => {
+    expect(CORPUS.bad).toHaveLength(20);
+    expect(CORPUS.good).toHaveLength(5);
+  });
+
+  it.each(CORPUS.bad.map((b) => [b.name, b] as const))(
+    "redacts bad case: %s",
+    (_name, bad) => {
+      const out = scrubPii(bad.input);
+      const json = JSON.stringify(out);
+      if (bad.expectRedactedKeys) {
+        for (const key of bad.expectRedactedKeys) {
+          expect(
+            json,
+            `bad "${bad.name}": expected "${key}":"[REDACTED]" in ${json}`,
+          ).toContain(`"${key}":"[REDACTED]"`);
+        }
+      }
+      if (bad.expectJwtRedacted) {
+        expect(
+          json.includes("[REDACTED_JWT]") || json.includes("[REDACTED]"),
+          `bad "${bad.name}": expected a JWT redaction in ${json}`,
+        ).toBe(true);
+      }
+      if (bad.expectFreeformJwtRedacted) {
+        // Whole-string JWT inside a dict value — anchored regex catches it.
+        expect(
+          json.includes("[REDACTED_JWT]"),
+          `bad "${bad.name}": expected freeform JWT redaction in ${json}`,
+        ).toBe(true);
+      }
+    },
+  );
+
+  it.each(CORPUS.good.map((g) => [g.name, g] as const))(
+    "leaves good case unchanged: %s",
+    (_name, good) => {
+      const out = scrubPii(good.input);
+      expect(out, `good "${good.name}" round-trip changed`).toEqual(good.input);
+    },
+  );
 });
