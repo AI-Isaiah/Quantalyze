@@ -17,6 +17,7 @@ import {
 } from "@/lib/intro/snapshot";
 import { trackUsageEventServer } from "@/lib/analytics/usage-events";
 import { logAuditEvent } from "@/lib/audit";
+import { getCorrelationId } from "@/lib/correlation-id";
 
 /**
  * Synchronous snapshot budget: if computePortfolioSnapshot finishes in
@@ -209,10 +210,14 @@ export async function POST(req: NextRequest) {
     let enqueueOk = false;
     try {
       const admin = createAdminClient();
+      // Phase 18 forensic thread (Day-2 Bug #1 follow-up): mirror the
+      // keys/sync pattern so compute_jobs.metadata->>'correlation_id' is
+      // queryable end-to-end for backfill snapshots too.
+      const correlation_id = await getCorrelationId();
       const { error: enqueueError } = await admin.rpc("enqueue_compute_job", {
         p_strategy_id: strategy_id,
         p_kind: "compute_intro_snapshot",
-        p_metadata: { contact_request_id: inserted.id },
+        p_metadata: { contact_request_id: inserted.id, correlation_id },
       });
       if (enqueueError) {
         console.error(

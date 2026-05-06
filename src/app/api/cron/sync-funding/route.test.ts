@@ -5,6 +5,15 @@ import type { NextRequest } from "next/server";
 // so the server-route modules under test can still be imported.
 vi.mock("server-only", () => ({}));
 
+// Cron requests don't have a real Next.js header context here. Stub the
+// correlation-id helper to a fixed UUID so the regression test below can
+// assert exact-match propagation into compute_jobs.metadata.
+const TEST_CORRELATION_ID = "ccccccc1-cccc-4ccc-8ccc-cccccccccccc";
+vi.mock("@/lib/correlation-id", () => ({
+  getCorrelationId: vi.fn(async () => TEST_CORRELATION_ID),
+  CORRELATION_HEADER: "x-correlation-id",
+}));
+
 /**
  * Cron route handler tests for /api/cron/sync-funding.
  *
@@ -122,7 +131,9 @@ describe.each([
 
   it("enqueues one job per strategy on the happy path", async () => {
     const strategies = [{ id: "strat-a" }, { id: "strat-b" }];
-    let rpcCall = 0;
+    const rpcMock = vi.fn().mockImplementation(() =>
+      Promise.resolve({ data: "job", error: null }),
+    );
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: () => ({
@@ -132,10 +143,7 @@ describe.each([
             }),
           }),
         }),
-        rpc: vi.fn().mockImplementation(() => {
-          rpcCall += 1;
-          return Promise.resolve({ data: `job-${rpcCall}`, error: null });
-        }),
+        rpc: rpcMock,
       }),
     }));
     const handler = await getHandler(_verb);
@@ -146,6 +154,19 @@ describe.each([
     const body = await res.json();
     expect(body.enqueued).toBe(2);
     expect(body.total_candidates).toBe(2);
+
+    // Phase 18 forensic thread (Day-2 Bug #1 follow-up): every enqueue in a
+    // cron batch shares one correlation_id so compute_jobs.metadata stays
+    // joinable. Without the route's getCorrelationId() thread, p_metadata
+    // would be missing entirely and this assertion would fail.
+    expect(rpcMock).toHaveBeenCalledTimes(2);
+    for (const call of rpcMock.mock.calls) {
+      expect(call[0]).toBe("enqueue_compute_job");
+      expect(call[1]).toMatchObject({
+        p_kind: "sync_funding",
+        p_metadata: { correlation_id: TEST_CORRELATION_ID },
+      });
+    }
   });
 
   it("collects rpc failures in the errors array", async () => {

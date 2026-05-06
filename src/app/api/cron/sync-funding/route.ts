@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { getCorrelationId } from "@/lib/correlation-id";
 
 /**
  * Vercel Cron — every 4 hours, enqueue a `sync_funding` compute_job for
@@ -54,11 +55,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ enqueued: 0, skipped: 0 });
   }
 
+  // Phase 18 forensic thread (Day-2 Bug #1 follow-up): Vercel Cron requests
+  // don't carry an inbound x-correlation-id, so getCorrelationId() falls back
+  // to a fresh UUID. One id per cron tick joins all enqueued jobs to the
+  // same batch in compute_jobs.metadata->>'correlation_id'.
+  const correlation_id = await getCorrelationId();
+
   const results = await Promise.allSettled(
     rows.map((row) =>
       admin.rpc("enqueue_compute_job", {
         p_strategy_id: row.id,
         p_kind: "sync_funding",
+        p_metadata: { correlation_id },
       }),
     ),
   );
