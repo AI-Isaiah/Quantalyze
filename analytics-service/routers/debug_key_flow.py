@@ -60,6 +60,21 @@ def _verify_internal_token(token: str | None) -> None:
 Broker = Literal["okx", "binance", "bybit"]
 
 
+def _maybe_enable_sandbox(exchange) -> None:
+    """Switch the exchange to its testnet endpoint by default.
+
+    DEBUG_KEY_FLOW_<BROKER>_* env vars hold testnet-only credentials. Sent at
+    the prod endpoint they authenticate as the wrong account and surface as
+    AuthenticationError — root cause of the 4/6 smoke fails on staged Railway
+    after Phase 18 #14 wired the real ccxt paths. ccxt's set_sandbox_mode flips
+    the base URL (or x-simulated-trading: 1 on OKX) to match. Set
+    DEBUG_KEY_FLOW_SANDBOX=false to point this router at a prod broker — the
+    smoke script would have to change too.
+    """
+    if os.getenv("DEBUG_KEY_FLOW_SANDBOX", "true").lower() != "false":
+        exchange.set_sandbox_mode(True)
+
+
 def _read_test_creds(broker: Broker) -> dict[str, str]:
     """Read DEBUG_KEY_FLOW_<BROKER>_{KEY,SECRET,PASSPHRASE} env vars (raw plaintext).
 
@@ -110,6 +125,7 @@ async def validate_key(
             creds["secret"],
             creds.get("passphrase"),
         )
+        _maybe_enable_sandbox(exchange)
         result = await validate_key_permissions(exchange)
         return StepResponse(
             step="validate_key",
@@ -192,6 +208,7 @@ async def fetch_trades(
             creds["secret"],
             creds.get("passphrase"),
         )
+        _maybe_enable_sandbox(exchange)
         # Direct ccxt.fetch_my_trades — bypasses services.exchange.fetch_raw_trades
         # to avoid the supabase-write side-effect (this endpoint is explicitly
         # non-persisting per invariant 3). BTC/USDT is universal across the 3
