@@ -186,14 +186,29 @@ async function fetchFactsheetPdfWithRetry(
   correlation_id: string,
 ): Promise<Response> {
   const url = `${APP_URL}/api/factsheet/${encodeURIComponent(strategy_id)}/pdf`;
-  const internalToken = process.env.INTERNAL_API_TOKEN ?? "";
-  const buildOptions = (): RequestInit => ({
-    headers: {
+  // Phase 18 / WR-03 — omit the header entirely when INTERNAL_API_TOKEN
+  // is unset rather than sending `x-internal-token: ""`. The factsheet
+  // endpoint correctly rejects empty-token bypass via its
+  // `internalEnv.length > 0` gate, but always sending the header masks
+  // config drift: a missing env var silently degrades to public-IP
+  // rate limiting against the shared Vercel egress IP, so the cron can
+  // be starved by alert-digest bursts on the same region. Omitting the
+  // header makes the bypass path engaged-or-not deterministic across
+  // deploys; the dual-alert path will surface the resulting 429s
+  // consistently instead of intermittently.
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  const buildOptions = (): RequestInit => {
+    const headers: Record<string, string> = {
       "x-correlation-id": correlation_id,
-      "x-internal-token": internalToken,
-    },
-    signal: AbortSignal.timeout(25_000),
-  });
+    };
+    if (typeof internalToken === "string" && internalToken.length > 0) {
+      headers["x-internal-token"] = internalToken;
+    }
+    return {
+      headers,
+      signal: AbortSignal.timeout(25_000),
+    };
+  };
   const first = await fetch(url, buildOptions());
   if (first.status !== 503) return first;
   const retryAfterRaw = first.headers.get("retry-after") ?? "10";
