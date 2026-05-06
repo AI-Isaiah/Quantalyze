@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.4.0] - 2026-05-06
+
+**Vercel Pro cron cutover — `sync_funding`, `reconcile_strategy`, and `cleanup_ack_tokens` move back to `vercel.json`; Railway-side `services/scheduled_tasks.py` retired.** Closes the Phase 18 forensic chain at the production scheduler layer: every `compute_jobs` row enqueued by these three jobs now carries `metadata->>'correlation_id'` because production scheduling now flows through the Next.js routes patched in v0.21.3.0.
+
+### Why
+
+v0.21.3.0 threaded `correlation_id` through the Next.js cron handlers (`src/app/api/cron/sync-funding`, `cron/reconcile-strategies`, `intro/route.ts`) but a post-ship DB spot-check returned `metadata: null` on every recent `sync_funding` / `reconcile_strategy` row. Root cause: those rows were being enqueued from `analytics-service/services/scheduled_tasks.py` on the Railway worker, not from the Vercel routes. The Hobby-plan 2-cron cap had forced the migration server-side; the team's recent upgrade to Vercel Pro lifts the cap (verified via Vercel API: `team_eujrXl2VWycA9wGJabHk1rcb`, `plan: pro`, `limits.crons: null`). The docstring at the top of `scheduled_tasks.py` made the cutover plan explicit: *"When the project upgrades to Vercel Pro, move all three back into vercel.json and delete this module."*
+
+### Added
+
+- **3 new entries in `vercel.json` `crons`** restoring the route docstring schedules:
+  - `/api/cron/sync-funding` → `0 */4 * * *` (every 4h)
+  - `/api/cron/reconcile-strategies` → `30 3 * * *` (nightly 03:30 UTC)
+  - `/api/cron/cleanup-ack-tokens` → `0 3 * * 0` (Sundays 03:00 UTC)
+
+### Changed
+
+- **`sync-funding` cadence: daily → every 4 hours.** Railway's `_scheduled_daily_loop` ran every job at a flat 86400s interval; restoring the original route design (`every 4 hours` per the route docstring) means more frequent funding-fee enqueues. `reconcile-strategies` (nightly) and `cleanup-ack-tokens` (weekly) cadences are unchanged.
+- **`analytics-service/main.py`** drops the 3 `_scheduled_daily_loop` task slots and the `services.scheduled_tasks` import.
+- **`analytics-service/main_worker.py`** drops the imports, the 3 entries from the top-level `asyncio.gather(...)`, and the now-unused `_scheduled_daily_loop` helper. Updated the comment block at the start of `main()` to reflect the new architecture.
+
+### Removed
+
+- **`analytics-service/services/scheduled_tasks.py`** (163 lines) — Hobby-plan workaround, no longer needed.
+- **`analytics-service/tests/test_scheduled_tasks.py`** (172 lines) — covered the deleted module. The Next.js cron routes already have their own regression tests in `src/app/api/cron/{sync-funding,reconcile-strategies}/route.test.ts` (39/39 passing across the 4 enqueue routes).
+
 ## [0.21.3.0] - 2026-05-06
 
 **Phase 18 follow-on — `/internal/debug-key-flow` testnet sandbox-mode toggle, `compute_jobs.metadata.correlation_id` thread completed across the remaining 3 enqueue callsites.** Closes the 4/6 `validate_key` + `fetch_trades` smoke fails introduced after v0.21.2.0 wired the real broker SDKs (OKX 50101 "APIKey does not match current environment"; Bybit retCode 10003 "You are not authorized") and brings every `enqueue_compute_job` callsite onto a single forensic-id pattern.
