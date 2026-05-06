@@ -62,23 +62,6 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 const PLATFORM_NAME = process.env.PLATFORM_NAME ?? "Quantalyze";
 const PLATFORM_EMAIL = process.env.PLATFORM_EMAIL ?? "notifications@quantalyze.com";
 
-// Adversarial revision 2026-05-06: B4 — defensive global handler so a
-// stray unhandledRejection during the cron window also surfaces under
-// the [CRON_DOUBLE_FAILURE] marker. process.on is available in Node
-// runtimes; guarded so an Edge port doesn't crash on module load.
-if (typeof process !== "undefined" && typeof process.on === "function") {
-  try {
-    process.on("unhandledRejection", (reason) => {
-      console.error(
-        "[CRON_DOUBLE_FAILURE] unhandledRejection in founder-lp-report:",
-        reason,
-      );
-    });
-  } catch {
-    // never block module load
-  }
-}
-
 async function captureSentry(
   error: unknown,
   ctx: Record<string, unknown>,
@@ -229,88 +212,124 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
   const correlation_id = await getCorrelationId();
 
-  const strategy_id = process.env.FOUNDER_LP_STRATEGY_ID;
-  const recipient = process.env.FOUNDER_LP_REPORT_TO ?? process.env.ADMIN_EMAIL ?? "";
-  const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
-
-  if (!strategy_id || !recipient || !resend) {
-    const ctx = {
-      correlation_id,
-      error_class: "ConfigError",
-      error_message:
-        `missing FOUNDER_LP_STRATEGY_ID=${!!strategy_id} ` +
-        `FOUNDER_LP_REPORT_TO=${!!recipient} ` +
-        `RESEND_API_KEY=${!!resend}`,
-    };
-    console.error("[cron/founder-lp-report] config error:", ctx);
-    await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
-    return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
-  }
-
-  // Adversarial revision 2026-05-06: B1 + Grok W5 — strategy publication precheck.
-  const readiness = await checkStrategyReadiness(strategy_id);
-  if (!readiness.ok) {
-    const ctx = {
-      correlation_id,
-      strategy_id,
-      error_class: "StrategyNotReady",
-      error_message: readiness.reason,
-    };
-    console.error("[cron/founder-lp-report] strategy not ready:", ctx);
-    await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
-    return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
+  // Adversarial revision 2026-05-06: B4 + Phase 18 / WR-01 follow-up
+  // (WR-02): defensive global unhandled-rejection handler. Registered
+  // INSIDE handle() (not at module scope) and removed in `finally` so
+  // each lambda invocation attaches exactly one listener. Module-scope
+  // registration leaked listeners across warm-starts and Vitest's
+  // repeated `await import("./route")` in route.test.ts, polluting all
+  // unhandled rejections in the same Node process with the
+  // [CRON_DOUBLE_FAILURE] founder-lp-report prefix.
+  const onUnhandledRejection = (reason: unknown) => {
+    console.error(
+      "[CRON_DOUBLE_FAILURE] unhandledRejection in founder-lp-report:",
+      reason,
+    );
+  };
+  const supportsProcessEvents =
+    typeof process !== "undefined" &&
+    typeof process.on === "function" &&
+    typeof process.off === "function";
+  if (supportsProcessEvents) {
+    try {
+      process.on("unhandledRejection", onUnhandledRejection);
+    } catch {
+      // never block the request on listener registration
+    }
   }
 
   try {
-    const pdfRes = await fetchFactsheetPdfWithRetry(strategy_id, correlation_id);
-    if (!pdfRes.ok) {
-      throw new Error(
-        `factsheet PDF fetch failed: ${pdfRes.status} ${pdfRes.statusText}`,
-      );
+    const strategy_id = process.env.FOUNDER_LP_STRATEGY_ID;
+    const recipient = process.env.FOUNDER_LP_REPORT_TO ?? process.env.ADMIN_EMAIL ?? "";
+    const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+
+    if (!strategy_id || !recipient || !resend) {
+      const ctx = {
+        correlation_id,
+        error_class: "ConfigError",
+        error_message:
+          `missing FOUNDER_LP_STRATEGY_ID=${!!strategy_id} ` +
+          `FOUNDER_LP_REPORT_TO=${!!recipient} ` +
+          `RESEND_API_KEY=${!!resend}`,
+      };
+      console.error("[cron/founder-lp-report] config error:", ctx);
+      await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
+      return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
     }
-    // Pitfall 6 — Buffer.from(arrayBuffer) for the Resend attachment encoding.
-    const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
-    const monthLabel = new Date().toLocaleString("en-US", {
-      month: "long",
-      year: "numeric",
-    });
 
-    await resend.emails.send({
-      from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
-      to: recipient,
-      subject: `Founder LP report — ${monthLabel}`,
-      html: `<p>Monthly LP factsheet attached.</p>
-             <p style="color:#666;font-size:12px;">correlation_id: ${correlation_id}</p>`,
-      attachments: [
-        {
-          filename: `founder-lp-${monthLabel.replace(/\s/g, "-")}.pdf`,
-          content: pdfBuffer,
-          contentType: "application/pdf",
-        },
-      ],
-      tags: [
-        { name: "correlation_id", value: correlation_id },
-        { name: "kind", value: "founder_lp_report" },
-      ],
-    });
+    // Adversarial revision 2026-05-06: B1 + Grok W5 — strategy publication precheck.
+    const readiness = await checkStrategyReadiness(strategy_id);
+    if (!readiness.ok) {
+      const ctx = {
+        correlation_id,
+        strategy_id,
+        error_class: "StrategyNotReady",
+        error_message: readiness.reason,
+      };
+      console.error("[cron/founder-lp-report] strategy not ready:", ctx);
+      await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
+      return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
+    }
 
-    return NextResponse.json({
-      ok: true,
-      correlation_id,
-      strategy_id,
-      pdf_bytes: pdfBuffer.length,
-      sent_to: recipient,
-    });
-  } catch (err) {
-    const ctx = {
-      correlation_id,
-      strategy_id,
-      error_class: err instanceof Error ? err.constructor.name : "UnknownError",
-      error_message: err instanceof Error ? err.message : String(err),
-    };
-    console.error("[cron/founder-lp-report] failure:", ctx);
-    await dualAlert(resend, recipient, err, ctx);
-    return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
+    try {
+      const pdfRes = await fetchFactsheetPdfWithRetry(strategy_id, correlation_id);
+      if (!pdfRes.ok) {
+        throw new Error(
+          `factsheet PDF fetch failed: ${pdfRes.status} ${pdfRes.statusText}`,
+        );
+      }
+      // Pitfall 6 — Buffer.from(arrayBuffer) for the Resend attachment encoding.
+      const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
+      const monthLabel = new Date().toLocaleString("en-US", {
+        month: "long",
+        year: "numeric",
+      });
+
+      await resend.emails.send({
+        from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
+        to: recipient,
+        subject: `Founder LP report — ${monthLabel}`,
+        html: `<p>Monthly LP factsheet attached.</p>
+               <p style="color:#666;font-size:12px;">correlation_id: ${correlation_id}</p>`,
+        attachments: [
+          {
+            filename: `founder-lp-${monthLabel.replace(/\s/g, "-")}.pdf`,
+            content: pdfBuffer,
+            contentType: "application/pdf",
+          },
+        ],
+        tags: [
+          { name: "correlation_id", value: correlation_id },
+          { name: "kind", value: "founder_lp_report" },
+        ],
+      });
+
+      return NextResponse.json({
+        ok: true,
+        correlation_id,
+        strategy_id,
+        pdf_bytes: pdfBuffer.length,
+        sent_to: recipient,
+      });
+    } catch (err) {
+      const ctx = {
+        correlation_id,
+        strategy_id,
+        error_class: err instanceof Error ? err.constructor.name : "UnknownError",
+        error_message: err instanceof Error ? err.message : String(err),
+      };
+      console.error("[cron/founder-lp-report] failure:", ctx);
+      await dualAlert(resend, recipient, err, ctx);
+      return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
+    }
+  } finally {
+    if (supportsProcessEvents) {
+      try {
+        process.off("unhandledRejection", onUnhandledRejection);
+      } catch {
+        // best-effort cleanup; never block the response
+      }
+    }
   }
 }
 
