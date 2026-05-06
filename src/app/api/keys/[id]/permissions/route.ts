@@ -142,9 +142,35 @@ export const GET = withAuth(
 
       return NextResponse.json(payload);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Probe failed";
+      // The raw Error.message used to bubble straight into the response
+      // body (e.g. "INTERNAL_API_TOKEN is not configured on the Next
+      // layer."). That leaks infra detail to any authenticated client
+      // and confuses the wizard alert with internal jargon. Classify
+      // into a stable code + generic copy here; keep the raw message
+      // server-side for debugging only.
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const isConfigError =
+        rawMessage.includes("INTERNAL_API_TOKEN") ||
+        rawMessage.startsWith("Upstream 5") ||
+        rawMessage.includes("ECONNREFUSED") ||
+        rawMessage.includes("not configured");
+      const isTimeout =
+        rawMessage.includes("aborted") ||
+        rawMessage.toLowerCase().includes("timeout");
+
+      const code = isConfigError
+        ? "PROBE_BACKEND_UNAVAILABLE"
+        : isTimeout
+        ? "PROBE_TIMEOUT"
+        : "PROBE_FAILED";
+      const userMessage = isConfigError
+        ? "Could not reach the permissions service. Try again shortly."
+        : isTimeout
+        ? "Permissions probe timed out. Try again."
+        : "Could not check key scopes. Try again.";
+
       console.error(`[keys/permissions] proxy failed for ${keyId}:`, err);
-      return NextResponse.json({ error: message }, { status: 502 });
+      return NextResponse.json({ error: userMessage, code }, { status: 502 });
     }
   },
 );
