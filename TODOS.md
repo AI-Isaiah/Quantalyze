@@ -12,6 +12,14 @@
 
 ---
 
+## Phase 18 — Root-Cause Fix + Founder LP Skeleton
+
+- 10-team onboarding tracker: [`.planning/phase-18/team-status.md`](.planning/phase-18/team-status.md) — one row per onboarding team (FIX-03). Founder updates as teams flow through the wizard.
+- Founder OKX smoke evidence template (FIX-02): [`.planning/phase-18/founder-okx-smoke.md`](.planning/phase-18/founder-okx-smoke.md). Filled at /ship time.
+- In-flight traceability (FIX-01 record-only): [`.planning/phase-18/in-flight-traceability.md`](.planning/phase-18/in-flight-traceability.md).
+
+---
+
 ## DISCO-05 migration drift — Path C ratified (2026-05-01, v1.0.0 Phase 16 prep)
 
 **Decision:** Path C — accept the local-only state for migrations 091 (DISCO-05

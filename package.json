@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "verify:phase18": "tsx scripts/verify-phase18-artifacts.ts",
     "worker:dev": "cd analytics-service && .venv/bin/python main_worker.py"
   },
   "dependencies": {
