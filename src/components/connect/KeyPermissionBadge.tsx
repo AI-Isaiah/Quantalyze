@@ -103,6 +103,11 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
       const data = (await res.json()) as Permissions;
       if (mountedRef.current) setPerms(data);
     } catch (e) {
+      // Preserve the raw error for the browser console before we squash
+      // it to a user-facing string. Stack traces and non-Error throws
+      // disappear once we hit setError(); without this log, debugging a
+      // probe failure from a user-submitted screenshot is much harder.
+      console.error("[KeyPermissionBadge] probe failed:", e);
       if (mountedRef.current) {
         setError(e instanceof Error ? e.message : "Could not check permissions.");
       }
