@@ -94,6 +94,15 @@ vi.mock("@/lib/audit", () => ({
   logAuditEvent: vi.fn(),
 }));
 
+// Stub the correlation-id helper so we can assert it propagates into
+// `enqueue_compute_job`'s p_metadata payload. The real helper reads
+// next/headers which is awkward to drive from vitest.
+const TEST_CORRELATION_ID = "11111111-2222-3333-4444-555555555555";
+vi.mock("@/lib/correlation-id", () => ({
+  getCorrelationId: vi.fn().mockResolvedValue(TEST_CORRELATION_ID),
+  CORRELATION_HEADER: "x-correlation-id",
+}));
+
 // Mock next/server — preserve NextRequest/NextResponse, capture after()
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>("next/server");
@@ -155,10 +164,12 @@ describe("POST /api/keys/sync", () => {
       status: "syncing",
     });
 
-    // RPC was called with correct args
+    // RPC was called with correct args, including the correlation_id
+    // forensic thread (Phase 18 Day-2 Bug #1 fix).
     expect(mockRpc).toHaveBeenCalledWith("enqueue_compute_job", {
       p_strategy_id: TEST_STRATEGY_ID,
       p_kind: "sync_trades",
+      p_metadata: { correlation_id: TEST_CORRELATION_ID },
     });
 
     // after() should NOT have been called on the queue path
@@ -281,5 +292,25 @@ describe("POST /api/keys/sync", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("Missing strategy_id");
+  });
+
+  // ── 8. Phase 18 Day-2 Bug #1 — correlation_id propagation ───────
+  // SC-1 fifth layer: compute_jobs.metadata->>'correlation_id' must be
+  // queryable end-to-end. The 062 + 032 RPC signature accepts
+  // p_metadata JSONB; this route was passing only {p_strategy_id, p_kind}
+  // before the fix, leaving the forensic chain incomplete. Without the
+  // import + getCorrelationId() call + p_metadata key in the rpc args,
+  // this test fails because mockRpc receives no `p_metadata` field.
+  it("threads getCorrelationId() into enqueue_compute_job p_metadata.correlation_id (Phase 18 Bug #1)", async () => {
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    expect(res.status).toBe(202);
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    const [rpcName, rpcArgs] = mockRpc.mock.calls[0] as [string, Record<string, unknown>];
+    expect(rpcName).toBe("enqueue_compute_job");
+    expect(rpcArgs.p_metadata).toEqual({ correlation_id: TEST_CORRELATION_ID });
   });
 });

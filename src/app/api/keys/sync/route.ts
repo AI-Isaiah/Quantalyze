@@ -5,6 +5,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import { getCorrelationId } from "@/lib/correlation-id";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -78,9 +79,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // ── Queue path (USE_COMPUTE_JOBS_QUEUE=true) ──────────────────────
   if (process.env.USE_COMPUTE_JOBS_QUEUE === "true") {
     const admin = createAdminClient();
+    // Phase 18 forensic patch (Day-2 Bug #1): thread the inbound
+    // correlation_id into compute_jobs.metadata so the SC-1 fifth layer
+    // is queryable end-to-end (Next.js → enqueue_compute_job RPC →
+    // compute_jobs row → worker dispatch → strategy_analytics bridge).
+    // The 062 + 032 RPC signature accepts p_metadata JSONB; we were
+    // passing only p_strategy_id + p_kind, leaving the chain incomplete.
+    const correlation_id = await getCorrelationId();
     const { data: rpcData, error: rpcError } = await admin.rpc(
       "enqueue_compute_job",
-      { p_strategy_id: strategy_id, p_kind: "sync_trades" },
+      {
+        p_strategy_id: strategy_id,
+        p_kind: "sync_trades",
+        p_metadata: { correlation_id },
+      },
     );
 
     if (rpcError) {

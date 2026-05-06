@@ -7,10 +7,15 @@ Asserted invariants:
   4. Missing DEBUG_KEY_FLOW_<BROKER>_{KEY,SECRET} env returns 503.
   5. Valid token + present creds returns StepResponse with status=ok or status=error
      (never raises uncaught).
-  6. After return, plaintext creds are NOT retained in memory (best-effort scrubbing).
+  6. Phase 18 wiring (Day-2 #13 + #14): validate_key invokes
+     services.exchange.validate_key_permissions; fetch_trades invokes
+     ccxt.exchange.fetch_my_trades. Mocks prove the call paths.
+  7. Exchanges are explicitly closed in `finally` blocks.
 """
 
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -25,6 +30,25 @@ def client(monkeypatch):
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
+
+
+def _stub_creds(monkeypatch, broker: str, *, with_passphrase: bool = False) -> None:
+    upper = broker.upper()
+    monkeypatch.setenv(f"DEBUG_KEY_FLOW_{upper}_KEY", f"raw-{upper}-key")
+    monkeypatch.setenv(f"DEBUG_KEY_FLOW_{upper}_SECRET", f"raw-{upper}-secret")
+    if with_passphrase:
+        monkeypatch.setenv(f"DEBUG_KEY_FLOW_{upper}_PASSPHRASE", f"raw-{upper}-pass")
+    else:
+        monkeypatch.delenv(f"DEBUG_KEY_FLOW_{upper}_PASSPHRASE", raising=False)
+
+
+def _make_mock_exchange() -> MagicMock:
+    """Build a stub ccxt-like exchange whose async methods return canned data."""
+    ex = MagicMock()
+    ex.id = "okx"
+    ex.fetch_my_trades = AsyncMock(return_value=[])
+    ex.close = AsyncMock(return_value=None)
+    return ex
 
 
 def test_missing_header_returns_401(client):
@@ -62,15 +86,21 @@ def test_missing_creds_env_returns_503(monkeypatch, client):
     assert r.status_code == 503
 
 
-def test_present_creds_returns_step_response(monkeypatch, client):
-    # Minimal happy path — mock decrypt to return canned plaintext.
-    monkeypatch.setenv("DEBUG_KEY_FLOW_OKX_KEY", "blob1")
-    monkeypatch.setenv("DEBUG_KEY_FLOW_OKX_SECRET", "blob2")
-    monkeypatch.setenv("DEBUG_KEY_FLOW_OKX_PASSPHRASE", "blob3")
-    monkeypatch.setattr(
-        "routers.debug_key_flow.encryption.decrypt_credentials",
-        lambda blob: f"decrypted-{blob}",
-    )
+def test_validate_invokes_validate_key_permissions(monkeypatch, client):
+    """Phase 18 #13/#14 — validate step calls real broker SDK path."""
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    mock_exchange = _make_mock_exchange()
+    create_calls: list[tuple] = []
+
+    def fake_create(broker, key, secret, passphrase=None):
+        create_calls.append((broker, key, secret, passphrase))
+        return mock_exchange
+
+    fake_validate = AsyncMock(return_value={"valid": True, "read_only": True})
+
+    monkeypatch.setattr("routers.debug_key_flow.create_exchange", fake_create)
+    monkeypatch.setattr("routers.debug_key_flow.validate_key_permissions", fake_validate)
+
     r = client.post(
         "/internal/debug-key-flow/validate",
         json={"broker": "okx"},
@@ -79,17 +109,70 @@ def test_present_creds_returns_step_response(monkeypatch, client):
     assert r.status_code == 200
     body = r.json()
     assert body["step"] == "validate_key"
-    assert body["status"] in ("ok", "error")
-    assert "duration_ms" in body
+    assert body["status"] == "ok"
+    assert body["detail"]["broker"] == "okx"
+    assert body["detail"]["valid"] is True
+
+    assert create_calls == [("okx", "raw-OKX-key", "raw-OKX-secret", "raw-OKX-pass")]
+    fake_validate.assert_awaited_once_with(mock_exchange)
+    mock_exchange.close.assert_awaited_once()
 
 
-def test_encrypt_endpoint_present_creds(monkeypatch, client):
-    monkeypatch.setenv("DEBUG_KEY_FLOW_BINANCE_KEY", "k")
-    monkeypatch.setenv("DEBUG_KEY_FLOW_BINANCE_SECRET", "s")
+def test_validate_returns_error_when_permissions_invalid(monkeypatch, client):
+    _stub_creds(monkeypatch, "binance")
+    mock_exchange = _make_mock_exchange()
     monkeypatch.setattr(
-        "routers.debug_key_flow.encryption.decrypt_credentials",
-        lambda blob: f"decrypted-{blob}",
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
     )
+    monkeypatch.setattr(
+        "routers.debug_key_flow.validate_key_permissions",
+        AsyncMock(return_value={
+            "valid": False,
+            "error": "AuthenticationError: bad signature",
+            "error_code": "AUTH_FAILED",
+        }),
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/validate",
+        json={"broker": "binance"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200  # FastAPI handler always returns 200 with structured payload
+    body = r.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "AUTH_FAILED"
+    assert "bad signature" in body["error"]["human_message"]
+    mock_exchange.close.assert_awaited_once()
+
+
+def test_validate_closes_exchange_on_exception(monkeypatch, client):
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    mock_exchange = _make_mock_exchange()
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
+    )
+    monkeypatch.setattr(
+        "routers.debug_key_flow.validate_key_permissions",
+        AsyncMock(side_effect=RuntimeError("ccxt blew up")),
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/validate",
+        json={"broker": "okx"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RuntimeError"
+    mock_exchange.close.assert_awaited_once()
+
+
+def test_encrypt_step_returns_field_lengths(monkeypatch, client):
+    _stub_creds(monkeypatch, "binance")
     r = client.post(
         "/internal/debug-key-flow/encrypt",
         json={"broker": "binance"},
@@ -99,15 +182,25 @@ def test_encrypt_endpoint_present_creds(monkeypatch, client):
     body = r.json()
     assert body["step"] == "encrypt_key"
     assert body["status"] == "ok"
+    assert body["detail"]["broker"] == "binance"
+    assert body["detail"]["field_lengths"] == {
+        "key": len("raw-BINANCE-key"),
+        "secret": len("raw-BINANCE-secret"),
+    }
 
 
-def test_fetch_trades_endpoint_present_creds(monkeypatch, client):
-    monkeypatch.setenv("DEBUG_KEY_FLOW_BYBIT_KEY", "k")
-    monkeypatch.setenv("DEBUG_KEY_FLOW_BYBIT_SECRET", "s")
+def test_fetch_trades_invokes_fetch_my_trades(monkeypatch, client):
+    """Phase 18 #14 — fetch-trades step calls ccxt.exchange.fetch_my_trades."""
+    _stub_creds(monkeypatch, "bybit")
+    mock_exchange = _make_mock_exchange()
+    mock_exchange.fetch_my_trades = AsyncMock(return_value=[
+        {"timestamp": 1700000000000, "symbol": "BTC/USDT"},
+    ])
     monkeypatch.setattr(
-        "routers.debug_key_flow.encryption.decrypt_credentials",
-        lambda blob: f"decrypted-{blob}",
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
     )
+
     r = client.post(
         "/internal/debug-key-flow/fetch-trades",
         json={"broker": "bybit"},
@@ -117,3 +210,56 @@ def test_fetch_trades_endpoint_present_creds(monkeypatch, client):
     body = r.json()
     assert body["step"] == "fetch_trades"
     assert body["status"] == "ok"
+    assert body["detail"] == {
+        "broker": "bybit",
+        "symbol": "BTC/USDT",
+        "fetched": 1,
+        "first_ts": 1700000000000,
+    }
+    mock_exchange.fetch_my_trades.assert_awaited_once_with("BTC/USDT", limit=5)
+    mock_exchange.close.assert_awaited_once()
+
+
+def test_fetch_trades_zero_fills_is_ok(monkeypatch, client):
+    """Empty trade list on a fresh testnet account is still status=ok."""
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    mock_exchange = _make_mock_exchange()
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/fetch-trades",
+        json={"broker": "okx"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["detail"]["fetched"] == 0
+    assert body["detail"]["first_ts"] is None
+
+
+def test_fetch_trades_propagates_broker_error(monkeypatch, client):
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    mock_exchange = _make_mock_exchange()
+    mock_exchange.fetch_my_trades = AsyncMock(
+        side_effect=RuntimeError("PermissionDenied: trade scope missing"),
+    )
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/fetch-trades",
+        json={"broker": "okx"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RuntimeError"
+    assert "PermissionDenied" in body["error"]["human_message"]
+    mock_exchange.close.assert_awaited_once()
