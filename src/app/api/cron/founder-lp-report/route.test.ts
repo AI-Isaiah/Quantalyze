@@ -44,10 +44,12 @@ vi.mock("@sentry/nextjs", () => ({
 
 // Resend SDK — the route instantiates `new Resend(KEY)` and calls `.emails.send`.
 // `sendMock` is shared across all instantiations so each test can configure
-// per-call resolutions.
+// per-call resolutions. Uses a real class so `new Resend(...)` resolves.
 const sendMock = vi.fn();
 vi.mock("resend", () => ({
-  Resend: vi.fn().mockImplementation(() => ({ emails: { send: sendMock } })),
+  Resend: class {
+    emails = { send: sendMock };
+  },
 }));
 
 // Supabase admin — Grok W5 publication precheck.
@@ -205,9 +207,9 @@ describe("GET /api/cron/founder-lp-report", () => {
     // Resend send: success email with attachment.
     expect(sendMock).toHaveBeenCalledTimes(1);
     const sendArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
-    const attachments = sendArgs.attachments as Array<{ content: unknown; content_type: string }>;
+    const attachments = sendArgs.attachments as Array<{ content: unknown; contentType: string }>;
     expect(attachments).toHaveLength(1);
-    expect(attachments[0].content_type).toBe("application/pdf");
+    expect(attachments[0].contentType).toBe("application/pdf");
     expect(Buffer.isBuffer(attachments[0].content)).toBe(true);
 
     // No failure path triggered.

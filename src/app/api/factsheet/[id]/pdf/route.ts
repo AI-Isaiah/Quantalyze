@@ -9,6 +9,7 @@ import {
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
+import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const maxDuration = 30;
 
@@ -18,18 +19,35 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  // Cross-lambda IP rate limit. Returns 429 BEFORE we touch the
-  // acquirePdfSlot semaphore or any DB query — so a scraper hammering this
-  // surface can't burn the in-memory queue or generate Supabase load.
-  // Cache hits served from Vercel's CDN bypass this entirely, which is the
-  // correct behavior for a public IP-based limiter.
-  const ip = getClientIp(req.headers);
-  const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
-  if (!rl.success) {
-    return new NextResponse("Rate limit exceeded", {
-      status: 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    });
+  // Adversarial revision 2026-05-06 (Phase 18 Plan 03 / B4) — internal cron
+  // callers (e.g. /api/cron/founder-lp-report) pass `x-internal-token:
+  // ${INTERNAL_API_TOKEN}` to bypass `publicIpLimiter`. This prevents the
+  // monthly LP cron from contending with alert-digest fan-out on the same
+  // public IP pool. Token validated via safeCompare (constant time); empty
+  // or missing token falls through to the existing public rate limiter so
+  // unauthenticated callers see no behavior change.
+  const internalToken = req.headers.get("x-internal-token");
+  const internalEnv = process.env.INTERNAL_API_TOKEN;
+  const isInternalCall =
+    internalToken !== null &&
+    typeof internalEnv === "string" &&
+    internalEnv.length > 0 &&
+    safeCompare(internalToken, internalEnv);
+
+  if (!isInternalCall) {
+    // Cross-lambda IP rate limit. Returns 429 BEFORE we touch the
+    // acquirePdfSlot semaphore or any DB query — so a scraper hammering this
+    // surface can't burn the in-memory queue or generate Supabase load.
+    // Cache hits served from Vercel's CDN bypass this entirely, which is the
+    // correct behavior for a public IP-based limiter.
+    const ip = getClientIp(req.headers);
+    const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
+    if (!rl.success) {
+      return new NextResponse("Rate limit exceeded", {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      });
+    }
   }
 
   const { id } = await params;
