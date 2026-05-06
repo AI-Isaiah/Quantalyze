@@ -144,27 +144,40 @@ test.describe("wizard hydration probe", () => {
   test("API branch with localStorage draft pointer pre-set", async ({ page, context }) => {
     const { consoleMessages, pageErrors } = attachConsoleCapture(page);
     await loginAsAllocator(page);
-    // Seed localStorage so the WizardClient `loaded` ref-init pattern
-    // returns a non-null value on first client render — divergence with
-    // SSR (which always sees null) is exactly what triggers #418 if the
-    // dependent state is rendered.
-    await context.addInitScript(() => {
+    // Seed localStorage with the EXACT shape and key that
+    // src/lib/wizard/localStorage.ts uses (storage key
+    // `quantalyze_wizard_state_v1`, fields strategyId/wizardSessionId/
+    // step/savedAt). The original probe used a fictional `:v2` key with
+    // `ts` instead of `savedAt`, so loadWizardState() returned null and
+    // this scenario was secretly identical to the fresh-load case.
+    //
+    // KNOWN LIMIT: this scenario cannot exercise the deepest divergence
+    // path (loaded.step DIFFERENT from initialDraft-derived step) without
+    // a real server-side wizard_draft fixture, because WizardClient's
+    // step initializer at WizardClient.tsx ~line 114-133 only consults
+    // `loaded.strategyId === initialDraft?.id` AFTER initialDraft is non-
+    // null. With this fake UUID and no DB row, initialDraft is null so
+    // both server and client converge on "connect_key" without consulting
+    // localStorage. To fully exercise that path, port the
+    // seedTestAllocator() pattern from wizard-axe.spec.ts and seed a
+    // real api_keys + strategies row keyed to the seeded strategyId.
+    const SEEDED_SAVED_AT = 1700000000000; // 2023-11-14, well within draft window
+    await context.addInitScript((args) => {
       try {
         localStorage.setItem(
-          "quantalyze:wizard:state:v2",
+          args.key,
           JSON.stringify({
-            wizardSessionId: "probe-session-id",
-            strategyId: "probe-strategy-id",
+            strategyId: "00000000-0000-4000-8000-000000000000",
+            wizardSessionId: "00000000-0000-4000-8000-000000000001",
             step: "metadata",
+            savedAt: args.savedAt,
             source: "api",
-            strategyName: "",
-            ts: Date.now(),
           }),
         );
       } catch {
         // ignore storage errors
       }
-    });
+    }, { key: "quantalyze_wizard_state_v1", savedAt: SEEDED_SAVED_AT });
     await page.goto("/strategies/new/wizard");
     await page.waitForLoadState("networkidle", { timeout: 15_000 });
     await page.waitForTimeout(2000);
