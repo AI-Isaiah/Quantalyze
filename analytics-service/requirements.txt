@@ -19,12 +19,15 @@ cryptography>=44.0
 # multipart route in the service). pandera 0.20.x is compatible with
 # pandas==2.2.3 / numpy==2.2.4 (already pinned above).
 pandera==0.20.4
-# Phase 18: pandera 0.20.4 transitively depends on `multimethod`. Default resolver
-# pulls multimethod 1.10 which uses `typing.Union` as a base type — illegal under
-# Python 3.14 (`TypeError: type 'typing.Union' is not an acceptable base type`),
-# breaking pytest collection of test_csv_validator.py. multimethod 2.x removes the
-# `overload` symbol pandera 0.20.4 imports, so pin to the 1.x line at >=1.12.
-multimethod>=1.12,<2.0
+# Phase 18 NOTE — Python 3.14 dev workaround (CI is unaffected):
+# pandera 0.20.4 declares multimethod<=1.10.0. multimethod 1.10 uses
+# `typing.Union` as a base type, which crashes pytest collection of
+# test_csv_validator.py on Python 3.14 (`TypeError: type 'typing.Union'
+# is not an acceptable base type`). CI runs on Python 3.12 where 1.10
+# works fine — no pin needed. Local devs on 3.14 must manually run:
+#   .venv/bin/pip install -U 'multimethod>=1.12,<2.0' --no-deps
+# (--no-deps to bypass pandera's <=1.10 constraint). multimethod 2.x
+# removes the `overload` symbol pandera 0.20.4 imports, so stay on 1.x.
 python-multipart==0.0.27
 # Phase 16 / OBSERV-09: structlog JSON-format logs with correlation_id contextvar.
 structlog==25.5.0
