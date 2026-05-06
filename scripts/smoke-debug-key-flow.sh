@@ -32,7 +32,10 @@ PREFIX="[smoke-debug-key-flow]"
 log() { echo "$PREFIX $*" >&2; }
 
 ANALYTICS_BASE="${ANALYTICS_BASE:-https://quantalyze-analytics-production.up.railway.app}"
-BROKERS="${BROKERS:-okx binance bybit}"
+# Binance is intentionally NOT in the default — founder has no Binance account
+# and the testnet endpoint (testnet.binance.vision) has been intermittently 502.
+# Override with `BROKERS="okx binance bybit"` once Binance is in scope again.
+BROKERS="${BROKERS:-okx bybit}"
 STEPS="validate encrypt fetch-trades"
 
 if [ -z "${INTERNAL_API_TOKEN:-}" ]; then

@@ -176,20 +176,24 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
     """Bybit: ``GET /v5/user/query-api`` returns a ``readOnly`` integer
     flag plus a ``permissions`` object.
 
-    Bybit V5 quirk (confirmed against a live read-only key, 2026-05-05):
+    Bybit V5 quirk (confirmed 2026-05-05 against a live production read-only
+    key and re-confirmed 2026-05-06 against a testnet read-only key):
     the ``permissions`` arrays describe the SCOPE of read access (which
     API categories the key can query) rather than active write capability.
-    A read-only key can show ``ContractTrade: ["Order", "Position"]`` and
-    ``Spot: ["SpotTrade"]`` while having ``readOnly: 1`` at the top level
-    — those entries indicate the key can READ orders/positions/spot data,
-    not that it can place trades. The authoritative trade-capability flag
-    is ``readOnly``: ``1`` means the key cannot trade or withdraw,
-    regardless of what's in the permissions object.
+    A read-only key can show ``ContractTrade: ["Order", "Position"]``,
+    ``Spot: ["SpotTrade"]``, AND ``Wallet: ["AccountTransfer",
+    "SubMemberTransfer"]`` while having ``readOnly: "1"`` at the top
+    level — those entries indicate the key can READ orders/positions/spot
+    data and READ wallet-transfer history, not that it can place trades
+    or move funds.
 
-    The ``Wallet`` permission array gates withdrawals specifically; a
-    read-only key returns ``Wallet: []``. We still inspect it for
-    defense in depth so a future Bybit API change that decouples
-    ``readOnly`` from ``Wallet`` doesn't silently grant withdrawal.
+    The authoritative trade-AND-withdraw flag is ``readOnly``: ``1`` means
+    the key cannot trade OR withdraw, regardless of what's in the
+    permissions object. PR #118 fixed the trade-detection false positive;
+    this docstring revision (Phase 18 follow-up) extends the same
+    "readOnly supersedes permissions arrays" rule to withdraw detection
+    after live testnet evidence falsified the original
+    "read-only key returns Wallet=[]" assumption.
     """
     try:
         api_info = await exchange.private_get_v5_user_query_api()
@@ -209,18 +213,23 @@ async def detect_bybit_permissions(exchange: ccxt.Exchange) -> PermissionDict:
     # (id 8qI8luq5LQeo023aDp): ccxt returned readOnly as Python `str`.
     is_bybit_read_only = str(result.get("readOnly", "")) == "1"
 
-    has_withdraw = bool(permissions.get("Wallet"))
-
     if is_bybit_read_only:
-        # readOnly=1 supersedes the permissions arrays for trade detection.
-        # Withdraw stays from the Wallet array as a defense-in-depth check.
+        # readOnly="1" supersedes the permissions arrays for BOTH trade
+        # AND withdraw detection. Bybit V5 contract: readOnly=1 means the
+        # key cannot trade OR withdraw, regardless of populated Wallet
+        # entries (which list READ scopes for wallet subsystems like
+        # AccountTransfer / SubMemberTransfer). Pre-fix the defense-in-
+        # depth Wallet check produced false-positive WITHDRAW_SCOPE
+        # rejections on live read-only testnet keys.
         return {
             "read": True,
             "trade": False,
-            "withdraw": has_withdraw,
+            "withdraw": False,
             "probe_error": False,
         }
 
+    # readOnly="0" path: the permissions arrays ARE authoritative.
+    has_withdraw = bool(permissions.get("Wallet"))
     has_trade = bool(
         permissions.get("ContractTrade")
         or permissions.get("Spot")

@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.5.0] - 2026-05-06
+
+**Bybit `WITHDRAW_SCOPE` false-positive fix — read-only Bybit keys with populated `Wallet` arrays no longer get rejected.** Phase 18 follow-up to PRs #118/#119 that extends the "`readOnly` flag supersedes permissions arrays" rule to withdraw detection, after live testnet evidence falsified the original "`readOnly=1` → `Wallet=[]`" assumption. Plus smoke harness now defaults to `okx bybit` only since the founder has no Binance account and the testnet endpoint has been intermittently 502.
+
+### Why
+
+Live evidence from a read-only Bybit testnet key (`fGeLli3QWGhqX2Lrob`, 2026-05-06) showed `readOnly: "1"` (correctly identifying the key as read-only) but a populated `Wallet: ["AccountTransfer", "SubMemberTransfer"]` permissions array. Pre-fix `detect_bybit_permissions` honored `readOnly="1"` for the `trade` field (PR #118) but kept `withdraw = bool(permissions.get("Wallet"))` as a defense-in-depth fallback. The defense was based on the assumption that a read-only key returns `Wallet=[]`. Live evidence proves that's wrong on testnet. Per Bybit V5 contract, `readOnly: "1"` means the key cannot trade OR withdraw — so the Wallet array entries are READ scopes, not write capabilities. Customers connecting legitimate read-only Bybit keys hit `WITHDRAW_SCOPE` rejections in the wizard.
+
+### Fixed
+
+- `analytics-service/services/key_permissions.py:detect_bybit_permissions` — the `is_bybit_read_only=True` branch now returns `withdraw: False` unconditionally, mirroring the `trade: False` decision from PR #118. The `readOnly="0"` path keeps the Wallet check as authoritative (defense-in-depth still applies when Bybit doesn't vouch for the key).
+- `analytics-service/tests/test_key_permissions.py` — replaced `test_read_only_flag_one_with_wallet_perm_still_rejects_withdraw` (which pinned the now-incorrect over-zealous behavior) with `test_read_only_flag_one_with_populated_wallet_array_still_no_withdraw` matching the live testnet response shape (populated ContractTrade/Spot/Wallet/Options/etc. plus `readOnly="1"`). Added `test_read_only_zero_with_wallet_perm_does_grant_withdraw` to pin the readOnly=0 path's defense-in-depth behavior.
+
+### Changed
+
+- `scripts/smoke-debug-key-flow.sh` — `BROKERS` default changed from `"okx binance bybit"` to `"okx bybit"`. Binance is intentionally excluded by default because the founder has no Binance account staged and `testnet.binance.vision` has been intermittently returning 502 nginx. Override with `BROKERS="okx binance bybit"` once Binance is in scope again.
+
 ## [0.21.4.0] - 2026-05-06
 
 **Vercel Pro cron cutover — `sync_funding`, `reconcile_strategy`, and `cleanup_ack_tokens` move back to `vercel.json`; Railway-side `services/scheduled_tasks.py` retired.** Closes the Phase 18 forensic chain at the production scheduler layer: every `compute_jobs` row enqueued by these three jobs now carries `metadata->>'correlation_id'` because production scheduling now flows through the Next.js routes patched in v0.21.3.0.
