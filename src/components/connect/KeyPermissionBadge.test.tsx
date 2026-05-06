@@ -193,5 +193,23 @@ describe("KeyPermissionBadge", () => {
       expect(summary).toHaveAttribute("data-state", "wrong-scope");
       expect(summary.textContent).toContain("No read permission");
     });
+
+    // probe_error is set by the Python service's _FAIL_CLOSED payload
+    // when the upstream exchange is unreachable. Without a dedicated
+    // branch, the badge would mis-diagnose this as "key revoked" since
+    // read/trade/withdraw all come back false in that payload.
+    it("renders probe-error state when probe_error is true (exchange unreachable)", async () => {
+      mockFetchOnce({
+        read: false,
+        trade: false,
+        withdraw: false,
+        probe_error: true,
+        detected_at: new Date().toISOString(),
+      });
+      render(<KeyPermissionBadge apiKeyId="key-1" />);
+      const summary = await screen.findByTestId("key-permission-summary");
+      expect(summary).toHaveAttribute("data-state", "probe-error");
+      expect(summary.textContent).toContain("Could not contact the exchange");
+    });
   });
 });

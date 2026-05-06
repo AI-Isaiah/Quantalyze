@@ -19,6 +19,13 @@ interface Permissions {
   trade: boolean;
   withdraw: boolean;
   detected_at: string;
+  /**
+   * Set by the Python service's _FAIL_CLOSED payload when the upstream
+   * exchange could not be contacted. Distinguishes "exchange unreachable"
+   * from "key revoked" — both surface as read=false/trade=false/withdraw=false
+   * otherwise, which would mislead users during outages.
+   */
+  probe_error?: boolean;
 }
 
 export interface KeyPermissionBadgeProps {
@@ -145,30 +152,42 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
             independent visual cues to know whether the key is safe.
             One sentence in either accent or negative spells it out.
           */}
-          <p
-            className={`text-[13px] ${
-              perms.read && !perms.trade && !perms.withdraw
-                ? "text-accent"
-                : "text-negative"
-            }`}
-            data-testid="key-permission-summary"
-            data-state={
-              perms.read && !perms.trade && !perms.withdraw
-                ? "read-only"
-                : "wrong-scope"
-            }
-          >
-            {perms.read && !perms.trade && !perms.withdraw
-              ? "Read-only key confirmed — trading and withdrawals are blocked."
-              : perms.trade || perms.withdraw
-                ? `⚠ This key has ${[
-                    perms.trade ? "trade" : null,
-                    perms.withdraw ? "withdraw" : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" and ")} permission. Re-key as read-only.`
-                : "⚠ No read permission detected on this key. The key may have been revoked or scoped wrong."}
-          </p>
+          {(() => {
+            // Branches are ordered probe-error → read-only → wrong-scope.
+            // probe_error MUST come first so we don't mis-diagnose an
+            // exchange outage as "key revoked" — both look like
+            // read=false/trade=false/withdraw=false on the wire.
+            const summaryState: "probe-error" | "read-only" | "wrong-scope" =
+              perms.probe_error
+                ? "probe-error"
+                : perms.read && !perms.trade && !perms.withdraw
+                  ? "read-only"
+                  : "wrong-scope";
+            const summaryText =
+              summaryState === "probe-error"
+                ? "Could not contact the exchange to verify scopes. Try the Re-check button in a moment."
+                : summaryState === "read-only"
+                  ? "Read-only key confirmed — trading and withdrawals are blocked."
+                  : perms.trade || perms.withdraw
+                    ? `⚠ This key has ${[
+                        perms.trade ? "trade" : null,
+                        perms.withdraw ? "withdraw" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" and ")} permission. Re-key as read-only.`
+                    : "⚠ No read permission detected on this key. The key may have been revoked or scoped wrong.";
+            return (
+              <p
+                className={`text-[13px] ${
+                  summaryState === "read-only" ? "text-accent" : "text-negative"
+                }`}
+                data-testid="key-permission-summary"
+                data-state={summaryState}
+              >
+                {summaryText}
+              </p>
+            );
+          })()}
           <div className="flex flex-wrap gap-2">
             <Pill label="Read" granted={perms.read} />
             <Pill label="Trade" granted={perms.trade} />
