@@ -270,3 +270,73 @@ class TestPhase16ScrubPaths:
         assert sentry_init._redact_before_send(event, None) == event
         event2 = {"exception": {"values": [{"stacktrace": "not-a-dict"}]}}
         assert sentry_init._redact_before_send(event2, None) == event2
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 / FIX-04 — _scrub now delegates to services.redact.scrub_pii.
+# The locally-defined PII surface (sentry_init._PII_KEYS) is still the
+# enumeration ground-truth for THIS module's defense-in-depth; the canonical
+# 17-key set lives in services.redact.DENYLIST_EXACT (Grok B1 promotions
+# included). The shim ensures both surfaces redact.
+# ---------------------------------------------------------------------------
+
+
+class TestRedactPyDelegation:
+    def test_scrub_imports_canonical_module(self):
+        """The shim must import services.redact.scrub_pii."""
+        from services import redact as redact_module
+
+        # Sanity: the canonical module exposes scrub_pii.
+        assert callable(redact_module.scrub_pii)
+
+    def test_canonical_grok_b1_keys_redacted_in_event(self):
+        """The 6 Grok-B1 promoted keys (now in canonical denylist) MUST be
+        scrubbed by the new _scrub shim path."""
+        event = {
+            "request": {
+                "headers": {
+                    "x-bapi-apikey": "leaky-bybit-1",
+                    "x-bapi-sign": "leaky-bybit-2",
+                    "x-bapi-signature": "leaky-bybit-3",
+                    "ok-access-passphrase": "leaky-okx-1",
+                    "ok-access-key": "leaky-okx-2",
+                    "ok-access-timestamp": "leaky-okx-3",
+                    "x-harmless": "ok",
+                }
+            }
+        }
+        result = sentry_init._redact_before_send(event, None)
+        h = result["request"]["headers"]
+        assert h["x-bapi-apikey"] == "[REDACTED]"
+        assert h["x-bapi-sign"] == "[REDACTED]"
+        assert h["x-bapi-signature"] == "[REDACTED]"
+        assert h["ok-access-passphrase"] == "[REDACTED]"
+        assert h["ok-access-key"] == "[REDACTED]"
+        assert h["ok-access-timestamp"] == "[REDACTED]"
+        assert h["x-harmless"] == "ok"
+
+    def test_broker_quirk_sweep_handles_unpromoted_keys(self):
+        """Forward-compat: keys still in _PII_KEYS but NOT in the canonical
+        DENYLIST_EXACT are still redacted by the broker-quirk sweep
+        (Bybit-specific x-bapi-api-key with hyphen between api-key, x-bapi-timestamp,
+        etc., and the Binance x-mbx-time-unit)."""
+        event = {
+            "request": {
+                "headers": {
+                    "x-bapi-api-key": "leaky-old-form",
+                    "x-bapi-timestamp": "leaky-ts",
+                    "x-bapi-recv-window": "leaky-rw",
+                    "x-bapi-sign-type": "leaky-st",
+                    "x-mbx-time-unit": "leaky-tu",
+                    "x-harmless": "ok",
+                }
+            }
+        }
+        result = sentry_init._redact_before_send(event, None)
+        h = result["request"]["headers"]
+        assert h["x-bapi-api-key"] == "[REDACTED]"
+        assert h["x-bapi-timestamp"] == "[REDACTED]"
+        assert h["x-bapi-recv-window"] == "[REDACTED]"
+        assert h["x-bapi-sign-type"] == "[REDACTED]"
+        assert h["x-mbx-time-unit"] == "[REDACTED]"
+        assert h["x-harmless"] == "ok"

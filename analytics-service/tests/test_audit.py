@@ -228,3 +228,125 @@ class TestLogAuditEventNullGuards:
         assert any(
             "empty user_id" in rec.getMessage() for rec in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 / FIX-04 — Adversarial revision B3 + redact wire-up.
+# audit.py uses stdlib `logging.getLogger("quantalyze.audit")` (NOT structlog),
+# so the structlog processor pipeline does NOT cover its `logger.error` calls.
+# Every formatter argument MUST pass through services.redact.scrub_pii directly.
+# ---------------------------------------------------------------------------
+
+
+class TestAuditPayloadScrubbed:
+    """The RPC payload (`p_metadata`) must be scrubbed BEFORE the wire."""
+
+    def test_audit_payload_scrubbed(self, monkeypatch):
+        supabase, rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        log_audit_event(
+            user_id=DUMMY_USER,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=DUMMY_ENTITY,
+            metadata={"api_key": "leaky-key-AAA", "safe": "ok"},
+        )
+
+        call_args = rpc.call_args[0]
+        sent_payload = call_args[1]["p_metadata"]
+        # api_key MUST be redacted before the RPC executes.
+        assert sent_payload["api_key"] == "[REDACTED]"
+        # Non-sensitive fields preserved.
+        assert sent_payload["safe"] == "ok"
+
+    def test_audit_payload_scrubbed_nested(self, monkeypatch):
+        """Nested credentials inside metadata are also redacted (recursive)."""
+        supabase, rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        log_audit_event(
+            user_id=DUMMY_USER,
+            action="bridge.score_candidates",
+            entity_type="bridge_run",
+            entity_id=DUMMY_ENTITY,
+            metadata={
+                "broker": "okx",
+                "creds": {"api_secret": "leaky", "passphrase": "leaky2"},
+            },
+        )
+
+        call_args = rpc.call_args[0]
+        sent = call_args[1]["p_metadata"]
+        assert sent["broker"] == "okx"
+        assert sent["creds"]["api_secret"] == "[REDACTED]"
+        assert sent["creds"]["passphrase"] == "[REDACTED]"
+
+
+class TestLoggerErrorScrubsPiiMetadata:
+    """Adversarial revision 2026-05-06: B3 — every `logger.error` formatter arg
+    in audit.py passes through scrub_pii before the message hits stderr.
+
+    Three audit.py callsites are covered:
+      1. NULL user_id branch (line ~88)
+      2. Empty user_id branch (line ~100)
+      3. RPC-throw branch (line ~125)
+    """
+
+    def test_null_user_id_action_arg_is_scrubbed(self, monkeypatch, caplog):
+        # Inject a JWT-shaped action string — scrub_pii on a JWT-shape returns
+        # the redaction token, proving the formatter arg passes through scrub_pii.
+        jwt = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc"
+        supabase, _rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
+            log_audit_event(
+                user_id=None,  # type: ignore[arg-type]
+                action=jwt,
+                entity_type="bridge_run",
+                entity_id=DUMMY_ENTITY,
+            )
+
+        msg = caplog.records[0].getMessage()
+        assert jwt not in msg, f"raw JWT leaked into log message: {msg!r}"
+        assert "[REDACTED_JWT]" in msg or "[REDACTED]" in msg
+
+    def test_empty_user_id_action_arg_is_scrubbed(self, monkeypatch, caplog):
+        jwt = "ddddddddd0.eeeeeeeeee.ffffffffff"
+        supabase, _rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
+            log_audit_event(
+                user_id="",
+                action=jwt,
+                entity_type="bridge_run",
+                entity_id=DUMMY_ENTITY,
+            )
+
+        msg = caplog.records[0].getMessage()
+        assert jwt not in msg, f"raw JWT leaked into log message: {msg!r}"
+        assert "[REDACTED_JWT]" in msg or "[REDACTED]" in msg
+
+    def test_rpc_throw_branch_scrubs_args(self, monkeypatch, caplog):
+        # When the RPC call throws, the except branch logs action/entity_type/
+        # entity_id/user_id/exc — every one must run through scrub_pii.
+        jwt_action = "1234567890.0987654321.abcdefghij"
+        rpc_method = MagicMock(side_effect=RuntimeError("network down"))
+        supabase = MagicMock(rpc=rpc_method)
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
+            log_audit_event(
+                user_id=DUMMY_USER,
+                action=jwt_action,
+                entity_type="bridge_run",
+                entity_id=DUMMY_ENTITY,
+            )
+
+        msg = caplog.records[-1].getMessage()
+        assert jwt_action not in msg, f"raw JWT leaked: {msg!r}"
+        assert "[REDACTED_JWT]" in msg or "[REDACTED]" in msg
+        # Confirm we hit the RPC-throw branch.
+        assert "log_audit_event_service call threw" in msg
