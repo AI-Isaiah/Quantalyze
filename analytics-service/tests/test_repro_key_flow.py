@@ -124,5 +124,10 @@ def test_schema_drift_raises_or_returns_partial(broker):
             assert not has_canonical, (
                 f"{broker} schema-drift cassette should fail or return partial; got {result!r}"
             )
-        except (ccxt.ExchangeError, KeyError, ValueError):
-            pass  # expected failure mode
+        except (ccxt.ExchangeError, KeyError, ValueError, TypeError):
+            # TypeError is a real-world drift symptom: ccxt's parser does
+            # `len(safe_list(entry, 'coin'))` and crashes when the broker
+            # silently drops the `coin` array (Bybit-class drift). Accept
+            # it as a valid drift exception class — the wizard's error
+            # envelope catches all of these the same way.
+            pass
