@@ -49,6 +49,14 @@ from typing import Any
 from uuid import UUID
 
 from services.db import get_supabase
+# Phase 18 / FIX-04 — Adversarial revision B3:
+# Every logger.error formatter argument in this file passes through
+# services.redact.scrub_pii BECAUSE stdlib logging.Logger.error does NOT run
+# through the structlog processor pipeline (only structlog.get_logger() does).
+# Without this, action / entity_id / exc strings can leak credential-shaped
+# values into Railway stderr -> log aggregation -> Sentry breadcrumbs.
+# The RPC payload (p_metadata) is also scrubbed before the wire.
+from services.redact import scrub_pii
 
 logger = logging.getLogger("quantalyze.audit")
 
@@ -85,10 +93,11 @@ def log_audit_event(
         JSON-serializable payload. Defaults to {}.
     """
     if user_id is None:
+        # Adversarial revision B3 — every formatter arg through scrub_pii.
         logger.error(
             "[audit] log_audit_event called with NULL user_id (dropping): "
             "action=%s entity_type=%s entity_id=%s",
-            action, entity_type, entity_id,
+            scrub_pii(action), scrub_pii(entity_type), scrub_pii(entity_id),
         )
         return
 
@@ -97,14 +106,20 @@ def log_audit_event(
     # now so the RPC args are uniform.
     uid = str(user_id)
     if not uid or uid == "None":
+        # Adversarial revision B3 — scrub_pii on action.
         logger.error(
             "[audit] log_audit_event called with empty user_id (dropping): "
-            "action=%s", action,
+            "action=%s", scrub_pii(action),
         )
         return
 
     eid = str(entity_id)
-    payload = metadata if metadata is not None else {}
+    # Phase 18 / FIX-04 — scrub the metadata payload BEFORE the RPC executes.
+    # Defense-in-depth: the audit_log table's p_metadata column should never
+    # land credential-shaped data even if a future caller accidentally posts
+    # it. scrub_pii on a None-defaulted-to-{} payload is safe (returns {}).
+    raw_payload = metadata if metadata is not None else {}
+    payload = scrub_pii(raw_payload)
 
     try:
         supabase = get_supabase()
@@ -122,8 +137,13 @@ def log_audit_event(
         # Never raise to the caller. An audit drop is visible via the
         # stable `[audit]` prefix in stderr so log aggregation can
         # surface dropped events as a metric.
+        # Adversarial revision B3 — scrub_pii on every formatter arg.
+        # exc.repr can include credential-shaped substrings (e.g., from a
+        # supabase RPC error that echoes the request body); scrub_pii on
+        # str(exc) catches any anchored JWT-shape too.
         logger.error(
             "[audit] log_audit_event_service call threw (dropping): "
             "action=%s entity_type=%s entity_id=%s user_id=%s error=%s",
-            action, entity_type, eid, uid, exc,
+            scrub_pii(action), scrub_pii(entity_type), scrub_pii(eid),
+            scrub_pii(uid), scrub_pii(str(exc)),
         )

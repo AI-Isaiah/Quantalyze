@@ -65,6 +65,11 @@ class TestRedactBeforeSend:
 
     def test_redacts_jwt_shaped_value_regardless_of_key_name(self):
         # FIX 7: JWT detector must replace the value even if key name is benign.
+        # Phase 18 / FIX-04 — token format aligned with canonical
+        # services.redact.REDACTED_JWT (mirrors TS pii-scrub.ts L63).
+        # Was "[JWT-REDACTED]" in the Phase 16 inline walker; the Grok B1
+        # delegation to services.redact.scrub_pii canonicalizes to
+        # "[REDACTED_JWT]" across both runtimes.
         jwt = (
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
             ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
@@ -72,7 +77,7 @@ class TestRedactBeforeSend:
         )
         event = {"extra": {"auth_token": jwt, "user_id": "preserved"}}
         result = sentry_init._redact_before_send(event, None)
-        assert result["extra"]["auth_token"] == "[JWT-REDACTED]"
+        assert result["extra"]["auth_token"] == "[REDACTED_JWT]"
         assert result["extra"]["user_id"] == "preserved"
 
     def test_redacts_sb_ec_prefixed_cookie_keys(self):
