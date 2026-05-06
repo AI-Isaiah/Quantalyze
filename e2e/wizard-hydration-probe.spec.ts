@@ -15,12 +15,11 @@
  *   4. post-login redirect chain that bounces through /strategies
  *      before reaching the wizard
  *
- * Origin: shipped 2026-05-05 alongside commit 9ea9d37 (savedAt deferred
- * out of useState lazy initializer). The savedAt fix was a preventive
- * action against a textbook SSR-unsafe Date.now() pattern. This spec
- * is the durable backstop — if a future change reintroduces a
- * client-only signal into a useState lazy initializer or a render-time
- * branch, the appropriate scenario above will fail.
+ * Backstop for the SSR-safe pattern enforced in WizardClient: any
+ * future `useState(() => clientOnlyValue())` style lazy initializer in
+ * the wizard tree (Date.now / Math.random / localStorage / window
+ * APIs) that bleeds into rendered JSX will trip one of the four
+ * scenarios below.
  */
 import { test, expect } from "@playwright/test";
 

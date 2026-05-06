@@ -163,15 +163,12 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       : null,
   );
 
-  // Phase 21 — savedAt was previously initialized to `Date.now()` in
-  // the useState lazy initializer. Lazy initializers RUN on both server
-  // (SSR) and client first render, so SSR's Date.now() and client's
-  // Date.now() resolve to different timestamps. The value is rendered
-  // by WizardChrome as `new Date(savedAt).toLocaleTimeString(...)`, so
-  // a minute-boundary or locale-format difference between server and
-  // client triggers React #418 hydration mismatch. Now: start at null,
-  // backfill via useEffect post-mount so SSR and client first render
-  // both see `null` and produce identical "Not saved yet" markup.
+  // savedAt must initialize to null synchronously: the value is rendered
+  // by WizardChrome as `new Date(savedAt).toLocaleTimeString(...)`, so a
+  // useState lazy initializer that calls Date.now() would resolve to
+  // different timestamps on SSR vs client first render and a minute-
+  // boundary or locale-format difference would trip React hydration
+  // mismatch. Backfill via useEffect post-mount instead.
   const [savedAt, setSavedAt] = useState<number | null>(null);
   useEffect(() => {
     if (initialDraft) setSavedAt(Date.now());

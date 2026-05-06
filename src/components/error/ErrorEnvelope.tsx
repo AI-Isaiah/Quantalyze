@@ -120,11 +120,8 @@ export function ErrorEnvelope({
         {envelope.human_message}
       </p>
       {envelope.cause && (
-        // Phase 21 — surface WizardErrorCopy.cause so the user sees WHY,
-        // not just WHAT. Was being silently dropped by buildEnvelope before
-        // this commit (only title/fix made it through). Same a11y-aware
-        // text-text-secondary token used for debug_context, so contrast
-        // ratios on bg-negative/5 stay above 4.5:1.
+        // Same secondary token as debug_context — keeps contrast ≥4.5:1
+        // on bg-negative/5.
         <p className="mt-1.5 text-sm text-text-secondary">{envelope.cause}</p>
       )}
       {envelope.debug_context.length > 0 && (
