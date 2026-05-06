@@ -1248,7 +1248,14 @@ export default function EquityChartWidget({ data }: WidgetProps) {
   const d = (data ?? {}) as EquityChartWidgetData;
   const showBench = useTweakValue("showBench");
 
-  const equityDailyPoints = d.equityDailyPoints ?? [];
+  // Stabilize the array reference so downstream useMemo deps (minDate,
+  // periodReturn) don't churn on every render. The `?? []` literal
+  // would otherwise build a new empty array each call, defeating
+  // memoization and tripping react-hooks/preserve-manual-memoization.
+  const equityDailyPoints = useMemo(
+    () => d.equityDailyPoints ?? [],
+    [d.equityDailyPoints],
+  );
   const benchmark = d.btcBenchmark;
   const overlays = d.equityOverlays ?? [];
   const stale = d.allKeysStale ?? false;
@@ -1262,11 +1269,25 @@ export default function EquityChartWidget({ data }: WidgetProps) {
   // formatRelativeTime helper is the project-canonical formatter
   // (used by MandateSaveStatus, ComputeJobsTable, AdminTabs) — same
   // bucket idiom keeps the strings consistent across the app.
+  // `now` is null on first render to keep SSR/CSR output identical
+  // (matches `useSharedMinuteClock` in ForQuantsLeadsTable); the
+  // effect ticks once on mount and every minute thereafter.
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    // Deferred via setTimeout(0) to satisfy react-hooks/set-state-in-effect
+    // (same idiom as useSharedMinuteClock in ForQuantsLeadsTable).
+    const tick = setTimeout(() => setNow(Date.now()), 0);
+    const interval = setInterval(() => setNow(Date.now()), 60_000);
+    return () => {
+      clearTimeout(tick);
+      clearInterval(interval);
+    };
+  }, []);
   const syncStampCopy = (() => {
-    if (!lastSyncAt) {
+    if (!lastSyncAt || now === null) {
       return stale ? "data stale" : "sync just now";
     }
-    const rel = formatRelativeTime(lastSyncAt, Date.now());
+    const rel = formatRelativeTime(lastSyncAt, now);
     return stale ? `stale · last sync ${rel}` : `last sync ${rel}`;
   })();
 
