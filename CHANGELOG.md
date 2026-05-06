@@ -16,14 +16,15 @@ v0.21.3.0 threaded `correlation_id` through the Next.js cron handlers (`src/app/
 
 ### Added
 
-- **3 new entries in `vercel.json` `crons`** restoring the route docstring schedules:
-  - `/api/cron/sync-funding` → `0 */4 * * *` (every 4h)
+- **3 new entries in `vercel.json` `crons`**, all daily-or-less-frequent (matches `src/__tests__/vercel-cron-limits.test.ts` discipline):
+  - `/api/cron/sync-funding` → `0 4 * * *` (daily 04:00 UTC — slotted after reconcile-strategies' 03:30 and well before alert-digest at 09:00)
   - `/api/cron/reconcile-strategies` → `30 3 * * *` (nightly 03:30 UTC)
   - `/api/cron/cleanup-ack-tokens` → `0 3 * * 0` (Sundays 03:00 UTC)
 
+`sync-funding`'s route docstring originally specified `every 4 hours`, but Railway has run it daily for months without operational pain — funding-fee analytics flow into `warm-analytics` (00:00 UTC daily) and `alert-digest` (09:00 UTC daily), neither of which needs sub-daily data freshness. Keeping daily preserves the operational behavior and the cron-quota test's self-imposed daily-or-less-frequent discipline.
+
 ### Changed
 
-- **`sync-funding` cadence: daily → every 4 hours.** Railway's `_scheduled_daily_loop` ran every job at a flat 86400s interval; restoring the original route design (`every 4 hours` per the route docstring) means more frequent funding-fee enqueues. `reconcile-strategies` (nightly) and `cleanup-ack-tokens` (weekly) cadences are unchanged.
 - **`analytics-service/main.py`** drops the 3 `_scheduled_daily_loop` task slots and the `services.scheduled_tasks` import.
 - **`analytics-service/main_worker.py`** drops the imports, the 3 entries from the top-level `asyncio.gather(...)`, and the now-unused `_scheduled_daily_loop` helper. Updated the comment block at the start of `main()` to reflect the new architecture.
 
