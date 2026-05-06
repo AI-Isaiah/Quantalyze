@@ -121,6 +121,10 @@
     {
       "name": "ID-shape but safe field",
       "input": {"strategy_id": "00000000-0000-0000-0000-000000000001"}
+    },
+    {
+      "name": "null value passes through (Phase 18 / WR-06 parity)",
+      "input": {"mandate_context": null}
     }
   ]
 }

@@ -263,6 +263,32 @@ def test_scrub_freeform_string_passes_benign_strings():
 
 
 # ---------------------------------------------------------------------------
+# Test 17: TS↔Python parity on null/None inputs (Phase 18 / WR-06)
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_pii_passes_none_unchanged():
+    """Mirror of pii-scrub.test.ts L155-158 — TS asserts both null and undefined
+    pass through unchanged; Python has no `undefined`, but `None` covers the same
+    semantic. Without this assertion, a future Python refactor that drops the
+    `if value is None: return value` guard would silently break admin pages
+    rendering `mandate_context: None` blobs.
+    """
+    assert scrub_pii(None) is None
+    # Round-trip via list/dict containers.
+    assert scrub_pii([None, "ok"]) == [None, "ok"]
+    assert scrub_pii({"k": None}) == {"k": None}
+
+
+def test_scrub_freeform_string_passes_non_strings_unchanged():
+    """Mirror of pii-scrub.ts scrubFreeformString's non-string guard."""
+    # The Python implementation's `if not isinstance(s, str)` guard returns
+    # the input unchanged for any non-string. Asserts None and int round-trip.
+    assert scrub_freeform_string(None) is None
+    assert scrub_freeform_string(42) == 42
+
+
+# ---------------------------------------------------------------------------
 # Constants smoke checks — ensure regex objects compiled correctly.
 # ---------------------------------------------------------------------------
 
@@ -300,7 +326,9 @@ class TestSharedCorpus:
 
     def test_corpus_shape(self):
         assert len(CORPUS["bad"]) == 20
-        assert len(CORPUS["good"]) == 5
+        # Phase 18 / WR-06: 6th good-case ("null value passes through")
+        # added so this class asserts null-input parity on BOTH runtimes.
+        assert len(CORPUS["good"]) == 6
 
     def test_bad_samples_redacted(self):
         for sample in CORPUS["bad"]:

@@ -263,9 +263,11 @@ const CORPUS: Corpus = JSON.parse(
 );
 
 describe("Shared corpus — TS side (Plan-checker fix 2026-05-06)", () => {
-  it("loads the corpus and exposes 20 bad + 5 good", () => {
+  it("loads the corpus and exposes 20 bad + 6 good", () => {
     expect(CORPUS.bad).toHaveLength(20);
-    expect(CORPUS.good).toHaveLength(5);
+    // Phase 18 / WR-06: 6th good-case ("null value passes through")
+    // added so TestSharedCorpus asserts null-input parity on BOTH runtimes.
+    expect(CORPUS.good).toHaveLength(6);
   });
 
   it.each(CORPUS.bad.map((b) => [b.name, b] as const))(
