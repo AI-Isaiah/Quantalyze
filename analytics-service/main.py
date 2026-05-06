@@ -85,15 +85,9 @@ async def lifespan(_app: FastAPI):
     from main_worker import (
         SHUTDOWN,
         WORKER_ID,
-        _scheduled_daily_loop,
         daily_enqueue_loop,
         dispatch_loop,
         watchdog_loop,
-    )
-    from services.scheduled_tasks import (
-        cleanup_ack_tokens_tick,
-        enqueue_reconcile_strategies_tick,
-        enqueue_sync_funding_tick,
     )
 
     # Bridge the worker's healthz signal into /health: every dispatch_tick
@@ -116,20 +110,6 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(dispatch_loop(WORKER_ID), name="dispatch_loop"),
         asyncio.create_task(watchdog_loop(), name="watchdog_loop"),
         asyncio.create_task(daily_enqueue_loop(), name="daily_enqueue_loop"),
-        asyncio.create_task(
-            _scheduled_daily_loop("sync_funding", enqueue_sync_funding_tick),
-            name="sync_funding_loop",
-        ),
-        asyncio.create_task(
-            _scheduled_daily_loop(
-                "reconcile_strategies", enqueue_reconcile_strategies_tick
-            ),
-            name="reconcile_strategies_loop",
-        ),
-        asyncio.create_task(
-            _scheduled_daily_loop("cleanup_ack_tokens", cleanup_ack_tokens_tick),
-            name="cleanup_ack_tokens_loop",
-        ),
         asyncio.create_task(_bridge_healthz(), name="healthz_bridge"),
     ]
 

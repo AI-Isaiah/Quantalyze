@@ -47,11 +47,6 @@ load_dotenv()
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, dispatch
-from services.scheduled_tasks import (
-    cleanup_ack_tokens_tick,
-    enqueue_reconcile_strategies_tick,
-    enqueue_sync_funding_tick,
-)
 
 logger = logging.getLogger("quantalyze.analytics.worker")
 
@@ -320,32 +315,6 @@ async def daily_enqueue_loop(interval: float = 86400.0) -> None:
     logger.info("daily_enqueue_loop exiting (shutdown)")
 
 
-async def _scheduled_daily_loop(name: str, tick_fn, interval: float = 86400.0) -> None:
-    """Daily loop wrapper for the ex-Vercel crons moved into the worker.
-
-    Hobby-plan compat only: see services/scheduled_tasks.py. Runs ``tick_fn``
-    on startup, then every ``interval`` seconds until SHUTDOWN.
-    """
-    try:
-        await tick_fn()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("%s initial tick failed: %s", name, exc, exc_info=True)
-
-    while not SHUTDOWN.is_set():
-        try:
-            await asyncio.wait_for(SHUTDOWN.wait(), timeout=interval)
-            break
-        except asyncio.TimeoutError:
-            pass
-
-        try:
-            await tick_fn()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("%s tick failed: %s", name, exc, exc_info=True)
-
-    logger.info("%s exiting (shutdown)", name)
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -373,17 +342,15 @@ async def main() -> None:
     # Import healthz server
     from main_worker_healthz import start_healthz_server
 
-    # Run all loops + healthz concurrently. The three scheduled-task loops
-    # are the ex-Vercel crons moved here while Quantalyze is on the Hobby
-    # plan (2-cron cap). Re-consolidate once on Pro: see
-    # docs/runbooks/vercel-cron-upgrade.md.
+    # Run all loops + healthz concurrently. sync_funding /
+    # reconcile_strategies / cleanup_ack_tokens were temporarily co-located
+    # here while Quantalyze was on the Vercel Hobby plan (2-cron cap); on
+    # Pro they live in vercel.json again and the routes that handle them
+    # (src/app/api/cron/...) thread correlation_id into compute_jobs.metadata.
     await asyncio.gather(
         dispatch_loop(WORKER_ID),
         watchdog_loop(),
         daily_enqueue_loop(),
-        _scheduled_daily_loop("sync_funding", enqueue_sync_funding_tick),
-        _scheduled_daily_loop("reconcile_strategies", enqueue_reconcile_strategies_tick),
-        _scheduled_daily_loop("cleanup_ack_tokens", cleanup_ack_tokens_tick),
         start_healthz_server(),
     )
 
