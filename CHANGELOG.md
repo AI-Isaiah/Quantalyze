@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.2.0] - 2026-05-06
+
+**Phase 18 root-cause fixes — `/api/debug-key-flow` SSE diagnostic harness fully wired against live broker SDKs, `compute_jobs.metadata->>'correlation_id'` thread closes Phase 16 SC-1 fifth layer, Vercel↔Railway `INTERNAL_API_TOKEN` parity restored on production.** Closes Day-2 hypotheses #12, #13, and #14 surfaced during Plan 16-07 Task 5 founder-gate review.
+
+### Added
+
+- **`scripts/smoke-debug-key-flow.sh`** — direct-curl smoke probe against the analytics-service `/internal/debug-key-flow/{validate,encrypt,fetch-trades}` endpoints. Bypasses the Vercel admin gate by sending `x-internal-token` directly to Railway, validates env staging + token parity + step-body wiring in three layers. Configurable via `INTERNAL_API_TOKEN`/`ANALYTICS_BASE`/`BROKERS` env vars; exit codes `0` (all ok), `1` (any step failure), `2` (pre-flight failure).
+- **`compute_jobs.metadata.correlation_id` thread at `keys/sync` (Phase 16 SC-1 fifth layer).** `src/app/api/keys/sync/route.ts` now reads `getCorrelationId()` from `@/lib/correlation-id` and passes it into `enqueue_compute_job` RPC's `p_metadata` payload. Forensic chain `Next.js → enqueue_compute_job RPC → compute_jobs row → worker dispatch` is now queryable end-to-end. Regression test asserts the third RPC arg shape.
+- **Real broker SDK invocation in FastAPI `/internal/debug-key-flow` step bodies.** `validate_key` now calls `services.exchange.validate_key_permissions` and surfaces `error_code` from real ccxt classification. `fetch_trades` calls `ccxt.exchange.fetch_my_trades("BTC/USDT", limit=5)` against a universal symbol; bypasses `services.exchange.fetch_raw_trades` to preserve the never-persists invariant. Empty trade lists on fresh testnet accounts still count as `status=ok`.
+- **`multimethod>=1.12,<2.0` pin in `analytics-service/requirements.txt`.** Default resolver pulled `multimethod==1.10` which broke `test_csv_validator.py` collection under Python 3.14 (`TypeError: type 'typing.Union' is not an acceptable base type`). multimethod 2.x removes the `overload` symbol pandera 0.20.4 imports, so the pin holds the 1.x line at >=1.12.
+
+### Changed
+
+- **`analytics-service/routers/debug_key_flow.py` raw-plaintext credential reads.** Phase 16 originally framed `DEBUG_KEY_FLOW_<BROKER>_{KEY,SECRET,PASSPHRASE}` as KEK-Fernet-encrypted blobs. Day-2 founder review concluded testnet sandbox creds are low-sensitivity (read-only scope, separate accounts, easily rotated from each broker dashboard), so the encrypt wrapping was over-engineered. Reverted to raw plaintext storage with a documented design note in the module docstring. The broken `encryption.decrypt_credentials(v)` placeholder call (wrong signature) was removed.
+- **`encrypt_key` step degenerated to a "creds present and parseable" check** returning field lengths. Original Fernet round-trip framing no longer applies; the step is kept as a distinct event in the SSE stream so the Next.js handler doesn't need a shape change.
+- **Exchange instances explicitly closed** in `finally` blocks for `validate_key` and `fetch_trades` step bodies — ccxt requires explicit `await exchange.close()` to release the underlying aiohttp session.
+
+### Fixed
+
+- **Vercel production `INTERNAL_API_TOKEN` parity bug.** Value bytes ended with literal `5c 6e` (backslash-`n`, not a newline char). Railway value was clean. FastAPI `secrets.compare_digest(provided, expected)` (constant-time strict bytewise) rejected every prod call from `/api/debug-key-flow`, `/api/strategies/finalize-wizard`, and `/api/keys/[id]/permissions`. Strong candidate for the recurring "API key fails after several attempts" customer pattern — `/api/keys/[id]/permissions` 403s manifested as opaque wizard failures because the route 403'd BEFORE reaching PR #116's swallow-site fix in `routers/exchange.py:validate_key`. Fixed via `vercel env rm INTERNAL_API_TOKEN production` + re-add via stdin (clean 64-hex-char value) + production redeploy.
+- **`pytest` collection on Python 3.14.** `test_csv_validator.py` previously errored at import time because pandera 0.20.4 transitively pulls `multimethod`, and the default resolver landed at 1.10 which uses `typing.Union` as a base type — illegal under 3.14. Now 700/700 pytest tests pass on Python 3.14.
+
 ## [0.21.1.0] - 2026-05-06
 
 **Wizard polish + EquityChart polish + Tailwind v4 sweep + scope-escalation hardening + silent-failure cleanup.** A single rollup PR converging three /investigate cycles: live Bybit verification surfaced two wizard UX gaps, an EquityChart polish pass that uncovered a silent Tailwind v4 token drift across four widgets, and a 6-reviewer specialist + red team pass that found one CRITICAL scope-escalation bypass and several HIGH silent failures.
