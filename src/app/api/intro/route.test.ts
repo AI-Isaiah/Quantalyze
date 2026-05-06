@@ -45,6 +45,10 @@ const STATE = vi.hoisted(() => ({
   insertedRow: null as { id: string } | null,
   contactInsertPayload: null as Record<string, unknown> | null,
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  // Hoisted controllable snapshot mock so individual tests can opt into the
+  // pending-timeout branch without disturbing the default ready path.
+  snapshotImpl: null as null | (() => Promise<unknown>),
 }));
 
 vi.mock("@/lib/supabase/server", () => {
@@ -96,7 +100,10 @@ vi.mock("@/lib/supabase/server", () => {
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
-    rpc: async () => ({ data: null, error: null }),
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      STATE.adminRpcCalls.push({ name, args });
+      return { data: null, error: null };
+    },
     from: () => ({
       select: () => ({
         eq: () => ({
@@ -110,6 +117,12 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
+const TEST_CORRELATION_ID = "ccccccc3-cccc-4ccc-8ccc-cccccccccccc";
+vi.mock("@/lib/correlation-id", () => ({
+  getCorrelationId: vi.fn(async () => TEST_CORRELATION_ID),
+  CORRELATION_HEADER: "x-correlation-id",
+}));
+
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: null,
   checkLimit: async () => ({ success: true, retryAfter: 0 }),
@@ -119,17 +132,22 @@ vi.mock("@/lib/analytics/usage-events", () => ({
   trackUsageEventServer: async () => undefined,
 }));
 
-// Snapshot helper — succeed fast with a ready result so we don't hit
-// the 2s timer branch in tests.
+// Snapshot helper — STATE.snapshotImpl lets individual tests swap the
+// resolution behavior. Default is a fast ready snapshot so the existing
+// audit-emission tests keep going through the simple path.
+const DEFAULT_SNAPSHOT = {
+  sharpe: null,
+  max_drawdown: null,
+  concentration: null,
+  top_3_strategies: [],
+  bottom_3_strategies: [],
+  alerts_last_7d: 0,
+};
 vi.mock("@/lib/intro/snapshot", () => ({
-  computePortfolioSnapshot: async () => ({
-    sharpe: null,
-    max_drawdown: null,
-    concentration: null,
-    top_3_strategies: [],
-    bottom_3_strategies: [],
-    alerts_last_7d: 0,
-  }),
+  computePortfolioSnapshot: () =>
+    STATE.snapshotImpl
+      ? STATE.snapshotImpl()
+      : Promise.resolve(DEFAULT_SNAPSHOT),
 }));
 
 vi.mock("@/lib/email", () => ({
@@ -168,6 +186,8 @@ beforeEach(() => {
   STATE.insertedRow = { id: CONTACT_ROW_ID };
   STATE.contactInsertPayload = null;
   STATE.rpcCalls = [];
+  STATE.adminRpcCalls = [];
+  STATE.snapshotImpl = null;
 });
 
 afterEach(() => {
@@ -240,6 +260,39 @@ describe("POST /api/intro — audit-log emission (Task 7.1a)", () => {
     expect(
       STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
     ).toHaveLength(0);
+  });
+
+  it("threads correlation_id into compute_intro_snapshot p_metadata when snapshot times out (Phase 18 Bug #1 follow-up)", async () => {
+    // Force the snapshot race into the 'pending' branch by handing back a
+    // promise that never resolves; the 2s timer wins. fake timers let us
+    // jump past the budget without actually sleeping.
+    vi.useFakeTimers();
+    STATE.snapshotImpl = () => new Promise(() => {});
+
+    try {
+      const { POST } = await import("./route");
+      const promise = POST(makeRequest({ strategy_id: STRAT_ID }));
+      // Advance past the 2s budget so the timeout resolves first.
+      await vi.advanceTimersByTimeAsync(2100);
+      const res = await promise;
+      expect(res.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Without the route's getCorrelationId() thread, p_metadata would only
+    // contain contact_request_id and this matcher would fail.
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeDefined();
+    expect(enqueueCall!.args).toMatchObject({
+      p_kind: "compute_intro_snapshot",
+      p_metadata: {
+        contact_request_id: CONTACT_ROW_ID,
+        correlation_id: TEST_CORRELATION_ID,
+      },
+    });
   });
 
   it("fails with 500 and emits no audit when the insert returns null id", async () => {

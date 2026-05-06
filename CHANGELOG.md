@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.21.3.0] - 2026-05-06
+
+**Phase 18 follow-on — `/internal/debug-key-flow` testnet sandbox-mode toggle, `compute_jobs.metadata.correlation_id` thread completed across the remaining 3 enqueue callsites.** Closes the 4/6 `validate_key` + `fetch_trades` smoke fails introduced after v0.21.2.0 wired the real broker SDKs (OKX 50101 "APIKey does not match current environment"; Bybit retCode 10003 "You are not authorized") and brings every `enqueue_compute_job` callsite onto a single forensic-id pattern.
+
+### Added
+
+- **`DEBUG_KEY_FLOW_SANDBOX` env-driven testnet toggle in `analytics-service/routers/debug_key_flow.py`.** New `_maybe_enable_sandbox()` helper calls `exchange.set_sandbox_mode(True)` after `create_exchange` so testnet credentials hit the testnet endpoint (OKX adds `x-simulated-trading: 1`; Bybit swaps `urls.api` to `api-testnet.bybit.com`). Default on — set `DEBUG_KEY_FLOW_SANDBOX=false` to point at prod for a one-off smoke against a real broker. 3 new tests in `test_debug_key_flow_router.py`: default-on for `validate`, default-on for `fetch-trades`, env opt-out path.
+- **`compute_jobs.metadata.correlation_id` thread at `intro/route.ts`.** `getCorrelationId()` from `@/lib/correlation-id` now lands in the `compute_intro_snapshot` enqueue alongside `contact_request_id` when the 2s snapshot race hits the pending branch. Regression test uses `vi.useFakeTimers()` to force the timeout path and asserts the full `p_metadata` shape.
+- **`compute_jobs.metadata.correlation_id` thread at `cron/sync-funding/route.ts`.** Cron requests don't carry an inbound `x-correlation-id`, so `getCorrelationId()` falls back to a fresh UUID. One id per cron tick joins all `sync_funding` enqueues in `compute_jobs.metadata`. Existing happy-path test now asserts every enqueue in the batch shares the same correlation_id.
+- **`compute_jobs.metadata.correlation_id` thread at `cron/reconcile-strategies/route.ts`.** Same pattern for nightly `reconcile_strategy` enqueues; new test file (no test existed before) covers auth gate, fetch error, empty batch, happy path with shared correlation_id, and the all-failed → 500 regression signal.
+
+### Changed
+
+- **`scripts/smoke-debug-key-flow.sh` expected outcome.** Pre-fix smoke against staged Railway returned 4/6 fails with real broker error codes (proving the v0.21.2.0 ccxt wiring landed). After Railway redeploys this commit, expect 6/6 ok for OKX + Bybit; Binance still deferred per Day-2 founder scoping.
+
 ## [0.21.2.0] - 2026-05-06
 
 **Phase 18 root-cause fixes — `/api/debug-key-flow` SSE diagnostic harness fully wired against live broker SDKs, `compute_jobs.metadata->>'correlation_id'` thread closes Phase 16 SC-1 fifth layer, Vercel↔Railway `INTERNAL_API_TOKEN` parity restored on production.** Closes Day-2 hypotheses #12, #13, and #14 surfaced during Plan 16-07 Task 5 founder-gate review.

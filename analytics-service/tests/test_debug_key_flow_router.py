@@ -48,6 +48,7 @@ def _make_mock_exchange() -> MagicMock:
     ex.id = "okx"
     ex.fetch_my_trades = AsyncMock(return_value=[])
     ex.close = AsyncMock(return_value=None)
+    ex.set_sandbox_mode = MagicMock()
     return ex
 
 
@@ -239,6 +240,73 @@ def test_fetch_trades_zero_fills_is_ok(monkeypatch, client):
     assert body["status"] == "ok"
     assert body["detail"]["fetched"] == 0
     assert body["detail"]["first_ts"] is None
+
+
+def test_validate_enables_sandbox_mode_by_default(monkeypatch, client):
+    """Day-2 follow-up — testnet creds must hit the testnet endpoint, else the 4/6
+    smoke fails with AuthenticationError. Default behavior: sandbox=on. The
+    DEBUG_KEY_FLOW_SANDBOX env var is the explicit opt-out."""
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    monkeypatch.delenv("DEBUG_KEY_FLOW_SANDBOX", raising=False)
+    mock_exchange = _make_mock_exchange()
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
+    )
+    monkeypatch.setattr(
+        "routers.debug_key_flow.validate_key_permissions",
+        AsyncMock(return_value={"valid": True, "read_only": True}),
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/validate",
+        json={"broker": "okx"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200
+    mock_exchange.set_sandbox_mode.assert_called_once_with(True)
+
+
+def test_fetch_trades_enables_sandbox_mode_by_default(monkeypatch, client):
+    _stub_creds(monkeypatch, "bybit")
+    mock_exchange = _make_mock_exchange()
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/fetch-trades",
+        json={"broker": "bybit"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200
+    mock_exchange.set_sandbox_mode.assert_called_once_with(True)
+
+
+def test_sandbox_mode_can_be_disabled_via_env(monkeypatch, client):
+    """DEBUG_KEY_FLOW_SANDBOX=false leaves the exchange pointed at prod —
+    documented escape hatch for the rare case someone wires real broker creds
+    into the testnet env vars."""
+    _stub_creds(monkeypatch, "okx", with_passphrase=True)
+    monkeypatch.setenv("DEBUG_KEY_FLOW_SANDBOX", "false")
+    mock_exchange = _make_mock_exchange()
+    monkeypatch.setattr(
+        "routers.debug_key_flow.create_exchange",
+        lambda *a, **kw: mock_exchange,
+    )
+    monkeypatch.setattr(
+        "routers.debug_key_flow.validate_key_permissions",
+        AsyncMock(return_value={"valid": True, "read_only": True}),
+    )
+
+    r = client.post(
+        "/internal/debug-key-flow/validate",
+        json={"broker": "okx"},
+        headers={"x-internal-token": "test-token"},
+    )
+    assert r.status_code == 200
+    mock_exchange.set_sandbox_mode.assert_not_called()
 
 
 def test_fetch_trades_propagates_broker_error(monkeypatch, client):
