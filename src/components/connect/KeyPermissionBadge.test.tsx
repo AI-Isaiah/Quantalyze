@@ -79,6 +79,7 @@ describe("KeyPermissionBadge", () => {
     global.fetch = vi.fn().mockResolvedValueOnce({
       ok: false,
       status: 502,
+      statusText: "Bad Gateway",
       json: async () => ({ error: "Exchange permission probe failed" }),
     } as Response) as unknown as typeof fetch;
 
@@ -86,6 +87,51 @@ describe("KeyPermissionBadge", () => {
     await waitFor(() =>
       expect(
         screen.getByText(/Exchange permission probe failed/),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  // When the upstream proxy returns an HTML error page (or gzip-corrupt
+  // body), res.json() throws. Without status preservation the user sees
+  // a generic "Probe failed" with no correlatable status code.
+  it("falls back to HTTP status + statusText when JSON parse fails", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 504,
+      statusText: "Gateway Timeout",
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON");
+      },
+    } as unknown as Response) as unknown as typeof fetch;
+
+    render(<KeyPermissionBadge apiKeyId="key-1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByText(/HTTP 504 \(Gateway Timeout\)/),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  // When the route returns a structured { error, code } payload (the new
+  // PROBE_BACKEND_UNAVAILABLE shape), prepend the code so support can
+  // grep for it in tickets without asking the user to copy the status.
+  it("prepends the structured `code` field to the error message", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      statusText: "Bad Gateway",
+      json: async () => ({
+        error: "Could not reach the permissions service. Try again shortly.",
+        code: "PROBE_BACKEND_UNAVAILABLE",
+      }),
+    } as Response) as unknown as typeof fetch;
+
+    render(<KeyPermissionBadge apiKeyId="key-1" />);
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          /PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions service/,
+        ),
       ).toBeInTheDocument(),
     );
   });

@@ -82,8 +82,23 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
         { method: "GET", cache: "no-store" },
       );
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Probe failed" }));
-        throw new Error(err.error ?? `HTTP ${res.status}`);
+        // Sentinel so we can distinguish a successful empty parse from a
+        // real JSON failure (HTML proxy error page, gzip corruption).
+        const PARSE_FAILED = Symbol("parse-failed");
+        const err = (await res.json().catch(() => PARSE_FAILED)) as
+          | { error?: string; code?: string }
+          | typeof PARSE_FAILED;
+        if (err === PARSE_FAILED) {
+          // Surface HTTP status + statusText so support has something to
+          // correlate against the proxy/CDN logs when no JSON body comes back.
+          throw new Error(
+            `HTTP ${res.status} (${res.statusText || "no body"})`,
+          );
+        }
+        const message = err.error ?? `HTTP ${res.status}`;
+        // Prepend the route's structured `code` (e.g. PROBE_BACKEND_UNAVAILABLE)
+        // so the displayed text is greppable in support tickets.
+        throw new Error(err.code ? `${err.code}: ${message}` : message);
       }
       const data = (await res.json()) as Permissions;
       if (mountedRef.current) setPerms(data);
