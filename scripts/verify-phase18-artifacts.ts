@@ -70,7 +70,9 @@ if (failures.length === 0) {
   }
 
   // Gate 5: leak guard — Fernet/base64 char class, threshold 40 (Rule 3 deviation).
-  if (/[A-Za-z0-9_=+/-]{40,}/s.test(smoke)) {
+  // No `.` metachar in the class so the dotAll (`s`) flag is unnecessary; dropping
+  // it keeps the regex compatible with tsconfig target=ES2017 (TS1501).
+  if (/[A-Za-z0-9_=+/-]{40,}/.test(smoke)) {
     failures.push(
       `founder-okx-smoke.md: Fernet/base64-shape run >= 40 chars detected (potential ciphertext leak)`,
     );
