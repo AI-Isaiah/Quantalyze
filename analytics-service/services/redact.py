@@ -68,15 +68,42 @@ JWT_SUBSTRING: re.Pattern[str] = re.compile(
     r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
 )
 
-# Mirror of pii-scrub.ts L57-60 SENSITIVE_KEY_VALUE.
-# Note: TS uses /gi flags; Python translates to re.IGNORECASE — `re.sub` is
-# already global by default (replaces all non-overlapping matches).
-SENSITIVE_KEY_VALUE: re.Pattern[str] = re.compile(
-    r"\b((?:api[-_]?key|api[-_]?secret|x-mbx-apikey|ok-access-sign|secret|"
-    r"passphrase|password|token|credential|cookie|session|authorization|bearer))"
-    r"\s*[:=]+\s*['\"]?([^\s'\"]+)['\"]?",
-    re.IGNORECASE,
+# Phase 18 / A1 (Claude adversarial 2026-05-07) — built dynamically from
+# `DENYLIST_EXACT` + `DENYLIST_PREFIX` so Pass 1/4 of `scrub_freeform_string`
+# can never drift from the object-walker denylist. The original hand-typed
+# regex was missing 7 canonical denylist keys (`x-bapi-apikey`,
+# `x-bapi-sign`, `x-bapi-signature`, `ok-access-passphrase`,
+# `ok-access-key`, `ok-access-timestamp`, `x-internal-token`) plus the
+# `sb-ec-` prefix — every one of which the TS `pii-scrub.ts` regex covers.
+# Mirrors the TS implementation so a freeform line like
+# "x-bapi-apikey: SECRET" is redacted on both runtimes.
+_FREEFORM_KEY_ALTERNATES: tuple[str, ...] = (
+    r"api[-_]?key",
+    r"api[-_]?secret",
+    "password",
+    "token",
+    "credential",
+    "cookie",
+    "session",
+    "bearer",
 )
+
+
+def _build_sensitive_key_value() -> re.Pattern[str]:
+    parts: list[str] = []
+    for key in DENYLIST_EXACT:
+        parts.append(re.escape(key))
+    for prefix in DENYLIST_PREFIX:
+        parts.append(re.escape(prefix) + r"[A-Za-z0-9_-]*")
+    parts.extend(_FREEFORM_KEY_ALTERNATES)
+    pattern = (
+        r"\b((?:" + "|".join(parts) + r"))"
+        r"\s*[:=]+\s*['\"]?([^\s'\"]+)['\"]?"
+    )
+    return re.compile(pattern, re.IGNORECASE)
+
+
+SENSITIVE_KEY_VALUE: re.Pattern[str] = _build_sensitive_key_value()
 
 REDACTED = "[REDACTED]"
 REDACTED_JWT = "[REDACTED_JWT]"
@@ -157,7 +184,7 @@ def truncate_account_id(s: Any) -> Any:
 
 
 def scrub_freeform_string(s: Any) -> Any:
-    """Three-pass redaction for freeform strings (mirrors TS scrubFreeformString).
+    """Four-pass redaction for freeform strings (mirrors TS scrubFreeformString).
 
     Pass 1: SENSITIVE_KEY_VALUE substring redaction (`key: value` / `key=value`).
     Pass 2: scrub_pii (whole-string JWT — anchored regex; no-op on non-JWT strings).

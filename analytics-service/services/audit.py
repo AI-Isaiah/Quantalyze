@@ -141,9 +141,25 @@ def log_audit_event(
         # exc.repr can include credential-shaped substrings (e.g., from a
         # supabase RPC error that echoes the request body); scrub_pii on
         # str(exc) catches any anchored JWT-shape too.
-        logger.error(
-            "[audit] log_audit_event_service call threw (dropping): "
-            "action=%s entity_type=%s entity_id=%s user_id=%s error=%s",
-            scrub_pii(action), scrub_pii(entity_type), scrub_pii(eid),
-            scrub_pii(uid), scrub_pii(str(exc)),
-        )
+        # Phase 18 / S1 — wrap the scrub+emit in a nested try/except so a
+        # RecursionError raised by `scrub_pii` (Grok W3 max_depth guard)
+        # on a pathological exception cannot escape the outer except and
+        # break the documented fire-and-forget contract. Pre-truncate
+        # str(exc) to keep the log line bounded even when the underlying
+        # error message is multi-MB.
+        try:
+            exc_str = str(exc)[:4096]
+            logger.error(
+                "[audit] log_audit_event_service call threw (dropping): "
+                "action=%s entity_type=%s entity_id=%s user_id=%s error=%s",
+                scrub_pii(action), scrub_pii(entity_type), scrub_pii(eid),
+                scrub_pii(uid), scrub_pii(exc_str),
+            )
+        except Exception:
+            # Worst-case fallback: emit a minimal stable marker so log
+            # aggregation can still alert on the audit drop, with no
+            # caller-controlled bytes that could re-trigger the failure.
+            try:
+                logger.error("[audit] log_audit_event_service double-failure (dropped)")
+            except Exception:
+                pass

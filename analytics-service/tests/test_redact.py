@@ -219,6 +219,36 @@ def test_denylist_contains_all_canonical_keys():
 
 
 # ---------------------------------------------------------------------------
+# Phase 18 / A2 (Claude adversarial 2026-05-07) — freeform-redaction parity.
+# The textual-presence parity check (TS side) only verified DENYLIST_EXACT
+# entries appeared in the Python file. It missed a real drift class: a key
+# in the frozenset but absent from `SENSITIVE_KEY_VALUE` regex. The case
+# below exercises EVERY canonical denylist key as a freeform `<key>: SECRET`
+# shape so a freeform-redaction gap can never re-emerge.
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_freeform_string_covers_every_denylist_key():
+    """Each canonical key + the sb-ec- prefix must redact the value in
+    freeform `<key>: SECRET` and `<key>=SECRET` shapes."""
+    sentinel = "SENTINEL_SECRET_VALUE_42"
+    for key in DENYLIST_EXACT:
+        colon = scrub_freeform_string(f"{key}: {sentinel}")
+        assert sentinel not in colon, (
+            f"freeform '{key}: SECRET' leaked secret (output: {colon!r})"
+        )
+        equals = scrub_freeform_string(f"{key}={sentinel}")
+        assert sentinel not in equals, (
+            f"freeform '{key}=SECRET' leaked secret (output: {equals!r})"
+        )
+    # DENYLIST_PREFIX
+    prefix_out = scrub_freeform_string(f"sb-ec-something={sentinel}")
+    assert sentinel not in prefix_out, (
+        f"freeform 'sb-ec-...=SECRET' leaked secret (output: {prefix_out!r})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 15: recursion guard — Adversarial revision Grok W3
 # ---------------------------------------------------------------------------
 

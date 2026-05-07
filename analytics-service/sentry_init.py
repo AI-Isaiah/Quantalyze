@@ -38,7 +38,10 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 # remains the surface enumeration ground truth for THIS module — it carries
 # additional defense-in-depth keys (e.g. x-bapi-timestamp, x-mbx-time-unit)
 # that have NOT yet been promoted to the canonical denylist.
-from services.redact import scrub_pii as _redact_scrub_pii
+from services.redact import (
+    scrub_pii as _redact_scrub_pii,
+    DENYLIST_EXACT as _CANONICAL_DENYLIST,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -113,20 +116,16 @@ def _scrub_value(value: Any) -> Any:
 # Phase 18 / FIX-04 — Adversarial revision Grok B1: 6 broker-quirk keys
 # (x-bapi-apikey, x-bapi-sign, x-bapi-signature, ok-access-passphrase,
 # ok-access-key, ok-access-timestamp) were PROMOTED into the canonical
-# denylist in services.redact.DENYLIST_EXACT. The local _PII_KEYS retains
+# denylist in `services.redact.DENYLIST_EXACT`. The local `_PII_KEYS` retains
 # additional Bybit/Binance defense-in-depth keys (x-bapi-timestamp,
 # x-bapi-recv-window, x-bapi-sign-type, x-bapi-api-key, x-mbx-time-unit)
 # that have NOT yet been promoted. The two-stage walker below covers both:
-# (a) canonical scrub via services.redact.scrub_pii, then
+# (a) canonical scrub via `services.redact.scrub_pii`, then
 # (b) broker-quirk sweep over the local extras.
-_CANONICAL_DENYLIST: frozenset[str] = frozenset({
-    # Mirrors services.redact.DENYLIST_EXACT verbatim.
-    "apikey", "apisecret", "api_key", "api_secret", "secret", "signature",
-    "passphrase", "authorization", "x-mbx-apikey", "ok-access-sign",
-    "x-internal-token",
-    "x-bapi-apikey", "x-bapi-sign", "x-bapi-signature",
-    "ok-access-passphrase", "ok-access-key", "ok-access-timestamp",
-})
+#
+# Phase 18 / M9 — `_CANONICAL_DENYLIST` is imported directly from
+# `services.redact.DENYLIST_EXACT` (above) so the mirror cannot drift.
+# Promoting a key in `redact.py` shrinks `_BROKER_QUIRK_KEYS` automatically.
 
 # Forward-compat slot — keys still in _PII_KEYS but NOT yet in the canonical
 # denylist. After Grok B1 promotion this is non-empty for the Bybit
