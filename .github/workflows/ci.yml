@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight CI on PR force-pushes only. On `push` to `main`, every
+# commit must produce its own recorded green CI run (deploy automation +
+# branch protection key on per-SHA status); cancelling intermediate runs
+# would leave `main` commits without a green check. `head_ref` is set on
+# pull_request events and empty on push events — falling back to `run_id`
+# (unique per run) ensures push events never share a group key, so they
+# never cancel each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
@@ -24,6 +35,22 @@ jobs:
       - name: Check GDPR export coverage (Task 7.3)
         run: npx tsx scripts/check-gdpr-export-coverage.ts
       - run: npm audit --audit-level=critical
+      # Cache .next/cache (Next.js incremental webpack/Turbopack output) keyed
+      # on every input that changes how the bundle compiles: lockfile,
+      # next.config, tailwind/postcss config, tsconfig, and the full src
+      # tree (any extension). The wide src glob catches CSS, MDX, JSON,
+      # locale files etc. that a `.ts/.tsx` glob would silently miss —
+      # missing them means a config change ships against a stale cache.
+      # restore-keys ladder is intentionally short: only fall back to a
+      # lockfile-matched cache, never to a "different lockfile" prefix
+      # (cross-Next-version cache restore is a known hazard).
+      - name: Cache .next/cache
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-
       - run: npm run build
         env:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
@@ -108,12 +135,41 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run build
+      # Cache the Playwright browser bundle (~120MB chromium) keyed on the
+      # `@playwright/test` package version specifically — not the whole
+      # lockfile. Keying on lockfile would bust the cache for every
+      # unrelated dep update; keying on Playwright's package.json (which
+      # `npm ci` materialized in node_modules) means the cache only rolls
+      # when Playwright itself changes, which is what determines the
+      # browser bundle compatibility.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+      # On cache hit, only install OS deps (no browser download). On miss,
+      # full install. The `--with-deps` apt step is fast (~5s) so always run
+      # it; the slow part (browser download) is what the cache skips.
+      - name: Install Playwright (browser bundle from cache when available)
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            npx playwright install-deps chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+      # Single build. When seed-gated CI is configured, build once with the
+      # real test-Supabase env so BOTH the smoke specs and the seed-gated
+      # specs use the same .next output. When not configured, fall back to
+      # placeholder env. Saves 60-120s vs the previous double-build.
+      - name: Build (real test-Supabase env when configured, else placeholder)
+        run: npm run build
         env:
-          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
-          SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder.supabase.co' }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_ANON_KEY || 'placeholder' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || 'placeholder_service_role' }}
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
@@ -170,9 +226,15 @@ jobs:
           done
           echo "[port-cleanup] after: $(lsof -ti:3000 2>/dev/null | tr '\n' ' '),ss:$(ss -ltn 2>/dev/null | grep ':3000\b' || echo none)"
         env:
-          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
-          SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
+          # Runtime env MUST match build-time env. NEXT_PUBLIC_* vars are
+          # baked into client bundles at build time; if the build saw real
+          # test-Supabase but the runtime uses placeholder, the server
+          # rejects its own signed tokens and the client bundle in the
+          # browser points at a different URL than the server's API
+          # handlers. Mirror the build-step ternary exactly.
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder.supabase.co' }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_ANON_KEY || 'placeholder' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || 'placeholder_service_role' }}
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
@@ -183,17 +245,10 @@ jobs:
       # in the workflow log. A `secrets.X != ''` gate would mask typos
       # behind redaction and silently disable the spec. See nightly.yml:17
       # for the analogous precedent. When the variable is unset (fork PRs,
-      # repos without test-DB setup), both steps below skip silently.
-      - name: Build with test Supabase env (for onboarding-funnel spec, BLOCK-3 gated)
-        if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
-        run: npm run build
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
-          ADMIN_EMAIL: test@example.com
-          PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+      # repos without test-DB setup), the seed + spec steps skip silently.
+      # CI speedup PR-A v0.22.1.0+: the build above is now seed-aware via
+      # ternary expressions, so the previously-duplicated test-env build was
+      # removed (saved 60-120s per seed-gated run).
       - name: Seed demo data into test Supabase (gated on vars.E2E_TEST_DB_CONFIGURED)
         # Populates the 8-strategy demo set the seed-gated specs require.
         # Defense-in-depth against running this against prod by accident:
