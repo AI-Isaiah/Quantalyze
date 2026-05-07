@@ -126,12 +126,27 @@ def test_nav_non_zero_violation():
 # ---------------------------------------------------------------------------
 
 def test_daily_return_lower_bound_violation():
+    # Bound is -100.0 (see csv_validator.py — widened 2026-05-07 to admit
+    # percent-form CSVs and leveraged decimal returns). Use -150.0 so the
+    # check still fires; this is sentinel-class garbage, not real data.
     df = _daily_returns_df(n=5)
-    df.loc[1, "daily_return"] = -1.5  # row 2 — impossible to lose >100%
+    df.loc[1, "daily_return"] = -150.0
     result = validate_csv(_csv_bytes(df), "daily_returns")
     assert result["ok"] is False
     rules = {e["rule"] for e in result["errors"]}
     assert "daily_return_lower_bound" in rules
+
+
+def test_daily_return_accepts_negative_below_minus_one():
+    # Regression: a -1.5 daily return must validate cleanly under the
+    # widened bound. Pre-2026-05-07 this would have failed
+    # daily_return_lower_bound; founder UAT (IQSF QuantumAlpha) blocked
+    # because of it.
+    df = _daily_returns_df(n=5)
+    df.loc[1, "daily_return"] = -1.5
+    result = validate_csv(_csv_bytes(df), "daily_returns")
+    rules = {e["rule"] for e in result["errors"]}
+    assert "daily_return_lower_bound" not in rules
 
 
 # ---------------------------------------------------------------------------

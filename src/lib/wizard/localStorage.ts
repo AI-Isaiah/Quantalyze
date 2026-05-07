@@ -128,6 +128,72 @@ export function loadWizardState(): WizardLocalState | null {
   }
 }
 
+/**
+ * Resume overrides derived from a localStorage payload. Pure function;
+ * never reads window/localStorage. The caller invokes loadWizardState()
+ * post-mount and applies these via setState.
+ *
+ * Hydration safety: WizardClient initializes its useState values to
+ * SSR-deterministic defaults (no LS access during render). After mount,
+ * a single useEffect calls loadWizardState() and feeds the result here
+ * to compute which fields need to flip. SSR HTML matches the first
+ * client render exactly; the resumed state arrives on the next paint.
+ *
+ * Returning an undefined field means "no override for this field" —
+ * leave the SSR-default in place.
+ */
+export interface WizardResumeOverrides {
+  step?: WizardStepKey;
+  strategyName?: string;
+  showResumeBanner?: boolean;
+  wizardSessionId?: string;
+}
+
+export function deriveWizardResumeOverrides(
+  loaded: WizardLocalState | null,
+  source: "api" | "csv",
+  initialDraftId: string | null,
+): WizardResumeOverrides {
+  if (!loaded) return {};
+  const out: WizardResumeOverrides = {};
+
+  if (loaded.wizardSessionId) {
+    out.wizardSessionId = loaded.wizardSessionId;
+  }
+
+  // strategyName is CSV-branch only.
+  if (loaded.source === "csv" && loaded.strategyName) {
+    out.strategyName = loaded.strategyName;
+  }
+
+  if (source === "csv") {
+    // CSV branch: only restore csv_upload from LS. csv_preview and
+    // csv_submit both render conditional on `csvFmt && csvPreview` in
+    // WizardClient, and those values are NOT persisted to LS (the
+    // parsed dataset can be megabytes — too large for localStorage).
+    // Restoring step=csv_preview from LS without the dependent state
+    // would leave the user staring at an empty preview body with no
+    // recovery path (the bug pinned by the regression test below).
+    // Falling through with no override means the SSR-default
+    // (csv_upload) stays in place, so the user re-selects the file
+    // while their typed strategyName + wizardSessionId carry over.
+    if (loaded.source === "csv" && loaded.step === "csv_upload") {
+      out.step = loaded.step;
+    }
+  } else if (initialDraftId && loaded.strategyId === initialDraftId) {
+    // API branch: only restore the LS step when the pointer matches the
+    // server-side draft. Mismatch ⇒ leave the SSR default ("sync_preview")
+    // and surface the resume banner instead.
+    out.step = loaded.step;
+  }
+
+  if (initialDraftId && loaded.strategyId !== initialDraftId) {
+    out.showResumeBanner = true;
+  }
+
+  return out;
+}
+
 /** Clear the wizard state (called on submit, delete draft, or explicit start fresh). */
 export function clearWizardState(): void {
   if (!hasLocalStorage()) return;
