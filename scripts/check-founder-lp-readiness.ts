@@ -12,9 +12,18 @@
  *   SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL),
  *   SUPABASE_SERVICE_ROLE_KEY,
  *   FOUNDER_LP_STRATEGY_ID
+ *
+ * Exit codes:
+ *   0 — strategy is ready (published + analytics complete)
+ *   1 — strategy is not ready (data state failure; details on stderr)
+ *   2 — misconfigured (missing env, unexpected exception)
+ *
+ * Phase 18 / M7 + M8 — readiness query delegated to the shared helper at
+ * `@/lib/founder-lp/readiness` so the cron and pre-flight script cannot
+ * drift on either the SELECT shape or the analytics-extraction path.
  */
 import { createClient } from "@supabase/supabase-js";
-import { extractAnalytics } from "@/lib/utils";
+import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
 
 async function main() {
   // Accept either SUPABASE_URL (CI/Railway convention) or
@@ -30,40 +39,10 @@ async function main() {
     process.exit(2);
   }
   const supabase = createClient(url, key, { auth: { persistSession: false } });
-  const { data, error } = await supabase
-    .from("strategies")
-    .select("id, status, strategy_analytics(computation_status)")
-    .eq("id", sid)
-    .single();
-  if (error || !data) {
-    console.error(
-      `[check-founder-lp-readiness] Strategy ${sid} not found:`,
-      error?.message ?? "no row",
-    );
-    process.exit(1);
-  }
-  const status = (data as { status?: string }).status;
-  // Phase 18 / WR-04 — use canonical extractAnalytics() instead of an
-  // inline `Array.isArray(...) ? [0] : raw` shape-handler. Keeps this
-  // pre-flight script in lock-step with src/app/api/factsheet/[id]/pdf
-  // and src/app/api/cron/founder-lp-report which both consume the same
-  // Supabase embedded-relation shape.
-  const analytics = extractAnalytics(
-    (data as { strategy_analytics?: unknown }).strategy_analytics,
-  );
-  const compStatus = analytics?.computation_status;
-  const failures: string[] = [];
-  if (status !== "published") {
-    failures.push(`strategies.status='${status}' (expected 'published')`);
-  }
-  if (compStatus !== "complete") {
-    failures.push(
-      `strategy_analytics.computation_status='${compStatus}' (expected 'complete')`,
-    );
-  }
-  if (failures.length > 0) {
+  const readiness = await checkFounderStrategyReadiness(supabase, sid);
+  if (!readiness.ok) {
     console.error("[check-founder-lp-readiness] FAIL:");
-    for (const f of failures) console.error(`  - ${f}`);
+    console.error(`  - ${readiness.reason}`);
     process.exit(1);
   }
   console.log(

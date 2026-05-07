@@ -15,7 +15,23 @@ import {
   formatRelativeTime,
 } from "@/lib/utils";
 import { displayStrategyName, type DisplayableStrategy } from "@/lib/strategy-display";
+import { isStrategySource, type StrategySource } from "@/lib/strategy-sources";
 import { ComputeJobsTable } from "./ComputeJobsTable";
+
+// Single-source-of-truth badge labels per `strategies.source` value.
+// `Record<StrategySource, string>` forces exhaustiveness — TypeScript
+// will fail the build when a new value is added to STRATEGY_SOURCES
+// without a paired badge label.
+const SOURCE_BADGE_LABEL: Record<StrategySource, string> = {
+  legacy: "legacy",
+  wizard: "wizard",
+  admin_import: "import",
+  allocator_connected: "connected",
+  csv: "csv",
+  okx: "okx",
+  binance: "binance",
+  bybit: "bybit",
+};
 
 const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Compute Jobs"] as const;
 type Tab = (typeof TABS)[number];
@@ -260,9 +276,7 @@ function formatRecency(iso: string | null | undefined): string {
 }
 
 function sourceBadgeLabel(source: string | undefined): string {
-  if (source === "wizard") return "wizard";
-  if (source === "admin_import") return "import";
-  return "legacy";
+  return isStrategySource(source) ? SOURCE_BADGE_LABEL[source] : "legacy";
 }
 
 function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, unknown>> }) {
