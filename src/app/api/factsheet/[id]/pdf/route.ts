@@ -26,13 +26,28 @@ export async function GET(
   // public IP pool. Token validated via safeCompare (constant time); empty
   // or missing token falls through to the existing public rate limiter so
   // unauthenticated callers see no behavior change.
+  //
+  // Phase 18 / R1 — additionally gate the bypass on VERCEL_ENV='production'.
+  // A preview deploy with a leaked token would otherwise let any caller skip
+  // the public limiter via `x-internal-token`. Local dev (VERCEL_ENV unset)
+  // still honors the bypass so the cron's smoke test works.
+  const vercelEnv = process.env.VERCEL_ENV;
+  const isProductionOrLocal = vercelEnv === undefined || vercelEnv === "production";
   const internalToken = req.headers.get("x-internal-token");
   const internalEnv = process.env.INTERNAL_API_TOKEN;
   const isInternalCall =
+    isProductionOrLocal &&
     internalToken !== null &&
     typeof internalEnv === "string" &&
     internalEnv.length > 0 &&
     safeCompare(internalToken, internalEnv);
+  // Phase 18 / R13 — the cron's `x-correlation-id` arrives on this
+  // request automatically (Vercel routes it through to next/headers).
+  // Downstream callers using `getCorrelationId()` from `@/lib/correlation-id`
+  // will read it directly from the request-scoped store; no copy needed.
+  // (An earlier fix attempted `req.headers.set(...)` here; that was a
+  // no-op against `next/headers` and has been removed — the contract
+  // is honored by Next.js itself.)
 
   if (!isInternalCall) {
     // Cross-lambda IP rate limit. Returns 429 BEFORE we touch the

@@ -9,9 +9,9 @@
  * Resend. Closes the v1.0.0 dogfood loop: every month the founder sees their
  * own LP-shaped output and notices regressions BEFORE LPs do.
  *
- * Note: Vercel cron does not pass x-correlation-id; cron always generates
- * a fresh UUID v4 per tick via getCorrelationId() (matches the
- * sync-funding/route.ts pattern at line 62).
+ * Note: Vercel cron does not pass x-correlation-id; the cron always generates
+ * a fresh UUID v4 per tick via `getCorrelationId()` (matches the
+ * `sync-funding/route.ts` pattern).
  *
  * Adversarial revisions 2026-05-06:
  *   - B1:     Supabase precheck on strategies.status='published' +
@@ -31,6 +31,24 @@
  *             (well under Vercel's 60s lambda ceiling)
  *   - Grok W5: strategy publication precheck via createAdminClient +
  *             select status + analytics
+ *
+ * Phase 18 / Pre-landing review fixes (2026-05-07):
+ *   - M5: magic numbers hoisted to named constants below
+ *   - M6: log prefixes split — `[CRON_DOUBLE_FAILURE]` only for double-alert
+ *         failure; `[CRON_UNHANDLED_REJECTION]` for the listener path
+ *   - M7: readiness check delegated to `@/lib/founder-lp/readiness` so the
+ *         cron and `scripts/check-founder-lp-readiness.ts` cannot drift
+ *   - M11: platform branding defaults centralized in `@/lib/platform`
+ *   - R1: env-guard: skip in non-production VERCEL_ENV (preview deploys
+ *         must NOT email the real founder via prod APP_URL)
+ *   - R3: explicit timeout on every Resend send (was only on factsheet fetch)
+ *   - R5: APP_URL host validated against an allowlist before forwarding
+ *         INTERNAL_API_TOKEN (the self-fetch traverses public infra)
+ *   - R6: empty-PDF guard (sub-1KB response treated as failure)
+ *   - R7: max-PDF guard (Resend rejects >40MB; we cap at 25MB)
+ *   - R8: Retry-After upper bound so a malicious 999999s value can't hang
+ *         the lambda past its 60s ceiling
+ *   - S2: HTML-escape error_class/error_message in the alert email body
  *
  * Auth: `Authorization: Bearer ${CRON_SECRET}` via `safeCompare`
  * (constant-time). Vercel Cron dispatches GET; manual POST also
@@ -52,16 +70,126 @@ import { Resend } from "resend";
 import { safeCompare } from "@/lib/timing-safe-compare";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { extractAnalytics } from "@/lib/queries";
+import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
+import { PLATFORM_NAME, PLATFORM_EMAIL } from "@/lib/platform";
 
 export const dynamic = "force-dynamic";
 // Vercel Pro lambda ceiling for cron handlers is 60s. The internal fetch
-// caps at 25s (Grok W4) so we leave plenty of headroom for Resend.
+// caps at 25s (Grok W4) so we leave plenty of headroom for Resend (15s
+// per send, R3) plus a small buffer.
 export const maxDuration = 60;
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-const PLATFORM_NAME = process.env.PLATFORM_NAME ?? "Quantalyze";
-const PLATFORM_EMAIL = process.env.PLATFORM_EMAIL ?? "notifications@quantalyze.com";
+// -----------------------------------------------------------------------
+// Magic-number hoisting (Phase 18 / M5)
+// -----------------------------------------------------------------------
+
+/** Internal factsheet fetch ceiling (well under Vercel's 60s lambda budget). */
+const FETCH_TIMEOUT_MS = 25_000;
+/** Per-Resend-send ceiling — prevents the lambda from dying mid-send if
+ *  Resend's API hangs. Two sends total fit inside the 60s budget. */
+const RESEND_TIMEOUT_MS = 15_000;
+/** Default Retry-After when the upstream omits the header. */
+const DEFAULT_RETRY_AFTER_S = 10;
+/** Phase 18 / R8 — upper bound on Retry-After: prevents a malicious or
+ *  buggy upstream from pinning the lambda past its 60s ceiling. */
+const MAX_RETRY_AFTER_S = 20;
+/** Phase 18 / R6 — minimum acceptable PDF size. A real factsheet is at
+ *  least tens of KB; sub-1KB responses are treated as upstream failures
+ *  rather than emailed as empty PDFs. */
+const MIN_PDF_BYTES = 1024;
+/** Phase 18 / R7 — Resend stable attachment ceiling is 40MB. Cap at 25MB
+ *  so a regression in the factsheet renderer surfaces as a clear alert
+ *  rather than a Resend 4xx that the dual-alert path would mis-attribute. */
+const MAX_PDF_BYTES = 25_000_000;
+
+/** Log prefix for the BOTH-alerts-failed escalation (the hard runbook trigger). */
+const CRON_DOUBLE_FAILURE_PREFIX = "[CRON_DOUBLE_FAILURE]";
+/** Phase 18 / M6 — distinct prefix for the unhandledRejection listener so
+ *  log-based alerts can target each path independently. */
+const CRON_UNHANDLED_REJECTION_PREFIX = "[CRON_UNHANDLED_REJECTION]";
+
+/** Stable error_class strings (becomes a Sentry tag and a log filter). */
+const ERROR_CLASS = {
+  CONFIG: "ConfigError",
+  NOT_READY: "StrategyNotReady",
+  PDF_EMPTY: "PdfTooSmall",
+  PDF_TOO_LARGE: "PdfTooLarge",
+  TIMEOUT: "AlertTimeout",
+  UNKNOWN: "UnknownError",
+} as const;
+
+/** Phase 18 / R5 — explicit allowlist of hosts the cron may forward
+ *  `x-internal-token` to. Prevents a misconfigured NEXT_PUBLIC_APP_URL
+ *  on a preview deploy (or a redirect through a third-party proxy) from
+ *  egressing the internal token. Enforced only in production VERCEL_ENV;
+ *  local + preview tolerate any host so dev/test paths keep working. */
+const APP_URL_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+  "quantalyze-rho.vercel.app",
+  "quantalyze.com",
+  "www.quantalyze.com",
+]);
+
+// NEXT_PUBLIC_APP_URL and VERCEL_ENV are read at HANDLER-CALL TIME (not
+// module-load time) so tests + Vitest's `vi.resetModules()` don't bake a
+// stale value into the cached module constants. Vercel injects both at
+// runtime, so the cost of re-reading on every cron tick is irrelevant.
+function appUrl(): string {
+  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+}
+function vercelEnv(): string | undefined {
+  return process.env.VERCEL_ENV;
+}
+function isProduction(): boolean {
+  return vercelEnv() === "production";
+}
+
+// -----------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------
+
+/** HTML escape for values interpolated into the alert email body (S2). */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** Promise.race-style ceiling for any awaited promise. Phase 18 / R3 —
+ *  Resend's SDK has no built-in timeout so we wrap each send. */
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Phase 18 / R5 — verify NEXT_PUBLIC_APP_URL host before forwarding the
+ *  internal token. Enforced in production; opt-out for local/preview so
+ *  dev paths keep working. */
+function isAppUrlAllowed(url: string): boolean {
+  if (!isProduction()) return true;
+  try {
+    const u = new URL(url);
+    return APP_URL_ALLOWED_HOSTS.has(u.host);
+  } catch {
+    return false;
+  }
+}
 
 async function captureSentry(
   error: unknown,
@@ -84,17 +212,25 @@ async function sendFailureAlert(
   ctx: { correlation_id: string; error_class: string; error_message: string },
 ): Promise<void> {
   if (!resend || !to) return;
-  await resend.emails.send({
+  // Phase 18 / S2 — escape user/upstream-controlled fields before HTML
+  // interpolation. Today every error_message originates from server-side
+  // strings, but a future caller wrapping a user-controlled error must
+  // not be able to render arbitrary HTML in the founder's inbox.
+  const safeClass = escapeHtml(ctx.error_class);
+  const safeMessage = escapeHtml(ctx.error_message);
+  const safeCid = escapeHtml(ctx.correlation_id);
+  const send = resend.emails.send({
     from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
     to,
     subject: `[ALERT] Founder LP cron FAILED — ${new Date().toISOString().slice(0, 10)}`,
-    html: `<p>The founder LP report cron failed. correlation_id=${ctx.correlation_id}</p>
-           <pre style="font-family:monospace;">${ctx.error_class}: ${ctx.error_message}</pre>`,
+    html: `<p>The founder LP report cron failed. correlation_id=${safeCid}</p>
+           <pre style="font-family:monospace;">${safeClass}: ${safeMessage}</pre>`,
     tags: [
       { name: "correlation_id", value: ctx.correlation_id },
       { name: "kind", value: "cron_failure_alert" },
     ],
   });
+  await withTimeout(send, RESEND_TIMEOUT_MS, "sendFailureAlert");
 }
 
 /**
@@ -123,7 +259,7 @@ async function dualAlert(
   }
   if (sentryThrew && resendThrew) {
     console.error(
-      `[CRON_DOUBLE_FAILURE] founder-lp-report: BOTH alerts failed. ` +
+      `${CRON_DOUBLE_FAILURE_PREFIX} founder-lp-report: BOTH alerts failed. ` +
         `correlation_id=${ctx.correlation_id} ` +
         `error_class=${ctx.error_class} error_message=${ctx.error_message}`,
     );
@@ -131,67 +267,17 @@ async function dualAlert(
 }
 
 /**
- * Adversarial revisions 2026-05-06: B1 + Grok W5 — strategy publication precheck.
- *
- * The factsheet PDF endpoint filters on `strategies.status='published'` and
- * `strategy_analytics.computation_status='complete'`. If either column is
- * not in the expected state, the endpoint returns 404/400 and the cron
- * falls into the dual-alert path on every tick. Pre-checking against
- * Supabase before the fetch lets us tag the failure precisely (so the
- * runbook trail is short) AND short-circuit the network round-trip.
- */
-async function checkStrategyReadiness(
-  strategy_id: string,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const supabase = createAdminClient();
-  const { data, error } = await supabase
-    .from("strategies")
-    .select("id, status, strategy_analytics(computation_status)")
-    .eq("id", strategy_id)
-    .single();
-  if (error || !data) {
-    return {
-      ok: false,
-      reason: `strategy ${strategy_id} not found: ${error?.message ?? "no row"}`,
-    };
-  }
-  const status = (data as { status?: string }).status;
-  // Phase 18 / WR-04 — use canonical extractAnalytics() instead of the
-  // inline `Array.isArray(...) ? [0] : raw` shape-handler. Supabase has
-  // changed its embedded-relation default from array to object (and back)
-  // in repo history; consolidating both call sites on extractAnalytics
-  // keeps the cron in lock-step with the factsheet endpoint.
-  const analytics = extractAnalytics(
-    (data as { strategy_analytics?: unknown }).strategy_analytics,
-  );
-  const compStatus = analytics?.computation_status;
-  if (status !== "published") {
-    return {
-      ok: false,
-      reason: `strategies.status='${status}' (expected 'published') — see .planning/phase-18/founder-lp-runbook.md`,
-    };
-  }
-  if (compStatus !== "complete") {
-    return {
-      ok: false,
-      reason: `strategy_analytics.computation_status='${compStatus}' (expected 'complete')`,
-    };
-  }
-  return { ok: true };
-}
-
-/**
  * Adversarial revision 2026-05-06: W1 — single 503 retry honoring
  * Retry-After. Grok W4 — 25s AbortSignal (Vercel lambda ceiling 60s,
  * factsheet endpoint maxDuration is 30s — 25s leaves a buffer).
  * B4 — passes `x-internal-token` to bypass `publicIpLimiter` on the
- * factsheet endpoint.
+ * factsheet endpoint. R8 — Retry-After capped to MAX_RETRY_AFTER_S.
  */
 async function fetchFactsheetPdfWithRetry(
   strategy_id: string,
   correlation_id: string,
 ): Promise<Response> {
-  const url = `${APP_URL}/api/factsheet/${encodeURIComponent(strategy_id)}/pdf`;
+  const url = `${appUrl()}/api/factsheet/${encodeURIComponent(strategy_id)}/pdf`;
   // Phase 18 / WR-03 — omit the header entirely when INTERNAL_API_TOKEN
   // is unset rather than sending `x-internal-token: ""`. The factsheet
   // endpoint correctly rejects empty-token bypass via its
@@ -202,36 +288,67 @@ async function fetchFactsheetPdfWithRetry(
   // header makes the bypass path engaged-or-not deterministic across
   // deploys; the dual-alert path will surface the resulting 429s
   // consistently instead of intermittently.
+  //
+  // Phase 18 / R5 — additionally REFUSE to forward the token if APP_URL
+  // host is not in the production allowlist. Defense in depth against
+  // env misconfiguration leaking the token to a third-party host.
   const internalToken = process.env.INTERNAL_API_TOKEN;
   const buildOptions = (): RequestInit => {
     const headers: Record<string, string> = {
       "x-correlation-id": correlation_id,
     };
-    if (typeof internalToken === "string" && internalToken.length > 0) {
-      headers["x-internal-token"] = internalToken;
+    const tokenForwardable =
+      typeof internalToken === "string" &&
+      internalToken.length > 0 &&
+      isAppUrlAllowed(url);
+    if (tokenForwardable) {
+      headers["x-internal-token"] = internalToken as string;
     }
     return {
       headers,
-      signal: AbortSignal.timeout(25_000),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     };
   };
   const first = await fetch(url, buildOptions());
   if (first.status !== 503) return first;
-  const retryAfterRaw = first.headers.get("retry-after") ?? "10";
-  const retryAfterSec = Math.max(1, Number.parseInt(retryAfterRaw, 10) || 10);
+  const retryAfterRaw = first.headers.get("retry-after") ?? String(DEFAULT_RETRY_AFTER_S);
+  const parsed = Number.parseInt(retryAfterRaw, 10);
+  const retryAfterSec = Math.min(
+    MAX_RETRY_AFTER_S,
+    Math.max(1, Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_RETRY_AFTER_S),
+  );
   await new Promise((resolve) => setTimeout(resolve, retryAfterSec * 1000));
   return await fetch(url, buildOptions());
 }
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   // Adversarial revision 2026-05-06: W5 — auth FIRST, then correlation_id.
-  // Matches sync-funding/route.ts:27-32 exactly.
+  // Matches the sync-funding cron pattern.
   const auth = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.CRON_SECRET}`;
   if (!process.env.CRON_SECRET || !safeCompare(auth, expected)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const correlation_id = await getCorrelationId();
+
+  // Phase 18 / R1 — preview/deploy environment guard. Vercel cron only
+  // fires on production by default, but a manual POST against a preview
+  // deploy with NEXT_PUBLIC_APP_URL inherited from production would
+  // (a) fetch the prod factsheet PDF using prod INTERNAL_API_TOKEN,
+  // (b) email the real founder, and (c) emit Sentry/log events tagged
+  // with the preview commit SHA. Refuse early.
+  const env = vercelEnv();
+  if (env !== undefined && env !== "production") {
+    return NextResponse.json(
+      {
+        ok: false,
+        skipped: "non-production",
+        vercel_env: env,
+        correlation_id,
+      },
+      { status: 200 },
+    );
+  }
 
   // Adversarial revision 2026-05-06: B4 + Phase 18 / WR-01 follow-up
   // (WR-02): defensive global unhandled-rejection handler. Registered
@@ -240,10 +357,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // registration leaked listeners across warm-starts and Vitest's
   // repeated `await import("./route")` in route.test.ts, polluting all
   // unhandled rejections in the same Node process with the
-  // [CRON_DOUBLE_FAILURE] founder-lp-report prefix.
+  // [CRON_UNHANDLED_REJECTION] founder-lp-report prefix.
   const onUnhandledRejection = (reason: unknown) => {
     console.error(
-      "[CRON_DOUBLE_FAILURE] unhandledRejection in founder-lp-report:",
+      `${CRON_UNHANDLED_REJECTION_PREFIX} unhandledRejection in founder-lp-report:`,
       reason,
     );
   };
@@ -267,7 +384,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     if (!strategy_id || !recipient || !resend) {
       const ctx = {
         correlation_id,
-        error_class: "ConfigError",
+        error_class: ERROR_CLASS.CONFIG,
         error_message:
           `missing FOUNDER_LP_STRATEGY_ID=${!!strategy_id} ` +
           `FOUNDER_LP_REPORT_TO=${!!recipient} ` +
@@ -279,12 +396,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
 
     // Adversarial revision 2026-05-06: B1 + Grok W5 — strategy publication precheck.
-    const readiness = await checkStrategyReadiness(strategy_id);
+    // Phase 18 / M7 — delegated to the shared `checkFounderStrategyReadiness`
+    // helper so the cron and `scripts/check-founder-lp-readiness.ts` cannot drift.
+    const supabase = createAdminClient();
+    const readiness = await checkFounderStrategyReadiness(supabase, strategy_id);
     if (!readiness.ok) {
       const ctx = {
         correlation_id,
         strategy_id,
-        error_class: "StrategyNotReady",
+        error_class: ERROR_CLASS.NOT_READY,
         error_message: readiness.reason,
       };
       console.error("[cron/founder-lp-report] strategy not ready:", ctx);
@@ -301,17 +421,41 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       }
       // Pitfall 6 — Buffer.from(arrayBuffer) for the Resend attachment encoding.
       const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
+      // Phase 18 / R6 — empty-PDF guard. A 200 OK with a near-zero-byte
+      // body (e.g. CDN edge cache hit on a stale empty response, or an
+      // upstream proxy that strips the body but preserves status) must
+      // not be emailed as a "successful" empty PDF.
+      if (pdfBuffer.length < MIN_PDF_BYTES) {
+        const err = new Error(
+          `factsheet PDF too small: ${pdfBuffer.length} bytes ` +
+            `(min ${MIN_PDF_BYTES})`,
+        );
+        Object.assign(err, { name: ERROR_CLASS.PDF_EMPTY });
+        throw err;
+      }
+      // Phase 18 / R7 — max-PDF guard. Resend's stable attachment limit
+      // is ~40MB; we cap at 25MB so the alert path tags the failure
+      // cleanly rather than relying on Resend's own 4xx + the dual-alert
+      // path's coarser error-class attribution.
+      if (pdfBuffer.length > MAX_PDF_BYTES) {
+        const err = new Error(
+          `factsheet PDF too large: ${pdfBuffer.length} bytes ` +
+            `(max ${MAX_PDF_BYTES})`,
+        );
+        Object.assign(err, { name: ERROR_CLASS.PDF_TOO_LARGE });
+        throw err;
+      }
       const monthLabel = new Date().toLocaleString("en-US", {
         month: "long",
         year: "numeric",
       });
 
-      await resend.emails.send({
+      const successSend = resend.emails.send({
         from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
         to: recipient,
         subject: `Founder LP report — ${monthLabel}`,
         html: `<p>Monthly LP factsheet attached.</p>
-               <p style="color:#666;font-size:12px;">correlation_id: ${correlation_id}</p>`,
+               <p style="color:#666;font-size:12px;">correlation_id: ${escapeHtml(correlation_id)}</p>`,
         attachments: [
           {
             filename: `founder-lp-${monthLabel.replace(/\s/g, "-")}.pdf`,
@@ -324,6 +468,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           { name: "kind", value: "founder_lp_report" },
         ],
       });
+      // Phase 18 / R3 — bound the Resend send so a hung API call cannot
+      // exhaust the lambda's 60s budget without writing a response.
+      await withTimeout(successSend, RESEND_TIMEOUT_MS, "successSend");
 
       return NextResponse.json({
         ok: true,
@@ -336,7 +483,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       const ctx = {
         correlation_id,
         strategy_id,
-        error_class: err instanceof Error ? err.constructor.name : "UnknownError",
+        error_class:
+          err instanceof Error
+            ? // PDF guards set err.name; otherwise use the constructor name.
+              err.name && err.name !== "Error"
+              ? err.name
+              : err.constructor.name
+            : ERROR_CLASS.UNKNOWN,
         error_message: err instanceof Error ? err.message : String(err),
       };
       console.error("[cron/founder-lp-report] failure:", ctx);

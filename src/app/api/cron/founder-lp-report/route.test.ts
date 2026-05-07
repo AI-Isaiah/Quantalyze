@@ -108,14 +108,42 @@ function mockSupabaseStillActive() {
   return { single, eq, select, from };
 }
 
-/** Helper: build a Response-like mock for the internal factsheet fetch. */
+/**
+ * Helper: build a Response-like mock for the internal factsheet fetch.
+ *
+ * Phase 18 / R6 — body must clear the cron's MIN_PDF_BYTES (1024) guard
+ * so the success-path tests don't trip the empty-PDF bailout.
+ */
+const HAPPY_PDF_BYTES = 4096;
 function pdfResponseOk(): Response {
   return {
     ok: true,
     status: 200,
     statusText: "OK",
     headers: new Headers(),
-    arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
+    arrayBuffer: () => Promise.resolve(new ArrayBuffer(HAPPY_PDF_BYTES)),
+  } as unknown as Response;
+}
+
+/** Phase 18 / R6 — under-1KB body to exercise the empty-PDF guard. */
+function pdfResponseTooSmall(bytes = 512): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    headers: new Headers(),
+    arrayBuffer: () => Promise.resolve(new ArrayBuffer(bytes)),
+  } as unknown as Response;
+}
+
+/** Phase 18 / R7 — over-25MB body to exercise the max-PDF guard. */
+function pdfResponseTooLarge(bytes = 26_000_000): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    headers: new Headers(),
+    arrayBuffer: () => Promise.resolve(new ArrayBuffer(bytes)),
   } as unknown as Response;
 }
 
@@ -191,7 +219,7 @@ describe("GET /api/cron/founder-lp-report", () => {
     expect(json.ok).toBe(true);
     expect(json.correlation_id).toBe("11111111-1111-1111-1111-111111111111");
     expect(json.strategy_id).toBe("00000000-0000-0000-0000-000000000001");
-    expect(json.pdf_bytes).toBe(8);
+    expect(json.pdf_bytes).toBe(HAPPY_PDF_BYTES);
 
     // fetch called with the correct URL + headers (B4: x-internal-token).
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -361,5 +389,108 @@ describe("GET /api/cron/founder-lp-report", () => {
     // Both alerts fired.
     expect(captureExceptionMock).toHaveBeenCalledTimes(1);
     expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------
+  // Phase 18 / pre-landing review hardening (2026-05-07)
+  // -------------------------------------------------------------------
+
+  it("R6: under-1KB PDF body fails with PdfTooSmall — never emails empty PDF", async () => {
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchSpy.mockResolvedValueOnce(pdfResponseTooSmall(512));
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(json.ok).toBe(false);
+    expect(json.error_class).toBe("PdfTooSmall");
+    // Success-email path NEVER fires; only the alert path does.
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const alertArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(String(alertArgs.subject)).toContain("[ALERT]");
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("R7: over-25MB PDF body fails with PdfTooLarge — never emails outsize PDF", async () => {
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchSpy.mockResolvedValueOnce(pdfResponseTooLarge(26_000_000));
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(json.ok).toBe(false);
+    expect(json.error_class).toBe("PdfTooLarge");
+    // Success-email path NEVER fires; only the alert path does.
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("R1: VERCEL_ENV='preview' short-circuits with 200 + skipped='non-production' (no fetch, no email)", async () => {
+    process.env.VERCEL_ENV = "preview";
+    vi.resetModules();
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(false);
+    expect(json.skipped).toBe("non-production");
+    expect(json.vercel_env).toBe("preview");
+    // No side effects on a non-production deploy.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(captureExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it("T3: Supabase select error branch (RLS denial / network) → StrategyNotReady + dual-alert", async () => {
+    // Mock the SELECT to error rather than returning a wrong status. Covers
+    // the `error || !data` branch in checkFounderStrategyReadiness — without
+    // this test, a regression that swallowed the error would land silently.
+    const single = vi
+      .fn()
+      .mockResolvedValue({ data: null, error: { message: "PGRST116 row level security" } });
+    const eq = vi.fn().mockReturnValue({ single });
+    const select = vi.fn().mockReturnValue({ eq });
+    const from = vi.fn().mockReturnValue({ select });
+    vi.mocked(createAdminClient).mockReset();
+    vi.mocked(createAdminClient).mockReturnValue({ from } as never);
+
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(json.ok).toBe(false);
+    expect(json.error_class).toBe("StrategyNotReady");
+    expect(String(json.error_message)).toContain("PGRST116");
+    // Network never touched — readiness short-circuit.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("S2: alert email HTML-escapes error_class and error_message (no XSS via upstream string)", async () => {
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchSpy.mockResolvedValueOnce(
+      pdfResponseStatus(500, "<script>alert('xss')</script>"),
+    );
+
+    const res = await GET(buildAuthorizedRequest());
+    expect(res.status).toBe(500);
+
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const alertArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
+    const html = String(alertArgs.html);
+    // Raw `<script>` must not appear; the escaped form must.
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
   });
 });
