@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { config } from "./proxy";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { config, proxy } from "./proxy";
+import { NextRequest } from "next/server";
 
 /**
  * Unit tests for the proxy middleware matcher config.
@@ -78,5 +79,105 @@ describe("proxy matcher config", () => {
     ])("guards %s", (path) => {
       expect(isGuarded(path)).toBe(true);
     });
+  });
+});
+
+/**
+ * Behavioral test for the cron bypass added in the post-landing hotfix.
+ *
+ * Pre-fix, every `/api/cron/*` request hit the session check and was 307'd
+ * to `/login` because Vercel Cron orchestrator doesn't carry a Supabase
+ * session cookie. The cron handler's own `Authorization: Bearer
+ * ${CRON_SECRET}` check was unreachable, so all crons silently no-op'd
+ * (Vercel saw a 200 on /login and assumed success). This regression test
+ * fails pre-fix and passes post-fix.
+ *
+ * Mocks @supabase/ssr so the test does not need a live Supabase URL — but
+ * the whole point of the bypass is to short-circuit BEFORE that client is
+ * constructed, so the mock should never actually be invoked for a cron
+ * path.
+ */
+vi.mock("@supabase/ssr", () => ({
+  // If the bypass works, this mock is never called. If the bypass regresses,
+  // proxy() still works because we return a valid client shape here.
+  createServerClient: vi.fn(() => ({
+    auth: {
+      getSession: vi.fn().mockResolvedValue({ data: { session: null } }),
+    },
+  })),
+}));
+
+describe("proxy /api/cron bypass", () => {
+  // Deliberately NO env stubs and NO mock setup here. If the bypass regresses,
+  // the test must FAIL LOUDLY — falling through to the @supabase/ssr mock
+  // (which would happen if env stubs let createServerClient succeed) silently
+  // masks the regression. The non-cron sibling tests below need the stubs
+  // because they DO exercise the session path; scope them there.
+
+  // The bypass uses `path.startsWith("/api/cron/")` — a prefix check, not a
+  // whitelist. One representative path under that prefix is enough to verify
+  // the predicate. Per-cron coverage is a drift-risk illusion: vercel.json's
+  // 6 cron entries are the source of truth for what's scheduled, not this
+  // file. Cover both verbs (Vercel Cron dispatches GET; manual ops typically
+  // POST) since the bypass MUST be method-agnostic.
+  it.each([
+    ["GET", "/api/cron/founder-lp-report"],
+    ["POST", "/api/cron/founder-lp-report"],
+    // A sibling path proves the prefix, not that founder-lp-report is special.
+    ["GET", "/api/cron/sync-funding"],
+  ])(
+    "%s %s bypasses the session gate (cron self-auths via Bearer)",
+    async (method, path) => {
+      const req = new NextRequest(`https://example.com${path}`, {
+        method,
+        headers: { authorization: "Bearer test-secret" },
+      });
+      const res = await proxy(req);
+      // NextResponse.next() is exactly 200. A regression that swapped the
+      // bypass for a redirect or a custom status would change this.
+      expect(res.status).toBe(200);
+      expect(res.headers.get("location")).toBeNull();
+    },
+  );
+
+  // Pin the predicate's edges. A future contributor who writes
+  // `pathname.startsWith("/api/cron")` (drop the trailing slash, "cleaner")
+  // must NOT inherit the bypass for sibling-named routes or path-parameter
+  // tricks. Each of these MUST go through the session gate.
+  describe("paths that look like cron but must NOT bypass", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      process.env.NEXT_PUBLIC_SUPABASE_URL = "https://stub.supabase.co";
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "stub-anon-key";
+    });
+
+    it.each([
+      "/api/cronjobs", // sibling-named route, no separator
+      "/api/cronx/admin", // sibling-prefixed nested route
+      "/api/cron-foo", // hyphenated sibling
+      "/api/cron;param=evil/admin", // path-parameter trick
+    ])("%s falls through to the session gate", async (path) => {
+      const { createServerClient } = await import("@supabase/ssr");
+      const req = new NextRequest(`https://example.com${path}`, {
+        method: "GET",
+      });
+      await proxy(req);
+      expect(vi.mocked(createServerClient)).toHaveBeenCalled();
+    });
+  });
+
+  it("non-cron API routes still go through the session gate", async () => {
+    // Sanity check that the bypass is targeted, not a blanket /api skip.
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://stub.supabase.co";
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "stub-anon-key";
+    const { createServerClient } = await import("@supabase/ssr");
+    vi.mocked(createServerClient).mockClear();
+    const req = new NextRequest("https://example.com/api/admin/users", {
+      method: "GET",
+    });
+    await proxy(req);
+    // The session-gated path constructs the supabase client; bypass would
+    // skip this. Mock-call evidence proves the bypass did NOT fire.
+    expect(vi.mocked(createServerClient)).toHaveBeenCalled();
   });
 });

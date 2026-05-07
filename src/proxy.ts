@@ -7,6 +7,17 @@ const ADMIN_ROUTES = ["/admin", "/api/admin"];
 const DEFAULT_AUTHENTICATED_ROUTE = "/discovery/crypto-sma";
 
 export async function proxy(request: NextRequest) {
+  // Vercel Cron orchestrator + manual ops POSTs to /api/cron/* arrive without
+  // a session cookie. Each cron route handler self-authenticates with a
+  // timing-safe `Authorization: Bearer ${CRON_SECRET}` compare. If we let
+  // them fall through to the session check below, the proxy 307s them to
+  // /login — which Vercel's cron pings see as a 200 on the login page,
+  // so cron failures are silent. Bypass the session path entirely; the
+  // route's own auth gate is the source of truth for cron access.
+  if (request.nextUrl.pathname.startsWith("/api/cron/")) {
+    return NextResponse.next({ request });
+  }
+
   const supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
