@@ -167,15 +167,17 @@ export function deriveWizardResumeOverrides(
   }
 
   if (source === "csv") {
-    // CSV branch: restore a stored CSV sub-step iff the LS payload was
-    // also written by the CSV branch. A stale API-branch payload must
-    // not snap the user to a CSV step that doesn't exist for it.
-    if (
-      loaded.source === "csv" &&
-      (loaded.step === "csv_upload" ||
-        loaded.step === "csv_preview" ||
-        loaded.step === "csv_submit")
-    ) {
+    // CSV branch: only restore csv_upload from LS. csv_preview and
+    // csv_submit both render conditional on `csvFmt && csvPreview` in
+    // WizardClient, and those values are NOT persisted to LS (the
+    // parsed dataset can be megabytes — too large for localStorage).
+    // Restoring step=csv_preview from LS without the dependent state
+    // would leave the user staring at an empty preview body with no
+    // recovery path (the bug pinned by the regression test below).
+    // Falling through with no override means the SSR-default
+    // (csv_upload) stays in place, so the user re-selects the file
+    // while their typed strategyName + wizardSessionId carry over.
+    if (loaded.source === "csv" && loaded.step === "csv_upload") {
       out.step = loaded.step;
     }
   } else if (initialDraftId && loaded.strategyId === initialDraftId) {

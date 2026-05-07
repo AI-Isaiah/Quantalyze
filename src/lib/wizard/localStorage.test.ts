@@ -28,22 +28,61 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
   });
 
   describe("CSV branch", () => {
-    const csvLoaded: WizardLocalState = {
-      strategyId: "",
-      wizardSessionId: "ls-session-id",
-      step: "csv_preview",
-      savedAt: 1_700_000_000_000,
-      source: "csv",
-      strategyName: "Aurora Capital",
-    };
-
-    it("restores csv_preview/csv_submit/csv_upload when LS source is csv", () => {
-      const out = deriveWizardResumeOverrides(csvLoaded, "csv", null);
-      expect(out.step).toBe("csv_preview");
+    it("restores csv_upload from LS but carries forward strategyName + sessionId", () => {
+      const loaded: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "ls-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+      };
+      const out = deriveWizardResumeOverrides(loaded, "csv", null);
+      expect(out.step).toBe("csv_upload");
       expect(out.strategyName).toBe("Aurora Capital");
       expect(out.wizardSessionId).toBe("ls-session-id");
       // No server-side draft id on the CSV branch ⇒ banner stays hidden.
       expect(out.showResumeBanner).toBeUndefined();
+    });
+
+    it("does NOT restore csv_preview from LS (state-loss recovery)", () => {
+      // Regression: WizardClient renders csv_preview conditional on
+      // `csvFmt && csvPreview`, which are NOT persisted to LS (the
+      // parsed dataset is too large). Restoring step=csv_preview from
+      // LS without the dependent state would leave an empty preview
+      // body with no recovery path. The fix forces the user back to
+      // csv_upload to re-select their file; strategyName persists.
+      const loaded: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "ls-session-id",
+        step: "csv_preview",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+      };
+      const out = deriveWizardResumeOverrides(loaded, "csv", null);
+      expect(out.step).toBeUndefined();
+      // strategyName + sessionId still carry over so the user keeps
+      // their place — they just re-select the file.
+      expect(out.strategyName).toBe("Aurora Capital");
+      expect(out.wizardSessionId).toBe("ls-session-id");
+    });
+
+    it("does NOT restore csv_submit from LS (state-loss recovery)", () => {
+      // Same trap as csv_preview — csv_submit renders conditional on
+      // `csvFmt && csvPreview`, neither persisted. Restoring it leaves
+      // an empty body. The user re-uploads instead.
+      const loaded: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "ls-session-id",
+        step: "csv_submit",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+      };
+      const out = deriveWizardResumeOverrides(loaded, "csv", null);
+      expect(out.step).toBeUndefined();
+      expect(out.strategyName).toBe("Aurora Capital");
     });
 
     it("does NOT restore an API-branch step (e.g. sync_preview) on the CSV branch", () => {
