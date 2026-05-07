@@ -11,20 +11,42 @@ interface ShareableLinkProps {
 export function ShareableLink({ strategyId, variant = "secondary" }: ShareableLinkProps) {
   const [copied, setCopied] = useState(false);
 
+  const [copyFailed, setCopyFailed] = useState(false);
+
   const handleCopy = useCallback(async () => {
     const url = `${window.location.origin}/factsheet/${strategyId}`;
     try {
       await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setCopyFailed(false);
+      setTimeout(() => setCopied(false), 2000);
+      return;
     } catch {
-      const input = document.createElement("input");
+      // Fall through to the legacy execCommand path.
+    }
+    let fallbackSucceeded = false;
+    const input = document.createElement("input");
+    try {
       input.value = url;
       document.body.appendChild(input);
       input.select();
-      document.execCommand("copy");
-      document.body.removeChild(input);
+      fallbackSucceeded = document.execCommand("copy");
+    } catch {
+      fallbackSucceeded = false;
+    } finally {
+      if (input.parentNode) input.parentNode.removeChild(input);
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (fallbackSucceeded) {
+      setCopied(true);
+      setCopyFailed(false);
+      setTimeout(() => setCopied(false), 2000);
+    } else {
+      // Audit-2026-05-07 #43: previously the success badge fired even when
+      // both clipboard paths failed silently. Surface the failure so the
+      // user can copy the URL manually.
+      setCopyFailed(true);
+      setTimeout(() => setCopyFailed(false), 4000);
+    }
   }, [strategyId]);
 
   return (
@@ -35,6 +57,13 @@ export function ShareableLink({ strategyId, variant = "secondary" }: ShareableLi
             <path fillRule="evenodd" d="M8 15A7 7 0 108 1a7 7 0 000 14zm3.28-8.72a.75.75 0 00-1.06-1.06L7 8.44 5.78 7.22a.75.75 0 00-1.06 1.06l1.75 1.75a.75.75 0 001.06 0l3.75-3.75z" clipRule="evenodd" />
           </svg>
           Link copied!
+        </>
+      ) : copyFailed ? (
+        <>
+          <svg className="h-4 w-4 mr-1.5 text-negative" viewBox="0 0 16 16" fill="currentColor">
+            <path fillRule="evenodd" d="M8 15A7 7 0 108 1a7 7 0 000 14zm0-10a.75.75 0 01.75.75v3a.75.75 0 01-1.5 0v-3A.75.75 0 018 5zm0 6.5a.75.75 0 100-1.5.75.75 0 000 1.5z" clipRule="evenodd" />
+          </svg>
+          Copy failed — copy the URL manually
         </>
       ) : (
         <>

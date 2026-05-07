@@ -35,18 +35,31 @@ export function PendingIntros({ requests }: { requests: IntroRequest[] }) {
     const supabase = createClient();
     const newStatus = action === "accept" ? "intro_made" : "declined";
 
-    const { error: updateError } = await supabase
+    // Audit-2026-05-07 #44: Use `.select("id")` so we know how many rows
+    // PostgREST actually mutated. RLS may silently reduce the affected-row
+    // set to 0 if the policy filter doesn't match — without this, the UI
+    // would optimistically render "Accepted" while the DB still showed
+    // 'pending', and the founder dashboard would never see the change.
+    const { data: updated, error: updateError } = await supabase
       .from("contact_requests")
       .update({
         status: newStatus,
         responded_at: new Date().toISOString(),
       })
-      .eq("id", id);
+      .eq("id", id)
+      .select("id");
 
     setLoading(null);
 
     if (updateError) {
       setError("Failed to update request. Please try again.");
+      return;
+    }
+
+    if (!updated || updated.length === 0) {
+      setError(
+        "Update did not apply — your account may not have permission to respond to this request. Refresh and try again, or contact the team if the problem persists.",
+      );
       return;
     }
 
