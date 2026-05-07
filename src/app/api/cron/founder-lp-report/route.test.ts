@@ -295,20 +295,28 @@ describe("GET /api/cron/founder-lp-report", () => {
   it("W1: 503 retry — cron retries once with Retry-After honor, then dual-alerts on 2nd 503", async () => {
     const { GET } = await import("./route");
     const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
-    fetchSpy.mockResolvedValueOnce(pdfResponseStatus(503, "Service Unavailable", { "retry-after": "1" }));
-    fetchSpy.mockResolvedValueOnce(pdfResponseStatus(503, "Service Unavailable", { "retry-after": "1" }));
+    vi.useFakeTimers();
+    try {
+      fetchSpy.mockResolvedValueOnce(pdfResponseStatus(503, "Service Unavailable", { "retry-after": "1" }));
+      fetchSpy.mockResolvedValueOnce(pdfResponseStatus(503, "Service Unavailable", { "retry-after": "1" }));
 
-    const res = await GET(buildAuthorizedRequest());
-    const json = (await res.json()) as Record<string, unknown>;
+      const handlerPromise = GET(buildAuthorizedRequest());
+      // Drive the retry-after=1 setTimeout virtually so the test stays sub-second.
+      await vi.advanceTimersByTimeAsync(1500);
+      const res = await handlerPromise;
+      const json = (await res.json()) as Record<string, unknown>;
 
-    expect(res.status).toBe(500);
-    expect(json.ok).toBe(false);
-    // W1: fetch called TWICE (initial + 1 retry).
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    const alertArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(String(alertArgs.subject)).toContain("[ALERT]");
+      expect(res.status).toBe(500);
+      expect(json.ok).toBe(false);
+      // W1: fetch called TWICE (initial + 1 retry).
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+      expect(sendMock).toHaveBeenCalledTimes(1);
+      const alertArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
+      expect(String(alertArgs.subject)).toContain("[ALERT]");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Pitfall 7: Resend success-path throw still triggers Sentry capture + Resend alert", async () => {
@@ -317,8 +325,14 @@ describe("GET /api/cron/founder-lp-report", () => {
     fetchSpy.mockResolvedValueOnce(pdfResponseOk());
 
     sendMock.mockReset();
-    // Success email throws (network down on first send).
-    sendMock.mockRejectedValueOnce(new Error("network down"));
+    // Success email throws with a multi-KB body — pre-fix the unbounded
+    // error_message would have flowed unbounded into Sentry capture, the
+    // Resend alert HTML, AND the NextResponse.json body. Round-2 R10
+    // truncation pins error_message to 2KB at the failure-site, so all
+    // three sinks (response body, alert email, [CRON_DOUBLE_FAILURE] log)
+    // see the truncated value.
+    const longLeak = "network down: " + "x".repeat(5000);
+    sendMock.mockRejectedValueOnce(new Error(longLeak));
     // Alert email succeeds.
     sendMock.mockResolvedValueOnce({ data: { id: "msg_alert" } });
 
@@ -327,9 +341,21 @@ describe("GET /api/cron/founder-lp-report", () => {
 
     expect(res.status).toBe(500);
     expect(json.ok).toBe(false);
+    // Round-2: error_class derived via err.constructor.name on a plain
+    // Error throw — surfaces as 'Error' so the operator runbook sees the
+    // exact label. (A future fix that tags Resend send failures as
+    // 'ResendError' would land here.)
+    expect(json.error_class).toBe("Error");
+    // R10: response body's error_message is truncated.
+    expect(String(json.error_message).length).toBeLessThanOrEqual(2100);
+    expect(String(json.error_message)).toContain("...[truncated]");
     // Both Resend calls happened — success attempt then alert.
     expect(sendMock).toHaveBeenCalledTimes(2);
     expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    // Alert email body also carries the truncated copy (no full-leak escape).
+    const alertArgs = sendMock.mock.calls[1][0] as Record<string, unknown>;
+    expect(String(alertArgs.html)).toContain("...[truncated]");
+    expect(String(alertArgs.html)).not.toContain("x".repeat(3000));
   });
 
   it("W7: Sentry mockImplementation throw doesn't suppress Resend alert (SENTRY_DSN remains set)", async () => {
@@ -431,6 +457,11 @@ describe("GET /api/cron/founder-lp-report", () => {
   it("R1: VERCEL_ENV='preview' short-circuits with 200 + skipped='non-production' (no fetch, no email)", async () => {
     process.env.VERCEL_ENV = "preview";
     vi.resetModules();
+    // Round-2 (testing conf 7) — vi.resetModules() invalidates the module
+    // cache; the freshly-imported route gets a NEW createAdminClient mock
+    // instance. Re-stub it before the route runs so any future reach into
+    // Supabase doesn't silently get an unmocked client returning undefined.
+    mockSupabasePublishedHappy();
     const { GET } = await import("./route");
     const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
 
@@ -544,6 +575,7 @@ describe("GET /api/cron/founder-lp-report", () => {
     process.env.VERCEL_ENV = "production";
     delete process.env.NEXT_PUBLIC_APP_URL;
     vi.resetModules();
+    mockSupabasePublishedHappy();
     const { GET } = await import("./route");
     const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
 
@@ -555,6 +587,27 @@ describe("GET /api/cron/founder-lp-report", () => {
     expect(String(json.error_message)).toContain("NEXT_PUBLIC_APP_URL=false");
     // Never let a missing prod APP_URL silently fall through to localhost.
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("WR-02 cleanup: unhandledRejection listener count returns to baseline after handle() (no leak across invocations)", async () => {
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+
+    const baseline = process.listenerCount("unhandledRejection");
+    fetchSpy.mockResolvedValue(pdfResponseOk());
+
+    // Run the handler several times — each invocation registers + removes
+    // its own listener. Pre-fix this leaked one listener per invocation,
+    // tripping Node's MaxListeners default at 10 and pasting
+    // [CRON_DOUBLE_FAILURE] across all unrelated unhandled rejections in
+    // the same Node process.
+    for (let i = 0; i < 5; i++) {
+      const res = await GET(buildAuthorizedRequest());
+      expect(res.status).toBe(200);
+    }
+
+    const after = process.listenerCount("unhandledRejection");
+    expect(after).toBe(baseline);
   });
 
   it("S2: alert email HTML-escapes error_class and error_message (no XSS via upstream string)", async () => {

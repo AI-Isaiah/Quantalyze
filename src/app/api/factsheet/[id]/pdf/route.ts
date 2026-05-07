@@ -13,7 +13,13 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const maxDuration = 30;
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+// Phase 18 / round-2 (Claude adv conf 4) — function-form (vs module-load
+// const) so vi.resetModules() in tests can drop a stale value, mirroring the
+// cron route's appUrl()/vercelEnv() pattern. Vercel injects the env at
+// runtime so the cost of re-reading per request is negligible.
+function appUrl(): string {
+  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+}
 
 export async function GET(
   req: NextRequest,
@@ -100,7 +106,7 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
-    await page.goto(`${APP_URL}/factsheet/${id}`, {
+    await page.goto(`${appUrl()}/factsheet/${id}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });

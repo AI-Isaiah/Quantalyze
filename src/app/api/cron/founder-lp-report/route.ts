@@ -72,6 +72,7 @@ import { getCorrelationId } from "@/lib/correlation-id";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
 import { getPlatformName, getPlatformEmail } from "@/lib/platform";
+import { escapeHtml } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
 // Vercel Pro lambda ceiling for cron handlers is 60s. The internal fetch
@@ -147,16 +148,6 @@ function isProduction(): boolean {
 // Helpers
 // -----------------------------------------------------------------------
 
-/** HTML escape for values interpolated into the alert email body (S2). */
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 /** Promise.race-style ceiling for any awaited promise. Phase 18 / R3 —
  *  Resend's SDK has no built-in timeout so we wrap each send. */
 async function withTimeout<T>(
@@ -166,10 +157,16 @@ async function withTimeout<T>(
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${label} timed out after ${ms}ms`)),
-      ms,
-    );
+    timer = setTimeout(() => {
+      // Phase 18 / round-2 (API-Contract conf 9) — tag the error with
+      // ERROR_CLASS.TIMEOUT so the catch handler's `err.name` branch
+      // surfaces it as `error_class: "AlertTimeout"`. Pre-fix, withTimeout
+      // threw a plain Error and the catch derived `err.constructor.name`
+      // = "Error" — the AlertTimeout constant was dead.
+      const err = new Error(`${label} timed out after ${ms}ms`);
+      err.name = ERROR_CLASS.TIMEOUT;
+      reject(err);
+    }, ms);
   });
   try {
     return await Promise.race([promise, timeout]);
@@ -189,6 +186,21 @@ function isAppUrlAllowed(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Cap on `error_message` length at the failure-site so the bound applies
+ *  to ALL sinks: console.error, NextResponse.json body, AND the dualAlert
+ *  path. Pre-fix the truncation only happened inside dualAlert, leaving
+ *  the response body + primary failure log unbounded. (Claude adv round-2
+ *  conf 7.) */
+const MAX_ERROR_MESSAGE_BYTES = 2048;
+function buildBoundedCtx<T extends { error_message: string }>(ctx: T): T {
+  if (ctx.error_message.length <= MAX_ERROR_MESSAGE_BYTES) return ctx;
+  return {
+    ...ctx,
+    error_message:
+      ctx.error_message.slice(0, MAX_ERROR_MESSAGE_BYTES) + "...[truncated]",
+  };
 }
 
 async function captureSentry(
@@ -243,29 +255,20 @@ async function dualAlert(
   err: unknown,
   ctx: { correlation_id: string; error_class: string; error_message: string },
 ): Promise<void> {
-  // Phase 18 / R10 (red team 2026-05-07) — bound `error_message` so an
-  // upstream multi-MB error string (e.g., a Supabase echo of the full
-  // request body) cannot bloat the Sentry event or trip Resend's body
-  // size limit, which would push the failure into the SECOND failure
-  // branch and surface a [CRON_DOUBLE_FAILURE] line that incorrectly
-  // accuses Sentry of also having gone down.
-  const safeCtx = {
-    ...ctx,
-    error_message:
-      ctx.error_message.length > 2048
-        ? ctx.error_message.slice(0, 2048) + "...[truncated]"
-        : ctx.error_message,
-  };
+  // Phase 18 / R10 — error_message is already bounded by the caller via
+  // buildBoundedCtx at every failure site (config-error, not-ready, catch).
+  // Trust the caller's contract here so the same bound applies to console
+  // .error, NextResponse.json body, AND the alert pair.
   let sentryThrew = false;
   let resendThrew = false;
   try {
-    await captureSentry(err, safeCtx);
+    await captureSentry(err, ctx);
   } catch (sentryErr) {
     sentryThrew = true;
     console.error("[cron/founder-lp-report] captureSentry threw:", sentryErr);
   }
   try {
-    await sendFailureAlert(resend, to, safeCtx);
+    await sendFailureAlert(resend, to, ctx);
   } catch (resendErr) {
     resendThrew = true;
     console.error("[cron/founder-lp-report] sendFailureAlert threw:", resendErr);
@@ -273,8 +276,8 @@ async function dualAlert(
   if (sentryThrew && resendThrew) {
     console.error(
       `${CRON_DOUBLE_FAILURE_PREFIX} founder-lp-report: BOTH alerts failed. ` +
-        `correlation_id=${safeCtx.correlation_id} ` +
-        `error_class=${safeCtx.error_class} error_message=${safeCtx.error_message}`,
+        `correlation_id=${ctx.correlation_id} ` +
+        `error_class=${ctx.error_class} error_message=${ctx.error_message}`,
     );
   }
 }
@@ -402,17 +405,29 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const appUrlIsSet =
       typeof process.env.NEXT_PUBLIC_APP_URL === "string" &&
       process.env.NEXT_PUBLIC_APP_URL.length > 0;
+    // Phase 18 / round-2 (Claude adv conf 6) — additionally fail-fast when
+    // NEXT_PUBLIC_APP_URL host is not in the production allowlist. Pre-fix,
+    // the bad-host case forwarded fetch (without the internal token) and
+    // surfaced as a misleading 4xx + dual-alert; tagging it as ConfigError
+    // makes the misconfig actionable from the runbook.
+    const appUrlAllowed = appUrlIsSet && isAppUrlAllowed(process.env.NEXT_PUBLIC_APP_URL!);
 
-    if (!strategy_id || !recipient || !resend || (isProduction() && !appUrlIsSet)) {
-      const ctx = {
+    if (
+      !strategy_id ||
+      !recipient ||
+      !resend ||
+      (isProduction() && (!appUrlIsSet || !appUrlAllowed))
+    ) {
+      const ctx = buildBoundedCtx({
         correlation_id,
         error_class: ERROR_CLASS.CONFIG,
         error_message:
           `missing FOUNDER_LP_STRATEGY_ID=${!!strategy_id} ` +
           `FOUNDER_LP_REPORT_TO=${!!recipient} ` +
           `RESEND_API_KEY=${!!resend} ` +
-          `NEXT_PUBLIC_APP_URL=${appUrlIsSet}`,
-      };
+          `NEXT_PUBLIC_APP_URL=${appUrlIsSet} ` +
+          `APP_URL_ALLOWED=${appUrlAllowed}`,
+      });
       console.error("[cron/founder-lp-report] config error:", ctx);
       await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
       return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
@@ -424,12 +439,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const supabase = createAdminClient();
     const readiness = await checkFounderStrategyReadiness(supabase, strategy_id);
     if (!readiness.ok) {
-      const ctx = {
+      const ctx = buildBoundedCtx({
         correlation_id,
         strategy_id,
         error_class: ERROR_CLASS.NOT_READY,
         error_message: readiness.reason,
-      };
+      });
       console.error("[cron/founder-lp-report] strategy not ready:", ctx);
       await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
       return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
@@ -503,18 +518,18 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         sent_to: recipient,
       });
     } catch (err) {
-      const ctx = {
+      const ctx = buildBoundedCtx({
         correlation_id,
         strategy_id,
         error_class:
           err instanceof Error
-            ? // PDF guards set err.name; otherwise use the constructor name.
+            ? // PDF guards + withTimeout set err.name; otherwise use ctor name.
               err.name && err.name !== "Error"
               ? err.name
               : err.constructor.name
             : ERROR_CLASS.UNKNOWN,
         error_message: err instanceof Error ? err.message : String(err),
-      };
+      });
       console.error("[cron/founder-lp-report] failure:", ctx);
       await dualAlert(resend, recipient, err, ctx);
       return NextResponse.json({ ok: false, ...ctx }, { status: 500 });

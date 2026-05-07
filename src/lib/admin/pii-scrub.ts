@@ -113,11 +113,21 @@ function scrubString(value: string): string {
  * denylisted keys or JWT-shaped strings replaced in place.
  *
  * Cycles: JSON does not have cycles by construction. The `max_depth` guard
- * (default 100, mirrors `redact.py::MAX_DEPTH`) bounds pathological deeply-
- * nested input so a malicious adversary can't push V8 past its hard stack
- * ceiling. On overflow the depth-bounded value is replaced with `[REDACTED]`
- * — same fail-closed behavior as the Python mirror's `RecursionError` path
- * after `_redact_processor` catches it.
+ * (default 100, value-symmetric with `redact.py::MAX_DEPTH`) bounds
+ * pathological deeply-nested input so a malicious adversary can't push V8
+ * past its hard stack ceiling. On overflow the offending node is replaced
+ * with `[REDACTED]` and sibling scrubbing continues — partial-scrub fail
+ * mode.
+ *
+ * **Cross-language asymmetry (Claude adv round-2 conf 6):** the Python
+ * mirror RAISES `RecursionError` on overflow; the upstream
+ * `_redact_processor` catches and returns the FULL UNSCRUBBED document
+ * (fail-OPEN). The TS side here returns a partially-scrubbed document
+ * (fail-CLOSED at the offending node). The values are equal but the
+ * failure modes differ. This is a deliberate trade-off: the TS surface is
+ * admin-page rendering (fail-closed is safer) while the Python surface is
+ * Sentry breadcrumbs (fail-open keeps observability online). When a parity
+ * test on a 110-deep dict is added, lock both behaviors explicitly.
  */
 const MAX_DEPTH = 100;
 

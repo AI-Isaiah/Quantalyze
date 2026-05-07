@@ -331,7 +331,7 @@ class TestLoggerErrorScrubsPiiMetadata:
 
     def test_rpc_throw_branch_scrubs_args(self, monkeypatch, caplog):
         # When the RPC call throws, the except branch logs action/entity_type/
-        # entity_id/user_id/exc — every one must run through scrub_pii.
+        # entity_id/user_id/exc — every one must run through the redactor.
         jwt_action = "1234567890.0987654321.abcdefghij"
         rpc_method = MagicMock(side_effect=RuntimeError("network down"))
         supabase = MagicMock(rpc=rpc_method)
@@ -350,3 +350,55 @@ class TestLoggerErrorScrubsPiiMetadata:
         assert "[REDACTED_JWT]" in msg or "[REDACTED]" in msg
         # Confirm we hit the RPC-throw branch.
         assert "log_audit_event_service call threw" in msg
+
+    # Phase 18 / round-2 red team — `scrub_pii` on a non-JWT string is a
+    # no-op; only `scrub_freeform_string` redacts substring `key=value` shapes.
+    # The B3 commit originally used `scrub_pii(str(exc))` and was operationally
+    # silent on the dominant Supabase-error-echo case. The cases below pin the
+    # post-fix behavior.
+    def test_rpc_throw_substring_leak_redacted(self, monkeypatch, caplog):
+        """Supabase RPC error that echoes a `key=value` substring (NOT a JWT
+        shape) must be redacted. This was leaking under the old `scrub_pii`
+        wrapper that only matched whole-anchored JWTs."""
+        leaky_msg = "request body: {'metadata': 'api_key=PROD_LEAK_VALUE_42 ok'}"
+        rpc_method = MagicMock(side_effect=RuntimeError(leaky_msg))
+        supabase = MagicMock(rpc=rpc_method)
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
+            log_audit_event(
+                user_id=DUMMY_USER,
+                action="bridge.run",
+                entity_type="bridge_run",
+                entity_id=DUMMY_ENTITY,
+            )
+
+        msg = caplog.records[-1].getMessage()
+        assert "PROD_LEAK_VALUE_42" not in msg, (
+            f"substring api_key=value leaked: {msg!r}"
+        )
+        assert "[REDACTED]" in msg
+        assert "log_audit_event_service call threw" in msg
+
+    def test_null_user_id_substring_leak_redacted(self, monkeypatch, caplog):
+        """The NULL user_id branch logs `action` raw via formatter — a caller
+        passing an action string with a `passphrase=value` substring must be
+        redacted (e.g. a misuse where the caller stuffed credentials into
+        action by mistake)."""
+        supabase, _rpc = _mock_supabase_with_rpc()
+        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
+
+        leaky_action = "bridge.run passphrase=NULLBRANCH_LEAK_VALUE_99"
+        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
+            log_audit_event(
+                user_id=None,  # type: ignore[arg-type]
+                action=leaky_action,
+                entity_type="bridge_run",
+                entity_id=DUMMY_ENTITY,
+            )
+
+        msg = caplog.records[0].getMessage()
+        assert "NULLBRANCH_LEAK_VALUE_99" not in msg, (
+            f"NULL-branch substring leaked: {msg!r}"
+        )
+        assert "[REDACTED]" in msg

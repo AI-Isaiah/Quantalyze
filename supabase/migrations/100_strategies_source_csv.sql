@@ -3,9 +3,9 @@
 -- Surfaced 2026-05-06 during Phase 18 founder UAT (FIX-03 onboarding teams via CSV path).
 -- Migration 093 added the `finalize_csv_strategy` RPC which inserts INTO strategies
 -- VALUES (..., source='csv', ...). The pre-existing `strategies_source_check`
--- constraint (created by an earlier migration before Phase 15) only admitted
--- {'legacy','wizard','admin_import','allocator_connected'} — the Phase 15 PR
--- shipped the RPC but did NOT extend the constraint.
+-- constraint (added by migration 031_wizard_source_column.sql:79-82) only
+-- admitted {'legacy','wizard','admin_import','allocator_connected'} — the
+-- Phase 15 PR shipped the RPC but did NOT extend the constraint.
 --
 -- Symptom: every CSV-path strategy submission returns HTTP 500 from
 -- /api/strategies/csv-finalize with Postgres error
@@ -57,13 +57,18 @@ ALTER TABLE strategies
     'bybit'
   ));
 
--- Self-verify: assert the new constraint actually admits the Phase 18 / FIX-03
--- target value. Mirrors the assert pattern in migrations 031 + 093. RAISE
--- EXCEPTION on missing — silent no-op apply (e.g. concurrent migration race)
--- would otherwise reintroduce the symptom this migration claims to fix.
+-- Self-verify: assert the new constraint actually admits every value the
+-- Phase 18 expansion intends. Pre-fix this only checked the substring 'csv',
+-- which would have green-lit a typo migration like `CHECK (source = 'csv')`
+-- (over-narrow) and broken every existing legacy/wizard/admin_import row.
+-- Round-2 (data-migration specialist conf 7) — assert all 8 values appear.
+-- RAISE EXCEPTION on missing — silent no-op apply (e.g., concurrent
+-- migration race) would otherwise reintroduce the symptom this migration
+-- claims to fix.
 DO $$
 DECLARE
   constraint_def TEXT;
+  expected_value TEXT;
 BEGIN
   SELECT pg_get_constraintdef(c.oid)
   INTO constraint_def
@@ -76,9 +81,16 @@ BEGIN
     RAISE EXCEPTION 'migration 100 self-verify failed: strategies_source_check constraint missing after apply';
   END IF;
 
-  IF constraint_def NOT LIKE '%csv%' THEN
-    RAISE EXCEPTION 'migration 100 self-verify failed: strategies_source_check does not admit ''csv'' (definition: %)', constraint_def;
-  END IF;
+  FOREACH expected_value IN ARRAY ARRAY[
+    'legacy', 'wizard', 'admin_import', 'allocator_connected',
+    'csv', 'okx', 'binance', 'bybit'
+  ] LOOP
+    IF constraint_def NOT LIKE '%''' || expected_value || '''%' THEN
+      RAISE EXCEPTION
+        'migration 100 self-verify failed: strategies_source_check does not admit %s (definition: %s)',
+        expected_value, constraint_def;
+    END IF;
+  END LOOP;
 END $$;
 
 COMMIT;

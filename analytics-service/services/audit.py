@@ -50,13 +50,23 @@ from uuid import UUID
 
 from services.db import get_supabase
 # Phase 18 / FIX-04 — Adversarial revision B3:
-# Every logger.error formatter argument in this file passes through
-# services.redact.scrub_pii BECAUSE stdlib logging.Logger.error does NOT run
+# Every logger.error formatter argument in this file passes through the
+# canonical redactor BECAUSE stdlib logging.Logger.error does NOT run
 # through the structlog processor pipeline (only structlog.get_logger() does).
 # Without this, action / entity_id / exc strings can leak credential-shaped
 # values into Railway stderr -> log aggregation -> Sentry breadcrumbs.
-# The RPC payload (p_metadata) is also scrubbed before the wire.
-from services.redact import scrub_pii
+#
+# String args use `scrub_freeform_string` (4-pass: SENSITIVE_KEY_VALUE +
+# JWT_SHAPE + JWT_SUBSTRING + transitive re-walk) NOT `scrub_pii`. The latter
+# is an object walker — on a non-JWT string it's a no-op, so a Supabase RPC
+# error echoing `Bearer api_key=PROD_KEY...` would have leaked verbatim. The
+# round-2 red team caught this in the first commit's `scrub_pii(str(exc))`
+# pattern; switching to `scrub_freeform_string` redacts substring `key=value`
+# shapes that the canonical denylist covers.
+#
+# The RPC payload (p_metadata) stays on `scrub_pii` because it IS a dict —
+# the object-walker contract is correct there.
+from services.redact import scrub_pii, scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.audit")
 
@@ -93,11 +103,15 @@ def log_audit_event(
         JSON-serializable payload. Defaults to {}.
     """
     if user_id is None:
-        # Adversarial revision B3 — every formatter arg through scrub_pii.
+        # Adversarial revision B3 + round-2: scrub_freeform_string on every
+        # string arg so substring `key=value` leaks are redacted, not just
+        # whole-anchored JWTs.
         logger.error(
             "[audit] log_audit_event called with NULL user_id (dropping): "
             "action=%s entity_type=%s entity_id=%s",
-            scrub_pii(action), scrub_pii(entity_type), scrub_pii(entity_id),
+            scrub_freeform_string(str(action)),
+            scrub_freeform_string(str(entity_type)),
+            scrub_freeform_string(str(entity_id)),
         )
         return
 
@@ -106,10 +120,10 @@ def log_audit_event(
     # now so the RPC args are uniform.
     uid = str(user_id)
     if not uid or uid == "None":
-        # Adversarial revision B3 — scrub_pii on action.
+        # Adversarial revision B3 + round-2: scrub_freeform_string on action.
         logger.error(
             "[audit] log_audit_event called with empty user_id (dropping): "
-            "action=%s", scrub_pii(action),
+            "action=%s", scrub_freeform_string(str(action)),
         )
         return
 
@@ -149,11 +163,17 @@ def log_audit_event(
         # error message is multi-MB.
         try:
             exc_str = str(exc)[:4096]
+            # Round-2: scrub_freeform_string on every string arg so substring
+            # `key=value` leaks (the dominant Supabase error echo case) are
+            # redacted, not just whole-anchored JWTs.
             logger.error(
                 "[audit] log_audit_event_service call threw (dropping): "
                 "action=%s entity_type=%s entity_id=%s user_id=%s error=%s",
-                scrub_pii(action), scrub_pii(entity_type), scrub_pii(eid),
-                scrub_pii(uid), scrub_pii(exc_str),
+                scrub_freeform_string(str(action)),
+                scrub_freeform_string(str(entity_type)),
+                scrub_freeform_string(eid),
+                scrub_freeform_string(uid),
+                scrub_freeform_string(exc_str),
             )
         except Exception:
             # Worst-case fallback: emit a minimal stable marker so log

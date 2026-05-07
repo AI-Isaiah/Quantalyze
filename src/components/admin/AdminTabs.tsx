@@ -352,7 +352,20 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
           const profile = s.profiles as Record<string, string> | null;
           const analytics = extractAnalytics(s.strategy_analytics);
           const source = s.source as string | undefined;
-          const isWizard = source === "wizard";
+          // Phase 18 / round-2 (Red Team conf 4) — fresh-onboarding sources
+          // (wizard, csv, allocator-connected, exchange) all get the accent
+          // badge styling. Pre-fix only `wizard` got the accent; csv-onboarded
+          // founder-LP teams (the entire reason for migration 100) rendered
+          // with the muted secondary style despite being first-class strategies
+          // in the pending-review queue. `legacy` and `admin_import` keep the
+          // muted style — they are imported / historical, not freshly onboarded.
+          const isFreshOnboarding =
+            source === "wizard" ||
+            source === "csv" ||
+            source === "allocator_connected" ||
+            source === "okx" ||
+            source === "binance" ||
+            source === "bybit";
           return (
             <Card key={s.id as string}>
               <div className="flex items-start justify-between gap-4">
@@ -364,7 +377,7 @@ function StrategyReviewTab({ strategies }: { strategies: Array<Record<string, un
                     <span
                       className={cn(
                         "rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
-                        isWizard
+                        isFreshOnboarding
                           ? "bg-accent/10 text-accent"
                           : "bg-page text-text-muted",
                       )}

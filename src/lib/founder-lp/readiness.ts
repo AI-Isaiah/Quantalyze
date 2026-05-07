@@ -38,13 +38,24 @@ export async function checkFounderStrategyReadiness(
   const analytics = extractAnalytics(
     (data as { strategy_analytics?: unknown }).strategy_analytics,
   );
-  const compStatus = analytics?.computation_status;
   if (status !== "published") {
     return {
       ok: false,
       reason: `strategies.status='${status}' (expected 'published') — see .planning/phase-18/founder-lp-runbook.md`,
     };
   }
+  // Phase 18 / round-2 (Claude adv conf 5) — distinguish "no analytics
+  // row" from "still computing". Pre-fix, a missing FK row produced
+  // `computation_status='undefined'` literally in the runbook trail, which
+  // misled operators into looking for a value that the column doesn't have.
+  if (analytics === null || analytics === undefined) {
+    return {
+      ok: false,
+      reason:
+        `strategy_analytics row missing for strategy ${strategy_id} — analytics worker has not run yet`,
+    };
+  }
+  const compStatus = analytics.computation_status;
   if (compStatus !== "complete") {
     return {
       ok: false,
