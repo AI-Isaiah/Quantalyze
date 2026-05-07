@@ -136,8 +136,16 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
     // Collect non-null values for this metric
     const values: { id: string; val: number }[] = [];
     for (const row of rows) {
-      const v = row.analytics[metric];
-      if (v != null) values.push({ id: row.id, val: v });
+      const raw = row.analytics[metric];
+      if (raw == null) continue;
+      // max_drawdown is stored as a NEGATIVE percentage (quantstats
+      // convention: -0.30 = 30% peak-to-trough drop). Without Math.abs the
+      // LOWER_IS_BETTER inversion below ranks the WORST drawdown as the
+      // best percentile, because -0.50 < -0.05 numerically. Take the
+      // magnitude so the inversion treats "small drawdown" as "low value
+      // = good" the same way it does for volatility.
+      const v = metric === "max_drawdown" ? Math.abs(raw) : raw;
+      values.push({ id: row.id, val: v });
     }
 
     const n = values.length;
