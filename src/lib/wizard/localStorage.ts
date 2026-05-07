@@ -128,6 +128,70 @@ export function loadWizardState(): WizardLocalState | null {
   }
 }
 
+/**
+ * Resume overrides derived from a localStorage payload. Pure function;
+ * never reads window/localStorage. The caller invokes loadWizardState()
+ * post-mount and applies these via setState.
+ *
+ * Hydration safety: WizardClient initializes its useState values to
+ * SSR-deterministic defaults (no LS access during render). After mount,
+ * a single useEffect calls loadWizardState() and feeds the result here
+ * to compute which fields need to flip. SSR HTML matches the first
+ * client render exactly; the resumed state arrives on the next paint.
+ *
+ * Returning an undefined field means "no override for this field" —
+ * leave the SSR-default in place.
+ */
+export interface WizardResumeOverrides {
+  step?: WizardStepKey;
+  strategyName?: string;
+  showResumeBanner?: boolean;
+  wizardSessionId?: string;
+}
+
+export function deriveWizardResumeOverrides(
+  loaded: WizardLocalState | null,
+  source: "api" | "csv",
+  initialDraftId: string | null,
+): WizardResumeOverrides {
+  if (!loaded) return {};
+  const out: WizardResumeOverrides = {};
+
+  if (loaded.wizardSessionId) {
+    out.wizardSessionId = loaded.wizardSessionId;
+  }
+
+  // strategyName is CSV-branch only.
+  if (loaded.source === "csv" && loaded.strategyName) {
+    out.strategyName = loaded.strategyName;
+  }
+
+  if (source === "csv") {
+    // CSV branch: restore a stored CSV sub-step iff the LS payload was
+    // also written by the CSV branch. A stale API-branch payload must
+    // not snap the user to a CSV step that doesn't exist for it.
+    if (
+      loaded.source === "csv" &&
+      (loaded.step === "csv_upload" ||
+        loaded.step === "csv_preview" ||
+        loaded.step === "csv_submit")
+    ) {
+      out.step = loaded.step;
+    }
+  } else if (initialDraftId && loaded.strategyId === initialDraftId) {
+    // API branch: only restore the LS step when the pointer matches the
+    // server-side draft. Mismatch ⇒ leave the SSR default ("sync_preview")
+    // and surface the resume banner instead.
+    out.step = loaded.step;
+  }
+
+  if (initialDraftId && loaded.strategyId !== initialDraftId) {
+    out.showResumeBanner = true;
+  }
+
+  return out;
+}
+
 /** Clear the wizard state (called on submit, delete draft, or explicit start fresh). */
 export function clearWizardState(): void {
   if (!hasLocalStorage()) return;

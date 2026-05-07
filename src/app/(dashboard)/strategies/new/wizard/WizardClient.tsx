@@ -18,6 +18,7 @@ import { WithdrawalWarningStrip } from "./WithdrawalWarningStrip";
 import { WizardIpAllowlistHint } from "./WizardIpAllowlistHint";
 import {
   clearWizardState,
+  deriveWizardResumeOverrides,
   loadWizardState,
   newWizardSessionId,
   saveWizardState,
@@ -82,53 +83,29 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   const source: "api" | "csv" =
     searchParams.get("source") === "csv" ? "csv" : "api";
 
-  // Read localStorage once on mount. Three useState initializers below
-  // all consume this same snapshot so we don't re-parse JSON three times.
+  // Hydration safety (fix for React #418 on `?source=csv`):
   //
-  // Phase-15 IN-05: this is an SSR-safe lazy ref-init pattern. `useState`
-  // with a lazy initializer would also run only once but evaluates BEFORE
-  // the first render commits, which on SSR (no window) would fall through
-  // to the `null` branch and pin the ref to null forever even after
-  // hydration. The `if (typeof window !== "undefined" && ref.current ===
-  // null)` form runs at every render but the inner block fires at most
-  // once — first-client-render seeds the ref; subsequent renders short-
-  // circuit on `current === null` returning false.
-  const initialLocalStateRef = useRef<ReturnType<typeof loadWizardState>>(null);
-  if (typeof window !== "undefined" && initialLocalStateRef.current === null) {
-    initialLocalStateRef.current = loadWizardState();
-  }
-  const loaded = initialLocalStateRef.current;
-
-  // Phase 15 resume guard: when the user lands on ?source=csv with a stored
-  // CSV draft (strategyId === '' sentinel), the API resume-redirect path
-  // would otherwise treat the empty-string id as a draft mismatch and snap
-  // the user back to sync_preview. Skip that redirect for the CSV branch.
-  const isCsvBranch = source === "csv" || loaded?.source === "csv";
-  const skipApiResumeRedirect =
-    isCsvBranch && (!loaded?.strategyId || loaded.strategyId === "");
-
-  const [wizardSessionId] = useState<string>(
-    () => loaded?.wizardSessionId ?? newWizardSessionId(),
+  // localStorage is browser-only. Reading it during render produces a
+  // different value on SSR (no window) vs the first client render
+  // (window present), and any useState initializer that consumes the
+  // result then renders different DOM on the two passes — React aborts
+  // hydration and unmounts the tree (the user-visible symptom was the
+  // CSV upload form vanishing). The previous `useRef` + conditional
+  // assignment pattern hit the same trap.
+  //
+  // The fix: every useState below initializes from SSR-deterministic
+  // inputs (`source`, `initialDraft`) only. The single `useEffect` at
+  // the top of the body reads localStorage once after mount and applies
+  // any resume overrides via setState, producing one extra paint for
+  // resume scenarios. The first-paint markup is identical on SSR and
+  // CSR, so React #418 cannot fire.
+  const [wizardSessionId, setWizardSessionId] = useState<string>(() =>
+    newWizardSessionId(),
   );
 
   const [step, setStep] = useState<WizardStepKey>(() => {
-    if (source === "csv") {
-      // Resume to a stored CSV sub-step if it matches the branch; else start
-      // at the upload step. The strategyId '' sentinel is allowed here.
-      if (
-        loaded?.source === "csv" &&
-        (loaded.step === "csv_upload" ||
-          loaded.step === "csv_preview" ||
-          loaded.step === "csv_submit")
-      ) {
-        return loaded.step;
-      }
-      return "csv_upload";
-    }
+    if (source === "csv") return "csv_upload";
     if (!initialDraft) return "connect_key";
-    if (!skipApiResumeRedirect && loaded?.strategyId === initialDraft.id) {
-      return loaded.step;
-    }
     return "sync_preview";
   });
 
@@ -139,9 +116,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     initialDraft?.api_key_id ?? null,
   );
 
-  const [showResumeBanner, setShowResumeBanner] = useState<boolean>(
-    () => Boolean(initialDraft) && loaded?.strategyId !== initialDraft?.id,
-  );
+  const [showResumeBanner, setShowResumeBanner] = useState<boolean>(false);
+  const [hydrated, setHydrated] = useState<boolean>(false);
 
   const [syncSnapshot, setSyncSnapshot] = useState<SyncPreviewSnapshot | null>(
     null,
@@ -168,11 +144,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   // useState lazy initializer that calls Date.now() would resolve to
   // different timestamps on SSR vs client first render and a minute-
   // boundary or locale-format difference would trip React hydration
-  // mismatch. Backfill via useEffect post-mount instead.
+  // mismatch. Backfill via the hydration effect below instead.
   const [savedAt, setSavedAt] = useState<number | null>(null);
-  useEffect(() => {
-    if (initialDraft) setSavedAt(Date.now());
-  }, [initialDraft]);
   const [toastKey, setToastKey] = useState(0);
   const [sessionExpired, setSessionExpired] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -183,22 +156,53 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   // name is restored from localStorage on resume so it survives tab close.
   // csvFmt + csvPreview are NOT persisted (the parsed file is too large for
   // localStorage) — a resumed CSV draft requires the user to re-upload, but
-  // the strategy name is preserved.
+  // the strategy name is preserved (applied via the hydration effect below).
   const [csvFmt, setCsvFmt] = useState<CsvFmt | null>(null);
   const [csvPreview, setCsvPreview] = useState<CsvPreview | null>(null);
   const [csvValidationPassed, setCsvValidationPassed] = useState<boolean>(false);
-  const [strategyName, setStrategyName] = useState<string>(
-    loaded?.source === "csv" ? (loaded?.strategyName ?? "") : "",
-  );
+  const [strategyName, setStrategyName] = useState<string>("");
+
+  // Single post-mount localStorage read. Computes resume overrides from
+  // the LS payload (if any) and applies them via setState. `hydrated`
+  // gates the wizard_start telemetry so the funnel id reflects the
+  // resumed wizardSessionId, not the throwaway one from useState init.
+  useEffect(() => {
+    const loaded = loadWizardState();
+    const overrides = deriveWizardResumeOverrides(
+      loaded,
+      source,
+      initialDraft?.id ?? null,
+    );
+    if (overrides.wizardSessionId) {
+      setWizardSessionId(overrides.wizardSessionId);
+    }
+    if (overrides.step) {
+      setStep(overrides.step);
+    }
+    if (overrides.strategyName !== undefined) {
+      setStrategyName(overrides.strategyName);
+    }
+    if (overrides.showResumeBanner) {
+      setShowResumeBanner(true);
+    }
+    if (initialDraft) {
+      setSavedAt(Date.now());
+    }
+    setHydrated(true);
+    // Run once on mount. `source` and `initialDraft` come from props/URL
+    // and are stable for the lifetime of this component instance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
+    if (!hydrated) return;
     if (wizardStartFiredRef.current) return;
     wizardStartFiredRef.current = true;
     trackForQuantsEventClient("wizard_start", {
       wizard_session_id: wizardSessionId,
       resume: Boolean(initialDraft),
     });
-  }, [wizardSessionId, initialDraft]);
+  }, [hydrated, wizardSessionId, initialDraft]);
 
   useEffect(() => {
     trackForQuantsEventClient(`wizard_step_view_${STEP_INDEX[step]}` as const, {
