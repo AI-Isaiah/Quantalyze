@@ -323,13 +323,20 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ hashFiles('node_modules/@playwright/test/package.json') }}
           restore-keys: |
             ${{ runner.os }}-playwright-
-      # On cache hit, only install OS deps (no browser download). On miss,
-      # full install. The `--with-deps` apt step is fast (~5s) so always run
-      # it; the slow part (browser download) is what the cache skips.
+      # On cache hit, skip the install entirely. The chromium browser is
+      # restored from the cache; GitHub ubuntu-latest runners have all
+      # the system libs chromium needs (libnss3, libgtk-3-0, libgbm1,
+      # etc.) baked in. The previous version ran `playwright install-deps
+      # chromium` (apt-get update + 30 lib install) on cache hit, which
+      # observed 5+ minutes on a slow apt mirror — defeating the cache
+      # win. If a future runner image update drops a chromium-required
+      # lib, the playwright run will fail with a clear missing-lib error
+      # and we add it back. On cache miss, do the full install (download
+      # + apt deps).
       - name: Install Playwright (browser bundle from cache when available)
         run: |
           if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
-            npx playwright install-deps chromium
+            echo "Cache hit — chromium bundle restored. Runner image has system libs; skipping apt install."
           else
             npx playwright install --with-deps chromium
           fi
