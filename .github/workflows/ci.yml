@@ -18,7 +18,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  frontend:
+  # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
+  # typecheck → lint → test → policy-checks → audit → build serially
+  # (~5min wall clock). Split into 5 parallel jobs so wall-clock collapses
+  # to max-of-jobs (~build, ~3min). Each parallel job pays the cold
+  # `npm ci` cost (~30-60s), but `actions/setup-node@v4 cache: npm`
+  # restores `~/.npm` so subsequent `npm ci`s are tarball-extract-only.
+  # Branch protection still gates on a single check (the aggregator
+  # `frontend` job below `needs:` all parallel jobs).
+  frontend-typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,13 +36,60 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+
+  frontend-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       - run: npm run lint
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       - run: npm test
+
+  frontend-audit-policy:
+    # Banned-package check + GDPR export coverage + npm audit. Grouped
+    # because all three are short (<30s each) and read-only — the
+    # parallel-job overhead would dominate if each ran solo.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       - name: Check for banned packages (supply-chain)
         run: node scripts/check-banned-packages.mjs
       - name: Check GDPR export coverage (Task 7.3)
         run: npx tsx scripts/check-gdpr-export-coverage.ts
       - run: npm audit --audit-level=critical
+
+  frontend-build:
+    # The build is the longest single step. It runs in parallel with the
+    # other frontend-* jobs (above) and uploads the .next + public output
+    # as an artifact so the e2e job can download instead of rebuilding —
+    # eliminating the duplicate ~60-120s build that used to live in e2e.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
       # Cache .next/cache (Next.js incremental webpack/Turbopack output) keyed
       # on every input that changes how the bundle compiles: lockfile,
       # next.config, tailwind/postcss config, tsconfig, and the full src
@@ -51,14 +106,71 @@ jobs:
           key: ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-${{ hashFiles('src/**') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('package-lock.json', 'next.config.*', 'tsconfig.json', 'tailwind.config.*', 'postcss.config.*') }}-
+      # The build env mirrors the e2e job's seed-aware ternary so the
+      # uploaded .next artifact carries the right NEXT_PUBLIC_* values
+      # baked into client bundles. e2e downloads this same artifact.
       - run: npm run build
         env:
-          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
-          SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder.supabase.co' }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_ANON_KEY || 'placeholder' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || 'placeholder_service_role' }}
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
           PLATFORM_EMAIL: test@quantalyze.com
+      # Upload the build output for the e2e job to download. Exclude
+      # .next/cache (the actions/cache above already persists it across
+      # runs; including it here would inflate every per-run artifact by
+      # 100MB+ for no e2e benefit). upload-artifact@v4 negative globs
+      # only exclude entries that actually match the negative pattern,
+      # so the directory match must use `/**` to recurse — `!.next/cache`
+      # alone only excludes the directory entry, not its contents.
+      - name: Upload .next + public artifact for e2e
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextjs-build
+          path: |
+            .next/**
+            !.next/cache/**
+            public/**
+          retention-days: 1
+          if-no-files-found: error
+
+  frontend:
+    # Aggregator. Branch protection gates on this single required check;
+    # `needs:` enforces that every parallel frontend-* job above passed.
+    # `if: always()` + the explicit result-check below is critical: a bare
+    # `needs:` chain marks the aggregator as `skipped` (not `failed`) when
+    # any upstream fails, and `skipped` checks can satisfy classic GitHub
+    # branch protection rules — silently letting broken code merge. The
+    # explicit `exit 1` on any non-success forces a definite `failure`
+    # status that all branch-protection configurations honor.
+    runs-on: ubuntu-latest
+    needs:
+      - frontend-typecheck
+      - frontend-lint
+      - frontend-test
+      - frontend-audit-policy
+      - frontend-build
+    if: always()
+    steps:
+      - name: Verify all frontend-* jobs succeeded
+        run: |
+          fail=0
+          for r in \
+            "frontend-typecheck=${{ needs.frontend-typecheck.result }}" \
+            "frontend-lint=${{ needs.frontend-lint.result }}" \
+            "frontend-test=${{ needs.frontend-test.result }}" \
+            "frontend-audit-policy=${{ needs.frontend-audit-policy.result }}" \
+            "frontend-build=${{ needs.frontend-build.result }}"; do
+            name="${r%=*}"; result="${r#*=}"
+            echo "$name: $result"
+            if [ "$result" != "success" ]; then fail=1; fi
+          done
+          if [ "$fail" = "1" ]; then
+            echo "::error::One or more frontend-* jobs did not succeed."
+            exit 1
+          fi
+          echo "All frontend-* jobs succeeded."
 
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
@@ -127,7 +239,16 @@ jobs:
     # issue tracks baseline generation; spec still runs locally via
     # `npx playwright test e2e/demo-screenshot.spec.ts`.
     runs-on: ubuntu-latest
-    needs: frontend
+    # PR-B: depend on frontend-build (for the artifact) PLUS the cheaper
+    # correctness gates so e2e doesn't burn ~3-5min of runner time when a
+    # typecheck or test failure is already known. Don't depend on the
+    # aggregator — that would only start after lint and audit-policy too,
+    # which don't gate e2e validity. Branch protection still gates merges
+    # on the `frontend` aggregator above.
+    needs:
+      - frontend-build
+      - frontend-typecheck
+      - frontend-test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -160,19 +281,18 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
-      # Single build. When seed-gated CI is configured, build once with the
-      # real test-Supabase env so BOTH the smoke specs and the seed-gated
-      # specs use the same .next output. When not configured, fall back to
-      # placeholder env. Saves 60-120s vs the previous double-build.
-      - name: Build (real test-Supabase env when configured, else placeholder)
-        run: npm run build
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder.supabase.co' }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_ANON_KEY || 'placeholder' }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || 'placeholder_service_role' }}
-          ADMIN_EMAIL: test@example.com
-          PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+      # PR-B: Download the build artifact from frontend-build instead of
+      # rebuilding. Saves 60-120s on every e2e run (the prior single-build
+      # consolidation in PR-A still rebuilt; this eliminates the rebuild
+      # entirely). The artifact carries the seed-aware NEXT_PUBLIC_* vars
+      # baked into client bundles at build time.
+      - name: Download .next + public artifact from frontend-build
+        uses: actions/download-artifact@v4
+        with:
+          name: nextjs-build
+          # download-artifact restores at the cwd by default; .next and
+          # public extract to project root, matching `npm run start`'s
+          # expected layout.
       - name: Start server and run Playwright
         run: |
           npm run start &

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.2.0] - 2026-05-07
+
+**CI speedup PR-B — parallelize frontend job + share build artifact with e2e.** The biggest single wall-clock win in the 5-PR series. Frontend collapses from sum-of-steps (~5min) to max-of-steps (~3min); e2e drops the duplicate `npm run build` (~60-120s) by downloading the artifact instead.
+
+### Changed
+
+- **`frontend` job split into 5 parallel jobs.** Replaced the monolithic frontend job with `frontend-typecheck`, `frontend-lint`, `frontend-test`, `frontend-audit-policy` (banned-packages + GDPR + npm audit), and `frontend-build`. Each runs in its own runner with `actions/setup-node@v4 cache: npm` so the second-and-later runs see tarball-extract-only `npm ci`s. Wall clock collapses from sum-of-steps to max-of-steps.
+- **`frontend` aggregator job for branch protection.** `needs:` all 5 parallels with `if: always()` and explicit `needs.<job>.result == 'success'` checks. Critical: a bare `needs:` chain marks the aggregator as `skipped` (not `failed`) when any upstream fails, and `skipped` checks can satisfy classic GitHub branch protection rules — silently letting broken code merge. The explicit `exit 1` forces a definite `failure` status. (Adversarial review F3 — addressed.)
+- **`frontend-build` uploads `.next` + `public/` as artifact** (`actions/upload-artifact@v4`, retention 1 day, `if-no-files-found: error`). Glob path uses `.next/**` + `!.next/cache/**` + `public/**` — the recursive `/**` pattern is required for upload-artifact@v4 negative globs to actually exclude `.next/cache` (a bare `!.next/cache` only excludes the directory entry, not contents, which would ship 100MB+ of incremental Webpack cache in every artifact). (Adversarial review F1 — addressed.)
+- **`e2e` job downloads the artifact instead of rebuilding** (`actions/download-artifact@v4`). Removes the previous in-job `npm run build` step entirely. The artifact carries the seed-aware `NEXT_PUBLIC_*` baked into client bundles at build time; the runtime env on the Start step still mirrors the same ternary so build-time and runtime stay aligned.
+- **`e2e` `needs:` widened** from just `frontend-build` to `[frontend-build, frontend-typecheck, frontend-test]` so e2e doesn't burn ~3-5min of runner time when a typecheck or unit-test failure is already known. (Adversarial review F4 — addressed.) Lint and audit-policy stay non-blocking for e2e — they don't gate e2e validity.
+
 ## [0.22.1.1] - 2026-05-07
 
 **CI speedup PR-A — concurrency cancel + caches + de-duplicated e2e build.** Cuts CI wall-clock without changing application behavior. Targets the frontend job (~5min → expected ~3min on cache hit) and the e2e job (skips a redundant full build when seed-gated).
