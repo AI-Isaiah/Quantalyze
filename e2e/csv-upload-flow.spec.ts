@@ -169,16 +169,18 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     // 10. Click the final "Submit strategy".
     await page.getByTestId("wizard-csv-submit-cta").click();
 
-    // 11. Redirect to factsheet (URL pattern matches the wizard's
-    //     router.push at WizardClient.tsx:276 — `/strategies/[id]?wizard_submitted=1`).
-    await page.waitForURL(/\/strategies\/[a-f0-9-]+\?wizard_submitted=1/, {
+    // 11. Redirect to the user's strategies list. The wizard now lands
+    //     on /strategies (plural) because pending_review strategies are
+    //     hidden by /strategy/[id]'s status='published' filter — the old
+    //     /strategy/{id} target was a 404 for every wizard submission.
+    //     The list shows the just-submitted strategy with its pending badge.
+    await page.waitForURL(/\/strategies\?wizard_submitted=1/, {
       timeout: 15_000,
     });
 
-    // 12. CSV-03 verification: TrustTierLabel renders the locked v0 string.
-    await expect(
-      page.getByText("CSV uploaded — verification pending"),
-    ).toBeVisible();
+    // 12. CSV-03 verification: the just-submitted strategy appears in the
+    //     "My Strategies" list under the user-typed name.
+    await expect(page.getByText(typedName).first()).toBeVisible();
 
     // 13. Cross-AI revision 2026-04-30: the user-typed strategy name lands
     //     on the factsheet (strategies.name was set to the typed value).

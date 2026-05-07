@@ -205,11 +205,17 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   }, [hydrated, wizardSessionId, initialDraft]);
 
   useEffect(() => {
+    // Gate on `hydrated` so resumed sessions don't double-fire: without
+    // this gate, mount fires step_view with the throwaway wizardSessionId,
+    // then the LS-hydration effect updates wizardSessionId (and possibly
+    // step), retriggering this effect under the resumed identity. The
+    // funnel would see two step_view_N events per resume.
+    if (!hydrated) return;
     trackForQuantsEventClient(`wizard_step_view_${STEP_INDEX[step]}` as const, {
       wizard_session_id: wizardSessionId,
       step,
     });
-  }, [step, wizardSessionId]);
+  }, [hydrated, step, wizardSessionId]);
 
   useEffect(() => {
     const supabase = createClient();
@@ -293,7 +299,15 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         strategy_id: finalStrategyId,
       });
       clearWizardState();
-      router.push(`/strategies/${finalStrategyId}?wizard_submitted=1`);
+      // Wizard finalize sets status='pending_review'. The public detail
+      // page at /strategy/[id] filters status='published' (queries.ts:255)
+      // so newly-submitted strategies 404 there. The list at /strategies
+      // is what the user actually wants — their just-submitted strategy
+      // appears in "My Strategies" with its pending badge. The
+      // ?wizard_submitted=1 query param is reserved for a future success
+      // toast on that page; harmless if unconsumed.
+      void finalStrategyId;
+      router.push(`/strategies?wizard_submitted=1`);
       router.refresh();
     },
     [wizardSessionId, router],
@@ -592,7 +606,10 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                     strategy_id: finalStrategyId,
                   });
                   clearWizardState();
-                  router.push(`/strategies/${finalStrategyId}?wizard_submitted=1`);
+                  // Same reasoning as handleSubmitSuccess above: pending_review
+                  // strategies aren't visible at /strategy/[id]; the list
+                  // page at /strategies is the right landing surface.
+                  router.push(`/strategies?wizard_submitted=1`);
                   router.refresh();
                 }}
               />

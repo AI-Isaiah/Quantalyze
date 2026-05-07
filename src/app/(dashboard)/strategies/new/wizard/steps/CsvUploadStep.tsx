@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import {
@@ -115,6 +115,25 @@ export function CsvUploadStep({
   const [submitting, setSubmitting] = useState(false);
   const [envelope, setEnvelope] = useState<ValidationEnvelope | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync local input state when the parent's strategyName arrives after
+  // mount. WizardClient runs its post-mount LS-hydration effect AFTER
+  // CsvUploadStep has already initialized `strategyName` from the
+  // (initially empty) prop, so without this sync the user types into a
+  // field that should have shown their resumed name.
+  //
+  // Clobber-guard: only sync when local state is still the empty default
+  // (`strategyName === ""`). React commits child effects before parent
+  // effects, so on slow paint the user could in theory type before the
+  // hydration prop update lands; the empty-string guard preserves any
+  // already-typed value. The CsvUploadStep.test.tsx suite pins both the
+  // resumed-name backfill and the clobber-guard explicitly.
+  useEffect(() => {
+    if (initialStrategyName && strategyName === "") {
+      setStrategyName(initialStrategyName);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialStrategyName]);
 
   const handleNameChange = useCallback((value: string) => {
     setStrategyName(value);
