@@ -28,6 +28,11 @@ description = "Known test fixtures and placeholder env samples"
 #   contains a canonical JWT fixture
 #   (eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMe...) used to
 #   verify the scrubber redacts JWT-shaped strings. Not a real token.
+# - tests/lib/admin/pii-scrub-python-parity.test.ts: Phase 18 / FIX-04
+#   TS<->Python redaction parity test. Reuses the same canonical jwt.io
+#   tutorial JWT fixture to assert TS-side scrubFreeformString redacts an
+#   embedded JWT (regression for CR-01 + WR-01 four-pass parity with
+#   redact.py). Not a real token.
 # - src/components/error/ErrorEnvelope.test.tsx: Phase 17 component test
 #   exercising the same PII scrubber from the ErrorEnvelope copy-diagnostics
 #   path. Reuses the canonical jwt.io tutorial JWT fixture to assert
@@ -53,6 +58,7 @@ description = "Known test fixtures and placeholder env samples"
 paths = [
   '''(^|/)\.env\.example$''',
   '''(^|/)src/lib/admin/pii-scrub\.test\.ts$''',
+  '''(^|/)tests/lib/admin/pii-scrub-python-parity\.test\.ts$''',
   '''(^|/)src/components/error/ErrorEnvelope\.test\.tsx$''',
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)package-lock\.json$''',

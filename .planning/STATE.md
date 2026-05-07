@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0.0
 milestone_name: API-Key Rewrite
-status: ready_to_plan
-stopped_at: Phase 16 Wave 3 merged — all 10 plans landed; 8 fully complete + 2 partial. Code+tests in repo for every plan. 16-05 Task 5 (migration 098) applied via Supabase MCP to qmnijlgmdhviwzwfyzlc with live RLS verification (anon=0 rows, service_role=visible). Two founder gates remain: 16-07 Task 5 (Railway DEBUG_KEY_FLOW_* env-staging + INTERNAL_API_TOKEN parity + smoke test) and 16-08 Task 3 (one-time recording of 12 VCR cassettes against real test broker creds). Post-merge tests 2731/2731 frontend + 653/653 analytics (excluding cassette-gated test_repro_key_flow.py). Code review + verification gates next.
-last_updated: "2026-05-01T12:38:00.000Z"
-last_activity: 2026-05-01 -- Phase 16 Wave 3 merged + tests pass; founder gates pending; verification next
+status: executing
+stopped_at: Phase 15 COMPLETE — 7 plans + 5 cross-AI fixes + 1 QA copy fix shipped on v1.0.0-api-key-rewrite-15-16. Autonomous run paused per user request before Phase 16.
+last_updated: "2026-05-06T17:13:23.622Z"
+last_activity: 2026-05-06 -- Phase 18 planning complete
 progress:
   total_phases: 5
-  completed_phases: 3
-  total_plans: 17
-  completed_plans: 17
-  percent: 60
+  completed_phases: 2
+  total_plans: 27
+  completed_plans: 22
+  percent: 81
 ---
 
 # Project State
@@ -28,8 +28,8 @@ See: `.planning/PROJECT.md` (updated 2026-04-30 at v1.0.0 milestone start)
 
 Phase: 18
 Plan: Not started
-Status: Ready to plan
-Last activity: 2026-05-01
+Status: Ready to execute
+Last activity: 2026-05-06 -- Phase 18 planning complete
 
 Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15 shipped local on v1.0.0-api-key-rewrite-15-16, awaiting milestone ship)
 
@@ -149,6 +149,7 @@ Progress: [██░░░░░░░░] 20% (1 of 5 phases complete; Phase 15
 - v1.0.0 (this milestone) re-prioritized over v0.18.0.0 Manager Workspace IA on 2026-04-30: founder's #1 operational pain is API-key wizard recurrence + 10 blocked teams + own-fund LP report. Manager Workspace breadth deferred until reliability + dogfood loop are proven.
 - v1.0.0 plan = autoplan-restructured "API-Key Rewrite" with 5 phases (15-19) and conditional Day-2 decision gate. Phase 19 only runs if Phase 16 diagnostic finds the root cause requires architectural rewrite vs single-config fix.
 - Roadmap (2026-04-30) ratified 5-phase structure with explicit wave dependencies + 11 phase-internal gates. Conditional Phase 19 modeled in `.planning/ROADMAP.md` "Conditional Execution Logic" diagram.
+- 2026-05-06 — Phase 18 plan-phase records that BACKBONE-06 (open-perp correctness) + BACKBONE-07 (TWR ≠ YTD reconciliation) push from Phase 18 to Phase 19 per `.planning/phases/18-root-cause-fix-founder-lp-skeleton/18-CONTEXT.md` L22-23. Rationale: Phase 19's `IngestionAdapter.reconstruct_positions` + equity-curve refactor absorbs the same call sites; Phase 18 already heavy with FIX-04 redact mirror + LP cron + 10-team verification. Day-2 doc Section 5's "IN (Phase 18)" rows are now superseded — see `.planning/phase-16/day-2-decision.md` Section 5 REVISED header AND inline row supersede annotations (Adversarial revision 2026-05-06: W6).
 
 ### Cross-AI dual-voice review conventions (from v0.17.0.0 onward)
 

@@ -11,6 +11,10 @@ export default defineConfig({
       "tests/a11y/**/*.test.ts",
       "tests/visual/**/*.test.ts",
       "tests/visual/**/*.test.tsx",
+      // Phase 18 / FIX-04 — TS↔Python parity test reads both
+      // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
+      // via fs.readFileSync to enforce denylist parity across runtimes.
+      "tests/lib/**/*.test.ts",
     ],
     setupFiles: ["src/test-setup.ts"],
     // Coverage tracking — measurement only, NOT a CI gate yet.

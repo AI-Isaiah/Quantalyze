@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.0.0] - 2026-05-07
+
+**Phase 18 — Founder LP report cron + canonical PII redaction across TS and Python + CSV-source unblock.** Closes the v1.0.0 dogfood loop: every month the founder receives their own LP factsheet by email (so regressions are caught BEFORE LPs see them), every Sentry/structlog/audit emission runs through the same denylist on both runtimes, and CSV-onboarded strategies stop bouncing off the database constraint that Phase 15 missed.
+
+### Why
+
+Three independent v1.0.0 blockers, ratified during Phase 18 founder UAT (2026-05-06): (1) ten LP-onboarding teams flowing through the CSV path were silently failing — every CSV submission returned HTTP 500 because the `strategies.source` CHECK constraint admitted only `{legacy,wizard,admin_import,allocator_connected}` even though Phase 15's `finalize_csv_strategy` RPC writes `source='csv'`; (2) the founder had no automated dogfood loop on the LP-facing factsheet PDF — regressions in chart layout, KPI values, or PDF rendering would only surface when LPs noticed and complained; (3) PII redaction lived only in TypeScript (`src/lib/admin/pii-scrub.ts`) — the Python analytics-service Sentry pipeline scrubbed via a separate hand-typed denylist that drifted from the canonical set and missed the six broker-quirk header keys (`x-bapi-*`, `ok-access-*`) that Phase 16 promoted as required.
+
+### Added
+
+- **Monthly founder LP report cron** (`src/app/api/cron/founder-lp-report/route.ts`) — fires at `15 9 1 * *` (1st of month, 09:15 UTC; offset from alert-digest's 09:00 to avoid the puppeteer queue), self-fetches `/api/factsheet/${FOUNDER_LP_STRATEGY_ID}/pdf`, emails the PDF to the founder via Resend. Auth via `Authorization: Bearer ${CRON_SECRET}` with `safeCompare` (constant-time). Vercel cron dispatches GET; manual POST works for incident response.
+- **Canonical Python PII redactor** (`analytics-service/services/redact.py`, 183 lines, stdlib-only) — mirrors `src/lib/admin/pii-scrub.ts` byte-for-byte: 17-key `DENYLIST_EXACT`, `sb-ec-` prefix, anchored + embedded JWT detectors, four-pass `scrub_freeform_string`, recursive `scrub_pii` with `max_depth=100` guard. The `SENSITIVE_KEY_VALUE` regex is built dynamically from `DENYLIST_EXACT` + `DENYLIST_PREFIX` so the freeform-redaction surface cannot drift from the object-walker denylist.
+- **Wire-up of canonical scrub** through Sentry `before_send` (`analytics-service/sentry_init.py`), structlog `_redact_processor` (`analytics-service/services/logging_config.py`), and audit-log formatter args + RPC payload (`analytics-service/services/audit.py`). `_CANONICAL_DENYLIST` is now imported from `services.redact.DENYLIST_EXACT` instead of hand-mirrored.
+- **Factsheet `x-internal-token` rate-limit bypass** (`src/app/api/factsheet/[id]/pdf/route.ts`) — internal cron callers (currently only the founder LP cron) skip `publicIpLimiter` so the monthly cron doesn't contend with alert-digest fan-out on the same Vercel egress IP. Bypass is gated on `VERCEL_ENV='production'` (preview deploys force fall-through), `safeCompare` constant-time match, and a non-empty `INTERNAL_API_TOKEN` env value.
+- **Single-source-of-truth `STRATEGY_SOURCES` constant** (`src/lib/strategy-sources.ts`) — the eight admitted values are now exported as a `as const` tuple plus an `isStrategySource` type guard. `AdminTabs.sourceBadgeLabel` is now a `Record<StrategySource, string>` lookup so adding a new value to the enum is a TypeScript build break until a paired badge label is added.
+- **Shared founder-LP readiness helper** (`src/lib/founder-lp/readiness.ts`) — both the cron route and the `npm run check:founder-lp-readiness` pre-flight script delegate to `checkFounderStrategyReadiness` so the runtime gate and the deploy gate cannot disagree on what "ready" means.
+- **/ship pre-flight gate scripts**: `scripts/verify-phase18-artifacts.ts` (`npm run verify:phase18`) and `scripts/check-founder-lp-readiness.ts` (`npm run check:founder-lp-readiness`).
+- **Migration 100** (`supabase/migrations/100_strategies_source_csv.sql`) — extends `strategies_source_check` to admit `{csv, okx, binance, bybit}`, with `SET lock_timeout = '3s'` to bound apply-time blast radius and a self-verifying `DO` block that `RAISE EXCEPTION` if `pg_constraint` doesn't reflect the change after apply.
+- **Centralized platform branding defaults** (`src/lib/platform.ts`) — `PLATFORM_NAME` / `PLATFORM_EMAIL` import sites replace inline `process.env.PLATFORM_NAME ?? "Quantalyze"` defaults.
+- **Hardening tests added this round (15 new test cases)**: factsheet R1 env-guard (preview rejects bypass + production positive control), factsheet INTERNAL_API_TOKEN delete-env, cron R6 (sub-1KB PDF → PdfTooSmall), cron R7 (>25MB PDF → PdfTooLarge), cron R1 (preview short-circuit), cron S2 (alert email HTML escape), cron T3 (Supabase select error → StrategyNotReady), Python `test_scrub_freeform_string_covers_every_denylist_key` (every canonical key + sb-ec- prefix redacts in `<key>: SECRET` shape), TS parity equivalent across all 17 keys, plus migration 100 regression test.
+
+### Changed
+
+- **Cron route hardening** — magic numbers hoisted to named constants (`FETCH_TIMEOUT_MS=25_000`, `RESEND_TIMEOUT_MS=15_000`, `MIN_PDF_BYTES=1024`, `MAX_PDF_BYTES=25_000_000`, `MAX_RETRY_AFTER_S=20`); log prefixes split (`[CRON_DOUBLE_FAILURE]` for the both-alerts-failed escalation vs `[CRON_UNHANDLED_REJECTION]` for the listener path); every Resend send wrapped in `withTimeout` (Resend SDK has no built-in ceiling so a hung send could otherwise burn the lambda's 60s budget without writing a response); `Retry-After` upper-bounded so a malicious 999999s value can't pin the lambda; `NEXT_PUBLIC_APP_URL` host validated against an allowlist before forwarding `INTERNAL_API_TOKEN`; `error_class` / `error_message` HTML-escaped before email interpolation.
+- **TS `pii-scrub.ts`** — `SENSITIVE_KEY_VALUE` regex rebuilt from `DENYLIST_EXACT` + `DENYLIST_PREFIX` so Pass 1/4 of `scrubFreeformString` cannot drift from the object-walker denylist (was missing 7 canonical keys before today). Added `MAX_DEPTH=100` recursion guard to match the Python mirror's `Grok-W3` ceiling.
+- **`audit.py`** — exception-handler wraps `scrub_pii` in a nested try/except and pre-truncates `str(exc)` to 4096 chars so a `RecursionError` raised by the redactor on a pathological exception cannot escape the outer except and break the documented fire-and-forget contract.
+- **`AdminTabs.sourceBadgeLabel`** — admin Strategy Review tab now renders truthful badges for every `strategies.source` value (was rendering "legacy" for csv-onboarded teams + every forward-compat broker source).
+
+### Fixed
+
+- **CSV-onboarded strategies were silently failing** (Phase 15 / CSV-finalize unblock) — migration 100 admits `'csv'` so the `finalize_csv_strategy` RPC's INSERT no longer violates `strategies_source_check`. Zero CSV strategies had been ingested in production before this fix.
+- **`VERCEL_ENV` and `NEXT_PUBLIC_APP_URL` are now read at handler-call time** (was module-load constants) — `vi.resetModules()` in tests no longer bakes a stale env value into the route's behavior.
+
+### Removed
+
+- Hand-typed `_CANONICAL_DENYLIST` frozenset in `analytics-service/sentry_init.py` (now imported from `services.redact.DENYLIST_EXACT`).
+- A misleading `req.headers.set('x-correlation-id', ...)` no-op in the factsheet bypass branch (the inbound header is already in `next/headers` automatically — the explicit set was cosmetic and confusing).
+
 ## [0.21.5.0] - 2026-05-06
 
 **Bybit `WITHDRAW_SCOPE` false-positive fix — read-only Bybit keys with populated `Wallet` arrays no longer get rejected.** Phase 18 follow-up to PRs #118/#119 that extends the "`readOnly` flag supersedes permissions arrays" rule to withdraw detection, after live testnet evidence falsified the original "`readOnly=1` → `Wallet=[]`" assumption. Plus smoke harness now defaults to `okx bybit` only since the founder has no Binance account and the testnet endpoint has been intermittently 502.

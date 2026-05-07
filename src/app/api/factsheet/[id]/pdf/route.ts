@@ -9,27 +9,66 @@ import {
 } from "@/lib/puppeteer";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
+import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const maxDuration = 30;
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+// Phase 18 / round-2 (Claude adv conf 4) — function-form (vs module-load
+// const) so vi.resetModules() in tests can drop a stale value, mirroring the
+// cron route's appUrl()/vercelEnv() pattern. Vercel injects the env at
+// runtime so the cost of re-reading per request is negligible.
+function appUrl(): string {
+  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+}
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  // Cross-lambda IP rate limit. Returns 429 BEFORE we touch the
-  // acquirePdfSlot semaphore or any DB query — so a scraper hammering this
-  // surface can't burn the in-memory queue or generate Supabase load.
-  // Cache hits served from Vercel's CDN bypass this entirely, which is the
-  // correct behavior for a public IP-based limiter.
-  const ip = getClientIp(req.headers);
-  const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
-  if (!rl.success) {
-    return new NextResponse("Rate limit exceeded", {
-      status: 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    });
+  // Adversarial revision 2026-05-06 (Phase 18 Plan 03 / B4) — internal cron
+  // callers (e.g. /api/cron/founder-lp-report) pass `x-internal-token:
+  // ${INTERNAL_API_TOKEN}` to bypass `publicIpLimiter`. This prevents the
+  // monthly LP cron from contending with alert-digest fan-out on the same
+  // public IP pool. Token validated via safeCompare (constant time); empty
+  // or missing token falls through to the existing public rate limiter so
+  // unauthenticated callers see no behavior change.
+  //
+  // Phase 18 / R1 — additionally gate the bypass on VERCEL_ENV='production'.
+  // A preview deploy with a leaked token would otherwise let any caller skip
+  // the public limiter via `x-internal-token`. Local dev (VERCEL_ENV unset)
+  // still honors the bypass so the cron's smoke test works.
+  const vercelEnv = process.env.VERCEL_ENV;
+  const isProductionOrLocal = vercelEnv === undefined || vercelEnv === "production";
+  const internalToken = req.headers.get("x-internal-token");
+  const internalEnv = process.env.INTERNAL_API_TOKEN;
+  const isInternalCall =
+    isProductionOrLocal &&
+    internalToken !== null &&
+    typeof internalEnv === "string" &&
+    internalEnv.length > 0 &&
+    safeCompare(internalToken, internalEnv);
+  // Phase 18 / R13 — the cron's `x-correlation-id` arrives on this
+  // request automatically (Vercel routes it through to next/headers).
+  // Downstream callers using `getCorrelationId()` from `@/lib/correlation-id`
+  // will read it directly from the request-scoped store; no copy needed.
+  // (An earlier fix attempted `req.headers.set(...)` here; that was a
+  // no-op against `next/headers` and has been removed — the contract
+  // is honored by Next.js itself.)
+
+  if (!isInternalCall) {
+    // Cross-lambda IP rate limit. Returns 429 BEFORE we touch the
+    // acquirePdfSlot semaphore or any DB query — so a scraper hammering this
+    // surface can't burn the in-memory queue or generate Supabase load.
+    // Cache hits served from Vercel's CDN bypass this entirely, which is the
+    // correct behavior for a public IP-based limiter.
+    const ip = getClientIp(req.headers);
+    const rl = await checkLimit(publicIpLimiter, `pdf:${ip}`);
+    if (!rl.success) {
+      return new NextResponse("Rate limit exceeded", {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      });
+    }
   }
 
   const { id } = await params;
@@ -67,7 +106,7 @@ export async function GET(
     page.setDefaultTimeout(15_000);
     await page.setViewport({ width: 800, height: 1100 });
 
-    await page.goto(`${APP_URL}/factsheet/${id}`, {
+    await page.goto(`${appUrl()}/factsheet/${id}`, {
       waitUntil: "networkidle0",
       timeout: 25000,
     });

@@ -46,9 +46,9 @@ quantalyze/
         portfolios/   # Portfolio dashboard, management, documents
       demo/           # Public editorial /demo hero — 3 personas (?persona=active|cold|stalled)
       api/            # API routes
-        cron/         # Vercel Cron handlers (warm-analytics)
+        cron/         # Vercel Cron handlers (warm-analytics, sync-funding, reconcile-strategies, cleanup-wizard-drafts, cleanup-ack-tokens, founder-lp-report)
         demo/         # Public demo endpoints (signed-token portfolio-pdf)
-        # plus: verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences
+        # plus: verify-strategy, portfolio-*, alert-digest, admin/match/*, preferences, factsheet/[id]/pdf
     components/       # React components (ui/, layout/, charts/, strategy/, portfolio/, admin/, preferences/, landing/, auth/)
     hooks/            # Reusable React hooks (useKeyboardShortcuts)
     lib/              # Utilities, types, Supabase clients, queries, preferences, personas, portfolio-insights
@@ -92,6 +92,8 @@ Version and changelog live in `VERSION` (4-digit `MAJOR.MINOR.PATCH.MICRO`) and
 | `npm run typecheck` | Run TypeScript type checker |
 | `npm test` | Run Vitest tests |
 | `npm run test:e2e` | Run Playwright E2E tests |
+| `npm run verify:phase18` | Verify Phase 18 artifacts (canonical redactor parity, founder LP cron, migration 100) |
+| `npm run check:founder-lp-readiness` | Pre-flight check for `FOUNDER_LP_STRATEGY_ID` (status=published, has factsheet) before the monthly cron's first tick |
 | `npm run worker:dev` | Run the analytics worker locally against `analytics-service/.env` |
 
 ## Analytics Service (Optional)

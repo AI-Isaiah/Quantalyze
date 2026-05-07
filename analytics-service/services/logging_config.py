@@ -26,6 +26,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+# Phase 18 / FIX-04 — canonical PII scrub. Inserted into the structlog
+# processor pipeline below so every event_dict walks through scrub_pii
+# BEFORE JSONRenderer egress.
+from services.redact import scrub_pii as _redact_scrub_pii
+
 
 # Module-scope ContextVar for surgical Token-based reset (FIX 11).
 # This complements structlog's internal contextvars — we register an explicit
@@ -35,11 +40,38 @@ correlation_id_var: ContextVar[str | None] = ContextVar(
 )
 
 
+def _redact_processor(_logger, _method_name, event_dict):
+    """structlog processor — walks every event_dict through scrub_pii so
+    denylisted key shapes never leak into the JSON log line.
+
+    Fail-open invariant: NEVER raises. A redaction bug here must not break
+    the request lifecycle. On any exception we fall through with the
+    unscrubbed event_dict and the request keeps moving.
+
+    Phase 18 / FIX-04. Inserted between merge_contextvars and add_log_level
+    so the contextvar-bound fields ARE included in the scrub pass (covers
+    correlation_id and any future user_id-bound contextvar) and the level/
+    timestamp/JSON-render processors still see the scrubbed dict.
+    """
+    try:
+        scrubbed = _redact_scrub_pii(event_dict)
+        # scrub_pii on a Mapping returns a plain dict — that's exactly what
+        # the next processor in the chain expects.
+        if isinstance(scrubbed, dict):
+            return scrubbed
+        return event_dict
+    except Exception:
+        return event_dict
+
+
 def configure_logging() -> None:
     """Configure structlog ONCE at process startup. Call BEFORE app = FastAPI()."""
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
+            # Phase 18 / FIX-04 — redact processor BEFORE add_log_level so
+            # downstream processors operate on the already-scrubbed event_dict.
+            _redact_processor,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.dict_tracebacks,

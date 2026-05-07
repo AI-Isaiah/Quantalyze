@@ -33,6 +33,16 @@ const DENYLIST_EXACT = new Set<string>([
   // on the seam to FastAPI; outbound HTTP breadcrumbs would otherwise
   // capture it).
   "x-internal-token",
+  // Phase 18 / FIX-04 — Adversarial revision 2026-05-06 (Grok B1):
+  // Bybit v5 + OKX broker-quirk header keys promoted to the canonical
+  // denylist so both runtimes (TS + Python redact.py) share the same
+  // surface. Mirrors analytics-service/sentry_init.py _PII_KEYS subset.
+  "x-bapi-apikey",
+  "x-bapi-sign",
+  "x-bapi-signature",
+  "ok-access-passphrase",
+  "ok-access-key",
+  "ok-access-timestamp",
 ]);
 
 const DENYLIST_PREFIX = ["sb-ec-"];
@@ -49,13 +59,36 @@ const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const JWT_SUBSTRING =
   /[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
 
-// Sensitive `key: value` / `key=value` substring detector. Anchored on a
-// key-shaped substring (one of the listed words) followed by `=`, `:`,
-// `=>`, or whitespace, then captures the value up to the next
-// whitespace/quote/end-of-string. Mirrors the DENYLIST_EXACT contract:
-// any future denylist key SHOULD be reflected here too.
+// Sensitive `key: value` / `key=value` substring detector. Built dynamically
+// from `DENYLIST_EXACT` + `DENYLIST_PREFIX` so Pass 1/4 of `scrubFreeformString`
+// can never drift from the object-walker denylist. Phase 18 / FIX-04 caught a
+// drift class where `x-bapi-apikey` / `ok-access-passphrase` / `sb-ec-*` were
+// in the object-key denylist but absent from the freeform regex. Regex-meta
+// chars in keys are escaped before alternation. Extra alternates (`password`,
+// `token`, `credential`, `cookie`, `session`, `bearer`) cover key-SHAPED words
+// that don't exactly match a denylist entry.
+const REGEX_META = /[.*+?^${}()|[\]\\]/g;
+function escapeRegex(s: string): string {
+  return s.replace(REGEX_META, "\\$&");
+}
+const FREEFORM_KEY_ALTERNATES: ReadonlyArray<string> = [
+  "api[-_]?key",
+  "api[-_]?secret",
+  "password",
+  "token",
+  "credential",
+  "cookie",
+  "session",
+  "bearer",
+];
 const SENSITIVE_KEY_VALUE = new RegExp(
-  "\\b((?:api[-_]?key|api[-_]?secret|x-mbx-apikey|ok-access-sign|secret|passphrase|password|token|credential|cookie|session|authorization|bearer))\\s*[:=]+\\s*['\"]?([^\\s'\"]+)['\"]?",
+  "\\b((?:" +
+    [
+      ...Array.from(DENYLIST_EXACT).map(escapeRegex),
+      ...DENYLIST_PREFIX.map((p) => `${escapeRegex(p)}[A-Za-z0-9_-]*`),
+      ...FREEFORM_KEY_ALTERNATES,
+    ].join("|") +
+    "))\\s*[:=]+\\s*['\"]?([^\\s'\"]+)['\"]?",
   "gi",
 );
 
@@ -79,17 +112,33 @@ function scrubString(value: string): string {
  * Recursive JSONB walker. Plain data in → plain data out, with any
  * denylisted keys or JWT-shaped strings replaced in place.
  *
- * Cycles: JSON does not have cycles by construction. If a caller hands a
- * non-JSON object graph with cycles, this will overflow the stack. That
- * is acceptable — the expected input is strictly JSONB read from Postgres.
+ * Cycles: JSON does not have cycles by construction. The `max_depth` guard
+ * (default 100, value-symmetric with `redact.py::MAX_DEPTH`) bounds
+ * pathological deeply-nested input so a malicious adversary can't push V8
+ * past its hard stack ceiling. On overflow the offending node is replaced
+ * with `[REDACTED]` and sibling scrubbing continues — partial-scrub fail
+ * mode.
+ *
+ * **Cross-language asymmetry (Claude adv round-2 conf 6):** the Python
+ * mirror RAISES `RecursionError` on overflow; the upstream
+ * `_redact_processor` catches and returns the FULL UNSCRUBBED document
+ * (fail-OPEN). The TS side here returns a partially-scrubbed document
+ * (fail-CLOSED at the offending node). The values are equal but the
+ * failure modes differ. This is a deliberate trade-off: the TS surface is
+ * admin-page rendering (fail-closed is safer) while the Python surface is
+ * Sentry breadcrumbs (fail-open keeps observability online). When a parity
+ * test on a 110-deep dict is added, lock both behaviors explicitly.
  */
-export function scrubPii(value: unknown): unknown {
+const MAX_DEPTH = 100;
+
+function scrubPiiInner(value: unknown, depth: number): unknown {
+  if (depth > MAX_DEPTH) return REDACTED;
   if (value === null || value === undefined) return value;
   if (typeof value === "string") return scrubString(value);
   if (typeof value === "number" || typeof value === "boolean") return value;
 
   if (Array.isArray(value)) {
-    return value.map((item) => scrubPii(item));
+    return value.map((item) => scrubPiiInner(item, depth + 1));
   }
 
   if (typeof value === "object") {
@@ -100,12 +149,16 @@ export function scrubPii(value: unknown): unknown {
         out[key] = REDACTED;
         continue;
       }
-      out[key] = scrubPii(source[key]);
+      out[key] = scrubPiiInner(source[key], depth + 1);
     }
     return out;
   }
 
   return value;
+}
+
+export function scrubPii(value: unknown): unknown {
+  return scrubPiiInner(value, 0);
 }
 
 /**
@@ -121,7 +174,7 @@ export function truncateAccountId(id: string): string {
 }
 
 /**
- * Three-pass redaction for freeform strings (e.g. wizard `debug_context`
+ * Four-pass redaction for freeform strings (e.g. wizard `debug_context`
  * lines copied to clipboard via `<ErrorEnvelope>`). Use this for any
  * user-visible exfiltration surface where the value is a free-form string
  * that may contain `key: value` shapes, whole-string JWTs, or JWTs
@@ -138,11 +191,17 @@ export function truncateAccountId(id: string): string {
  *          ANYWHERE in the line. Loads-bearing for `Authorization: Bearer
  *          <JWT>` style payloads where Pass 1 captures only `Bearer` (the
  *          key-shaped word) and Pass 2's anchored match fails.
+ * Pass 4 — `SENSITIVE_KEY_VALUE` (transitive re-walk): re-runs the
+ *          key-value sub on Pass 3's output to catch denylisted-key shapes
+ *          that an earlier redaction may have surfaced (Phase 18 / WR-01
+ *          parity with `redact.py` Grok B1 secondary pass). Cheap — `RegExp`
+ *          test is O(n) over an already-redacted line.
  *
- * Together the three passes give the same coverage as the original
+ * Together the four passes give the same coverage as the original
  * inline implementation in `ErrorEnvelope.tsx` (Phase 17 / DESIGN-02 /
- * CR-01) but lives in the canonical PII module so future denylist
- * additions need only one edit.
+ * CR-01) and BYTE-FOR-BYTE parity with `analytics-service/services/
+ * redact.py::scrub_freeform_string`. Future denylist additions need
+ * only one edit.
  */
 export function scrubFreeformString(value: string): string {
   // Pass 1: key:value substring redaction.
@@ -157,5 +216,12 @@ export function scrubFreeformString(value: string): string {
   const asString =
     typeof pass2 === "string" ? pass2 : String(pass2 ?? "");
   // Pass 3: substring JWT redaction (catches embedded JWTs).
-  return asString.replace(JWT_SUBSTRING, REDACTED_JWT);
+  const pass3 = asString.replace(JWT_SUBSTRING, REDACTED_JWT);
+  // Pass 4: transitive re-walk (Phase 18 / WR-01 — parity with
+  // redact.py Grok B1 secondary). Catches denylisted key:value shapes
+  // that survived Pass 1 because Pass 1 redaction or Pass 3 JWT
+  // substitution exposed a fresh `key: value` shape on the same line.
+  return pass3.replace(SENSITIVE_KEY_VALUE, (_match, keyName) => {
+    return `${keyName}: [REDACTED]`;
+  });
 }

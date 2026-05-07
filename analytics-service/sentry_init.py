@@ -31,6 +31,18 @@ import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 
+# Phase 18 / FIX-04 — canonical PII scrub module. The walker below is now a
+# thin shim around services.redact.scrub_pii (which mirrors src/lib/admin/
+# pii-scrub.ts byte-for-byte at the API layer, including the 6 broker-quirk
+# header keys promoted in Adversarial revision Grok B1). Local _PII_KEYS
+# remains the surface enumeration ground truth for THIS module — it carries
+# additional defense-in-depth keys (e.g. x-bapi-timestamp, x-mbx-time-unit)
+# that have NOT yet been promoted to the canonical denylist.
+from services.redact import (
+    scrub_pii as _redact_scrub_pii,
+    DENYLIST_EXACT as _CANONICAL_DENYLIST,
+)
+
 
 # ---------------------------------------------------------------------------
 # Mirror of src/lib/admin/pii-scrub.ts L16-25 DENYLIST_EXACT (8 keys) PLUS the
@@ -101,20 +113,70 @@ def _scrub_value(value: Any) -> Any:
     return value
 
 
-def _scrub(value: Any) -> Any:
-    """Recursive denylist walker. Replaces matching keys with [REDACTED] (case-insensitive)
-    AND scrubs JWT-shaped string values regardless of key name."""
+# Phase 18 / FIX-04 — Adversarial revision Grok B1: 6 broker-quirk keys
+# (x-bapi-apikey, x-bapi-sign, x-bapi-signature, ok-access-passphrase,
+# ok-access-key, ok-access-timestamp) were PROMOTED into the canonical
+# denylist in `services.redact.DENYLIST_EXACT`. The local `_PII_KEYS` retains
+# additional Bybit/Binance defense-in-depth keys (x-bapi-timestamp,
+# x-bapi-recv-window, x-bapi-sign-type, x-bapi-api-key, x-mbx-time-unit)
+# that have NOT yet been promoted. The two-stage walker below covers both:
+# (a) canonical scrub via `services.redact.scrub_pii`, then
+# (b) broker-quirk sweep over the local extras.
+#
+# Phase 18 / M9 — `_CANONICAL_DENYLIST` is imported directly from
+# `services.redact.DENYLIST_EXACT` (above) so the mirror cannot drift.
+# Promoting a key in `redact.py` shrinks `_BROKER_QUIRK_KEYS` automatically.
+
+# Forward-compat slot — keys still in _PII_KEYS but NOT yet in the canonical
+# denylist. After Grok B1 promotion this is non-empty for the Bybit
+# x-bapi-timestamp / x-bapi-recv-window / x-bapi-sign-type / x-bapi-api-key
+# (hyphenated form) and Binance x-mbx-time-unit headers.
+_BROKER_QUIRK_KEYS: frozenset[str] = _PII_KEYS - _CANONICAL_DENYLIST
+
+
+def _broker_quirk_sweep(value: Any) -> Any:
+    """Walk the canonical-scrubbed structure once more for keys that are in
+    `_PII_KEYS` but NOT in the canonical denylist (forward-compat slot)."""
     if isinstance(value, Mapping):
         out: dict[str, Any] = {}
         for k, v in value.items():
-            if _is_denylisted_key(k):
+            if isinstance(k, str) and k.lower() in _BROKER_QUIRK_KEYS:
                 out[k] = _REDACTED
             else:
-                out[k] = _scrub(v)
+                out[k] = _broker_quirk_sweep(v)
         return out
     if isinstance(value, list):
-        return [_scrub(v) for v in value]
-    return _scrub_value(value)
+        return [_broker_quirk_sweep(v) for v in value]
+    return value
+
+
+def _scrub(value: Any) -> Any:
+    """Two-stage scrub:
+      (a) canonical scrub via services.redact.scrub_pii (covers all 17 TS-mirrored
+          keys including broker-quirk x-bapi-* / ok-access-* per Grok B1, plus
+          sb-ec- prefix and JWT-shape detection),
+      (b) broker-quirk sweep for the local extras still in `_PII_KEYS` but not
+          yet in the canonical denylist.
+
+    JWT_SUBSTRING substring detection inside un-anchored strings is intentionally
+    NOT applied here — the Sentry surface assumes structured headers/cookies/data
+    where keys are dict keys, not embedded `key=value` substrings.
+
+    Phase 18 / WR-05 — note on (b): once stage (a) has redacted a key
+    that is ALSO in `_PII_KEYS`, stage (b) walks the redacted value
+    (already a `[REDACTED]` string) and is a structural no-op for that
+    branch. Stage (b) is only load-bearing for the 5 keys still in
+    `_BROKER_QUIRK_KEYS` (i.e. `_PII_KEYS - _CANONICAL_DENYLIST`):
+    `x-bapi-api-key` (hyphenated form), `x-bapi-timestamp`,
+    `x-bapi-recv-window`, `x-bapi-sign-type`, `x-mbx-time-unit`. These
+    haven't been promoted to the canonical denylist yet, so stage (b)
+    catches them as a forward-compat slot. Performance is negligible —
+    deepest observed Sentry event dict is 7 levels per Grok W3 — and
+    promoting any of these keys to the canonical denylist will simply
+    shift their handling from (b) to (a) with no behavior change.
+    """
+    canonical = _redact_scrub_pii(value)
+    return _broker_quirk_sweep(canonical)
 
 
 def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> dict[str, Any]:

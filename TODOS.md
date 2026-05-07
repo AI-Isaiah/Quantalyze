@@ -12,6 +12,28 @@
 
 ---
 
+## Phase 18 — Root-Cause Fix + Founder LP Skeleton
+
+- 10-team onboarding tracker: [`.planning/phase-18/team-status.md`](.planning/phase-18/team-status.md) — one row per onboarding team (FIX-03). Founder updates as teams flow through the wizard.
+- Founder OKX smoke evidence template (FIX-02): [`.planning/phase-18/founder-okx-smoke.md`](.planning/phase-18/founder-okx-smoke.md). Filled at /ship time.
+- In-flight traceability (FIX-01 record-only): [`.planning/phase-18/in-flight-traceability.md`](.planning/phase-18/in-flight-traceability.md).
+
+### v1.1 follow-up: CSV daily-return scale auto-detect (operational friction surfaced 2026-05-06)
+
+CSV ingestion (Phase 15 / CSV-02 schema) currently requires daily returns in **decimal** form (-0.0605 = -6.05%). Founder's real-world LP-team CSVs arrive in mixed formats — some in **percent points** (-6.05), some in **decimals** (-0.0605), some as **whole-number basis points** depending on the team's tooling. Today the schema rejects anything where any single row exceeds the `> -100% impossible` rule (i.e. value `< -1.0`), which means percent-point CSVs fail with N rows of "Column 'daily_return' failed: -X.XXX" and the founder has to hand-convert before re-uploading.
+
+**Proposed enhancement (CSV-02 v1.1):** ingestion auto-detects the scale and normalizes:
+
+1. **Decimal (default):** if every value is `|v| < 1.0`, treat as decimal — current behavior.
+2. **Percent points:** if 5+ rows have `1.0 ≤ |v| < 100.0`, divide everything by 100. Surface a "detected percent format — auto-converted; NN values divided by 100" toast in the validator step.
+3. **Whole numbers / basis points:** if 5+ rows have `|v| ≥ 100.0`, divide by 10000. Same auto-convert toast.
+
+**Why this matters:** v1 founder LP teams won't standardize their export pipelines; making upload "just work" removes a per-team friction point. The fix is small (heuristic in `analytics-service/services/csv_validator.py` before pandera schema validation) and is testable via the existing CSV fixture corpus.
+
+**Surface deferred to v1.1** — Phase 18 already shipped; opens after v1.0.0 ships.
+
+---
+
 ## DISCO-05 migration drift — Path C ratified (2026-05-01, v1.0.0 Phase 16 prep)
 
 **Decision:** Path C — accept the local-only state for migrations 091 (DISCO-05

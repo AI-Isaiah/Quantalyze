@@ -162,7 +162,7 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
 ### Phase 18: Root-Cause Fix + Founder LP Skeleton
 **Goal**: Fix the actual bug Phase 16 surfaced with a regression test that fails without the fix; ship the Python `redact.py` mirror of the existing `pii-scrub.ts` (NOT a parallel `src/lib/redact.ts`); ship the founder LP report cron reusing the existing factsheet PDF endpoint to establish the dogfood loop that prevented the prior 5-patch recurrence pattern from sticking.
 **Depends on**: Phase 16 root cause surfaced (Phase 18 cannot start until Day-2 decision document lands — fix scope is unknown until then); Phase 17 design contract complete (Phase 18 wires `pii-scrub.ts` at TypeScript error-handler boundaries that must use the locked envelope shape).
-**Entry gate**: Theme 4 ≥1 verbal-in-writing Metaworld commitment (text logged in `.planning/phase-18/metaworld-commitment.md`) before Phase 18 starts. Without commitment, log gap and reduce Phase 19 scope to "internal infrastructure only" (no marketplace credibility claim).
+**Entry gate**: Theme 4 ≥1 verbal-in-writing Metaworld commitment (text logged in `.planning/phase-18/metaworld-commitment.md`) before Phase 18 starts. Without commitment, log gap and reduce Phase 19 scope to "internal infrastructure only" (no marketplace credibility claim). **SATISFIED 2026-05-06.**
 **Requirements**: FIX-01, FIX-02, FIX-03, FIX-04, LP-01, LP-02, LP-03
 **Success Criteria** (what must be TRUE):
   1. Founder's own OKX test key passes the wizard end-to-end in production-equivalent environment — `strategies` row at `status='active'`, `encrypted_key` decrypts cleanly via Vault to the exact original tuple, regression test for the surfaced root cause fails without the fix
@@ -170,8 +170,12 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   3. PII redaction utility — `analytics-service/services/redact.py` mirrors existing `pii-scrub.ts` denylist (8 keys: `apikey | apisecret | secret | signature | passphrase | authorization | x-mbx-apikey | ok-access-sign`) with case-insensitive regex, recursive walker, JWT-shape detector, account-id truncator; shared 20-bad / 5-good fixture corpus across TS + Python; grep over Supabase log table after a test run shows zero PII
   4. Founder LP report cron emits monthly PDF via existing `/api/factsheet/[id]/pdf` endpoint reused as-is (no branded design dependency); Sentry capture with cron-failure tag + correlation_id surfaces alert on failure; silent failure prohibited
   5. Phase 18 exit interview captures founder verbal-in-writing commitment to send the unedited cron PDF to a real LP within 14 days of milestone close (text logged in `.planning/phase-18/dogfood-commitment.md`)
-**Plans**: TBD
-**Complexity**: MEDIUM (root-cause fix scope unknown until Phase 16 surfaces it; Python `redact.py` mirror is straightforward (denylist matches `pii-scrub.ts`); LP cron is reuse not new build).
+**Plans**: 4 plans (Wave 1: 18-01 — traceability + smoke template + 10-team tracker, no code; Wave 2: 18-02 + 18-03 parallel — redact.py + LP cron, independent code paths; Wave 3: 18-04 — doc updates depending on Wave 2 outcomes)
+- [ ] 18-01-PLAN.md — Phase 18 traceability (PR #116 + Bug #1 + Bybit quirks record-only) + founder OKX smoke evidence template + 10-team onboarding tracker (FIX-01 + FIX-02 + FIX-03)
+- [ ] 18-02-PLAN.md — `analytics-service/services/redact.py` Python mirror of `pii-scrub.ts` + 3 wire-up boundaries (Sentry before_send, structlog processor, audit-log writer) + shared 20-bad / 5-good fixture corpus + Vitest TS↔Python denylist parity test (FIX-04)
+- [ ] 18-03-PLAN.md — Founder LP cron at `/api/cron/founder-lp-report` (`0 9 1 * *`) reusing existing factsheet PDF endpoint + Resend send with PDF attachment + dual-alert (Sentry + Resend) failure path per Pitfall 7 + vercel.json registration + .env.example documentation (LP-01 + LP-02)
+- [ ] 18-04-PLAN.md — Dogfood-commitment.md stub (LP-03; founder fills at /ship time) + REQUIREMENTS/ROADMAP/STATE doc-sync pushing BACKBONE-06/-07 from Phase 18 to Phase 19 + Day-2 doc Section 5 REVISED header (LP-03 + cross-cutting docs)
+**Complexity**: MEDIUM (root-cause fix already shipped in-flight via PR #116 + commits a48a92e/1960f54; scope is now traceability + redact.py mirror + LP cron + doc-sync; BACKBONE-06/-07 push to Phase 19 per CONTEXT.md L22-23).
 **Exit gate**: All 10 teams reach `published` (API teams) or `validated` (CSV teams). Founder LP commitment text in writing. PII grep over Supabase log table returns zero credential-shaped strings.
 
 ### Phase 19: Unified Backbone *(conditional on Day-2 gate = COMMIT)*
@@ -188,6 +192,7 @@ See `milestones/v0.17.0.0-ROADMAP.md` for full phase details, success criteria, 
   4. VIEW-shim migration sequence ships as exactly 4 sequential PRs (plan-checker rejects exit if any single PR combines adjacent steps): (a) repoint `verify-strategy/route.ts:115` UPDATE to `strategy_verifications` BEFORE rename, (b) flip `process_key_unified_backbone` flag, (c) verify zero writes to old table over ≥24h via logs + 7 calendar days at 100% rollout, (d) rename old to `verification_requests_legacy` + `CREATE VIEW verification_requests AS SELECT ... FROM strategy_verifications` with `INSTEAD OF` triggers (read-only enforcement); legacy retained read-only 90 days
   5. `wizard_session_id` UNIQUE INDEX prevents wizard-double-submit duplicates; long-fetch flows dispatch via existing PR #53 worker dyno on Railway (`compute_jobs.kind='process_key_long'`, `priority='normal'`) avoiding Vercel 300s timeout; `/api/cron/flag-monitor` cron polls Sentry events API + Vercel REST API every 15 min and flips feature flag if error-envelope rate > 0.5% in 15-min window; drain semantics — `compute_jobs.metadata->'unified_backbone_at_claim'` locked at job-claim time so flag flip mid-execution doesn't split-brain in-flight jobs
   6. `strategies.fingerprint JSONB` column added (versioned shape with per-component arrays preserving identity for future weighting); partial index `WHERE fingerprint IS NOT NULL`; `compute_similarity(a JSONB, b JSONB) RETURNS NUMERIC` SQL function (`IMMUTABLE PARALLEL SAFE`, plain plpgsql cosine, returns 0.0 on shape mismatch never errors); pgvector explicitly deferred to v2 per UC-C
+  7. Open-perp position valuation correctness (BACKBONE-06) + TWR ≠ YTD reconciliation at the equity-curve layer (BACKBONE-07) ship as part of Phase 19 — pushed from Phase 18 (per `.planning/phases/18-root-cause-fix-founder-lp-skeleton/18-CONTEXT.md` L22-23) because they pair naturally with `IngestionAdapter.reconstruct_positions` and the equity-curve unification.
 **Plans**: TBD
 **Complexity**: HIGH (full unified backbone; +1-2 days for perp correctness per E-9; conditional execution; 4-PR VIEW-shim sequence enforced; idempotency + drain semantics + flag-monitor cron; 10 BACKBONE REQs + 2 FINGERPRINT REQs are 6 distinct architectural workstreams).
 **UI hint**: yes
@@ -264,5 +269,5 @@ Phases execute in numeric order: 15 → 16 → [Day-2 gate] → 17 → 18 → 19
 | 15. CSV Unblock | v1.0.0 | 0/6 | Not started | - |
 | 16. Diagnostic Spike + Observability | v1.0.0 | 9/10 | Complete    | 2026-05-01 |
 | 17. Design Contract | v1.0.0 | 6/6 | Complete    | 2026-05-01 |
-| 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/TBD | Not started | - |
+| 18. Root-Cause Fix + Founder LP Skeleton | v1.0.0 | 0/4 | Not started | - |
 | 19. Unified Backbone (conditional) | v1.0.0 | 0/TBD | Not started | - |
