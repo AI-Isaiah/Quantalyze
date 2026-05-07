@@ -72,7 +72,10 @@ import { getCorrelationId } from "@/lib/correlation-id";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
 import { getPlatformName, getPlatformEmail } from "@/lib/platform";
-import { escapeHtml } from "@/lib/email";
+import {
+  renderSuccessEmailHtml,
+  renderFailureAlertHtml,
+} from "@/lib/founder-lp/email-templates";
 
 export const dynamic = "force-dynamic";
 // Vercel Pro lambda ceiling for cron handlers is 60s. The internal fetch
@@ -224,19 +227,25 @@ async function sendFailureAlert(
   ctx: { correlation_id: string; error_class: string; error_message: string },
 ): Promise<void> {
   if (!resend || !to) return;
-  // Phase 18 / S2 — escape user/upstream-controlled fields before HTML
-  // interpolation. Today every error_message originates from server-side
-  // strings, but a future caller wrapping a user-controlled error must
-  // not be able to render arbitrary HTML in the founder's inbox.
-  const safeClass = escapeHtml(ctx.error_class);
-  const safeMessage = escapeHtml(ctx.error_message);
-  const safeCid = escapeHtml(ctx.correlation_id);
+  // Phase 18 / round-2 polish — render the alert HTML via the templated
+  // email module so escape-on-interpolation, brand strip, hairline
+  // dividers, and the FactSet-aligned typography all live in one place
+  // and stay aligned with DESIGN.md.
+  const monthLabel = new Date().toLocaleString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+  const html = renderFailureAlertHtml({
+    correlationId: ctx.correlation_id,
+    monthLabel,
+    errorClass: ctx.error_class,
+    errorMessage: ctx.error_message,
+  });
   const send = resend.emails.send({
     from: `${getPlatformName()} <${getPlatformEmail()}>`,
     to,
     subject: `[ALERT] Founder LP cron FAILED — ${new Date().toISOString().slice(0, 10)}`,
-    html: `<p>The founder LP report cron failed. correlation_id=${safeCid}</p>
-           <pre style="font-family:monospace;">${safeClass}: ${safeMessage}</pre>`,
+    html,
     tags: [
       { name: "correlation_id", value: ctx.correlation_id },
       { name: "kind", value: "cron_failure_alert" },
@@ -488,12 +497,22 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         year: "numeric",
       });
 
+      // Phase 18 / round-2 polish — institutional-factsheet HTML email
+      // rendered via `@/lib/founder-lp/email-templates` so DESIGN.md
+      // tokens (Charter serif fallback, hairline dividers, accent strip,
+      // FactSet-aligned typography) live in one place. Strategy name
+      // surfaces from readiness.ok via the typed `name` field; falls back
+      // to a generic phrase when the row's name is null.
       const successSend = resend.emails.send({
         from: `${getPlatformName()} <${getPlatformEmail()}>`,
         to: recipient,
         subject: `Founder LP report — ${monthLabel}`,
-        html: `<p>Monthly LP factsheet attached.</p>
-               <p style="color:#666;font-size:12px;">correlation_id: ${escapeHtml(correlation_id)}</p>`,
+        html: renderSuccessEmailHtml({
+          correlationId: correlation_id,
+          monthLabel,
+          strategyName: readiness.name,
+          pdfBytes: pdfBuffer.length,
+        }),
         attachments: [
           {
             filename: `founder-lp-${monthLabel.replace(/\s/g, "-")}.pdf`,

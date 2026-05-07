@@ -14,7 +14,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { extractAnalytics } from "@/lib/queries";
 
-export type ReadinessResult = { ok: true } | { ok: false; reason: string };
+export type ReadinessResult =
+  | { ok: true; name: string | null }
+  | { ok: false; reason: string };
 
 export async function checkFounderStrategyReadiness(
   supabase: SupabaseClient,
@@ -22,7 +24,7 @@ export async function checkFounderStrategyReadiness(
 ): Promise<ReadinessResult> {
   const { data, error } = await supabase
     .from("strategies")
-    .select("id, status, strategy_analytics(computation_status)")
+    .select("id, name, status, strategy_analytics(computation_status)")
     .eq("id", strategy_id)
     .single();
   if (error || !data) {
@@ -62,5 +64,8 @@ export async function checkFounderStrategyReadiness(
       reason: `strategy_analytics.computation_status='${compStatus}' (expected 'complete')`,
     };
   }
-  return { ok: true };
+  return {
+    ok: true,
+    name: (data as { name?: string | null }).name ?? null,
+  };
 }
