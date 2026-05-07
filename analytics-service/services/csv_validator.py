@@ -77,8 +77,18 @@ SCHEMAS: dict[str, pa.DataFrameSchema] = {
             ),
             "daily_return": pa.Column(
                 float,
+                # 2026-05-07 — bound widened from -1.0 to -100.0 so the
+                # validator accepts strategies whose CSVs are in PERCENT
+                # form (e.g. -7.17 for a -7.17% day) and leveraged /
+                # derivative strategies whose decimal returns can dip
+                # below -1.0 in a single bar. The original -1.0 floor
+                # rejected the IQSF QuantumAlpha founder UAT submission
+                # along with any leveraged track record. -100.0 still
+                # catches obvious sentinel garbage (NaN-cast, -1e10,
+                # corrupt int) and complements the dataset-level Sharpe
+                # sentinel post-check below.
                 checks=pa.Check.greater_than(
-                    -1.0,
+                    -100.0,
                     error="daily_return_lower_bound",
                 ),
             ),
@@ -259,6 +269,16 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             }],
             "correlation_id": None,
         }
+
+    # 2026-05-07 — case-insensitive header normalization. Real-world CSVs
+    # ship headers like "Date,Daily_Return" or "DATE,DAILY_RETURN". Pandera
+    # column matching is case-sensitive, so without this pass the schema
+    # would fire `column_in_dataframe` and reject otherwise-valid files.
+    # Lowercased + stripped headers are also what the downstream
+    # _redact_preview / Sharpe sentinel / preview accessors all expect.
+    # Trailing/leading whitespace is also stripped because Excel and
+    # certain accounting tools sometimes emit "  date  ,  daily_return  ".
+    df.columns = [str(c).strip().lower() for c in df.columns]
 
     if len(df) == 0:
         return {
