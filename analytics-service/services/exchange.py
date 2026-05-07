@@ -771,7 +771,17 @@ def parse_since_ms(
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return int(dt.timestamp() * 1000)
-    except Exception:
+    except Exception as exc:
+        # Audit-2026-05-07 #10: returning None silently means "fetch from
+        # the beginning of time" to fetch_all_trades, which burns API
+        # quota and can collide with sync_trades' DELETE+INSERT (audit
+        # item #2). Log the bad value so an operator can spot a malformed
+        # ISO timestamp on api_keys.last_sync_at instead of debugging a
+        # quiet full-history refetch.
+        logger.warning(
+            "parse_since_ms: failed to parse %r — caller will refetch from start: %s",
+            value, exc,
+        )
         return None
 
 
