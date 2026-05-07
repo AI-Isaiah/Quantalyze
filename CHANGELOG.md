@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.1.0] - 2026-05-07
+
+**Phase 18 hotfix — unblock founder LP cron in production.** Fixes two production bugs that surfaced during the v0.22.0.0 founder UAT and would have left the monthly cron silently failing.
+
+### Why
+
+Two regressions shipped in v0.22.0.0 escaped review (both unit tests vi-mock the affected layer, so the chain stayed hidden): (1) `scripts/check-founder-lp-readiness.ts` always crashed on `tsx` — its import chain pulled in `src/lib/supabase/admin.ts` which top-imports `"server-only"`, throwing under any non-React-Server-Components runtime; (2) every `/api/cron/*` request 307'd to `/login` because the Next.js 16 `proxy.ts` session check ran ahead of the route's own Bearer auth — Vercel cron silently saw the 200 on `/login` and reported success, so all six crons (sync-funding, cleanup-ack-tokens, reconcile-strategies, cleanup-wizard-drafts, warm-analytics, founder-lp-report) had been no-ops since `proxy.ts` was introduced.
+
+### Fixed
+
+- **`src/proxy.ts` cron bypass** — early-return for `/api/cron/*` BEFORE the supabase session client is constructed. Cron handlers self-auth with timing-safe `safeCompare(authorization, "Bearer ${CRON_SECRET}")`. `/api/cron/*` callers without a valid Bearer now receive **401 from the route handler** (was 307 → /login). External callers must update any probes that expected the legacy redirect.
+- **`src/lib/founder-lp/readiness.ts` import path** — the shared readiness helper now imports `extractAnalytics` from `@/lib/utils` (the pure source) instead of `@/lib/queries` (a barrel that transitively pulls in `@/lib/supabase/admin` → `"server-only"`). WR-04 canonicalization intent is preserved: `utils.ts` is the single definition; `queries.ts` re-exports it.
+
+### Added
+
+- **`tests/lib/scripts/no-server-only-leak.test.ts`** — regression gate that walks every `scripts/*.ts` importing from `@/`, spawns it under `tsx` with a scrubbed env, and asserts no `server-only` banner appears in stderr/stdout. Catches the next script that drifts into the same trap.
+- **`src/proxy.test.ts` behavioral tests** — pin the `/api/cron/*` bypass against GET + POST verbs, cover bypass-edge predicates (`/api/cronjobs`, `/api/cronx/admin`, `/api/cron-foo`, `/api/cron;param=evil/admin` — all must fall through to the session gate), and prove non-cron API routes still go through the session gate. Replaces matcher-only string-assertion tests as the regression contract.
+
 ## [0.22.0.0] - 2026-05-07
 
 **Phase 18 — Founder LP report cron + canonical PII redaction across TS and Python + CSV-source unblock.** Closes the v1.0.0 dogfood loop: every month the founder receives their own LP factsheet by email (so regressions are caught BEFORE LPs see them), every Sentry/structlog/audit emission runs through the same denylist on both runtimes, and CSV-onboarded strategies stop bouncing off the database constraint that Phase 15 missed.

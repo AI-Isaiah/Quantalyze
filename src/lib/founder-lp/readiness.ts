@@ -12,7 +12,9 @@
  *   ok=false → reason string suitable for Sentry tagging + Resend body.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { extractAnalytics } from "@/lib/queries";
+// Import from @/lib/utils (not the @/lib/queries barrel) — gated by the
+// no-server-only-leak smoke test so tsx-run scripts can import readiness.
+import { extractAnalytics } from "@/lib/utils";
 
 export type ReadinessResult =
   | { ok: true; name: string | null }

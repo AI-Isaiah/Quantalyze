@@ -706,3 +706,34 @@ percentage steps based on span). The PR4 question is whether to force a
 minimum of 5 ticks regardless of span — at the cost of awkward
 fractional steps like `0.25%` on tight ranges. Probably worth a /qa pass
 on a real account with realistic returns before deciding.
+
+---
+
+## Phase 18 v0.22.1.0 hotfix — deferred follow-ups
+
+**Priority:** P1 — surface during v0.22.1.0 landing review; not in scope for the hotfix because they require design or touch out-of-branch code.
+
+### Founder LP cron idempotency (H2 from adversarial review 2026-05-07)
+
+The monthly founder LP cron (`src/app/api/cron/founder-lp-report/route.ts`) sends the Resend success email FIRST then returns 200. Vercel cron retries on non-2xx. If the lambda dies AFTER Resend accepted the message but BEFORE the 200 is returned (e.g., the 60s `maxDuration` ceiling fires during the post-send timing window), Vercel retries and **the founder receives two LP emails**.
+
+Blast radius is small (founder only, once a month), but on a credit-counted Resend plan it's real cost and the per-month idempotency was explicitly scoped out in v0.22.0.0 ("manual POST blast radius is one extra email"). Fix path: write a `compute_jobs`-style row keyed on `(cron_name, year_month)` and short-circuit if a successful row exists. Design call — needs its own plan.
+
+### Founder LP cron timeout-budget math doesn't fit lambda (L2 from adversarial review 2026-05-07)
+
+Worst-case timeout sum in `src/app/api/cron/founder-lp-report/route.ts:81-107`: 25s (initial fetch) + 20s (max retry-after) + 25s (retry fetch) + 15s (Resend send) = 85s vs 60s `maxDuration`. The comment claims "leave plenty of headroom" but math doesn't add up. Won't bite on most ticks (retry-after caps don't fire often) but a flaky factsheet endpoint could wedge the lambda at 60s, Vercel retries, idempotency bug above (H2) double-fires.
+
+Fix path: shrink `FETCH_TIMEOUT_MS` from 25s → 15s and `MAX_RETRY_AFTER_S` from 20s → 5s. New worst case: 15 + 5 + 15 + 15 = 50s, comfortable inside 60s. Or extend `maxDuration` to 90s explicitly. Touches code outside the hotfix branch — separate PR.
+
+### `/api/alert-digest` cron verb mismatch (A3 from api-contract specialist 2026-05-07)
+
+`vercel.json` lists `/api/alert-digest` as a daily cron at `0 9 * * *`. Vercel cron dispatches GET. `src/app/api/alert-digest/route.ts:24` only exports POST → every cron tick has been returning 405 Method Not Allowed since the cron was added. Pre-existing on `main`, not introduced by this hotfix, but the same class of bug as the founder LP cron's proxy-redirect issue — silent failure that the alerting system can't see because Vercel cron failure detection happens at the orchestrator level.
+
+Fix path: add `export const GET = POST;` to `src/app/api/alert-digest/route.ts` (matches the pattern in all 6 `/api/cron/*` handlers). Verify Sentry/structured logs show actual digest emissions before declaring fixed. Separate PR.
+
+### Migrate `extractAnalytics` consumers off `@/lib/queries` barrel (M2 from maintainability specialist 2026-05-07)
+
+Four files still import `extractAnalytics`/`EMPTY_ANALYTICS` from `@/lib/queries` (a barrel that transitively pulls in `@/lib/supabase/admin` → `"server-only"`). All four are Server Components or API route handlers, so they're fine today — but the asymmetric pattern (some files use `@/lib/utils`, some `@/lib/queries`) is the trap that bit the readiness helper. Delete the re-export at `src/lib/queries.ts:167` and migrate the four consumers to import from `@/lib/utils` directly.
+
+Fix path: mechanical refactor across `src/app/portfolio-pdf/[id]/page.tsx`, `src/app/api/factsheet/[id]/tearsheet.pdf/route.ts`, `src/app/api/factsheet/[id]/pdf/route.ts`, `src/app/(dashboard)/compare/page.tsx`. Also remove the now-redundant `vi.mock` in `src/app/(dashboard)/compare/page.test.tsx:22`. Once done, the explanatory comment in `readiness.ts` can shrink further.
+
