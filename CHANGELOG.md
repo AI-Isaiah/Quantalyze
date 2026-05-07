@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.1.1] - 2026-05-07
+
+**CI speedup PR-A — concurrency cancel + caches + de-duplicated e2e build.** Cuts CI wall-clock without changing application behavior. Targets the frontend job (~5min → expected ~3min on cache hit) and the e2e job (skips a redundant full build when seed-gated).
+
+### Changed
+
+- **`.github/workflows/ci.yml` concurrency cancellation** — PR force-pushes during iteration cancel the in-flight CI run on that PR's ref. Push events on `main` are excluded (each `main` commit must produce its own recorded green CI run for branch protection + deploy automation), achieved via `group: ci-${{ github.workflow }}-${{ github.head_ref || github.run_id }}`. (Adversarial review F1 — addressed.)
+- **`.next/cache` action cache** — `actions/cache@v4` keyed on `package-lock.json`, `next.config.*`, `tsconfig.json`, `tailwind.config.*`, `postcss.config.*`, AND the full `src/**` tree (any extension). Wide src glob catches CSS/MDX/JSON/locale/etc. that a `.ts/.tsx`-only key would miss — preventing the "config change ships against stale cache" hazard. `restore-keys` falls back only to lockfile-matched caches, never to a different lockfile prefix (cross-Next-version cache restore is a known hazard). (Adversarial review F2 — addressed.)
+- **Playwright browser cache** — `actions/cache@v4` on `~/.cache/ms-playwright` keyed on `node_modules/@playwright/test/package.json` (the actual Playwright version), not the whole lockfile. Unrelated dep updates no longer bust the browser cache. Conditional install: `playwright install-deps chromium` on cache hit (apt-only, ~5s); full `playwright install --with-deps chromium` on miss. Saves 30-60s per e2e run on cache hit. (Adversarial review F3 — addressed.)
+- **De-duplicated e2e build** — replaced the two separate `npm run build` steps (placeholder env always + real-env conditional) with a single seed-aware build using ternary expressions: `NEXT_PUBLIC_SUPABASE_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || 'https://placeholder...' }}`. The "Start server and run Playwright" runtime env mirrors the same ternary so build-time and runtime envs always match (preventing client-bundle vs server-process URL drift). Saves 60-120s per seed-gated run. (Adversarial review F5 — addressed.)
+
 ## [0.22.1.0] - 2026-05-07
 
 **Phase 18 hotfix — unblock founder LP cron in production.** Fixes two production bugs that surfaced during the v0.22.0.0 founder UAT and would have left the monthly cron silently failing.
