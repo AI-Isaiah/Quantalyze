@@ -54,12 +54,21 @@ describe("scripts/*.ts — no server-only leak", () => {
   it.each(atRiskScripts)(
     "%s is loadable under tsx without a server-only crash",
     (script) => {
+      // Scrubbed env: forces script's missing-env branch to fire
+      // immediately, before any module main() can do real work.
+      // PATH/HOME preserved so npx/tsx resolve. NODE_ENV preserved
+      // because tsconfig augments NodeJS.ProcessEnv to require it.
+      // Cast through unknown — the spawn call only needs string-keyed
+      // env, but ProcessEnv's augmented shape demands every required
+      // key, which would defeat the scrub.
+      const scrubbedEnv = {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        NODE_ENV: process.env.NODE_ENV ?? "test",
+      } as unknown as NodeJS.ProcessEnv;
       const result = spawnSync("npx", ["tsx", `scripts/${script}`], {
         cwd: repoRoot,
-        // Scrubbed env: forces script's missing-env branch to fire
-        // immediately, before any module main() can do real work.
-        // PATH preserved so npx/tsx resolve.
-        env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+        env: scrubbedEnv,
         encoding: "utf8",
         timeout: 60_000,
       });
