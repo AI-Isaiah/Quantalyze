@@ -40,7 +40,7 @@ wrong mid-demo.
 - [ ] **Puppeteer smoke test.** Open one factsheet PDF URL in the
       browser:
       ```
-      https://quantalyze.com/api/factsheet/[seeded-strategy-id]/pdf
+      https://quantalyze-rho.vercel.app/api/factsheet/[seeded-strategy-id]/pdf
       ```
       Expected: PDF downloads within 15 seconds. If hangs, the Vercel
       function timed out — try once more, then fall back to HTML tear

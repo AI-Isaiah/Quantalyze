@@ -30,7 +30,7 @@ tear sheet, and request an introduction. Total time: 6 minutes."
 
 ## 0:30-1:30 — Sign in + accredited gate
 
-- Navigate to `https://quantalyze.com` (or staging URL).
+- Navigate to `https://quantalyze-rho.vercel.app` (production) or the configured staging URL. **Note:** `quantalyze.com` is a third-party WordPress site, NOT the Quantalyze allocator app — do not type that into the address bar in front of a prospect.
 - Click "Sign up" or "Sign in" with the pre-seeded email.
 - Land on `/discovery/crypto-sma` (redirected by the accredited gate).
 - See the AccreditedInvestorGate form.

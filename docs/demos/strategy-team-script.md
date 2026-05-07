@@ -24,7 +24,7 @@ your business."
 
 ## 0:30-1:30 — Sign up + exchange API
 
-Navigate to `https://quantalyze.com`. Click "List your strategy."
+Navigate to `https://quantalyze-rho.vercel.app` (production) or the configured staging URL. Click "List your strategy." (`quantalyze.com` is a third-party WordPress site, NOT this app — never paste it into the address bar live.)
 
 Sign up with email + password. Land on onboarding.
 
