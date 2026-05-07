@@ -337,6 +337,23 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             {submitting ? "Validating..." : "Validate key and continue"}
           </Button>
         </div>
+
+        {/* Phase 15 follow-up (2026-05-07): the CSV branch shipped without a
+            GUI entry point — only reachable via direct URL — so founders
+            with a track-record CSV but no exchange API key had no way in.
+            This is the bridge: a quiet inline link from the API wizard's
+            first step to the CSV branch. Same wizard chrome, same
+            DesktopGate, just a different first-step component. */}
+        <p className="pt-2 text-xs text-text-muted">
+          Don&apos;t have an API key yet?{" "}
+          <Link
+            href="/strategies/new/wizard?source=csv"
+            className="font-medium text-accent underline-offset-4 hover:underline"
+            data-testid="wizard-csv-branch-link"
+          >
+            Upload a CSV track record instead →
+          </Link>
+        </p>
       </form>
     </section>
   );
