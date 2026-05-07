@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.3.0] - 2026-05-07
+
+**Wizard hydration + CSV onboarding fixes.** Resolves the React #418 hydration crash on `/strategies/new/wizard?source=csv`, lands a GUI entry point to the CSV branch, fixes the post-submit redirect from a guaranteed 404 to the user's strategies list, hardens the CSV validator against real-world Excel exports, and adds regression coverage for every fix.
+
+### Fixed
+
+- **Wizard hydration crash on the CSV branch.** `WizardClient.tsx` no longer reads `localStorage` during render — the SSR/CSR mismatch that destroyed the React tree (and hid the upload form) is resolved. The LS-derivation logic moved into a pure `deriveWizardResumeOverrides()` helper called from a single post-mount `useEffect`. SSR HTML and the first client render are now identical; the resumed state arrives on the next paint.
+- **Wizard submit redirect lands on a real page.** Both the API-branch and CSV-branch submit handlers used to push to `/strategies/${id}` (no such route — guaranteed 404). The new redirect target is `/strategies?wizard_submitted=1` — the user's "My Strategies" list, where their just-submitted strategy appears with its `pending_review` badge. The earlier candidate `/strategy/${id}` was also a 404 because that page filters `status='published'`.
+- **CSV validator handles Excel-shaped exports.** The Python `validate_csv` pipeline now: case-insensitively normalizes headers (with leading/trailing whitespace stripped); detects and re-parses CSVs whose first row is blank (`Unnamed: N` columns); scrubs currency-decorated, percent-decorated, and accounting-paren-negative values from float-typed schema columns; and accepts percent-form daily returns by widening the lower bound from `-1.0` to `-100.0`. Real-world FX and equity dailies that previously hit `CSV_SCHEMA_INVALID` now validate.
+- **Wizard `csv_preview` / `csv_submit` no longer restored from localStorage.** Both steps render conditional on parsed-dataset state (`csvFmt` + `csvPreview`) that is intentionally NOT persisted (the dataset can be megabytes). Restoring `step=csv_preview` from LS without the dependent state left users stuck on an empty preview body. The LS-resume allowlist is now `csv_upload` only; `strategyName` and `wizardSessionId` still carry forward so the user keeps their place across tab refresh.
+- **`wizard_step_view_*` telemetry no longer double-fires on resume.** The effect is now gated on `hydrated` so resumed sessions emit one event per step view instead of two (one with the throwaway `wizardSessionId`, then another after LS-hydration updated the id).
+
+### Added
+
+- **GUI entry point to the CSV branch.** `ConnectKeyStep.tsx` now renders an inline link below the API-key CTA — "Don't have an API key yet? Upload a CSV track record instead →" — that lands on `/strategies/new/wizard?source=csv`. The CSV branch was previously reachable only via direct URL.
+- **`CsvUploadStep` syncs the parent's `initialStrategyName` post-mount.** A guarded `useEffect` (`strategyName === ""` clobber-guard) backfills the input when WizardClient's LS-hydration effect delivers the resumed name AFTER the child mounted with the empty default. Tests pin both the backfill and the clobber-guard.
+- **Regression test coverage** — 10 specs for `deriveWizardResumeOverrides` (CSV restore, API restore, mismatch banner, CSV-sentinel leak guard, sessionId continuity); 4 specs for `CsvUploadStep` prop sync; 9 specs for CSV Excel-quirk handling (currency, percent, paren-negatives, blank header, header case + whitespace).
+
 ## [0.22.2.1] - 2026-05-07
 
 **CI speedup PR-C — ESLint cache + TS incremental cache + npm audit nightly.** Cuts repeat lint and typecheck 30-60% on small diffs (locally verified: typecheck 7.2s cold → 1.8s warm; lint ~5s cold → 1.2s warm). Removes 15-30s from the per-PR critical path by moving npm audit out of the per-PR frontend job.
