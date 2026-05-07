@@ -59,13 +59,36 @@ const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const JWT_SUBSTRING =
   /[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
 
-// Sensitive `key: value` / `key=value` substring detector. Anchored on a
-// key-shaped substring (one of the listed words) followed by `=`, `:`,
-// `=>`, or whitespace, then captures the value up to the next
-// whitespace/quote/end-of-string. Mirrors the DENYLIST_EXACT contract:
-// any future denylist key SHOULD be reflected here too.
+// Sensitive `key: value` / `key=value` substring detector. Built dynamically
+// from `DENYLIST_EXACT` + `DENYLIST_PREFIX` so Pass 1/4 of `scrubFreeformString`
+// can never drift from the object-walker denylist. Phase 18 / FIX-04 caught a
+// drift class where `x-bapi-apikey` / `ok-access-passphrase` / `sb-ec-*` were
+// in the object-key denylist but absent from the freeform regex. Regex-meta
+// chars in keys are escaped before alternation. Extra alternates (`password`,
+// `token`, `credential`, `cookie`, `session`, `bearer`) cover key-SHAPED words
+// that don't exactly match a denylist entry.
+const REGEX_META = /[.*+?^${}()|[\]\\]/g;
+function escapeRegex(s: string): string {
+  return s.replace(REGEX_META, "\\$&");
+}
+const FREEFORM_KEY_ALTERNATES: ReadonlyArray<string> = [
+  "api[-_]?key",
+  "api[-_]?secret",
+  "password",
+  "token",
+  "credential",
+  "cookie",
+  "session",
+  "bearer",
+];
 const SENSITIVE_KEY_VALUE = new RegExp(
-  "\\b((?:api[-_]?key|api[-_]?secret|x-mbx-apikey|ok-access-sign|secret|passphrase|password|token|credential|cookie|session|authorization|bearer))\\s*[:=]+\\s*['\"]?([^\\s'\"]+)['\"]?",
+  "\\b((?:" +
+    [
+      ...Array.from(DENYLIST_EXACT).map(escapeRegex),
+      ...DENYLIST_PREFIX.map((p) => `${escapeRegex(p)}[A-Za-z0-9_-]*`),
+      ...FREEFORM_KEY_ALTERNATES,
+    ].join("|") +
+    "))\\s*[:=]+\\s*['\"]?([^\\s'\"]+)['\"]?",
   "gi",
 );
 
@@ -89,17 +112,23 @@ function scrubString(value: string): string {
  * Recursive JSONB walker. Plain data in → plain data out, with any
  * denylisted keys or JWT-shaped strings replaced in place.
  *
- * Cycles: JSON does not have cycles by construction. If a caller hands a
- * non-JSON object graph with cycles, this will overflow the stack. That
- * is acceptable — the expected input is strictly JSONB read from Postgres.
+ * Cycles: JSON does not have cycles by construction. The `max_depth` guard
+ * (default 100, mirrors `redact.py::MAX_DEPTH`) bounds pathological deeply-
+ * nested input so a malicious adversary can't push V8 past its hard stack
+ * ceiling. On overflow the depth-bounded value is replaced with `[REDACTED]`
+ * — same fail-closed behavior as the Python mirror's `RecursionError` path
+ * after `_redact_processor` catches it.
  */
-export function scrubPii(value: unknown): unknown {
+const MAX_DEPTH = 100;
+
+function scrubPiiInner(value: unknown, depth: number): unknown {
+  if (depth > MAX_DEPTH) return REDACTED;
   if (value === null || value === undefined) return value;
   if (typeof value === "string") return scrubString(value);
   if (typeof value === "number" || typeof value === "boolean") return value;
 
   if (Array.isArray(value)) {
-    return value.map((item) => scrubPii(item));
+    return value.map((item) => scrubPiiInner(item, depth + 1));
   }
 
   if (typeof value === "object") {
@@ -110,12 +139,16 @@ export function scrubPii(value: unknown): unknown {
         out[key] = REDACTED;
         continue;
       }
-      out[key] = scrubPii(source[key]);
+      out[key] = scrubPiiInner(source[key], depth + 1);
     }
     return out;
   }
 
   return value;
+}
+
+export function scrubPii(value: unknown): unknown {
+  return scrubPiiInner(value, 0);
 }
 
 /**

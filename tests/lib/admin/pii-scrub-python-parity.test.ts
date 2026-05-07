@@ -148,6 +148,45 @@ describe("redact.py mirrors pii-scrub.ts denylist verbatim", () => {
       const twice = scrubFreeformString(once);
       expect(once).toBe(twice);
     });
+
+    // Phase 18 / A2 (Claude adversarial 2026-05-07) — earlier versions of
+    // this test only checked DENYLIST_EXACT keys appeared in `redact.py` as
+    // text. That left a real drift class invisible: a key in the frozenset
+    // but absent from `SENSITIVE_KEY_VALUE` would pass the textual check
+    // while leaking through `scrub_freeform_string`. The cases below
+    // exercise EVERY canonical denylist key as a freeform `<key>: SECRET`
+    // shape on the TS side. The Python mirror is covered by the new
+    // `test_scrub_freeform_string_covers_every_denylist_key` case in
+    // `analytics-service/tests/test_redact.py`.
+    it("scrubFreeformString redacts EVERY canonical DENYLIST_EXACT key in freeform shape", () => {
+      const ts = readFileSync(TS_FILE, "utf8");
+      const blockMatch = ts.match(
+        /DENYLIST_EXACT\s*=\s*new Set<string>\(\[([\s\S]*?)\]\)/,
+      );
+      expect(blockMatch).not.toBeNull();
+      const keys = [...blockMatch![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      expect(keys.length).toBeGreaterThanOrEqual(17);
+
+      const sentinel = "SENTINEL_SECRET_VALUE_42";
+      for (const key of keys) {
+        const colon = scrubFreeformString(`${key}: ${sentinel}`);
+        expect(
+          colon,
+          `'${key}: <secret>' must redact the value`,
+        ).not.toContain(sentinel);
+        const equals = scrubFreeformString(`${key}=${sentinel}`);
+        expect(
+          equals,
+          `'${key}=<secret>' must redact the value`,
+        ).not.toContain(sentinel);
+      }
+    });
+
+    it("scrubFreeformString redacts DENYLIST_PREFIX (sb-ec-) freeform shape", () => {
+      const sentinel = "SENTINEL_SECRET_VALUE_43";
+      const out = scrubFreeformString(`sb-ec-something=${sentinel}`);
+      expect(out).not.toContain(sentinel);
+    });
   });
 
   it("redact.py is a leaf module (no sentry_sdk / structlog / services.* sibling imports)", () => {
