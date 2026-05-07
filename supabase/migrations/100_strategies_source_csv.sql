@@ -22,11 +22,15 @@
 -- in migration 093 (lines 91 + 161-162). Phase 19 BACKBONE-04 VIEW-shim sequence
 -- will not need to ALTER this constraint again.
 --
--- Regression coverage: src/__tests__/migrations-strategies-source-csv.test.ts
+-- Regression coverage: src/__tests__/strategies-source-csv-constraint.test.ts
 -- (Vitest) asserts a real INSERT INTO strategies (..., source='csv', ...) on the
 -- live test project Supabase instance succeeds without violating the constraint.
 
 BEGIN;
+
+-- Bound the apply-time blast radius if the strategies table is locked or the
+-- full-table CHECK validation scan is slow. Mirrors migration 093 line 66.
+SET lock_timeout = '3s';
 
 ALTER TABLE strategies
   DROP CONSTRAINT IF EXISTS strategies_source_check;
@@ -43,6 +47,30 @@ ALTER TABLE strategies
     'binance',
     'bybit'
   ));
+
+-- Self-verify: assert the new constraint actually admits the Phase 18 / FIX-03
+-- target value. Mirrors the assert pattern in migrations 031 + 093. RAISE
+-- EXCEPTION on missing — silent no-op apply (e.g. concurrent migration race)
+-- would otherwise reintroduce the symptom this migration claims to fix.
+DO $$
+DECLARE
+  constraint_def TEXT;
+BEGIN
+  SELECT pg_get_constraintdef(c.oid)
+  INTO constraint_def
+  FROM pg_constraint c
+  JOIN pg_class t ON t.oid = c.conrelid
+  WHERE t.relname = 'strategies'
+    AND c.conname = 'strategies_source_check';
+
+  IF constraint_def IS NULL THEN
+    RAISE EXCEPTION 'migration 100 self-verify failed: strategies_source_check constraint missing after apply';
+  END IF;
+
+  IF constraint_def NOT LIKE '%csv%' THEN
+    RAISE EXCEPTION 'migration 100 self-verify failed: strategies_source_check does not admit ''csv'' (definition: %)', constraint_def;
+  END IF;
+END $$;
 
 COMMIT;
 
