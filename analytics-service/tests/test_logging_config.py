@@ -111,3 +111,13 @@ class TestRedactProcessor:
         # Note: when scrub_pii raises, the unscrubbed event_dict is returned —
         # this is intentional fail-open behavior so logging never breaks.
         assert record["event"] == "safe_event"
+        # Phase 18 / T2 (Claude adversarial 2026-05-07) — pin the fail-open
+        # contract. Earlier the test only asserted event=safe_event, which
+        # passed even if a future refactor returned `{}` (silently dropping
+        # the leaked field). Asserting that the unscrubbed key still flows
+        # through proves the fail-open trade-off is exactly what's
+        # documented at logging_config.py L49 ("a redaction bug here must
+        # not break the request lifecycle"). If you instead decide to
+        # FAIL-CLOSED on redactor exceptions, invert this to
+        # `assert "api_key" not in record or record["api_key"] == "[REDACTED]"`.
+        assert record["api_key"] == "still-here"

@@ -25,6 +25,15 @@
 -- Regression coverage: src/__tests__/strategies-source-csv-constraint.test.ts
 -- (Vitest) asserts a real INSERT INTO strategies (..., source='csv', ...) on the
 -- live test project Supabase instance succeeds without violating the constraint.
+--
+-- Forward-only / no down migration: this constraint expansion is a one-way
+-- door. Re-narrowing the CHECK list once any row exists with source IN
+-- ('csv','okx','binance','bybit') would fail the new constraint validation
+-- (every existing CSV/broker row would need to be deleted or migrated first).
+-- If a rollback is ever needed: (1) delete or update strategies rows with
+-- source IN ('csv','okx','binance','bybit'), (2) DROP + ADD the legacy
+-- 4-value CHECK manually. There is no DOWN.sql shim — the recovery path is
+-- intentionally not automated to force operator intent.
 
 BEGIN;
 

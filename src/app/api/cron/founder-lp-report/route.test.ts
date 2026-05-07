@@ -476,6 +476,87 @@ describe("GET /api/cron/founder-lp-report", () => {
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 
+  it("R8 boundary: HTTP-date Retry-After header (parseInt → NaN) falls back to default cap, not infinite wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const { GET } = await import("./route");
+      const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+      // Two 503s with HTTP-date Retry-After. parseInt of an HTTP-date is NaN —
+      // the route's Number.isFinite gate must catch this and fall back to the
+      // numeric default (10s), capped at MAX_RETRY_AFTER_S=20s.
+      const httpDate = "Wed, 21 Oct 2026 07:28:00 GMT";
+      fetchSpy.mockResolvedValueOnce(
+        pdfResponseStatus(503, "Service Unavailable", { "retry-after": httpDate }),
+      );
+      fetchSpy.mockResolvedValueOnce(
+        pdfResponseStatus(503, "Service Unavailable", { "retry-after": httpDate }),
+      );
+
+      const handlerPromise = GET(buildAuthorizedRequest());
+      // Drive the retry's setTimeout(10s) virtually — no wall-clock wait.
+      await vi.advanceTimersByTimeAsync(11_000);
+      const res = await handlerPromise;
+      const json = (await res.json()) as Record<string, unknown>;
+
+      expect(res.status).toBe(500);
+      expect(json.ok).toBe(false);
+      // Both fetches happened — the retry path engaged with sane fallback,
+      // NOT a NaN-derived setTimeout that would have hung the lambda.
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("R6 boundary: PDF exactly at MIN_PDF_BYTES-1 trips the empty guard; exactly at MIN_PDF_BYTES passes", async () => {
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    // 1023 bytes — must trip the guard.
+    fetchSpy.mockResolvedValueOnce(pdfResponseTooSmall(1023));
+    const tooSmall = await GET(buildAuthorizedRequest());
+    const tooSmallJson = (await tooSmall.json()) as Record<string, unknown>;
+    expect(tooSmall.status).toBe(500);
+    expect(tooSmallJson.error_class).toBe("PdfTooSmall");
+
+    // Reset state for the second arm — fresh Resend mock since the alert path consumed one.
+    sendMock.mockReset();
+    sendMock.mockResolvedValue({ data: { id: "msg_test" } });
+    captureExceptionMock.mockReset();
+
+    // Exactly 1024 bytes — must pass the guard. Use the full 4096 fixture
+    // since `pdfBuffer.length < MIN_PDF_BYTES` is the predicate; >=1024
+    // passes. Pin the documented 1024 boundary explicitly so a regression
+    // that bumped MIN_PDF_BYTES (or zeroed it) would trip this test.
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers(),
+      arrayBuffer: () => Promise.resolve(new ArrayBuffer(1024)),
+    } as unknown as Response);
+    const ok = await GET(buildAuthorizedRequest());
+    const okJson = (await ok.json()) as Record<string, unknown>;
+    expect(ok.status).toBe(200);
+    expect(okJson.pdf_bytes).toBe(1024);
+  });
+
+  it("ConfigError: NEXT_PUBLIC_APP_URL unset in production VERCEL_ENV is rejected early (silent-prod-misconfig)", async () => {
+    process.env.VERCEL_ENV = "production";
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    vi.resetModules();
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(json.error_class).toBe("ConfigError");
+    expect(String(json.error_message)).toContain("NEXT_PUBLIC_APP_URL=false");
+    // Never let a missing prod APP_URL silently fall through to localhost.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("S2: alert email HTML-escapes error_class and error_message (no XSS via upstream string)", async () => {
     const { GET } = await import("./route");
     const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;

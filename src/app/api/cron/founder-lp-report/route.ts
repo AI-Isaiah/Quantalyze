@@ -71,7 +71,7 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { checkFounderStrategyReadiness } from "@/lib/founder-lp/readiness";
-import { PLATFORM_NAME, PLATFORM_EMAIL } from "@/lib/platform";
+import { getPlatformName, getPlatformEmail } from "@/lib/platform";
 
 export const dynamic = "force-dynamic";
 // Vercel Pro lambda ceiling for cron handlers is 60s. The internal fetch
@@ -220,7 +220,7 @@ async function sendFailureAlert(
   const safeMessage = escapeHtml(ctx.error_message);
   const safeCid = escapeHtml(ctx.correlation_id);
   const send = resend.emails.send({
-    from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
+    from: `${getPlatformName()} <${getPlatformEmail()}>`,
     to,
     subject: `[ALERT] Founder LP cron FAILED — ${new Date().toISOString().slice(0, 10)}`,
     html: `<p>The founder LP report cron failed. correlation_id=${safeCid}</p>
@@ -243,16 +243,29 @@ async function dualAlert(
   err: unknown,
   ctx: { correlation_id: string; error_class: string; error_message: string },
 ): Promise<void> {
+  // Phase 18 / R10 (red team 2026-05-07) — bound `error_message` so an
+  // upstream multi-MB error string (e.g., a Supabase echo of the full
+  // request body) cannot bloat the Sentry event or trip Resend's body
+  // size limit, which would push the failure into the SECOND failure
+  // branch and surface a [CRON_DOUBLE_FAILURE] line that incorrectly
+  // accuses Sentry of also having gone down.
+  const safeCtx = {
+    ...ctx,
+    error_message:
+      ctx.error_message.length > 2048
+        ? ctx.error_message.slice(0, 2048) + "...[truncated]"
+        : ctx.error_message,
+  };
   let sentryThrew = false;
   let resendThrew = false;
   try {
-    await captureSentry(err, ctx);
+    await captureSentry(err, safeCtx);
   } catch (sentryErr) {
     sentryThrew = true;
     console.error("[cron/founder-lp-report] captureSentry threw:", sentryErr);
   }
   try {
-    await sendFailureAlert(resend, to, ctx);
+    await sendFailureAlert(resend, to, safeCtx);
   } catch (resendErr) {
     resendThrew = true;
     console.error("[cron/founder-lp-report] sendFailureAlert threw:", resendErr);
@@ -260,8 +273,8 @@ async function dualAlert(
   if (sentryThrew && resendThrew) {
     console.error(
       `${CRON_DOUBLE_FAILURE_PREFIX} founder-lp-report: BOTH alerts failed. ` +
-        `correlation_id=${ctx.correlation_id} ` +
-        `error_class=${ctx.error_class} error_message=${ctx.error_message}`,
+        `correlation_id=${safeCtx.correlation_id} ` +
+        `error_class=${safeCtx.error_class} error_message=${safeCtx.error_message}`,
     );
   }
 }
@@ -381,14 +394,24 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const recipient = process.env.FOUNDER_LP_REPORT_TO ?? process.env.ADMIN_EMAIL ?? "";
     const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
-    if (!strategy_id || !recipient || !resend) {
+    // Phase 18 / silent-prod-misconfig (Claude adversarial 2026-05-07) —
+    // when running in production VERCEL_ENV, fall through to localhost is
+    // never the right behavior. Catch the unset NEXT_PUBLIC_APP_URL early
+    // so the dual-alert ctx tags it precisely instead of surfacing as a
+    // generic ECONNREFUSED 30 days later.
+    const appUrlIsSet =
+      typeof process.env.NEXT_PUBLIC_APP_URL === "string" &&
+      process.env.NEXT_PUBLIC_APP_URL.length > 0;
+
+    if (!strategy_id || !recipient || !resend || (isProduction() && !appUrlIsSet)) {
       const ctx = {
         correlation_id,
         error_class: ERROR_CLASS.CONFIG,
         error_message:
           `missing FOUNDER_LP_STRATEGY_ID=${!!strategy_id} ` +
           `FOUNDER_LP_REPORT_TO=${!!recipient} ` +
-          `RESEND_API_KEY=${!!resend}`,
+          `RESEND_API_KEY=${!!resend} ` +
+          `NEXT_PUBLIC_APP_URL=${appUrlIsSet}`,
       };
       console.error("[cron/founder-lp-report] config error:", ctx);
       await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
@@ -451,7 +474,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       });
 
       const successSend = resend.emails.send({
-        from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
+        from: `${getPlatformName()} <${getPlatformEmail()}>`,
         to: recipient,
         subject: `Founder LP report — ${monthLabel}`,
         html: `<p>Monthly LP factsheet attached.</p>
