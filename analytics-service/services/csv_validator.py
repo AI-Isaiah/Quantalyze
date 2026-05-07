@@ -227,6 +227,95 @@ def _redact_preview(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Numeric-column scrub (currency / percent / thousands separators).
+# Real-world Excel + accounting tools encode `nav` as "$9,994,084.29" and
+# `daily_return` / `drawdown` as "-0.06%". Pandera coerce() can't handle
+# the cosmetic decoration; without this scrub a perfectly valid track
+# record fails column_in_dataframe with no actionable feedback. Strip
+# only the columns the active schema declares as `float`, leave string
+# columns (currency, side, symbol) alone.
+# ---------------------------------------------------------------------------
+
+# Regex captures a leading sign, then the magnitude (digits + optional
+# decimal), tolerating thousands separators and a trailing percent. The
+# percent flag is detected separately so we can divide by 100. Wrapped
+# parentheses (Excel's "(123)" for negatives) are also handled.
+_CURRENCY_OR_PERCENT_RE = re.compile(
+    r"""
+    ^\s*                       # leading whitespace
+    (?P<paren>\()?             # optional opening paren (Excel negatives)
+    \s*
+    (?P<sign>[+-])?            # explicit sign
+    \s*
+    [\$€£¥]?                   # optional currency symbol
+    \s*
+    (?P<sign2>[+-])?           # sign can come after the symbol too
+    \s*
+    [\$€£¥]?                   # currency may even repeat in pasted data
+    \s*
+    (?P<num>[\d,]+(?:\.\d+)?)  # digits + optional decimal, allow commas
+    \s*
+    (?P<percent>%)?            # optional percent suffix
+    \s*
+    \)?                        # optional closing paren
+    \s*$
+    """,
+    re.VERBOSE,
+)
+
+
+def _scrub_numeric_columns(df: pd.DataFrame, fmt: str) -> None:
+    """In-place scrub of currency/percent decoration on float-typed columns
+    declared by the active schema. NO-OP for string columns (e.g. side,
+    symbol, currency). Caller is `validate_csv` after lowercasing
+    headers and before `schema.validate(...)`."""
+    schema = SCHEMAS.get(fmt)
+    if schema is None:
+        return
+    float_cols: set[str] = set()
+    for col_name, col_spec in schema.columns.items():
+        # pandera Column carries a `dtype` attribute — `float` here
+        # matches the daily_return / nav / qty / price / drawdown shape.
+        if col_spec.dtype is not None and "float" in str(col_spec.dtype).lower():
+            float_cols.add(col_name)
+    for col in float_cols:
+        if col not in df.columns:
+            continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        df[col] = df[col].map(_coerce_numeric_string)
+
+
+def _coerce_numeric_string(value: object) -> object:
+    """Strip currency / thousands / percent decoration from a single
+    cell. Leaves NaN and unrecognized shapes untouched so the caller's
+    Pandera coerce step can raise a precise per-row failure."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    s = str(value).strip()
+    if not s:
+        return value
+    m = _CURRENCY_OR_PERCENT_RE.match(s)
+    if not m:
+        return value  # let pandera coerce raise on this
+    num = m.group("num").replace(",", "")
+    try:
+        result = float(num)
+    except ValueError:
+        return value
+    sign1 = m.group("sign")
+    sign2 = m.group("sign2")
+    is_negative = (sign1 == "-") or (sign2 == "-") or bool(m.group("paren"))
+    if is_negative:
+        result = -result
+    if m.group("percent"):
+        result /= 100.0
+    return result
+
+
+# ---------------------------------------------------------------------------
 # validate_csv — public API used by the FastAPI router AND (Phase 19) by
 # the worker. Pure logic; no I/O beyond pd.read_csv on the in-memory bytes.
 # ---------------------------------------------------------------------------
@@ -270,6 +359,32 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             "correlation_id": None,
         }
 
+    # 2026-05-07 — leading blank-header detection. Excel + many accounting
+    # tools export an unhelpful all-empty first row (e.g. ",,,,,,") above
+    # the real header row. pd.read_csv treats the blank row as the header,
+    # which makes every column "Unnamed: N" and the actual headers slip
+    # into row 0 of the data. Re-parse with header=1 once we detect this
+    # so the founder doesn't have to hand-clean their export.
+    looks_like_blank_header = (
+        len(df.columns) > 0
+        and all(str(c).startswith("Unnamed:") for c in df.columns)
+    )
+    if looks_like_blank_header:
+        try:
+            df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig", header=1)
+        except Exception as e:
+            logger.warning("[csv-validator] blank-header re-parse failure")
+            return {
+                "ok": False,
+                "preview": None,
+                "errors": [{
+                    "rule": "parse_error",
+                    "row": 0,
+                    "message": f"Could not parse CSV: {e}",
+                }],
+                "correlation_id": None,
+            }
+
     # 2026-05-07 — case-insensitive header normalization. Real-world CSVs
     # ship headers like "Date,Daily_Return" or "DATE,DAILY_RETURN". Pandera
     # column matching is case-sensitive, so without this pass the schema
@@ -279,6 +394,19 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
     # Trailing/leading whitespace is also stripped because Excel and
     # certain accounting tools sometimes emit "  date  ,  daily_return  ".
     df.columns = [str(c).strip().lower() for c in df.columns]
+
+    # 2026-05-07 — currency / percent / thousands-separator scrub on the
+    # numeric schema columns. Excel + accounting tools love to format
+    # `nav` as "$9,994,084.29" and `daily_return` / drawdown values as
+    # "-0.06%". Pandera's `coerce=True` calls float() under the hood,
+    # which can't parse those — we'd reject otherwise-valid track records
+    # with a generic `column_in_dataframe`. Strip the cosmetic decoration
+    # off any column declared `float` in the active schema BEFORE
+    # validation, then let coerce do its job. Percent-suffix values are
+    # divided by 100 so a "5.5%" daily return becomes 0.055 — matches the
+    # decimal convention the downstream analytics service expects, and
+    # complements the wider `daily_return > -100.0` bound below.
+    _scrub_numeric_columns(df, fmt)
 
     if len(df) == 0:
         return {
