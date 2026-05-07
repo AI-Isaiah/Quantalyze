@@ -1,12 +1,12 @@
 {
   "name": "quantalyze",
-  "version": "0.22.2.0",
+  "version": "0.22.2.1",
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint src/",
+    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

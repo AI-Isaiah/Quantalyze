@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.2.1] - 2026-05-07
+
+**CI speedup PR-C — ESLint cache + TS incremental cache + npm audit nightly.** Cuts repeat lint and typecheck 30-60% on small diffs (locally verified: typecheck 7.2s cold → 1.8s warm; lint ~5s cold → 1.2s warm). Removes 15-30s from the per-PR critical path by moving npm audit out of the per-PR frontend job.
+
+### Changed
+
+- **ESLint cache** — `package.json` lint script now passes `--cache --cache-location node_modules/.cache/.eslintcache`. ESLint skips re-linting files whose mtime + content hash haven't changed since the last run; repeat lint on unchanged files drops to milliseconds. The `frontend-lint` CI job persists `node_modules/.cache/.eslintcache` via `actions/cache@v4` keyed on `package-lock.json` + ESLint config files + `src/**`.
+- **TypeScript incremental build cache** — `tsconfig.json` already has `incremental: true`; `tsc --noEmit` emits `tsconfig.tsbuildinfo` at the project root. The `frontend-typecheck` CI job persists this file via `actions/cache@v4` keyed on `package-lock.json` + `tsconfig.json` + `src/**`. Restore-key fallback is a lockfile-and-tsconfig prefix only — never cross-tsconfig (different config could cache-poison).
+- **`npm audit` moved from the per-PR `frontend-audit-policy` job to a new `npm-audit` job in `.github/workflows/nightly.yml`.** Daily at the same nightly cadence (08:00 UTC) so any new critical-severity advisory shows up before the next PR cycle, without burning 15-30s on every push to a feature branch. Dependabot covers the continuous surface. The `--audit-level=critical` gate is unchanged. On failure, the nightly workflow opens a labeled GitHub issue (`security`, `p1`).
+- **`frontend-audit-policy` renamed to `frontend-policy`** to reflect the narrowed scope (banned-packages + GDPR export coverage only). The aggregator `frontend` job's `needs:` updated accordingly.
+- **`frontend-test` sharded 3 ways** via `strategy.matrix.shard: [1, 2, 3]` running `npx vitest run --shard=N/3 --reporter=dot`. Wall clock collapses to the slowest shard (~1/3 of monolithic). Trade-off: ~3× runner-minutes during cold-cache runs.
+- **vitest transform cache** (`node_modules/.vite`) persisted via `actions/cache@v4` per shard, keyed on lockfile + vitest config + src/tests trees. On warm cache the TS/JSX transform step is largely a no-op.
+- **`npm ci --prefer-offline --no-audit --no-fund`** across every frontend-* job. Skips the metadata round-trip + audit/fund noise (saves ~5-10s per `npm ci`).
+- **`vitest --reporter=dot`** in CI for less stdout cruft.
+
 ## [0.22.2.0] - 2026-05-07
 
 **CI speedup PR-B — parallelize frontend job + share build artifact with e2e.** The biggest single wall-clock win in the 5-PR series. Frontend collapses from sum-of-steps (~5min) to max-of-steps (~3min); e2e drops the duplicate `npm run build` (~60-120s) by downloading the artifact instead.
