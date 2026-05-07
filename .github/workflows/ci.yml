@@ -134,6 +134,13 @@ jobs:
             public/**
           retention-days: 1
           if-no-files-found: error
+          # Critical: upload-artifact@v4 defaults `include-hidden-files: false`,
+          # which excludes any path starting with `.` — `.next` is dotfile-
+          # prefixed so the action silently uploaded only `public/**` (6 files,
+          # 60KB total) when this was missing. The e2e job's `next start` then
+          # crashed with "Could not find a production build in the '.next'
+          # directory" because the artifact carried no .next at all.
+          include-hidden-files: true
 
   frontend:
     # Aggregator. Branch protection gates on this single required check;
