@@ -60,7 +60,36 @@ END $$;
 -- ==========================================================================
 -- STEP 1 — Rename the legacy table out of the way (data + FKs preserved)
 -- ==========================================================================
-ALTER TABLE verification_requests RENAME TO verification_requests_legacy;
+-- DM-5 — pre-flight guard: skip the RENAME if verification_requests is
+-- already a VIEW (i.e. the migration was previously applied and not rolled
+-- back). Without this, a second apply errors `cannot rename view to
+-- "verification_requests_legacy"` and leaves the migration partially
+-- applied.
+DO $$
+DECLARE
+  v_is_base_table BOOLEAN;
+  v_is_view BOOLEAN;
+BEGIN
+  SELECT EXISTS(
+    SELECT 1 FROM information_schema.tables
+     WHERE table_schema='public'
+       AND table_name='verification_requests'
+       AND table_type='BASE TABLE'
+  ) INTO v_is_base_table;
+  SELECT EXISTS(
+    SELECT 1 FROM information_schema.views
+     WHERE table_schema='public'
+       AND table_name='verification_requests'
+  ) INTO v_is_view;
+
+  IF v_is_base_table THEN
+    EXECUTE 'ALTER TABLE verification_requests RENAME TO verification_requests_legacy';
+  ELSIF v_is_view THEN
+    RAISE NOTICE 'Migration 107 DM-5: verification_requests is already a VIEW; skipping rename (idempotent re-apply path).';
+  ELSE
+    RAISE EXCEPTION 'Migration 107 DM-5: verification_requests does not exist as either table or view; aborting';
+  END IF;
+END $$;
 
 -- ==========================================================================
 -- STEP 2 — DM-3: backfill REMOVED (was the original C-7 backfill).
@@ -90,7 +119,15 @@ ALTER TABLE verification_requests RENAME TO verification_requests_legacy;
 -- columns on strategy_verifications (added in migration 103), NOT nested
 -- in JSONB.
 -- M-5: filter retained as 'teaser' (preflight asserted no non-teaser rows present).
-CREATE VIEW verification_requests AS
+-- SEC-1 — security_invoker = true forces the underlying SELECT against
+-- strategy_verifications to run as the *invoking* role (anon /
+-- authenticated / service_role) rather than the view-owner role.
+-- Without this, a Supabase anon GET /rest/v1/verification_requests
+-- silently bypasses RLS on strategy_verifications because the view owner
+-- (postgres / supabase_admin) has implicit SELECT, returning teaser rows
+-- to the public. Postgres ≥15 supports security_invoker.
+CREATE OR REPLACE VIEW verification_requests
+  WITH (security_invoker = true) AS
 SELECT
   sv.id                                AS id,
   NULL::TEXT                           AS email,
@@ -109,7 +146,15 @@ FROM strategy_verifications sv
 WHERE sv.flow_type = 'teaser';
 
 COMMENT ON VIEW verification_requests IS
-  'Phase 19 / BACKBONE-04 step (d). Read-only VIEW backed by strategy_verifications WHERE flow_type=teaser (M-5 — verified at apply time that no non-teaser rows exist). Writes rejected by INSTEAD OF triggers. New code MUST write to strategy_verifications directly.';
+  'Phase 19 / BACKBONE-04 step (d). Read-only VIEW backed by strategy_verifications WHERE flow_type=teaser (M-5 — verified at apply time that no non-teaser rows exist). Writes rejected by INSTEAD OF triggers. New code MUST write to strategy_verifications directly. SEC-1 — WITH (security_invoker = true) forces RLS on strategy_verifications to evaluate against the calling role.';
+
+-- SEC-1 defense-in-depth — REVOKE direct SELECT from anon/authenticated;
+-- only service_role and the underlying RLS policies on
+-- strategy_verifications gate access. Combined with security_invoker, anon
+-- GET against /rest/v1/verification_requests now requires the row to pass
+-- strategy_verifications RLS (which the existing policies enforce).
+REVOKE SELECT ON verification_requests FROM anon, authenticated;
+GRANT SELECT ON verification_requests TO service_role;
 
 -- ==========================================================================
 -- STEP 4 — INSTEAD OF triggers (C-9: INSERT + UPDATE + DELETE)
@@ -127,12 +172,17 @@ BEGIN
 END;
 $$;
 
+-- DM-4 — DROP IF EXISTS each trigger before CREATE so a re-apply against a
+-- partially-rolled-back DB does not error on duplicate-trigger.
+DROP TRIGGER IF EXISTS verification_requests_view_readonly_insert ON verification_requests;
 CREATE TRIGGER verification_requests_view_readonly_insert
   INSTEAD OF INSERT ON verification_requests
   FOR EACH ROW EXECUTE FUNCTION verification_requests_view_readonly_trigger();
+DROP TRIGGER IF EXISTS verification_requests_view_readonly_update ON verification_requests;
 CREATE TRIGGER verification_requests_view_readonly_update  -- C-9
   INSTEAD OF UPDATE ON verification_requests
   FOR EACH ROW EXECUTE FUNCTION verification_requests_view_readonly_trigger();
+DROP TRIGGER IF EXISTS verification_requests_view_readonly_delete ON verification_requests;
 CREATE TRIGGER verification_requests_view_readonly_delete  -- C-9
   INSTEAD OF DELETE ON verification_requests
   FOR EACH ROW EXECUTE FUNCTION verification_requests_view_readonly_trigger();
@@ -168,6 +218,15 @@ CREATE POLICY verification_requests_legacy_public_token_select ON verification_r
 COMMENT ON POLICY verification_requests_legacy_public_token_select ON verification_requests_legacy IS
   'M-6 — preserves the original verification_requests public_token-gated SELECT for the 90-day window after rename. Without this policy, every public verification status URL pointing at a pre-Phase-19 row would 404 for the public.';
 
+-- SEC-2 — REVOKE direct SELECT from anon on the legacy table. RLS alone is
+-- not enough on its own when the table grants base-level SELECT to anon
+-- via the schema/table grants — anon could submit `?id=eq.<guess>` on the
+-- public_token-gated policy and harvest enumerable IDs. The existing
+-- /api/verify-strategy/[id]/status route handler uses createAdminClient
+-- (RLS bypass) to look up the row, so revoking anon's direct grant does
+-- not break the public-status feature.
+REVOKE SELECT ON verification_requests_legacy FROM anon;
+
 -- ==========================================================================
 -- STEP 6 — Self-verifying DO block
 -- ==========================================================================
@@ -177,11 +236,26 @@ DECLARE
   v_legacy_exists BOOLEAN;
   v_trigger_count INT;
   v_legacy_policy_count INT;
+  v_security_invoker_ok BOOLEAN;
 BEGIN
   SELECT EXISTS(SELECT 1 FROM information_schema.views
     WHERE table_schema='public' AND table_name='verification_requests'
   ) INTO v_view_exists;
   IF NOT v_view_exists THEN RAISE EXCEPTION 'Migration 107: verification_requests VIEW missing'; END IF;
+
+  -- SEC-1 — assert WITH (security_invoker = true) is set on the VIEW so RLS
+  -- on the underlying strategy_verifications table is evaluated against the
+  -- calling role (anon / authenticated), not the view-owner role.
+  SELECT EXISTS(
+    SELECT 1
+      FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid
+     WHERE n.nspname='public'
+       AND c.relname='verification_requests'
+       AND c.reloptions @> ARRAY['security_invoker=true']
+  ) INTO v_security_invoker_ok;
+  IF NOT v_security_invoker_ok THEN
+    RAISE EXCEPTION 'Migration 107 SEC-1: verification_requests VIEW must have WITH (security_invoker = true)';
+  END IF;
 
   SELECT EXISTS(SELECT 1 FROM information_schema.tables
     WHERE table_schema='public' AND table_name='verification_requests_legacy' AND table_type='BASE TABLE'

@@ -32,6 +32,18 @@ DROP POLICY IF EXISTS verification_requests_legacy_admin_select ON verification_
 -- Rename the legacy table back into its original slot.
 ALTER TABLE verification_requests_legacy RENAME TO verification_requests;
 
-DO $$ BEGIN RAISE NOTICE 'Migration 107 rollback: completed (note: C-7 backfill rows in strategy_verifications NOT removed — see rollback header).'; END $$;
+-- DM-6 — restore the original verification_requests_service_all RLS policy
+-- from migration 010 line 184-186. The 107 forward path didn't drop this
+-- policy explicitly (it travels with the rename), but the legacy
+-- verification_requests_legacy_admin_select + _public_token_select policies
+-- the rollback drops above DO NOT replace the service_role FOR ALL grant.
+-- Without re-adding service_all, server-side admin clients lose write
+-- access to the table on rollback.
+DROP POLICY IF EXISTS verification_requests_service_all ON verification_requests;
+CREATE POLICY verification_requests_service_all ON verification_requests FOR ALL
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
+
+DO $$ BEGIN RAISE NOTICE 'Migration 107 rollback: completed.'; END $$;
 
 COMMIT;
