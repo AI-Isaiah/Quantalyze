@@ -302,28 +302,41 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     audit_entity_id = (
         body.context.get("strategy_id") or body.context.get("wizard_session_id")
     )
-    try:
-        supabase.rpc(
-            "log_audit_event_service",
-            {
-                "p_user_id": body.context.get("user_id"),
-                "p_action": "process_key.entry",
-                "p_entity_type": "process_key",
-                "p_entity_id": audit_entity_id,
-                "p_metadata": {
-                    "flow_type": body.flow_type,
-                    "source": body.source,
-                    "correlation_id": correlation_id,
-                    "entity_id_source": (
-                        "strategy_id"
-                        if body.context.get("strategy_id")
-                        else "wizard_session_id"
-                    ),
+
+    # I-perf-3 — fire-and-forget the audit row write. The RPC is
+    # best-effort (non-fatal on failure; the request continues either
+    # way), so adding its RTT to the synchronous /process-key path is
+    # pure latency tax. Wrapping in asyncio.to_thread + create_task
+    # detaches the write from the response path; failures still surface
+    # via structlog WARN inside the helper. We intentionally do NOT
+    # await the resulting task — that would re-serialize.
+    import asyncio
+
+    def _write_audit_sync() -> None:
+        try:
+            supabase.rpc(
+                "log_audit_event_service",
+                {
+                    "p_user_id": body.context.get("user_id"),
+                    "p_action": "process_key.entry",
+                    "p_entity_type": "process_key",
+                    "p_entity_id": audit_entity_id,
+                    "p_metadata": {
+                        "flow_type": body.flow_type,
+                        "source": body.source,
+                        "correlation_id": correlation_id,
+                        "entity_id_source": (
+                            "strategy_id"
+                            if body.context.get("strategy_id")
+                            else "wizard_session_id"
+                        ),
+                    },
                 },
-            },
-        ).execute()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("process_key.audit_write_failed", error=str(exc))
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("process_key.audit_write_failed", error=str(exc))
+
+    asyncio.create_task(asyncio.to_thread(_write_audit_sync))
 
     submission = KeySubmissionRequest(
         flow_type=body.flow_type,
