@@ -33,7 +33,7 @@ from services.db import get_supabase
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
-from services.ingestion.serde import metrics_to_jsonb as _shared_metrics_to_jsonb
+from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.rate_limit import limiter
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
@@ -217,16 +217,6 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
     onboard + resync queue via worker dyno (BACKBONE-09).
     """
     return body.flow_type in {"onboard", "resync"}
-
-
-def _metrics_to_jsonb(m: Any) -> dict:
-    """MC-4 — re-export from services.ingestion.serde so the synchronous
-    router and the async long_fetch worker share a single source of truth
-    (WR-05 fix per REVIEW.md 2026-05-08). The wrapper keeps the existing
-    ``routers.process_key._metrics_to_jsonb`` symbol stable for tests that
-    import it directly.
-    """
-    return _shared_metrics_to_jsonb(m)
 
 
 async def _run_validate_only(
