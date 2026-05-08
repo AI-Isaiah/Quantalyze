@@ -37,7 +37,24 @@ from services.db import get_supabase
 
 logger = logging.getLogger("quantalyze.analytics.feature_flags")
 
-_CACHE_TTL_S: float = 30.0
+# Phase 19 / D-4 — cache TTL during stability window. Default 30s. During the
+# 7-day stability window after PR-B, the founder can set
+# PHASE_19_STABILITY_CACHE_TTL_S=5 in the analytics-service environment to
+# shorten kill-switch propagation from 30s → 5s. Combined with the 15-min
+# /api/cron/flag-monitor tick the worst-case auto-rollback latency drops to
+# ≤15min05s. After PR-D ships the env var can be unset (defaults back to 30s).
+def _resolve_cache_ttl_s() -> float:
+    raw = os.getenv("PHASE_19_STABILITY_CACHE_TTL_S")
+    if not raw:
+        return 30.0
+    try:
+        v = float(raw)
+        return v if v > 0 else 30.0
+    except ValueError:
+        return 30.0
+
+
+_CACHE_TTL_S: float = _resolve_cache_ttl_s()
 _cache: dict[str, dict[str, Any]] = {}
 
 
@@ -74,9 +91,12 @@ async def is_unified_backbone_active() -> bool:
     env_value = os.getenv("PROCESS_KEY_UNIFIED_BACKBONE", "off") == "on"
 
     value = env_value and not kill_switch_off
+    # Re-resolve TTL each call so a runtime env-var change (e.g. founder sets
+    # PHASE_19_STABILITY_CACHE_TTL_S=5 during stability window) takes effect
+    # without a process restart. The cost is one os.getenv per cache miss.
     _cache["process_key_unified_backbone"] = {
         "value": value,
-        "expires_at": now + _CACHE_TTL_S,
+        "expires_at": now + _resolve_cache_ttl_s(),
     }
     return value
 
