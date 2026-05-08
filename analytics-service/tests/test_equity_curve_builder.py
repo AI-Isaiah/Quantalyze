@@ -171,7 +171,7 @@ def test_open_perp_valuation_okx():
             f"open position {pos.symbol} has no mark price in fixture"
         )
         # Open positions get pnl populated from unrealized_pnl per the
-        # _phase19_position_dict_to_kwargs mapping.
+        # _position_dict_to_position_kwargs mapping.
         assert pos.pnl is not None
 
 

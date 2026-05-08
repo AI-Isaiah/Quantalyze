@@ -1740,7 +1740,7 @@ class EquityCurveBuilder:
                         pos["unrealized_pnl"] = (entry - mark) * qty
 
         positions_typed = [
-            Position(**_phase19_position_dict_to_kwargs(p)) for p in all_positions
+            Position(**_position_dict_to_position_kwargs(p)) for p in all_positions
         ]
         self._positions_cache = positions_typed
         return positions_typed
@@ -1946,7 +1946,7 @@ class EquityCurveBuilder:
         )
 
 
-def _phase19_position_dict_to_kwargs(p: dict) -> dict:
+def _position_dict_to_position_kwargs(p: dict) -> dict:
     """Map ``_match_positions_fifo`` output dict → ``Position`` dataclass kwargs.
 
     ``_match_positions_fifo`` keys (verified):
