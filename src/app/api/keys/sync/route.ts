@@ -7,6 +7,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { postProcessKey } from "@/lib/process-key-client";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -49,9 +50,6 @@ import type { User } from "@supabase/supabase-js";
  */
 export const maxDuration = 300;
 
-const ANALYTICS_URL =
-  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
-
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(userActionLimiter, `keys-sync:${user.id}`);
   if (!rl.success) {
@@ -87,7 +85,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
   if (await isUnifiedBackboneActive()) {
-    return await unifiedKeysSyncHandler({ strategy_id, userId: user.id });
+    // API-8: resolve the actual exchange from strategies.api_key_id →
+    // api_keys.exchange so we don't hardcode `source: 'okx'`. Falls back to
+    // 'okx' when the strategy has no api_key (CSV-only resync, which the
+    // unified router will short-circuit).
+    let resolvedSource = "okx";
+    const { data: stratKey } = await supabase
+      .from("strategies")
+      .select("api_key_id")
+      .eq("id", strategy_id)
+      .single();
+    if (stratKey?.api_key_id) {
+      const admin = createAdminClient();
+      const { data: keyRow } = await admin
+        .from("api_keys")
+        .select("exchange")
+        .eq("id", stratKey.api_key_id)
+        .single();
+      if (keyRow?.exchange) {
+        resolvedSource = keyRow.exchange;
+      }
+    }
+    return await unifiedKeysSyncHandler({
+      strategy_id,
+      userId: user.id,
+      source: resolvedSource,
+    });
   }
 
   return await legacyKeysSyncHandler({ supabase, strategy_id, userId: user.id });
@@ -102,37 +125,37 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 async function unifiedKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
+  source: string;
 }): Promise<NextResponse> {
-  const internalToken = process.env.INTERNAL_API_TOKEN;
-  if (!internalToken) {
-    console.error("[keys/sync] INTERNAL_API_TOKEN not configured");
-    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-  }
-
-  const correlationId = await getCorrelationId();
-  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${internalToken}`,
-      "X-Correlation-Id": correlationId,
+  const result = await postProcessKey({
+    flow_type: "resync",
+    source: args.source, // API-8: resolved from strategies.api_keys.exchange.
+    context: {
+      strategy_id: args.strategy_id,
+      user_id: args.userId,
     },
-    body: JSON.stringify({
-      flow_type: "resync",
-      source: "okx", // Worker resolves actual exchange from strategies.api_keys.exchange.
-      context: {
-        strategy_id: args.strategy_id,
-        user_id: args.userId,
-      },
-    }),
-    cache: "no-store",
+    routeTag: "keys/sync",
   });
+  if (!result.ok) return result.response;
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    return NextResponse.json(err, { status: res.status });
+  // I-API1: translate unified `{queued, verification_id}` back to the legacy
+  // 202 `{accepted, strategy_id, status:'syncing'}` shape so callers reading
+  // `body.strategy_id` keep working. Preserve verification_id + queued as
+  // additive fields.
+  const upstream = (result.body ?? {}) as Record<string, unknown>;
+  if (upstream && typeof upstream === "object" && "queued" in upstream) {
+    return NextResponse.json(
+      {
+        accepted: true,
+        strategy_id: args.strategy_id,
+        status: "syncing",
+        verification_id: upstream.verification_id ?? null,
+        queued: upstream.queued ?? true,
+      },
+      { status: 202 },
+    );
   }
-  return NextResponse.json(await res.json());
+  return NextResponse.json(upstream);
 }
 
 /**
@@ -140,6 +163,7 @@ async function unifiedKeysSyncHandler(args: {
  * Will be removed in a follow-up cleanup PR after the 7-day stability
  * window passes.
  */
+// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
 async function legacyKeysSyncHandler(args: {
   supabase: Awaited<ReturnType<typeof createClient>>;
   strategy_id: string;

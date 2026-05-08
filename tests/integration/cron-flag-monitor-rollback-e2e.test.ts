@@ -74,12 +74,35 @@ describe.skipIf(!HAS_TEST_SUPABASE)(
       return mod.isUnifiedBackboneActive();
     }
 
+    /**
+     * I-T9: poll-based wait. The legacy implementation slept a fixed 6_000ms
+     * after each kill-switch flip, which is brittle: if the cache TTL ever
+     * changes (D-4) or Supabase round-trip latency creeps up, the test
+     * either flakes (cache still warm) or wastes wall-time. This helper
+     * polls `isUnifiedBackboneActive()` (with a fresh module each tick to
+     * blow away the in-process cache) until the expected value is observed
+     * or the budget is exhausted.
+     */
+    async function waitForFlagValue(
+      expected: boolean,
+      budgetMs = 10_000,
+      tickMs = 250,
+    ): Promise<boolean> {
+      const deadline = Date.now() + budgetMs;
+      while (Date.now() < deadline) {
+        const value = await callFromFreshModule();
+        if (value === expected) return true;
+        await new Promise((r) => setTimeout(r, tickMs));
+      }
+      return false;
+    }
+
     it(
       "test_e2e_auto_rollback_propagates_within_30s",
       async () => {
-        // Speed up the test: tighten cache TTL via the D-4 env var so we
-        // only need ~6s of real time instead of 31s.
-        process.env.PHASE_19_STABILITY_CACHE_TTL_S = "5";
+        // Tighten cache TTL via the D-4 env var so the polling loop sees
+        // fresh reads quickly.
+        process.env.PHASE_19_STABILITY_CACHE_TTL_S = "1";
         process.env.PROCESS_KEY_UNIFIED_BACKBONE = "on";
         // Override the default Supabase clients used by feature-flags.ts so
         // it talks to the test project. Tests should not require network
@@ -90,20 +113,19 @@ describe.skipIf(!HAS_TEST_SUPABASE)(
 
         try {
           await setKillSwitch("on");
-          // Sleep for cache TTL + buffer to ensure no stale cache.
-          await new Promise((r) => setTimeout(r, 6_000));
-          expect(await callFromFreshModule()).toBe(true);
+          // I-T9: poll for true within 10s instead of fixed 6_000ms sleep.
+          expect(await waitForFlagValue(true)).toBe(true);
 
           await setKillSwitch("off");
-          await new Promise((r) => setTimeout(r, 6_000));
-          expect(await callFromFreshModule()).toBe(false);
+          // I-T9: poll for false within 10s instead of fixed 6_000ms sleep.
+          expect(await waitForFlagValue(false)).toBe(true);
         } finally {
           // Restore: leave the test project in a clean state.
           await setKillSwitch("on");
           delete process.env.PHASE_19_STABILITY_CACHE_TTL_S;
         }
       },
-      30_000, // 30s timeout — covers two 6s sleeps + Supabase round-trips
+      30_000, // 30s timeout — covers two 10s polling budgets + Supabase round-trips
     );
   },
 );

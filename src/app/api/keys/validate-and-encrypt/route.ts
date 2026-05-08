@@ -2,9 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateKey, encryptKey } from "@/lib/analytics-client";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import type { User } from "@supabase/supabase-js";
+
+// NOTE: imports preserved for the unified handler below; suppress unused-import
+// lint while the unified branch is intentionally dormant (see API-2 comment).
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { getCorrelationId } from "@/lib/correlation-id";
-import type { User } from "@supabase/supabase-js";
+void isUnifiedBackboneActive;
+void getCorrelationId;
 
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
@@ -25,11 +30,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
-  if (await isUnifiedBackboneActive()) {
-    return await unifiedValidateAndEncryptHandler({ exchange, api_key, api_secret, passphrase, userId: user.id });
-  }
-
+  // Phase 19 / API-2 — DO NOT delegate to /process-key for validate-and-encrypt.
+  //
+  // Why this route is locked to the legacy path even when the unified-backbone
+  // flag is on:
+  // The allocator client (src/components/exchanges/AllocatorExchangeManager.tsx)
+  // reads `result.api_key_encrypted` / `result.api_secret_encrypted` /
+  // `result.passphrase_encrypted` / `result.dek_encrypted` / `result.nonce` /
+  // `result.kek_version` from the response and persists them to api_keys.
+  // The unified `/process-key` validate step returns
+  // `{ ok, valid, read_only, correlation_id, step }` — there is NO encryption
+  // payload. Delegating here would silently drop those fields and the
+  // allocator would write all-NULL ciphertext to api_keys.
+  //
+  // TODO(phase-19+): once /process-key gains an encrypt branch (or a separate
+  // /process-key/encrypt endpoint that returns the same envelope shape as
+  // legacy encryptKey), restore the flag-gated unified handler below and
+  // route through it. Tracked under the unified-encrypt deferred work item.
   return await legacyValidateAndEncryptHandler({ exchange, api_key, api_secret, passphrase });
 });
 
@@ -83,7 +100,14 @@ async function unifiedValidateAndEncryptHandler(args: {
 
 /**
  * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ *
+ * NOTE (M-9): this branch is the ONLY active code path on this route — the
+ * unified handler is intentionally dormant pending the deferred encrypt
+ * branch (see API-2 comment in POST). The deprecation date below applies to
+ * the unified-handler decision, not to this function which stays around
+ * until /process-key gains an encrypt step.
  */
+// DEPRECATED: remove after unified encrypt branch lands (deferred from PR-D)
 async function legacyValidateAndEncryptHandler(args: {
   exchange: string;
   api_key: string;
