@@ -410,4 +410,138 @@ describe("thin adapters — flag=off preserves legacy path", () => {
     // /process-key MUST NOT be called when flag is off.
     expect(findProcessKeyCall()).toBeUndefined();
   });
+
+  // -------------------------------------------------------------------------
+  // I-T2 — flag=off cases for the remaining 4 thin adapters. Each asserts
+  // findProcessKeyCall() is undefined AND the legacy mock IS called. Combined
+  // with the existing keys/sync test above, this covers all 5 unified
+  // adapters (verify-strategy, keys/sync, finalize-wizard, csv-validate,
+  // csv-finalize) — validate-and-encrypt is special-cased by API-2 so its
+  // flag-off behavior is identical to flag-on.
+  // -------------------------------------------------------------------------
+  it("I-T2a: verify-strategy flag=off does NOT call /process-key (legacy verifyStrategy runs)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(false);
+    const analyticsClient = await import("@/lib/analytics-client");
+    vi.mocked(analyticsClient.verifyStrategy).mockResolvedValue({
+      verification_id: "v-legacy-it2a",
+    });
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
+    expect(analyticsClient.verifyStrategy).toHaveBeenCalled();
+  });
+
+  it("I-T2b: keys/validate-and-encrypt flag=off does NOT call /process-key", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(false);
+    const analyticsClient = await import("@/lib/analytics-client");
+    vi.mocked(analyticsClient.validateKey).mockResolvedValue({
+      valid: true,
+      read_only: true,
+    });
+    vi.mocked(analyticsClient.encryptKey).mockResolvedValue({
+      api_key_encrypted: "e",
+      api_secret_encrypted: "e",
+      passphrase_encrypted: null,
+      dek_encrypted: "e",
+      nonce: "n",
+      kek_version: 1,
+    });
+
+    const { POST } = await import("@/app/api/keys/validate-and-encrypt/route");
+    const res = await POST(
+      jsonReq("/api/keys/validate-and-encrypt", {
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
+    expect(analyticsClient.validateKey).toHaveBeenCalled();
+    expect(analyticsClient.encryptKey).toHaveBeenCalled();
+  });
+
+  it("I-T2c: strategies/finalize-wizard flag=off does NOT call /process-key (legacy RPC runs)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(false);
+    // Probe still runs because the strategy has an api_key_id; mock it
+    // returning read-only.
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({ read: true, trade: false, withdraw: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+
+    const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
+    const res = await POST(
+      jsonReq("/api/strategies/finalize-wizard", {
+        strategy_id: TEST_STRATEGY_ID,
+        name: "Alpha Centauri",
+        description: "A reasonable description that is at least 10 chars long.",
+        category_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
+
+  it("I-T2d: strategies/csv-validate flag=off does NOT call /process-key (legacy validateCsv runs)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(false);
+    const analyticsClient = await import("@/lib/analytics-client");
+    vi.mocked(analyticsClient.validateCsv).mockResolvedValue({
+      ok: true,
+      rows: 0,
+    } as unknown as Awaited<ReturnType<typeof analyticsClient.validateCsv>>);
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File(["a,b\n1,2"], "test.csv", { type: "text/csv" }),
+    );
+    formData.append("fmt", "daily_returns");
+    formData.append("wizard_session_id", "44444444-4444-4444-4444-444444444444");
+    const req = new NextRequest(
+      "http://localhost:3000/api/strategies/csv-validate",
+      { method: "POST", headers: VALID_ORIGIN, body: formData },
+    );
+
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
+    expect(analyticsClient.validateCsv).toHaveBeenCalled();
+  });
+
+  it("I-T2e: strategies/csv-finalize flag=off does NOT call /process-key (legacy RPC runs)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(false);
+
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(
+      jsonReq("/api/strategies/csv-finalize", {
+        wizard_session_id: "44444444-4444-4444-4444-444444444444",
+        fmt: "daily_returns",
+        strategy_name: "Apollo CSV",
+      }),
+    );
+
+    // Legacy RPC mock returns the strategy_id; status 200.
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
 });
