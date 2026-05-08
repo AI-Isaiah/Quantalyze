@@ -272,7 +272,15 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: analytics-service/requirements.txt
-      - run: pip install -r requirements.txt pytest pytest-cov pytest-asyncio pytest-mock cryptography
+      - run: pip install -r requirements.txt pytest pytest-cov pytest-asyncio pytest-mock cryptography mypy
+      # Phase 19 / BACKBONE-02 / MC-3 fix: @runtime_checkable Protocol only
+      # verifies method *presence* at runtime, not signature shape. mypy
+      # --strict scoped to services/ingestion/ catches signature drift
+      # (e.g. `validate(req)` vs `validate(request)`) at type-check time
+      # before the test pipeline. --follow-imports=silent keeps strictness
+      # local to the new package; the legacy untyped surface migrates
+      # incrementally.
+      - run: mypy --strict --follow-imports=silent services/ingestion/
       - run: pytest --cov=services --cov-report=term-missing --cov-fail-under=80
 
   e2e:

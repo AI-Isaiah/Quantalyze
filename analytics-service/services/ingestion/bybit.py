@@ -15,6 +15,8 @@ Re-patching here would silently shadow the canonical fix.
 """
 from __future__ import annotations
 
+from typing import Any, cast
+
 from services import exchange as exchange_service
 from services.ingestion.adapter import (
     Fingerprint,
@@ -61,7 +63,7 @@ class BybitAdapter:
         finally:
             await ex.close()
 
-    async def fetch_raw(self, creds_or_file: dict) -> list[Trade]:
+    async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         ex = exchange_service.create_exchange(
             "bybit",
             creds_or_file["api_key"],
@@ -81,7 +83,7 @@ class BybitAdapter:
             EquityCurveBuilder,
         )
 
-        return EquityCurveBuilder(trades).to_metrics_snapshot()
+        return cast(MetricsSnapshot, EquityCurveBuilder(trades).to_metrics_snapshot())
 
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
@@ -90,7 +92,7 @@ class BybitAdapter:
             compute_fingerprint_v1,
         )
 
-        return compute_fingerprint_v1(trades, metrics)
+        return cast(Fingerprint, compute_fingerprint_v1(trades, metrics))
 
     async def reconstruct_positions(
         self, trades: list[Trade]
@@ -99,4 +101,4 @@ class BybitAdapter:
             EquityCurveBuilder,
         )
 
-        return EquityCurveBuilder(trades).reconstruct_positions()
+        return cast(list[Position], EquityCurveBuilder(trades).reconstruct_positions())

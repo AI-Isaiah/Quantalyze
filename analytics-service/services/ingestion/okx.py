@@ -19,7 +19,7 @@ disallows). Lazy imports inside the method bodies satisfy this.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from services import exchange as exchange_service
 from services.ingestion.adapter import (
@@ -66,7 +66,7 @@ class OkxAdapter:
         finally:
             await ex.close()
 
-    async def fetch_raw(self, creds_or_file: dict) -> list[Trade]:
+    async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         ex = exchange_service.create_exchange(
             "okx",
             creds_or_file["api_key"],
@@ -88,7 +88,7 @@ class OkxAdapter:
             EquityCurveBuilder,
         )
 
-        return EquityCurveBuilder(trades).to_metrics_snapshot()
+        return cast(MetricsSnapshot, EquityCurveBuilder(trades).to_metrics_snapshot())
 
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
@@ -98,7 +98,7 @@ class OkxAdapter:
             compute_fingerprint_v1,
         )
 
-        return compute_fingerprint_v1(trades, metrics)
+        return cast(Fingerprint, compute_fingerprint_v1(trades, metrics))
 
     async def reconstruct_positions(
         self, trades: list[Trade]
@@ -110,7 +110,7 @@ class OkxAdapter:
             EquityCurveBuilder,
         )
 
-        return EquityCurveBuilder(trades).reconstruct_positions()
+        return cast(list[Position], EquityCurveBuilder(trades).reconstruct_positions())
 
 
 def _normalize_trade(raw: dict[str, Any], exchange: str) -> Trade:
