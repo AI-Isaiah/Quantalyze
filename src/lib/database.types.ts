@@ -991,6 +991,29 @@ export type Database = {
           },
         ]
       }
+      feature_flags: {
+        // Phase 19 / BACKBONE-05 (migration 104). Kill-switch row written by
+        // /api/cron/flag-monitor on auto-rollback. CHECK (value IN ('on','off')).
+        Row: {
+          flag_key: string
+          updated_at: string
+          updated_by: string | null
+          value: string
+        }
+        Insert: {
+          flag_key: string
+          updated_at?: string
+          updated_by?: string | null
+          value: string
+        }
+        Update: {
+          flag_key?: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: string
+        }
+        Relationships: []
+      }
       funding_fees: {
         Row: {
           amount: number
