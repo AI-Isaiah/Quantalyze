@@ -4,6 +4,8 @@ import { validateCsv } from "@/lib/analytics-client";
 import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { getCorrelationId } from "@/lib/correlation-id";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -16,6 +18,12 @@ import { isUuid } from "@/lib/utils";
  * missing — caught here and translated to a CSV_UPSTREAM_FAIL envelope
  * (no silent localhost fallback per cross-AI revision 2026-04-30).
  *
+ * Phase 19 / BACKBONE-10
+ * ----------------------
+ * When `isUnifiedBackboneActive()` is true the route re-targets the
+ * upstream from `/csv/validate` to `/process-key` with `flow_type=csv`.
+ * The legacy `validateCsv()` call stays as the flag=off fallback.
+ *
  * Error envelope shape (v0): { ok: false, code, human_message,
  * debug_context, correlation_id: null }. Phase 16 / OBSERV-06 will
  * thread real correlation_id values through this route without
@@ -23,6 +31,8 @@ import { isUuid } from "@/lib/utils";
  */
 
 const MAX_BYTES = 10 * 1024 * 1024;
+const ANALYTICS_URL =
+  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(
@@ -145,6 +155,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
+  if (await isUnifiedBackboneActive()) {
+    return await unifiedCsvValidateHandler({
+      formData,
+      file,
+      fmt,
+      sessionId,
+      userId: user.id,
+    });
+  }
+
   try {
     const result = await validateCsv(formData);
     return NextResponse.json(result);
@@ -163,3 +184,79 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 });
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Re-targets the upstream from
+ * `/csv/validate` to `/process-key` with `flow_type=csv`. The CSV bytes
+ * are passed in `context.raw_bytes` (base64) along with `fmt` and
+ * `wizard_session_id`. Returns the same envelope shape as the legacy
+ * path so wizard chrome doesn't need to branch.
+ */
+async function unifiedCsvValidateHandler(args: {
+  formData: FormData;
+  file: File;
+  fmt: string;
+  sessionId: string;
+  userId: string;
+}): Promise<NextResponse> {
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!internalToken) {
+    console.error("[strategies/csv-validate] INTERNAL_API_TOKEN not configured");
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_UPSTREAM_FAIL",
+        human_message: "Service unavailable.",
+        debug_context: {},
+        correlation_id: null,
+      },
+      { status: 503 },
+    );
+  }
+
+  try {
+    const correlationId = await getCorrelationId();
+    const arrayBuffer = await args.file.arrayBuffer();
+    const rawBase64 = Buffer.from(arrayBuffer).toString("base64");
+    const res = await fetch(`${ANALYTICS_URL}/process-key`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${internalToken}`,
+        "X-Correlation-Id": correlationId,
+      },
+      body: JSON.stringify({
+        flow_type: "csv",
+        source: "csv",
+        context: {
+          fmt: args.fmt,
+          wizard_session_id: args.sessionId,
+          user_id: args.userId,
+          file_name: args.file.name,
+          raw_bytes_base64: rawBase64,
+          step: "validate",
+        },
+      }),
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return NextResponse.json(err, { status: res.status });
+    }
+    return NextResponse.json(await res.json());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "CSV validation failed";
+    console.error("[strategies/csv-validate] unified path threw:", message);
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_UPSTREAM_FAIL",
+        human_message: message,
+        debug_context: {},
+        correlation_id: null,
+      },
+      { status: 502 },
+    );
+  }
+}

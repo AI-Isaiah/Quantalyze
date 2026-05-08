@@ -5,8 +5,13 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { verifyStrategy } from "@/lib/analytics-client";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { getCorrelationId } from "@/lib/correlation-id";
 
 const MAX_REQUESTS_PER_DAY = 5;
+
+const ANALYTICS_URL =
+  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -57,6 +62,74 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
+  // Public-route protections (CSRF + IP rate-limit + payload validation)
+  // run BEFORE the flag check so unified delegation cannot bypass them.
+  if (await isUnifiedBackboneActive()) {
+    return await unifiedVerifyStrategyHandler(body);
+  }
+
+  return await legacyVerifyStrategyHandler({
+    email,
+    exchange,
+    api_key,
+    api_secret,
+    passphrase,
+  });
+}
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * `flow_type=teaser`. Source is the user-supplied exchange (already validated
+ * against SUPPORTED_EXCHANGES above).
+ */
+async function unifiedVerifyStrategyHandler(
+  body: Record<string, unknown>,
+): Promise<NextResponse> {
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!internalToken) {
+    console.error("[verify-strategy] INTERNAL_API_TOKEN not configured");
+    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
+  }
+
+  const correlationId = await getCorrelationId();
+  const exchange = (body.exchange as string) ?? "okx";
+  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${internalToken}`,
+      "X-Correlation-Id": correlationId,
+    },
+    body: JSON.stringify({
+      flow_type: "teaser",
+      source: exchange,
+      context: body,
+    }),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return NextResponse.json(err, { status: res.status });
+  }
+  return NextResponse.json(await res.json());
+}
+
+/**
+ * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ * Runs when `isUnifiedBackboneActive()` returns false. Will be removed in a
+ * follow-up cleanup PR after the 7-day stability window passes.
+ */
+async function legacyVerifyStrategyHandler(args: {
+  email: string;
+  exchange: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string;
+}): Promise<NextResponse> {
+  const { email, exchange, api_key, api_secret, passphrase } = args;
 
   // Rate limit: max 5 requests per email per 24h
   const admin = createAdminClient();

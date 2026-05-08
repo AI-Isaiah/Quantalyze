@@ -6,6 +6,8 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { getCorrelationId } from "@/lib/correlation-id";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -17,6 +19,15 @@ import type { User } from "@supabase/supabase-js";
  * notification email via `after()`. Migration 031's guard trigger
  * enforces that the RPC is the only promotion path for wizard
  * drafts.
+ *
+ * Phase 19 / Open Question 1
+ * --------------------------
+ * The force-refresh permissions probe (fetchLivePermissions below) is
+ * RETAINED at the thin-adapter layer when the unified backbone path is
+ * active. The probe runs BEFORE delegating to /process-key so the
+ * scope-broadening defense is preserved end-to-end. Pushing the probe
+ * into IngestionAdapter.validate would lose the strategies.api_key_id
+ * lookup that resolves which key to probe.
  *
  * Scope-broadening defense
  * ------------------------
@@ -200,6 +211,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const apiKeyId =
     typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
+  // Phase 19 / Open Question 1 — force-refresh permissions probe RETAINED
+  // at the thin-adapter layer. Runs BEFORE the unified-backbone delegation
+  // OR the legacy finalize RPC, so the scope-broadening defense covers
+  // both code paths.
   if (apiKeyId) {
     let livePerms: LivePermissions;
     try {
@@ -245,6 +260,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
   }
 
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag. The
+  // force-refresh probe above ALREADY ran for both code paths.
+  if (await isUnifiedBackboneActive()) {
+    return await unifiedFinalizeWizardHandler({
+      strategy_id: strategy_id as string,
+      userId: user.id,
+      payload: body as Record<string, unknown>,
+      apiKeyId,
+    });
+  }
+
+  // ── Legacy path ───────────────────────────────────────────────────
   const { data: finalizedId, error } = await supabase.rpc(
     "finalize_wizard_strategy",
     {
@@ -377,3 +404,51 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   return NextResponse.json({ strategy_id: resolvedId, status: "pending_review" });
 });
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * `flow_type=onboard` (finalize step). The force-refresh permissions probe
+ * has already run in the caller (Open Question 1 — RETAINED at this layer).
+ */
+async function unifiedFinalizeWizardHandler(args: {
+  strategy_id: string;
+  userId: string;
+  payload: Record<string, unknown>;
+  apiKeyId: string | null;
+}): Promise<NextResponse> {
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!internalToken) {
+    console.error("[strategies/finalize-wizard] INTERNAL_API_TOKEN not configured");
+    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
+  }
+
+  const correlationId = await getCorrelationId();
+  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${internalToken}`,
+      "X-Correlation-Id": correlationId,
+    },
+    body: JSON.stringify({
+      flow_type: "onboard",
+      // Worker resolves the actual exchange from strategies.api_keys.exchange
+      // server-side; "okx" is a placeholder that the unified router ignores.
+      source: "okx",
+      context: {
+        ...args.payload,
+        strategy_id: args.strategy_id,
+        user_id: args.userId,
+        api_key_id: args.apiKeyId,
+        step: "finalize",
+      },
+    }),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return NextResponse.json(err, { status: res.status });
+  }
+  return NextResponse.json(await res.json());
+}
