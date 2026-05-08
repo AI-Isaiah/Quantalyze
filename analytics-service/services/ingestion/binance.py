@@ -92,11 +92,9 @@ class BinanceAdapter:
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
     ) -> Fingerprint:
-        from services.ingestion.fingerprint import (  # type: ignore[import-not-found]
-            compute_fingerprint_v1,
-        )
+        from services.ingestion.fingerprint import compute_fingerprint_v1
 
-        return cast(Fingerprint, compute_fingerprint_v1(trades, metrics))
+        return compute_fingerprint_v1(trades, metrics)
 
     async def reconstruct_positions(
         self, trades: list[Trade]

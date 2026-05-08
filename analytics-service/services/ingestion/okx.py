@@ -93,12 +93,12 @@ class OkxAdapter:
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
     ) -> Fingerprint:
-        # Lazy import: P9 ships compute_fingerprint_v1 in Wave 2.
-        from services.ingestion.fingerprint import (  # type: ignore[import-not-found]
-            compute_fingerprint_v1,
-        )
+        # P9 ships compute_fingerprint_v1 in this same package; lazy
+        # import preserved to keep adapter module-load cost minimal
+        # (avoids pulling collections/Counter on the validate-only path).
+        from services.ingestion.fingerprint import compute_fingerprint_v1
 
-        return cast(Fingerprint, compute_fingerprint_v1(trades, metrics))
+        return compute_fingerprint_v1(trades, metrics)
 
     async def reconstruct_positions(
         self, trades: list[Trade]
