@@ -803,7 +803,7 @@ async def fetch_usdt_balance(exchange: ccxt.Exchange) -> float | None:
 # 60s in-process cache prevents fan-out hammering the broker on every
 # equity-curve recompute. Mirrors the existing in-process cache pattern
 # elsewhere in services/ (e.g. key_permissions._FAIL_CLOSED).
-import time as _phase19_time
+import time
 
 _MARK_PRICE_CACHE: dict[str, tuple[float, float]] = {}
 _MARK_PRICE_TTL_S = 60.0
@@ -832,7 +832,7 @@ async def fetch_mark_prices(
     in the returned dict. The caller should fall back to the entry price
     or treat the open position as flat.
     """
-    now = _phase19_time.monotonic()
+    now = time.monotonic()
     result: dict[str, float] = {}
     to_fetch: list[str] = []
     for sym in instruments or []:
@@ -846,21 +846,37 @@ async def fetch_mark_prices(
         return result
 
     if exchange.id == "okx":
-        for sym in to_fetch:
+        # CR-perf-1 — wrap per-symbol calls in asyncio.gather so a portfolio
+        # with N open perps takes ~one round-trip instead of N sequential
+        # ones. OKX has no instType-wide batch endpoint that returns a
+        # single-shot list of mark prices, so we still fan out one request
+        # per symbol — but in parallel. return_exceptions=True keeps a
+        # single failed symbol from torpedoing the whole batch.
+        import asyncio
+
+        async def _fetch_one(sym: str):
             try:
                 resp = await exchange.public_get_public_mark_price(
                     {"instId": sym}
                 )
                 rows = (resp or {}).get("data") or []
                 if not rows:
-                    continue
-                price = float(rows[0]["markPx"])
-                result[sym] = price
-                _MARK_PRICE_CACHE[sym] = (price, now + _MARK_PRICE_TTL_S)
+                    return sym, None
+                return sym, float(rows[0]["markPx"])
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "fetch_mark_prices OKX failed for %s: %s", sym, exc
                 )
+                return sym, None
+
+        gathered = await asyncio.gather(
+            *(_fetch_one(s) for s in to_fetch), return_exceptions=False
+        )
+        for sym, price in gathered:
+            if price is None:
+                continue
+            result[sym] = price
+            _MARK_PRICE_CACHE[sym] = (price, now + _MARK_PRICE_TTL_S)
     elif exchange.id == "binance":
         try:
             resp = await exchange.fapiPublic_get_premiumindex()

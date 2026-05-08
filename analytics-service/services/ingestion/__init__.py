@@ -19,7 +19,7 @@ Per CONTEXT.md §IngestionAdapter:
 """
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from .adapter import (
     Fingerprint,
@@ -96,26 +96,53 @@ ADAPTERS: dict[str, IngestionAdapter] = {}
 
 def _instantiate(source: str) -> IngestionAdapter:
     """Lazy import + construction. Keeps unknown-source rejection cheap
-    (no broker adapter import on the unhappy path)."""
-    if source == "okx":
-        from .okx import OkxAdapter
+    (no broker adapter import on the unhappy path).
 
-        return OkxAdapter()
-    if source == "binance":
-        from .binance import BinanceAdapter
+    M-11 — adapter registry as ``_FACTORIES`` lookup. Each value is a
+    ``Callable[[], IngestionAdapter]`` that imports + constructs lazily
+    so the unhappy-path import cost matches the previous if-branch
+    chain. Adding a new adapter is now a one-line registry entry.
+    """
+    factory = _FACTORIES.get(source)
+    if factory is None:
+        raise ValueError(
+            f"Unsupported source: {source!r}; valid: {list(SUPPORTED_SOURCES)}"
+        )
+    return factory()
 
-        return BinanceAdapter()
-    if source == "bybit":
-        from .bybit import BybitAdapter
 
-        return BybitAdapter()
-    if source == "csv":
-        from .csv_adapter import CsvAdapter
+def _make_okx_adapter() -> IngestionAdapter:
+    from .okx import OkxAdapter
 
-        return CsvAdapter()
-    raise ValueError(
-        f"Unsupported source: {source!r}; valid: {list(SUPPORTED_SOURCES)}"
-    )
+    return OkxAdapter()
+
+
+def _make_binance_adapter() -> IngestionAdapter:
+    from .binance import BinanceAdapter
+
+    return BinanceAdapter()
+
+
+def _make_bybit_adapter() -> IngestionAdapter:
+    from .bybit import BybitAdapter
+
+    return BybitAdapter()
+
+
+def _make_csv_adapter() -> IngestionAdapter:
+    from .csv_adapter import CsvAdapter
+
+    return CsvAdapter()
+
+
+# M-11 — adapter factory registry. New adapters slot in here without
+# touching the dispatch chain.
+_FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
+    "okx": _make_okx_adapter,
+    "binance": _make_binance_adapter,
+    "bybit": _make_bybit_adapter,
+    "csv": _make_csv_adapter,
+}
 
 
 def get_adapter(source: str) -> IngestionAdapter:

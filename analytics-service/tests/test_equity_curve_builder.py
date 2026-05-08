@@ -171,7 +171,7 @@ def test_open_perp_valuation_okx():
             f"open position {pos.symbol} has no mark price in fixture"
         )
         # Open positions get pnl populated from unrealized_pnl per the
-        # _phase19_position_dict_to_kwargs mapping.
+        # _position_dict_to_position_kwargs mapping.
         assert pos.pnl is not None
 
 
@@ -260,3 +260,52 @@ def test_csv_adapter_twr_ytd_parity():
     # Recorded expected values must also hold.
     assert abs(twr - gold["expected_twr"]) < 1e-4
     assert abs(ytd - gold["expected_ytd"]) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# CR-perf-2 — reconstruct_positions cache regression
+# ---------------------------------------------------------------------------
+
+
+def test_reconstruct_positions_is_cached_across_calls(monkeypatch):
+    """CR-perf-2 regression: to_metrics_snapshot calls reconstruct_positions
+    AND to_equity_curve_daily ALSO calls it. Without the cache the
+    underlying _match_positions_fifo runs twice for every snapshot read,
+    burning CPU on every equity-curve recompute.
+    """
+    gold = _load_fixture("csv-spot-only")
+    trades = [_trade_from_dict(t) for t in gold["trades"]]
+
+    builder = EquityCurveBuilder(trades, mark_prices={})
+
+    from services import position_reconstruction
+    real_match = position_reconstruction._match_positions_fifo
+    call_counter = {"n": 0}
+
+    def _counting_match(*a, **kw):
+        call_counter["n"] += 1
+        return real_match(*a, **kw)
+
+    monkeypatch.setattr(
+        position_reconstruction, "_match_positions_fifo", _counting_match
+    )
+
+    # 1st call: cold cache, populates self._positions_cache.
+    builder.reconstruct_positions()
+    n_after_first = call_counter["n"]
+    assert n_after_first >= 1, "First call must invoke _match_positions_fifo"
+
+    # 2nd call: must hit cache and NOT re-invoke _match_positions_fifo.
+    builder.reconstruct_positions()
+    assert call_counter["n"] == n_after_first, (
+        "CR-perf-2: reconstruct_positions must cache; second call should "
+        f"not re-invoke _match_positions_fifo (got n={call_counter['n']})"
+    )
+
+    # to_metrics_snapshot triggers compute_sharpe → to_equity_curve_daily
+    # → reconstruct_positions internally. Cache must short-circuit those.
+    builder.to_metrics_snapshot()
+    assert call_counter["n"] == n_after_first, (
+        "CR-perf-2: to_metrics_snapshot must reuse cached positions "
+        f"(got n={call_counter['n']})"
+    )

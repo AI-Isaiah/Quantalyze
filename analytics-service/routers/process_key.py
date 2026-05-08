@@ -22,21 +22,51 @@ import secrets
 import time
 from typing import Any
 
+import hashlib
+
 import structlog
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.db import get_supabase
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
-from services.ingestion.serde import metrics_to_jsonb as _shared_metrics_to_jsonb
+from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
+from services.rate_limit import limiter
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
 log = structlog.get_logger("quantalyze.analytics.process_key")
-limiter = Limiter(key_func=get_remote_address)
+
+
+def _process_key_rate_limit_key(request: Request) -> str:
+    """API-5 — rate-limit key for /process-key.
+
+    Pre-fix used ``get_remote_address`` which buckets all Vercel egress
+    behind a single shared NAT into the same window — so one tenant's
+    burst can starve every other tenant. The unified backbone is
+    service-to-service auth via INTERNAL_API_TOKEN with a JSON
+    ``context.user_id``; we key on a hash of (token, user_id) so each
+    user gets an isolated 100/hour window.
+
+    Tokens are SHA-256-hashed with a non-cryptographic suffix because
+    the resulting key shows up in slowapi error logs and we don't want
+    raw bearer tokens in observability output. The hash collapses the
+    bearer to a stable 16-char prefix.
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[len("Bearer "):]
+    else:
+        token = auth or "unauthenticated"
+    token_id = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    # Best-effort user_id extraction. The body has been parsed by the time
+    # FastAPI hands it to slowapi only if slowapi reads it from
+    # request.state — which it does NOT. We fall back to a header sent by
+    # the Vercel thin adapters where available.
+    user_id = request.headers.get("X-User-Id") or "anon"
+    return f"process_key:{token_id}:{user_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +109,51 @@ class _ProcessKeyBody(BaseModel):
                 f"allowed={sorted(allowed)}"
             )
         return source
+
+    # I-API2 — per-flow_type required-keys assertion. Pre-fix, missing
+    # context fields surfaced deep inside the adapter as KeyError 500s;
+    # this model_validator surfaces them as a clean 422 at the wire
+    # boundary. Validate-only flows (step='validate') skip the credential
+    # / file-bytes assertion because those keys are still being collected
+    # by the wizard step.
+    @model_validator(mode="after")
+    def _validate_per_flow_required_keys(self) -> "_ProcessKeyBody":
+        ctx = self.context or {}
+        step = ctx.get("step")
+
+        # Validate-only and finalize-step flows have their own pre-strategy
+        # branches in the route handler; skip the credential / file-bytes
+        # assertion here so those branches can run.
+        if step in {"validate", "finalize"}:
+            return self
+
+        if self.flow_type in {"teaser", "onboard", "resync"}:
+            missing = [k for k in ("api_key", "api_secret") if k not in ctx]
+            if missing:
+                raise ValueError(
+                    f"flow_type={self.flow_type!r} requires context keys "
+                    f"{missing!r}"
+                )
+        elif self.flow_type == "csv":
+            # CSV needs raw_bytes_base64 (canonical) OR raw_bytes (legacy)
+            # AND fmt AND wizard_session_id. internal_report has its own
+            # set; keeping the strict check for csv only here keeps the
+            # validator low-risk and tightly scoped.
+            if "fmt" not in ctx:
+                raise ValueError("flow_type='csv' requires context.fmt")
+            if "wizard_session_id" not in ctx:
+                raise ValueError(
+                    "flow_type='csv' requires context.wizard_session_id"
+                )
+            if (
+                "raw_bytes_base64" not in ctx
+                and "raw_bytes" not in ctx
+            ):
+                raise ValueError(
+                    "flow_type='csv' requires context.raw_bytes_base64 "
+                    "(canonical) or context.raw_bytes (legacy)"
+                )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -144,16 +219,6 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
     return body.flow_type in {"onboard", "resync"}
 
 
-def _metrics_to_jsonb(m: Any) -> dict:
-    """MC-4 — re-export from services.ingestion.serde so the synchronous
-    router and the async long_fetch worker share a single source of truth
-    (WR-05 fix per REVIEW.md 2026-05-08). The wrapper keeps the existing
-    ``routers.process_key._metrics_to_jsonb`` symbol stable for tests that
-    import it directly.
-    """
-    return _shared_metrics_to_jsonb(m)
-
-
 async def _run_validate_only(
     *,
     body: "_ProcessKeyBody",
@@ -206,7 +271,7 @@ async def _run_validate_only(
 
 
 @router.post("")
-@limiter.limit("100/hour")
+@limiter.limit("100/hour", key_func=_process_key_rate_limit_key)
 async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     # Slowapi inspects the function signature for a parameter literally named
     # `request` (or `websocket`) to attach the limiter context — see
@@ -234,13 +299,18 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     # outage; tested in test_feature_flags.py::test_supabase_outage_falls_back_to_env.
     if not await is_unified_backbone_active():
         log.info("process_key.flag_off")
-        raise HTTPException(
+        # API-6 — Phase 17 DESIGN-05 envelope. Pre-fix used
+        # HTTPException(detail={code,...}) which serialized to
+        # {"detail": {"code": ...}} — incompatible with the wizard
+        # error renderer that reads top-level `code` / `human_message`.
+        return JSONResponse(
             status_code=503,
-            detail={
-                "code": "UNIFIED_BACKBONE_DISABLED",
-                "human_message": "Unified backbone is disabled; legacy route should handle.",
-                "correlation_id": correlation_id,
-            },
+            content=_envelope_error(
+                "UNIFIED_BACKBONE_DISABLED",
+                "Unified backbone is disabled; legacy route should handle.",
+                correlation_id,
+                None,
+            ),
         )
 
     supabase = get_supabase()
@@ -267,28 +337,59 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     audit_entity_id = (
         body.context.get("strategy_id") or body.context.get("wizard_session_id")
     )
-    try:
-        supabase.rpc(
-            "log_audit_event_service",
-            {
-                "p_user_id": body.context.get("user_id"),
-                "p_action": "process_key.entry",
-                "p_entity_type": "process_key",
-                "p_entity_id": audit_entity_id,
-                "p_metadata": {
-                    "flow_type": body.flow_type,
-                    "source": body.source,
-                    "correlation_id": correlation_id,
-                    "entity_id_source": (
-                        "strategy_id"
-                        if body.context.get("strategy_id")
-                        else "wizard_session_id"
-                    ),
+
+    # I-SEC2 — emit a structured warning when context.user_id is missing on
+    # a non-public flow. The teaser flow_type is intentionally
+    # unauthenticated and runs without a user_id (the public homepage form
+    # can be submitted by anyone). For onboard / resync / csv / internal_report
+    # the wizard ALWAYS has an auth session, so a missing user_id signals a
+    # caller misconfiguration that the cron's audit-log denominator cannot
+    # subsequently disambiguate.
+    if (
+        body.context.get("user_id") is None
+        and body.flow_type != "teaser"
+    ):
+        log.warning(
+            "process_key.user_id_missing",
+            flow_type=body.flow_type,
+            source=body.source,
+            wizard_session_id=body.context.get("wizard_session_id"),
+        )
+
+    # I-perf-3 — fire-and-forget the audit row write. The RPC is
+    # best-effort (non-fatal on failure; the request continues either
+    # way), so adding its RTT to the synchronous /process-key path is
+    # pure latency tax. Wrapping in asyncio.to_thread + create_task
+    # detaches the write from the response path; failures still surface
+    # via structlog WARN inside the helper. We intentionally do NOT
+    # await the resulting task — that would re-serialize.
+    import asyncio
+
+    def _write_audit_sync() -> None:
+        try:
+            supabase.rpc(
+                "log_audit_event_service",
+                {
+                    "p_user_id": body.context.get("user_id"),
+                    "p_action": "process_key.entry",
+                    "p_entity_type": "process_key",
+                    "p_entity_id": audit_entity_id,
+                    "p_metadata": {
+                        "flow_type": body.flow_type,
+                        "source": body.source,
+                        "correlation_id": correlation_id,
+                        "entity_id_source": (
+                            "strategy_id"
+                            if body.context.get("strategy_id")
+                            else "wizard_session_id"
+                        ),
+                    },
                 },
-            },
-        ).execute()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("process_key.audit_write_failed", error=str(exc))
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("process_key.audit_write_failed", error=str(exc))
+
+    asyncio.create_task(asyncio.to_thread(_write_audit_sync))
 
     submission = KeySubmissionRequest(
         flow_type=body.flow_type,
@@ -311,7 +412,14 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 "process_key.idempotent_hit",
                 verification_id=existing.data["id"],
             )
+            # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
+            # idempotent-resume affordance. Pre-fix this path returned a
+            # plain happy-shape dict and the wizard had no observable
+            # signal that the row pre-existed. Status 200 (NOT a 409) per
+            # the spec — idempotency is a feature, not a failure.
             return {
+                "code": "WIZARD_DUPLICATE",
+                "idempotent": True,
                 "verification_id": existing.data["id"],
                 "status": existing.data["status"],
                 "trust_tier": existing.data.get("trust_tier"),
@@ -338,16 +446,73 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 correlation_id=correlation_id,
                 started_at=started_at,
             )
-        raise HTTPException(
+        # API-3 — csv-finalize step. The CSV wizard's finalize step (POST
+        # /api/strategies/csv-finalize) lands here AFTER validate but
+        # BEFORE the strategies row exists. We delegate to the
+        # finalize_csv_strategy RPC (migration 093 STEP 5) which atomically
+        # creates the strategies row + strategy_verifications row in a
+        # single SECURITY DEFINER transaction. Pre-fix this returned 422
+        # because the strategy_id branch only allowed step='validate'.
+        if (
+            body.flow_type == "csv"
+            and step == "finalize"
+            and body.source == "csv"
+        ):
+            user_id = body.context.get("user_id")
+            wsid = body.context.get("wizard_session_id")
+            fmt = body.context.get("fmt")
+            strategy_name = body.context.get("strategy_name")
+            try:
+                rpc_result = (
+                    supabase.rpc(
+                        "finalize_csv_strategy",
+                        {
+                            "p_user_id": user_id,
+                            "p_wizard_session_id": wsid,
+                            "p_fmt": fmt,
+                            "p_strategy_name": strategy_name,
+                        },
+                    ).execute()
+                )
+                new_strategy_id = rpc_result.data
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "process_key.csv_finalize_rpc_failed", error=str(exc)[:200]
+                )
+                return JSONResponse(
+                    status_code=422,
+                    content=_envelope_error(
+                        "CSV_FINALIZE_FAILED",
+                        f"finalize_csv_strategy RPC failed: {exc}",
+                        correlation_id,
+                        None,
+                    ),
+                )
+            log.info(
+                "process_key.csv_finalize_ok",
+                strategy_id=str(new_strategy_id),
+            )
+            return {
+                "ok": True,
+                "strategy_id": new_strategy_id,
+                "status": "pending_review",
+                "correlation_id": correlation_id,
+                "step": "finalize",
+            }
+        # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
+        # not nested under `detail`). The wizard's error renderer reads the
+        # envelope shape directly off the response body.
+        return JSONResponse(
             status_code=422,
-            detail={
-                "code": "MISSING_STRATEGY_ID",
-                "human_message": (
+            content=_envelope_error(
+                "MISSING_STRATEGY_ID",
+                (
                     "context.strategy_id is required for this flow_type. "
                     "Validate-only flows must set context.step='validate'."
                 ),
-                "correlation_id": correlation_id,
-            },
+                correlation_id,
+                None,
+            ),
         )
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
@@ -384,7 +549,11 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 "process_key.idempotent_race_resolved",
                 verification_id=existing.data["id"],
             )
+            # API-7 — race-resolved idempotent hit emits WIZARD_DUPLICATE
+            # for the same reason as the SELECT-pre-check path above.
             return {
+                "code": "WIZARD_DUPLICATE",
+                "idempotent": True,
                 "verification_id": existing.data["id"],
                 "status": existing.data["status"],
                 "trust_tier": existing.data.get("trust_tier"),

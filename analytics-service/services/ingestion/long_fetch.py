@@ -35,19 +35,9 @@ import structlog
 from services.db import get_supabase
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
-from services.ingestion.serde import metrics_to_jsonb as _shared_metrics_to_jsonb
+from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 
 log = structlog.get_logger("quantalyze.analytics.long_fetch")
-
-
-def _metrics_to_jsonb(m: Any) -> dict:
-    """WR-05 fix (REVIEW.md 2026-05-08): delegate to the shared MC-4
-    encoder in services.ingestion.serde so the long-fetch worker path
-    matches the synchronous router path. The pre-fix ``__dict__`` walk
-    silently corrupted JSONB if any future MetricsSnapshot field became
-    ``datetime`` / ``Decimal`` / non-primitive.
-    """
-    return _shared_metrics_to_jsonb(m)
 
 
 async def run_process_key_long_job(job: dict) -> "DispatchResult":
@@ -121,6 +111,24 @@ async def run_process_key_long_job(job: dict) -> "DispatchResult":
 
     if existing_data and existing_data.get("status") == "published":
         log.info("process_key_long.already_published_skip")
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # I-perf-5 — broker-work short-circuit. If the verification has already
+    # advanced past metrics_captured (i.e. report_queued / encrypted /
+    # near-published), the broker fetch + metrics compute are wasted: the
+    # remaining work is post-fetch (encryption + fingerprint persistence
+    # + final transition). On a worker retry-after-transient-error this
+    # avoids hammering the broker for trades we already have. We still
+    # return DONE rather than re-running the post-fetch tail because
+    # those side effects already landed before the transient-failure
+    # checkpoint. A follow-up that resumes the tail from
+    # metrics_captured belongs in a separate plan.
+    advanced_statuses = {"encrypted", "report_queued"}
+    if existing_data and existing_data.get("status") in advanced_statuses:
+        log.info(
+            "process_key_long.advanced_status_skip",
+            status=existing_data.get("status"),
+        )
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # Build the request from the job's strategy + stored credentials.

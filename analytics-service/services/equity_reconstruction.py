@@ -1633,9 +1633,9 @@ def reconstruct_symbol_returns(
 #   purpose (Phase 19 / MC-2 decision: leave private to avoid touching
 #   the DB-side tested primitive).
 
-from collections import defaultdict as _phase19_defaultdict
+from collections import defaultdict
 
-import math as _phase19_math
+import math
 
 
 class EquityCurveBuilder:
@@ -1678,6 +1678,10 @@ class EquityCurveBuilder:
         )
         self._funding_pnl_by_day: dict[date, float] = {}
         self._curve_cache: pd.DataFrame | None = None
+        # CR-perf-2 — cache reconstruct_positions output. to_metrics_snapshot
+        # and to_equity_curve_daily both call reconstruct_positions; pre-fix
+        # this fired _match_positions_fifo twice for every snapshot read.
+        self._positions_cache: list | None = None
 
     # ------------------------------------------------------------------
     # Position reconstruction (in-memory, not persisted)
@@ -1687,12 +1691,17 @@ class EquityCurveBuilder:
         """In-memory FIFO matching (NOT persisted to DB).
 
         Calls existing services.position_reconstruction._match_positions_fifo
-        (private — Phase 19 / MC-2 Option B).
+        (private — Phase 19 / MC-2 Option B). CR-perf-2 — result cached on
+        self._positions_cache; the cache is invalidated by attach_funding
+        the same way self._curve_cache is.
         """
+        if self._positions_cache is not None:
+            return self._positions_cache
+
         from services.ingestion.adapter import Position
         from services.position_reconstruction import _match_positions_fifo
 
-        positions_by_symbol: dict[str, list[dict]] = _phase19_defaultdict(list)
+        positions_by_symbol: dict[str, list[dict]] = defaultdict(list)
         for trade in self.trades:
             ts = trade.timestamp
             if isinstance(ts, datetime):
@@ -1730,7 +1739,11 @@ class EquityCurveBuilder:
                     else:
                         pos["unrealized_pnl"] = (entry - mark) * qty
 
-        return [Position(**_phase19_position_dict_to_kwargs(p)) for p in all_positions]
+        positions_typed = [
+            Position(**_position_dict_to_position_kwargs(p)) for p in all_positions
+        ]
+        self._positions_cache = positions_typed
+        return positions_typed
 
     # ------------------------------------------------------------------
     # Funding-rate accumulation
@@ -1793,7 +1806,7 @@ class EquityCurveBuilder:
 
         positions = self.reconstruct_positions()
 
-        realized_by_date: dict[date, float] = _phase19_defaultdict(float)
+        realized_by_date: dict[date, float] = defaultdict(float)
         for pos in positions:
             if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
                 closed_at = pos.closed_at
@@ -1888,7 +1901,7 @@ class EquityCurveBuilder:
         returns = df["daily_return"]
         excess = returns - (risk_free_rate / periods)
         std = excess.std()
-        if std == 0 or _phase19_math.isnan(std):
+        if std == 0 or math.isnan(std):
             return None
         return float((excess.mean() / std) * (periods ** 0.5))
 
@@ -1933,7 +1946,7 @@ class EquityCurveBuilder:
         )
 
 
-def _phase19_position_dict_to_kwargs(p: dict) -> dict:
+def _position_dict_to_position_kwargs(p: dict) -> dict:
     """Map ``_match_positions_fifo`` output dict → ``Position`` dataclass kwargs.
 
     ``_match_positions_fifo`` keys (verified):

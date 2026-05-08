@@ -34,6 +34,18 @@ try:
 except ImportError:  # pragma: no cover
     create_client = None  # type: ignore[assignment]
 
+# I-T8 — narrow the rpc-not-exposed except to PostgrestException so an
+# unrelated bug (e.g. a 500 from PostgreSQL) actually fails the test
+# instead of being silently skipped. PostgrestException is the supabase
+# client's wire-error wrapper. If postgrest_py isn't importable (older
+# supabase-py releases that don't ship it) we fall back to a sentinel
+# class that's unreachable so the except block re-raises real bugs.
+try:
+    from postgrest.exceptions import APIError as PostgrestException  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover
+    class PostgrestException(Exception):  # type: ignore[no-redef]
+        pass
+
 
 SUPABASE_URL = os.getenv("SUPABASE_TEST_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
@@ -68,10 +80,13 @@ def _call_compute_similarity(admin, a, b):
     """Call compute_similarity via execute_sql wrapper (rpc preferred but
     PostgREST may not auto-expose IMMUTABLE function args). Use
     raw SQL via the supabase admin postgrest client."""
-    # Use rpc — if Supabase exposes the function it works; else skip.
+    # I-T8 — narrow except to PostgrestException so a real bug (500,
+    # ConnectionError, etc.) actually fails the test instead of being
+    # silently skipped. We only skip when supabase-py reports the RPC
+    # itself is missing from PostgREST schema cache.
     try:
         return admin.rpc("compute_similarity", {"a": a, "b": b}).execute().data
-    except Exception as exc:  # pragma: no cover — environment-specific
+    except PostgrestException as exc:  # pragma: no cover — environment-specific
         pytest.skip(f"compute_similarity rpc not exposed: {exc}")
 
 

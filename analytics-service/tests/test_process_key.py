@@ -197,16 +197,28 @@ def _build_supabase_mock(
 # ---------------------------------------------------------------------------
 
 
+def _csv_validate_body() -> dict:
+    """Minimal csv-validate body that passes I-API2 model_validator (step=validate
+    branch) without requiring the strategy_id/full credential set. Used by
+    auth tests that need to exercise auth BEFORE pydantic body validation."""
+    return {
+        "flow_type": "csv",
+        "source": "csv",
+        "context": {
+            "step": "validate",
+            "wizard_session_id": "00000000-0000-0000-0000-000000000001",
+            "fmt": "trades",
+            "raw_bytes_base64": "Y29sCjE=",
+        },
+    }
+
+
 def test_process_key_auth_missing_token(client, monkeypatch):
     """Missing INTERNAL_API_TOKEN env → 403 'Internal API not configured'."""
     monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
     r = client.post(
         "/process-key",
-        json={
-            "flow_type": "csv",
-            "source": "csv",
-            "context": {"strategy_id": "s1"},
-        },
+        json=_csv_validate_body(),
         headers={"Authorization": "Bearer whatever"},
     )
     assert r.status_code == 403
@@ -217,11 +229,7 @@ def test_process_key_auth_wrong_token(client):
     """Wrong bearer → 403 'Forbidden' (constant-time compare path)."""
     r = client.post(
         "/process-key",
-        json={
-            "flow_type": "csv",
-            "source": "csv",
-            "context": {"strategy_id": "s1"},
-        },
+        json=_csv_validate_body(),
         headers={"Authorization": "Bearer wrong"},
     )
     assert r.status_code == 403
@@ -244,13 +252,23 @@ def test_process_key_flag_off_503(client):
             json={
                 "flow_type": "csv",
                 "source": "csv",
-                "context": {"strategy_id": "s1"},
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wsid-1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
+                },
             },
             headers=_auth_headers(),
         )
     assert r.status_code == 503
     body = r.json()
-    assert body["detail"]["code"] == "UNIFIED_BACKBONE_DISABLED"
+    # API-6: Phase 17 DESIGN-05 envelope — top-level `code`, NOT nested
+    # under `detail`. The wizard's error renderer reads the body
+    # directly.
+    assert body["ok"] is False
+    assert body["code"] == "UNIFIED_BACKBONE_DISABLED"
+    assert "correlation_id" in body
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +370,12 @@ def test_internal_api_token_no_newline_regression(monkeypatch):
         json={
             "flow_type": "csv",
             "source": "csv",
-            "context": {"strategy_id": "s1"},
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wsid-h12",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
+            },
         },
         headers={"Authorization": f"Bearer {'a' * SHAPE_LEN}"},
     )
@@ -440,14 +463,22 @@ def test_process_key_idempotent_double_submit(client):
             "context": {
                 "strategy_id": "s1",
                 "wizard_session_id": "wiz-1",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
             },
         }
         r1 = client.post("/process-key", json=body, headers=_auth_headers())
         r2 = client.post("/process-key", json=body, headers=_auth_headers())
     assert r1.status_code == 200
     assert r2.status_code == 200
-    assert r1.json()["verification_id"] == "ver-existing"
-    assert r2.json()["verification_id"] == "ver-existing"
+    body1 = r1.json()
+    body2 = r2.json()
+    assert body1["verification_id"] == "ver-existing"
+    assert body2["verification_id"] == "ver-existing"
+    # API-7 — observable WIZARD_DUPLICATE signal so the wizard renders
+    # the resume affordance instead of pretending it's a fresh submit.
+    assert body2["code"] == "WIZARD_DUPLICATE"
+    assert body2["idempotent"] is True
 
 
 def test_process_key_unique_violation_returns_existing(client):
@@ -475,11 +506,17 @@ def test_process_key_unique_violation_returns_existing(client):
             "context": {
                 "strategy_id": "s1",
                 "wizard_session_id": "wiz-race",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
             },
         }
         r = client.post("/process-key", json=body, headers=_auth_headers())
     assert r.status_code == 200
-    assert r.json()["verification_id"] == "ver-raced"
+    body_json = r.json()
+    assert body_json["verification_id"] == "ver-raced"
+    # API-7 — race-resolved idempotent hit also emits WIZARD_DUPLICATE.
+    assert body_json["code"] == "WIZARD_DUPLICATE"
+    assert body_json["idempotent"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +576,8 @@ def test_process_key_csv_sync_path(client):
             "context": {
                 "strategy_id": "s1",
                 "wizard_session_id": "wiz-csv-1",
-                "raw_bytes_marker": "x",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
             },
         }
         r = client.post("/process-key", json=body, headers=_auth_headers())
@@ -787,7 +825,78 @@ def test_process_key_missing_strategy_id_returns_422(client):
 
     assert r.status_code == 422, r.text
     body = r.json()
-    assert body["detail"]["code"] == "MISSING_STRATEGY_ID"
+    # API-6: Phase 17 DESIGN-05 envelope — top-level fields.
+    assert body["ok"] is False
+    assert body["code"] == "MISSING_STRATEGY_ID"
+    assert "human_message" in body
+    assert "correlation_id" in body
+
+
+def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
+    """API-3 regression: flow_type='csv', step='finalize' lands here without
+    a strategy_id (the strategies row hasn't been created yet). Pre-fix this
+    returned 422 MISSING_STRATEGY_ID; post-fix it delegates to
+    finalize_csv_strategy RPC which atomically creates the strategies +
+    strategy_verifications rows.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    new_sid = "11111111-1111-1111-1111-111111111111"
+    # Override rpc so finalize_csv_strategy returns the new strategy_id
+    finalize_call = MagicMock()
+    finalize_call.execute.return_value = MagicMock(data=new_sid)
+
+    log_audit_call = MagicMock()
+    log_audit_call.execute.return_value = MagicMock(data={})
+
+    def _rpc_router(name, *_a, **_kw):
+        if name == "finalize_csv_strategy":
+            return finalize_call
+        return log_audit_call
+
+    fake.rpc.side_effect = _rpc_router
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
+                    "user_id": "33333333-3333-3333-3333-333333333333",
+                    "fmt": "trades",
+                    "strategy_name": "Test Strategy",
+                    "step": "finalize",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["strategy_id"] == new_sid
+    assert body["status"] == "pending_review"
+    assert body["step"] == "finalize"
+
+    # finalize_csv_strategy RPC was called exactly once with the expected payload.
+    finalize_calls = [
+        c.args
+        for c in fake.rpc.call_args_list
+        if c.args and c.args[0] == "finalize_csv_strategy"
+    ]
+    assert len(finalize_calls) == 1, "finalize_csv_strategy must be called once"
+    payload = finalize_calls[0][1]
+    assert payload["p_user_id"] == "33333333-3333-3333-3333-333333333333"
+    assert payload["p_wizard_session_id"] == "22222222-2222-2222-2222-222222222222"
+    assert payload["p_fmt"] == "trades"
+    assert payload["p_strategy_name"] == "Test Strategy"
 
 
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
@@ -898,6 +1007,8 @@ def test_process_key_writes_audit_row(client):
                 "context": {
                     "strategy_id": "s1-audit",
                     "wizard_session_id": "wiz-audit-1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
                 },
             },
             headers=_auth_headers(),
@@ -907,4 +1018,129 @@ def test_process_key_writes_audit_row(client):
     rpc_call_names = [c.args[0] for c in fake.rpc.call_args_list if c.args]
     assert "log_audit_event_service" in rpc_call_names, (
         f"Expected log_audit_event_service RPC; got {rpc_call_names}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# API-1 — verify_service_key middleware skip-list regression
+# ---------------------------------------------------------------------------
+
+
+def test_process_key_csv_missing_fmt_returns_422(client):
+    """I-API2 — model_validator catches missing csv-required keys at the
+    wire boundary. Pre-fix, missing fmt surfaced deep in the adapter as
+    a KeyError 500."""
+    r = client.post(
+        "/process-key",
+        json={
+            "flow_type": "csv",
+            "source": "csv",
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wiz-x",
+                # No fmt, no raw_bytes_base64.
+            },
+        },
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_process_key_onboard_missing_creds_returns_422(client):
+    """I-API2 — onboard requires api_key + api_secret in context (when not
+    a validate-step body)."""
+    r = client.post(
+        "/process-key",
+        json={
+            "flow_type": "onboard",
+            "source": "okx",
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wiz-y",
+                # No api_key, no api_secret.
+            },
+        },
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_process_key_shares_main_limiter_instance():
+    """API-5 regression: routers.process_key.limiter MUST be the same
+    instance as services.rate_limit.limiter (which main.py also imports).
+
+    Pre-fix, process_key.py instantiated its own ``Limiter()`` at module
+    scope; main.py owned a different one and registered it on
+    ``app.state.limiter``. The slowapi ``@limiter.limit(...)`` decorator
+    binds to whichever Limiter the source file imports — so the
+    in-process route counts and the app-state metrics were divorced.
+    """
+    from services import rate_limit as _rl
+
+    assert process_key_router.limiter is _rl.limiter, (
+        "API-5: process_key.limiter must be the singleton from "
+        "services.rate_limit. A drift here means slowapi storage on the "
+        "decorator and on app.state.limiter is no longer shared."
+    )
+
+
+def test_process_key_rate_limit_key_func_uses_token_and_user_id():
+    """API-5: per-tenant isolation — the limiter key must vary by
+    (Authorization, X-User-Id), NOT remote IP. Two requests from the
+    same Vercel egress IP but different tenants must land in different
+    buckets.
+    """
+    from unittest.mock import MagicMock
+
+    key_func = process_key_router._process_key_rate_limit_key
+
+    req_a = MagicMock()
+    req_a.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-a"}
+    req_b = MagicMock()
+    req_b.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-b"}
+    req_c = MagicMock()
+    req_c.headers = {"Authorization": "Bearer bbb", "X-User-Id": "user-a"}
+
+    ka = key_func(req_a)
+    kb = key_func(req_b)
+    kc = key_func(req_c)
+
+    assert ka != kb, "Same token, different user_id must produce different keys"
+    assert ka != kc, "Different token must produce different keys"
+    # Bearer token must NEVER appear in plaintext (it shows up in slowapi
+    # error logs).
+    assert "aaa" not in ka and "bbb" not in kc
+    # Stable: same input → same key.
+    assert key_func(req_a) == ka
+
+
+def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
+    """API-1 regression: main.verify_service_key middleware must skip
+    /process-key the same way it skips /internal/*.
+
+    Pre-fix, every Vercel→FastAPI POST returned 401 'Unauthorized' BEFORE
+    the route's own _verify_internal_token ran, because the middleware
+    only whitelisted /health and /internal/*. This test imports the
+    real `verify_service_key` from main.py via inspect.getsource and
+    re-evaluates it (the actual function is bound to the global FastAPI
+    app instance which we can't reuse here without booting the entire
+    lifespan). We assert that the on-disk source explicitly contains
+    `/process-key` in its skip-list — a regression that drops the skip
+    would surface as a string-match failure here.
+    """
+    import inspect
+    from main import verify_service_key
+
+    src = inspect.getsource(verify_service_key)
+    # API-1 invariant: the middleware MUST whitelist /process-key the same
+    # way it whitelists /internal/*. If a future refactor drops this
+    # branch, every Vercel→FastAPI call regresses to 401.
+    assert "/process-key" in src, (
+        "API-1: main.verify_service_key must explicitly skip /process-key. "
+        "Without this, the middleware rejects every Vercel→FastAPI call "
+        "with 401 BEFORE the route's bearer-token gate runs.\n"
+        f"Source:\n{src}"
+    )
+    assert "/internal/" in src, (
+        "Sanity: middleware must still skip /internal/* (existing contract)."
     )

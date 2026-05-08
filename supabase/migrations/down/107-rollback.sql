@@ -2,11 +2,10 @@
 -- Reverses the rename + VIEW + INSTEAD OF triggers + RLS policy adds.
 -- Mirrors the rollback runbook Stage D recovery procedure.
 --
--- IMPORTANT — asymmetry: the C-7 backfill rows in strategy_verifications
--- are NOT removed by rollback. They are real strategy_verifications rows
--- now and removing them would lose data. If you need a strict round-trip,
--- snapshot strategy_verifications.id values before applying 107 and
--- DELETE WHERE id IN (snapshot) after this rollback.
+-- DM-3 update: the C-7 synthetic-strategy backfill was removed from migration
+-- 107 source (privacy leak via synthetic strategies anchor). This rollback no
+-- longer needs the asymmetric "C-7 rows are real and not removed" caveat —
+-- nothing is backfilled, nothing to leave behind.
 --
 -- C-8 — paired down-migration.
 
@@ -33,6 +32,18 @@ DROP POLICY IF EXISTS verification_requests_legacy_admin_select ON verification_
 -- Rename the legacy table back into its original slot.
 ALTER TABLE verification_requests_legacy RENAME TO verification_requests;
 
-DO $$ BEGIN RAISE NOTICE 'Migration 107 rollback: completed (note: C-7 backfill rows in strategy_verifications NOT removed — see rollback header).'; END $$;
+-- DM-6 — restore the original verification_requests_service_all RLS policy
+-- from migration 010 line 184-186. The 107 forward path didn't drop this
+-- policy explicitly (it travels with the rename), but the legacy
+-- verification_requests_legacy_admin_select + _public_token_select policies
+-- the rollback drops above DO NOT replace the service_role FOR ALL grant.
+-- Without re-adding service_all, server-side admin clients lose write
+-- access to the table on rollback.
+DROP POLICY IF EXISTS verification_requests_service_all ON verification_requests;
+CREATE POLICY verification_requests_service_all ON verification_requests FOR ALL
+  USING (auth.role() = 'service_role')
+  WITH CHECK (auth.role() = 'service_role');
+
+DO $$ BEGIN RAISE NOTICE 'Migration 107 rollback: completed.'; END $$;
 
 COMMIT;

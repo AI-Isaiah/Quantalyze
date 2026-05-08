@@ -18,30 +18,13 @@ Canonical key: `raw_bytes_base64` (string). The adapter base64-decodes on
 entry. We retain a fallback to legacy `raw_bytes` (raw Python bytes) for
 unit tests and any internal caller that already speaks bytes natively.
 
-DEVIATION FROM PLAN BLUEPRINT (Rule 3 — blocking issue):
-The 19-03 plan blueprint references `csv_validator.parse_csv`,
-`validate_schema`, `df_to_trades`, and `CsvValidationError` — none of
-which exist in the actual services/csv_validator.py. The Phase 15
-module exposes a single public entrypoint `validate_csv(raw_bytes,
-fmt) -> dict` that returns the envelope `{ok, preview, errors,
-correlation_id}`. This adapter therefore wraps THAT envelope shape
-(the only available primitive) instead of the granular helpers the
-blueprint imagined. Behavior is equivalent: pandera schemas still run,
-the 6 CSV-02 rules still fire, error codes still surface.
-
-Trade-level fetch (`fetch_raw`) is implemented inline against
-pd.read_csv on the raw bytes for `fmt='trades'` because the blueprint's
-`df_to_trades` helper does not exist. For `daily_returns` and
-`daily_nav` formats, fetch_raw returns an empty list — those formats
-do not produce fill-level data; the existing CSV pipeline routes them
-through a daily-PnL aggregation downstream that does not need Trade
-objects.
-
-v0 limitation (per CONTEXT.md L83): mark prices are not applicable for
-CSV ingestion; open positions are assumed flat at upload time. Funding-
-rate accumulation is not computed for CSV. Documented here for
-downstream consumers (PDF report, dashboard); revisited in v2 once a
-mark-snapshot column ships.
+DEVIATION FROM PLAN BLUEPRINT: blueprint helpers (parse_csv,
+validate_schema, df_to_trades, CsvValidationError) don't exist in
+services/csv_validator.py — the actual public entrypoint is
+``validate_csv(raw_bytes, fmt) -> dict``. Adapter wraps the envelope
+shape directly. v0 limitation per CONTEXT.md L83: mark-prices and
+funding accumulation are not applied to CSV. Full rationale in
+.planning/phase-19/csv-adapter-deviation.md.
 """
 from __future__ import annotations
 
@@ -159,8 +142,16 @@ class CsvAdapter:
         df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig")
         df.columns = [str(c).strip().lower() for c in df.columns]
 
+        # I-perf-4 — itertuples avoids materialising the entire dataframe
+        # as a list of dicts in memory. For a 50k-row CSV upload that's
+        # ~30MB of dict allocation that gets immediately discarded after
+        # the per-row Trade construction. itertuples streams the rows
+        # without that intermediate. We pass index=False because the
+        # CSV row index is meaningless to _csv_row_to_trade.
+        cols = list(df.columns)
         trades: list[Trade] = []
-        for row in df.to_dict(orient="records"):
+        for tup in df.itertuples(index=False, name=None):
+            row = dict(zip(cols, tup))
             trades.append(_csv_row_to_trade(row))
         return trades
 
@@ -200,16 +191,13 @@ def _csv_row_to_trade(row: dict[str, Any]) -> Trade:
     list shortcut.
     """
     ts_raw = row.get("date") or row.get("timestamp")
-    if isinstance(ts_raw, datetime):
-        ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
-    elif isinstance(ts_raw, (int, float)):
-        ts = datetime.fromtimestamp(float(ts_raw) / 1000, tz=timezone.utc)
-    elif ts_raw is None:
+    if ts_raw is None:
         raise ValueError("CSV row missing date/timestamp")
-    else:
-        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+    # M-17 — shared coercion lives in services.ingestion._timestamps so
+    # CSV + broker adapters parse identical shapes.
+    from services.ingestion._timestamps import coerce_to_aware_utc
+
+    ts = coerce_to_aware_utc(ts_raw, "csv")
 
     return Trade(
         exchange="csv",
