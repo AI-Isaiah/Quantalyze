@@ -26,6 +26,7 @@ import hashlib
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from services.db import get_supabase
@@ -263,13 +264,18 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     # outage; tested in test_feature_flags.py::test_supabase_outage_falls_back_to_env.
     if not await is_unified_backbone_active():
         log.info("process_key.flag_off")
-        raise HTTPException(
+        # API-6 — Phase 17 DESIGN-05 envelope. Pre-fix used
+        # HTTPException(detail={code,...}) which serialized to
+        # {"detail": {"code": ...}} — incompatible with the wizard
+        # error renderer that reads top-level `code` / `human_message`.
+        return JSONResponse(
             status_code=503,
-            detail={
-                "code": "UNIFIED_BACKBONE_DISABLED",
-                "human_message": "Unified backbone is disabled; legacy route should handle.",
-                "correlation_id": correlation_id,
-            },
+            content=_envelope_error(
+                "UNIFIED_BACKBONE_DISABLED",
+                "Unified backbone is disabled; legacy route should handle.",
+                correlation_id,
+                None,
+            ),
         )
 
     supabase = get_supabase()
@@ -367,16 +373,20 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 correlation_id=correlation_id,
                 started_at=started_at,
             )
-        raise HTTPException(
+        # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
+        # not nested under `detail`). The wizard's error renderer reads the
+        # envelope shape directly off the response body.
+        return JSONResponse(
             status_code=422,
-            detail={
-                "code": "MISSING_STRATEGY_ID",
-                "human_message": (
+            content=_envelope_error(
+                "MISSING_STRATEGY_ID",
+                (
                     "context.strategy_id is required for this flow_type. "
                     "Validate-only flows must set context.step='validate'."
                 ),
-                "correlation_id": correlation_id,
-            },
+                correlation_id,
+                None,
+            ),
         )
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:

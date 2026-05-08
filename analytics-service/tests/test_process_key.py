@@ -250,7 +250,12 @@ def test_process_key_flag_off_503(client):
         )
     assert r.status_code == 503
     body = r.json()
-    assert body["detail"]["code"] == "UNIFIED_BACKBONE_DISABLED"
+    # API-6: Phase 17 DESIGN-05 envelope — top-level `code`, NOT nested
+    # under `detail`. The wizard's error renderer reads the body
+    # directly.
+    assert body["ok"] is False
+    assert body["code"] == "UNIFIED_BACKBONE_DISABLED"
+    assert "correlation_id" in body
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +792,11 @@ def test_process_key_missing_strategy_id_returns_422(client):
 
     assert r.status_code == 422, r.text
     body = r.json()
-    assert body["detail"]["code"] == "MISSING_STRATEGY_ID"
+    # API-6: Phase 17 DESIGN-05 envelope — top-level fields.
+    assert body["ok"] is False
+    assert body["code"] == "MISSING_STRATEGY_ID"
+    assert "human_message" in body
+    assert "correlation_id" in body
 
 
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
