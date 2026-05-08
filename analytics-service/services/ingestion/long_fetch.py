@@ -123,6 +123,24 @@ async def run_process_key_long_job(job: dict) -> "DispatchResult":
         log.info("process_key_long.already_published_skip")
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
+    # I-perf-5 — broker-work short-circuit. If the verification has already
+    # advanced past metrics_captured (i.e. report_queued / encrypted /
+    # near-published), the broker fetch + metrics compute are wasted: the
+    # remaining work is post-fetch (encryption + fingerprint persistence
+    # + final transition). On a worker retry-after-transient-error this
+    # avoids hammering the broker for trades we already have. We still
+    # return DONE rather than re-running the post-fetch tail because
+    # those side effects already landed before the transient-failure
+    # checkpoint. A follow-up that resumes the tail from
+    # metrics_captured belongs in a separate plan.
+    advanced_statuses = {"encrypted", "report_queued"}
+    if existing_data and existing_data.get("status") in advanced_statuses:
+        log.info(
+            "process_key_long.advanced_status_skip",
+            status=existing_data.get("status"),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
     # Build the request from the job's strategy + stored credentials.
     # NOTE: For onboard, credentials are in job.metadata.context.
     # For resync, credentials decrypt from
