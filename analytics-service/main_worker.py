@@ -46,6 +46,7 @@ load_dotenv()
 
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
+from services.feature_flags import is_unified_backbone_active
 from services.job_worker import DispatchOutcome, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
@@ -132,10 +133,25 @@ async def dispatch_tick(worker_id: str) -> None:
     # Same atomic concurrency primitive (FOR UPDATE SKIP LOCKED) as the
     # legacy claim_compute_jobs (migration 032), so two replicas claiming
     # in parallel still get disjoint result sets.
+    #
+    # Phase 19 / BACKBONE-05 — drain semantics: read the unified-backbone
+    # flag once per tick and pass it as the third argument so migration
+    # 104's claim RPC stamps 'unified_backbone_at_claim' into
+    # compute_jobs.metadata at claim time. Workers later read that
+    # snapshot (NOT the live env var) to decide which code path to run,
+    # so a flag flip mid-tick doesn't split-brain in-flight jobs. The
+    # is_unified_backbone_active() call is cached for 30s in-process so
+    # this is effectively a free op on most ticks.
+    flag_active = await is_unified_backbone_active()
+
     def _claim():
         return supabase.rpc(
             "claim_compute_jobs_with_priority",
-            {"p_batch_size": 5, "p_worker_id": worker_id},
+            {
+                "p_batch_size": 5,
+                "p_worker_id": worker_id,
+                "p_unified_backbone_active": flag_active,
+            },
         ).execute()
 
     claim_result = await db_execute(_claim)
