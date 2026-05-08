@@ -53,6 +53,12 @@ const ZERO_DENOMINATOR_ALERT_AFTER = 2; // alert when streak exceeds this (i.e. 
 const KILL_SWITCH_KEY = "process_key_unified_backbone";
 const ZERO_DENOM_STREAK_KEY = "flag_monitor_zero_denominator_streak";
 
+// M-7: alert From: header. Hoisted near other constants so a domain-rename
+// (e.g. quantalyze.com → quantalyze.app) is a one-line config edit, not a
+// scatter through three hard-coded literals.
+const ALERT_FROM =
+  process.env.RESEND_ALERT_FROM ?? "Quantalyze <alerts@quantalyze.com>";
+
 /** Resilient parse for Sentry events API response. Probe-verified shape is
  *  `data[0]["count()"]` but Sentry has rotated this twice — also accept
  *  `data[0].count` as a fallback. Anything else returns 0 (cron will report
@@ -188,7 +194,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     );
     if (newStreak > ZERO_DENOMINATOR_ALERT_AFTER && resend && founderEmail) {
       await resend.emails.send({
-        from: "Quantalyze <alerts@quantalyze.com>",
+        from: ALERT_FROM,
         to: founderEmail,
         subject: `[H-2 SEV-2] Phase 19 flag-monitor denominator stuck at 0 for ${newStreak} windows`,
         html: `<p>The /process-key audit_log denominator has been 0 for ${newStreak} consecutive 15-min windows. Either no traffic is reaching /process-key OR the audit-write at /process-key entry is failing. Auto-rollback cannot trip in this state — investigate before traffic resumes.</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
@@ -235,7 +241,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         console.error("[cron/flag-monitor] D-3 PostgREST resolution error:", err);
         if (resend && founderEmail) {
           await resend.emails.send({
-            from: "Quantalyze <alerts@quantalyze.com>",
+            from: ALERT_FROM,
             to: founderEmail,
             subject: `[D-3 SEV-2] Phase 19 kill-switch upsert failed (PGRST)`,
             html: `<p>Auto-rollback failed because the Supabase kill-switch upsert raised a PostgREST resolution error. Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p><p>Error: <code>${String(err).replace(/</g, "&lt;")}</code></p><p>Error envelope rate <code>${(errorRate * 100).toFixed(2)}%</code> (${errorCount}/${total}) WAS observed but the kill-switch row could not be flipped.</p>`,
@@ -255,7 +261,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
     if (resend && founderEmail) {
       await resend.emails.send({
-        from: "Quantalyze <alerts@quantalyze.com>",
+        from: ALERT_FROM,
         to: founderEmail,
         subject: `[ALERT] Phase 19 backbone auto-rolled-back: ${(errorRate * 100).toFixed(2)}% error rate`,
         html: `<p>Error envelope rate <code>${(errorRate * 100).toFixed(2)}%</code> exceeded ${(ALERT_THRESHOLD * 100).toFixed(2)}% threshold over the past 15 minutes (${errorCount}/${total}). Kill-switch row <code>${KILL_SWITCH_KEY}</code> has been flipped to <code>off</code>; new traffic falls back to legacy routes within the configured cache TTL (default 30s; <code>PHASE_19_STABILITY_CACHE_TTL_S</code> shortens this to 5s during the stability window).</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
@@ -277,7 +283,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (errorRate > WARN_THRESHOLD && total >= MIN_SAMPLE) {
     if (resend && founderEmail) {
       await resend.emails.send({
-        from: "Quantalyze <alerts@quantalyze.com>",
+        from: ALERT_FROM,
         to: founderEmail,
         subject: `[WARN] Phase 19 error rate ${(errorRate * 100).toFixed(2)}% — below auto-rollback threshold`,
         html: `<p>Error rate ${errorCount}/${total} = ${(errorRate * 100).toFixed(2)}% — below the ${(ALERT_THRESHOLD * 100).toFixed(2)}% auto-rollback threshold but worth a look.</p>`,
