@@ -191,16 +191,13 @@ def _csv_row_to_trade(row: dict[str, Any]) -> Trade:
     list shortcut.
     """
     ts_raw = row.get("date") or row.get("timestamp")
-    if isinstance(ts_raw, datetime):
-        ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
-    elif isinstance(ts_raw, (int, float)):
-        ts = datetime.fromtimestamp(float(ts_raw) / 1000, tz=timezone.utc)
-    elif ts_raw is None:
+    if ts_raw is None:
         raise ValueError("CSV row missing date/timestamp")
-    else:
-        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+    # M-17 — shared coercion lives in services.ingestion._timestamps so
+    # CSV + broker adapters parse identical shapes.
+    from services.ingestion._timestamps import coerce_to_aware_utc
+
+    ts = coerce_to_aware_utc(ts_raw, "csv")
 
     return Trade(
         exchange="csv",

@@ -126,18 +126,11 @@ def _normalize_trade(raw: dict[str, Any], exchange: str) -> Trade:
     import this symbol from .okx to avoid duplication).
     """
     ts_raw = raw.get("timestamp") or raw.get("ts")
-    if isinstance(ts_raw, datetime):
-        ts = ts_raw if ts_raw.tzinfo else ts_raw.replace(tzinfo=timezone.utc)
-    elif isinstance(ts_raw, (int, float)):
-        ts = datetime.fromtimestamp(ts_raw / 1000, tz=timezone.utc)
-    elif isinstance(ts_raw, str):
-        # ISO string — exchange.py emits .isoformat() on datetimes that
-        # are already UTC, so the trailing 'Z' may or may not be present.
-        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-    else:
-        raise ValueError(
-            f"Unsupported timestamp shape from {exchange}: {ts_raw!r}"
-        )
+    # M-17 — shared coercion lives in services.ingestion._timestamps so
+    # CSV + broker adapters parse identical shapes.
+    from services.ingestion._timestamps import coerce_to_aware_utc
+
+    ts = coerce_to_aware_utc(ts_raw, exchange)
 
     fee_raw = raw.get("fee", 0.0)
     if isinstance(fee_raw, dict):
