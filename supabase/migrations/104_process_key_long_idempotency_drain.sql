@@ -85,7 +85,17 @@ COMMIT;
 -- M-2: explicit BEGIN/COMMIT around the CHECK swap. Postgres takes ACCESS
 -- EXCLUSIVE locks for ALTER TABLE so this is safe in practice; the explicit
 -- block makes the intent unambiguous.
+--
+-- DM-1 fix: register process_key_long in the compute_job_kinds reference
+-- table BEFORE the CHECK widens. Without this, every enqueue of a
+-- process_key_long row fails with SQLSTATE 23503 (FK violation against
+-- compute_jobs.kind → compute_job_kinds.name). Pattern mirrors migration
+-- 070 STEP 3 (reconstruct_allocator_history / refresh_allocator_equity_daily)
+-- and migration 062 (rescore_allocator).
 BEGIN;
+INSERT INTO compute_job_kinds (name) VALUES ('process_key_long')
+  ON CONFLICT (name) DO NOTHING;
+
 ALTER TABLE compute_jobs DROP CONSTRAINT IF EXISTS compute_jobs_kind_check;
 ALTER TABLE compute_jobs ADD CONSTRAINT compute_jobs_kind_check CHECK (kind IN (
   'sync_trades', 'compute_analytics', 'compute_portfolio', 'poll_positions',
@@ -94,6 +104,38 @@ ALTER TABLE compute_jobs ADD CONSTRAINT compute_jobs_kind_check CHECK (kind IN (
   'reconstruct_allocator_history', 'refresh_allocator_equity_daily',
   'process_key_long'   -- Phase 19 / BACKBONE-09
 ));
+
+-- DM-2 fix: extend compute_jobs_kind_target_coherence so process_key_long
+-- rows are admitted with strategy_id (the only target a process-key job
+-- carries). Mirrors migration 070 STEP 4 DROP+ADD pattern. Without this,
+-- inserting a process_key_long row trips the coherence CHECK because none
+-- of the existing branches mention the new kind.
+ALTER TABLE compute_jobs DROP CONSTRAINT IF EXISTS compute_jobs_kind_target_coherence;
+ALTER TABLE compute_jobs ADD CONSTRAINT compute_jobs_kind_target_coherence CHECK (
+  (kind = 'compute_portfolio'
+      AND portfolio_id IS NOT NULL AND strategy_id IS NULL AND allocator_id IS NULL) OR
+  (kind = 'rescore_allocator'
+      AND allocator_id IS NOT NULL AND strategy_id IS NULL AND portfolio_id IS NULL) OR
+  (kind IN (
+    'sync_trades','compute_analytics','poll_positions',
+    'sync_funding','reconcile_strategy','compute_intro_snapshot'
+  ) AND strategy_id IS NOT NULL AND portfolio_id IS NULL AND allocator_id IS NULL) OR
+  (kind = 'poll_allocator_positions'
+      AND api_key_id IS NOT NULL AND strategy_id IS NULL
+      AND portfolio_id IS NULL AND allocator_id IS NULL) OR
+  (kind = 'reconstruct_allocator_history'
+      AND api_key_id IS NOT NULL AND strategy_id IS NULL
+      AND portfolio_id IS NULL AND allocator_id IS NULL) OR
+  (kind = 'refresh_allocator_equity_daily'
+      AND api_key_id IS NOT NULL AND strategy_id IS NULL
+      AND portfolio_id IS NULL AND allocator_id IS NULL) OR
+  -- Phase 19 / DM-2 — process_key_long is strategy-scoped (same shape as
+  -- sync_trades/compute_analytics; the long-fetch worker reads
+  -- compute_jobs.metadata for the per-flow context).
+  (kind = 'process_key_long'
+      AND strategy_id IS NOT NULL AND portfolio_id IS NULL
+      AND allocator_id IS NULL AND api_key_id IS NULL)
+);
 COMMIT;
 
 BEGIN;
@@ -249,6 +291,22 @@ BEGIN
        AND check_clause LIKE '%process_key_long%'
   ) INTO v_kind_check_ok;
   IF NOT v_kind_check_ok THEN RAISE EXCEPTION 'Migration 104: process_key_long not in compute_jobs_kind_check'; END IF;
+
+  -- DM-1 — process_key_long must be registered in compute_job_kinds (FK target)
+  IF NOT EXISTS(
+    SELECT 1 FROM compute_job_kinds WHERE name = 'process_key_long'
+  ) THEN
+    RAISE EXCEPTION 'Migration 104 DM-1: process_key_long missing from compute_job_kinds (FK target)';
+  END IF;
+
+  -- DM-2 — coherence CHECK admits process_key_long with strategy_id
+  IF NOT EXISTS(
+    SELECT 1 FROM information_schema.check_constraints
+     WHERE constraint_name='compute_jobs_kind_target_coherence'
+       AND check_clause LIKE '%process_key_long%'
+  ) THEN
+    RAISE EXCEPTION 'Migration 104 DM-2: process_key_long branch missing from compute_jobs_kind_target_coherence';
+  END IF;
 
   -- (c) claim RPC has 3 args
   SELECT EXISTS(
