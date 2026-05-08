@@ -5,7 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
-import { getCorrelationId } from "@/lib/correlation-id";
+import { postProcessKey } from "@/lib/process-key-client";
 
 /**
  * POST /api/strategies/csv-finalize — Phase 15 / CSV-01.
@@ -38,8 +38,6 @@ import { getCorrelationId } from "@/lib/correlation-id";
 
 const ALLOWED_FMTS = new Set(["daily_returns", "daily_nav", "trades"]);
 const MAX_NAME_CHARS = 80;
-const ANALYTICS_URL =
-  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(
@@ -226,8 +224,10 @@ async function unifiedCsvFinalizeHandler(args: {
   strategy_name: string;
   userId: string;
 }): Promise<NextResponse> {
-  const internalToken = process.env.INTERNAL_API_TOKEN;
-  if (!internalToken) {
+  // M-3: csv-finalize keeps a route-local INTERNAL_API_TOKEN check because
+  // the 503 envelope must use CSV_FINALIZE_FAIL shape, not the generic
+  // `{error: "Service unavailable"}` the shared helper returns.
+  if (!process.env.INTERNAL_API_TOKEN) {
     console.error("[strategies/csv-finalize] INTERNAL_API_TOKEN not configured");
     return NextResponse.json(
       {
@@ -241,31 +241,18 @@ async function unifiedCsvFinalizeHandler(args: {
     );
   }
 
-  const correlationId = await getCorrelationId();
-  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${internalToken}`,
-      "X-Correlation-Id": correlationId,
+  const result = await postProcessKey({
+    flow_type: "csv",
+    source: "csv",
+    context: {
+      wizard_session_id: args.wizard_session_id,
+      fmt: args.fmt,
+      strategy_name: args.strategy_name,
+      user_id: args.userId,
+      step: "finalize",
     },
-    body: JSON.stringify({
-      flow_type: "csv",
-      source: "csv",
-      context: {
-        wizard_session_id: args.wizard_session_id,
-        fmt: args.fmt,
-        strategy_name: args.strategy_name,
-        user_id: args.userId,
-        step: "finalize",
-      },
-    }),
-    cache: "no-store",
+    routeTag: "strategies/csv-finalize",
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    return NextResponse.json(err, { status: res.status });
-  }
-  return NextResponse.json(await res.json());
+  if (!result.ok) return result.response;
+  return NextResponse.json(result.body);
 }

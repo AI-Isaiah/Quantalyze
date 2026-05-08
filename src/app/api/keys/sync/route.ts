@@ -7,6 +7,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { postProcessKey } from "@/lib/process-key-client";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -48,9 +49,6 @@ import type { User } from "@supabase/supabase-js";
  * ──────────────────────────────────────────────────────────────────────
  */
 export const maxDuration = 300;
-
-const ANALYTICS_URL =
-  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(userActionLimiter, `keys-sync:${user.id}`);
@@ -129,41 +127,22 @@ async function unifiedKeysSyncHandler(args: {
   userId: string;
   source: string;
 }): Promise<NextResponse> {
-  const internalToken = process.env.INTERNAL_API_TOKEN;
-  if (!internalToken) {
-    console.error("[keys/sync] INTERNAL_API_TOKEN not configured");
-    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-  }
-
-  const correlationId = await getCorrelationId();
-  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${internalToken}`,
-      "X-Correlation-Id": correlationId,
+  const result = await postProcessKey({
+    flow_type: "resync",
+    source: args.source, // API-8: resolved from strategies.api_keys.exchange.
+    context: {
+      strategy_id: args.strategy_id,
+      user_id: args.userId,
     },
-    body: JSON.stringify({
-      flow_type: "resync",
-      source: args.source, // API-8: resolved from strategies.api_keys.exchange.
-      context: {
-        strategy_id: args.strategy_id,
-        user_id: args.userId,
-      },
-    }),
-    cache: "no-store",
+    routeTag: "keys/sync",
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    return NextResponse.json(err, { status: res.status });
-  }
+  if (!result.ok) return result.response;
 
   // I-API1: translate unified `{queued, verification_id}` back to the legacy
   // 202 `{accepted, strategy_id, status:'syncing'}` shape so callers reading
   // `body.strategy_id` keep working. Preserve verification_id + queued as
   // additive fields.
-  const upstream = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
     return NextResponse.json(
       {

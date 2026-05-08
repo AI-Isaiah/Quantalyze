@@ -5,7 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
-import { getCorrelationId } from "@/lib/correlation-id";
+import { postProcessKey } from "@/lib/process-key-client";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -31,8 +31,6 @@ import { getCorrelationId } from "@/lib/correlation-id";
  */
 
 const MAX_BYTES = 10 * 1024 * 1024;
-const ANALYTICS_URL =
-  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 /**
  * M-14: shared error-envelope builder for the CSV routes. Every error path
@@ -172,43 +170,34 @@ async function unifiedCsvValidateHandler(args: {
   sessionId: string;
   userId: string;
 }): Promise<NextResponse> {
-  const internalToken = process.env.INTERNAL_API_TOKEN;
-  if (!internalToken) {
+  // M-3: csv-validate keeps a route-local INTERNAL_API_TOKEN check because
+  // the 503 envelope must be the CSV envelope shape, not the generic
+  // `{error: "Service unavailable"}` the shared helper returns. The helper
+  // is still used for the actual POST so the per-route fetch boilerplate is
+  // gone.
+  if (!process.env.INTERNAL_API_TOKEN) {
     console.error("[strategies/csv-validate] INTERNAL_API_TOKEN not configured");
     return csvErrorEnvelope("CSV_UPSTREAM_FAIL", "Service unavailable.", {}, 503);
   }
 
   try {
-    const correlationId = await getCorrelationId();
     const arrayBuffer = await args.file.arrayBuffer();
     const rawBase64 = Buffer.from(arrayBuffer).toString("base64");
-    const res = await fetch(`${ANALYTICS_URL}/process-key`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${internalToken}`,
-        "X-Correlation-Id": correlationId,
+    const result = await postProcessKey({
+      flow_type: "csv",
+      source: "csv",
+      context: {
+        fmt: args.fmt,
+        wizard_session_id: args.sessionId,
+        user_id: args.userId,
+        file_name: args.file.name,
+        raw_bytes_base64: rawBase64,
+        step: "validate",
       },
-      body: JSON.stringify({
-        flow_type: "csv",
-        source: "csv",
-        context: {
-          fmt: args.fmt,
-          wizard_session_id: args.sessionId,
-          user_id: args.userId,
-          file_name: args.file.name,
-          raw_bytes_base64: rawBase64,
-          step: "validate",
-        },
-      }),
-      cache: "no-store",
+      routeTag: "strategies/csv-validate",
     });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      return NextResponse.json(err, { status: res.status });
-    }
-    return NextResponse.json(await res.json());
+    if (!result.ok) return result.response;
+    return NextResponse.json(result.body);
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV validation failed";
     console.error("[strategies/csv-validate] unified path threw:", message);

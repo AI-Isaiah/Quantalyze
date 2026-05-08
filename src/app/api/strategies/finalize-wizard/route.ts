@@ -7,7 +7,7 @@ import { STRATEGY_NAMES } from "@/lib/constants";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
-import { getCorrelationId } from "@/lib/correlation-id";
+import { postProcessKey } from "@/lib/process-key-client";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -434,48 +434,29 @@ async function unifiedFinalizeWizardHandler(args: {
   apiKeyId: string | null;
   source: string;
 }): Promise<NextResponse> {
-  const internalToken = process.env.INTERNAL_API_TOKEN;
-  if (!internalToken) {
-    console.error("[strategies/finalize-wizard] INTERNAL_API_TOKEN not configured");
-    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-  }
-
-  const correlationId = await getCorrelationId();
-  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${internalToken}`,
-      "X-Correlation-Id": correlationId,
+  const result = await postProcessKey({
+    flow_type: "onboard",
+    // API-8: actual exchange resolved from api_keys.exchange (or 'okx' for
+    // CSV-only strategies). The unified router still server-side resolves
+    // from strategies.api_keys.exchange when the linkage is present, but
+    // forwarding the resolved value here keeps the contract honest.
+    source: args.source,
+    context: {
+      ...args.payload,
+      strategy_id: args.strategy_id,
+      user_id: args.userId,
+      api_key_id: args.apiKeyId,
+      step: "finalize",
     },
-    body: JSON.stringify({
-      flow_type: "onboard",
-      // API-8: actual exchange resolved from api_keys.exchange (or 'okx' for
-      // CSV-only strategies). The unified router still server-side resolves
-      // from strategies.api_keys.exchange when the linkage is present, but
-      // forwarding the resolved value here keeps the contract honest.
-      source: args.source,
-      context: {
-        ...args.payload,
-        strategy_id: args.strategy_id,
-        user_id: args.userId,
-        api_key_id: args.apiKeyId,
-        step: "finalize",
-      },
-    }),
-    cache: "no-store",
+    routeTag: "strategies/finalize-wizard",
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    return NextResponse.json(err, { status: res.status });
-  }
+  if (!result.ok) return result.response;
 
   // API-9: translate the unified `{queued, verification_id}` shape back to the
   // legacy `{strategy_id, status:'pending_review'}` shape that wizard chrome
   // and downstream callers read off `body.strategy_id`. Preserve
   // `verification_id` + `queued` as additive fields for callers that want them.
-  const upstream = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
     return NextResponse.json({
       strategy_id: args.strategy_id,

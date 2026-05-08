@@ -105,12 +105,25 @@ vi.mock("@/lib/supabase/server", () => ({
 // Service-role admin client. The verify-strategy route uses it for the
 // rate-limit count + UPDATE; in the unified path the count call still runs
 // (rate limit precedes the flag check), so we stub it to a clean count.
+//
+// API-8 lookup support: the finalize-wizard / keys-sync unified branches
+// resolve the actual exchange via `admin.from('api_keys').select('exchange')
+// .eq('id', apiKeyId).single()` before delegating. The mock below also
+// supports the verification_requests count chain via .eq().gte() and the
+// strategy_verifications upsert chain via .upsert().
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from: () => ({
       select: () => ({
         eq: () => ({
           gte: async () => ({ count: 0, error: null }),
+          single: async () => ({ data: { exchange: "okx" }, error: null }),
+          maybeSingle: async () => ({ data: { id: "anchor" }, error: null }),
+          order: () => ({
+            limit: () => ({
+              maybeSingle: async () => ({ data: { id: "anchor" }, error: null }),
+            }),
+          }),
         }),
       }),
       update: () => ({ eq: async () => ({ error: null }) }),
@@ -215,8 +228,27 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("okx");
   });
 
-  it("keys/validate-and-encrypt: flow_type=onboard", async () => {
+  // API-2: validate-and-encrypt is locked to the legacy code path even
+  // when the unified-backbone flag is on, because the unified `/process-key`
+  // validate step does not return the encryption envelope the allocator
+  // client persists. This test documents the locked behavior — it must
+  // FAIL if a future refactor reintroduces the unified delegation before
+  // /process-key gains a real encrypt branch.
+  it("keys/validate-and-encrypt flag=on STILL uses legacy path (API-2 lock)", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const analyticsClient = await import("@/lib/analytics-client");
+    vi.mocked(analyticsClient.validateKey).mockResolvedValue({
+      valid: true,
+      read_only: true,
+    });
+    vi.mocked(analyticsClient.encryptKey).mockResolvedValue({
+      api_key_encrypted: "enc-key",
+      api_secret_encrypted: "enc-secret",
+      passphrase_encrypted: null,
+      dek_encrypted: "enc-dek",
+      nonce: "nonce",
+      kek_version: 1,
+    });
 
     const { POST } = await import("@/app/api/keys/validate-and-encrypt/route");
     const res = await POST(
@@ -227,11 +259,12 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
       }),
     );
 
+    // /process-key MUST NOT be called for this route — the legacy
+    // validateKey + encryptKey wrappers are the only path.
+    expect(findProcessKeyCall()).toBeUndefined();
     expect(res.status).toBe(200);
-    const call = findProcessKeyCall();
-    const body = parseFetchBody(call);
-    expect(body!.flow_type).toBe("onboard");
-    expect(body!.source).toBe("binance");
+    expect(analyticsClient.validateKey).toHaveBeenCalled();
+    expect(analyticsClient.encryptKey).toHaveBeenCalled();
   });
 
   it("strategies/finalize-wizard: flow_type=onboard with force-refresh probe RUN BEFORE delegation", async () => {
@@ -273,10 +306,19 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     // /process-key body shape
     const body = parseFetchBody(fetchCalls[procIdx]);
     expect(body!.flow_type).toBe("onboard");
+    // API-8: source is the resolved api_keys.exchange, not hardcoded 'okx'.
+    expect(body!.source).toBe("okx");
     expect(res.status).toBe(200);
+
+    // API-9: response shape translation — when upstream returns
+    // `{queued, verification_id}`, the thin adapter must hand back the
+    // legacy `{strategy_id, status:'pending_review'}` shape.
+    const respBody = await res.json();
+    expect(respBody.strategy_id).toBe("11111111-1111-1111-1111-111111111111");
+    expect(respBody.status).toBe("pending_review");
   });
 
-  it("keys/sync: flow_type=resync", async () => {
+  it("keys/sync: flow_type=resync — translates queued upstream to legacy 202 (I-API1)", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
 
     const { POST } = await import("@/app/api/keys/sync/route");
@@ -284,10 +326,22 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
       jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }),
     );
 
-    expect(res.status).toBe(200);
+    // I-API1: when /process-key returns `{queued, verification_id}`, the
+    // thin adapter must translate it back to the legacy 202 + accepted +
+    // strategy_id + status:syncing shape so callers reading body.strategy_id
+    // keep working.
+    expect(res.status).toBe(202);
+    const responseBody = await res.json();
+    expect(responseBody.accepted).toBe(true);
+    expect(responseBody.strategy_id).toBe(TEST_STRATEGY_ID);
+    expect(responseBody.status).toBe("syncing");
+
     const call = findProcessKeyCall();
     const body = parseFetchBody(call);
     expect(body!.flow_type).toBe("resync");
+    // API-8: source is the resolved api_keys.exchange (mocked to 'okx'),
+    // not a hardcoded literal.
+    expect(body!.source).toBe("okx");
   });
 
   it("strategies/csv-validate: flow_type=csv (re-routed from /csv/validate)", async () => {
