@@ -373,7 +373,8 @@ describe("/api/cron/flag-monitor", () => {
     let killSwitchUpsertCalls = 0;
     const admin = makeAdminMock({
       auditLogTotal: 1000,
-      featureFlagsUpsertImpl: (row: Record<string, unknown>) => {
+      featureFlagsUpsertImpl: (...args: unknown[]) => {
+        const row = args[0] as Record<string, unknown>;
         if (row.flag_key === "process_key_unified_backbone") {
           killSwitchUpsertCalls += 1;
           throw new Error(

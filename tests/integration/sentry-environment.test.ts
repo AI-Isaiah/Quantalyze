@@ -36,7 +36,9 @@ describe("Phase 19 / H-6 — Sentry init writes environment tag", () => {
     const src = readFileSync(TS_INIT_PATH, "utf8");
     // Tolerate either nullish-coalesce or logical-or fallback. Reject any
     // init that hardcodes "production" without an env-var read.
-    expect(src).toMatch(/Sentry\.init\(\s*\{[^}]*environment\s*:/s);
+    // Match Sentry.init({...environment: ...}) — use [\s\S] instead of `s`
+    // flag (ES2017 target compat).
+    expect(src).toMatch(/Sentry\.init\([\s\S]*?environment\s*:/);
     expect(src).toMatch(/process\.env\.VERCEL_ENV/);
   });
 
