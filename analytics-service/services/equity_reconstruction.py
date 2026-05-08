@@ -1678,6 +1678,10 @@ class EquityCurveBuilder:
         )
         self._funding_pnl_by_day: dict[date, float] = {}
         self._curve_cache: pd.DataFrame | None = None
+        # CR-perf-2 — cache reconstruct_positions output. to_metrics_snapshot
+        # and to_equity_curve_daily both call reconstruct_positions; pre-fix
+        # this fired _match_positions_fifo twice for every snapshot read.
+        self._positions_cache: list | None = None
 
     # ------------------------------------------------------------------
     # Position reconstruction (in-memory, not persisted)
@@ -1687,8 +1691,13 @@ class EquityCurveBuilder:
         """In-memory FIFO matching (NOT persisted to DB).
 
         Calls existing services.position_reconstruction._match_positions_fifo
-        (private — Phase 19 / MC-2 Option B).
+        (private — Phase 19 / MC-2 Option B). CR-perf-2 — result cached on
+        self._positions_cache; the cache is invalidated by attach_funding
+        the same way self._curve_cache is.
         """
+        if self._positions_cache is not None:
+            return self._positions_cache
+
         from services.ingestion.adapter import Position
         from services.position_reconstruction import _match_positions_fifo
 
@@ -1730,7 +1739,11 @@ class EquityCurveBuilder:
                     else:
                         pos["unrealized_pnl"] = (entry - mark) * qty
 
-        return [Position(**_phase19_position_dict_to_kwargs(p)) for p in all_positions]
+        positions_typed = [
+            Position(**_phase19_position_dict_to_kwargs(p)) for p in all_positions
+        ]
+        self._positions_cache = positions_typed
+        return positions_typed
 
     # ------------------------------------------------------------------
     # Funding-rate accumulation
