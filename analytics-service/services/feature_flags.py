@@ -38,6 +38,13 @@ from services.db import get_supabase
 
 logger = logging.getLogger("quantalyze.analytics.feature_flags")
 
+# M-6 — hoist the 30s default into a module-level constant so the env-var
+# fallback, the explicit constant, and the test reference all point at
+# the same number. Locked per CONTEXT.md L37 (Phase 19 / D-4 — cache TTL
+# during stability window).
+DEFAULT_CACHE_TTL_S: float = 30.0
+
+
 # Phase 19 / D-4 — cache TTL during stability window. Default 30s. During the
 # 7-day stability window after PR-B, the founder can set
 # PHASE_19_STABILITY_CACHE_TTL_S=5 in the analytics-service environment to
@@ -47,12 +54,12 @@ logger = logging.getLogger("quantalyze.analytics.feature_flags")
 def _resolve_cache_ttl_s() -> float:
     raw = os.getenv("PHASE_19_STABILITY_CACHE_TTL_S")
     if not raw:
-        return 30.0
+        return DEFAULT_CACHE_TTL_S
     try:
         v = float(raw)
-        return v if v > 0 else 30.0
+        return v if v > 0 else DEFAULT_CACHE_TTL_S
     except ValueError:
-        return 30.0
+        return DEFAULT_CACHE_TTL_S
 
 
 _CACHE_TTL_S: float = _resolve_cache_ttl_s()
