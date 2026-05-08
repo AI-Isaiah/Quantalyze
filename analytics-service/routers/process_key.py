@@ -17,8 +17,6 @@ Two execution modes
 """
 from __future__ import annotations
 
-import dataclasses
-import json
 import os
 import secrets
 import time
@@ -34,6 +32,7 @@ from services.db import get_supabase
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
+from services.ingestion.serde import metrics_to_jsonb as _shared_metrics_to_jsonb
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
 log = structlog.get_logger("quantalyze.analytics.process_key")
@@ -146,22 +145,13 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
 
 
 def _metrics_to_jsonb(m: Any) -> dict:
-    """MC-4 — explicit type-aware serialization for the JSONB column.
-
-    The original ``__dict__`` walk in the planning blueprint works for the
-    primitive-only MetricsSnapshot but silently breaks if any future field
-    is ``datetime`` / ``Decimal`` / non-primitive. Use ``dataclasses.asdict``
-    for dataclasses and ``model_dump(mode='json')`` for pydantic. Anything
-    else falls back to a json-roundtrip that surfaces TypeError on a
-    non-encodable value rather than persisting a corrupted dict.
+    """MC-4 — re-export from services.ingestion.serde so the synchronous
+    router and the async long_fetch worker share a single source of truth
+    (WR-05 fix per REVIEW.md 2026-05-08). The wrapper keeps the existing
+    ``routers.process_key._metrics_to_jsonb`` symbol stable for tests that
+    import it directly.
     """
-    if dataclasses.is_dataclass(m) and not isinstance(m, type):
-        return dataclasses.asdict(m)
-    if hasattr(m, "model_dump"):
-        return m.model_dump(mode="json")
-    out = {k: v for k, v in m.__dict__.items() if not k.startswith("_")}
-    json.dumps(out)  # raises TypeError on non-encodable values
-    return out
+    return _shared_metrics_to_jsonb(m)
 
 
 async def _run_validate_only(

@@ -226,3 +226,49 @@ async def test_dispatch_dict_routes_process_key_long():
 def test_timeout_per_kind_set():
     """TIMEOUT_PER_KIND['process_key_long'] == 30 * 60 (30 min)."""
     assert TIMEOUT_PER_KIND["process_key_long"] == 30 * 60
+
+
+def test_long_fetch_uses_shared_metrics_encoder() -> None:
+    """WR-05 regression (REVIEW.md 2026-05-08).
+
+    The pre-fix `long_fetch._metrics_to_jsonb` was a `__dict__` walk —
+    while `process_key.py._metrics_to_jsonb` got the MC-4 type-aware
+    encoder. If a future MetricsSnapshot field becomes datetime/Decimal,
+    the long-fetch path would silently corrupt the JSONB column.
+
+    After the fix both paths delegate to services.ingestion.serde —
+    single source of truth.
+    """
+    import inspect
+
+    from services.ingestion import long_fetch, serde
+    from services.ingestion.adapter import MetricsSnapshot
+    from routers import process_key
+
+    # Source-level guard — long_fetch must reference the shared encoder.
+    src = inspect.getsource(long_fetch)
+    assert "from services.ingestion.serde import metrics_to_jsonb" in src, (
+        "long_fetch must import the shared MC-4 encoder per WR-05; "
+        "the local __dict__ walk silently corrupts JSONB if a future "
+        "MetricsSnapshot field is datetime / Decimal."
+    )
+
+    # Functional equivalence — both delegators produce the same output for
+    # a dataclass MetricsSnapshot.
+    m = MetricsSnapshot(
+        sharpe=1.2,
+        twr=0.10,
+        ytd=0.05,
+        max_drawdown=-0.07,
+        total_pnl=999.0,
+        trade_count=7,
+        win_rate=0.6,
+    )
+    assert long_fetch._metrics_to_jsonb(m) == process_key._metrics_to_jsonb(m)
+    assert long_fetch._metrics_to_jsonb(m) == serde.metrics_to_jsonb(m)
+
+    # MC-4 type-awareness — uses dataclasses.asdict so the result is a
+    # plain dict with the dataclass field values intact.
+    out = long_fetch._metrics_to_jsonb(m)
+    assert out["sharpe"] == 1.2
+    assert out["trade_count"] == 7

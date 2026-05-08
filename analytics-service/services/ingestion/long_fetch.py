@@ -35,13 +35,19 @@ import structlog
 from services.db import get_supabase
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
+from services.ingestion.serde import metrics_to_jsonb as _shared_metrics_to_jsonb
 
 log = structlog.get_logger("quantalyze.analytics.long_fetch")
 
 
 def _metrics_to_jsonb(m: Any) -> dict:
-    """Mirror routers/process_key.py — strip private fields, return a dict."""
-    return {k: v for k, v in m.__dict__.items() if not k.startswith("_")}
+    """WR-05 fix (REVIEW.md 2026-05-08): delegate to the shared MC-4
+    encoder in services.ingestion.serde so the long-fetch worker path
+    matches the synchronous router path. The pre-fix ``__dict__`` walk
+    silently corrupted JSONB if any future MetricsSnapshot field became
+    ``datetime`` / ``Decimal`` / non-primitive.
+    """
+    return _shared_metrics_to_jsonb(m)
 
 
 async def run_process_key_long_job(job: dict) -> "DispatchResult":
