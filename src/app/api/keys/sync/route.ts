@@ -158,7 +158,25 @@ async function unifiedKeysSyncHandler(args: {
     const err = await res.json().catch(() => ({}));
     return NextResponse.json(err, { status: res.status });
   }
-  return NextResponse.json(await res.json());
+
+  // I-API1: translate unified `{queued, verification_id}` back to the legacy
+  // 202 `{accepted, strategy_id, status:'syncing'}` shape so callers reading
+  // `body.strategy_id` keep working. Preserve verification_id + queued as
+  // additive fields.
+  const upstream = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (upstream && typeof upstream === "object" && "queued" in upstream) {
+    return NextResponse.json(
+      {
+        accepted: true,
+        strategy_id: args.strategy_id,
+        status: "syncing",
+        verification_id: upstream.verification_id ?? null,
+        queued: upstream.queued ?? true,
+      },
+      { status: 202 },
+    );
+  }
+  return NextResponse.json(upstream);
 }
 
 /**
