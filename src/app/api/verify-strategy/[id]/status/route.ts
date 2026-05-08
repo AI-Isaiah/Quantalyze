@@ -99,7 +99,14 @@ export async function GET(
     status: resolved.status,
   };
 
-  if (resolved.status === "complete" && resolved.results) {
+  // Phase 19 / API-4: legacy strategy_verifications uses 'complete'; the
+  // unified backbone (strategy_verifications.status post-PR-A) uses
+  // 'published' as the terminal success state. Accept both so teaser status
+  // pages keep rendering results across the migration.
+  if (
+    (resolved.status === "complete" || resolved.status === "published") &&
+    resolved.results
+  ) {
     response.results = resolved.results;
   }
 
