@@ -915,6 +915,55 @@ def test_process_key_writes_audit_row(client):
 # ---------------------------------------------------------------------------
 
 
+def test_process_key_shares_main_limiter_instance():
+    """API-5 regression: routers.process_key.limiter MUST be the same
+    instance as services.rate_limit.limiter (which main.py also imports).
+
+    Pre-fix, process_key.py instantiated its own ``Limiter()`` at module
+    scope; main.py owned a different one and registered it on
+    ``app.state.limiter``. The slowapi ``@limiter.limit(...)`` decorator
+    binds to whichever Limiter the source file imports — so the
+    in-process route counts and the app-state metrics were divorced.
+    """
+    from services import rate_limit as _rl
+
+    assert process_key_router.limiter is _rl.limiter, (
+        "API-5: process_key.limiter must be the singleton from "
+        "services.rate_limit. A drift here means slowapi storage on the "
+        "decorator and on app.state.limiter is no longer shared."
+    )
+
+
+def test_process_key_rate_limit_key_func_uses_token_and_user_id():
+    """API-5: per-tenant isolation — the limiter key must vary by
+    (Authorization, X-User-Id), NOT remote IP. Two requests from the
+    same Vercel egress IP but different tenants must land in different
+    buckets.
+    """
+    from unittest.mock import MagicMock
+
+    key_func = process_key_router._process_key_rate_limit_key
+
+    req_a = MagicMock()
+    req_a.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-a"}
+    req_b = MagicMock()
+    req_b.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-b"}
+    req_c = MagicMock()
+    req_c.headers = {"Authorization": "Bearer bbb", "X-User-Id": "user-a"}
+
+    ka = key_func(req_a)
+    kb = key_func(req_b)
+    kc = key_func(req_c)
+
+    assert ka != kb, "Same token, different user_id must produce different keys"
+    assert ka != kc, "Different token must produce different keys"
+    # Bearer token must NEVER appear in plaintext (it shows up in slowapi
+    # error logs).
+    assert "aaa" not in ka and "bbb" not in kc
+    # Stable: same input → same key.
+    assert key_func(req_a) == ka
+
+
 def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
     """API-1 regression: main.verify_service_key middleware must skip
     /process-key the same way it skips /internal/*.

@@ -22,21 +22,50 @@ import secrets
 import time
 from typing import Any
 
+import hashlib
+
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from services.db import get_supabase
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
 from services.ingestion.serde import metrics_to_jsonb as _shared_metrics_to_jsonb
+from services.rate_limit import limiter
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
 log = structlog.get_logger("quantalyze.analytics.process_key")
-limiter = Limiter(key_func=get_remote_address)
+
+
+def _process_key_rate_limit_key(request: Request) -> str:
+    """API-5 — rate-limit key for /process-key.
+
+    Pre-fix used ``get_remote_address`` which buckets all Vercel egress
+    behind a single shared NAT into the same window — so one tenant's
+    burst can starve every other tenant. The unified backbone is
+    service-to-service auth via INTERNAL_API_TOKEN with a JSON
+    ``context.user_id``; we key on a hash of (token, user_id) so each
+    user gets an isolated 100/hour window.
+
+    Tokens are SHA-256-hashed with a non-cryptographic suffix because
+    the resulting key shows up in slowapi error logs and we don't want
+    raw bearer tokens in observability output. The hash collapses the
+    bearer to a stable 16-char prefix.
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[len("Bearer "):]
+    else:
+        token = auth or "unauthenticated"
+    token_id = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    # Best-effort user_id extraction. The body has been parsed by the time
+    # FastAPI hands it to slowapi only if slowapi reads it from
+    # request.state — which it does NOT. We fall back to a header sent by
+    # the Vercel thin adapters where available.
+    user_id = request.headers.get("X-User-Id") or "anon"
+    return f"process_key:{token_id}:{user_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +235,7 @@ async def _run_validate_only(
 
 
 @router.post("")
-@limiter.limit("100/hour")
+@limiter.limit("100/hour", key_func=_process_key_rate_limit_key)
 async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     # Slowapi inspects the function signature for a parameter literally named
     # `request` (or `websocket`) to attach the limiter context — see

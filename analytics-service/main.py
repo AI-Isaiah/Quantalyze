@@ -7,8 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from dotenv import load_dotenv
 
@@ -49,7 +48,13 @@ init_sentry()
 
 logger = logging.getLogger("quantalyze.analytics")
 
-limiter = Limiter(key_func=get_remote_address)
+# API-5 fix — single shared Limiter for the process. Routers that need rate
+# limits import the same instance from services.rate_limit so the
+# `@limiter.limit(...)` decorator and `app.state.limiter` reference the
+# same storage. Pre-fix, main.py and routers/process_key.py each owned a
+# separate Limiter() and the route's metrics were never visible on
+# app.state (and any future storage backend swap would only cover one).
+from services.rate_limit import limiter
 
 
 # --------------------------------------------------------------------------
