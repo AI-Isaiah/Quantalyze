@@ -8,6 +8,9 @@ BEGIN;
 
 DROP FUNCTION IF EXISTS compute_similarity(JSONB, JSONB);
 
+-- I-perf-2 — drop the GIN replacement AND the legacy partial-on-id name
+-- so a rollback against either generation of the migration cleans up.
+DROP INDEX IF EXISTS strategies_fingerprint_gin_idx;
 DROP INDEX IF EXISTS strategies_fingerprint_partial_idx;
 
 ALTER TABLE strategies DROP CONSTRAINT IF EXISTS strategies_fingerprint_version_check;

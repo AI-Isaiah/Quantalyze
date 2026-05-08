@@ -46,18 +46,23 @@ ALTER TABLE strategies
     )
   );
 
--- M-4: partial index retained for v0 to support future v2 similarity queries
--- (compute_similarity over WHERE fingerprint IS NOT NULL). Indexing PK column
--- under partial predicate has minimal benefit on its own; document rationale
--- here so future reviewers can drop in a follow-up if benchmarks show zero
--- benefit.
-CREATE INDEX IF NOT EXISTS strategies_fingerprint_partial_idx
-  ON strategies (id) WHERE fingerprint IS NOT NULL;
+-- I-perf-2 — partial GIN index on the fingerprint JSONB. The pre-fix
+-- partial index on `(id) WHERE fingerprint IS NOT NULL` indexed the PK
+-- column under a partial predicate with minimal benefit (the PK already
+-- has a unique btree). The replacement GIN index supports actual
+-- containment / lookup queries on the JSONB body — which is what the
+-- v2 similarity ranker will need. Partial WHERE keeps the index size
+-- bounded to populated rows.
+CREATE INDEX IF NOT EXISTS strategies_fingerprint_gin_idx
+  ON strategies USING gin (fingerprint) WHERE fingerprint IS NOT NULL;
+-- Drop the old btree-on-id partial that this replaces. Idempotent on
+-- DBs that already had it dropped or never built it.
+DROP INDEX IF EXISTS strategies_fingerprint_partial_idx;
 
 COMMENT ON COLUMN strategies.fingerprint IS
   'Phase 19 / FINGERPRINT-01. v0 placeholder; pgvector explicitly deferred to v2 per UC-C. Shape: {version: 1, trade_size_buckets: [4 floats], hold_duration_buckets: [4 floats], asset_class_mix: [4 floats], instrument_concentration: [10 floats], temporal_pattern: [24 floats]}.';
-COMMENT ON INDEX strategies_fingerprint_partial_idx IS
-  'Phase 19 / FINGERPRINT-01 / M-4. Retained for v0; supports future v2 similarity queries on populated rows. Drop in follow-up if benchmarks show no benefit.';
+COMMENT ON INDEX strategies_fingerprint_gin_idx IS
+  'Phase 19 / FINGERPRINT-01 / I-perf-2. GIN over the JSONB fingerprint body, partial WHERE fingerprint IS NOT NULL. Replaces the prior btree-on-id partial which had minimal benefit (the PK already covers id).';
 
 -- ==========================================================================
 -- STEP 2 — compute_similarity cosine function (FINGERPRINT-02)
