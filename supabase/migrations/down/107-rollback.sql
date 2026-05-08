@@ -2,11 +2,10 @@
 -- Reverses the rename + VIEW + INSTEAD OF triggers + RLS policy adds.
 -- Mirrors the rollback runbook Stage D recovery procedure.
 --
--- IMPORTANT — asymmetry: the C-7 backfill rows in strategy_verifications
--- are NOT removed by rollback. They are real strategy_verifications rows
--- now and removing them would lose data. If you need a strict round-trip,
--- snapshot strategy_verifications.id values before applying 107 and
--- DELETE WHERE id IN (snapshot) after this rollback.
+-- DM-3 update: the C-7 synthetic-strategy backfill was removed from migration
+-- 107 source (privacy leak via synthetic strategies anchor). This rollback no
+-- longer needs the asymmetric "C-7 rows are real and not removed" caveat —
+-- nothing is backfilled, nothing to leave behind.
 --
 -- C-8 — paired down-migration.
 

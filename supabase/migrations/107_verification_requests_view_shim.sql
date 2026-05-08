@@ -63,62 +63,22 @@ END $$;
 ALTER TABLE verification_requests RENAME TO verification_requests_legacy;
 
 -- ==========================================================================
--- STEP 2 — C-7 backfill historical teaser rows from legacy table
+-- STEP 2 — DM-3: backfill REMOVED (was the original C-7 backfill).
 -- ==========================================================================
--- The legacy `verification_requests` schema does not carry strategy_id /
--- wizard_session_id (it pre-dates Phase 15), so this backfill creates
--- synthetic strategy_id-bound rows ONLY for legacy entries that the public
--- status API would otherwise lose. Any legacy row missing the FK target is
--- logged and skipped — admins can fall back to the legacy table via the
--- admin / public_token policies below.
+-- The earlier draft of this migration backfilled legacy verification_requests
+-- rows into strategy_verifications by picking the "most recent strategies row"
+-- as a synthetic strategy_id anchor. Per Phase 19 / DM-3 review (REVIEWS.md
+-- 2026-05-08) that is a privacy leak: the synthetic anchor inherits the
+-- strategies row's user_id under RLS, so a legacy public-token URL would
+-- return data attributed to an unrelated strategy owner.
 --
--- C-7 backfill — historical teaser rows.
-DO $$
-DECLARE
-  v_backfilled INT := 0;
-  v_skipped INT := 0;
-  r RECORD;
-  v_synthetic_strategy_id UUID;
-BEGIN
-  FOR r IN SELECT * FROM verification_requests_legacy LOOP
-    -- For each legacy row, attempt to find a matching strategy by recent
-    -- timestamp. If none, skip (orphan or non-teaser legacy) — admins
-    -- still see via legacy table.
-    SELECT id INTO v_synthetic_strategy_id
-      FROM strategies
-     WHERE created_at <= COALESCE(r.completed_at, r.created_at)
-     ORDER BY created_at DESC
-     LIMIT 1;
-    IF v_synthetic_strategy_id IS NULL THEN
-      v_skipped := v_skipped + 1;
-      CONTINUE;
-    END IF;
-    -- INSERT INTO strategy_verifications if a row with this id does not already exist.
-    INSERT INTO strategy_verifications (
-      id, strategy_id, wizard_session_id, status, trust_tier, flow_type, source,
-      metrics_snapshot, public_token, expires_at, created_at, transitioned_at
-    )
-    VALUES (
-      r.id, v_synthetic_strategy_id, gen_random_uuid(),
-      -- Legacy status enum: pending/processing/complete/failed.
-      -- Map to strategy_verifications status enum (draft/validated/...
-      -- /published) — completed legacy rows surface as 'published'.
-      CASE COALESCE(r.status, 'complete')
-        WHEN 'complete' THEN 'published'
-        WHEN 'failed'   THEN 'draft'
-        ELSE 'draft'
-      END,
-      'self_reported',  -- legacy rows are pre-Phase-15; no trust verification done
-      'teaser',
-      COALESCE(r.exchange, 'okx'),
-      r.results, r.public_token, r.expires_at,
-      r.created_at, COALESCE(r.completed_at, r.created_at)
-    )
-    ON CONFLICT (id) DO NOTHING;
-    v_backfilled := v_backfilled + 1;
-  END LOOP;
-  RAISE NOTICE 'Migration 107 C-7 backfill: % rows copied, % rows skipped (no strategy_id match)', v_backfilled, v_skipped;
-END $$;
+-- The legacy table is renamed to verification_requests_legacy (STEP 1 above)
+-- and reachable via the M-6 public-token-gated SELECT policy + admin SELECT
+-- policy (STEP 5 below). Public-token URLs continue to resolve through the
+-- existing /api/verify-strategy/[id]/status route handler which uses
+-- createAdminClient (RLS bypass) to look up the row directly. No data is
+-- lost; legacy rows simply remain under their legacy-schema identity rather
+-- than being re-anchored under a stranger's strategy_id.
 
 -- ==========================================================================
 -- STEP 3 — CREATE VIEW verification_requests AS SELECT … FROM strategy_verifications
