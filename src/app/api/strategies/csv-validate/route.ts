@@ -188,9 +188,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 /**
  * Phase 19 / BACKBONE-01 unified path. Re-targets the upstream from
  * `/csv/validate` to `/process-key` with `flow_type=csv`. The CSV bytes
- * are passed in `context.raw_bytes` (base64) along with `fmt` and
- * `wizard_session_id`. Returns the same envelope shape as the legacy
- * path so wizard chrome doesn't need to branch.
+ * are passed in `context.raw_bytes_base64` (base64-encoded raw bytes)
+ * along with `fmt` and `wizard_session_id`. Returns the same envelope
+ * shape as the legacy path so wizard chrome doesn't need to branch.
  */
 async function unifiedCsvValidateHandler(args: {
   formData: FormData;
