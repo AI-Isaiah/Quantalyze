@@ -10,9 +10,18 @@ Special note vs OKX/Bybit: services/exchange.py
 takes a strategy_id + supabase client because Binance's per-symbol
 fetch_my_trades requires the symbol set to be known up-front; the
 existing fetcher reads it from the strategies-already-traded set in
-the trades + position_snapshots tables. The adapter therefore expects
-`creds_or_file` to also carry `strategy_id` and `supabase` (the P4
-router passes them in alongside the raw credentials).
+the trades + position_snapshots tables.
+
+CR-01 fix (REVIEW.md 2026-05-08):
+The supabase client cannot be transported through the JSON envelope
+sent by the Next.js thin adapters — JSON has no representation for a
+Python supabase client object. We instead build the supabase client
+locally inside `fetch_raw` via `services.db.get_supabase()` (the same
+pattern the rest of analytics-service uses). `strategy_id` is read
+from the context dict; if absent (teaser flow has no anchor strategy
+row yet) we raise a clear error so the router surfaces a recoverable
+envelope rather than letting the underlying KeyError leak as an
+unhandled 500.
 """
 from __future__ import annotations
 
@@ -65,6 +74,27 @@ class BinanceAdapter:
             await ex.close()
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
+        # CR-01 fix — build supabase client locally rather than expecting
+        # a Python client object on the JSON envelope. The thin adapters
+        # under src/app/api/* serialize creds_or_file as JSON; a supabase
+        # client cannot survive that round-trip, so the previous
+        # `creds_or_file["supabase"]` lookup raised KeyError on every
+        # Binance teaser/onboard hit when the unified-backbone flag was on.
+        from services.db import get_supabase
+
+        strategy_id = creds_or_file.get("strategy_id")
+        if not strategy_id:
+            # Teaser flow lands here pre-strategy creation. The legacy
+            # `_fetch_raw_trades_binance` requires `strategy_id` to look up
+            # the symbol set already traded (it cannot enumerate all
+            # binance symbols in a single fetch). Surface a typed error so
+            # the router can return a recoverable envelope.
+            raise ValueError(
+                "BinanceAdapter.fetch_raw requires context.strategy_id; "
+                "teaser flow has no anchor strategy row yet — caller must "
+                "allocate a draft strategy first."
+            )
+
         ex = exchange_service.create_exchange(
             "binance",
             creds_or_file["api_key"],
@@ -74,8 +104,8 @@ class BinanceAdapter:
         try:
             raw = await exchange_service._fetch_raw_trades_binance(
                 ex,
-                creds_or_file["strategy_id"],
-                creds_or_file["supabase"],
+                strategy_id,
+                get_supabase(),
                 creds_or_file.get("since_ms"),
             )
             return [_normalize_trade(r, "binance") for r in raw]

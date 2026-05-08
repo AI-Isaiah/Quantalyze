@@ -142,6 +142,59 @@ def test_get_adapter_returns_concrete_classes() -> None:
     # CSV-specific behavior contract co-located.
 
 
+def test_binance_fetch_raw_does_not_require_supabase_in_context() -> None:
+    """CR-01 regression (REVIEW.md 2026-05-08).
+
+    The pre-fix `BinanceAdapter.fetch_raw` read `creds_or_file["supabase"]`
+    which raised KeyError on every Binance teaser/onboard call once the
+    unified-backbone flag flipped on. The thin adapters in src/app/api/*
+    serialize the envelope as JSON; a Python supabase client cannot
+    survive that round-trip. After the fix, fetch_raw builds the
+    supabase client locally via services.db.get_supabase().
+
+    This test verifies:
+      1. The KeyError on `supabase` is gone (no `creds_or_file["supabase"]`
+         lookup remains).
+      2. Missing `strategy_id` produces a clear ValueError instead of a
+         leaky KeyError.
+    """
+    import asyncio
+    import inspect
+    from unittest.mock import patch
+
+    import pytest
+
+    from services.ingestion.binance import BinanceAdapter
+
+    # Source-level guard — strip comments so the descriptive comment that
+    # references the legacy lookup string does not produce a false positive.
+    src_lines = inspect.getsource(BinanceAdapter.fetch_raw).splitlines()
+    code_only = "\n".join(
+        ln for ln in src_lines if not ln.lstrip().startswith("#")
+    )
+    assert 'creds_or_file["supabase"]' not in code_only, (
+        "BinanceAdapter.fetch_raw must build the supabase client "
+        "internally per CR-01; expecting it on the JSON envelope is "
+        "structurally impossible from the thin adapters."
+    )
+
+    # Behavioral guard — missing strategy_id surfaces ValueError, not KeyError.
+    adapter = BinanceAdapter()
+    # Patch get_supabase so the test does not require live SUPABASE_URL.
+    with patch("services.db.get_supabase", return_value=object()):
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(
+                adapter.fetch_raw(
+                    {
+                        "api_key": "k",
+                        "api_secret": "s",
+                        # strategy_id intentionally absent — teaser-flow shape.
+                    }
+                )
+            )
+    assert "strategy_id" in str(exc_info.value)
+
+
 def test_literal_types() -> None:
     from services.ingestion.adapter import FlowType, Source, Status, TrustTier
 
