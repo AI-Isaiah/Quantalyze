@@ -1,3 +1,4 @@
+import logging
 import quantstats as qs
 import pandas as pd
 import numpy as np
@@ -6,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .transforms import downsample_series, cap_data_points
+
+logger = logging.getLogger("quantalyze.analytics.metrics")
 
 
 # Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
@@ -314,8 +317,18 @@ def compute_all_metrics(
                     "is_current": bool(is_current),
                 })
             metrics_json["drawdown_episodes"] = episodes
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # audit-2026-05-07 G11.E.1: replaced bare `except: pass` with structured
+        # logging + a `drawdown_episodes_error` flag so the frontend can render
+        # 'Drawdown episodes unavailable due to compute error' instead of silently
+        # falling back to lower-fidelity client-side segmentation.
+        logger.warning(
+            "drawdown_episodes computation failed (returns_len=%s): %s",
+            len(returns) if returns is not None else None,
+            exc,
+            exc_info=True,
+        )
+        metrics_json["drawdown_episodes_error"] = str(exc)[:200]
 
     # Outlier ratios
     try:
@@ -346,8 +359,21 @@ def compute_all_metrics(
                     metrics_json["treynor"] = _safe_float(cagr / beta)
             if len(aligned[0]) >= 90:
                 metrics_json["btc_rolling_correlation_90d"] = _rolling_correlation(aligned[0], aligned[1], 90)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # audit-2026-05-07 G11.E.2: this `try` historically wrapped the entire
+            # benchmark-metrics fan-out (greeks/alpha/beta/correlation/info_ratio/
+            # treynor/btc_rolling_correlation_90d). One failure silently dropped ALL
+            # of them. Log the exception with context so a regression in any of
+            # those helpers surfaces in Railway logs instead of making the Risk
+            # tab render "Insufficient data" forever.
+            logger.warning(
+                "benchmark_metrics fan-out failed (returns_len=%s, benchmark_len=%s): %s",
+                len(returns) if returns is not None else None,
+                len(benchmark_returns) if benchmark_returns is not None else None,
+                exc,
+                exc_info=True,
+            )
+            metrics_json["benchmark_metrics_error"] = str(exc)[:200]
 
         # Store benchmark cumulative returns series aligned to strategy dates
         try:
@@ -360,8 +386,21 @@ def compute_all_metrics(
                     {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
                     for d, v in bm_cumulative.items()
                 ]
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # audit-2026-05-07 G11.E.3: silently dropping benchmark_returns also
+            # kills the client-side correlation fallback in
+            # CorrelationWithBenchmark.tsx. Log + emit an error flag so the
+            # frontend can surface "Benchmark data unavailable due to compute
+            # error" instead of the indistinguishable "no benchmark assigned"
+            # empty state.
+            logger.warning(
+                "benchmark_returns serialization failed (returns_len=%s, benchmark_len=%s): %s",
+                len(returns) if returns is not None else None,
+                len(benchmark_returns) if benchmark_returns is not None else None,
+                exc,
+                exc_info=True,
+            )
+            metrics_json["benchmark_returns_error"] = str(exc)[:200]
 
     # METRICS-11: 10 new qstats scalars merged into the inner metrics_json
     # JSONB sub-dict (D-01 storage split — these are scalars, they live in
