@@ -169,9 +169,12 @@ Seeded by `scripts/seed-full-app-demo.ts` (committed on the feat branch).
 ## Post-demo housekeeping
 
 1. **Rotate secrets** that were pasted in chat during setup:
-   - Upstash management API key `f25ddf32-...` → Upstash console
-   - Supabase service role key `sb_secret_Gj8...` → Supabase dashboard
+   - Upstash management API key → Upstash console
+   - Supabase service role key → Supabase dashboard
    - DEMO_PDF_SECRET (auto-generated but pasted in chat)
+   _(Concrete prefixes were redacted from this checklist 2026-05-07
+   per audit-2026-05-07 #36 — committing partial UUIDs/prefixes
+   narrows attacker entropy even when the secret has been rotated.)_
 2. **Merge the feat branch** — `feat/full-app-demo-seed-and-scenarios` →
    main, assuming CI goes green on PR
 3. **Build the Multistrategy Dashboard** (top TODO in `TODOS.md`) —

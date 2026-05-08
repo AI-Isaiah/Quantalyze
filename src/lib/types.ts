@@ -330,12 +330,26 @@ export interface FundingFee {
   created_at: string;
 }
 
+/**
+ * Status values for `contact_requests.status` mirror migration 008's
+ * `contact_requests_status_check` CHECK constraint:
+ *   pending → intro_made → completed (or declined at any point)
+ *
+ * The interim `accepted` value was migrated to `intro_made` in migration 008
+ * step 1; do not re-introduce it.
+ */
+export type ContactRequestStatus =
+  | "pending"
+  | "intro_made"
+  | "completed"
+  | "declined";
+
 export interface ContactRequest {
   id: string;
   allocator_id: string;
   strategy_id: string;
   message: string | null;
-  status: "pending" | "accepted" | "declined";
+  status: ContactRequestStatus;
   created_at: string;
   responded_at: string | null;
 }

@@ -1254,10 +1254,31 @@ async function wipeLegacySeed(admin: SupabaseClient) {
     await admin.from("strategies").delete().in("id", legacyStrategyIds);
   }
 
-  // Delete legacy allocator profiles (auth.users will be soft-retained)
+  // Delete legacy allocator profiles, then their auth.users entries.
+  //
+  // Audit-2026-05-07 #47: previously the auth.admin.deleteUser call swallowed
+  // every failure with `.catch(() => {})`. When the auth delete actually
+  // failed, the profile row was already gone but the auth.users row stayed
+  // around — an orphan that subsequent runs cannot detect (the FK lookup
+  // by id misses because the profile is gone). Surface the error at WARN
+  // level so the operator sees the orphan instead of debugging missing
+  // signup attempts later. The catch is preserved (this is a wipe, not a
+  // critical path) but the error no longer disappears.
   await admin.from("profiles").delete().in("id", legacyAllocators);
   for (const id of legacyAllocators) {
-    await admin.auth.admin.deleteUser(id).catch(() => {});
+    try {
+      const { error } = await admin.auth.admin.deleteUser(id);
+      if (error) {
+        console.warn(
+          `[seed] auth.admin.deleteUser(${id}) returned error — auth.users row may be orphaned: ${error.message}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[seed] auth.admin.deleteUser(${id}) threw — auth.users row may be orphaned:`,
+        err,
+      );
+    }
   }
 
   console.log("[seed] Legacy wipe complete.");
@@ -1335,6 +1356,32 @@ async function main() {
       "[seed] NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.",
     );
     process.exit(2);
+  }
+  // Audit-2026-05-07 #35: the legacy `\b(prod|production)\b` guard never
+  // matched a real Supabase URL (project refs are 8-char alphanumerics,
+  // not human-readable strings). Switch to an EXPLICIT staging allowlist:
+  // refuse to run unless the URL points at the known staging/test project
+  // ref. Override via SEED_ALLOW_SUPABASE_PROJECT_REF for ad-hoc forks.
+  //
+  // The test/staging project ref is documented in
+  // `.planning/intel/` and the GH-secret SUPABASE_PROJECT_REF_TEST.
+  // Hardcoding it here is intentional — accidental seed-against-prod is
+  // catastrophic (DemoAlpha2026! creds + DEMO_SEED_PLACEHOLDER_ENCRYPTED
+  // ciphertext would land in the live api_keys table).
+  const STAGING_PROJECT_REF_ALLOWLIST = new Set<string>([
+    "qmnijlgmdhviwzwfyzlc", // Quantalyze E2E / staging
+    ...(process.env.SEED_ALLOW_SUPABASE_PROJECT_REF
+      ? process.env.SEED_ALLOW_SUPABASE_PROJECT_REF.split(",").map((s) => s.trim())
+      : []),
+  ]);
+  const projectRefMatch = url.match(/^https:\/\/([a-z0-9]+)\.supabase\.co/i);
+  const projectRef = projectRefMatch?.[1] ?? null;
+  if (!projectRef || !STAGING_PROJECT_REF_ALLOWLIST.has(projectRef.toLowerCase())) {
+    console.error(
+      `[seed] Refusing to run against ${url} — project ref ${projectRef ?? "(unparseable)"} is not in the staging allowlist. ` +
+        `If this IS your staging project, set SEED_ALLOW_SUPABASE_PROJECT_REF=${projectRef ?? "<your-ref>"} explicitly to acknowledge.`,
+    );
+    process.exit(3);
   }
   if (/\b(prod|production)\b/i.test(url)) {
     console.error(`[seed] Refusing production-flavored URL: ${url}`);

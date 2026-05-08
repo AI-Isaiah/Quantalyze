@@ -136,8 +136,16 @@ def _load_candidate_universe() -> dict[str, Any]:
                 if start.tzinfo is None:
                     start = start.replace(tzinfo=timezone.utc)
                 track_record_days = (datetime.now(timezone.utc) - start).days
-            except (ValueError, AttributeError):
-                pass
+            except (ValueError, AttributeError) as exc:
+                # Audit-2026-05-07 #38: a malformed start_date silently
+                # produced track_record_days=0, which biased match scoring
+                # AGAINST the strategy. Log the bad value so an operator
+                # can spot the source row instead of debugging a quiet
+                # ranking drift.
+                logger.warning(
+                    "match: bad start_date %r for strategy %s — track_record_days=0: %s",
+                    strategy.get("start_date"), sid, exc,
+                )
 
         # First strategy type as primary
         types = strategy.get("strategy_types") or []
