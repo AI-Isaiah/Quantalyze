@@ -380,6 +380,59 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 correlation_id=correlation_id,
                 started_at=started_at,
             )
+        # API-3 — csv-finalize step. The CSV wizard's finalize step (POST
+        # /api/strategies/csv-finalize) lands here AFTER validate but
+        # BEFORE the strategies row exists. We delegate to the
+        # finalize_csv_strategy RPC (migration 093 STEP 5) which atomically
+        # creates the strategies row + strategy_verifications row in a
+        # single SECURITY DEFINER transaction. Pre-fix this returned 422
+        # because the strategy_id branch only allowed step='validate'.
+        if (
+            body.flow_type == "csv"
+            and step == "finalize"
+            and body.source == "csv"
+        ):
+            user_id = body.context.get("user_id")
+            wsid = body.context.get("wizard_session_id")
+            fmt = body.context.get("fmt")
+            strategy_name = body.context.get("strategy_name")
+            try:
+                rpc_result = (
+                    supabase.rpc(
+                        "finalize_csv_strategy",
+                        {
+                            "p_user_id": user_id,
+                            "p_wizard_session_id": wsid,
+                            "p_fmt": fmt,
+                            "p_strategy_name": strategy_name,
+                        },
+                    ).execute()
+                )
+                new_strategy_id = rpc_result.data
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "process_key.csv_finalize_rpc_failed", error=str(exc)[:200]
+                )
+                return JSONResponse(
+                    status_code=422,
+                    content=_envelope_error(
+                        "CSV_FINALIZE_FAILED",
+                        f"finalize_csv_strategy RPC failed: {exc}",
+                        correlation_id,
+                        None,
+                    ),
+                )
+            log.info(
+                "process_key.csv_finalize_ok",
+                strategy_id=str(new_strategy_id),
+            )
+            return {
+                "ok": True,
+                "strategy_id": new_strategy_id,
+                "status": "pending_review",
+                "correlation_id": correlation_id,
+                "step": "finalize",
+            }
         # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
         # not nested under `detail`). The wizard's error renderer reads the
         # envelope shape directly off the response body.

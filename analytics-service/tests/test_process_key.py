@@ -809,6 +809,73 @@ def test_process_key_missing_strategy_id_returns_422(client):
     assert "correlation_id" in body
 
 
+def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
+    """API-3 regression: flow_type='csv', step='finalize' lands here without
+    a strategy_id (the strategies row hasn't been created yet). Pre-fix this
+    returned 422 MISSING_STRATEGY_ID; post-fix it delegates to
+    finalize_csv_strategy RPC which atomically creates the strategies +
+    strategy_verifications rows.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    new_sid = "11111111-1111-1111-1111-111111111111"
+    # Override rpc so finalize_csv_strategy returns the new strategy_id
+    finalize_call = MagicMock()
+    finalize_call.execute.return_value = MagicMock(data=new_sid)
+
+    log_audit_call = MagicMock()
+    log_audit_call.execute.return_value = MagicMock(data={})
+
+    def _rpc_router(name, *_a, **_kw):
+        if name == "finalize_csv_strategy":
+            return finalize_call
+        return log_audit_call
+
+    fake.rpc.side_effect = _rpc_router
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
+                    "user_id": "33333333-3333-3333-3333-333333333333",
+                    "fmt": "trades",
+                    "strategy_name": "Test Strategy",
+                    "step": "finalize",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["strategy_id"] == new_sid
+    assert body["status"] == "pending_review"
+    assert body["step"] == "finalize"
+
+    # finalize_csv_strategy RPC was called exactly once with the expected payload.
+    finalize_calls = [
+        c.args
+        for c in fake.rpc.call_args_list
+        if c.args and c.args[0] == "finalize_csv_strategy"
+    ]
+    assert len(finalize_calls) == 1, "finalize_csv_strategy must be called once"
+    payload = finalize_calls[0][1]
+    assert payload["p_user_id"] == "33333333-3333-3333-3333-333333333333"
+    assert payload["p_wizard_session_id"] == "22222222-2222-2222-2222-222222222222"
+    assert payload["p_fmt"] == "trades"
+    assert payload["p_strategy_name"] == "Test Strategy"
+
+
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
     """WR-06 regression: audit_log.entity_id is NOT NULL (migration 010)
     and log_audit_event_service raises when p_entity_id is NULL
