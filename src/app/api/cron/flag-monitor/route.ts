@@ -120,11 +120,37 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, reason: "sentry_unreachable" });
   }
   if (!sentryRes.ok) {
-    console.warn("[cron/flag-monitor] sentry status:", sentryRes.status);
+    // I-perf-cron: distinguish rate-limiting from outage. 429 + the documented
+    // Sentry rate-limit headers map to a separate reason code so the H-2
+    // streak detector doesn't fold rate-limiting into a real Sentry outage.
+    const retryAfter = sentryRes.headers.get("retry-after");
+    const sentryRateLimitRemaining = sentryRes.headers.get(
+      "x-sentry-rate-limit-remaining",
+    );
+    const sentryRateLimitReset = sentryRes.headers.get(
+      "x-sentry-rate-limit-reset",
+    );
+    const sentryRateLimitConcurrentRemaining = sentryRes.headers.get(
+      "x-sentry-rate-limit-concurrent-remaining",
+    );
+    const isRateLimited =
+      sentryRes.status === 429 ||
+      retryAfter !== null ||
+      sentryRateLimitRemaining !== null ||
+      sentryRateLimitConcurrentRemaining !== null;
+    const reason = isRateLimited ? "sentry_rate_limited" : "sentry_unreachable";
+    console.warn(
+      `[cron/flag-monitor] sentry status=${sentryRes.status} reason=${reason}`,
+    );
     return NextResponse.json({
       ok: false,
-      reason: "sentry_unreachable",
+      reason,
       status: sentryRes.status,
+      ...(retryAfter ? { retry_after: retryAfter } : {}),
+      ...(sentryRateLimitRemaining
+        ? { rate_limit_remaining: sentryRateLimitRemaining }
+        : {}),
+      ...(sentryRateLimitReset ? { rate_limit_reset: sentryRateLimitReset } : {}),
     });
   }
   const sentryData = await sentryRes.json().catch(() => ({}));
