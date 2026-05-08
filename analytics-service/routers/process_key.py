@@ -1,0 +1,452 @@
+"""Phase 19 / BACKBONE-01 — unified key-submission RPC.
+
+Wraps the IngestionAdapter Protocol (BACKBONE-02) and the
+strategy_verifications state-machine RPC (BACKBONE-03 / migration 103).
+Auth via INTERNAL_API_TOKEN (constant-time compare; mirrors
+routers/internal.py:117).
+
+Two execution modes
+-------------------
+  - SYNCHRONOUS (default for csv flow_type, teaser, internal_report):
+    Runs the full 5-method pipeline inline, returns a VerificationResult-
+    shaped dict.
+  - QUEUED (for resync + onboard):
+    Returns ``{queued, correlation_id, verification_id}`` synchronously;
+    enqueues a process_key_long compute_job; the worker (P6) writes the
+    result back to strategy_verifications. See BACKBONE-09 / P6.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import secrets
+import time
+from typing import Any
+
+import structlog
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+from services.db import get_supabase
+from services.feature_flags import is_unified_backbone_active
+from services.ingestion import get_adapter
+from services.ingestion.adapter import KeySubmissionRequest
+
+router = APIRouter(prefix="/process-key", tags=["process-key"])
+log = structlog.get_logger("quantalyze.analytics.process_key")
+limiter = Limiter(key_func=get_remote_address)
+
+
+# ---------------------------------------------------------------------------
+# Request body
+# ---------------------------------------------------------------------------
+
+
+class _ProcessKeyBody(BaseModel):
+    flow_type: str = Field(
+        ...,
+        pattern=r"^(teaser|onboard|internal_report|csv|resync)$",
+    )
+    source: str = Field(..., pattern=r"^(okx|binance|bybit|csv)$")
+    context: dict[str, Any]
+
+    # H-11 — per-flow_type source whitelist. Without this, a malicious caller
+    # can send flow_type='teaser', source='csv' which routes to the CSV
+    # adapter whose fetch_raw expects raw_bytes context — producing 500 +
+    # traceback noise that consumes the cron's error budget and triggers
+    # auto-rollback (DoS).
+    @field_validator("source")
+    @classmethod
+    def _validate_source_per_flow(cls, source: str, info) -> str:
+        flow_type = info.data.get("flow_type")
+        if flow_type is None:
+            # If flow_type is absent or already invalid, let its own
+            # validator surface the error rather than masking it here.
+            return source
+        valid: dict[str, set[str]] = {
+            "teaser": {"okx", "binance", "bybit"},
+            "onboard": {"okx", "binance", "bybit"},
+            "internal_report": {"okx", "binance", "bybit"},
+            "resync": {"okx", "binance", "bybit"},
+            "csv": {"csv"},
+        }
+        allowed = valid.get(flow_type, set())
+        if source not in allowed:
+            raise ValueError(
+                f"H-11: source={source!r} not allowed for flow_type={flow_type!r}; "
+                f"allowed={sorted(allowed)}"
+            )
+        return source
+
+
+# ---------------------------------------------------------------------------
+# Auth (mirrors routers/internal.py:104-118)
+# ---------------------------------------------------------------------------
+
+
+def _verify_internal_token(request: Request) -> None:
+    """Constant-time compare on Authorization header.
+
+    Mirrors routers/internal.py:117 verbatim. The X-Internal-Token header
+    is the wire shape used by the existing /internal/* surface, but the
+    Phase 19 thin adapters (P5) post `Authorization: Bearer ${token}`
+    (the standard idiom for cross-service calls between Vercel and
+    Railway). We accept both shapes — the bearer form for the new
+    callers and a bare token for any internal call that piggybacks on
+    this seam — but always run the compare via secrets.compare_digest.
+    """
+    expected = os.getenv("INTERNAL_API_TOKEN")
+    if not expected:
+        log.error("INTERNAL_API_TOKEN not set", path="/process-key")
+        raise HTTPException(
+            status_code=403, detail="Internal API not configured"
+        )
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        provided = auth[len("Bearer ") :]
+    else:
+        provided = auth
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _envelope_error(
+    code: str | None,
+    msg: str | None,
+    cid: str,
+    vid: str | None,
+) -> dict:
+    """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI."""
+    return {
+        "ok": False,
+        "code": code or "UNKNOWN",
+        "human_message": msg or "Unknown error",
+        "debug_context": {"verification_id": vid} if vid else {},
+        "correlation_id": cid,
+        "recoverable": code
+        in {"RATE_LIMITED", "EXCHANGE_UNAVAILABLE", "NETWORK_UNAVAILABLE"},
+    }
+
+
+def _is_long_fetch(body: _ProcessKeyBody) -> bool:
+    """Heuristic per RESEARCH §P4 L1034-1045.
+
+    teaser/csv/internal_report run inline (Vercel 300s ceiling sufficient);
+    onboard + resync queue via worker dyno (BACKBONE-09).
+    """
+    return body.flow_type in {"onboard", "resync"}
+
+
+def _metrics_to_jsonb(m: Any) -> dict:
+    """MC-4 — explicit type-aware serialization for the JSONB column.
+
+    The original ``__dict__`` walk in the planning blueprint works for the
+    primitive-only MetricsSnapshot but silently breaks if any future field
+    is ``datetime`` / ``Decimal`` / non-primitive. Use ``dataclasses.asdict``
+    for dataclasses and ``model_dump(mode='json')`` for pydantic. Anything
+    else falls back to a json-roundtrip that surfaces TypeError on a
+    non-encodable value rather than persisting a corrupted dict.
+    """
+    if dataclasses.is_dataclass(m) and not isinstance(m, type):
+        return dataclasses.asdict(m)
+    if hasattr(m, "model_dump"):
+        return m.model_dump(mode="json")
+    out = {k: v for k, v in m.__dict__.items() if not k.startswith("_")}
+    json.dumps(out)  # raises TypeError on non-encodable values
+    return out
+
+
+# ---------------------------------------------------------------------------
+# POST /process-key
+# ---------------------------------------------------------------------------
+
+
+@router.post("")
+@limiter.limit("100/hour")
+async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
+    # Slowapi inspects the function signature for a parameter literally named
+    # `request` (or `websocket`) to attach the limiter context — see
+    # slowapi/extension.py:713. Renaming this parameter from `req` to
+    # `request` is non-negotiable; the closer-spelled `req` raised
+    # `Exception: No "request" or "websocket" argument on function`.
+    _verify_internal_token(request)
+
+    correlation_id = request.headers.get("X-Correlation-Id", "")
+    started_at = time.monotonic()
+
+    structlog.contextvars.bind_contextvars(
+        correlation_id=correlation_id,
+        flow_type=body.flow_type,
+        source=body.source,
+    )
+    log.info("process_key.start")
+
+    # Feature flag gate (BACKBONE-04 / BACKBONE-05) BEFORE any Supabase work.
+    # H-3 — Supabase outage handling: is_unified_backbone_active() in
+    # services/feature_flags.py keeps the in-process cache live across
+    # transient Supabase failures so a brief upstream outage does NOT flip
+    # the synchronous /process-key path to 503. The kill-switch read fails
+    # open (env decides) and extends the in-process cache TTL across the
+    # outage; tested in test_feature_flags.py::test_supabase_outage_falls_back_to_env.
+    if not await is_unified_backbone_active():
+        log.info("process_key.flag_off")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "UNIFIED_BACKBONE_DISABLED",
+                "human_message": "Unified backbone is disabled; legacy route should handle.",
+                "correlation_id": correlation_id,
+            },
+        )
+
+    supabase = get_supabase()
+
+    # H-2 — write audit row at entry (after the flag gate) so the
+    # flag-monitor cron's denominator is non-zero on the served path.
+    # Without this row, the cron computes errorRate = errorCount/0 = 0 and
+    # never trips even at 100% Sentry error rate. Use the existing
+    # log_audit_event_service RPC (migration 058) so the service-role client
+    # can write without auth.uid(). Audit-write failure is non-fatal — the
+    # request continues — but we log so a sustained outage surfaces in
+    # Sentry (cron P7 also alerts when the denominator stays at 0 for >2
+    # windows). We intentionally write AFTER the flag gate so the cron
+    # measures only requests that actually traversed the unified backbone;
+    # flag-off rejections should not inflate the denominator.
+    try:
+        supabase.rpc(
+            "log_audit_event_service",
+            {
+                "p_user_id": body.context.get("user_id"),
+                "p_action": "process_key.entry",
+                "p_entity_type": "process_key",
+                "p_entity_id": body.context.get("strategy_id"),
+                "p_metadata": {
+                    "flow_type": body.flow_type,
+                    "source": body.source,
+                    "correlation_id": correlation_id,
+                },
+            },
+        ).execute()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("process_key.audit_write_failed", error=str(exc))
+
+    submission = KeySubmissionRequest(
+        flow_type=body.flow_type,
+        source=body.source,
+        context=body.context,
+    )
+
+    # 1) Idempotency check (BACKBONE-08): wizard_session_id UNIQUE INDEX.
+    wizard_session_id = body.context.get("wizard_session_id")
+    if wizard_session_id:
+        existing = (
+            supabase.table("strategy_verifications")
+            .select("*")
+            .eq("wizard_session_id", wizard_session_id)
+            .maybe_single()
+            .execute()
+        )
+        if existing.data:
+            log.info(
+                "process_key.idempotent_hit",
+                verification_id=existing.data["id"],
+            )
+            return {
+                "verification_id": existing.data["id"],
+                "status": existing.data["status"],
+                "trust_tier": existing.data.get("trust_tier"),
+                "correlation_id": correlation_id,
+                "queued": False,
+            }
+
+    # 2) Insert draft row + Pitfall 2 race-handling.
+    strategy_id = body.context["strategy_id"]
+    trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
+    try:
+        draft_insert = (
+            supabase.table("strategy_verifications")
+            .insert(
+                {
+                    "strategy_id": strategy_id,
+                    "wizard_session_id": wizard_session_id,
+                    "status": "draft",
+                    "trust_tier": trust_tier,
+                    "flow_type": body.flow_type,
+                    "source": body.source,
+                    "correlation_id": correlation_id,
+                }
+            )
+            .execute()
+        )
+        verification_id = draft_insert.data[0]["id"]
+    except Exception as exc:
+        # Pitfall 2 — TOCTOU race: SELECT pre-check passed but INSERT loses
+        # to a concurrent insert from another wizard tab. Catch SQLSTATE
+        # 23505 and return the row that actually won the race.
+        msg = str(exc)
+        if "23505" in msg or "duplicate key" in msg.lower():
+            existing = (
+                supabase.table("strategy_verifications")
+                .select("*")
+                .eq("wizard_session_id", wizard_session_id)
+                .single()
+                .execute()
+            )
+            log.info(
+                "process_key.idempotent_race_resolved",
+                verification_id=existing.data["id"],
+            )
+            return {
+                "verification_id": existing.data["id"],
+                "status": existing.data["status"],
+                "trust_tier": existing.data.get("trust_tier"),
+                "correlation_id": correlation_id,
+                "queued": False,
+            }
+        raise
+
+    # 3) Long-fetch dispatch (BACKBONE-09) — onboard/resync go to worker dyno.
+    if _is_long_fetch(body):
+        supabase.rpc(
+            "enqueue_compute_job",
+            {
+                "p_strategy_id": strategy_id,
+                "p_kind": "process_key_long",
+                "p_metadata": {
+                    "correlation_id": correlation_id,
+                    "verification_id": verification_id,
+                    "flow_type": body.flow_type,
+                    "source": body.source,
+                },
+            },
+        ).execute()
+        log.info("process_key.queued", verification_id=verification_id)
+        return {
+            "queued": True,
+            "verification_id": verification_id,
+            "correlation_id": correlation_id,
+        }
+
+    # 4) Synchronous pipeline (teaser / csv / internal_report).
+    adapter = get_adapter(body.source)
+
+    # validate
+    val = await adapter.validate(submission)
+    if not val.valid:
+        supabase.rpc(
+            "transition_strategy_verification",
+            {
+                "p_verification_id": verification_id,
+                "p_new_status": "draft",
+                "p_metadata": {
+                    "errors": [
+                        {
+                            "code": val.error_code,
+                            "human_message": val.human_message,
+                        }
+                    ]
+                },
+            },
+        ).execute()
+        return _envelope_error(
+            val.error_code, val.human_message, correlation_id, verification_id
+        )
+
+    supabase.rpc(
+        "transition_strategy_verification",
+        {
+            "p_verification_id": verification_id,
+            "p_new_status": "validated",
+            "p_metadata": {},
+        },
+    ).execute()
+
+    # fetch_raw
+    trades = await adapter.fetch_raw(body.context)
+
+    # compute_metrics
+    metrics = adapter.compute_metrics(trades)
+    supabase.rpc(
+        "transition_strategy_verification",
+        {
+            "p_verification_id": verification_id,
+            "p_new_status": "metrics_captured",
+            "p_metadata": {"metrics_snapshot": _metrics_to_jsonb(metrics)},
+        },
+    ).execute()
+
+    # encrypt_credentials (API path only)
+    encrypted: dict[str, Any] | None = None
+    if body.source != "csv":
+        from services.encryption import encrypt_credentials, get_kek
+
+        encrypted = encrypt_credentials(
+            body.context["api_key"],
+            body.context["api_secret"],
+            body.context.get("passphrase"),
+            get_kek(),
+        )
+    supabase.rpc(
+        "transition_strategy_verification",
+        {
+            "p_verification_id": verification_id,
+            "p_new_status": "encrypted",
+            "p_metadata": {"encrypted_credentials": encrypted}
+            if encrypted
+            else {},
+        },
+    ).execute()
+
+    # compute_fingerprint + persist on strategies row
+    fp = adapter.compute_fingerprint(trades, metrics)
+    supabase.table("strategies").update({"fingerprint": fp.to_jsonb()}).eq(
+        "id", strategy_id
+    ).execute()
+
+    supabase.rpc(
+        "transition_strategy_verification",
+        {
+            "p_verification_id": verification_id,
+            "p_new_status": "report_queued",
+            "p_metadata": {},
+        },
+    ).execute()
+
+    # reconstruct_positions (BACKBONE-09 wiring); persisted in P8.
+    await adapter.reconstruct_positions(trades)
+
+    # Final transition
+    supabase.rpc(
+        "transition_strategy_verification",
+        {
+            "p_verification_id": verification_id,
+            "p_new_status": "published",
+            "p_metadata": {},
+        },
+    ).execute()
+
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    log.info(
+        "process_key.complete",
+        verification_id=verification_id,
+        duration_ms=duration_ms,
+    )
+
+    return {
+        "verification_id": verification_id,
+        "status": "published",
+        "trust_tier": trust_tier,
+        "metrics_snapshot": _metrics_to_jsonb(metrics),
+        "fingerprint": fp.to_jsonb(),
+        "encrypted_credentials": encrypted,
+        "errors": [],
+        "correlation_id": correlation_id,
+    }
