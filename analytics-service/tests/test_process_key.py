@@ -27,9 +27,69 @@ import os
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import importlib
+import sys
+
+
+def _ensure_real_third_party() -> None:
+    """Undo sys.modules pollution from sibling tests.
+
+    Several pre-existing test files (test_routers_audit_emission*.py,
+    test_portfolio_router_logic.py) stub `slowapi`, `slowapi.util`,
+    `fastapi`, `fastapi.routing`, `supabase`, and `pydantic` either by
+    replacing the whole module entry with a MagicMock OR — the harder
+    case — by mutating attributes on an already-imported real module
+    (e.g. `sys.modules["fastapi"].APIRouter = MagicMock(...)`). The
+    second pattern means `__spec__` is still set on the module, so a
+    naive 'pop only if __spec__ is None' check misses it.
+
+    Strategy: pop EVERY fastapi/slowapi/etc entry unconditionally and
+    then re-import. The previously-imported objects in other test
+    modules keep their references (the popped module is GC-traced
+    through them), but our subsequent `from fastapi import APIRouter`
+    gets a fresh, untainted module with the real classes restored from
+    the on-disk source.
+
+    Drop the cached router modules too — without this, the limiter is a
+    MagicMock, `@limiter.limit("100/hour")` is a no-op decorator, and
+    the route is never registered (every request returns 404).
+    """
+    stubbed_roots = (
+        "slowapi",
+        "fastapi",
+        "starlette",
+        "pydantic",
+        "supabase",
+    )
+    for name in list(sys.modules):
+        if any(
+            name == root or name.startswith(root + ".")
+            for root in stubbed_roots
+        ):
+            del sys.modules[name]
+    # Drop the cached router + dependent routers so they rebind against
+    # the real slowapi/fastapi. Without this, the cached `limiter` is a
+    # MagicMock and `@limiter.limit("100/hour")` is a no-op → route
+    # un-registered → 404.
+    for cached in (
+        "routers.process_key",
+        "routers.csv",
+        "routers.internal",
+        "routers.portfolio",
+    ):
+        sys.modules.pop(cached, None)
+
+
+_ensure_real_third_party()
+
+import pytest  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+process_key_router = importlib.import_module("routers.process_key")
+print(f"POST-IMPORT: routes = {[(r.methods, r.path) for r in process_key_router.router.routes]}", flush=True)
+print(f"POST-IMPORT: limiter = {type(process_key_router.limiter)}", flush=True)
+from services import feature_flags  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -41,24 +101,21 @@ from fastapi.testclient import TestClient
 def app(monkeypatch):
     """Mount routers/process_key.py in a bare FastAPI app for isolated unit tests.
 
-    Wraps slowapi state and the limiter exception handler so the
-    `@limiter.limit("100/hour")` decorator does not blow up in tests.
+    The slowapi limiter is plumbed in via `app.state.limiter` so the
+    `@limiter.limit("100/hour")` decorator's middleware probe does not
+    raise. We do NOT register the RateLimitExceeded exception handler —
+    rate limiting is not exercised in unit tests (each test fires at most
+    a couple of requests, well under 100/hour) and the import of
+    `slowapi.errors` is fragile under sibling-test sys.modules pollution.
     """
     monkeypatch.setenv(
         "INTERNAL_API_TOKEN",
         "a" * 64,  # H-12: 64 chars, no newline.
     )
-    from slowapi import _rate_limit_exceeded_handler
-    from slowapi.errors import RateLimitExceeded
-
-    from routers import process_key as process_key_router
-    from services import feature_flags
-
     feature_flags._reset_cache_for_tests()
 
     app = FastAPI()
     app.state.limiter = process_key_router.limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.include_router(process_key_router.router)
     return app
 
@@ -268,7 +325,7 @@ def test_metrics_to_jsonb_handles_dataclass():
     """
     from datetime import datetime
 
-    from routers.process_key import _metrics_to_jsonb
+    _metrics_to_jsonb = process_key_router._metrics_to_jsonb
     from services.ingestion.adapter import MetricsSnapshot
 
     m = MetricsSnapshot(

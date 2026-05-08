@@ -209,6 +209,12 @@ app.include_router(portfolio.router)
 app.include_router(simulator.router)
 app.include_router(internal.router)
 app.include_router(csv.router)
+# Phase 19 / BACKBONE-01 — unified key-submission backbone. Slots in AFTER
+# csv.router per CONTEXT.md §IngestionAdapter L58. The router lives in its
+# own module so the import is local to this registration block.
+from routers import process_key as process_key_router  # noqa: E402
+
+app.include_router(process_key_router.router)
 # Phase 16 / OBSERV-07 — admin-gated diagnostic SSE backend (founder-only)
 app.include_router(debug_key_flow_router)
 
