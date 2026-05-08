@@ -42,6 +42,11 @@ export interface ListForQuantsLeadsResult {
   /** True only when the full-history view was served and the cap
    *  was actually hit — so the UI can surface the truncation note. */
   hitCap: boolean;
+  /** Set when the underlying query failed. Callers MUST distinguish
+   *  this from `rows.length === 0` so the admin UI can render an
+   *  error banner instead of the misleading "All caught up" empty
+   *  state. audit-2026-05-07 G10.D.1. */
+  error?: string;
 }
 
 export async function listForQuantsLeads({
@@ -67,8 +72,18 @@ export async function listForQuantsLeads({
 
   const { data, error } = await query;
   if (error) {
+    // audit-2026-05-07 G10.D.1: surface the error to the caller so the
+    // admin page renders "Could not load leads" instead of conflating
+    // RLS / network / 5xx failures with "All caught up. No unprocessed
+    // leads." The founder uses this page as a notification queue —
+    // misclassifying a query error as "nothing to do" silently drops
+    // real lead follow-ups.
     console.error("[for-quants-leads-admin] list query failed:", error);
-    return { rows: [], hitCap: false };
+    return {
+      rows: [],
+      hitCap: false,
+      error: error.message ?? "Failed to load for-quants leads.",
+    };
   }
   const rows = (data as ForQuantsLeadRow[] | null) ?? [];
   return {
