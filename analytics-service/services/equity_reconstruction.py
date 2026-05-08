@@ -1656,13 +1656,26 @@ class EquityCurveBuilder:
     (qs.stats.sharpe(returns, periods=252)) within ±0.05.
     """
 
+    # Synthetic starting NAV used when the caller does not supply one.
+    # Daily returns are computed as ``daily_pnl / nav_yesterday`` which
+    # demands a finite, non-zero base. 100_000 USDT is a realistic
+    # placeholder for a self-reported strategy where capital is unknown
+    # (matches the convention in services/metrics.py + analytics_runner.py
+    # where starting NAV is implicit). Tests that need an absolute return
+    # number can pass starting_nav explicitly.
+    DEFAULT_STARTING_NAV: float = 100_000.0
+
     def __init__(
         self,
         trades: list,  # list[Trade] — annotation kept loose to avoid circular import
         mark_prices: dict[str, float] | None = None,
+        starting_nav: float | None = None,
     ) -> None:
         self.trades = sorted(trades, key=lambda t: t.timestamp)
         self.mark_prices = mark_prices or {}
+        self.starting_nav = float(
+            starting_nav if starting_nav is not None else self.DEFAULT_STARTING_NAV
+        )
         self._funding_pnl_by_day: dict[date, float] = {}
         self._curve_cache: pd.DataFrame | None = None
 
@@ -1822,10 +1835,15 @@ class EquityCurveBuilder:
         df["daily_pnl"] = (
             df["realized_pnl"] + df["funding_pnl"] + df["unrealized_pnl"]
         )
-        df["equity"] = df["daily_pnl"].cumsum()
-        # Avoid division-by-zero on day 1: shift to a 1.0 starting basis.
-        equity_basis = df["equity"] + 1.0
-        df["daily_return"] = equity_basis.pct_change().fillna(0.0)
+        df["equity"] = self.starting_nav + df["daily_pnl"].cumsum()
+        # Daily return = daily_pnl / nav_yesterday. Day 1 returns 0.0.
+        prev_equity = df["equity"].shift(1).fillna(self.starting_nav)
+        # prev_equity is guaranteed > 0 because starting_nav > 0 and the
+        # cumulative PnL would have to exceed -starting_nav for it to flip
+        # negative — unrealistic for a synthetic seed but guarded with a
+        # mask.
+        prev_equity = prev_equity.where(prev_equity > 0, other=self.starting_nav)
+        df["daily_return"] = (df["daily_pnl"] / prev_equity).fillna(0.0)
         df = df.drop(columns=["daily_pnl"])
         self._curve_cache = df
         return df
@@ -1880,8 +1898,9 @@ class EquityCurveBuilder:
             return None
         equity = df["equity"]
         running_max = equity.cummax()
-        # Replace zero peaks with 1.0 to avoid divide-by-zero on day 1.
-        denom = running_max.replace(0, 1.0)
+        # equity is ``starting_nav + cum(daily_pnl)`` so running_max ≥
+        # starting_nav > 0 — safe denominator.
+        denom = running_max.where(running_max != 0, other=self.starting_nav)
         dd = (equity - running_max) / denom
         return float(dd.min())
 
