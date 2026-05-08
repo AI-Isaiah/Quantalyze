@@ -159,8 +159,16 @@ class CsvAdapter:
         df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig")
         df.columns = [str(c).strip().lower() for c in df.columns]
 
+        # I-perf-4 — itertuples avoids materialising the entire dataframe
+        # as a list of dicts in memory. For a 50k-row CSV upload that's
+        # ~30MB of dict allocation that gets immediately discarded after
+        # the per-row Trade construction. itertuples streams the rows
+        # without that intermediate. We pass index=False because the
+        # CSV row index is meaningless to _csv_row_to_trade.
+        cols = list(df.columns)
         trades: list[Trade] = []
-        for row in df.to_dict(orient="records"):
+        for tup in df.itertuples(index=False, name=None):
+            row = dict(zip(cols, tup))
             trades.append(_csv_row_to_trade(row))
         return trades
 
