@@ -59,6 +59,9 @@ const TEST_VERIFICATION_ID = "22222222-2222-2222-2222-222222222222";
 let strategyVerificationsUpsertArgs: unknown = null;
 let verificationRequestsUpdateArgs: unknown = null;
 let strategiesAnchorReturned: { id: string } | null = { id: ANCHOR_STRATEGY_ID };
+// I-T-pra-write: optional upsert error injection. When set, the
+// strategy_verifications.upsert mock returns this error instead of {error:null}.
+let strategyVerificationsUpsertError: { message: string } | null = null;
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
@@ -81,7 +84,7 @@ vi.mock("@/lib/supabase/admin", () => ({
             opts: Record<string, unknown>,
           ) => {
             strategyVerificationsUpsertArgs = { row, opts };
-            return { error: null };
+            return { error: strategyVerificationsUpsertError };
           },
         };
       }
@@ -112,6 +115,7 @@ beforeEach(() => {
   strategyVerificationsUpsertArgs = null;
   verificationRequestsUpdateArgs = null;
   strategiesAnchorReturned = { id: ANCHOR_STRATEGY_ID };
+  strategyVerificationsUpsertError = null;
   verifyStrategyMock.mockResolvedValue({ verification_id: TEST_VERIFICATION_ID });
 });
 
@@ -218,5 +222,40 @@ describe("PR-A / phase-19-shim-step-a — strategy_verifications upsert (C-5)", 
     expect(res.status).toBe(200);
     expect(strategyVerificationsUpsertArgs).toBeNull();
     expect(verificationRequestsUpdateArgs).not.toBeNull();
+  });
+
+  /**
+   * I-T-pra-write — strategy_verifications upsert FAILURE branch.
+   *
+   * If Supabase rejects the upsert (e.g. transient connection refused, schema
+   * cache stale, RLS misconfig), the route MUST NOT 500. Instead the legacy
+   * verification_requests UPDATE preserves runtime correctness during the
+   * PR-A → PR-D stability window (see phase-19-shim-step-a comment in
+   * src/app/api/verify-strategy/route.ts). This test pins that fallback.
+   */
+  it("I-T-pra-write: strategy_verifications upsert failure falls back to legacy UPDATE (no 500)", async () => {
+    strategyVerificationsUpsertError = {
+      message: "connection refused",
+    };
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      postReq({
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    // Must NOT 500 — the legacy UPDATE saves the request.
+    expect(res.status).toBe(200);
+    // Upsert was attempted (proof the new write path ran first).
+    expect(strategyVerificationsUpsertArgs).not.toBeNull();
+    // Legacy UPDATE still ran (the fallback).
+    expect(verificationRequestsUpdateArgs).not.toBeNull();
+    const patch = verificationRequestsUpdateArgs as Record<string, unknown>;
+    expect(typeof patch.public_token).toBe("string");
+    expect(typeof patch.expires_at).toBe("string");
   });
 });
