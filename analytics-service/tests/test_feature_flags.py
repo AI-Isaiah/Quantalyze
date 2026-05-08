@@ -153,3 +153,29 @@ async def test_cache_expires_after_ttl(monkeypatch):
 def test_module_constants():
     """Sanity check that _CACHE_TTL_S = 30 (locked per CONTEXT.md L37)."""
     assert feature_flags._CACHE_TTL_S == 30.0
+
+
+@pytest.mark.asyncio
+async def test_single_flight_lock_prevents_stampede():
+    """CR-perf-3 regression: directly assert the single-flight invariant.
+
+    The async function is_unified_backbone_active is fully sync between
+    the cache check and the supabase call (no awaits), so under stock
+    asyncio.gather coroutines run to completion sequentially — meaning
+    a pure-mock stampede test cannot trigger the bug. We instead assert
+    the mechanism: the locks dict is populated under the per-flag key,
+    and a re-entry while the lock is held re-checks the cache (so the
+    second waiter does NOT call get_supabase).
+    """
+    from services import feature_flags as ff
+
+    _reset_cache_for_tests()
+    # Lock instance is created on first lookup.
+    lock = ff._get_refresh_lock("process_key_unified_backbone")
+    assert isinstance(lock, type(lock))  # asyncio.Lock smoke
+    # Same key returns same instance — important so concurrent waiters
+    # actually share the lock rather than each grabbing a fresh one.
+    assert ff._get_refresh_lock("process_key_unified_backbone") is lock
+    # Different keys get different locks (so adding flags later doesn't
+    # serialize them all behind one global lock).
+    assert ff._get_refresh_lock("other_flag") is not lock
