@@ -40,6 +40,26 @@ ALTER TABLE strategy_verifications
   ADD COLUMN IF NOT EXISTS public_token TEXT,
   ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
+-- I-DM2 — backfill transitioned_at for pre-existing rows so audit queries
+-- (e.g. "when did this strategy last transition?") return the meaningful
+-- timestamp instead of the migration-apply moment. The DEFAULT now()
+-- above already populated freshly-added columns to a single point in
+-- time; here we walk the table once and replace that with COALESCE of
+-- the row's existing audit timestamps so historical rows surface their
+-- real transition history. Idempotent — re-applying after the
+-- transition_strategy_verification RPC has updated rows is a no-op
+-- because the WHERE filter restricts to rows whose transitioned_at
+-- still equals the migration-apply DEFAULT.
+DO $$
+DECLARE
+  v_apply_window_start TIMESTAMPTZ := now() - interval '1 minute';
+BEGIN
+  UPDATE strategy_verifications
+     SET transitioned_at = COALESCE(updated_at, created_at, now())
+   WHERE transitioned_at >= v_apply_window_start
+     AND (updated_at IS NOT NULL OR created_at IS NOT NULL);
+END $$;
+
 -- Public token uniqueness (only when populated) — VIEW shim relies on this
 -- being globally unique so a token lookup returns the unambiguous row.
 CREATE UNIQUE INDEX IF NOT EXISTS strategy_verifications_public_token_unique_idx
