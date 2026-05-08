@@ -79,6 +79,202 @@ function isPostgrestResolutionError(err: unknown): boolean {
   return /PGRST/.test(s) || /function not found/i.test(s) || /schema cache/i.test(s);
 }
 
+/**
+ * M-19 helpers — extracted from `handle()` so each step is independently
+ * readable. Behavior is preserved: each helper returns either a NextResponse
+ * (terminal — caller returns immediately) or a numeric/structured result the
+ * caller folds into the next step. Tests assert on the same JSON envelopes.
+ */
+
+type SentryFetchResult =
+  | { kind: "ok"; errorCount: number }
+  | { kind: "terminal"; res: NextResponse };
+
+async function getNumerator(args: {
+  orgSlug: string;
+  sentryToken: string;
+}): Promise<SentryFetchResult> {
+  const params = new URLSearchParams({
+    statsPeriod: "15m",
+    query:
+      "level:error path:/api/process-key correlation_id:* environment:production",
+    field: "count()",
+  });
+  const sentryUrl = `${SENTRY_BASE}/${args.orgSlug}/events/?${params}`;
+
+  let sentryRes: Response;
+  try {
+    sentryRes = await fetch(sentryUrl, {
+      headers: { Authorization: `Bearer ${args.sentryToken}` },
+      cache: "no-store",
+    });
+  } catch (err) {
+    console.warn("[cron/flag-monitor] sentry fetch threw:", err);
+    return {
+      kind: "terminal",
+      res: NextResponse.json({ ok: false, reason: "sentry_unreachable" }),
+    };
+  }
+
+  if (!sentryRes.ok) {
+    // I-perf-cron: distinguish rate-limiting from outage.
+    const retryAfter = sentryRes.headers.get("retry-after");
+    const sentryRateLimitRemaining = sentryRes.headers.get(
+      "x-sentry-rate-limit-remaining",
+    );
+    const sentryRateLimitReset = sentryRes.headers.get(
+      "x-sentry-rate-limit-reset",
+    );
+    const sentryRateLimitConcurrentRemaining = sentryRes.headers.get(
+      "x-sentry-rate-limit-concurrent-remaining",
+    );
+    const isRateLimited =
+      sentryRes.status === 429 ||
+      retryAfter !== null ||
+      sentryRateLimitRemaining !== null ||
+      sentryRateLimitConcurrentRemaining !== null;
+    const reason = isRateLimited ? "sentry_rate_limited" : "sentry_unreachable";
+    console.warn(
+      `[cron/flag-monitor] sentry status=${sentryRes.status} reason=${reason}`,
+    );
+    return {
+      kind: "terminal",
+      res: NextResponse.json({
+        ok: false,
+        reason,
+        status: sentryRes.status,
+        ...(retryAfter ? { retry_after: retryAfter } : {}),
+        ...(sentryRateLimitRemaining
+          ? { rate_limit_remaining: sentryRateLimitRemaining }
+          : {}),
+        ...(sentryRateLimitReset
+          ? { rate_limit_reset: sentryRateLimitReset }
+          : {}),
+      }),
+    };
+  }
+
+  const sentryData = await sentryRes.json().catch(() => ({}));
+  return { kind: "ok", errorCount: parseSentryCount(sentryData) };
+}
+
+async function getDenominator(args: {
+  admin: ReturnType<typeof createAdminClient>;
+  windowStart: Date;
+}): Promise<number> {
+  const { count: totalCount } = await args.admin
+    .from("audit_log")
+    .select("id", { count: "exact", head: true })
+    .eq("entity_type", "process_key")
+    .gte("created_at", args.windowStart.toISOString());
+  return totalCount ?? 0;
+}
+
+async function handleZeroDenominator(args: {
+  admin: ReturnType<typeof createAdminClient>;
+  now: Date;
+  resend: Resend | null;
+  founderEmail: string | undefined;
+}): Promise<NextResponse> {
+  const { data: flagRow } = await args.admin
+    .from("feature_flags")
+    .select("value")
+    .eq("flag_key", ZERO_DENOM_STREAK_KEY)
+    .maybeSingle();
+  const currentStreak = parseInt(flagRow?.value ?? "0", 10) || 0;
+  const newStreak = currentStreak + 1;
+  await args.admin.from("feature_flags").upsert(
+    {
+      flag_key: ZERO_DENOM_STREAK_KEY,
+      value: String(newStreak),
+      updated_at: args.now.toISOString(),
+      updated_by: "cron/flag-monitor",
+    },
+    { onConflict: "flag_key" },
+  );
+  if (
+    newStreak > ZERO_DENOMINATOR_ALERT_AFTER &&
+    args.resend &&
+    args.founderEmail
+  ) {
+    await args.resend.emails.send({
+      from: ALERT_FROM,
+      to: args.founderEmail,
+      subject: `[H-2 SEV-2] Phase 19 flag-monitor denominator stuck at 0 for ${newStreak} windows`,
+      html: `<p>The /process-key audit_log denominator has been 0 for ${newStreak} consecutive 15-min windows. Either no traffic is reaching /process-key OR the audit-write at /process-key entry is failing. Auto-rollback cannot trip in this state — investigate before traffic resumes.</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
+    });
+  }
+  return NextResponse.json({
+    ok: false,
+    reason: "zero_denominator",
+    streak: newStreak,
+  });
+}
+
+async function triggerAutoRollback(args: {
+  admin: ReturnType<typeof createAdminClient>;
+  now: Date;
+  resend: Resend | null;
+  founderEmail: string | undefined;
+  errorRate: number;
+  errorCount: number;
+  total: number;
+}): Promise<NextResponse> {
+  // D-3 — PostgREST resolution-error fallback.
+  try {
+    await args.admin.from("feature_flags").upsert(
+      {
+        flag_key: KILL_SWITCH_KEY,
+        value: "off",
+        updated_at: args.now.toISOString(),
+        updated_by: "cron/flag-monitor",
+      },
+      { onConflict: "flag_key" },
+    );
+  } catch (err: unknown) {
+    if (isPostgrestResolutionError(err)) {
+      console.error("[cron/flag-monitor] D-3 PostgREST resolution error:", err);
+      if (args.resend && args.founderEmail) {
+        await args.resend.emails.send({
+          from: ALERT_FROM,
+          to: args.founderEmail,
+          subject: `[D-3 SEV-2] Phase 19 kill-switch upsert failed (PGRST)`,
+          html: `<p>Auto-rollback failed because the Supabase kill-switch upsert raised a PostgREST resolution error. Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p><p>Error: <code>${String(err).replace(/</g, "&lt;")}</code></p><p>Error envelope rate <code>${(args.errorRate * 100).toFixed(2)}%</code> (${args.errorCount}/${args.total}) WAS observed but the kill-switch row could not be flipped.</p>`,
+        });
+      }
+      return NextResponse.json(
+        {
+          ok: false,
+          reason: "kill_switch_unreachable_d3",
+          error: String(err),
+        },
+        { status: 500 },
+      );
+    }
+    throw err;
+  }
+
+  if (args.resend && args.founderEmail) {
+    await args.resend.emails.send({
+      from: ALERT_FROM,
+      to: args.founderEmail,
+      subject: `[ALERT] Phase 19 backbone auto-rolled-back: ${(args.errorRate * 100).toFixed(2)}% error rate`,
+      html: `<p>Error envelope rate <code>${(args.errorRate * 100).toFixed(2)}%</code> exceeded ${(ALERT_THRESHOLD * 100).toFixed(2)}% threshold over the past 15 minutes (${args.errorCount}/${args.total}). Kill-switch row <code>${KILL_SWITCH_KEY}</code> has been flipped to <code>off</code>; new traffic falls back to legacy routes within the configured cache TTL (default 30s; <code>PHASE_19_STABILITY_CACHE_TTL_S</code> shortens this to 5s during the stability window).</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
+    });
+  }
+
+  console.warn(
+    `[cron/flag-monitor] AUTO-ROLLBACK: errorRate=${args.errorRate} total=${args.total}`,
+  );
+  return NextResponse.json({
+    ok: true,
+    action: "rolled_back",
+    errorRate: args.errorRate,
+    errorCount: args.errorCount,
+    total: args.total,
+  });
+}
+
 async function handle(req: NextRequest): Promise<NextResponse> {
   // Auth — mirrors src/app/api/cron/sync-funding/route.ts:29-32
   const auth = req.headers.get("authorization") ?? "";
@@ -107,104 +303,20 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // 1) Numerator — Sentry error event count for /api/process-key in the last
   //    15 minutes. Pitfall 8: environment:production filter prevents
   //    dev/preview events (CI cassette runs) from triggering rollback.
-  const params = new URLSearchParams({
-    statsPeriod: "15m",
-    query:
-      "level:error path:/api/process-key correlation_id:* environment:production",
-    field: "count()",
-  });
-  const sentryUrl = `${SENTRY_BASE}/${orgSlug}/events/?${params}`;
-
-  let sentryRes: Response;
-  try {
-    sentryRes = await fetch(sentryUrl, {
-      headers: { Authorization: `Bearer ${sentryToken}` },
-      cache: "no-store",
-    });
-  } catch (err) {
-    console.warn("[cron/flag-monitor] sentry fetch threw:", err);
-    return NextResponse.json({ ok: false, reason: "sentry_unreachable" });
-  }
-  if (!sentryRes.ok) {
-    // I-perf-cron: distinguish rate-limiting from outage. 429 + the documented
-    // Sentry rate-limit headers map to a separate reason code so the H-2
-    // streak detector doesn't fold rate-limiting into a real Sentry outage.
-    const retryAfter = sentryRes.headers.get("retry-after");
-    const sentryRateLimitRemaining = sentryRes.headers.get(
-      "x-sentry-rate-limit-remaining",
-    );
-    const sentryRateLimitReset = sentryRes.headers.get(
-      "x-sentry-rate-limit-reset",
-    );
-    const sentryRateLimitConcurrentRemaining = sentryRes.headers.get(
-      "x-sentry-rate-limit-concurrent-remaining",
-    );
-    const isRateLimited =
-      sentryRes.status === 429 ||
-      retryAfter !== null ||
-      sentryRateLimitRemaining !== null ||
-      sentryRateLimitConcurrentRemaining !== null;
-    const reason = isRateLimited ? "sentry_rate_limited" : "sentry_unreachable";
-    console.warn(
-      `[cron/flag-monitor] sentry status=${sentryRes.status} reason=${reason}`,
-    );
-    return NextResponse.json({
-      ok: false,
-      reason,
-      status: sentryRes.status,
-      ...(retryAfter ? { retry_after: retryAfter } : {}),
-      ...(sentryRateLimitRemaining
-        ? { rate_limit_remaining: sentryRateLimitRemaining }
-        : {}),
-      ...(sentryRateLimitReset ? { rate_limit_reset: sentryRateLimitReset } : {}),
-    });
-  }
-  const sentryData = await sentryRes.json().catch(() => ({}));
-  const errorCount = parseSentryCount(sentryData);
+  const numerator = await getNumerator({ orgSlug, sentryToken });
+  if (numerator.kind === "terminal") return numerator.res;
+  const errorCount = numerator.errorCount;
 
   // 2) Denominator — Supabase audit_log /process-key entries in same window.
   //    P4 (analytics-service/routers/process_key.py) writes audit_log row at
   //    /process-key entry; this is the load-bearing source.
-  const { count: totalCount } = await admin
-    .from("audit_log")
-    .select("id", { count: "exact", head: true })
-    .eq("entity_type", "process_key")
-    .gte("created_at", windowStart.toISOString());
-  const total = totalCount ?? 0;
+  const total = await getDenominator({ admin, windowStart });
 
   // 3) H-2 — denominator streak guard. If audit_log row count stays at 0 for
   //    >2 consecutive 15-min windows the denominator is silently broken and
   //    the cron is a no-op. Fail-open by sending a SEV-2 alert.
   if (total === 0) {
-    const { data: flagRow } = await admin
-      .from("feature_flags")
-      .select("value")
-      .eq("flag_key", ZERO_DENOM_STREAK_KEY)
-      .maybeSingle();
-    const currentStreak = parseInt(flagRow?.value ?? "0", 10) || 0;
-    const newStreak = currentStreak + 1;
-    await admin.from("feature_flags").upsert(
-      {
-        flag_key: ZERO_DENOM_STREAK_KEY,
-        value: String(newStreak),
-        updated_at: now.toISOString(),
-        updated_by: "cron/flag-monitor",
-      },
-      { onConflict: "flag_key" },
-    );
-    if (newStreak > ZERO_DENOMINATOR_ALERT_AFTER && resend && founderEmail) {
-      await resend.emails.send({
-        from: ALERT_FROM,
-        to: founderEmail,
-        subject: `[H-2 SEV-2] Phase 19 flag-monitor denominator stuck at 0 for ${newStreak} windows`,
-        html: `<p>The /process-key audit_log denominator has been 0 for ${newStreak} consecutive 15-min windows. Either no traffic is reaching /process-key OR the audit-write at /process-key entry is failing. Auto-rollback cannot trip in this state — investigate before traffic resumes.</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
-      });
-    }
-    return NextResponse.json({
-      ok: false,
-      reason: "zero_denominator",
-      streak: newStreak,
-    });
+    return await handleZeroDenominator({ admin, now, resend, founderEmail });
   }
 
   // Reset streak on the first non-zero window. Best-effort — if the upsert
@@ -223,57 +335,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   // 4) Threshold logic — order matters: ALERT first, then WARN.
   if (errorRate > ALERT_THRESHOLD && total >= MIN_SAMPLE) {
-    // D-3 — PostgREST resolution-error fallback. PGRST function-not-found
-    // (or schema-cache stale) means the kill-switch upsert is unreachable;
-    // SEV-2 alert + 500 so the founder uses the manual runbook.
-    try {
-      await admin.from("feature_flags").upsert(
-        {
-          flag_key: KILL_SWITCH_KEY,
-          value: "off",
-          updated_at: now.toISOString(),
-          updated_by: "cron/flag-monitor",
-        },
-        { onConflict: "flag_key" },
-      );
-    } catch (err: unknown) {
-      if (isPostgrestResolutionError(err)) {
-        console.error("[cron/flag-monitor] D-3 PostgREST resolution error:", err);
-        if (resend && founderEmail) {
-          await resend.emails.send({
-            from: ALERT_FROM,
-            to: founderEmail,
-            subject: `[D-3 SEV-2] Phase 19 kill-switch upsert failed (PGRST)`,
-            html: `<p>Auto-rollback failed because the Supabase kill-switch upsert raised a PostgREST resolution error. Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p><p>Error: <code>${String(err).replace(/</g, "&lt;")}</code></p><p>Error envelope rate <code>${(errorRate * 100).toFixed(2)}%</code> (${errorCount}/${total}) WAS observed but the kill-switch row could not be flipped.</p>`,
-          });
-        }
-        return NextResponse.json(
-          {
-            ok: false,
-            reason: "kill_switch_unreachable_d3",
-            error: String(err),
-          },
-          { status: 500 },
-        );
-      }
-      throw err;
-    }
-
-    if (resend && founderEmail) {
-      await resend.emails.send({
-        from: ALERT_FROM,
-        to: founderEmail,
-        subject: `[ALERT] Phase 19 backbone auto-rolled-back: ${(errorRate * 100).toFixed(2)}% error rate`,
-        html: `<p>Error envelope rate <code>${(errorRate * 100).toFixed(2)}%</code> exceeded ${(ALERT_THRESHOLD * 100).toFixed(2)}% threshold over the past 15 minutes (${errorCount}/${total}). Kill-switch row <code>${KILL_SWITCH_KEY}</code> has been flipped to <code>off</code>; new traffic falls back to legacy routes within the configured cache TTL (default 30s; <code>PHASE_19_STABILITY_CACHE_TTL_S</code> shortens this to 5s during the stability window).</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
-      });
-    }
-
-    console.warn(
-      `[cron/flag-monitor] AUTO-ROLLBACK: errorRate=${errorRate} total=${total}`,
-    );
-    return NextResponse.json({
-      ok: true,
-      action: "rolled_back",
+    return await triggerAutoRollback({
+      admin,
+      now,
+      resend,
+      founderEmail,
       errorRate,
       errorCount,
       total,
