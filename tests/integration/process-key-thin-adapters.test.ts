@@ -545,3 +545,92 @@ describe("thin adapters — flag=off preserves legacy path", () => {
     expect(findProcessKeyCall()).toBeUndefined();
   });
 });
+
+// -----------------------------------------------------------------------------
+// I-T3 — INTERNAL_API_TOKEN-missing branch. Each unified-delegating route must
+// return 503 (or the route-specific 503 envelope) and MUST NOT issue a fetch
+// to /process-key. Validate-and-encrypt is excluded because API-2 locks it to
+// the legacy path regardless.
+// -----------------------------------------------------------------------------
+describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () => {
+  it("I-T3a: verify-strategy missing token → 503, no /process-key call", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    delete process.env.INTERNAL_API_TOKEN;
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+    expect(res.status).toBe(503);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
+
+  it("I-T3b: keys/sync missing token → 503, no /process-key call", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    delete process.env.INTERNAL_API_TOKEN;
+    const { POST } = await import("@/app/api/keys/sync/route");
+    const res = await POST(
+      jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }),
+    );
+    expect(res.status).toBe(503);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
+
+  it("I-T3c: strategies/finalize-wizard missing token → 503 OR 502 (probe), no /process-key call", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    delete process.env.INTERNAL_API_TOKEN;
+    // The pre-flight scope-broadening probe also needs INTERNAL_API_TOKEN —
+    // its absence triggers a 502 KEY_NETWORK_TIMEOUT BEFORE the unified
+    // delegation runs. Either way, /process-key MUST NOT be called.
+    const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
+    const res = await POST(
+      jsonReq("/api/strategies/finalize-wizard", {
+        strategy_id: TEST_STRATEGY_ID,
+        name: "Alpha Centauri",
+        description: "A reasonable description that is at least 10 chars long.",
+        category_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+    expect([502, 503]).toContain(res.status);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
+
+  it("I-T3d: strategies/csv-validate missing token → 503 envelope, no /process-key call", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    delete process.env.INTERNAL_API_TOKEN;
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File(["a,b\n1,2"], "test.csv", { type: "text/csv" }),
+    );
+    formData.append("fmt", "daily_returns");
+    formData.append("wizard_session_id", "44444444-4444-4444-4444-444444444444");
+    const req = new NextRequest(
+      "http://localhost:3000/api/strategies/csv-validate",
+      { method: "POST", headers: VALID_ORIGIN, body: formData },
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+    expect(res.status).toBe(503);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
+
+  it("I-T3e: strategies/csv-finalize missing token → 503 envelope, no /process-key call", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    delete process.env.INTERNAL_API_TOKEN;
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(
+      jsonReq("/api/strategies/csv-finalize", {
+        wizard_session_id: "44444444-4444-4444-4444-444444444444",
+        fmt: "daily_returns",
+        strategy_name: "Apollo CSV",
+      }),
+    );
+    expect(res.status).toBe(503);
+    expect(findProcessKeyCall()).toBeUndefined();
+  });
+});
