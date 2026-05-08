@@ -27,7 +27,7 @@ import hashlib
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.db import get_supabase
 from services.feature_flags import is_unified_backbone_active
@@ -109,6 +109,51 @@ class _ProcessKeyBody(BaseModel):
                 f"allowed={sorted(allowed)}"
             )
         return source
+
+    # I-API2 — per-flow_type required-keys assertion. Pre-fix, missing
+    # context fields surfaced deep inside the adapter as KeyError 500s;
+    # this model_validator surfaces them as a clean 422 at the wire
+    # boundary. Validate-only flows (step='validate') skip the credential
+    # / file-bytes assertion because those keys are still being collected
+    # by the wizard step.
+    @model_validator(mode="after")
+    def _validate_per_flow_required_keys(self) -> "_ProcessKeyBody":
+        ctx = self.context or {}
+        step = ctx.get("step")
+
+        # Validate-only and finalize-step flows have their own pre-strategy
+        # branches in the route handler; skip the credential / file-bytes
+        # assertion here so those branches can run.
+        if step in {"validate", "finalize"}:
+            return self
+
+        if self.flow_type in {"teaser", "onboard", "resync"}:
+            missing = [k for k in ("api_key", "api_secret") if k not in ctx]
+            if missing:
+                raise ValueError(
+                    f"flow_type={self.flow_type!r} requires context keys "
+                    f"{missing!r}"
+                )
+        elif self.flow_type == "csv":
+            # CSV needs raw_bytes_base64 (canonical) OR raw_bytes (legacy)
+            # AND fmt AND wizard_session_id. internal_report has its own
+            # set; keeping the strict check for csv only here keeps the
+            # validator low-risk and tightly scoped.
+            if "fmt" not in ctx:
+                raise ValueError("flow_type='csv' requires context.fmt")
+            if "wizard_session_id" not in ctx:
+                raise ValueError(
+                    "flow_type='csv' requires context.wizard_session_id"
+                )
+            if (
+                "raw_bytes_base64" not in ctx
+                and "raw_bytes" not in ctx
+            ):
+                raise ValueError(
+                    "flow_type='csv' requires context.raw_bytes_base64 "
+                    "(canonical) or context.raw_bytes (legacy)"
+                )
+        return self
 
 
 # ---------------------------------------------------------------------------

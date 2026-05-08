@@ -197,16 +197,28 @@ def _build_supabase_mock(
 # ---------------------------------------------------------------------------
 
 
+def _csv_validate_body() -> dict:
+    """Minimal csv-validate body that passes I-API2 model_validator (step=validate
+    branch) without requiring the strategy_id/full credential set. Used by
+    auth tests that need to exercise auth BEFORE pydantic body validation."""
+    return {
+        "flow_type": "csv",
+        "source": "csv",
+        "context": {
+            "step": "validate",
+            "wizard_session_id": "00000000-0000-0000-0000-000000000001",
+            "fmt": "trades",
+            "raw_bytes_base64": "Y29sCjE=",
+        },
+    }
+
+
 def test_process_key_auth_missing_token(client, monkeypatch):
     """Missing INTERNAL_API_TOKEN env → 403 'Internal API not configured'."""
     monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
     r = client.post(
         "/process-key",
-        json={
-            "flow_type": "csv",
-            "source": "csv",
-            "context": {"strategy_id": "s1"},
-        },
+        json=_csv_validate_body(),
         headers={"Authorization": "Bearer whatever"},
     )
     assert r.status_code == 403
@@ -217,11 +229,7 @@ def test_process_key_auth_wrong_token(client):
     """Wrong bearer → 403 'Forbidden' (constant-time compare path)."""
     r = client.post(
         "/process-key",
-        json={
-            "flow_type": "csv",
-            "source": "csv",
-            "context": {"strategy_id": "s1"},
-        },
+        json=_csv_validate_body(),
         headers={"Authorization": "Bearer wrong"},
     )
     assert r.status_code == 403
@@ -244,7 +252,12 @@ def test_process_key_flag_off_503(client):
             json={
                 "flow_type": "csv",
                 "source": "csv",
-                "context": {"strategy_id": "s1"},
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wsid-1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
+                },
             },
             headers=_auth_headers(),
         )
@@ -357,7 +370,12 @@ def test_internal_api_token_no_newline_regression(monkeypatch):
         json={
             "flow_type": "csv",
             "source": "csv",
-            "context": {"strategy_id": "s1"},
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wsid-h12",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
+            },
         },
         headers={"Authorization": f"Bearer {'a' * SHAPE_LEN}"},
     )
@@ -445,6 +463,8 @@ def test_process_key_idempotent_double_submit(client):
             "context": {
                 "strategy_id": "s1",
                 "wizard_session_id": "wiz-1",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
             },
         }
         r1 = client.post("/process-key", json=body, headers=_auth_headers())
@@ -486,6 +506,8 @@ def test_process_key_unique_violation_returns_existing(client):
             "context": {
                 "strategy_id": "s1",
                 "wizard_session_id": "wiz-race",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
             },
         }
         r = client.post("/process-key", json=body, headers=_auth_headers())
@@ -554,7 +576,8 @@ def test_process_key_csv_sync_path(client):
             "context": {
                 "strategy_id": "s1",
                 "wizard_session_id": "wiz-csv-1",
-                "raw_bytes_marker": "x",
+                "fmt": "trades",
+                "raw_bytes_base64": "Y29sCjE=",
             },
         }
         r = client.post("/process-key", json=body, headers=_auth_headers())
@@ -984,6 +1007,8 @@ def test_process_key_writes_audit_row(client):
                 "context": {
                     "strategy_id": "s1-audit",
                     "wizard_session_id": "wiz-audit-1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
                 },
             },
             headers=_auth_headers(),
@@ -999,6 +1024,45 @@ def test_process_key_writes_audit_row(client):
 # ---------------------------------------------------------------------------
 # API-1 — verify_service_key middleware skip-list regression
 # ---------------------------------------------------------------------------
+
+
+def test_process_key_csv_missing_fmt_returns_422(client):
+    """I-API2 — model_validator catches missing csv-required keys at the
+    wire boundary. Pre-fix, missing fmt surfaced deep in the adapter as
+    a KeyError 500."""
+    r = client.post(
+        "/process-key",
+        json={
+            "flow_type": "csv",
+            "source": "csv",
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wiz-x",
+                # No fmt, no raw_bytes_base64.
+            },
+        },
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_process_key_onboard_missing_creds_returns_422(client):
+    """I-API2 — onboard requires api_key + api_secret in context (when not
+    a validate-step body)."""
+    r = client.post(
+        "/process-key",
+        json={
+            "flow_type": "onboard",
+            "source": "okx",
+            "context": {
+                "strategy_id": "s1",
+                "wizard_session_id": "wiz-y",
+                # No api_key, no api_secret.
+            },
+        },
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
 
 
 def test_process_key_shares_main_limiter_instance():
