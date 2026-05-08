@@ -100,7 +100,14 @@ async function unifiedValidateAndEncryptHandler(args: {
 
 /**
  * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ *
+ * NOTE (M-9): this branch is the ONLY active code path on this route — the
+ * unified handler is intentionally dormant pending the deferred encrypt
+ * branch (see API-2 comment in POST). The deprecation date below applies to
+ * the unified-handler decision, not to this function which stays around
+ * until /process-key gains an encrypt step.
  */
+// DEPRECATED: remove after unified encrypt branch lands (deferred from PR-D)
 async function legacyValidateAndEncryptHandler(args: {
   exchange: string;
   api_key: string;

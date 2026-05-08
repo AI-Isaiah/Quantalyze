@@ -122,6 +122,7 @@ async function unifiedVerifyStrategyHandler(
  * Runs when `isUnifiedBackboneActive()` returns false. Will be removed in a
  * follow-up cleanup PR after the 7-day stability window passes.
  */
+// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
 async function legacyVerifyStrategyHandler(args: {
   email: string;
   exchange: string;
