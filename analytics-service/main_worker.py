@@ -97,6 +97,13 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # reproducing the wizard-hang failure mode for allocator equity
     # reconstruction. Caught by /review cross-PR audit, 2026-04-30.
     "reconstruct_allocator_history": "35 minutes",  # handler timeout = 30 minutes
+    # Phase 19 / BACKBONE-09 / MC-6 — process_key_long handler timeout is
+    # 30 minutes (90-day OKX archive backfill). Watchdog threshold is set
+    # to 40 minutes (≥ handler timeout + 30% slack = 39 minutes minimum).
+    # Without this override, the global 10-minute default reclaims slow
+    # legitimate backfills mid-run and produces duplicate state-machine
+    # transitions through transition_strategy_verification.
+    "process_key_long": "40 minutes",  # handler timeout = 30 minutes
 }
 
 
