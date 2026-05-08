@@ -138,7 +138,8 @@ def test_get_adapter_returns_concrete_classes() -> None:
     assert get_adapter("okx").__class__.__name__ == "OkxAdapter"
     assert get_adapter("binance").__class__.__name__ == "BinanceAdapter"
     assert get_adapter("bybit").__class__.__name__ == "BybitAdapter"
-    assert get_adapter("csv").__class__.__name__ == "CsvAdapter"
+    # `csv` covered separately in tests/test_csv_adapter.py to keep the
+    # CSV-specific behavior contract co-located.
 
 
 def test_literal_types() -> None:
