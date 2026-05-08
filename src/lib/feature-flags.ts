@@ -54,25 +54,43 @@ export async function isUnifiedBackboneActive(): Promise<boolean> {
   const now = Date.now();
   if (_cache && _cache.expiresAt > now) return _cache.value;
 
+  // I-API3: outage-aware cache. On Supabase failure, hold the previous cached
+  // value (if any) for one TTL window so a flapping kill-switch row doesn't
+  // cause unrelated callers to oscillate between env-on and env-off. Falls
+  // through to envValue when there's no prior cache (cold start during
+  // outage). Mirrors analytics-service/services/feature_flags.py.
+  const prevCache = _cache;
   let killSwitchOff = false;
+  let supabaseErrored = false;
   try {
     const admin = createAdminClient();
-    const { data } = await admin
+    const { data, error } = await admin
       .from("feature_flags")
       .select("value")
       .eq("flag_key", KILL_SWITCH_KEY)
       .maybeSingle();
-    if (data?.value === "off") killSwitchOff = true;
+    if (error) {
+      supabaseErrored = true;
+      console.warn("[feature-flags] kill-switch read failed:", error.message);
+    } else if (data?.value === "off") {
+      killSwitchOff = true;
+    }
   } catch (err) {
-    // Don't block on Supabase outage; fall through to env var.
-    // Logged at WARN so Sentry sees sustained outages.
-    console.warn("[feature-flags] kill-switch read failed:", err);
+    supabaseErrored = true;
+    console.warn("[feature-flags] kill-switch read threw:", err);
   }
 
   const envValue = process.env.PROCESS_KEY_UNIFIED_BACKBONE === "on";
-  const value = envValue && !killSwitchOff;
+  const ttlMs = resolveCacheTtlMs();
 
-  _cache = { value, expiresAt: now + resolveCacheTtlMs() };
+  if (supabaseErrored) {
+    const heldValue = prevCache ? prevCache.value : envValue;
+    _cache = { value: heldValue, expiresAt: now + ttlMs };
+    return heldValue;
+  }
+
+  const value = envValue && !killSwitchOff;
+  _cache = { value, expiresAt: now + ttlMs };
   return value;
 }
 
