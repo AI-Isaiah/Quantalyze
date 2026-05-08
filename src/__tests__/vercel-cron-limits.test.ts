@@ -21,9 +21,31 @@ import { join } from "node:path";
  * any build was created, so the only symptom was "Vercel check failed"
  * on the PR. See docs/runbooks/vercel-cron-upgrade.md for the full
  * story and the Pro-migration playbook.
+ *
+ * Phase 19 / BACKBONE-05 (2026-05-08) — `/api/cron/flag-monitor` is the
+ * first deliberately sub-daily cron. It polls Sentry every 15 minutes
+ * and flips the unified-backbone kill-switch when error envelope rate
+ * breaches 0.5% with sample ≥ 20. The 15-min cadence is load-bearing:
+ * a daily tick would let a regression burn for up to 24h before the
+ * auto-rollback path activates. The exception lives in
+ * SUB_DAILY_ALLOWLIST below; new sub-daily crons MUST be added here
+ * with rationale + a link to the planning docs.
  */
 
 const MAX_CRONS_ALLOWED = 10;
+
+// Paths whose schedule is intentionally sub-daily. Each entry needs a
+// reason in the surrounding doc-block. New entries SHOULD be debated in
+// a CEO review before landing — the discipline only works when this
+// list is small and every line earns its place.
+const SUB_DAILY_ALLOWLIST = new Set<string>([
+  // Phase 19 / BACKBONE-05 — auto-rollback monitor cron. Polls Sentry
+  // every 15 minutes; threshold breach flips the kill-switch row in
+  // Supabase feature_flags. See
+  // .planning/phases/19-unified-backbone-conditional-on-day-2-gate-commit/
+  //   19-CONTEXT.md L40 + 19-07-flag-monitor-cron-and-drain-PLAN.md.
+  "/api/cron/flag-monitor",
+]);
 
 type CronEntry = { path: string; schedule: string };
 
@@ -51,9 +73,24 @@ describe("vercel.json cron quota (Pro plan, soft bound)", () => {
     expect(crons.length).toBeLessThanOrEqual(MAX_CRONS_ALLOWED);
   });
 
-  it("every schedule is daily or less frequent", () => {
+  it("every schedule is daily or less frequent (or in SUB_DAILY_ALLOWLIST)", () => {
     const crons = loadCrons();
-    const offenders = crons.filter((c) => !isDailyOrLessFrequent(c.schedule));
+    const offenders = crons.filter(
+      (c) =>
+        !isDailyOrLessFrequent(c.schedule) && !SUB_DAILY_ALLOWLIST.has(c.path),
+    );
     expect(offenders).toEqual([]);
+  });
+
+  it("SUB_DAILY_ALLOWLIST entries are actually present in vercel.json", () => {
+    const crons = loadCrons();
+    const cronPaths = new Set(crons.map((c) => c.path));
+    const stale: string[] = [];
+    for (const path of SUB_DAILY_ALLOWLIST) {
+      if (!cronPaths.has(path)) stale.push(path);
+    }
+    // Stale allowlist entries (cron deleted but allowlist still references it)
+    // are technical debt; the suite surfaces them so the next PR can prune.
+    expect(stale).toEqual([]);
   });
 });

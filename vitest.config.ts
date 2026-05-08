@@ -15,9 +15,12 @@ export default defineConfig({
       // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
       // via fs.readFileSync to enforce denylist parity across runtimes.
       "tests/lib/**/*.test.ts",
-      // Phase 19 / BACKBONE-10 — thin-adapter integration tests assert
-      // outbound /process-key fetch shape (headers + body) for the 7
-      // converted routes when the unified-backbone feature flag is on.
+      // Phase 19 / BACKBONE-05 + BACKBONE-10 — integration tests for
+      // (a) thin-adapter outbound /process-key fetch shape (headers + body)
+      //     across the 7 converted routes when the unified-backbone flag is on
+      // (b) auto-rollback cron + Sentry env-tag smoke
+      // both globs share the `tests/integration/` directory so a single
+      // `vitest run` invocation picks them up alongside the unit suite.
       "tests/integration/**/*.test.ts",
     ],
     setupFiles: ["src/test-setup.ts"],

@@ -32,3 +32,29 @@
 - ≥168h between flag_flipped_at and commit (d)
 - Daily cassette refresh succeeded all 7 days
 - Customer-feedback file (`.planning/phase-19/customer-feedback.md`) has ≥1 verbatim entry
+
+## Auto-Rollback SLA (BACKBONE-05 — D-4)
+
+The /api/cron/flag-monitor cron polls Sentry every 15 minutes. When error
+envelope rate breaches 0.5% with sample ≥ 20, it flips the Supabase
+feature_flags kill-switch row to `off`. The Next.js + analytics-service
+read seams cache the flag for `PHASE_19_STABILITY_CACHE_TTL_S` seconds
+(default 30s).
+
+| State | Cron tick | Cache TTL | Worst-case latency (breach → all traffic falling back) |
+|-------|-----------|-----------|--------------------------------------------------------|
+| Default | 15 min | 30 s | 15 min 30 s |
+| Stability window (D-4) | 15 min | 5 s (`PHASE_19_STABILITY_CACHE_TTL_S=5`) | 15 min 5 s |
+
+**Founder action during the 7-day stability window:** set
+`PHASE_19_STABILITY_CACHE_TTL_S=5` on Vercel (production) and
+analytics-service (Railway). After PR-D ships, unset the override —
+default 30s TTL trades 25s of additional rollback latency for a 6×
+reduction in Supabase reads on the kill-switch row (cost optimization
+once the surface is proven stable).
+
+**Manual rollback fallback** (Supabase outage, or PGRST resolution
+error caught by D-3): `.planning/phase-19/rollback-runbook.md`. The
+cron sends a SEV-2 email when the auto-rollback path itself fails
+(D-3 + H-2 escalation paths) so on-call sees both Sentry and Resend
+alerts.
