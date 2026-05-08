@@ -33,6 +33,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify no writes to legacy verification_requests since flag_flipped_at
+        # WR-01 fix (REVIEW.md 2026-05-08): SUPABASE_URL +
+        # SUPABASE_SERVICE_ROLE_KEY are wired (via repo secrets, NOT
+        # untrusted input) so verify-no-legacy-writes.sh actually executes
+        # the count query against the test project's PostgREST endpoint
+        # instead of merely printing it. The gate is pre-flip
+        # (flag_flipped_at=TODO in stability-log.md) until PR-B ships, at
+        # which point the script enforces the zero-row contract and the
+        # workflow fails the run on any detected legacy write.
         run: bash scripts/verify-no-legacy-writes.sh
         env:
           SUPABASE_PROJECT_ID: qmnijlgmdhviwzwfyzlc
+          SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}
