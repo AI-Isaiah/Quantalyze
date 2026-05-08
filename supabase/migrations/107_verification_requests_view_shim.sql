@@ -119,6 +119,16 @@ END $$;
 -- columns on strategy_verifications (added in migration 103), NOT nested
 -- in JSONB.
 -- M-5: filter retained as 'teaser' (preflight asserted no non-teaser rows present).
+-- I-DM6 invariant: teaser-row public_token uniqueness is enforced by the
+-- partial UNIQUE INDEX strategy_verifications_public_token_unique_idx
+-- (migration 103 STEP 1 — `WHERE public_token IS NOT NULL`). The VIEW
+-- below filters WHERE flow_type='teaser', and the legacy
+-- /api/verify-strategy/[id]/status route resolves rows by token. Without
+-- the partial unique index a token collision would surface as
+-- non-deterministic public-status results; with it, every token maps to
+-- exactly one row across the union of teaser strategy_verifications
+-- (current) and verification_requests_legacy (M-6 90-day window).
+--
 -- SEC-1 — security_invoker = true forces the underlying SELECT against
 -- strategy_verifications to run as the *invoking* role (anon /
 -- authenticated / service_role) rather than the view-owner role.

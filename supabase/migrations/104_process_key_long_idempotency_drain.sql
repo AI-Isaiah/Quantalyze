@@ -71,6 +71,15 @@ END $$;
 -- ==========================================================================
 -- Per migration 093 line 80, wizard_session_id is UUID NOT NULL — plain
 -- UNIQUE INDEX (no partial WHERE clause) is correct.
+--
+-- I-DM7 deploy note: this CREATE UNIQUE INDEX takes an ACCESS EXCLUSIVE
+-- lock on strategy_verifications. For a >100k-row table CONCURRENTLY
+-- would be safer (avoids the SHARE lock blocking writes), but
+-- CONCURRENTLY cannot run inside a transaction block — and this whole
+-- migration is wrapped in BEGIN/COMMIT. At current row counts the build
+-- completes in <1s; if the table grows past 1M rows, split this STEP
+-- into a standalone non-transactional migration that uses CREATE UNIQUE
+-- INDEX CONCURRENTLY before the drain pieces.
 CREATE UNIQUE INDEX IF NOT EXISTS strategy_verifications_wizard_session_id_unique_idx
   ON strategy_verifications (wizard_session_id);
 
