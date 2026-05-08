@@ -258,9 +258,17 @@ CREATE TABLE IF NOT EXISTS feature_flags (
 
 ALTER TABLE feature_flags ENABLE ROW LEVEL SECURITY;
 
+-- I-SEC1 — policy renamed to feature_flags_public_select to reflect what
+-- it actually does (USING (true) admits anon + authenticated + service).
+-- The earlier name `feature_flags_authenticated_select` mis-suggested it
+-- gated on a JWT. Drop both the old and new names defensively so a
+-- re-apply is idempotent against either generation.
 DROP POLICY IF EXISTS feature_flags_authenticated_select ON feature_flags;
-CREATE POLICY feature_flags_authenticated_select ON feature_flags
+DROP POLICY IF EXISTS feature_flags_public_select ON feature_flags;
+CREATE POLICY feature_flags_public_select ON feature_flags
   FOR SELECT USING (true);
+COMMENT ON POLICY feature_flags_public_select ON feature_flags IS
+  'I-SEC1 — explicit public-read policy (USING (true)). Kill-switch values are non-secret; the column is the boolean ''on''/''off''. Renamed from feature_flags_authenticated_select to remove the implication of an auth gate that wasn''t actually there.';
 
 DROP POLICY IF EXISTS feature_flags_service_all ON feature_flags;
 CREATE POLICY feature_flags_service_all ON feature_flags
