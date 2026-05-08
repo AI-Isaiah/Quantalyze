@@ -512,6 +512,68 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
+  // I-T6 — RESEND_API_KEY missing in ALERT path: kill-switch still flips,
+  // no send call, action='rolled_back'.
+  // -------------------------------------------------------------------------
+  it("I-T6: missing RESEND_API_KEY still flips kill-switch but skips alert email", async () => {
+    delete process.env.RESEND_API_KEY;
+    mockSentry(10);
+    const admin = makeAdminMock({ auditLogTotal: 1000 }); // 1%
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.action).toBe("rolled_back");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(1);
+    expect(flips[0].row.value).toBe("off");
+    // Resend was never instantiated (resendKey absent), so send was never called.
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // I-perf-cron — Sentry 429 + rate-limit headers map to sentry_rate_limited.
+  // -------------------------------------------------------------------------
+  it("I-perf-cron: Sentry 429 + Retry-After header returns sentry_rate_limited", async () => {
+    fetchSpy.mockImplementation((async (url: string) => {
+      if (typeof url === "string" && url.includes("sentry.io")) {
+        return new Response("Too Many Requests", {
+          status: 429,
+          headers: {
+            "content-type": "text/plain",
+            "retry-after": "60",
+            "x-sentry-rate-limit-remaining": "0",
+          },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch);
+    const admin = makeAdminMock({ auditLogTotal: 1000 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("sentry_rate_limited");
+    expect(body.retry_after).toBe("60");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
   // 11. H-6 — CI smoke workflow file existence stub
   // -------------------------------------------------------------------------
   it("test_sentry_environment_smoke: workflow OR static-source smoke wires VERCEL_ENV", () => {
