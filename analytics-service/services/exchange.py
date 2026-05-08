@@ -803,7 +803,7 @@ async def fetch_usdt_balance(exchange: ccxt.Exchange) -> float | None:
 # 60s in-process cache prevents fan-out hammering the broker on every
 # equity-curve recompute. Mirrors the existing in-process cache pattern
 # elsewhere in services/ (e.g. key_permissions._FAIL_CLOSED).
-import time as _phase19_time
+import time
 
 _MARK_PRICE_CACHE: dict[str, tuple[float, float]] = {}
 _MARK_PRICE_TTL_S = 60.0
@@ -832,7 +832,7 @@ async def fetch_mark_prices(
     in the returned dict. The caller should fall back to the entry price
     or treat the open position as flat.
     """
-    now = _phase19_time.monotonic()
+    now = time.monotonic()
     result: dict[str, float] = {}
     to_fetch: list[str] = []
     for sym in instruments or []:

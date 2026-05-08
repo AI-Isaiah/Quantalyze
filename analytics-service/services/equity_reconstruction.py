@@ -1633,9 +1633,9 @@ def reconstruct_symbol_returns(
 #   purpose (Phase 19 / MC-2 decision: leave private to avoid touching
 #   the DB-side tested primitive).
 
-from collections import defaultdict as _phase19_defaultdict
+from collections import defaultdict
 
-import math as _phase19_math
+import math
 
 
 class EquityCurveBuilder:
@@ -1701,7 +1701,7 @@ class EquityCurveBuilder:
         from services.ingestion.adapter import Position
         from services.position_reconstruction import _match_positions_fifo
 
-        positions_by_symbol: dict[str, list[dict]] = _phase19_defaultdict(list)
+        positions_by_symbol: dict[str, list[dict]] = defaultdict(list)
         for trade in self.trades:
             ts = trade.timestamp
             if isinstance(ts, datetime):
@@ -1806,7 +1806,7 @@ class EquityCurveBuilder:
 
         positions = self.reconstruct_positions()
 
-        realized_by_date: dict[date, float] = _phase19_defaultdict(float)
+        realized_by_date: dict[date, float] = defaultdict(float)
         for pos in positions:
             if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
                 closed_at = pos.closed_at
@@ -1901,7 +1901,7 @@ class EquityCurveBuilder:
         returns = df["daily_return"]
         excess = returns - (risk_free_rate / periods)
         std = excess.std()
-        if std == 0 or _phase19_math.isnan(std):
+        if std == 0 or math.isnan(std):
             return None
         return float((excess.mean() / std) * (periods ** 0.5))
 
