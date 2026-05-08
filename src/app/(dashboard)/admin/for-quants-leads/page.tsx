@@ -23,7 +23,7 @@ export default async function ForQuantsLeadsPage({
 
   const { show } = await searchParams;
   const showAll = show === "all";
-  const { rows, hitCap } = await listForQuantsLeads({ showAll });
+  const { rows, hitCap, error } = await listForQuantsLeads({ showAll });
 
   return (
     <>
@@ -31,6 +31,20 @@ export default async function ForQuantsLeadsPage({
         title="Request-a-Call leads"
         description="Public /for-quants submissions. Mark as processed once you've reached out."
       />
+      {error ? (
+        // audit-2026-05-07 G10.D.1: distinct error banner so a query
+        // failure isn't masked as "All caught up. No unprocessed leads."
+        // The founder uses this page as a notification queue — silently
+        // showing zero rows on a DB error meant real leads piled up
+        // unseen.
+        <div
+          role="alert"
+          className="mb-4 rounded border border-red-300 bg-red-50 p-4 text-sm text-red-900"
+        >
+          Could not load leads. Check Supabase status or try again. Details:{" "}
+          {error}
+        </div>
+      ) : null}
       <ForQuantsLeadsTable
         leads={rows}
         showAll={showAll}

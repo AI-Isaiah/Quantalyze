@@ -91,7 +91,11 @@ describe("listForQuantsLeads", () => {
     expect(result.hitCap).toBe(true);
   });
 
-  it("returns empty rows + no hitCap when DB errors", async () => {
+  it("returns empty rows + no hitCap + error message when DB errors", async () => {
+    // audit-2026-05-07 G10.D.1: caller must be able to distinguish a real
+    // DB error from "no unprocessed leads", otherwise the admin page
+    // misclassifies a query failure as the empty state and the founder
+    // misses real lead follow-ups.
     setTableErrorOnce(store, "for_quants_leads", { message: "boom" });
     const client = createMockSupabaseClient(store);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -100,6 +104,7 @@ describe("listForQuantsLeads", () => {
 
     expect(result.rows).toEqual([]);
     expect(result.hitCap).toBe(false);
+    expect(result.error).toBe("boom");
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });

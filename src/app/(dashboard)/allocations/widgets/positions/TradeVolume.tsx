@@ -29,6 +29,7 @@ export default function TradeVolume({ data }: WidgetProps) {
   const [volumeByDay, setVolumeByDay] = useState<VolumeDay[]>([]);
   const [hasFills, setHasFills] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!portfolioId) {
@@ -41,14 +42,29 @@ export default function TradeVolume({ data }: WidgetProps) {
         const res = await fetch(
           `/api/activity/portfolio?portfolio_id=${portfolioId}`,
         );
-        if (!res.ok) throw new Error("fetch failed");
+        if (!res.ok) throw new Error(`fetch failed (${res.status})`);
         const json = await res.json();
         if (!cancelled) {
           setVolumeByDay(json.volumeByDay ?? []);
           setHasFills(json.has_fills === true);
+          setError(null);
         }
-      } catch {
-        // silent
+      } catch (err) {
+        // audit-2026-05-07 G12.G.2: previously silent — allocator saw the
+        // empty state ("No trade volume data yet.") on transient 500s,
+        // RLS rejections, network blips, or fetch aborts, indistinguishable
+        // from a genuinely empty trade history. Surface the failure so the
+        // user knows to refresh and operators can detect spikes via console
+        // diagnostics.
+        console.error(
+          "[TradeVolume] portfolio activity fetch failed:",
+          err,
+        );
+        if (!cancelled) {
+          setError(
+            err instanceof Error ? err.message : "Could not load trade volume.",
+          );
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -62,6 +78,21 @@ export default function TradeVolume({ data }: WidgetProps) {
     return (
       <div className="flex h-full items-center justify-center text-xs" style={{ color: "#64748B" }}>
         Loading...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div
+        role="alert"
+        className="flex h-full flex-col items-center justify-center px-4 text-center text-sm"
+        style={{ color: "#991B1B" }}
+      >
+        <span>Couldn&apos;t load trade volume.</span>
+        <span className="text-xs" style={{ color: "#64748B" }}>
+          Try refreshing. ({error})
+        </span>
       </div>
     );
   }

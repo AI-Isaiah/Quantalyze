@@ -9,6 +9,7 @@ export default function TradingActivityLog({ data }: WidgetProps) {
   const [activity, setActivity] = useState<DailyPnlRow[]>([]);
   const [hasFills, setHasFills] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!portfolioId) {
@@ -21,14 +22,30 @@ export default function TradingActivityLog({ data }: WidgetProps) {
         const res = await fetch(
           `/api/activity/portfolio?portfolio_id=${portfolioId}`,
         );
-        if (!res.ok) throw new Error("fetch failed");
+        if (!res.ok) throw new Error(`fetch failed (${res.status})`);
         const json = await res.json();
         if (!cancelled) {
           setActivity(json.activity ?? []);
           setHasFills(json.has_fills === true);
+          setError(null);
         }
-      } catch {
-        // silent — empty state is fine
+      } catch (err) {
+        // audit-2026-05-07 G12.G.2: previously "silent — empty state is
+        // fine" was wrong. The empty state ("No trading activity yet.")
+        // is indistinguishable from a 5xx, RLS rejection, or fetch abort,
+        // so allocators saw the misleading "no trades" message even when
+        // they had a populated book and the API was failing.
+        console.error(
+          "[TradingActivityLog] portfolio activity fetch failed:",
+          err,
+        );
+        if (!cancelled) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Could not load trading activity.",
+          );
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -42,6 +59,21 @@ export default function TradingActivityLog({ data }: WidgetProps) {
     return (
       <div className="flex h-full items-center justify-center text-xs" style={{ color: "#64748B" }}>
         Loading activity...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div
+        role="alert"
+        className="flex h-full flex-col items-center justify-center px-4 text-center text-sm"
+        style={{ color: "#991B1B" }}
+      >
+        <span>Couldn&apos;t load trading activity.</span>
+        <span className="text-xs" style={{ color: "#64748B" }}>
+          Try refreshing. ({error})
+        </span>
       </div>
     );
   }

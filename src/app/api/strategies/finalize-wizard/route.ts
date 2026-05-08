@@ -303,27 +303,74 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         .single(),
     ]);
 
-    const results = await Promise.allSettled([
-      notifyFounderNewStrategy(name, managerName),
+    // audit-2026-05-07 G10.E.1: name each side effect so a future grep /
+    // Sentry filter can disambiguate. Index-based logging (`side effect 0`)
+    // was impossible to triage and didn't reach Sentry — console.warn on
+    // Vercel is best-effort log capture, not alertable.
+    const sideEffects: Array<{
+      label: "notify_founder_new_strategy" | "api_keys_last_sync_at_touch";
+      run: () => Promise<unknown>;
+    }> = [
+      {
+        label: "notify_founder_new_strategy",
+        run: () => notifyFounderNewStrategy(name, managerName),
+      },
       // @audit-skip: denormalization timestamp. api_keys.last_sync_at
       // is a sync-state hint, not a user-visible state change. The
       // user-intent event for this flow is the finalize_wizard_strategy
       // RPC call that promoted the draft to pending_review (which is a
       // stored-procedure call, not a .insert/.update/.delete — not
       // reached by the grep test).
-      keyLink?.api_key_id
-        ? admin
+      {
+        label: "api_keys_last_sync_at_touch",
+        run: async () => {
+          if (!keyLink?.api_key_id) return;
+          // @audit-skip: denormalization timestamp. api_keys.last_sync_at is a
+          // sync-state hint, not a user-visible state change. The user-intent
+          // event for this flow is finalize_wizard_strategy (RPC) which
+          // promoted the draft to pending_review.
+          await admin
             .from("api_keys")
             .update({ last_sync_at: new Date().toISOString() })
-            .eq("id", keyLink.api_key_id)
-        : Promise.resolve(),
-    ]);
+            .eq("id", keyLink.api_key_id);
+        },
+      },
+    ];
+
+    const results = await Promise.allSettled(sideEffects.map((e) => e.run()));
     for (const [i, r] of results.entries()) {
       if (r.status === "rejected") {
+        const label = sideEffects[i].label;
+        // notify_founder_new_strategy is the ONLY signal a founder gets
+        // that a new strategy was submitted. Failure here means the
+        // strategy lands in pending_review with nobody told — escalate
+        // to Sentry instead of swallowing on stdout. The cosmetic
+        // last_sync_at touch goes through the same channel for parity
+        // (operators want a single place to read for after()-failures).
         console.warn(
-          `[strategies/finalize-wizard] side effect ${i} failed (non-blocking):`,
+          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking):`,
           r.reason,
         );
+        if (process.env.SENTRY_DSN) {
+          try {
+            const Sentry = await import("@sentry/nextjs");
+            Sentry.captureException(r.reason, {
+              tags: {
+                surface: "finalize-wizard-after",
+                side_effect: label,
+              },
+              extra: {
+                strategy_id: resolvedId,
+                manager_name: managerName,
+              },
+            });
+          } catch (sentryErr) {
+            console.warn(
+              "[strategies/finalize-wizard] Sentry capture failed:",
+              sentryErr,
+            );
+          }
+        }
       }
     }
   });

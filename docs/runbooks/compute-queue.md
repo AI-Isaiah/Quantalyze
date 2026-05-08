@@ -9,7 +9,7 @@ This is a setup recipe and incident-response reference, not a spec. For
 the full architecture see the plan at
 `~/.claude/plans/lazy-hugging-raccoon.md` and migration 032.
 
-> **⚠️ DO NOT flip `COMPUTE_QUEUE_ENABLED=true` until Round 2 ships.**
+> **⚠️ DO NOT flip `USE_COMPUTE_JOBS_QUEUE=true` until Round 2 ships.**
 > Round 1 lands the SQL schema + RPCs + types + runbook only. The Python
 > worker, the Next.js enqueue path, the Vercel fallback cron, and the
 > `pg_try_advisory_xact_lock` double-execution guard all ship in Round 2.
@@ -43,7 +43,7 @@ at any moment, enforced by partial unique indexes.
 - `pg_net` extension enabled in Supabase
 - `app.analytics_service_url` GUC set to the Railway worker URL
 - `app.analytics_service_key` GUC set to the Railway service key
-- `COMPUTE_QUEUE_ENABLED` env var on Vercel:
+- `USE_COMPUTE_JOBS_QUEUE` env var on Vercel:
   - `false` = /api/keys/sync uses the legacy `after()` path (rollback)
   - `true` = /api/keys/sync enqueues into compute_jobs (shipped state)
 - `COMPUTE_QUEUE_HMAC_SECRET` env var (shared between Vercel fallback
@@ -180,7 +180,7 @@ Sentry fires this when the Railway `/api/jobs/tick` endpoint returns
    — it should be absorbing the failures with HMAC-verified retries to
    the Railway tick
 3. If the fallback is also failing: the issue is deeper (Railway region
-   outage, DB connectivity). Flip `COMPUTE_QUEUE_ENABLED=false` to fall
+   outage, DB connectivity). Flip `USE_COMPUTE_JOBS_QUEUE=false` to fall
    back to the legacy `after()` path, then diagnose
 4. If Railway is down and the fallback can't help: existing pending
    jobs stay safe in the table. Users see "Queued" in the wizard until
@@ -211,7 +211,7 @@ The wizard `SyncPreviewStep` shows "Computing..." and never advances.
    future → they will auto-retry. Wait.
 4. If rows exist in `failed_final` → click Retry in the admin page
 5. If no rows exist at all → the enqueue never happened. Check the
-   Vercel log for `/api/keys/sync`. Check `COMPUTE_QUEUE_ENABLED` env
+   Vercel log for `/api/keys/sync`. Check `USE_COMPUTE_JOBS_QUEUE` env
    var. Fall back to legacy by flipping the flag and having the user
    resubmit
 
@@ -222,8 +222,8 @@ The wizard `SyncPreviewStep` shows "Computing..." and never advances.
 processed by the `after()` path. They sit until the flag flips back.
 
 ```bash
-vercel env rm COMPUTE_QUEUE_ENABLED production
-vercel env add COMPUTE_QUEUE_ENABLED production <<< "false"
+vercel env rm USE_COMPUTE_JOBS_QUEUE production
+vercel env add USE_COMPUTE_JOBS_QUEUE production <<< "false"
 vercel --prod redeploy  # or wait for next auto-deploy
 ```
 
