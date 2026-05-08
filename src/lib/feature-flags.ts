@@ -34,19 +34,23 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 const KILL_SWITCH_KEY = "process_key_unified_backbone";
 
-function resolveCacheTtlMs(): number {
-  const raw = process.env.PHASE_19_STABILITY_CACHE_TTL_S;
-  if (!raw) return 30_000;
-  const parsed = parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 30_000;
-  return parsed * 1_000;
-}
-
 // Default constant for greppability (acceptance criterion in 19-05 P5-1
 // `grep -q 'CACHE_TTL_MS = 30_000' src/lib/feature-flags.ts`). The runtime
 // TTL is re-resolved per cache miss in resolveCacheTtlMs() so an env-var
 // change during the stability window takes effect without a redeploy.
+//
+// M-16: this constant is load-bearing — resolveCacheTtlMs() now falls back
+// to it instead of duplicating the literal `30_000`. Editing this constant
+// changes the default in one place.
 const CACHE_TTL_MS = 30_000;
+
+function resolveCacheTtlMs(): number {
+  const raw = process.env.PHASE_19_STABILITY_CACHE_TTL_S;
+  if (!raw) return CACHE_TTL_MS;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return CACHE_TTL_MS;
+  return parsed * 1_000;
+}
 
 let _cache: { value: boolean; expiresAt: number } | null = null;
 
