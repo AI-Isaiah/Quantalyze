@@ -1,0 +1,16 @@
+# Phase 19 / BACKBONE-07 — dev-only dependencies for tests/tooling.
+#
+# These deps are NOT shipped to production runtime. Install via:
+#   pip install -r requirements-dev.txt
+# alongside requirements.txt during local dev/CI test runs.
+
+# Phase 19 / BACKBONE-07 golden-file Sharpe reference.
+# Assumption A2 verified via scripts/probe-quantstats-version.sh
+# (qs.stats.sharpe(returns, periods=252) responds with a finite float).
+#
+# Note: quantstats==0.0.81 is also pinned in requirements.txt today
+# (services/metrics.py uses it at runtime). Re-pinning here is a tracking
+# guarantee for the golden-file test suite — if requirements.txt ever
+# drops quantstats, the dev-only pin keeps the reference Sharpe assertion
+# working.
+quantstats==0.0.81

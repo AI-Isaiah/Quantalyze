@@ -1609,3 +1609,374 @@ def reconstruct_symbol_returns(
     if len(returns) == 0:
         return None
     return returns
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 / BACKBONE-06 + BACKBONE-07 — EquityCurveBuilder
+# ---------------------------------------------------------------------------
+#
+# Wraps existing primitives (position_reconstruction.py, funding_fetch.py)
+# per ROADMAP REUSE flag. Open perps valued at mark-price; YTD = window-
+# filtered TWR; Sharpe matches an independently-computed quantstats
+# reference within ±0.05 per source.
+#
+# Design notes (verified against the actual primitives 2026-05-08):
+# - services.position_reconstruction._match_positions_fifo returns dicts
+#   keyed by entry_price_avg / exit_price_avg / size_base / realized_pnl
+#   and emits side as "long"/"short" plus opened_at/closed_at as string
+#   timestamps. EquityCurveBuilder maps that shape into the
+#   services.ingestion.adapter.Position dataclass (entry_price /
+#   exit_price / quantity / pnl, datetime fields).
+# - Trade.timestamp is a datetime; _match_positions_fifo expects a string
+#   timestamp on each fill, so we serialize on the way in.
+# - We import _match_positions_fifo via its underscore-prefixed name on
+#   purpose (Phase 19 / MC-2 decision: leave private to avoid touching
+#   the DB-side tested primitive).
+
+from collections import defaultdict as _phase19_defaultdict
+
+import math as _phase19_math
+
+
+class EquityCurveBuilder:
+    """Phase 19 / BACKBONE-06 + BACKBONE-07.
+
+    Builds an equity curve from raw trades, with mark-price valuation for
+    open perpetual positions and funding-rate accumulation. YTD = window-
+    filtered TWR; TWR = full-history.
+
+    Wraps existing primitives (RESEARCH gotcha L1720 — Option B chosen):
+      - position_reconstruction._match_positions_fifo (private; imported
+        directly because we don't touch the existing tested DB primitive)
+      - services.funding_fetch primitives (8h bucket dedup)
+      - services.exchange.fetch_mark_prices(instruments) (60s in-process
+        cache)
+
+    Sharpe matches an independently-computed quantstats reference
+    (qs.stats.sharpe(returns, periods=252)) within ±0.05.
+    """
+
+    def __init__(
+        self,
+        trades: list,  # list[Trade] — annotation kept loose to avoid circular import
+        mark_prices: dict[str, float] | None = None,
+    ) -> None:
+        self.trades = sorted(trades, key=lambda t: t.timestamp)
+        self.mark_prices = mark_prices or {}
+        self._funding_pnl_by_day: dict[date, float] = {}
+        self._curve_cache: pd.DataFrame | None = None
+
+    # ------------------------------------------------------------------
+    # Position reconstruction (in-memory, not persisted)
+    # ------------------------------------------------------------------
+
+    def reconstruct_positions(self) -> list:
+        """In-memory FIFO matching (NOT persisted to DB).
+
+        Calls existing services.position_reconstruction._match_positions_fifo
+        (private — Phase 19 / MC-2 Option B).
+        """
+        from services.ingestion.adapter import Position
+        from services.position_reconstruction import _match_positions_fifo
+
+        positions_by_symbol: dict[str, list[dict]] = _phase19_defaultdict(list)
+        for trade in self.trades:
+            ts = trade.timestamp
+            if isinstance(ts, datetime):
+                ts_str = ts.isoformat().replace("+00:00", "Z")
+            else:
+                ts_str = str(ts)
+            positions_by_symbol[trade.symbol].append(
+                {
+                    "side": trade.side,
+                    "price": float(trade.price),
+                    "quantity": float(trade.quantity),
+                    "fee": float(trade.fee or 0.0),
+                    "timestamp": ts_str,
+                }
+            )
+
+        all_positions: list[dict] = []
+        for symbol, fills in positions_by_symbol.items():
+            matched = _match_positions_fifo(
+                symbol, fills, strategy_id="<in-memory>"
+            )
+            all_positions.extend(matched)
+
+        # Attach mark prices to open positions (BACKBONE-06).
+        for pos in all_positions:
+            if pos.get("status") == "open":
+                mark = self.mark_prices.get(pos.get("symbol", ""))
+                if mark is not None:
+                    pos["mark_price"] = float(mark)
+                    entry = float(pos.get("entry_price_avg") or 0.0)
+                    qty = float(pos.get("size_base") or 0.0)
+                    side = pos.get("side")
+                    if side == "long":
+                        pos["unrealized_pnl"] = (mark - entry) * qty
+                    else:
+                        pos["unrealized_pnl"] = (entry - mark) * qty
+
+        return [Position(**_phase19_position_dict_to_kwargs(p)) for p in all_positions]
+
+    # ------------------------------------------------------------------
+    # Funding-rate accumulation
+    # ------------------------------------------------------------------
+
+    def attach_funding(self, funding_rows: list[dict]) -> None:
+        """Sum signed funding payments into self._funding_pnl_by_day.
+
+        Each ``funding_row`` shape: ``{timestamp, symbol, payment, ...}``.
+        Bucketed by UTC date; 8h cycles (per services/funding_fetch.py)
+        are aggregated up to a daily slot for the equity-curve consumer.
+        """
+        for row in funding_rows or []:
+            ts = row.get("timestamp")
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if not isinstance(ts, datetime):
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            d = ts.astimezone(timezone.utc).date()
+            payment = row.get("payment", row.get("amount", 0.0))
+            try:
+                amount = float(payment)
+            except (TypeError, ValueError):
+                continue
+            self._funding_pnl_by_day[d] = (
+                self._funding_pnl_by_day.get(d, 0.0) + amount
+            )
+        self._curve_cache = None  # invalidate
+
+    # ------------------------------------------------------------------
+    # Daily equity DataFrame
+    # ------------------------------------------------------------------
+
+    def to_equity_curve_daily(self) -> "pd.DataFrame":
+        """Return a daily equity DataFrame.
+
+        Columns: ``[date, realized_pnl, unrealized_pnl, funding_pnl,
+        equity, daily_return]``.
+        """
+        if self._curve_cache is not None:
+            return self._curve_cache
+
+        if not self.trades:
+            self._curve_cache = pd.DataFrame(
+                columns=[
+                    "date",
+                    "realized_pnl",
+                    "unrealized_pnl",
+                    "funding_pnl",
+                    "equity",
+                    "daily_return",
+                ]
+            )
+            return self._curve_cache
+
+        positions = self.reconstruct_positions()
+
+        realized_by_date: dict[date, float] = _phase19_defaultdict(float)
+        for pos in positions:
+            if pos.status == "closed" and pos.closed_at and pos.pnl is not None:
+                closed_at = pos.closed_at
+                if isinstance(closed_at, datetime):
+                    if closed_at.tzinfo is None:
+                        closed_at = closed_at.replace(tzinfo=timezone.utc)
+                    d = closed_at.astimezone(timezone.utc).date()
+                else:
+                    continue
+                realized_by_date[d] += float(pos.pnl)
+
+        first = min(t.timestamp for t in self.trades)
+        last = max(t.timestamp for t in self.trades)
+        if first.tzinfo is None:
+            first = first.replace(tzinfo=timezone.utc)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        first_d = first.astimezone(timezone.utc).date()
+        last_d = last.astimezone(timezone.utc).date()
+        idx = pd.date_range(first_d, last_d, freq="D")
+
+        df = pd.DataFrame({"date": idx})
+        df["realized_pnl"] = df["date"].map(
+            lambda d: realized_by_date.get(d.date(), 0.0)
+        )
+        df["funding_pnl"] = df["date"].map(
+            lambda d: self._funding_pnl_by_day.get(d.date(), 0.0)
+        )
+        df["unrealized_pnl"] = 0.0
+        # Open-position unrealized pnl is realised on the last bar (BACKBONE-06).
+        if not df.empty:
+            open_unrealized = sum(
+                float(getattr(p, "pnl", None) or 0.0)
+                for p in positions
+                if p.status == "open"
+            )
+            df.loc[df.index[-1], "unrealized_pnl"] = open_unrealized
+
+        df["daily_pnl"] = (
+            df["realized_pnl"] + df["funding_pnl"] + df["unrealized_pnl"]
+        )
+        df["equity"] = df["daily_pnl"].cumsum()
+        # Avoid division-by-zero on day 1: shift to a 1.0 starting basis.
+        equity_basis = df["equity"] + 1.0
+        df["daily_return"] = equity_basis.pct_change().fillna(0.0)
+        df = df.drop(columns=["daily_pnl"])
+        self._curve_cache = df
+        return df
+
+    # ------------------------------------------------------------------
+    # Metrics (TWR / YTD / Sharpe / max drawdown)
+    # ------------------------------------------------------------------
+
+    def compute_twr(self) -> float | None:
+        """Time-Weighted Return over the full history."""
+        df = self.to_equity_curve_daily()
+        if df.empty:
+            return None
+        return float((1 + df["daily_return"]).prod() - 1)
+
+    def compute_ytd(self) -> float | None:
+        """YTD = TWR computed over the year-to-date window.
+
+        BACKBONE-07: differs from full-history TWR when the strategy has
+        history outside the current calendar year.
+        """
+        df = self.to_equity_curve_daily()
+        if df.empty:
+            return None
+        year_start = pd.Timestamp(date(date.today().year, 1, 1))
+        ytd_df = df[df["date"] >= year_start]
+        if ytd_df.empty:
+            return None
+        return float((1 + ytd_df["daily_return"]).prod() - 1)
+
+    def compute_sharpe(
+        self, risk_free_rate: float = 0.0, periods: int = 252
+    ) -> float | None:
+        """Annualized Sharpe ratio.
+
+        Matches ``qs.stats.sharpe(returns, periods=252)`` within ±0.05
+        (Assumption A2 verified by ``scripts/probe-quantstats-version.sh``).
+        """
+        df = self.to_equity_curve_daily()
+        if df.empty or len(df) < 2:
+            return None
+        returns = df["daily_return"]
+        excess = returns - (risk_free_rate / periods)
+        std = excess.std()
+        if std == 0 or _phase19_math.isnan(std):
+            return None
+        return float((excess.mean() / std) * (periods ** 0.5))
+
+    def compute_max_drawdown(self) -> float | None:
+        df = self.to_equity_curve_daily()
+        if df.empty:
+            return None
+        equity = df["equity"]
+        running_max = equity.cummax()
+        # Replace zero peaks with 1.0 to avoid divide-by-zero on day 1.
+        denom = running_max.replace(0, 1.0)
+        dd = (equity - running_max) / denom
+        return float(dd.min())
+
+    # ------------------------------------------------------------------
+    # MetricsSnapshot composition
+    # ------------------------------------------------------------------
+
+    def to_metrics_snapshot(self):
+        """Compose into a services.ingestion.adapter.MetricsSnapshot."""
+        from services.ingestion.adapter import MetricsSnapshot
+
+        positions = self.reconstruct_positions()
+        closed = [p for p in positions if p.status == "closed"]
+        wins = [
+            p for p in closed if p.pnl is not None and p.pnl > 0
+        ]
+        win_rate = (len(wins) / len(closed)) if closed else None
+        total_pnl = sum(
+            float(p.pnl or 0.0) for p in closed
+        ) + sum(self._funding_pnl_by_day.values())
+
+        return MetricsSnapshot(
+            sharpe=self.compute_sharpe(),
+            twr=self.compute_twr(),
+            ytd=self.compute_ytd(),
+            max_drawdown=self.compute_max_drawdown(),
+            total_pnl=float(total_pnl),
+            trade_count=len(self.trades),
+            win_rate=win_rate,
+        )
+
+
+def _phase19_position_dict_to_kwargs(p: dict) -> dict:
+    """Map ``_match_positions_fifo`` output dict → ``Position`` dataclass kwargs.
+
+    ``_match_positions_fifo`` keys (verified):
+      strategy_id, symbol, side ("long"/"short"), status ("open"/"closed"),
+      entry_price_avg, exit_price_avg, size_base, size_peak, realized_pnl,
+      fee_total, roi, duration_days, opened_at (str|None),
+      closed_at (str|None), fill_count, funding_pnl, [unrealized_pnl, mark_price]
+
+    ``Position`` fields:
+      strategy_id, symbol, side, opened_at (datetime), closed_at (datetime|None),
+      entry_price, exit_price, quantity, pnl, funding_pnl, status, roi,
+      duration_days
+    """
+    def _parse_dt(value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    opened_at_dt = _parse_dt(p.get("opened_at")) or datetime.now(timezone.utc)
+    closed_at_dt = _parse_dt(p.get("closed_at"))
+
+    pnl_value: float | None
+    if p.get("status") == "open":
+        pnl_value = p.get("unrealized_pnl")
+        if pnl_value is not None:
+            pnl_value = float(pnl_value)
+    else:
+        rp = p.get("realized_pnl")
+        pnl_value = float(rp) if rp is not None else None
+
+    return {
+        "strategy_id": p.get("strategy_id", "<in-memory>"),
+        "symbol": p.get("symbol", ""),
+        "side": p.get("side", ""),
+        "opened_at": opened_at_dt,
+        "closed_at": closed_at_dt,
+        "entry_price": float(p.get("entry_price_avg") or 0.0),
+        "exit_price": (
+            float(p["exit_price_avg"])
+            if p.get("exit_price_avg") is not None
+            else None
+        ),
+        "quantity": float(p.get("size_base") or 0.0),
+        "pnl": pnl_value,
+        "funding_pnl": (
+            float(p["funding_pnl"])
+            if p.get("funding_pnl") is not None
+            else None
+        ),
+        "status": p.get("status", "closed"),
+        "roi": (
+            float(p["roi"]) if p.get("roi") is not None else None
+        ),
+        "duration_days": (
+            float(p["duration_days"])
+            if p.get("duration_days") is not None
+            else None
+        ),
+    }
