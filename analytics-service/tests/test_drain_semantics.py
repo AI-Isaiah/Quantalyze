@@ -88,9 +88,16 @@ def test_compute_jobs_kind_admits_process_key_long(admin, strategy_id):
         "status": "pending",
         "priority": "normal",
     }).execute()
-    assert res.data and res.data[0]["kind"] == "process_key_long"
-    # cleanup
-    admin.table("compute_jobs").delete().eq("id", res.data[0]["id"]).execute()
+    # I-T7 — wrap the assertion in try/finally so a fixture-cleanup leak
+    # doesn't leave a stray pending compute_jobs row when an assertion
+    # fails. A leaked row would poison subsequent runs of this test
+    # against the test Supabase project.
+    job_id = res.data[0]["id"] if res.data else None
+    try:
+        assert res.data and res.data[0]["kind"] == "process_key_long"
+    finally:
+        if job_id is not None:
+            admin.table("compute_jobs").delete().eq("id", job_id).execute()
 
 
 def test_claim_writes_unified_backbone_metadata(admin, strategy_id):
