@@ -405,6 +405,52 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
+  // I-T4 — Sentry-not-configured + Sentry-unreachable distinction.
+  // -------------------------------------------------------------------------
+  it("I-T4a: SENTRY_ORG_SLUG missing returns sentry_not_configured + no kill-switch flip", async () => {
+    delete process.env.SENTRY_ORG_SLUG;
+    const admin = makeAdminMock({ auditLogTotal: 1000 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("sentry_not_configured");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(0);
+  });
+
+  it("I-T4b: fetch ECONNRESET returns sentry_unreachable + no kill-switch flip", async () => {
+    fetchSpy.mockImplementation((async (url: string) => {
+      if (typeof url === "string" && url.includes("sentry.io")) {
+        throw new Error("ECONNRESET");
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch);
+    const admin = makeAdminMock({ auditLogTotal: 1000 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("sentry_unreachable");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
   // 11. H-6 — CI smoke workflow file existence stub
   // -------------------------------------------------------------------------
   it("test_sentry_environment_smoke: workflow OR static-source smoke wires VERCEL_ENV", () => {
