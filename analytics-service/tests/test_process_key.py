@@ -908,3 +908,40 @@ def test_process_key_writes_audit_row(client):
     assert "log_audit_event_service" in rpc_call_names, (
         f"Expected log_audit_event_service RPC; got {rpc_call_names}"
     )
+
+
+# ---------------------------------------------------------------------------
+# API-1 — verify_service_key middleware skip-list regression
+# ---------------------------------------------------------------------------
+
+
+def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
+    """API-1 regression: main.verify_service_key middleware must skip
+    /process-key the same way it skips /internal/*.
+
+    Pre-fix, every Vercel→FastAPI POST returned 401 'Unauthorized' BEFORE
+    the route's own _verify_internal_token ran, because the middleware
+    only whitelisted /health and /internal/*. This test imports the
+    real `verify_service_key` from main.py via inspect.getsource and
+    re-evaluates it (the actual function is bound to the global FastAPI
+    app instance which we can't reuse here without booting the entire
+    lifespan). We assert that the on-disk source explicitly contains
+    `/process-key` in its skip-list — a regression that drops the skip
+    would surface as a string-match failure here.
+    """
+    import inspect
+    from main import verify_service_key
+
+    src = inspect.getsource(verify_service_key)
+    # API-1 invariant: the middleware MUST whitelist /process-key the same
+    # way it whitelists /internal/*. If a future refactor drops this
+    # branch, every Vercel→FastAPI call regresses to 401.
+    assert "/process-key" in src, (
+        "API-1: main.verify_service_key must explicitly skip /process-key. "
+        "Without this, the middleware rejects every Vercel→FastAPI call "
+        "with 401 BEFORE the route's bearer-token gate runs.\n"
+        f"Source:\n{src}"
+    )
+    assert "/internal/" in src, (
+        "Sanity: middleware must still skip /internal/* (existing contract)."
+    )

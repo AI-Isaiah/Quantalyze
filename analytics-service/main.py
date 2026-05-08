@@ -191,6 +191,16 @@ async def verify_service_key(request: Request, call_next):
     if request.url.path.startswith("/internal/"):
         return await call_next(request)
 
+    # /process-key (Phase 19 / BACKBONE-01) authenticates via the same
+    # rotateable INTERNAL_API_TOKEN gate (Authorization: Bearer <token>)
+    # validated inside routers/process_key.py:_verify_internal_token. Without
+    # this skip the X-Service-Key middleware rejects every Vercel→FastAPI
+    # call with 401 Unauthorized BEFORE the route's own auth runs (API-1).
+    if request.url.path == "/process-key" or request.url.path.startswith(
+        "/process-key/"
+    ):
+        return await call_next(request)
+
     if not SERVICE_KEY:
         raise HTTPException(status_code=503, detail="Service not configured")
 
