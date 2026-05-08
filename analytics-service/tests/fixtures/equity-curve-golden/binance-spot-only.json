@@ -1,0 +1,933 @@
+{
+  "strategy_name": "binance-spot-only",
+  "trades": [
+    {
+      "timestamp": "2026-01-05T10:00:00Z",
+      "symbol": "BTCUSDT",
+      "side": "buy",
+      "price": 100.0,
+      "quantity": 1.0,
+      "fee": 0.1,
+      "exchange": "binance",
+      "fee_currency": "USDT",
+      "order_type": "limit",
+      "is_fill": true
+    },
+    {
+      "timestamp": "2026-01-20T10:00:00Z",
+      "symbol": "BTCUSDT",
+      "side": "sell",
+      "price": 110.0,
+      "quantity": 1.0,
+      "fee": 0.1,
+      "exchange": "binance",
+      "fee_currency": "USDT",
+      "order_type": "limit",
+      "is_fill": true
+    },
+    {
+      "timestamp": "2026-02-10T09:00:00Z",
+      "symbol": "ETHUSDT",
+      "side": "buy",
+      "price": 200.0,
+      "quantity": 1.0,
+      "fee": 0.2,
+      "exchange": "binance",
+      "fee_currency": "USDT",
+      "order_type": "limit",
+      "is_fill": true
+    },
+    {
+      "timestamp": "2026-03-15T11:00:00Z",
+      "symbol": "ETHUSDT",
+      "side": "sell",
+      "price": 220.0,
+      "quantity": 1.0,
+      "fee": 0.2,
+      "exchange": "binance",
+      "fee_currency": "USDT",
+      "order_type": "limit",
+      "is_fill": true
+    },
+    {
+      "timestamp": "2026-04-01T12:00:00Z",
+      "symbol": "SOLUSDT",
+      "side": "buy",
+      "price": 50.0,
+      "quantity": 2.0,
+      "fee": 0.05,
+      "exchange": "binance",
+      "fee_currency": "USDT",
+      "order_type": "limit",
+      "is_fill": true
+    },
+    {
+      "timestamp": "2026-04-20T15:00:00Z",
+      "symbol": "SOLUSDT",
+      "side": "sell",
+      "price": 55.0,
+      "quantity": 2.0,
+      "fee": 0.05,
+      "exchange": "binance",
+      "fee_currency": "USDT",
+      "order_type": "limit",
+      "is_fill": true
+    }
+  ],
+  "mark_prices": {},
+  "funding_rows": [],
+  "expected_equity_curve": [
+    {
+      "date": "2026-01-05",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-06",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-07",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-08",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-09",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-10",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-11",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-12",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-13",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-14",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-15",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-16",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-17",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-18",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-19",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100000.0,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-20",
+      "realized_pnl": 9.8,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 9.8e-05
+    },
+    {
+      "date": "2026-01-21",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-22",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-23",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-24",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-25",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-26",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-27",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-28",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-29",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-30",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-01-31",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-01",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-02",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-03",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-04",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-05",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-06",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-07",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-08",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-09",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-10",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-11",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-12",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-13",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-14",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-15",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-16",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-17",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-18",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-19",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-20",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-21",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-22",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-23",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-24",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-25",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-26",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-27",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-02-28",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-01",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-02",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-03",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-04",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-05",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-06",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-07",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-08",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-09",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-10",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-11",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-12",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-13",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-14",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100009.8,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-15",
+      "realized_pnl": 19.6,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.000195980794
+    },
+    {
+      "date": "2026-03-16",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-17",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-18",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-19",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-20",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-21",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-22",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-23",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-24",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-25",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-26",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-27",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-28",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-29",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-30",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-03-31",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-01",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-02",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-03",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-04",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-05",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-06",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-07",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-08",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-09",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-10",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-11",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-12",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-13",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-14",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-15",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-16",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-17",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-18",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-19",
+      "realized_pnl": 0.0,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100029.4,
+      "daily_return": 0.0
+    },
+    {
+      "date": "2026-04-20",
+      "realized_pnl": 9.9,
+      "funding_pnl": 0.0,
+      "unrealized_pnl": 0.0,
+      "equity": 100039.3,
+      "daily_return": 9.8970903e-05
+    }
+  ],
+  "expected_twr": 0.000393,
+  "expected_ytd": 0.000393,
+  "expected_sharpe": 2.54025548,
+  "quantstats_sharpe_reference": 2.54025548
+}
