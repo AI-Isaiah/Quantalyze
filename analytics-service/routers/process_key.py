@@ -303,6 +303,24 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
         body.context.get("strategy_id") or body.context.get("wizard_session_id")
     )
 
+    # I-SEC2 — emit a structured warning when context.user_id is missing on
+    # a non-public flow. The teaser flow_type is intentionally
+    # unauthenticated and runs without a user_id (the public homepage form
+    # can be submitted by anyone). For onboard / resync / csv / internal_report
+    # the wizard ALWAYS has an auth session, so a missing user_id signals a
+    # caller misconfiguration that the cron's audit-log denominator cannot
+    # subsequently disambiguate.
+    if (
+        body.context.get("user_id") is None
+        and body.flow_type != "teaser"
+    ):
+        log.warning(
+            "process_key.user_id_missing",
+            flow_type=body.flow_type,
+            source=body.source,
+            wizard_session_id=body.context.get("wizard_session_id"),
+        )
+
     # I-perf-3 — fire-and-forget the audit row write. The RPC is
     # best-effort (non-fatal on failure; the request continues either
     # way), so adding its RTT to the synchronous /process-key path is
