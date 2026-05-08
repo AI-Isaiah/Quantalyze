@@ -12,8 +12,6 @@ Covers the CSV-specific contract:
 """
 from __future__ import annotations
 
-import asyncio
-
 
 VALID_DAILY_RETURNS_CSV = (
     b"date,daily_return\n"
@@ -32,11 +30,7 @@ INVALID_DAILY_NAV_CSV = (
 )
 
 
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
-
-
-def test_validate_returns_none_read_only() -> None:
+async def test_validate_returns_none_read_only() -> None:
     from services.ingestion.adapter import KeySubmissionRequest
     from services.ingestion.csv_adapter import CsvAdapter
 
@@ -53,7 +47,7 @@ def test_validate_returns_none_read_only() -> None:
         },
     )
 
-    result = _run(adapter.validate(req))
+    result = await adapter.validate(req)
 
     assert result.valid is True, f"expected valid=True, got {result}"
     assert result.read_only is None, (
@@ -64,7 +58,7 @@ def test_validate_returns_none_read_only() -> None:
     assert result.human_message is None
 
 
-def test_validate_returns_error_on_invalid_format() -> None:
+async def test_validate_returns_error_on_invalid_format() -> None:
     from services.ingestion.adapter import KeySubmissionRequest
     from services.ingestion.csv_adapter import CsvAdapter
 
@@ -81,7 +75,7 @@ def test_validate_returns_error_on_invalid_format() -> None:
         },
     )
 
-    result = _run(adapter.validate(req))
+    result = await adapter.validate(req)
 
     assert result.valid is False
     assert result.read_only is None  # always None for CSV
@@ -95,7 +89,7 @@ def test_validate_returns_error_on_invalid_format() -> None:
     assert "violations" in result.debug_context
 
 
-def test_reconstruct_positions_empty() -> None:
+async def test_reconstruct_positions_empty() -> None:
     from datetime import datetime, timezone
 
     from services.ingestion.adapter import Trade
@@ -118,7 +112,7 @@ def test_reconstruct_positions_empty() -> None:
         )
     ]
 
-    positions = _run(adapter.reconstruct_positions(trades))
+    positions = await adapter.reconstruct_positions(trades)
 
     # v0 limitation per CONTEXT.md L83: mark prices not applicable; open
     # positions assumed flat at upload time. Adapter must return [] for
