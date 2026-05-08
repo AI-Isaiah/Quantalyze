@@ -93,6 +93,54 @@ def test_get_adapter_unknown_source() -> None:
     assert "Unsupported source" in str(exc_info.value)
 
 
+def test_okx_adapter_protocol_conforms() -> None:
+    from services.ingestion import IngestionAdapter
+    from services.ingestion.okx import OkxAdapter
+
+    assert isinstance(OkxAdapter(), IngestionAdapter)
+    assert OkxAdapter.SOURCE == "okx"
+
+
+def test_binance_adapter_protocol_conforms() -> None:
+    from services.ingestion import IngestionAdapter
+    from services.ingestion.binance import BinanceAdapter
+
+    assert isinstance(BinanceAdapter(), IngestionAdapter)
+    assert BinanceAdapter.SOURCE == "binance"
+
+
+def test_bybit_adapter_protocol_conforms() -> None:
+    from services.ingestion import IngestionAdapter
+    from services.ingestion.bybit import BybitAdapter
+
+    assert isinstance(BybitAdapter(), IngestionAdapter)
+    assert BybitAdapter.SOURCE == "bybit"
+
+
+def test_bybit_adapter_does_not_repatch_fetchcurrencies() -> None:
+    """Per RESEARCH.md gotcha L809: Bybit fetchCurrencies is already
+    patched in services/exchange.py:35-46. The adapter must NOT add
+    its own patch — wrap, don't modify."""
+    import inspect
+
+    from services.ingestion import bybit as bybit_module
+
+    src = inspect.getsource(bybit_module)
+    assert "fetchCurrencies" not in src, (
+        "BybitAdapter must not re-patch fetchCurrencies; it is already "
+        "handled in services/exchange.py:35-46."
+    )
+
+
+def test_get_adapter_returns_concrete_classes() -> None:
+    from services.ingestion import get_adapter
+
+    assert get_adapter("okx").__class__.__name__ == "OkxAdapter"
+    assert get_adapter("binance").__class__.__name__ == "BinanceAdapter"
+    assert get_adapter("bybit").__class__.__name__ == "BybitAdapter"
+    assert get_adapter("csv").__class__.__name__ == "CsvAdapter"
+
+
 def test_literal_types() -> None:
     from services.ingestion.adapter import FlowType, Source, Status, TrustTier
 
