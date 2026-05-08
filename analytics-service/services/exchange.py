@@ -795,3 +795,120 @@ async def fetch_usdt_balance(exchange: ccxt.Exchange) -> float | None:
     except Exception as e:
         logger.warning("Could not fetch account balance: %s", str(e))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 / BACKBONE-06 — fetch_mark_prices for open-perp valuation.
+# ---------------------------------------------------------------------------
+# 60s in-process cache prevents fan-out hammering the broker on every
+# equity-curve recompute. Mirrors the existing in-process cache pattern
+# elsewhere in services/ (e.g. key_permissions._FAIL_CLOSED).
+import time as _phase19_time
+
+_MARK_PRICE_CACHE: dict[str, tuple[float, float]] = {}
+_MARK_PRICE_TTL_S = 60.0
+
+
+async def fetch_mark_prices(
+    exchange: ccxt.Exchange,
+    instruments: list[str],
+) -> dict[str, float]:
+    """Phase 19 / BACKBONE-06. Fetch current mark prices for open perp instruments.
+
+    60s in-process cache prevents fan-out hammering on equity-curve
+    recompute. Returns ``{symbol: price}`` for every requested symbol that
+    has a mark; symbols missing on the exchange are absent from the dict
+    (caller decides what to do — typical CSV path supplies an empty list).
+
+    Per-exchange branches:
+      * OKX:     ``public_get_public_mark_price({"instId": sym})`` →
+                 ``data[0].markPx``.
+      * Binance: ``fapiPublic_get_premiumindex()`` (mark-price endpoint;
+                 returns a list keyed by ``symbol`` + ``markPrice``).
+      * Bybit:   ``private_get_v5_market_tickers({"category": "linear"})``
+                 → ``result.list[*].markPrice``.
+
+    Failures are logged at warning level; the symbol simply does not appear
+    in the returned dict. The caller should fall back to the entry price
+    or treat the open position as flat.
+    """
+    now = _phase19_time.monotonic()
+    result: dict[str, float] = {}
+    to_fetch: list[str] = []
+    for sym in instruments or []:
+        cached = _MARK_PRICE_CACHE.get(sym)
+        if cached and cached[1] > now:
+            result[sym] = cached[0]
+        else:
+            to_fetch.append(sym)
+
+    if not to_fetch:
+        return result
+
+    if exchange.id == "okx":
+        for sym in to_fetch:
+            try:
+                resp = await exchange.public_get_public_mark_price(
+                    {"instId": sym}
+                )
+                rows = (resp or {}).get("data") or []
+                if not rows:
+                    continue
+                price = float(rows[0]["markPx"])
+                result[sym] = price
+                _MARK_PRICE_CACHE[sym] = (price, now + _MARK_PRICE_TTL_S)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "fetch_mark_prices OKX failed for %s: %s", sym, exc
+                )
+    elif exchange.id == "binance":
+        try:
+            resp = await exchange.fapiPublic_get_premiumindex()
+            rows = resp if isinstance(resp, list) else []
+            wanted = set(to_fetch)
+            for row in rows:
+                sym = row.get("symbol")
+                if sym in wanted:
+                    try:
+                        price = float(row["markPrice"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    result[sym] = price
+                    _MARK_PRICE_CACHE[sym] = (
+                        price,
+                        now + _MARK_PRICE_TTL_S,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_mark_prices Binance failed: %s", exc)
+    elif exchange.id == "bybit":
+        try:
+            resp = await exchange.private_get_v5_market_tickers(
+                {"category": "linear"}
+            )
+            tickers = (resp or {}).get("result", {}).get("list", []) or []
+            wanted = set(to_fetch)
+            for row in tickers:
+                sym = row.get("symbol")
+                if sym in wanted:
+                    try:
+                        price = float(row["markPrice"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    result[sym] = price
+                    _MARK_PRICE_CACHE[sym] = (
+                        price,
+                        now + _MARK_PRICE_TTL_S,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_mark_prices Bybit failed: %s", exc)
+    else:
+        logger.warning(
+            "fetch_mark_prices: unknown exchange.id=%s", exchange.id
+        )
+
+    return result
+
+
+def _reset_mark_price_cache_for_tests() -> None:
+    """Test-only helper: clear the in-process mark-price cache."""
+    _MARK_PRICE_CACHE.clear()

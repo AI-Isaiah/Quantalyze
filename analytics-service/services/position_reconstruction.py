@@ -288,6 +288,10 @@ async def _attribute_funding(
         pos["funding_pnl"] = float(round(total, 8))
 
 
+# Phase 19 / MC-2 decision: leave private (underscore prefix preserved).
+# EquityCurveBuilder (services/equity_reconstruction.py) imports this
+# directly to avoid touching the DB-side tested primitive. Future API
+# cleanup may rename without underscore once the equity-curve seam is stable.
 def _match_positions_fifo(
     symbol: str, fills: list[dict], strategy_id: str
 ) -> list[dict]:
