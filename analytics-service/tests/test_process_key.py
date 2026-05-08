@@ -586,6 +586,213 @@ def test_process_key_validate_failure_returns_envelope(client):
 # ---------------------------------------------------------------------------
 
 
+def test_process_key_validate_only_csv_succeeds_without_strategy_id(client):
+    """CR-02 regression: csv-validate step lands at /process-key without
+    strategy_id (the wizard step happens BEFORE a strategy row exists).
+
+    Pre-fix this raised KeyError on body.context['strategy_id'] and surfaced
+    as a generic 500. Post-fix, the route detects step='validate' + missing
+    strategy_id and runs validate-only — no DB insert, no state transitions.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=csv_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    # No strategy_id — wizard step 1 fires before strategy row.
+                    "wizard_session_id": "wiz-csv-pre",
+                    "user_id": "u1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sMSxjb2wyCjEsMg==",  # base64 'col1,col2\n1,2'
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True
+    assert body.get("valid") is True
+    assert body.get("step") == "validate"
+    # No strategy_verifications insert occurred.
+    assert not any(
+        c.args and c.args[0] == "strategy_verifications"
+        for c in fake.table.call_args_list
+        if c.args
+    ) or not any(
+        c.kwargs.get("data")
+        for c in fake.table.return_value.insert.call_args_list
+    )
+
+
+def test_process_key_validate_only_onboard_succeeds_without_strategy_id(client):
+    """CR-02 regression: keys/validate-and-encrypt fires step='validate'
+    without strategy_id (onboard wizard step 2). No KeyError, no 500."""
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    okx_adapter = MagicMock()
+    okx_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=True,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=okx_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "okx",
+                "context": {
+                    "wizard_session_id": "wiz-onb-pre",
+                    "user_id": "u1",
+                    "api_key": "k",
+                    "api_secret": "s",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True
+    assert body.get("read_only") is True
+
+
+def test_process_key_missing_strategy_id_returns_422(client):
+    """CR-02: when step != 'validate' AND strategy_id is missing, return a
+    structured 422 envelope instead of an unhandled KeyError 500."""
+    fake = _build_supabase_mock(existing_row=None)
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "wizard_session_id": "wiz-no-sid",
+                    "user_id": "u1",
+                    "api_key": "k",
+                    "api_secret": "s",
+                    # No step='validate' AND no strategy_id → 422.
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["detail"]["code"] == "MISSING_STRATEGY_ID"
+
+
+def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
+    """WR-06 regression: audit_log.entity_id is NOT NULL (migration 010)
+    and log_audit_event_service raises when p_entity_id is NULL
+    (migration 058). Validate-only flows have no strategy_id; the route
+    must fall back to wizard_session_id so the cron's denominator
+    continues to populate.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    csv_adapter = MagicMock()
+    csv_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=None,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=csv_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-audit-no-sid",
+                    "user_id": "u1",
+                    "fmt": "daily_returns",
+                    "raw_bytes_base64": "ZGF0ZSx2YWx1ZQoyMDI2LTAxLTAxLDEuMA==",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    audit_calls = [
+        c.args
+        for c in fake.rpc.call_args_list
+        if c.args and c.args[0] == "log_audit_event_service"
+    ]
+    assert audit_calls, "log_audit_event_service RPC must fire on validate-only"
+    payload = audit_calls[0][1]
+    # entity_id sentinel — wizard_session_id, never None.
+    assert payload["p_entity_id"] == "wiz-audit-no-sid"
+    assert payload["p_metadata"]["entity_id_source"] == "wizard_session_id"
+
+
 def test_process_key_writes_audit_row(client):
     """H-2: a successful POST writes a row to audit_log via log_audit_event RPC.
 

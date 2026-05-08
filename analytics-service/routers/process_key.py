@@ -164,6 +164,52 @@ def _metrics_to_jsonb(m: Any) -> dict:
     return out
 
 
+async def _run_validate_only(
+    *,
+    body: "_ProcessKeyBody",
+    correlation_id: str,
+    started_at: float,
+) -> dict:
+    """CR-02 — pre-strategy validation flow.
+
+    Runs only `adapter.validate()` (no DB insert, no state-machine
+    transitions, no fingerprint/encryption). Used by the two wizard steps
+    that fire BEFORE a strategy_verifications row exists:
+      - keys/validate-and-encrypt (onboard step 2, context.step='validate')
+      - strategies/csv-validate    (CSV step 1, context.step='validate')
+
+    Returns the same envelope shape both legacy callers were already
+    consuming (`{ ok, code, human_message, debug_context, ... }` for failure;
+    `{ valid: true, ... }` for success), so the thin adapters do not need
+    to branch on the flow shape.
+    """
+    submission = KeySubmissionRequest(
+        flow_type=body.flow_type,
+        source=body.source,
+        context=body.context,
+    )
+    adapter = get_adapter(body.source)
+    val = await adapter.validate(submission)
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    if not val.valid:
+        log.info(
+            "process_key.validate_only_failed",
+            error_code=val.error_code,
+            duration_ms=duration_ms,
+        )
+        return _envelope_error(
+            val.error_code, val.human_message, correlation_id, None
+        )
+    log.info("process_key.validate_only_ok", duration_ms=duration_ms)
+    return {
+        "ok": True,
+        "valid": True,
+        "read_only": val.read_only,
+        "correlation_id": correlation_id,
+        "step": "validate",
+    }
+
+
 # ---------------------------------------------------------------------------
 # POST /process-key
 # ---------------------------------------------------------------------------
@@ -220,6 +266,17 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     # windows). We intentionally write AFTER the flag gate so the cron
     # measures only requests that actually traversed the unified backbone;
     # flag-off rejections should not inflate the denominator.
+    #
+    # WR-06 fix: audit_log.entity_id is NOT NULL (migration 010 line 72) and
+    # log_audit_event_service raises when p_entity_id is NULL (migration 058
+    # line 105-106). For validate-only flows (CR-02), strategy_id is absent
+    # because the wizard step happens before strategy creation; fall back to
+    # wizard_session_id (a UUID, schema-compatible with the entity_id UUID
+    # column). The cron's denominator query keys on entity_type='process_key'
+    # only, so the entity_id sentinel does not affect the rollback math.
+    audit_entity_id = (
+        body.context.get("strategy_id") or body.context.get("wizard_session_id")
+    )
     try:
         supabase.rpc(
             "log_audit_event_service",
@@ -227,11 +284,16 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 "p_user_id": body.context.get("user_id"),
                 "p_action": "process_key.entry",
                 "p_entity_type": "process_key",
-                "p_entity_id": body.context.get("strategy_id"),
+                "p_entity_id": audit_entity_id,
                 "p_metadata": {
                     "flow_type": body.flow_type,
                     "source": body.source,
                     "correlation_id": correlation_id,
+                    "entity_id_source": (
+                        "strategy_id"
+                        if body.context.get("strategy_id")
+                        else "wizard_session_id"
+                    ),
                 },
             },
         ).execute()
@@ -267,8 +329,36 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 "queued": False,
             }
 
-    # 2) Insert draft row + Pitfall 2 race-handling.
-    strategy_id = body.context["strategy_id"]
+    # CR-02 fix (REVIEW.md 2026-05-08): two flag-on entry routes do NOT carry
+    # strategy_id because the wizard step runs BEFORE the strategy row exists:
+    #   - keys/validate-and-encrypt (onboard wizard step 2, context.step="validate")
+    #   - strategies/csv-validate    (CSV wizard step 1, context.step="validate")
+    # The pre-fix `body.context["strategy_id"]` lookup raised KeyError on every
+    # such call. We treat `step=="validate"` AND missing strategy_id as the
+    # pre-strategy validation flow: run only adapter.validate() and return the
+    # envelope without persisting a strategy_verifications row. The eventual
+    # full pipeline runs later via finalize-wizard / verify-strategy once a
+    # strategy_id has been allocated.
+    step = body.context.get("step")
+    strategy_id = body.context.get("strategy_id")
+    if strategy_id is None:
+        if step == "validate":
+            return await _run_validate_only(
+                body=body,
+                correlation_id=correlation_id,
+                started_at=started_at,
+            )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "MISSING_STRATEGY_ID",
+                "human_message": (
+                    "context.strategy_id is required for this flow_type. "
+                    "Validate-only flows must set context.step='validate'."
+                ),
+                "correlation_id": correlation_id,
+            },
+        )
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
         draft_insert = (
