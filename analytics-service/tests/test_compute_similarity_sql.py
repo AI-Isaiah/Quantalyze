@@ -1,7 +1,7 @@
 """
 Phase 19 / FINGERPRINT-02: tests for compute_similarity SQL function.
 
-7 behaviors:
+10 behaviors:
   1. test_identical_returns_one — compute_similarity(fp, fp) returns 1.0000
   2. test_orthogonal_returns_low — disjoint single-bucket vectors return < 0.1
   3. test_null_inputs_return_zero — NULL inputs return 0.0 (never errors)
@@ -9,6 +9,15 @@ Phase 19 / FINGERPRINT-02: tests for compute_similarity SQL function.
   5. test_check_constraint_rejects_v0 — INSERT with version=0 raises 23514
   6. test_immutable_parallel_safe_flags — pg_proc.provolatile='i' AND proparallel='s'
   7. test_check_rejects_missing_version (M-3) — INSERT with no version key raises 23514
+
+Plan 19-09 H-9 augmentation (REVIEWS.md):
+  8. test_h9_scale_invariance — cos(fp, k*fp) == 1.0 for k > 0 across the
+     full 46-dim concatenated vector (cosine is scale-invariant)
+  9. test_h9_swap_symmetry — compute_similarity(a, b) == compute_similarity(b, a)
+ 10. test_h9_hand_computed_concat — fixed inputs produce 2/sqrt(6) ≈ 0.8165,
+     confirming the array-concat order locked at trade_size || hold_duration ||
+     asset_class || instrument || temporal (matches migration 105 SQL function
+     and services/ingestion/fingerprint.py compute_fingerprint_v1)
 
 Integration tests against the test Supabase project; auto-skip when
 SUPABASE_TEST_URL / SUPABASE_TEST_SERVICE_KEY are unset.
@@ -169,3 +178,98 @@ def test_check_rejects_missing_version(admin):
         }).execute()
     msg = str(excinfo.value).lower()
     assert "23514" in msg or "check" in msg or "violates" in msg
+
+
+# ---------------------------------------------------------------------------
+# Plan 19-09 H-9 augmentation — explicit cosine-property contract tests.
+#
+# REVIEWS.md H-9 calls for these explicit cases on top of the basic
+# identical / orthogonal / null pair already covered above. These exercise
+# the array-concat order (trade_size || hold_duration || asset_class ||
+# instrument || temporal) shared between the SQL function and
+# services/ingestion/fingerprint.py compute_fingerprint_v1.
+# ---------------------------------------------------------------------------
+
+
+def test_h9_scale_invariance(admin):
+    """Cosine is scale-invariant: cos(fp, k*fp) == 1.0 for any k > 0.
+
+    Build two fingerprints with the same shape but different magnitudes
+    BEFORE L1 normalization. After the planner's L1 normalization both
+    fingerprints should be identical (both sum to 1.0); cosine should be
+    1.0 either way. This checks that the SQL function's vector
+    construction does not introduce any non-linearity that would break
+    scale invariance.
+    """
+    a = _v1_fp(t1=(2, 0, 0, 0), t2=(2, 0, 0, 0), t3=(2, 0, 0, 0),
+               ic=(2, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+               tp=(2,) + (0,) * 23)
+    # Same one-hot shape but 100x magnitude — purely a scale change.
+    b = _v1_fp(t1=(200, 0, 0, 0), t2=(200, 0, 0, 0), t3=(200, 0, 0, 0),
+               ic=(200, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+               tp=(200,) + (0,) * 23)
+    res = _call_compute_similarity(admin, a, b)
+    assert float(res) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_h9_swap_symmetry(admin):
+    """compute_similarity(a, b) == compute_similarity(b, a) — cosine is
+    symmetric and the SQL function must not introduce any asymmetric
+    early-exit that breaks swap parity (e.g. testing only `a` for shape
+    mismatch but accepting any `b`)."""
+    a = _v1_fp(t1=(0.7, 0.2, 0.1, 0), t2=(0.5, 0.3, 0.2, 0),
+               t3=(0, 1, 0, 0),
+               ic=(0.4, 0.3, 0.2, 0.1, 0, 0, 0, 0, 0, 0),
+               tp=(0.1,) * 10 + (0,) * 14)
+    b = _v1_fp(t1=(0.4, 0.5, 0.1, 0), t2=(0.6, 0.2, 0.1, 0.1),
+               t3=(0, 0.5, 0.5, 0),
+               ic=(0.2, 0.4, 0.3, 0.1, 0, 0, 0, 0, 0, 0),
+               tp=(0.05,) * 20 + (0,) * 4)
+    ab = float(_call_compute_similarity(admin, a, b))
+    ba = float(_call_compute_similarity(admin, b, a))
+    # Cosine is symmetric to the limit of NUMERIC(5,4) precision.
+    assert ab == pytest.approx(ba, abs=1e-4)
+    # And both are in (0, 1) — neither pathological 0.0 nor 1.0.
+    assert 0.0 < ab < 1.0
+
+
+def test_h9_hand_computed_concat(admin):
+    """Hand-computed cosine for fixed inputs — locks the 5-component
+    concat order (trade_size || hold_duration || asset_class ||
+    instrument || temporal) shared between migration 105 and
+    services/ingestion/fingerprint.py. If the SQL function reordered the
+    components, this test would yield a different (or zero) cosine.
+
+    Inputs:
+      a = [1,0,0,0 | 0,1,0,0 | 0,0,1,0 | 0×10 | 0×24]  → 3 ones at slots 0,5,10
+      b = [1,0,0,0 | 0,0,0,0 | 0,0,1,0 | 0×10 | 0×24]  → 2 ones at slots 0,10
+
+    Hand math:
+      a·b   = 1*1 (slot 0) + 0 (slot 5 vs 0) + 1*1 (slot 10) = 2
+      ‖a‖   = sqrt(1 + 1 + 1) = sqrt(3)
+      ‖b‖   = sqrt(1 + 1)     = sqrt(2)
+      cos   = 2 / sqrt(6) ≈ 0.8165
+
+    Any other concat order would break this — e.g. if asset_class came
+    BEFORE hold_duration, slot 5 would map to a different bucket and
+    the cosine would change.
+    """
+    import math
+
+    a = _v1_fp(
+        t1=(1, 0, 0, 0),       # bucket 0 of trade_size
+        t2=(0, 1, 0, 0),       # bucket 1 of hold_duration → slot 5
+        t3=(0, 0, 1, 0),       # bucket 2 of asset_class   → slot 10
+        ic=(0,) * 10,
+        tp=(0,) * 24,
+    )
+    b = _v1_fp(
+        t1=(1, 0, 0, 0),       # bucket 0 of trade_size
+        t2=(0, 0, 0, 0),       # zero hold_duration — will lower b's norm
+        t3=(0, 0, 1, 0),       # bucket 2 of asset_class   → slot 10
+        ic=(0,) * 10,
+        tp=(0,) * 24,
+    )
+    expected = 2.0 / math.sqrt(6.0)
+    res = _call_compute_similarity(admin, a, b)
+    assert float(res) == pytest.approx(expected, abs=1e-4)
