@@ -34,21 +34,43 @@ const MAX_BYTES = 10 * 1024 * 1024;
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
+/**
+ * M-14: shared error-envelope builder for the CSV routes. Every error path
+ * returns the same v0 envelope shape (`ok: false`, code, human_message,
+ * debug_context, correlation_id: null) — co-locate that here so a future
+ * Phase 16 / OBSERV-06 correlation_id thread is one edit, not seven.
+ */
+function csvErrorEnvelope(
+  code: string,
+  human_message: string,
+  debug_context: Record<string, unknown> = {},
+  status = 400,
+  init: ResponseInit = {},
+): NextResponse {
+  return NextResponse.json(
+    {
+      ok: false,
+      code,
+      human_message,
+      debug_context,
+      correlation_id: null,
+    },
+    { status, ...init },
+  );
+}
+
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(
     csvValidateLimiter,
     `strategies-csv-validate:${user.id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_RATE_LIMIT",
-        human_message: "Too many requests. Wait a minute and try again.",
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    return csvErrorEnvelope(
+      "CSV_RATE_LIMIT",
+      "Too many requests. Wait a minute and try again.",
+      {},
+      429,
+      { headers: { "Retry-After": String(rl.retryAfter) } },
     );
   }
 
@@ -62,57 +84,30 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (contentLengthHeader) {
     const contentLength = Number(contentLengthHeader);
     if (Number.isFinite(contentLength) && contentLength > MAX_BYTES) {
-      return NextResponse.json(
-        {
-          ok: false,
-          code: "CSV_FILE_TOO_LARGE",
-          human_message: `Maximum file size is 10 MB. Your upload is ${(contentLength / 1024 / 1024).toFixed(1)} MB.`,
-          debug_context: { content_length: contentLength },
-          correlation_id: null,
-        },
-        { status: 400 },
+      return csvErrorEnvelope(
+        "CSV_FILE_TOO_LARGE",
+        `Maximum file size is 10 MB. Your upload is ${(contentLength / 1024 / 1024).toFixed(1)} MB.`,
+        { content_length: contentLength },
+        400,
       );
     }
   }
 
   const formData = await req.formData().catch(() => null);
   if (!formData) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_INVALID_FORMAT",
-        human_message: "Invalid multipart body.",
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 400 },
-    );
+    return csvErrorEnvelope("CSV_INVALID_FORMAT", "Invalid multipart body.");
   }
 
   const file = formData.get("file");
   if (!(file instanceof File)) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_INVALID_FORMAT",
-        human_message: "Missing file field.",
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 400 },
-    );
+    return csvErrorEnvelope("CSV_INVALID_FORMAT", "Missing file field.");
   }
 
   if (file.size > MAX_BYTES) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_FILE_TOO_LARGE",
-        human_message: `Maximum file size is 10 MB. Your file is ${(file.size / 1024 / 1024).toFixed(1)} MB.`,
-        debug_context: { size_bytes: file.size },
-        correlation_id: null,
-      },
-      { status: 400 },
+    return csvErrorEnvelope(
+      "CSV_FILE_TOO_LARGE",
+      `Maximum file size is 10 MB. Your file is ${(file.size / 1024 / 1024).toFixed(1)} MB.`,
+      { size_bytes: file.size },
     );
   }
 
@@ -121,17 +116,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     typeof fmt !== "string" ||
     !["daily_returns", "daily_nav", "trades"].includes(fmt)
   ) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_INVALID_FORMAT",
-        human_message: "fmt must be one of daily_returns, daily_nav, trades.",
-        debug_context: {
-          fmt_received: typeof fmt === "string" ? fmt : "(missing)",
-        },
-        correlation_id: null,
-      },
-      { status: 400 },
+    return csvErrorEnvelope(
+      "CSV_INVALID_FORMAT",
+      "fmt must be one of daily_returns, daily_nav, trades.",
+      { fmt_received: typeof fmt === "string" ? fmt : "(missing)" },
     );
   }
 
@@ -143,15 +131,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // route already performs.
   const sessionId = formData.get("wizard_session_id");
   if (typeof sessionId !== "string" || !isUuid(sessionId)) {
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_INVALID_FORMAT",
-        human_message: "wizard_session_id must be a valid UUID.",
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 400 },
+    return csvErrorEnvelope(
+      "CSV_INVALID_FORMAT",
+      "wizard_session_id must be a valid UUID.",
     );
   }
 
@@ -172,16 +154,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV validation failed";
     console.error("[strategies/csv-validate] threw:", message);
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_UPSTREAM_FAIL",
-        human_message: message,
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 502 },
-    );
+    return csvErrorEnvelope("CSV_UPSTREAM_FAIL", message, {}, 502);
   }
 });
 
@@ -202,16 +175,7 @@ async function unifiedCsvValidateHandler(args: {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
     console.error("[strategies/csv-validate] INTERNAL_API_TOKEN not configured");
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_UPSTREAM_FAIL",
-        human_message: "Service unavailable.",
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 503 },
-    );
+    return csvErrorEnvelope("CSV_UPSTREAM_FAIL", "Service unavailable.", {}, 503);
   }
 
   try {
@@ -248,15 +212,6 @@ async function unifiedCsvValidateHandler(args: {
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV validation failed";
     console.error("[strategies/csv-validate] unified path threw:", message);
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_UPSTREAM_FAIL",
-        human_message: message,
-        debug_context: {},
-        correlation_id: null,
-      },
-      { status: 502 },
-    );
+    return csvErrorEnvelope("CSV_UPSTREAM_FAIL", message, {}, 502);
   }
 }
