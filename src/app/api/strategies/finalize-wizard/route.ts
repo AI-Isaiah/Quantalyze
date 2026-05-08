@@ -470,5 +470,19 @@ async function unifiedFinalizeWizardHandler(args: {
     const err = await res.json().catch(() => ({}));
     return NextResponse.json(err, { status: res.status });
   }
-  return NextResponse.json(await res.json());
+
+  // API-9: translate the unified `{queued, verification_id}` shape back to the
+  // legacy `{strategy_id, status:'pending_review'}` shape that wizard chrome
+  // and downstream callers read off `body.strategy_id`. Preserve
+  // `verification_id` + `queued` as additive fields for callers that want them.
+  const upstream = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (upstream && typeof upstream === "object" && "queued" in upstream) {
+    return NextResponse.json({
+      strategy_id: args.strategy_id,
+      status: "pending_review",
+      verification_id: upstream.verification_id ?? null,
+      queued: upstream.queued ?? true,
+    });
+  }
+  return NextResponse.json(upstream);
 }
