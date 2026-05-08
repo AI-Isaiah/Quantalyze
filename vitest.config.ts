@@ -15,6 +15,10 @@ export default defineConfig({
       // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
       // via fs.readFileSync to enforce denylist parity across runtimes.
       "tests/lib/**/*.test.ts",
+      // Phase 19 / BACKBONE-05 — auto-rollback cron + Sentry env-tag smoke
+      // tests live alongside the existing `tests/lib` shim layout so they
+      // land in the same default `vitest run` invocation as the unit suite.
+      "tests/integration/**/*.test.ts",
     ],
     setupFiles: ["src/test-setup.ts"],
     // Coverage tracking — measurement only, NOT a CI gate yet.
