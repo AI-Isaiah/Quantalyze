@@ -6,6 +6,18 @@ file-format validation (pandera schemas + the 6 CSV-02 rules) and
 returns ValidationResult.read_only=None because the field is N/A for a
 file upload.
 
+Wire-shape contract (CR-03 fix, REVIEW.md 2026-05-08)
+-----------------------------------------------------
+The Next.js thin adapter at src/app/api/strategies/csv-validate/route.ts
+serializes file bytes as base64 under `context.raw_bytes_base64` because
+JSON has no native bytes type (multipart can't survive JSON encode). The
+pre-fix adapter expected `context.raw_bytes` (raw bytes) and threw KeyError
+on every CSV validate call when the unified-backbone flag was on.
+
+Canonical key: `raw_bytes_base64` (string). The adapter base64-decodes on
+entry. We retain a fallback to legacy `raw_bytes` (raw Python bytes) for
+unit tests and any internal caller that already speaks bytes natively.
+
 DEVIATION FROM PLAN BLUEPRINT (Rule 3 — blocking issue):
 The 19-03 plan blueprint references `csv_validator.parse_csv`,
 `validate_schema`, `df_to_trades`, and `CsvValidationError` — none of
@@ -33,6 +45,7 @@ mark-snapshot column ships.
 """
 from __future__ import annotations
 
+import base64
 import io
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -47,17 +60,45 @@ from services.ingestion.adapter import (
 )
 
 
+def _resolve_raw_bytes(context: dict[str, Any]) -> bytes:
+    """CR-03 — resolve CSV bytes from the unified-backbone wire envelope.
+
+    Canonical key: `raw_bytes_base64` (string). Falls back to legacy
+    `raw_bytes` (raw bytes) for unit tests / internal callers. Raises
+    KeyError if neither is present so the route surfaces a clean error.
+    """
+    b64 = context.get("raw_bytes_base64")
+    if b64 is not None:
+        if isinstance(b64, (bytes, bytearray)):
+            b64 = bytes(b64).decode("ascii")
+        return base64.b64decode(b64)
+    raw = context.get("raw_bytes")
+    if raw is not None:
+        if isinstance(raw, str):
+            # Legacy callers occasionally hand a UTF-8 string; preserve
+            # backwards-compatibility but emit bytes.
+            return raw.encode("utf-8")
+        return bytes(raw)
+    raise KeyError(
+        "CSV context missing both `raw_bytes_base64` (canonical) and "
+        "`raw_bytes` (legacy); the thin adapter must base64-encode file bytes."
+    )
+
+
 class CsvAdapter:
     """CSV adapter — wraps services/csv_validator.py."""
 
     SOURCE: str = "csv"
 
     async def validate(self, req: KeySubmissionRequest) -> ValidationResult:
-        # context carries: raw_bytes (bytes), fmt ∈ {daily_returns,
-        # daily_nav, trades}, strategy_id, wizard_session_id, user_id.
+        # CR-03: context.raw_bytes_base64 is the canonical wire shape from
+        # the Next.js thin adapter (csv-validate/route.ts). Legacy raw_bytes
+        # (Python bytes) still accepted for unit tests / internal callers.
+        # context also carries: fmt ∈ {daily_returns, daily_nav, trades},
+        # strategy_id (optional pre-strategy), wizard_session_id, user_id.
         from services import csv_validator
 
-        raw_bytes = req.context["raw_bytes"]
+        raw_bytes = _resolve_raw_bytes(req.context)
         fmt = req.context["fmt"]
 
         try:
@@ -113,7 +154,8 @@ class CsvAdapter:
 
         import pandas as pd  # type: ignore[import-untyped]
 
-        raw_bytes = creds_or_file["raw_bytes"]
+        # CR-03: same canonical-key resolution as validate().
+        raw_bytes = _resolve_raw_bytes(creds_or_file)
         df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig")
         df.columns = [str(c).strip().lower() for c in df.columns]
 

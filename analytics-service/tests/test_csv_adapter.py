@@ -127,3 +127,70 @@ def test_csv_adapter_protocol_conforms() -> None:
 
     assert isinstance(CsvAdapter(), IngestionAdapter)
     assert CsvAdapter.SOURCE == "csv"
+
+
+async def test_validate_accepts_raw_bytes_base64_wire_shape() -> None:
+    """CR-03 regression (REVIEW.md 2026-05-08).
+
+    The thin adapter at src/app/api/strategies/csv-validate/route.ts sends
+    file bytes as base64 under context.raw_bytes_base64. The pre-fix
+    adapter read context['raw_bytes'] (KeyError) and even if the key had
+    matched, csv_validator.validate_csv expected raw bytes not a base64
+    string. Exercise the adapter against the EXACT shape the thin adapter
+    sends.
+    """
+    import base64
+
+    from services.ingestion.adapter import KeySubmissionRequest
+    from services.ingestion.csv_adapter import CsvAdapter
+
+    raw_b64 = base64.b64encode(VALID_DAILY_RETURNS_CSV).decode("ascii")
+
+    adapter = CsvAdapter()
+    req = KeySubmissionRequest(
+        flow_type="csv",
+        source="csv",
+        context={
+            # No raw_bytes — only the canonical raw_bytes_base64 key the
+            # thin adapter actually sends.
+            "raw_bytes_base64": raw_b64,
+            "fmt": "daily_returns",
+            "wizard_session_id": "test-session",
+            "user_id": "test-user",
+            "file_name": "test.csv",
+            "step": "validate",
+        },
+    )
+
+    result = await adapter.validate(req)
+
+    assert result.valid is True, (
+        f"CSV adapter must accept the raw_bytes_base64 wire shape; got {result}"
+    )
+    assert result.read_only is None
+    assert result.error_code is None
+
+
+async def test_fetch_raw_accepts_raw_bytes_base64_wire_shape() -> None:
+    """CR-03: fetch_raw also reads from the unified-backbone wire envelope."""
+    import base64
+
+    from services.ingestion.csv_adapter import CsvAdapter
+
+    csv_payload = (
+        b"date,side,qty,price,symbol,currency\n"
+        b"2025-01-02T00:00:00Z,buy,0.1,50000,BTC-USDT,USD\n"
+        b"2025-01-03T00:00:00Z,sell,0.1,51000,BTC-USDT,USD\n"
+    )
+    raw_b64 = base64.b64encode(csv_payload).decode("ascii")
+
+    adapter = CsvAdapter()
+    trades = await adapter.fetch_raw(
+        {
+            "raw_bytes_base64": raw_b64,
+            "fmt": "trades",
+        }
+    )
+    assert len(trades) == 2
+    assert trades[0].exchange == "csv"
+    assert trades[0].symbol == "BTC-USDT"
