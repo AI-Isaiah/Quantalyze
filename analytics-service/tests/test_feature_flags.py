@@ -155,6 +155,39 @@ def test_module_constants():
     assert feature_flags._CACHE_TTL_S == 30.0
 
 
+# ---------------------------------------------------------------------------
+# I-T1 — _resolve_cache_ttl_s tests (mirror TS resolveCacheTtlMs)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cache_ttl_s_default_when_unset(monkeypatch):
+    """Unset env var → default 30s."""
+    monkeypatch.delenv("PHASE_19_STABILITY_CACHE_TTL_S", raising=False)
+    assert feature_flags._resolve_cache_ttl_s() == 30.0
+
+
+def test_resolve_cache_ttl_s_honors_positive_override(monkeypatch):
+    """Positive env value → that value."""
+    monkeypatch.setenv("PHASE_19_STABILITY_CACHE_TTL_S", "5")
+    assert feature_flags._resolve_cache_ttl_s() == 5.0
+
+
+def test_resolve_cache_ttl_s_falls_back_on_zero_or_negative(monkeypatch):
+    """Zero / negative env → fall back to 30s default (refuse to disable cache)."""
+    monkeypatch.setenv("PHASE_19_STABILITY_CACHE_TTL_S", "0")
+    assert feature_flags._resolve_cache_ttl_s() == 30.0
+    monkeypatch.setenv("PHASE_19_STABILITY_CACHE_TTL_S", "-5")
+    assert feature_flags._resolve_cache_ttl_s() == 30.0
+
+
+def test_resolve_cache_ttl_s_falls_back_on_invalid_value(monkeypatch):
+    """Non-numeric env → fall back to 30s default."""
+    monkeypatch.setenv("PHASE_19_STABILITY_CACHE_TTL_S", "not-a-number")
+    assert feature_flags._resolve_cache_ttl_s() == 30.0
+    monkeypatch.setenv("PHASE_19_STABILITY_CACHE_TTL_S", "")
+    assert feature_flags._resolve_cache_ttl_s() == 30.0
+
+
 @pytest.mark.asyncio
 async def test_single_flight_lock_prevents_stampede():
     """CR-perf-3 regression: directly assert the single-flight invariant.
