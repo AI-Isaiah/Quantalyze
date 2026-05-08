@@ -451,6 +451,67 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
+  // I-T5 — boundary tests for ALERT_THRESHOLD + MIN_SAMPLE.
+  // -------------------------------------------------------------------------
+  it("I-T5a: 5/1000 (errorRate=0.5%) does NOT flip — strict > threshold", async () => {
+    mockSentry(5);
+    const admin = makeAdminMock({ auditLogTotal: 1000 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // 0.005 is NOT > 0.005 (strict >), so no rollback. Above WARN_THRESHOLD
+    // (0.0025) so action may be `warn_sent` — but critically NO kill-switch
+    // flip.
+    expect(body.action).not.toBe("rolled_back");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(0);
+  });
+
+  it("I-T5b: 1/20 (errorRate=5%, total=20) FLIPS — meets MIN_SAMPLE", async () => {
+    mockSentry(1);
+    const admin = makeAdminMock({ auditLogTotal: 20 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    expect(body.action).toBe("rolled_back");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(1);
+  });
+
+  it("I-T5c: 1/19 (total=19 < MIN_SAMPLE) does NOT flip — sample-size guard", async () => {
+    mockSentry(1);
+    const admin = makeAdminMock({ auditLogTotal: 19 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+    expect(body.action).not.toBe("rolled_back");
+    const flips = admin.upsertCalls.filter(
+      (c) => c.row.flag_key === "process_key_unified_backbone",
+    );
+    expect(flips.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
   // 11. H-6 — CI smoke workflow file existence stub
   // -------------------------------------------------------------------------
   it("test_sentry_environment_smoke: workflow OR static-source smoke wires VERCEL_ENV", () => {
