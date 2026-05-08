@@ -302,14 +302,71 @@ def test_process_key_h11_csv_source_blocked_for_teaser_flow(client):
 
 
 def test_internal_api_token_no_newline_regression(monkeypatch):
-    """H-12: assert env var has no trailing newline + length=64.
+    """H-12: regression test for the malformed-token bypass path.
 
     Catches the 2026-05-06 Day-2 hypothesis #12 regression where a literal
-    `\\n` suffix on the prod env-var bypassed the constant-time compare.
+    `\\n` suffix on the prod env-var caused the constant-time compare to
+    fail in surprising ways.
+
+    WR-03 fix (REVIEW.md 2026-05-08): the previous version of this test set
+    INTERNAL_API_TOKEN via monkeypatch and then asserted the shape — which
+    trivially passed because monkeypatch had just set it to that exact
+    shape. That is documentation, not a regression catch. The PRODUCTION
+    env-var-shape smoke check belongs in CI (see
+    `.github/workflows/phase-19-stability.yml`) where a real
+    `vercel env pull` can run.
+
+    The unit-test contract that DOES catch a real bug is: the auth seam
+    `_verify_internal_token` MUST reject a token that contains a newline,
+    irrespective of which side has the trailing `\\n`. We exercise that
+    path against the real router so a regression in the secrets.compare_digest
+    seam (or accidental .strip() that masks misconfigured prod env) surfaces
+    here. The shape-match smoke is left as a one-line assert that documents
+    the production invariant.
     """
-    monkeypatch.setenv("INTERNAL_API_TOKEN", "a" * 64)
-    assert "\n" not in os.environ["INTERNAL_API_TOKEN"]
-    assert len(os.environ["INTERNAL_API_TOKEN"]) == 64
+    from fastapi.testclient import TestClient
+    from fastapi import FastAPI
+
+    # Production env value is exactly 64 bytes with no newline. The
+    # below asserts are documentation of the invariant the deploy step
+    # enforces; CI smoke pulls the real value.
+    SHAPE_LEN = 64
+
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "a" * SHAPE_LEN)
+    # Documentation assertion — a deploy-time failure (newline appended)
+    # would set the env var to length 65 with a trailing \n; the
+    # constant-time compare would still reject the request because the
+    # provided header from the Vercel side has no matching newline.
+    assert os.environ["INTERNAL_API_TOKEN"] == "a" * SHAPE_LEN
+
+    # Real regression — exercise the auth seam against a malformed env.
+    # If a future maintainer accidentally inserts `.strip()` to "fix" the
+    # newline issue, this test surfaces the silent bypass.
+    monkeypatch.setenv("INTERNAL_API_TOKEN", ("a" * SHAPE_LEN) + "\n")
+    app_isolated = FastAPI()
+    app_isolated.state.limiter = process_key_router.limiter
+    app_isolated.include_router(process_key_router.router)
+    test_client = TestClient(app_isolated)
+    r = test_client.post(
+        "/process-key",
+        json={
+            "flow_type": "csv",
+            "source": "csv",
+            "context": {"strategy_id": "s1"},
+        },
+        headers={"Authorization": f"Bearer {'a' * SHAPE_LEN}"},
+    )
+    # The provided bearer is the well-shaped 64-byte string; the env var
+    # is the malformed 65-byte string with a trailing newline. The
+    # constant-time compare must reject — never strip-and-match. A 403
+    # here proves the seam refuses the malformed env without a silent
+    # bypass.
+    assert r.status_code == 403, (
+        "INTERNAL_API_TOKEN constant-time compare must reject when env "
+        "var carries a trailing newline; if this fails, a deploy-time "
+        "newline bug would silently authenticate any caller that knows "
+        "the un-newlined prefix."
+    )
 
 
 # ---------------------------------------------------------------------------
