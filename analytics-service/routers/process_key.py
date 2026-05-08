@@ -346,7 +346,14 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 "process_key.idempotent_hit",
                 verification_id=existing.data["id"],
             )
+            # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
+            # idempotent-resume affordance. Pre-fix this path returned a
+            # plain happy-shape dict and the wizard had no observable
+            # signal that the row pre-existed. Status 200 (NOT a 409) per
+            # the spec — idempotency is a feature, not a failure.
             return {
+                "code": "WIZARD_DUPLICATE",
+                "idempotent": True,
                 "verification_id": existing.data["id"],
                 "status": existing.data["status"],
                 "trust_tier": existing.data.get("trust_tier"),
@@ -423,7 +430,11 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
                 "process_key.idempotent_race_resolved",
                 verification_id=existing.data["id"],
             )
+            # API-7 — race-resolved idempotent hit emits WIZARD_DUPLICATE
+            # for the same reason as the SELECT-pre-check path above.
             return {
+                "code": "WIZARD_DUPLICATE",
+                "idempotent": True,
                 "verification_id": existing.data["id"],
                 "status": existing.data["status"],
                 "trust_tier": existing.data.get("trust_tier"),

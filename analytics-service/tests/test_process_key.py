@@ -451,8 +451,14 @@ def test_process_key_idempotent_double_submit(client):
         r2 = client.post("/process-key", json=body, headers=_auth_headers())
     assert r1.status_code == 200
     assert r2.status_code == 200
-    assert r1.json()["verification_id"] == "ver-existing"
-    assert r2.json()["verification_id"] == "ver-existing"
+    body1 = r1.json()
+    body2 = r2.json()
+    assert body1["verification_id"] == "ver-existing"
+    assert body2["verification_id"] == "ver-existing"
+    # API-7 — observable WIZARD_DUPLICATE signal so the wizard renders
+    # the resume affordance instead of pretending it's a fresh submit.
+    assert body2["code"] == "WIZARD_DUPLICATE"
+    assert body2["idempotent"] is True
 
 
 def test_process_key_unique_violation_returns_existing(client):
@@ -484,7 +490,11 @@ def test_process_key_unique_violation_returns_existing(client):
         }
         r = client.post("/process-key", json=body, headers=_auth_headers())
     assert r.status_code == 200
-    assert r.json()["verification_id"] == "ver-raced"
+    body_json = r.json()
+    assert body_json["verification_id"] == "ver-raced"
+    # API-7 — race-resolved idempotent hit also emits WIZARD_DUPLICATE.
+    assert body_json["code"] == "WIZARD_DUPLICATE"
+    assert body_json["idempotent"] is True
 
 
 # ---------------------------------------------------------------------------
