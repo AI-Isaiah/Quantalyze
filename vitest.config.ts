@@ -15,6 +15,10 @@ export default defineConfig({
       // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
       // via fs.readFileSync to enforce denylist parity across runtimes.
       "tests/lib/**/*.test.ts",
+      // Phase 19 / BACKBONE-10 — thin-adapter integration tests assert
+      // outbound /process-key fetch shape (headers + body) for the 7
+      // converted routes when the unified-backbone feature flag is on.
+      "tests/integration/**/*.test.ts",
     ],
     setupFiles: ["src/test-setup.ts"],
     // Coverage tracking — measurement only, NOT a CI gate yet.

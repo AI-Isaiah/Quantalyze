@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateKey, encryptKey } from "@/lib/analytics-client";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { getCorrelationId } from "@/lib/correlation-id";
 import type { User } from "@supabase/supabase-js";
+
+const ANALYTICS_URL =
+  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
@@ -20,6 +25,72 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
+  if (await isUnifiedBackboneActive()) {
+    return await unifiedValidateAndEncryptHandler({ exchange, api_key, api_secret, passphrase, userId: user.id });
+  }
+
+  return await legacyValidateAndEncryptHandler({ exchange, api_key, api_secret, passphrase });
+});
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * `flow_type=onboard`. Source is taken from the request body — the wizard's
+ * Connect step picks an exchange before submitting.
+ */
+async function unifiedValidateAndEncryptHandler(args: {
+  exchange: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string;
+  userId: string;
+}): Promise<NextResponse> {
+  const internalToken = process.env.INTERNAL_API_TOKEN;
+  if (!internalToken) {
+    console.error("[keys/validate-and-encrypt] INTERNAL_API_TOKEN not configured");
+    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
+  }
+
+  const correlationId = await getCorrelationId();
+  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${internalToken}`,
+      "X-Correlation-Id": correlationId,
+    },
+    body: JSON.stringify({
+      flow_type: "onboard",
+      source: args.exchange,
+      context: {
+        exchange: args.exchange,
+        api_key: args.api_key,
+        api_secret: args.api_secret,
+        passphrase: args.passphrase,
+        user_id: args.userId,
+        step: "validate",
+      },
+    }),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    return NextResponse.json(err, { status: res.status });
+  }
+  return NextResponse.json(await res.json());
+}
+
+/**
+ * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ */
+async function legacyValidateAndEncryptHandler(args: {
+  exchange: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string;
+}): Promise<NextResponse> {
+  const { exchange, api_key, api_secret, passphrase } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase);
@@ -35,4 +106,4 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const message = err instanceof Error ? err.message : "Validation failed";
     return NextResponse.json({ error: message }, { status: 400 });
   }
-});
+}
