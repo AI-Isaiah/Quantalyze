@@ -263,11 +263,28 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag. The
   // force-refresh probe above ALREADY ran for both code paths.
   if (await isUnifiedBackboneActive()) {
+    // API-8: resolve the actual exchange from the linked api_keys row so we
+    // don't hardcode `source: 'okx'` for non-OKX strategies. Falls back to
+    // 'okx' when the strategy has no api_key (CSV branch) — the unified
+    // router treats source as advisory in that case.
+    let resolvedSource = "okx";
+    if (apiKeyId) {
+      const admin = createAdminClient();
+      const { data: keyRow } = await admin
+        .from("api_keys")
+        .select("exchange")
+        .eq("id", apiKeyId)
+        .single();
+      if (keyRow?.exchange) {
+        resolvedSource = keyRow.exchange;
+      }
+    }
     return await unifiedFinalizeWizardHandler({
       strategy_id: strategy_id as string,
       userId: user.id,
       payload: body as Record<string, unknown>,
       apiKeyId,
+      source: resolvedSource,
     });
   }
 
@@ -415,6 +432,7 @@ async function unifiedFinalizeWizardHandler(args: {
   userId: string;
   payload: Record<string, unknown>;
   apiKeyId: string | null;
+  source: string;
 }): Promise<NextResponse> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
@@ -432,9 +450,11 @@ async function unifiedFinalizeWizardHandler(args: {
     },
     body: JSON.stringify({
       flow_type: "onboard",
-      // Worker resolves the actual exchange from strategies.api_keys.exchange
-      // server-side; "okx" is a placeholder that the unified router ignores.
-      source: "okx",
+      // API-8: actual exchange resolved from api_keys.exchange (or 'okx' for
+      // CSV-only strategies). The unified router still server-side resolves
+      // from strategies.api_keys.exchange when the linkage is present, but
+      // forwarding the resolved value here keeps the contract honest.
+      source: args.source,
       context: {
         ...args.payload,
         strategy_id: args.strategy_id,

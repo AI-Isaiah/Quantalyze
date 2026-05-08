@@ -87,7 +87,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
   if (await isUnifiedBackboneActive()) {
-    return await unifiedKeysSyncHandler({ strategy_id, userId: user.id });
+    // API-8: resolve the actual exchange from strategies.api_key_id →
+    // api_keys.exchange so we don't hardcode `source: 'okx'`. Falls back to
+    // 'okx' when the strategy has no api_key (CSV-only resync, which the
+    // unified router will short-circuit).
+    let resolvedSource = "okx";
+    const { data: stratKey } = await supabase
+      .from("strategies")
+      .select("api_key_id")
+      .eq("id", strategy_id)
+      .single();
+    if (stratKey?.api_key_id) {
+      const admin = createAdminClient();
+      const { data: keyRow } = await admin
+        .from("api_keys")
+        .select("exchange")
+        .eq("id", stratKey.api_key_id)
+        .single();
+      if (keyRow?.exchange) {
+        resolvedSource = keyRow.exchange;
+      }
+    }
+    return await unifiedKeysSyncHandler({
+      strategy_id,
+      userId: user.id,
+      source: resolvedSource,
+    });
   }
 
   return await legacyKeysSyncHandler({ supabase, strategy_id, userId: user.id });
@@ -102,6 +127,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 async function unifiedKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
+  source: string;
 }): Promise<NextResponse> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
@@ -119,7 +145,7 @@ async function unifiedKeysSyncHandler(args: {
     },
     body: JSON.stringify({
       flow_type: "resync",
-      source: "okx", // Worker resolves actual exchange from strategies.api_keys.exchange.
+      source: args.source, // API-8: resolved from strategies.api_keys.exchange.
       context: {
         strategy_id: args.strategy_id,
         user_id: args.userId,
