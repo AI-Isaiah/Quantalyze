@@ -171,14 +171,21 @@ class TestMigration085StampFirstBridgeSurfaced:
 
 
 class TestMigration086ComputeJobsPriority:
-    """OBSERV-10: claim_compute_jobs_with_priority honors low-throttle when normal pending.
+    """OBSERV-10 (+ Phase 19 / BACKBONE-05): claim_compute_jobs_with_priority
+    honors low-throttle when normal pending, and stamps the unified-backbone
+    snapshot at claim time.
 
-    Function signature (verified against supabase/migrations/086_compute_jobs_priority.sql L96-99):
-      claim_compute_jobs_with_priority(p_batch_size INTEGER, p_worker_id TEXT) RETURNS SETOF compute_jobs
+    Function signature (migration 086 + extended in migration 104 — Phase 19):
+      claim_compute_jobs_with_priority(
+          p_batch_size INTEGER,
+          p_worker_id TEXT,
+          p_unified_backbone_active BOOLEAN DEFAULT NULL  -- migration 104
+      ) RETURNS SETOF compute_jobs
 
-    Both args are required. Calling with one arg fails at the SQL layer with `function ...
-    does not exist`. FIX 6 from the outside-voice review explicitly corrects the prior
-    one-arg test invocation that would have failed at runtime.
+    Migration 104 added the third arg with DEFAULT NULL for backward
+    compatibility, but the H-5 caller-enumeration audit for Phase 19 P6
+    requires every call site to pass it explicitly so a future signature
+    change cannot silently swallow an old caller.
     """
 
     def test_priority_claim_excludes_low_when_normal_pending(
@@ -195,10 +202,14 @@ class TestMigration086ComputeJobsPriority:
                 "(%s, 'analytics', 'low', 'pending', now())",
                 (fresh_user_id,) * 5,
             )
-            # FIX 6: BOTH args required - p_batch_size INTEGER, p_worker_id TEXT.
+            # Phase 19 / H-5 — pass all three args explicitly (the third
+            # is BOOLEAN, DEFAULT NULL since migration 104). Passing TRUE
+            # mirrors normal worker behavior post-flag-flip; the
+            # priority-throttle assertion below is invariant under the
+            # third arg.
             cur.execute(
-                "SELECT * FROM claim_compute_jobs_with_priority(%s, %s)",
-                (5, "test-worker-phase-16"),
+                "SELECT * FROM claim_compute_jobs_with_priority(%s, %s, %s)",
+                (5, "test-worker-phase-16", True),
             )
             claimed = cur.fetchall()
         priorities = [row["priority"] for row in claimed]

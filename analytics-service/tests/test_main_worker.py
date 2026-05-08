@@ -251,21 +251,29 @@ class TestDispatchTick:
             f"Phase 12 / METRICS-14 swap; got: {called_rpc_names}"
         )
 
-    # METRICS-14: confirm the new RPC is called with the same parameter
-    # shape as the legacy one. Migration 086 keeps the signature
-    # (p_batch_size INTEGER, p_worker_id TEXT) — a wrong shape would cause
-    # a PostgREST error at runtime even though the RPC name is correct.
+    # METRICS-14 (+ BACKBONE-05 update): confirm the new RPC is called with
+    # the right parameter shape. Migration 086 ships the 2-arg signature
+    # (p_batch_size INTEGER, p_worker_id TEXT); migration 104 (Phase 19)
+    # extends it with `p_unified_backbone_active BOOLEAN DEFAULT NULL`.
+    # The dispatch loop now passes all three so 104 can stamp the metadata
+    # snapshot used by drain semantics. A wrong shape would cause a
+    # PostgREST error at runtime even though the RPC name is correct.
     @pytest.mark.asyncio
     async def test_dispatch_tick_priority_rpc_param_shape(self) -> None:
-        """The priority-aware RPC is called with batch_size=5 and the
-        worker_id passed through."""
+        """The priority-aware RPC is called with batch_size=5, the
+        worker_id passed through, and the BACKBONE-05 unified-backbone
+        flag (boolean, captured once per tick)."""
         mock_supabase = MagicMock()
         chain = MagicMock()
         chain.execute.return_value = MagicMock(data=[])
         mock_supabase.rpc.return_value = chain
 
         with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()):
+             patch("main_worker.dispatch", new=AsyncMock()), \
+             patch(
+                 "main_worker.is_unified_backbone_active",
+                 new=AsyncMock(return_value=True),
+             ):
             await dispatch_tick("worker-test-shape")
 
         priority_calls = [
@@ -274,7 +282,41 @@ class TestDispatchTick:
         ]
         assert len(priority_calls) == 1
         params = priority_calls[0].args[1]
-        assert params == {"p_batch_size": 5, "p_worker_id": "worker-test-shape"}
+        assert params == {
+            "p_batch_size": 5,
+            "p_worker_id": "worker-test-shape",
+            "p_unified_backbone_active": True,
+        }
+
+    # Phase 19 / BACKBONE-05 — drain semantics: the dispatch loop must
+    # always pass the third arg (boolean), even when the flag is OFF, so
+    # migration 104 can stamp 'unified_backbone_at_claim' = 'false' for
+    # legacy claims. The handler-side drain check then refuses to
+    # process them through the unified path.
+    @pytest.mark.asyncio
+    async def test_dispatch_tick_passes_flag_off_when_disabled(self) -> None:
+        """When is_unified_backbone_active() returns False, the third
+        arg to claim_compute_jobs_with_priority is False (NOT omitted)."""
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=[])
+        mock_supabase.rpc.return_value = chain
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()), \
+             patch(
+                 "main_worker.is_unified_backbone_active",
+                 new=AsyncMock(return_value=False),
+             ):
+            await dispatch_tick("worker-test-flag-off")
+
+        priority_calls = [
+            c for c in mock_supabase.rpc.call_args_list
+            if c.args[0] == "claim_compute_jobs_with_priority"
+        ]
+        assert len(priority_calls) == 1
+        params = priority_calls[0].args[1]
+        assert params["p_unified_backbone_active"] is False
 
 
 # ---------------------------------------------------------------------------

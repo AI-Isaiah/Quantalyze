@@ -14,6 +14,7 @@ Supported kinds:
   sync_funding           -> run_sync_funding_job            (3-minute timeout)
   reconcile_strategy     -> run_reconcile_strategy_job      (5-minute timeout)
   compute_intro_snapshot -> run_compute_intro_snapshot_job  (2-minute timeout)
+  process_key_long       -> run_process_key_long_job        (30-minute timeout) [Phase 19 / BACKBONE-09]
 
 Error classification table — drives mark_compute_job_failed's retry-vs-final
 decision:
@@ -135,6 +136,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "poll_allocator_positions": 3 * 60,  # Phase 06 / INGEST-03 — same envelope as poll_positions
     "reconstruct_allocator_history": 30 * 60,   # Phase 07 / D-01 / RESEARCH.md §1E — 30 min full backfill
     "refresh_allocator_equity_daily": 3 * 60,   # Phase 07 / D-02 — one-day delta per key (VOICES-ACCEPTED f1)
+    "process_key_long": 30 * 60,   # Phase 19 / BACKBONE-09 — 30 min ceiling supports 90-day OKX archive backfill
 }
 
 
@@ -1600,6 +1602,13 @@ async def dispatch(job: dict) -> DispatchResult:
     elif kind == "refresh_allocator_equity_daily":
         from services.equity_reconstruction import run_refresh_allocator_equity_daily_job
         handler = run_refresh_allocator_equity_daily_job
+    elif kind == "process_key_long":
+        # Phase 19 / BACKBONE-09 — long-fetch worker handler. Lazy import
+        # mirrors the equity_reconstruction pattern above; the
+        # services.ingestion package depends on services.exchange which we
+        # don't want to load on workers that never see this kind.
+        from services.ingestion.long_fetch import run_process_key_long_job
+        handler = run_process_key_long_job
     else:
         handler = None
 
