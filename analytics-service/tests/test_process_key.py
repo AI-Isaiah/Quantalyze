@@ -1146,6 +1146,43 @@ def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
     )
 
 
+def test_ct8_audit_tasks_set_and_done_callback_present():
+    """CT-8 (army2) — the fire-and-forget audit write must hold a
+    strong reference to the asyncio.Task in a module-level set and
+    register a done_callback that removes it on completion.
+
+    Pre-fix the bare `asyncio.create_task(...)` returned a Task whose
+    only ref was a weak ref held by the running loop. Per CPython docs,
+    if the caller discards the return value, the GC may collect the
+    Task mid-flight and raise:
+        RuntimeError: Task was destroyed but it is pending!
+    losing the audit row silently. The cron's flag-monitor denominator
+    becomes unreliable.
+
+    Static-source check covers both invariants — the module-level
+    `_audit_tasks` set AND the `add_done_callback(_audit_tasks.discard)`
+    pattern. A regression that drops either fails this test.
+    """
+    import inspect
+
+    src = inspect.getsource(process_key_router)
+    assert "_audit_tasks" in src and "set[" in src.lower(), (
+        "CT-8: process_key must declare a module-level "
+        "`_audit_tasks: set[asyncio.Task]` so the GC cannot collect "
+        "in-flight audit Tasks mid-flight."
+    )
+    # The handler must add the Task to the set + register a discard
+    # done_callback so the set self-cleans.
+    assert "_audit_tasks.add(" in src, (
+        "CT-8: handler must add the audit Task to _audit_tasks for "
+        "strong-ref retention."
+    )
+    assert "_audit_tasks.discard" in src, (
+        "CT-8: handler must register `add_done_callback(_audit_tasks.discard)` "
+        "so the set self-cleans on Task completion."
+    )
+
+
 def test_ct4_logs_warning_when_x_user_id_missing_on_non_teaser():
     """CT-4 (army2) — when a non-teaser request arrives without an
     X-User-Id header, the route must emit a structured WARNING so a

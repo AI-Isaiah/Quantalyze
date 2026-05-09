@@ -17,6 +17,7 @@ Two execution modes
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import time
@@ -38,6 +39,17 @@ from services.rate_limit import limiter
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
 log = structlog.get_logger("quantalyze.analytics.process_key")
+
+# CT-8 (army2) — module-level strong-reference set for the I-perf-3
+# fire-and-forget audit tasks. Per CPython docs, asyncio.create_task()
+# only holds a WEAK reference to the returned Task; if the caller
+# discards the reference and there are no other strong refs, the GC
+# may collect the Task mid-flight and raise
+#   RuntimeError: Task was destroyed but it is pending!
+# losing the audit row silently. Holding a strong ref in this set —
+# combined with task.add_done_callback(_audit_tasks.discard) — keeps
+# the Task alive until completion and self-cleans on success.
+_audit_tasks: set[asyncio.Task[None]] = set()
 
 
 def _process_key_rate_limit_key(request: Request) -> str:
@@ -381,7 +393,14 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     # detaches the write from the response path; failures still surface
     # via structlog WARN inside the helper. We intentionally do NOT
     # await the resulting task — that would re-serialize.
-    import asyncio
+    #
+    # CT-8 (army2) — hold a strong reference to the Task in
+    # `_audit_tasks` and add a done_callback to discard it on
+    # completion. Pre-fix the bare `asyncio.create_task(...)` discarded
+    # the return value; CPython holds only a WEAK ref so the GC could
+    # collect the Task mid-flight, raising
+    #   RuntimeError: Task was destroyed but it is pending!
+    # and silently losing the audit row.
 
     def _write_audit_sync() -> None:
         try:
@@ -407,7 +426,9 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("process_key.audit_write_failed", error=str(exc))
 
-    asyncio.create_task(asyncio.to_thread(_write_audit_sync))
+    _audit_task = asyncio.create_task(asyncio.to_thread(_write_audit_sync))
+    _audit_tasks.add(_audit_task)
+    _audit_task.add_done_callback(_audit_tasks.discard)
 
     submission = KeySubmissionRequest(
         flow_type=body.flow_type,
