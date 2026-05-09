@@ -29,6 +29,13 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
     and open position has its funding_pnl column populated by summing
     funding_fees rows in its [opened_at, closed_at] window for the same
     symbol. See migration 044.
+
+    Audit-2026-05-07 G12.C.1/C.2: persistence now goes through the
+    `reconstruct_positions_atomic(uuid, jsonb)` RPC (migration 113) which
+    performs DELETE-then-INSERT in a single transaction guarded by a
+    per-strategy advisory xact lock. The previous PostgREST-level DELETE
+    + batched INSERT pair could partial-fail mid-flight, leaving the
+    dashboard with empty positions and contradictory trade_metrics.
     """
     # Query fills ordered by timestamp
     def _fetch_fills():
@@ -48,38 +55,71 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
         logger.info("No fills found for strategy %s", strategy_id)
         return {}
 
-    # Group by symbol
-    fills_by_symbol: dict[str, list[dict]] = defaultdict(list)
+    # Audit-2026-05-07 G12.C.6: bucket by (symbol, exchange) tuple instead
+    # of symbol alone. Symbol-less fills are DROPPED (not bucketed under
+    # 'UNKNOWN') so heterogeneous instruments can no longer FIFO-match
+    # under a fictitious shared lifecycle (a buy of BTC and a sell of ETH
+    # would otherwise "close" a position).
+    fills_by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    fills_dropped_no_symbol = 0
     for fill in fills:
-        fills_by_symbol[fill.get("symbol", "UNKNOWN")].append(fill)
+        sym = fill.get("symbol")
+        if not sym:
+            logger.error(
+                "Fill missing symbol; skipping. raw=%s",
+                fill.get("raw_data"),
+            )
+            fills_dropped_no_symbol += 1
+            continue
+        exch = (fill.get("exchange") or "unknown")
+        fills_by_key[(sym, exch)].append(fill)
 
     all_positions: list[dict] = []
+    aggregated_data_quality_flags: dict[str, Any] = {}
 
-    for symbol, symbol_fills in fills_by_symbol.items():
-        # Sort by timestamp within symbol
+    for (symbol, _exchange), symbol_fills in fills_by_key.items():
+        # Sort by timestamp within bucket (per-symbol-per-exchange).
         symbol_fills.sort(key=lambda f: f.get("timestamp", ""))
         positions = _match_positions_fifo(symbol, symbol_fills, strategy_id)
+        # Audit G12.C.4: collect transient data_quality_flags from
+        # in-memory position dicts BEFORE we strip them for DB persistence.
+        for pos in positions:
+            flags = pos.get("data_quality_flags")
+            if isinstance(flags, dict):
+                for k, v in flags.items():
+                    # OR-merge booleans / counters: any True wins, ints sum.
+                    if isinstance(v, bool):
+                        aggregated_data_quality_flags[k] = (
+                            aggregated_data_quality_flags.get(k, False) or v
+                        )
+                    elif isinstance(v, (int, float)):
+                        aggregated_data_quality_flags[k] = (
+                            aggregated_data_quality_flags.get(k, 0) + v
+                        )
+                    else:
+                        aggregated_data_quality_flags[k] = v
         all_positions.extend(positions)
+
+    if fills_dropped_no_symbol:
+        aggregated_data_quality_flags["fills_dropped_no_symbol"] = (
+            fills_dropped_no_symbol
+        )
 
     await _attribute_funding(strategy_id, all_positions, supabase)
 
-    # Persist: DELETE existing positions for strategy, then INSERT new ones
-    def _delete_existing():
-        supabase.table("positions").delete().eq(
-            "strategy_id", strategy_id
+    # Audit-2026-05-07 G12.C.1/C.2: atomic DELETE+INSERT via RPC. The RPC
+    # signature mirrors the column list of the previous direct INSERT so
+    # the on-disk shape is unchanged. Strip in-memory-only keys (e.g.
+    # `data_quality_flags` which the positions table does not have).
+    payload = [_strip_non_db_keys(p) for p in all_positions]
+
+    def _atomic_rebuild():
+        supabase.rpc(
+            "reconstruct_positions_atomic",
+            {"p_strategy_id": strategy_id, "p_positions": payload},
         ).execute()
 
-    await db_execute(_delete_existing)
-
-    if all_positions:
-        # Insert in batches of 100 to avoid payload limits
-        for i in range(0, len(all_positions), 100):
-            batch = all_positions[i : i + 100]
-
-            def _insert(rows=batch):
-                supabase.table("positions").insert(rows).execute()
-
-            await db_execute(_insert)
+    await db_execute(_atomic_rebuild)
 
     logger.info(
         "Reconstructed %d positions for strategy %s", len(all_positions), strategy_id
@@ -137,7 +177,7 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
         for p in closed
     ]
 
-    return {
+    out: dict[str, Any] = {
         "total_positions": total,
         "open_positions": open_count,
         "closed_positions": closed_count,
@@ -155,6 +195,26 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
         "losers_count": len(losers),
         "realized_pnl_per_trade": realized_pnl_per_trade,
     }
+    # Audit-2026-05-07 G12.C.4 / C.6: surface aggregated data quality
+    # flags so analytics_runner can merge them into
+    # strategy_analytics.data_quality_flags. Only present when non-empty.
+    if aggregated_data_quality_flags:
+        out["data_quality_flags"] = aggregated_data_quality_flags
+    return out
+
+
+# Audit-2026-05-07 G12.C.1/C.2: keys we attach in-memory to position dicts
+# but which are NOT columns on the positions table. They must be stripped
+# before sending the payload to reconstruct_positions_atomic, otherwise
+# the JSONB-to-column projection in migration 113 will silently ignore
+# them (or, depending on Postgres version, raise on unknown casts).
+_NON_DB_KEYS = frozenset({"data_quality_flags"})
+
+
+def _strip_non_db_keys(pos: dict) -> dict:
+    """Return a copy of the position dict with transient (non-column) keys
+    removed. Caller-side defense for the atomic-rebuild RPC payload."""
+    return {k: v for k, v in pos.items() if k not in _NON_DB_KEYS}
 
 
 async def _attribute_funding(
@@ -308,9 +368,17 @@ def _match_positions_fifo(
     total_entry_cost = 0.0
     total_entry_qty = 0.0
     peak_qty = 0.0  # track peak position size for size_peak column
+    # Audit-2026-05-07 G12.C.5: track exit VWAP across multi-fill closes.
+    # Previously `exit_avg = price` of the last closing fill only.
+    total_exit_cost = 0.0
+    total_exit_qty = 0.0
     total_fees = 0.0
     position_side = None  # "long" or "short"
     position_open_time = None
+    # Audit-2026-05-07 G12.C.4: per-position transient quality flags
+    # (e.g. posSide_side_mismatch). Stored on the in-memory dict and
+    # stripped before the atomic-rebuild RPC payload is sent.
+    position_quality_flags: dict[str, Any] = {}
 
     for fill in fills:
         side = fill.get("side", "").lower()
@@ -318,9 +386,19 @@ def _match_positions_fifo(
         price = float(fill.get("price", 0) or 0)
         fee = float(fill.get("fee", 0) or 0)
 
-        # Determine direction from posSide if available (OKX hedge mode)
+        # Audit-2026-05-07 G12.C.4: whitelist `posSide` from the
+        # exchange-supplied raw_data. Anything outside the known set is
+        # treated as missing — an attacker-controlled OKX response can no
+        # longer flip the reconstructed direction by injecting a
+        # garbage posSide.
         raw_data = fill.get("raw_data") or {}
-        pos_side = raw_data.get("posSide", "")
+        pos_side = raw_data.get("posSide", "") or ""
+        if pos_side not in ("long", "short", "net", ""):
+            logger.warning(
+                "invalid posSide=%s for fill, ignoring (strategy=%s symbol=%s)",
+                pos_side, strategy_id, symbol,
+            )
+            pos_side = ""
 
         if qty <= 0:
             continue
@@ -329,22 +407,37 @@ def _match_positions_fifo(
 
         # Determine if this fill opens or closes position
         if abs(net_qty) < 1e-12:
-            # Opening a new position
-            if pos_side == "short" or (not pos_side and side == "sell"):
-                position_side = "short"
-                net_qty = -qty
-            else:
-                position_side = "long"
-                net_qty = qty
+            # Opening a new position. Direction is derived from `side`
+            # (buy → long, sell → short). posSide is treated as a HINT
+            # only: if it disagrees with side, we PREFER side and flag
+            # the mismatch in data_quality_flags. The previous code
+            # blindly trusted posSide, allowing posSide='short' on a
+            # side='buy' fill to publish a fabricated short-side
+            # position to allocators (G12.C.4).
+            side_derived = "short" if side == "sell" else "long"
+            if pos_side in ("long", "short") and pos_side != side_derived:
+                position_quality_flags["posSide_side_mismatch"] = True
+                logger.warning(
+                    "posSide=%s conflicts with side=%s for first fill "
+                    "(strategy=%s symbol=%s); preferring side-derived direction=%s",
+                    pos_side, side, strategy_id, symbol, side_derived,
+                )
+            position_side = side_derived
+            net_qty = qty if side_derived == "long" else -qty
 
             total_entry_cost = price * qty
             total_entry_qty = qty
             peak_qty = qty
+            total_exit_cost = 0.0
+            total_exit_qty = 0.0
             entry_fills = [fill]
             position_open_time = fill.get("timestamp")
             continue
 
-        # Existing position
+        # Existing position. Determine whether this fill is closing (or
+        # partial-closing/overshooting) the current side and how much of
+        # the fill quantity is allocated to the close vs. the next leg.
+        closing_qty = 0.0
         if position_side == "long":
             if side == "buy":
                 # Adding to long
@@ -354,7 +447,9 @@ def _match_positions_fifo(
                 peak_qty = max(peak_qty, abs(net_qty))
                 entry_fills.append(fill)
             else:
-                # Reducing/closing long
+                # Reducing/closing long: portion of qty that closes the
+                # current long is min(qty, current net long size).
+                closing_qty = min(qty, net_qty) if net_qty > 0 else 0.0
                 net_qty -= qty
         elif position_side == "short":
             if side == "sell":
@@ -366,14 +461,50 @@ def _match_positions_fifo(
                 entry_fills.append(fill)
             else:
                 # Reducing/closing short
+                closing_qty = min(qty, -net_qty) if net_qty < 0 else 0.0
                 net_qty += qty
+
+        # Audit-2026-05-07 G12.C.5: accumulate VWAP exit across all
+        # closing fills (partial reductions PLUS the final closing fill).
+        # Previously `exit_avg = price` only used the last closing fill,
+        # silently dropping prior reducing-fills' price/qty.
+        if closing_qty > 0:
+            total_exit_cost += price * closing_qty
+            total_exit_qty += closing_qty
 
         # Check if position crossed zero (closed)
         if (position_side == "long" and net_qty <= 0) or (
             position_side == "short" and net_qty >= 0
         ):
+            close_time = fill.get("timestamp")
+
+            # Audit-2026-05-07 G12.C.3: prorate THIS fill's fee between
+            # the closed leg and the (potentially) new opening leg.
+            # `total_fees` was already incremented by `fee` at the top of
+            # the loop, so the fee is currently 100% attributed to the
+            # closed position. If this fill flipped direction, allocate
+            # `opening_share` to the new leg's seed.
+            #
+            # closing_share / opening_share split based on size_used:
+            #   closing_qty = size that closed the prior side
+            #   opening_qty = size that opens the new (flipped) side
+            #   ratio = closing_qty / qty
+            remainder = abs(net_qty)
+            opening_qty = remainder if remainder > 1e-12 else 0.0
+            opening_share = 0.0
+            if opening_qty > 0 and qty > 0 and fee > 0:
+                opening_share = (opening_qty / qty) * fee
+                # Subtract from the closed leg's fee total.
+                total_fees -= opening_share
+
             entry_avg = total_entry_cost / total_entry_qty if total_entry_qty > 0 else 0
-            exit_avg = price  # last fill is the closing fill
+            # Audit G12.C.5: VWAP across the position's closing fills.
+            # Fall back to the last fill's price only if (defensively)
+            # no closing volume was tracked — should not happen in
+            # practice but avoids ZeroDivisionError on degenerate input.
+            exit_avg = (
+                total_exit_cost / total_exit_qty if total_exit_qty > 0 else price
+            )
 
             if position_side == "long":
                 realized_pnl = (exit_avg - entry_avg) * total_entry_qty - total_fees
@@ -390,8 +521,15 @@ def _match_positions_fifo(
             # Sub-day-aware duration. The DB column is NUMERIC (migration
             # 092) so fractional days express positions held for hours
             # instead of int-truncating to 0.
+            #
+            # Audit-2026-05-07 G12.C.9: also write `duration_seconds`
+            # alongside `duration_days` so downstream consumers can
+            # report sub-day holds without precision loss. Migration 114
+            # adds the column; the JSONB→column projection in migration
+            # 113's RPC ignores unknown keys, so writing this key today
+            # is safe even before 114 lands.
             duration_days = None
-            close_time = fill.get("timestamp")
+            duration_seconds: int | None = None
             if position_open_time and close_time:
                 try:
                     open_dt = datetime.fromisoformat(
@@ -400,13 +538,27 @@ def _match_positions_fifo(
                     close_dt = datetime.fromisoformat(
                         close_time.replace("Z", "+00:00")
                     )
-                    duration_days = round(
-                        (close_dt - open_dt).total_seconds() / 86400, 4
-                    )
+                    seconds = (close_dt - open_dt).total_seconds()
+                    # Adversarial-review hardening (PR #140 follow-up):
+                    # clock skew or out-of-order fills can make close_dt
+                    # < open_dt — pre-fix int(negative_seconds) would
+                    # persist a negative duration that downstream
+                    # dashboards inherit as garbage. Clamp to 0 and flag
+                    # the position so admin can triage.
+                    if seconds < 0:
+                        logger.warning(
+                            "Negative position duration detected — clamping to 0. "
+                            "open=%s close=%s seconds=%.2f. Likely cause: clock skew "
+                            "or out-of-order fills.",
+                            position_open_time, close_time, seconds,
+                        )
+                        seconds = 0.0
+                    duration_days = round(seconds / 86400, 4)
+                    duration_seconds = int(seconds)
                 except (ValueError, TypeError):
                     pass
 
-            positions.append({
+            position_dict: dict[str, Any] = {
                 "strategy_id": strategy_id,
                 "symbol": symbol,
                 "side": position_side,
@@ -419,15 +571,18 @@ def _match_positions_fifo(
                 "fee_total": round(total_fees, 4),
                 "roi": round(roi, 6),
                 "duration_days": duration_days,
+                "duration_seconds": duration_seconds,
                 "opened_at": position_open_time,
                 "closed_at": close_time,
                 "fill_count": len(entry_fills) + 1,  # +1 for closing fill
                 # Default 0; _attribute_funding sums in-window funding_fees rows before insert.
                 "funding_pnl": 0,
-            })
+            }
+            if position_quality_flags:
+                position_dict["data_quality_flags"] = dict(position_quality_flags)
+            positions.append(position_dict)
 
             # If overshot (net != 0), start a new position with remainder
-            remainder = abs(net_qty)
             if remainder > 1e-12:
                 # Flip direction
                 if position_side == "long":
@@ -440,22 +595,32 @@ def _match_positions_fifo(
                 total_entry_qty = remainder
                 peak_qty = remainder
                 entry_fills = [fill]
-                total_fees = 0.0
+                # Audit G12.C.3: seed the new leg with the prorated
+                # opening share of the flip-fill's fee. The closed-leg
+                # fee_total already had this subtracted above.
+                total_fees = opening_share
+                total_exit_cost = 0.0
+                total_exit_qty = 0.0
                 position_open_time = fill.get("timestamp")
+                # Reset per-position quality flags for the new leg.
+                position_quality_flags = {}
             else:
                 net_qty = 0.0
                 total_entry_cost = 0.0
                 total_entry_qty = 0.0
                 peak_qty = 0.0
+                total_exit_cost = 0.0
+                total_exit_qty = 0.0
                 entry_fills = []
                 total_fees = 0.0
                 position_side = None
                 position_open_time = None
+                position_quality_flags = {}
 
     # Record any open position
     if abs(net_qty) > 1e-12 and position_side and total_entry_qty > 0:
         entry_avg = total_entry_cost / total_entry_qty
-        positions.append({
+        open_dict: dict[str, Any] = {
             "strategy_id": strategy_id,
             "symbol": symbol,
             "side": position_side,
@@ -468,13 +633,18 @@ def _match_positions_fifo(
             "fee_total": round(total_fees, 4),
             "roi": None,
             "duration_days": None,
+            # Audit G12.C.9: also write duration_seconds (NULL while open).
+            "duration_seconds": None,
             "opened_at": position_open_time,
             "closed_at": None,
             "fill_count": len(entry_fills),
             # Default 0; _attribute_funding sums funding_fees rows up to now
             # for open positions (closed_at=None → window-end = now).
             "funding_pnl": 0,
-        })
+        }
+        if position_quality_flags:
+            open_dict["data_quality_flags"] = dict(position_quality_flags)
+        positions.append(open_dict)
 
     return positions
 
@@ -490,7 +660,70 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     aggregated into mean/std/max and then discarded. Now they also persist
     as `exposure_series: [{date, gross, net}]` for sibling-table writes
     (D-01 sibling kind = `exposure_series`).
+
+    Audit-2026-05-07 G12.C.7: position_snapshots is account-scoped (the
+    poll_positions worker writes ALL exchange positions for an
+    api_key_id under the strategy that triggered the poll). When two
+    strategies share an api_key_id, computing exposure_metrics from
+    snapshots would mix the two strategies' exposures together and
+    publish a misleading gross/net to allocators. We refuse to compute
+    in that case and surface a `exposure_metrics_skipped_shared_api_key`
+    flag for analytics_runner to merge into data_quality_flags.
     """
+
+    # Detect shared api_key_id BEFORE we touch snapshots — short-circuits
+    # the contamination case quickly. Failure to read strategies (e.g.
+    # transient DB error) is treated as "unknown" and we proceed: better
+    # to publish exposure than to silently zero it out for everyone.
+    try:
+        def _fetch_self():
+            return (
+                supabase.table("strategies")
+                .select("api_key_id")
+                .eq("id", strategy_id)
+                .limit(1)
+                .execute()
+            )
+
+        self_result = await db_execute(_fetch_self)
+        self_rows = (self_result.data if self_result else []) or []
+        api_key_id = self_rows[0].get("api_key_id") if self_rows else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "compute_exposure_metrics: api_key_id lookup failed for %s: %s",
+            strategy_id, exc,
+        )
+        api_key_id = None
+
+    if api_key_id:
+        try:
+            def _fetch_siblings():
+                return (
+                    supabase.table("strategies")
+                    .select("id")
+                    .eq("api_key_id", api_key_id)
+                    .execute()
+                )
+
+            sib_result = await db_execute(_fetch_siblings)
+            sib_rows = (sib_result.data if sib_result else []) or []
+            if len(sib_rows) > 1:
+                logger.warning(
+                    "compute_exposure_metrics: api_key_id %s is shared by %d "
+                    "strategies; refusing to compute exposure_metrics for %s "
+                    "to avoid cross-strategy contamination",
+                    api_key_id, len(sib_rows), strategy_id,
+                )
+                return {
+                    "data_quality_flags": {
+                        "exposure_metrics_skipped_shared_api_key": True,
+                    }
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "compute_exposure_metrics: shared-key check failed for %s: %s",
+                strategy_id, exc,
+            )
 
     def _fetch_snapshots():
         return (

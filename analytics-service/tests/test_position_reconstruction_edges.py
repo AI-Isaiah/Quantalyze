@@ -129,6 +129,22 @@ def _make_trades_funding_mock(
 
     mock.table = _table
     mock._captured_inserts = captured_inserts
+
+    # Audit-2026-05-07 G12.C.1/C.2: persistence now goes through
+    # ``supabase.rpc('reconstruct_positions_atomic', payload)``. Mirror
+    # the payload's ``p_positions`` array into ``_captured_inserts`` so
+    # the existing per-test assertions on inserted rows keep working
+    # without rewriting them.
+    def _rpc(name, payload=None):
+        if name == "reconstruct_positions_atomic" and payload:
+            rows = payload.get("p_positions") or []
+            if rows:
+                captured_inserts.append(list(rows))
+        rpc_handle = MagicMock()
+        rpc_handle.execute.return_value = MagicMock(data=[])
+        return rpc_handle
+
+    mock.rpc = _rpc
     return mock
 
 
@@ -291,8 +307,13 @@ class TestFifoEdges:
         assert len(positions) == 1
         assert positions[0]["duration_days"] is None
 
-    def test_hedge_mode_posside_override(self) -> None:
-        """posSide='short' in raw_data opens a short even on a buy fill."""
+    def test_hedge_mode_posside_no_longer_overrides_side(self) -> None:
+        """Audit-2026-05-07 G12.C.4: posSide is now a HINT only — when it
+        disagrees with the side-derived direction (buy → long, sell →
+        short), side wins and `data_quality_flags.posSide_side_mismatch`
+        is recorded. Previously posSide could unconditionally flip the
+        published direction, which an attacker-controlled exchange
+        response could exploit to publish a fabricated side."""
         fills = [
             _make_fill(
                 "buy",
@@ -310,11 +331,14 @@ class TestFifoEdges:
             ),
         ]
         positions = _match_positions_fifo("BTCUSDT", fills, "s-1")
-        # With posSide forcing short, the first fill opens short; second fill
-        # (sell) adds to short. No close → one open position with qty=2.
-        opens = [p for p in positions if p["status"] == "open"]
-        assert len(opens) == 1
-        assert opens[0]["side"] == "short"
+        # First fill (side=buy) opens LONG (posSide ignored). Second fill
+        # (sell) closes the long → one closed long position.
+        closed = [p for p in positions if p["status"] == "closed"]
+        assert len(closed) == 1
+        assert closed[0]["side"] == "long"
+        # And the conflict was flagged for analytics_runner to surface.
+        flags = closed[0].get("data_quality_flags") or {}
+        assert flags.get("posSide_side_mismatch") is True
 
 
 # ---------------------------------------------------------------------------
