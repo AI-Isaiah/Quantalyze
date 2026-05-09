@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.15.0] - 2026-05-09
+
+**audit-2026-05-07 G12.D — positions/trades schema + RLS asymmetry.** Closes 4 audit items (1 CRITICAL + 1 HIGH + 1 MED + 1 LOW). PR 4 of 5 in the audit-2026-05-07 G12 split. The positions table previously published full-lifecycle PnL/fees/ROI/duration to ANY authenticated user for any published strategy — bypassing the disclosure-tier contract that limits what published strategies expose. Migration 114 brings positions RLS to parity with trades (owner-only by default), adds a natural-key uniqueness contract for the positions atomic-rebuild RPC (PR 5), high-precision `duration_seconds`, and a partial index for "recent open" queries.
+
+### Added
+
+- **Migration 114** (`114_positions_schema_rls_g12d.sql`):
+  - `positions.duration_seconds BIGINT NULL` for sub-day position granularity (paired with G12.C.9 in PR 5).
+  - `positions_natural_key UNIQUE (strategy_id, symbol, side, opened_at)` constraint via `NOT VALID` + guarded `VALIDATE`.
+  - `positions_open_recent` partial index on `(strategy_id, opened_at DESC) WHERE status='open'`.
+- **Two-actor anti-leak test** at `src/__tests__/positions-rls-g12d-disclosure-tier.test.ts` gated on `HAS_LIVE_DB`.
+
+### Changed
+
+- **`positions_read` RLS policy** is now owner-only: `strategy_id IN (SELECT id FROM strategies WHERE user_id = (SELECT auth.uid()))`. Mirrors `trades_read` from migration 002:58–60. The previous published-OR-owned policy leaked realized PnL, fee_total, exit_price_avg, duration_days, size_peak, opened_at/closed_at to every authenticated user. Audit competitive risk closed.
+
 ## [0.22.13.0] - 2026-05-09
 
 **audit-2026-05-07 G12.B — exchange.py per-symbol normalization + pagination hardening.** Closes 7 audit items (1 CRITICAL + 5 HIGH + 1 MEDIUM single-line) on the exchange-fetch path that produces `trades` rows. PR 2 of 5 in the audit-2026-05-07 G12 split (parallel with PR 1, v0.22.12.0). Three exchange branches (OKX / Bybit / CCXT-Binance) no longer drift apart, cold-start failures are visible to operators, Binance per-symbol fetch is ~5x faster under bounded concurrency, and pagination loops can no longer infinite-loop on a stuck cursor.
