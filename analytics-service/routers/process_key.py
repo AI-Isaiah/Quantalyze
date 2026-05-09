@@ -14,8 +14,18 @@ Two execution modes
     Returns ``{queued, correlation_id, verification_id}`` synchronously;
     enqueues a process_key_long compute_job; the worker (P6) writes the
     result back to strategy_verifications. See BACKBONE-09 / P6.
+
+NOTE — DO NOT add ``from __future__ import annotations`` to this module.
+FastAPI 0.115.x (pinned in requirements.txt) inspects ``param.annotation``
+(the raw, source-form annotation) to decide body-vs-query for a route
+parameter. Under PEP-563 stringification, the BaseModel-typed ``body``
+parameter becomes the string ``"_ProcessKeyBody"`` and FastAPI falls
+back to treating it as a query parameter — every JSON-body POST then
+422s with ``loc:["query","body"], "Field required"``. The Annotated
+``Body()`` marker survives PEP-563 in newer fastapi but not in the
+pinned version. Until fastapi is bumped (separate PR), this module
+must keep annotations evaluated at function-definition time.
 """
-from __future__ import annotations
 
 import asyncio
 import os
