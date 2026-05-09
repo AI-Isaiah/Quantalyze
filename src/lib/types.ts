@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { AlertSeverity } from "./utils";
 
 export type Role = "manager" | "allocator" | "both";
@@ -305,11 +306,114 @@ export interface Position {
   opened_at: string;
   closed_at: string | null;
   duration_days: number | null;
+  // High-precision duration in whole seconds — added by migration 114
+  // (PR #139 / G12.D.3) and populated by position_reconstruction.py
+  // (PR #140 / G12.C.9). Nullable because:
+  //   - open positions have no close_at and emit NULL.
+  //   - rows reconstructed before PR #140 lands carry NULL until the
+  //     next analytics tick rewrites them.
+  // Cross-PR specialist finding: extending this interface + the Zod
+  // schema NOW (PR #138) keeps the .strict() guard forward-compatible
+  // with PRs #139 and #140 — without this, the moment any UI consumer
+  // adds duration_seconds to a SELECT projection, EVERY row gets
+  // dropped by safeParse and the Discovery page renders empty positions.
+  duration_seconds: number | null;
   roi: number | null;
   // funding_pnl is the sum of funding_fees over the position window.
   // Total economic P&L = realized_pnl + funding_pnl (computed client-side;
   // no generated DB column). NOT NULL DEFAULT 0 — rows without funding carry 0.
   funding_pnl: number;
+}
+
+/**
+ * G12.E.1 (audit 2026-05-07) — Runtime guard for Position rows fetched from
+ * Supabase. The TS `Position.side: 'long'|'short'` and
+ * `Position.status: 'open'|'closed'` unions are compile-time only; raw rows
+ * cast directly from `supabase.from('positions').select(...)` would satisfy
+ * the type even when the DB returns `'LONG'` (case drift) or a future enum
+ * addition like `'partial'`. This Zod schema validates each row at the trust
+ * boundary so violations are dropped + warned about, never silently rendered.
+ *
+ * Mirrors the schema-validation pattern already used in
+ * `src/lib/analytics-schemas.ts` for the Python service trust boundary.
+ */
+// Adversarial-review hardening (PR #138 follow-up):
+//   1. PostgREST returns DECIMAL/NUMERIC columns as strings when arbitrary
+//      precision matters — supabase-js may or may not coerce depending on
+//      the column metadata pipeline. Use z.coerce.number() so the schema
+//      accepts BOTH number and string-encoded number; coercion produces a
+//      typed Position[] either way and the call site downstream stays
+//      number-shaped. Defensive against PostgREST shape drift.
+//   2. opened_at / closed_at are TIMESTAMPTZ strings — pin format with
+//      .datetime({ offset: true }) so a corrupted '' doesn't silently
+//      pass through and produce NaN durations downstream.
+//   3. .strict() on the object: if the SELECT later picks up a new column
+//      (e.g. unrealized_pnl from migration 040 — currently NOT selected
+//      but exists in the DB), the row gets dropped with a warning instead
+//      of silently passing through with shape drift. The whole point of
+//      the guard is to make schema drift loud, not invisible.
+const _coerceNumber = z.coerce.number();
+const _coerceNumberNullable = z.coerce.number().nullable();
+const _isoTimestamp = z.string().datetime({ offset: true });
+const _isoTimestampNullable = z.string().datetime({ offset: true }).nullable();
+
+export const PositionRowSchema = z.object({
+  id: z.string(),
+  strategy_id: z.string(),
+  symbol: z.string(),
+  side: z.enum(["long", "short"]),
+  status: z.enum(["open", "closed"]),
+  entry_price_avg: _coerceNumber,
+  exit_price_avg: _coerceNumberNullable,
+  size_base: _coerceNumber,
+  size_peak: _coerceNumber,
+  realized_pnl: _coerceNumberNullable,
+  fee_total: _coerceNumberNullable,
+  fill_count: _coerceNumber,
+  opened_at: _isoTimestamp,
+  closed_at: _isoTimestampNullable,
+  duration_days: _coerceNumberNullable,
+  duration_seconds: _coerceNumberNullable,
+  roi: _coerceNumberNullable,
+  funding_pnl: _coerceNumber,
+}).strict() satisfies z.ZodType<Position>;
+
+/**
+ * Parse an array of unknown rows (typically `positionsResult.data` from a
+ * Supabase select) into a typed `Position[]`. Rows that fail the schema are
+ * dropped and a `console.warn` is emitted with the row id (when present) and
+ * the Zod issues, so silent shape drift surfaces in server logs.
+ *
+ * Returning `Position[]` (never `null`) is intentional: the page-level call
+ * site is responsible for preserving the null-vs-empty distinction it cares
+ * about (see `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`).
+ */
+export function parsePositionRows(rows: unknown[]): Position[] {
+  const out: Position[] = [];
+  for (const row of rows) {
+    const parsed = PositionRowSchema.safeParse(row);
+    if (parsed.success) {
+      out.push(parsed.data);
+    } else {
+      // Adversarial-review hardening (PR #138 follow-up): only log paths
+      // and codes — never the row contents or `received` values. Zod
+      // issue `received` may include allocator-attributable strategy_id
+      // and PnL numbers; warn payloads route to Vercel runtime logs
+      // visible to ops, so we strip down to schema-shape information only.
+      const rowId = (row && typeof row === "object" && "id" in row)
+        ? (row as { id?: unknown }).id
+        : undefined;
+      const safeIssues = parsed.error.issues.map((i) => ({
+        path: i.path.join("."),
+        code: i.code,
+      }));
+      console.warn(
+        "[parsePositionRows] dropping invalid position row",
+        { rowId, issues: safeIssues },
+      );
+    }
+  }
+  return out;
 }
 
 /**

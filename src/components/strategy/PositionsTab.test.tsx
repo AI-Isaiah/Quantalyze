@@ -69,6 +69,7 @@ const makePosition = (overrides?: Partial<Position>): Position => ({
   opened_at: "2024-01-01T00:00:00Z",
   closed_at: "2024-01-02T00:00:00Z",
   duration_days: 1,
+  duration_seconds: 86400,
   roi: 0.1,
   funding_pnl: 0,
   ...overrides,
