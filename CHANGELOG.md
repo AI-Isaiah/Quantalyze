@@ -6,18 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
-## [0.22.14.0] - 2026-05-09
+## [0.22.16.0] - 2026-05-09
 
-**audit-2026-05-07 G12.E.1 — Position TS runtime guard at the API boundary.** Closes 1 audit item (HIGH conf=9). PR 3 of 5 in the audit-2026-05-07 G12 split (parallel with PR 1 + PR 2). The Discovery `/strategy/[id]` page previously cast raw Supabase rows directly into the typed `Position[]` consumer with no runtime validation — any DB row with `side='LONG'` or a future-added `status='partial'` would satisfy TypeScript at the trust boundary while silently corrupting the consumer's exhaustive switches.
+**audit-2026-05-07 G12.C — position_reconstruction FIFO + fees (final PR of the G12 split).** Closes 8 audit items (2 CRITICAL + 5 HIGH + 1 MED). PR 5 of 5. Position rebuild is now atomic (no more mid-cron-tick allocator dashboard reads of an empty positions table), the FIFO matcher correctly prorates fees on flip-fills, multi-fill closes use VWAP, posSide injection is defanged, multi-exchange contamination is ruled out, and shared-api_key cross-strategy exposure is gated.
 
 ### Added
 
-- **`PositionRowSchema` Zod schema + `parsePositionRows()` helper** in `src/lib/types.ts`. Schema kept in lockstep with the existing `Position` interface via `satisfies z.ZodType<Position>` — drift causes a compile error.
-- **8-test regression suite** at `src/__tests__/positions-runtime-guard-g12e.test.ts`.
+- **Migration 113** (`113_positions_atomic_rebuild_rpc.sql`): `reconstruct_positions_atomic(p_strategy_id UUID, p_positions JSONB) RETURNS VOID` SECURITY DEFINER. Body: `pg_advisory_xact_lock(hashtext(p_strategy_id::text))` → DELETE → bulk INSERT from `jsonb_array_elements`, all in one transaction.
+- **`data_quality_flags` aggregation** in `reconstruct_positions` return dict for `posSide_side_mismatch` and `fills_dropped_no_symbol`.
+- **11 new regression tests** at `analytics-service/tests/test_position_reconstruction.py`.
 
 ### Changed
 
-- **`src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`** replaces `positions = positionsResult?.data ?? null` with `positions = positionsResult?.data ? parsePositionRows(positionsResult.data) : null`.
+- **`reconstruct_positions`** now calls the migration-113 RPC. Closes G12.C.1 + G12.C.2 (CRITICAL — partial-failure data loss + mid-cron-tick concurrent-read race).
+- **`_match_positions_fifo`** flip-fill fee proration; side-wins-on-conflict for posSide; exit VWAP across closing fills; (symbol, exchange) bucketing; shared-api_key exposure-skip; duration_seconds in payload (G12.C.3–G12.C.9).
+
+## [0.22.14.0] - 2026-05-09
+
+**audit-2026-05-07 G12.E.1 — Position TS runtime guard at the API boundary.** Closes 1 audit item (HIGH conf=9). PR 3 of 5. See merged commit history in PR #138 for details.
 
 ## [0.22.15.0] - 2026-05-09
 
