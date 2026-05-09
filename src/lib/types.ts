@@ -306,6 +306,18 @@ export interface Position {
   opened_at: string;
   closed_at: string | null;
   duration_days: number | null;
+  // High-precision duration in whole seconds — added by migration 114
+  // (PR #139 / G12.D.3) and populated by position_reconstruction.py
+  // (PR #140 / G12.C.9). Nullable because:
+  //   - open positions have no close_at and emit NULL.
+  //   - rows reconstructed before PR #140 lands carry NULL until the
+  //     next analytics tick rewrites them.
+  // Cross-PR specialist finding: extending this interface + the Zod
+  // schema NOW (PR #138) keeps the .strict() guard forward-compatible
+  // with PRs #139 and #140 — without this, the moment any UI consumer
+  // adds duration_seconds to a SELECT projection, EVERY row gets
+  // dropped by safeParse and the Discovery page renders empty positions.
+  duration_seconds: number | null;
   roi: number | null;
   // funding_pnl is the sum of funding_fees over the position window.
   // Total economic P&L = realized_pnl + funding_pnl (computed client-side;
@@ -361,6 +373,7 @@ export const PositionRowSchema = z.object({
   opened_at: _isoTimestamp,
   closed_at: _isoTimestampNullable,
   duration_days: _coerceNumberNullable,
+  duration_seconds: _coerceNumberNullable,
   roi: _coerceNumberNullable,
   funding_pnl: _coerceNumber,
 }).strict() satisfies z.ZodType<Position>;

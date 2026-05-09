@@ -29,6 +29,7 @@ const validRow: Position = {
   opened_at: "2026-01-01T00:00:00Z",
   closed_at: "2026-01-02T00:00:00Z",
   duration_days: 1,
+  duration_seconds: 86400,
   roi: 0.1,
   funding_pnl: 0,
 };
@@ -42,6 +43,7 @@ const validRow2: Position = {
   realized_pnl: null,
   closed_at: null,
   duration_days: null,
+  duration_seconds: null,
   roi: null,
 };
 
