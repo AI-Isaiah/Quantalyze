@@ -94,6 +94,7 @@ export function SubmitStep({
         status?: string;
         error?: string;
         code?: string;
+        idempotent?: boolean;
       };
 
       if (!res.ok) {
@@ -120,6 +121,23 @@ export function SubmitStep({
           wizard_session_id: wizardSessionId,
           step: "submit",
           code: surfaced,
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      // CT-5 (army2) — even on a 200 OK, the upstream may emit
+      // `code: 'WIZARD_DUPLICATE'` + `idempotent: true` to signal that
+      // the strategy_verifications row pre-existed (BACKBONE-08
+      // wizard_session_id idempotency). Surface the WIZARD_DUPLICATE
+      // copy from wizardErrors.ts so the user sees the resume
+      // affordance instead of a silent re-submit.
+      if (data.code === "WIZARD_DUPLICATE") {
+        setErrorCode("WIZARD_DUPLICATE");
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "submit",
+          code: "WIZARD_DUPLICATE",
         });
         setSubmitting(false);
         return;

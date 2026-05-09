@@ -315,6 +315,88 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     ).toBe(TEST_USER.id);
   });
 
+  // CT-5 (army2) — when upstream returns the WIZARD_DUPLICATE envelope
+  // (queued=false + code=WIZARD_DUPLICATE + idempotent=true), the
+  // finalize-wizard translation must preserve `code` and `idempotent`,
+  // and keys/sync must return 200 (not 202) for the idempotent path.
+  it("finalize-wizard preserves code+idempotent on WIZARD_DUPLICATE upstream (CT-5)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    // First mockFetch (probe) — return read-only
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({ read: true, trade: false, withdraw: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    // Second mockFetch — /process-key returns the WIZARD_DUPLICATE envelope
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            queued: false,
+            code: "WIZARD_DUPLICATE",
+            idempotent: true,
+            verification_id: "v-existing",
+            status: "pending_review",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+
+    const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
+    const res = await POST(
+      jsonReq("/api/strategies/finalize-wizard", {
+        strategy_id: TEST_STRATEGY_ID,
+        name: "Alpha Centauri",
+        description: "A reasonable description that is at least 10 chars long.",
+        category_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.idempotent).toBe(true);
+    expect(body.strategy_id).toBe(TEST_STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+  });
+
+  it("keys/sync returns 200 (not 202) on WIZARD_DUPLICATE upstream (CT-5)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            queued: false,
+            code: "WIZARD_DUPLICATE",
+            idempotent: true,
+            verification_id: "v-existing",
+            status: "validated",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+
+    const { POST } = await import("@/app/api/keys/sync/route");
+    const res = await POST(jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }));
+
+    // Idempotent path → 200, NOT 202
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.idempotent).toBe(true);
+    expect(body.queued).toBe(false);
+    // Status preserved from upstream (was 'validated', not coerced to 'syncing')
+    expect(body.status).toBe("validated");
+  });
+
   it("strategies/csv-finalize unified path forwards X-User-Id=user.id (CT-4)", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
