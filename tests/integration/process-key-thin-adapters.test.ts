@@ -228,6 +228,36 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("okx");
   });
 
+  // CT-3 (army2) — the unified verify-strategy path must mint a public_token
+  // and persist it to strategy_verifications, then return BOTH verification_id
+  // and public_token. Without this, landing-page <VerificationForm/> throws
+  // "invalid response" when the unified-backbone flag flips on.
+  it("verify-strategy unified path mints public_token + expires_at (CT-3)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const respBody = (await res.json()) as Record<string, unknown>;
+    expect(respBody.verification_id).toBe("v-thin-adapter");
+    // 32 random bytes → 43 base64url chars (no padding).
+    expect(typeof respBody.public_token).toBe("string");
+    expect(respBody.public_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(typeof respBody.expires_at).toBe("string");
+    // 90-day window matches migration 107 M-6 policy.
+    const expiresAt = new Date(respBody.expires_at as string).getTime();
+    const ninetyDaysFromNow = Date.now() + 90 * 24 * 60 * 60 * 1000;
+    expect(Math.abs(expiresAt - ninetyDaysFromNow)).toBeLessThan(60_000);
+  });
+
   // API-2: validate-and-encrypt is locked to the legacy code path even
   // when the unified-backbone flag is on, because the unified `/process-key`
   // validate step does not return the encryption envelope the allocator
