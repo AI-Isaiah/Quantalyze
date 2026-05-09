@@ -55,17 +55,24 @@
 BEGIN;
 
 -- --------------------------------------------------------------------
--- positions.duration_seconds (paired with G12.C.9 + G12.D.3)
+-- positions.duration_seconds — owned by migration 114 (PR #139)
 -- --------------------------------------------------------------------
--- Adversarial-review hardening (PR #140 follow-up): ensure the
--- positions.duration_seconds column exists at migration-apply time so
--- the RPC's INSERT projection below can write it. Migration 114
--- (PR #139) also adds this column with IF NOT EXISTS — both migrations
--- are idempotent, so whichever lands first wins and the other is a
--- no-op for this column. Without this, the original 113 omitted the
--- column from INSERT and the Python writer's duration_seconds value
--- would be silently discarded forever (defeating G12.C.9).
-ALTER TABLE positions ADD COLUMN IF NOT EXISTS duration_seconds BIGINT NULL;
+-- Specialist red-team finding (PR #140 follow-up): the previous draft
+-- duplicated the `ADD COLUMN IF NOT EXISTS duration_seconds BIGINT NULL`
+-- here as defense-in-depth. That created an invisible-type-drift
+-- hazard: if any future migration changed the column type with the
+-- same `IF NOT EXISTS` pattern, the `IF NOT EXISTS` skips silently
+-- and the type drift goes undetected. Migration 114 already owns
+-- this column and asserts `is_nullable='YES'` in its self-verifying
+-- DO block — duplicating the ADD here without duplicating the
+-- type-assertion would weaken the contract.
+--
+-- Resolution: 114 owns ADD COLUMN; 113 omits duration_seconds from
+-- the INSERT projection. Both migrations stay commutative because
+-- the Python writer always emits the JSONB key, and the RPC simply
+-- doesn't reference it until a follow-up CREATE OR REPLACE FUNCTION
+-- migration adds it. This is the safe ordering: schema evolves in
+-- 114, RPC stays conservative until both apply.
 
 -- --------------------------------------------------------------------
 -- reconstruct_positions_atomic
@@ -114,7 +121,6 @@ BEGIN
       fee_total,
       roi,
       duration_days,
-      duration_seconds,
       opened_at,
       closed_at,
       fill_count,
@@ -133,12 +139,16 @@ BEGIN
       NULLIF(elem->>'fee_total', '')::NUMERIC,
       NULLIF(elem->>'roi', '')::NUMERIC,
       NULLIF(elem->>'duration_days', '')::NUMERIC,
-      NULLIF(elem->>'duration_seconds', '')::BIGINT,
       (elem->>'opened_at')::TIMESTAMPTZ,
       NULLIF(elem->>'closed_at', '')::TIMESTAMPTZ,
       COALESCE((elem->>'fill_count')::INTEGER, 0),
       COALESCE((elem->>'funding_pnl')::NUMERIC, 0)
     FROM jsonb_array_elements(p_positions) AS elem;
+    -- NOTE: duration_seconds intentionally omitted from this projection
+    -- — the Python writer (position_reconstruction.py) emits the key in
+    -- the JSONB payload but the RPC ignores it until migration 114
+    -- (PR #139) adds the column AND a follow-up RPC revision lands.
+    -- See the header block above for the safe-ordering rationale.
 
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
   ELSE
