@@ -108,6 +108,23 @@ def _make_mock_supabase_with_funding(
 
     mock.table = _table
     mock._captured_inserts = captured_inserts
+
+    # Audit-2026-05-07 G12.C.1/C.2: persistence flipped from
+    # ``positions.insert(rows)`` to ``supabase.rpc(
+    # 'reconstruct_positions_atomic', {'p_strategy_id', 'p_positions'})``.
+    # Mirror the captured payload back into _captured_inserts so the
+    # pre-existing assertions ("inspect what was inserted") keep working
+    # without rewriting every test below.
+    def _rpc(name, payload=None):
+        if name == "reconstruct_positions_atomic" and payload:
+            rows = payload.get("p_positions") or []
+            if rows:
+                captured_inserts.append(list(rows))
+        rpc_handle = MagicMock()
+        rpc_handle.execute.return_value = MagicMock(data=[])
+        return rpc_handle
+
+    mock.rpc = _rpc
     return mock
 
 
@@ -409,6 +426,20 @@ async def test_attribute_funding_pagination_includes_all_rows() -> None:
 
     mock.table = _table
     mock._captured_inserts = captured_inserts
+
+    # Audit-2026-05-07 G12.C.1/C.2: persistence flipped from
+    # ``positions.insert`` to ``supabase.rpc('reconstruct_positions_atomic')``.
+    # Mirror the RPC payload's ``p_positions`` array into captured_inserts.
+    def _rpc(name, payload=None):
+        if name == "reconstruct_positions_atomic" and payload:
+            rows = payload.get("p_positions") or []
+            if rows:
+                captured_inserts.append(list(rows))
+        rpc_handle = MagicMock()
+        rpc_handle.execute.return_value = MagicMock(data=[])
+        return rpc_handle
+
+    mock.rpc = _rpc
 
     # Patch _PAGE_SIZE inside _attribute_funding to 2 so 4 rows span 2 pages.
     with patch(

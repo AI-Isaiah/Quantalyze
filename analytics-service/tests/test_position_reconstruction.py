@@ -46,7 +46,13 @@ def _make_fill(
 
 def _make_mock_supabase(fills: list[dict]) -> MagicMock:
     """Create a mock supabase client that returns the given fills on
-    select and accepts DELETE + INSERT without error."""
+    select and accepts DELETE + INSERT (legacy) or the atomic
+    rebuild RPC (audit-2026-05-07 G12.C.1/C.2) without error.
+
+    Records every `supabase.rpc(name, payload)` call into
+    ``mock.rpc_calls`` (a list of (name, payload) tuples) so tests can
+    assert the new atomic-rebuild contract.
+    """
     mock = MagicMock()
 
     # trades.select().eq().eq().order().execute() → fills
@@ -61,7 +67,10 @@ def _make_mock_supabase(fills: list[dict]) -> MagicMock:
     mock_select.eq.return_value = mock_eq1
     mock_table_trades.select.return_value = mock_select
 
-    # positions.delete().eq().execute() → ok
+    # positions.delete().eq().execute() → ok (legacy path; the atomic
+    # rebuild fix removes this from the live code path, but the mock
+    # still tolerates it so any unrelated test that exercises the old
+    # contract does not blow up.)
     mock_table_positions = MagicMock()
     mock_delete = MagicMock()
     mock_delete_eq = MagicMock()
@@ -69,7 +78,7 @@ def _make_mock_supabase(fills: list[dict]) -> MagicMock:
     mock_delete.eq.return_value = mock_delete_eq
     mock_table_positions.delete.return_value = mock_delete
 
-    # positions.insert().execute() → ok
+    # positions.insert().execute() → ok (legacy path, same rationale as above)
     mock_insert = MagicMock()
     mock_insert.execute.return_value = MagicMock(data=[])
     mock_table_positions.insert.return_value = mock_insert
@@ -82,6 +91,20 @@ def _make_mock_supabase(fills: list[dict]) -> MagicMock:
         return MagicMock()
 
     mock.table = _table
+    mock.table_positions = mock_table_positions
+
+    # supabase.rpc(name, payload).execute() — capture all calls for
+    # contract assertions (G12.C.1/C.2 atomic rebuild).
+    rpc_calls: list[tuple[str, dict]] = []
+    mock.rpc_calls = rpc_calls
+
+    def _rpc(name: str, payload: dict | None = None):
+        rpc_calls.append((name, payload))
+        rpc_handle = MagicMock()
+        rpc_handle.execute.return_value = MagicMock(data=[])
+        return rpc_handle
+
+    mock.rpc = _rpc
     return mock
 
 
@@ -500,3 +523,399 @@ def test_turnover_series_multi_symbol() -> None:
     days = {p["date"]: p["turnover"] for p in series}
     # Δ_BTC × P_BTC + Δ_ETH × P_ETH = 1*100 + 5*50 = 350; nav=10000 → 0.035
     assert abs(days["2025-01-02"] - 0.035) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 G12.C.* — regression tests
+# ---------------------------------------------------------------------------
+# Each test below pins one finding in the FIX-LIST so a future regression
+# fails the suite at the expected point.
+
+
+class TestAtomicRebuildRPC:
+    """G12.C.1 / G12.C.2: persistence flips from
+    ``positions.delete().insert()`` (PostgREST, no transaction) to a
+    SECURITY DEFINER RPC `reconstruct_positions_atomic(uuid, jsonb)`
+    (migration 113) that does DELETE+INSERT atomically per-strategy
+    under an advisory xact lock."""
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_calls_atomic_rebuild_rpc_with_payload(self) -> None:
+        fills = [
+            {
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "price": 100.0,
+                "quantity": 1.0,
+                "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {},
+                "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "side": "sell",
+                "price": 110.0,
+                "quantity": 1.0,
+                "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {},
+                "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            await reconstruct_positions("strat-1", mock_supabase)
+
+        # Exactly one RPC invocation, with the expected name and payload shape.
+        assert len(mock_supabase.rpc_calls) == 1
+        name, payload = mock_supabase.rpc_calls[0]
+        assert name == "reconstruct_positions_atomic"
+        assert payload is not None
+        assert payload["p_strategy_id"] == "strat-1"
+        assert isinstance(payload["p_positions"], list)
+        assert len(payload["p_positions"]) == 1
+        # Payload row carries every column the legacy INSERT wrote.
+        row = payload["p_positions"][0]
+        for col in (
+            "strategy_id", "symbol", "side", "status",
+            "entry_price_avg", "exit_price_avg", "size_base", "size_peak",
+            "realized_pnl", "fee_total", "roi", "duration_days",
+            "opened_at", "closed_at", "fill_count", "funding_pnl",
+        ):
+            assert col in row, f"missing column {col} in atomic-rebuild payload"
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_does_not_use_legacy_delete_path(self) -> None:
+        """Audit G12.C.1: the legacy ``positions.delete()`` PostgREST
+        path is NOT called. All persistence must flow through the RPC."""
+        fills = [
+            {
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "price": 100.0,
+                "quantity": 1.0,
+                "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {},
+                "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT",
+                "side": "sell",
+                "price": 110.0,
+                "quantity": 1.0,
+                "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {},
+                "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            await reconstruct_positions("strat-1", mock_supabase)
+
+        # Old path: supabase.table('positions').delete() — must not be called.
+        assert not mock_supabase.table_positions.delete.called, (
+            "regression: legacy positions.delete() PostgREST path was invoked; "
+            "atomic-rebuild RPC must own DELETE+INSERT (G12.C.1)"
+        )
+        # And no direct positions.insert() either.
+        assert not mock_supabase.table_positions.insert.called, (
+            "regression: legacy positions.insert() PostgREST path was invoked"
+        )
+
+
+class TestFlipFillFeeProration:
+    """G12.C.3: a closing fill that overshoots and flips direction must
+    prorate the fill's fee between the closed leg and the new opening
+    leg by ``size_used / qty``. The previous code reset
+    ``total_fees=0.0`` after recording the closed position, so the new
+    leg started with fee_total=0 even though its opening fill paid a fee.
+    """
+
+    def test_flip_fill_fee_split_preserves_total(self) -> None:
+        """fees(closed) + total_fees(seed of new leg) == fee on the
+        flip-fill (prior fees cleanly attributed to the closed leg)."""
+        # Open long 1 unit @100, then sell 2 units @110 (closes long,
+        # opens short of 1 unit). The sell fee is 1.0 — half should
+        # close the long (1/2 ratio), half should seed the short.
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0, fee=0.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=2.0, fee=1.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        # Two positions: closed long, then open short.
+        assert len(positions) == 2
+        closed = next(p for p in positions if p["status"] == "closed")
+        opened = next(p for p in positions if p["status"] == "open")
+
+        # G12.C.3: closing-fill fee (1.0) is split 50/50 because the
+        # 2-unit sell closed 1 unit of long and opened 1 unit of short.
+        assert abs(closed["fee_total"] - 0.5) < 1e-9, (
+            f"expected closed fee 0.5, got {closed['fee_total']}"
+        )
+        assert abs(opened["fee_total"] - 0.5) < 1e-9, (
+            f"expected opened-leg seed fee 0.5, got {opened['fee_total']}"
+        )
+        # And the total across both legs equals the original fee on the fill.
+        assert abs(closed["fee_total"] + opened["fee_total"] - 1.0) < 1e-9
+
+
+class TestPosSideAdversarialInjection:
+    """G12.C.4: posSide from raw_data is treated as a HINT only — when
+    it disagrees with the side-derived direction we PREFER side and
+    flag the mismatch. Previously a hostile exchange response could
+    flip the published position direction unconditionally."""
+
+    def test_pos_side_conflicts_with_side_prefers_side_and_flags(self) -> None:
+        # A 'buy' fill with posSide='short' — pre-fix this opened a
+        # short. Post-fix it opens a long and flags the mismatch.
+        fills = [
+            _make_fill(
+                side="buy", price=100.0, quantity=1.0,
+                timestamp="2024-01-01T00:00:00+00:00",
+                raw_data={"posSide": "short"},
+            ),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        pos = positions[0]
+        assert pos["side"] == "long", (
+            "side-derived direction must win over hostile posSide"
+        )
+        assert pos.get("data_quality_flags", {}).get("posSide_side_mismatch") is True
+
+    def test_pos_side_garbage_value_is_ignored(self) -> None:
+        """G12.C.4: posSide values outside the whitelist are dropped to
+        empty so they cannot influence direction at all."""
+        fills = [
+            _make_fill(
+                side="buy", price=100.0, quantity=1.0,
+                timestamp="2024-01-01T00:00:00+00:00",
+                raw_data={"posSide": "<script>"},
+            ),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        # No mismatch flag — posSide was sanitized BEFORE direction
+        # determination, so there is no conflict to report.
+        assert positions[0]["side"] == "long"
+        flags = positions[0].get("data_quality_flags", {}) or {}
+        assert flags.get("posSide_side_mismatch") is not True
+
+
+class TestExitVWAPAcrossClosingFills:
+    """G12.C.5: exit_avg must be VWAP across ALL closing fills, not the
+    last fill's price. Multi-leg exits (sell 0.3 @99, sell 0.3 @101,
+    sell 0.4 @103) must roll up to ~101.2."""
+
+    def test_multi_fill_exit_uses_vwap(self) -> None:
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0, fee=0.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=99.0, quantity=0.3, fee=0.0,
+                       timestamp="2024-01-02T00:00:00+00:00"),
+            _make_fill(side="sell", price=101.0, quantity=0.3, fee=0.0,
+                       timestamp="2024-01-03T00:00:00+00:00"),
+            _make_fill(side="sell", price=103.0, quantity=0.4, fee=0.0,
+                       timestamp="2024-01-04T00:00:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        pos = positions[0]
+        # VWAP = (99*0.3 + 101*0.3 + 103*0.4) / 1.0 = 29.7 + 30.3 + 41.2 = 101.2
+        assert abs(pos["exit_price_avg"] - 101.2) < 1e-6, (
+            f"expected VWAP 101.2, got {pos['exit_price_avg']}"
+        )
+        # And realized_pnl uses VWAP, not last-fill price (103).
+        # entry=100, exit_vwap=101.2, qty=1 → realized_pnl=1.2
+        assert abs(pos["realized_pnl"] - 1.2) < 1e-6
+
+
+class TestSymbolAndExchangeBucketing:
+    """G12.C.6: bucket fills by (symbol, exchange) and DROP fills with
+    no symbol (don't bucket under 'UNKNOWN')."""
+
+    @pytest.mark.asyncio
+    async def test_separate_lifecycles_for_same_symbol_different_exchange(self) -> None:
+        """A Binance BTCUSDT trade and an OKX BTCUSDT-SWAP trade must
+        produce two independent FIFO lifecycles (or here: two separate
+        opens), not be merged into one bucket."""
+        fills = [
+            {
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT-SWAP", "exchange": "okx", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:01+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            await reconstruct_positions("strat-1", mock_supabase)
+
+        # Two separate (open) positions in the persisted payload,
+        # one per (symbol, exchange) bucket — proves we did NOT merge.
+        assert len(mock_supabase.rpc_calls) == 1
+        _, payload = mock_supabase.rpc_calls[0]
+        rows = payload["p_positions"]
+        assert len(rows) == 2, (
+            f"expected 2 separate position lifecycles (one per "
+            f"(symbol, exchange)), got {len(rows)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_symbol_less_fills_dropped_and_flagged(self) -> None:
+        """Fills with no `symbol` key are dropped from FIFO matching and
+        a `fills_dropped_no_symbol` counter is exposed in the result's
+        data_quality_flags so analytics_runner can persist it."""
+        fills = [
+            {
+                "symbol": "", "exchange": "binance", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {"hint": "instId=missing"}, "is_fill": True,
+            },
+            {
+                "symbol": None, "exchange": "binance", "side": "sell",
+                "price": 110.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("fills_dropped_no_symbol") == 2, (
+            f"expected 2 dropped fills, got flags={flags}"
+        )
+        # Atomic rebuild was still called (idempotent — empty positions
+        # rebuild just wipes any stale rows).
+        assert len(mock_supabase.rpc_calls) == 1
+        assert mock_supabase.rpc_calls[0][1]["p_positions"] == []
+
+
+class TestExposureSharedApiKeyGuard:
+    """G12.C.7: when two strategies share an api_key_id, position_snapshots
+    contains account-level (not strategy-level) exposure. Computing
+    exposure_metrics in that case mixes the strategies. The guard
+    refuses to compute and surfaces a flag."""
+
+    @pytest.mark.asyncio
+    async def test_shared_api_key_skips_exposure_with_flag(self) -> None:
+        # Build a mock that:
+        #   strategies.select('api_key_id').eq('id', X).limit(1).execute()
+        #     -> [{'api_key_id': 'shared-key'}]
+        #   strategies.select('id').eq('api_key_id', 'shared-key').execute()
+        #     -> [{'id': 'A'}, {'id': 'B'}]   ← shared
+        mock = MagicMock()
+
+        # First call (api_key_id lookup): chain ends in .limit(1).execute()
+        first_chain_execute = MagicMock(return_value=MagicMock(
+            data=[{"api_key_id": "shared-key"}]
+        ))
+        # Second call (sibling lookup): chain ends in .eq().execute()
+        second_chain_execute = MagicMock(return_value=MagicMock(
+            data=[{"id": "A"}, {"id": "B"}]
+        ))
+
+        # Build a shared select() handle whose .eq() can return either
+        # branch depending on whether .limit() is then called.
+        select_handle = MagicMock()
+        eq_handle = MagicMock()
+        # .limit(1).execute() goes to first_chain_execute
+        limit_handle = MagicMock()
+        limit_handle.execute = first_chain_execute
+        eq_handle.limit.return_value = limit_handle
+        # .execute() (no .limit) goes to second_chain_execute
+        eq_handle.execute = second_chain_execute
+        select_handle.eq.return_value = eq_handle
+
+        strategies_table = MagicMock()
+        strategies_table.select.return_value = select_handle
+
+        def _table(name: str):
+            if name == "strategies":
+                return strategies_table
+            return MagicMock()
+
+        mock.table = _table
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            result = await compute_exposure_metrics("strat-A", mock)
+
+        # When shared, computation is REFUSED — only the flag is returned.
+        assert "mean_gross_exposure" not in result
+        assert (
+            result.get("data_quality_flags", {}).get(
+                "exposure_metrics_skipped_shared_api_key"
+            ) is True
+        )
+
+
+class TestDurationSecondsWritten:
+    """G12.C.9 (paired with D.3): position duration_seconds is written
+    alongside duration_days. A 23h59m position has duration_days=0
+    (legacy INTEGER column) but duration_seconds=86340 — preserves
+    sub-day granularity for downstream consumers."""
+
+    def test_duration_seconds_for_sub_day_hold(self) -> None:
+        # 23h59m hold (86340 seconds, 0 calendar days when truncated)
+        fills = [
+            _make_fill(side="buy", price=100.0, quantity=1.0,
+                       timestamp="2024-01-01T00:00:00+00:00"),
+            _make_fill(side="sell", price=110.0, quantity=1.0,
+                       timestamp="2024-01-01T23:59:00+00:00"),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-1")
+        assert len(positions) == 1
+        pos = positions[0]
+        # int-truncated days: floor(86340/86400) == 0
+        assert int(pos["duration_days"]) == 0
+        # but sub-day-aware seconds preserved
+        assert pos["duration_seconds"] == 86340
+
+    @pytest.mark.asyncio
+    async def test_duration_seconds_in_atomic_rebuild_payload(self) -> None:
+        """Persistence path also includes duration_seconds (column added
+        by migration 114; the JSONB→column projection in the 113 RPC
+        ignores keys not in its column list, so it's safe to write
+        before 114 lands)."""
+        fills = [
+            {
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "sell",
+                "price": 110.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T23:59:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            await reconstruct_positions("strat-1", mock_supabase)
+        rows = mock_supabase.rpc_calls[0][1]["p_positions"]
+        assert len(rows) == 1
+        assert rows[0]["duration_seconds"] == 86340
+        # And data_quality_flags is NOT in the DB payload (transient key
+        # is stripped before sending to the RPC, since positions table
+        # has no such column).
+        assert "data_quality_flags" not in rows[0]
