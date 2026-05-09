@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 import {
@@ -6,6 +6,7 @@ import {
   resolveBenchmarkCorrelation,
 } from "./CorrelationWithBenchmark";
 import type { StrategyAnalytics } from "@/lib/types";
+import { CORRELATION_90D_MIN_DAYS } from "@/lib/min-history";
 
 // ---------------------------------------------------------------------------
 // Recharts ResponsiveContainer requires a measured parent to render in
@@ -27,43 +28,20 @@ vi.mock("recharts", async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a minimal StrategyAnalytics-shaped object that has exactly the two
- * fields resolveBenchmarkCorrelation reads. The `as StrategyAnalytics` cast
- * is acceptable because the resolver takes a Pick<…> slice.
+ * Build a minimal StrategyAnalytics-shaped object that has exactly the
+ * fields resolveBenchmarkCorrelation reads. The cast is acceptable because
+ * the resolver takes a Pick<…>+Partial slice.
  */
 function buildAnalytics(opts: {
   returns_series?: { date: string; value: number }[] | null;
   metrics_json?: Record<string, unknown> | null;
+  computation_status?: StrategyAnalytics["computation_status"];
 }): StrategyAnalytics {
   return {
     returns_series: opts.returns_series ?? null,
     metrics_json: opts.metrics_json ?? null,
-    // The rest of StrategyAnalytics is unused by the resolver but must
-    // be cast-compatible.
+    computation_status: opts.computation_status ?? "complete",
   } as unknown as StrategyAnalytics;
-}
-
-/**
- * Build a cumulative-returns series from daily simple returns. Seeds at
- * value 1.0 like `(1+r).cumprod()`. The returned array is ONE point longer
- * than `dailyReturns` because the seed is included.
- */
-function cumulativeFromDaily(
-  startDate: string,
-  dailyReturns: number[],
-): { date: string; value: number }[] {
-  const out: { date: string; value: number }[] = [];
-  const base = new Date(`${startDate}T00:00:00Z`);
-  let cum = 1;
-  // Seed row (i=0) corresponds to startDate with cum = 1.0.
-  out.push({ date: startDate, value: cum });
-  for (let i = 0; i < dailyReturns.length; i++) {
-    cum *= 1 + dailyReturns[i];
-    const d = new Date(base);
-    d.setUTCDate(d.getUTCDate() + i + 1);
-    out.push({ date: d.toISOString().slice(0, 10), value: cum });
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,13 +49,22 @@ function cumulativeFromDaily(
 // ---------------------------------------------------------------------------
 
 describe("resolveBenchmarkCorrelation", () => {
-  it("uses server-side btc_rolling_correlation_90d when present", () => {
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("returns kind:'ok' with the server-side btc_rolling_correlation_90d when present", () => {
     const serverSeries = [
       { date: "2024-04-01", value: 0.12 },
       { date: "2024-04-02", value: 0.18 },
       { date: "2024-04-03", value: 0.22 },
     ];
-    const { series, message } = resolveBenchmarkCorrelation(
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
         returns_series: [{ date: "2024-04-01", value: 1.0 }],
         metrics_json: {
@@ -86,204 +73,175 @@ describe("resolveBenchmarkCorrelation", () => {
         },
       }),
     );
-    expect(message).toBeNull();
-    // Returns the exact server array when shape is valid.
-    expect(series).toEqual(serverSeries);
+    expect(resolved.kind).toBe("ok");
+    if (resolved.kind === "ok") {
+      // Returns the exact server array when shape is valid.
+      expect(resolved.series).toEqual(serverSeries);
+    }
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("returns 'Benchmark data unavailable.' when there is no benchmark", () => {
-    const { series, message } = resolveBenchmarkCorrelation(
+  it("returns kind:'unavailable' when precomputed is absent and status is not 'computing'", () => {
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
         returns_series: [
           { date: "2024-01-01", value: 1.0 },
           { date: "2024-01-02", value: 1.01 },
         ],
         metrics_json: { something_else: 1 },
+        computation_status: "complete",
       }),
     );
-    expect(series).toEqual([]);
-    expect(message).toBe("Benchmark data unavailable.");
+    expect(resolved.kind).toBe("unavailable");
+    if (resolved.kind === "unavailable") {
+      expect(resolved.message).toMatch(/unavailable/i);
+    }
   });
 
-  it("returns 'Benchmark data unavailable.' when metrics_json is null", () => {
-    const { series, message } = resolveBenchmarkCorrelation(
+  it("returns kind:'unavailable' when metrics_json is null", () => {
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
         returns_series: [{ date: "2024-01-01", value: 1.0 }],
         metrics_json: null,
+        computation_status: "complete",
       }),
     );
-    expect(series).toEqual([]);
-    expect(message).toBe("Benchmark data unavailable.");
+    expect(resolved.kind).toBe("unavailable");
   });
 
-  it("returns '0 days so far' when returns_series is empty but benchmark present", () => {
-    const { series, message } = resolveBenchmarkCorrelation(
+  it("returns kind:'computing' with friendly copy when precomputed is absent and status is 'computing'", () => {
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
-        returns_series: [],
-        metrics_json: {
-          benchmark_returns: [
-            { date: "2024-01-01", value: 1.0 },
-            { date: "2024-01-02", value: 1.02 },
-          ],
-        },
+        returns_series: [{ date: "2024-01-01", value: 1.0 }],
+        metrics_json: { something_else: 1 },
+        computation_status: "computing",
       }),
     );
-    expect(series).toEqual([]);
-    expect(message).toBe(
-      "Insufficient data — 90 days needed, 0 days so far.",
-    );
-  });
-
-  it("returns a '{N} days so far' message when aligned daily returns < 90", () => {
-    // 30 matching dates of daily returns — strategy cumulative has 31 points
-    // (seed + 30 steps), daily map has 30 entries after cumulative -> daily.
-    const dailyStrat = Array.from({ length: 30 }, (_, i) =>
-      Math.sin(i * 0.3) * 0.01,
-    );
-    const dailyBench = Array.from({ length: 30 }, (_, i) =>
-      Math.cos(i * 0.3) * 0.01,
-    );
-    const { series, message } = resolveBenchmarkCorrelation(
-      buildAnalytics({
-        returns_series: cumulativeFromDaily("2024-01-01", dailyStrat),
-        metrics_json: {
-          benchmark_returns: cumulativeFromDaily("2024-01-01", dailyBench),
-        },
-      }),
-    );
-    expect(series).toEqual([]);
-    expect(message).toBe(
-      "Insufficient data — 90 days needed, 30 days so far.",
-    );
-  });
-
-  it("falls back to client-side computation when server series is absent and aligned count >= 90", () => {
-    // 120 daily-return pairs → 31 rolling-90 windows.
-    const N = 120;
-    const dailyStrat = Array.from({ length: N }, (_, i) => Math.sin(i * 0.2) * 0.01);
-    const dailyBench = Array.from({ length: N }, (_, i) =>
-      Math.sin(i * 0.2) * 0.01 + Math.cos(i * 0.1) * 0.005,
-    );
-    const { series, message } = resolveBenchmarkCorrelation(
-      buildAnalytics({
-        returns_series: cumulativeFromDaily("2024-01-01", dailyStrat),
-        metrics_json: {
-          benchmark_returns: cumulativeFromDaily("2024-01-01", dailyBench),
-        },
-      }),
-    );
-    expect(message).toBeNull();
-    // N pairs - 90 window + 1 = 31 output points.
-    expect(series.length).toBe(N - 90 + 1);
-    for (const p of series) {
-      expect(typeof p.date).toBe("string");
-      expect(Number.isFinite(p.value)).toBe(true);
-      // Correlation is always in [-1, 1].
-      expect(p.value).toBeGreaterThanOrEqual(-1);
-      expect(p.value).toBeLessThanOrEqual(1);
+    expect(resolved.kind).toBe("computing");
+    if (resolved.kind === "computing") {
+      expect(resolved.message).toBe("Computing correlation…");
     }
   });
 
-  it("converts cumulative -> daily before correlating (not the cumulative curves themselves)", () => {
-    // Build two series where the CUMULATIVE curves are both monotonically
-    // increasing and therefore trivially ~1 Pearson-correlated, but the
-    // DAILY returns are uncorrelated (one alternates +/-, the other is
-    // near-constant small positive).
-    //
-    // If the resolver incorrectly correlates cumulative curves, the rolling
-    // correlation will be ~1. The correct behavior is a correlation near 0.
-    const N = 100;
-    const dailyStrat = Array.from({ length: N }, (_, i) =>
-      // Alternating sign — zero mean, high variance
-      (i % 2 === 0 ? 0.02 : -0.018),
-    );
-    const dailyBench = Array.from({ length: N }, () =>
-      // Constant tiny positive drift
-      0.0005,
-    );
-    // Note: dailyBench has zero variance → pearson() returns 0 by
-    // construction. That's perfect for this test: cumulative curves are
-    // both monotone (correlation ~1 if used wrong), but daily-return
-    // correlation collapses to 0.
-    const { series, message } = resolveBenchmarkCorrelation(
+  it("returns kind:'computing' when metrics_json is null and status is 'computing'", () => {
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
-        returns_series: cumulativeFromDaily("2024-01-01", dailyStrat),
-        metrics_json: {
-          benchmark_returns: cumulativeFromDaily("2024-01-01", dailyBench),
-        },
+        returns_series: null,
+        metrics_json: null,
+        computation_status: "computing",
       }),
     );
-    expect(message).toBeNull();
-    expect(series.length).toBeGreaterThan(0);
-    // If the resolver had correlated cumulative curves (bug), every value
-    // would be ~1. Because benchmark daily variance is 0, pearson() returns
-    // exactly 0, so every value must be 0 under correct behavior.
-    for (const p of series) {
-      expect(p.value).toBe(0);
+    expect(resolved.kind).toBe("computing");
+  });
+
+  it("returns kind:'insufficient' with min-history copy when precomputed is empty array", () => {
+    // Server explicitly returned [] meaning "history below 250-day floor".
+    // Strategy returns_series has 50 cumulative points → 49 daily samples.
+    const stratSeries = Array.from({ length: 50 }, (_, i) => ({
+      date: `2024-01-${String(i + 1).padStart(2, "0")}`,
+      value: 1 + i * 0.001,
+    }));
+    const resolved = resolveBenchmarkCorrelation(
+      buildAnalytics({
+        returns_series: stratSeries,
+        metrics_json: { btc_rolling_correlation_90d: [] },
+      }),
+    );
+    expect(resolved.kind).toBe("insufficient");
+    if (resolved.kind === "insufficient") {
+      expect(resolved.message).toContain("90-day BTC correlation");
+      expect(resolved.message).toContain(String(CORRELATION_90D_MIN_DAYS));
+      expect(resolved.message).toContain("49"); // length-1 daily samples
     }
   });
 
-  it("intersects by date when strategy and benchmark have different coverage", () => {
-    // Strategy has 100 daily returns starting 2024-01-01.
-    // Benchmark has the same 100 daily returns plus 30 more at the front
-    // (so only 100 dates overlap after the intersection).
-    const dailyStrat = Array.from({ length: 100 }, (_, i) => 0.001 + i * 0.0001);
-    const dailyBench = Array.from({ length: 130 }, (_, i) => 0.001 + i * 0.0001);
-    const analytics = buildAnalytics({
-      returns_series: cumulativeFromDaily("2024-02-01", dailyStrat),
-      metrics_json: {
-        // Benchmark starts 30 days earlier
-        benchmark_returns: cumulativeFromDaily("2024-01-02", dailyBench),
-      },
-    });
-    const { series, message } = resolveBenchmarkCorrelation(analytics);
-    expect(message).toBeNull();
-    // 100 daily pairs intersect, yielding 100 - 90 + 1 = 11 windows.
-    expect(series.length).toBe(11);
+  it("falls back to a generic insufficient message when returns_series is null", () => {
+    const resolved = resolveBenchmarkCorrelation(
+      buildAnalytics({
+        returns_series: null,
+        metrics_json: { btc_rolling_correlation_90d: [] },
+      }),
+    );
+    expect(resolved.kind).toBe("insufficient");
+    if (resolved.kind === "insufficient") {
+      expect(resolved.message).toContain("90-day BTC correlation");
+      expect(resolved.message).toContain(String(CORRELATION_90D_MIN_DAYS));
+    }
   });
 
-  it("falls through to client-side when server series has malformed entries", () => {
-    // Server field present but entries fail the shape validator — resolver
-    // should fall through rather than return a bogus series.
-    const N = 120;
-    const dailyStrat = Array.from({ length: N }, (_, i) => Math.sin(i * 0.2) * 0.01);
-    const dailyBench = Array.from({ length: N }, (_, i) =>
-      Math.sin(i * 0.2) * 0.01 + Math.cos(i * 0.1) * 0.005,
-    );
-    const { series, message } = resolveBenchmarkCorrelation(
+  // -------------------------------------------------------------------------
+  // P67: previously this test asserted a silent client-side fallback when
+  // the server payload was malformed. The audit (G11.A P64 + P67) replaced
+  // that fallthrough with explicit logging + an `unavailable` outcome —
+  // recomputing on the client diverges from the server pipeline.
+  //
+  // OLD assertion: `expect(message).toBeNull()` + a 31-point client series.
+  // NEW assertion: console.error called + kind === 'unavailable'.
+  // -------------------------------------------------------------------------
+  it("logs and returns kind:'unavailable' when server series has malformed entries (was: silent client fallback)", () => {
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
-        returns_series: cumulativeFromDaily("2024-01-01", dailyStrat),
+        returns_series: [{ date: "2024-01-01", value: 1.0 }],
         metrics_json: {
-          // Malformed: wrong types for value.
+          // Malformed: wrong types for value and date.
           btc_rolling_correlation_90d: [
             { date: "2024-04-01", value: "not-a-number" },
             { date: 123, value: 0.1 },
           ],
-          benchmark_returns: cumulativeFromDaily("2024-01-01", dailyBench),
         },
       }),
     );
-    expect(message).toBeNull();
-    expect(series.length).toBe(N - 90 + 1);
+    expect(resolved.kind).toBe("unavailable");
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    const message = consoleErrorSpy.mock.calls[0]?.[0] as string;
+    expect(message).toContain("[CorrelationWithBenchmark]");
+    expect(message).toContain("btc_rolling_correlation_90d malformed");
   });
 
-  it("falls through to client-side when server series is an empty array", () => {
-    const N = 120;
-    const dailyStrat = Array.from({ length: N }, (_, i) => Math.sin(i * 0.2) * 0.01);
-    const dailyBench = Array.from({ length: N }, (_, i) =>
-      Math.sin(i * 0.2) * 0.01 + Math.cos(i * 0.1) * 0.005,
-    );
-    const { series, message } = resolveBenchmarkCorrelation(
+  it("logs and returns kind:'unavailable' when precomputed is a non-array primitive", () => {
+    const resolved = resolveBenchmarkCorrelation(
       buildAnalytics({
-        returns_series: cumulativeFromDaily("2024-01-01", dailyStrat),
+        returns_series: [{ date: "2024-01-01", value: 1.0 }],
         metrics_json: {
-          btc_rolling_correlation_90d: [], // empty → fall through
-          benchmark_returns: cumulativeFromDaily("2024-01-01", dailyBench),
+          btc_rolling_correlation_90d: "broken",
         },
       }),
     );
-    expect(message).toBeNull();
-    expect(series.length).toBe(N - 90 + 1);
+    expect(resolved.kind).toBe("unavailable");
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    const message = consoleErrorSpy.mock.calls[0]?.[0] as string;
+    // For non-arrays we log `typeof` rather than a JSON sample.
+    expect(message).toContain("string");
+  });
+
+  // -------------------------------------------------------------------------
+  // P64: previously this test asserted the resolver fell through to a
+  // client-side recompute when the server returned []. The new contract
+  // treats empty server output as the authoritative "history below
+  // institutional-grade threshold" signal and surfaces the friendly
+  // min-history message — no client fallback.
+  //
+  // OLD assertion: `expect(message).toBeNull()` + a 31-point client series.
+  // NEW assertion: kind === 'insufficient' with a min-history message.
+  // -------------------------------------------------------------------------
+  it("returns kind:'insufficient' (NOT a client fallback) when server series is an empty array (was: silent client fallback)", () => {
+    const N = 120;
+    const stratSeries = Array.from({ length: N }, (_, i) => ({
+      date: `2024-01-${String((i % 28) + 1).padStart(2, "0")}`,
+      value: 1 + i * 0.001,
+    }));
+    const resolved = resolveBenchmarkCorrelation(
+      buildAnalytics({
+        returns_series: stratSeries,
+        metrics_json: {
+          btc_rolling_correlation_90d: [], // empty → insufficient
+        },
+      }),
+    );
+    expect(resolved.kind).toBe("insufficient");
+    if (resolved.kind === "insufficient") {
+      expect(resolved.message).toContain("90-day BTC correlation");
+    }
   });
 });
 
@@ -292,36 +250,83 @@ describe("resolveBenchmarkCorrelation", () => {
 // ---------------------------------------------------------------------------
 
 describe("<CorrelationWithBenchmark />", () => {
-  it("renders the empty-state message when benchmark is missing", () => {
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("renders the unavailable message when benchmark is missing and status is complete", () => {
     render(
       <CorrelationWithBenchmark
         analytics={buildAnalytics({
           returns_series: [{ date: "2024-01-01", value: 1.0 }],
           metrics_json: null,
+          computation_status: "complete",
         })}
       />,
     );
-    expect(screen.getByText("Benchmark data unavailable.")).toBeInTheDocument();
+    expect(screen.getByText(/unavailable/i)).toBeInTheDocument();
   });
 
-  it("renders the insufficient-data message when aligned count < 90", () => {
-    const daily = Array.from({ length: 10 }, () => 0.01);
+  it("renders 'Computing correlation…' when status is 'computing' and precomputed is absent", () => {
     render(
       <CorrelationWithBenchmark
         analytics={buildAnalytics({
-          returns_series: cumulativeFromDaily("2024-01-01", daily),
-          metrics_json: {
-            benchmark_returns: cumulativeFromDaily("2024-01-01", daily),
-          },
+          returns_series: [{ date: "2024-01-01", value: 1.0 }],
+          metrics_json: null,
+          computation_status: "computing",
         })}
       />,
     );
+    expect(screen.getByText("Computing correlation…")).toBeInTheDocument();
+  });
+
+  it("renders the institutional-grade insufficient-history message when server returned []", () => {
+    render(
+      <CorrelationWithBenchmark
+        analytics={buildAnalytics({
+          returns_series: Array.from({ length: 11 }, (_, i) => ({
+            date: `2024-01-${String(i + 1).padStart(2, "0")}`,
+            value: 1 + i * 0.001,
+          })),
+          metrics_json: { btc_rolling_correlation_90d: [] },
+        })}
+      />,
+    );
+    // 11 cumulative points → 10 daily samples; 250 = CORRELATION_90D_MIN_DAYS.
     expect(
-      screen.getByText("Insufficient data — 90 days needed, 10 days so far."),
+      screen.getByText(
+        /Insufficient history for institutional-grade 90-day BTC correlation \(have 10 days, need 250\)\./,
+      ),
     ).toBeInTheDocument();
   });
 
-  it("renders the chart (not an empty-state) when server-side series is present", () => {
+  it("logs an error and renders the unavailable message when precomputed is malformed", () => {
+    render(
+      <CorrelationWithBenchmark
+        analytics={buildAnalytics({
+          returns_series: [{ date: "2024-01-01", value: 1.0 }],
+          metrics_json: {
+            btc_rolling_correlation_90d: [
+              { date: "2024-04-01", value: "not-a-number" },
+            ],
+          },
+          computation_status: "complete",
+        })}
+      />,
+    );
+    expect(screen.getByText(/unavailable/i)).toBeInTheDocument();
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    const msg = consoleErrorSpy.mock.calls[0]?.[0] as string;
+    expect(msg).toContain("[CorrelationWithBenchmark]");
+    expect(msg).toContain("malformed");
+  });
+
+  it("renders the chart (NOT an empty-state) when server-side series is present and well-formed", () => {
     const serverSeries = Array.from({ length: 10 }, (_, i) => ({
       date: `2024-04-${String(i + 1).padStart(2, "0")}`,
       value: 0.1 + i * 0.02,
@@ -336,10 +341,11 @@ describe("<CorrelationWithBenchmark />", () => {
     );
     // Something rendered (the mocked ResponsiveContainer + Recharts tree).
     // Recharts may or may not paint an SVG in jsdom depending on
-    // measurement — the load-bearing assertion is that we're NOT in the
+    // measurement — the load-bearing assertion is that we're NOT in any
     // empty-state branch.
     expect(container.firstChild).toBeTruthy();
-    expect(screen.queryByText(/Benchmark data unavailable/)).toBeNull();
-    expect(screen.queryByText(/Insufficient data/)).toBeNull();
+    expect(screen.queryByText(/unavailable/i)).toBeNull();
+    expect(screen.queryByText(/Insufficient history/i)).toBeNull();
+    expect(screen.queryByText(/Computing correlation/i)).toBeNull();
   });
 });

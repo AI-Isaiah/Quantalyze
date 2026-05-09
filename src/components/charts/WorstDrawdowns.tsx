@@ -2,6 +2,10 @@
 
 import { useMemo } from "react";
 import { segmentDrawdowns, type DrawdownEpisode } from "@/lib/drawdown-math";
+import {
+  WORST_DRAWDOWNS_MIN_DAYS,
+  insufficientHistoryMessage,
+} from "@/lib/min-history";
 import type { StrategyAnalytics, TimeSeriesPoint } from "@/lib/types";
 import { formatPercent } from "@/lib/utils";
 
@@ -33,17 +37,6 @@ function isServerEpisode(value: unknown): value is ServerEpisode {
   );
 }
 
-function normalizeServerEpisode(e: ServerEpisode): DrawdownEpisode {
-  return {
-    peakDate: e.peak_date,
-    troughDate: e.trough_date,
-    recoveryDate: e.recovery_date,
-    depthPct: e.depth_pct,
-    durationDays: e.duration_days,
-    isCurrent: e.is_current,
-  };
-}
-
 // Mirrors the `segmentDrawdowns` default so server-sourced and
 // client-sourced lists apply the same floor.
 const MIN_DEPTH_PCT = 0.005;
@@ -52,14 +45,35 @@ function normalize(analytics: StrategyAnalytics): DrawdownEpisode[] {
   const raw = (analytics.metrics_json ?? {}) as Record<string, unknown>;
   const serverRaw = raw.drawdown_episodes;
   if (Array.isArray(serverRaw) && serverRaw.length > 0) {
-    const validated = serverRaw
-      .filter(isServerEpisode)
-      .filter((e) => Math.abs(e.depth_pct) >= MIN_DEPTH_PCT);
-    if (validated.length > 0) {
-      return validated.slice(0, 5).map(normalizeServerEpisode);
+    // Shape validation FIRST so we can distinguish "all entries malformed"
+    // (a silent-failure cluster bug worth logging) from "well-formed but
+    // below the 0.5% floor" (intentional filtering, no log).
+    const shapeValid = serverRaw.filter(isServerEpisode);
+    if (shapeValid.length === 0) {
+      // P65: surface the malformation instead of silently falling through.
+      // eslint-disable-next-line no-console
+      console.error(
+        "[WorstDrawdowns] server drawdown_episodes malformed — every entry failed shape validation. Sample:",
+        JSON.stringify(serverRaw[0]),
+      );
+    } else {
+      const validated = shapeValid.filter(
+        (e) => Math.abs(e.depth_pct) >= MIN_DEPTH_PCT,
+      );
+      if (validated.length > 0) {
+        return validated.slice(0, 5).map((e) => ({
+          peakDate: e.peak_date,
+          troughDate: e.trough_date,
+          recoveryDate: e.recovery_date,
+          depthPct: e.depth_pct,
+          durationDays: e.duration_days,
+          isCurrent: e.is_current,
+        }));
+      }
+      // All well-formed entries below the depth floor — fall through to
+      // client-side segmentation (which applies the same floor) without
+      // logging; this is intentional filtering, not malformation.
     }
-    // All server entries malformed or below threshold — fall through so a
-    // freshly-computed strategy with legit client-side data still renders.
   }
 
   const series = (analytics.drawdown_series ?? []) as TimeSeriesPoint[];
@@ -72,7 +86,7 @@ function buildAriaLabel(episode: DrawdownEpisode, index: number): string {
   if (episode.isCurrent) {
     return `${base}, ongoing after ${episode.durationDays} days`;
   }
-  return `${base}, recovered ${episode.recoveryDate ?? ""} (${episode.durationDays} days)`;
+  return `${base}, recovered ${episode.recoveryDate ?? "—"} (${episode.durationDays} days)`;
 }
 
 const HEADER_CELL =
@@ -85,6 +99,23 @@ const CELL_DAYS = `${CELL_BASE} text-xs font-metric tabular-nums text-text-muted
 
 export function WorstDrawdowns({ analytics }: { analytics: StrategyAnalytics }) {
   const episodes = useMemo(() => normalize(analytics), [analytics]);
+
+  // P69: top-5 drawdowns are statistically meaningless on thin history.
+  // Use the length of `drawdown_series` as the inferable history measure
+  // (one point per day in the analytics worker output). The gate runs
+  // AFTER `normalize()` so malformed-server logging (P65) still fires.
+  const historyDays = analytics.drawdown_series?.length ?? 0;
+  if (historyDays < WORST_DRAWDOWNS_MIN_DAYS) {
+    return (
+      <div className="text-sm text-text-muted p-6 text-center">
+        {insufficientHistoryMessage(
+          "top-5 drawdowns",
+          WORST_DRAWDOWNS_MIN_DAYS,
+          historyDays,
+        )}
+      </div>
+    );
+  }
 
   if (episodes.length === 0) {
     return (
@@ -116,7 +147,7 @@ export function WorstDrawdowns({ analytics }: { analytics: StrategyAnalytics }) 
               <td className={CELL_DATE}>{ep.peakDate}</td>
               <td className={CELL_DATE}>{ep.troughDate}</td>
               <td className={ep.isCurrent ? CELL_ONGOING : CELL_DATE}>
-                {ep.isCurrent ? "ongoing" : ep.recoveryDate}
+                {ep.isCurrent ? "ongoing" : (ep.recoveryDate ?? "—")}
               </td>
               <td className={CELL_DEPTH}>{formatPercent(ep.depthPct)}</td>
               <td className={CELL_DAYS}>

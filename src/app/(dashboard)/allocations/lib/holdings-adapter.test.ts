@@ -52,6 +52,12 @@ function makeStrategy(partial: Partial<AdapterStrategy> = {}): AdapterStrategy {
     name: "Default Strategy",
     alias: null,
     codename: null,
+    // audit-2026-05-07 G8.A.10 (P43) — adapter routes through
+    // `displayStrategyName`, which only surfaces `name` for institutional
+    // tier. Tests that don't care about disclosure default to institutional
+    // so the legacy "name appears verbatim" assertions still pass; tests
+    // that exercise exploratory-tier redaction set their own tier.
+    disclosure_tier: "institutional",
     strategy_types: null,
     strategy_analytics: null,
     ...partial,

@@ -900,6 +900,14 @@ export async function getAllocatorAggregates(userId: string) {
  * return either exactly one row or null. Wrapped in React.cache() so
  * multiple server components in the same render tree deduplicate to
  * one DB call per request.
+ *
+ * audit-2026-05-07 G8.A.9 (P42): a Supabase error (RLS misconfig, network,
+ * 500) collapsed to the same `null` that means "user has no real portfolio
+ * yet", so transient infra failures presented as the empty-state
+ * "connect your first exchange" prompt on a money-tracking surface. We
+ * now log + throw on `error` and reserve `null` for the genuinely-absent
+ * row — the upstream `error.tsx` boundary then surfaces a real failure
+ * to the allocator and to Sentry instead of a misleading onboarding nudge.
  */
 export const getRealPortfolio = cache(
   async (userId: string): Promise<Portfolio | null> => {
@@ -910,8 +918,16 @@ export const getRealPortfolio = cache(
       .eq("user_id", userId)
       .eq("is_test", false)
       .maybeSingle();
-    if (error || !data) return null;
-    return data as Portfolio;
+    if (error) {
+      console.error(
+        "[queries.getRealPortfolio] supabase error:",
+        error.message ?? error,
+      );
+      throw new Error(
+        `getRealPortfolio failed: ${error.message ?? "unknown supabase error"}`,
+      );
+    }
+    return (data ?? null) as Portfolio | null;
   },
 );
 
@@ -975,7 +991,17 @@ export interface MyAllocationDashboardPayload {
     existing_outcome: BridgeOutcome | null;
     strategy: {
       id: string;
-      name: string;
+      /**
+       * audit-2026-05-07 G8.A.2 (P35): redacted to `null` server-side when
+       * `disclosure_tier !== 'institutional'`. The disclosure tier model
+       * forbids leaking the manager-given canonical name to allocators on
+       * exploratory rows; the RSC payload is what the client sees, so the
+       * redaction has to happen at the query layer (not just in the
+       * rendered DOM). Consumers must use `displayName` from
+       * `@/lib/allocation-helpers` (which routes through
+       * `displayStrategyName`) and tolerate `null`.
+       */
+      name: string | null;
       codename: string | null;
       disclosure_tier: DisclosureTier;
       strategy_types: string[];
@@ -1545,6 +1571,30 @@ export const getMyAllocationDashboard = cache(
     // to cut cold-cache waves from 3 to 2. The !portfolio branch still
     // short-circuits Step 2 cleanly — Phase 07 allocators can have real
     // equity snapshots + holdings even without a portfolio_strategies row.
+    // audit-2026-05-07 G8.A.1 (P34): `assertOk` upgrades each Supabase
+    // result's silent `error` channel into a thrown error. The previous
+    // code mapped `.data ?? []` for every result and never inspected
+    // `.error`, so a single RLS denial / transient DB failure / schema
+    // drift presented as "user has no investments" — for an allocator with
+    // $1M+ deployed, indistinguishable from being wiped. Throw instead;
+    // the existing `app/error.tsx` boundary catches and Sentry reports via
+    // `instrumentation.ts:onRequestError`.
+    const assertOk = <T,>(
+      res: { data: T; error: { message?: string } | null },
+      label: string,
+    ): T => {
+      if (res.error) {
+        console.error(
+          `[queries.getMyAllocationDashboard] ${label} failed:`,
+          res.error.message ?? res.error,
+        );
+        throw new Error(
+          `getMyAllocationDashboard.${label}: ${res.error.message ?? "unknown supabase error"}`,
+        );
+      }
+      return res.data;
+    };
+
     const [
       portfolio,
       phase07EquityRes,
@@ -1661,6 +1711,59 @@ export const getMyAllocationDashboard = cache(
         } satisfies OutcomeRow;
       },
     );
+
+    // audit-2026-05-07 G8.A.1 (P34) — explicit error checks. The four raw
+    // Supabase queries from Step 1 had their `.error` channels silently
+    // ignored before this audit; promote them now so RLS / network /
+    // schema-drift surfaces as a real error instead of an empty array.
+    // `apiKeysCountRes` is intentionally left lenient — its `.count` is
+    // already a defensive `?? 0` below and we prefer to render the
+    // onboarding nudge over an error page when the count probe fails.
+    if (phase07EquityRes.error) {
+      console.error(
+        "[queries.getMyAllocationDashboard] allocator_equity_snapshots failed:",
+        phase07EquityRes.error.message,
+      );
+      throw new Error(
+        `getMyAllocationDashboard.allocator_equity_snapshots: ${phase07EquityRes.error.message}`,
+      );
+    }
+    if (phase07HoldingsRes.error) {
+      console.error(
+        "[queries.getMyAllocationDashboard] allocator_holdings failed:",
+        phase07HoldingsRes.error.message,
+      );
+      throw new Error(
+        `getMyAllocationDashboard.allocator_holdings: ${phase07HoldingsRes.error.message}`,
+      );
+    }
+    if (phase09MatchBatchRes.error) {
+      console.error(
+        "[queries.getMyAllocationDashboard] match_batches failed:",
+        phase09MatchBatchRes.error.message,
+      );
+      throw new Error(
+        `getMyAllocationDashboard.match_batches: ${phase09MatchBatchRes.error.message}`,
+      );
+    }
+    if (phase09MatchDecisionsRes.error) {
+      console.error(
+        "[queries.getMyAllocationDashboard] match_decisions failed:",
+        phase09MatchDecisionsRes.error.message,
+      );
+      throw new Error(
+        `getMyAllocationDashboard.match_decisions: ${phase09MatchDecisionsRes.error.message}`,
+      );
+    }
+    if (outcomesFullRes.error) {
+      console.error(
+        "[queries.getMyAllocationDashboard] bridge_outcomes failed:",
+        outcomesFullRes.error.message,
+      );
+      throw new Error(
+        `getMyAllocationDashboard.bridge_outcomes: ${outcomesFullRes.error.message}`,
+      );
+    }
 
     // Phase 11 / D-02 — server-side COUNT result (head:true returns no rows;
     // the `count` field is the authoritative integer). PostgREST can return
@@ -1830,6 +1933,10 @@ export const getMyAllocationDashboard = cache(
     // declaring a non-conflicting alias and letting the existing
     // call sites keep reading `apiKeys`.
     const nowIso = new Date().toISOString();
+    // audit-2026-05-07 G8.A.1 (P34) — Step 2 raw-Supabase results were
+    // also unwrapped via `?? []` / `?? null`. Hoist to a single
+    // `assertOk` pass below so any RLS / schema / network failure is
+    // visible as a thrown error captured by Sentry.
     const [
       analyticsRes,
       strategiesRes,
@@ -1908,6 +2015,14 @@ export const getMyAllocationDashboard = cache(
       // payload. See `outcomesFullRes` and the `outcomes` derivation above.
     ]);
 
+    // audit-2026-05-07 G8.A.1 (P34) — Step 2 explicit error checks.
+    assertOk(analyticsRes, "portfolio_analytics");
+    assertOk(strategiesRes, "portfolio_strategies");
+    assertOk(alertsRes, "portfolio_alerts");
+    assertOk(sentAsIntroRes, "match_decisions");
+    assertOk(existingOutcomesRes, "bridge_outcomes");
+    assertOk(activeDismissalsRes, "bridge_outcome_dismissals");
+
     // Normalize the strategies join: Supabase returns the embedded
     // strategy as either an object or an array depending on the embed
     // inference. Same normalization pattern the old allocations page
@@ -1933,11 +2048,28 @@ export const getMyAllocationDashboard = cache(
       ),
     );
 
-    const strategies = (strategiesRes.data ?? []).map((row) => {
+    const strategies = (strategiesRes.data ?? []).flatMap((row) => {
       const rawStrategy = castRow<{ strategy: unknown }>(row, "strategy-join").strategy;
       const strategy = (
         Array.isArray(rawStrategy) ? rawStrategy[0] : rawStrategy
-      ) as StrategyPayload;
+      ) as StrategyPayload | null | undefined;
+
+      // audit-2026-05-07 G8.A.24 (P57): TypeScript hides the null case via
+      // `as`-cast, but a missing embed (RLS denial on `strategies`, schema
+      // drift dropping the join, FK widow) hits `...strategy` and throws
+      // `Cannot read properties of null`. Drop the row with a stable log
+      // instead of crashing the whole dashboard render.
+      if (!strategy) {
+        console.error(
+          "[queries.getMyAllocationDashboard] strategy embed missing for portfolio_strategies row",
+          {
+            portfolio_id: portfolio.id,
+            strategy_id: (row as { strategy_id?: unknown }).strategy_id,
+          },
+        );
+        return [];
+      }
+
       const rawAnalytics = castRow<{ strategy_analytics: unknown }>(strategy, "analytics-join")
         ?.strategy_analytics;
       const analytics = Array.isArray(rawAnalytics)
@@ -1956,21 +2088,40 @@ export const getMyAllocationDashboard = cache(
         existing_outcome === null &&
         !activeDismissalSet.has(row.strategy_id as string);
 
-      return {
-        strategy_id: row.strategy_id,
-        current_weight: row.current_weight,
-        allocated_amount: row.allocated_amount,
-        alias: castRow<{ alias: string | null }>(row, "alias").alias ?? null,
-        eligible_for_outcome,
-        existing_outcome,
-        strategy: {
-          ...strategy,
-          strategy_analytics: (analytics ?? null) as
-            | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"],
+      // audit-2026-05-07 G8.A.2 (P35): redact `name` to `null` for
+      // non-institutional rows so the canonical strategy name never
+      // reaches the RSC payload. The canonical client-side resolver
+      // (`displayStrategyName` via `displayName` in allocation-helpers)
+      // already falls back to `codename` first, then a synthetic
+      // `Strategy #<id-prefix>`, so this is a strict redaction without UX
+      // cost on exploratory tier.
+      const redactedName =
+        strategy.disclosure_tier === "institutional" ? strategy.name : null;
+
+      return [
+        {
+          strategy_id: row.strategy_id,
+          current_weight: row.current_weight,
+          allocated_amount: row.allocated_amount,
+          alias: castRow<{ alias: string | null }>(row, "alias").alias ?? null,
+          eligible_for_outcome,
+          existing_outcome,
+          strategy: {
+            ...strategy,
+            name: redactedName,
+            strategy_analytics: (analytics ?? null) as
+              | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"],
+          },
         },
-      };
+      ];
     });
 
+    // audit-2026-05-07 G8.A.11 (P44): keep `total` consistent with the
+    // sum of recognised severity buckets. Previously `total++` ran outside
+    // the if/else chain so an unknown severity (typo, future enum addition
+    // missed here) inflated `total > critical+high+medium+low`. Now an
+    // unrecognised severity is logged and excluded — the dashboard
+    // invariant `total === critical+high+medium+low` is restored.
     const alertCounts = {
       critical: 0,
       high: 0,
@@ -1984,6 +2135,13 @@ export const getMyAllocationDashboard = cache(
       else if (sev === "high") alertCounts.high++;
       else if (sev === "medium") alertCounts.medium++;
       else if (sev === "low") alertCounts.low++;
+      else {
+        console.error(
+          "[queries.getMyAllocationDashboard] portfolio_alerts unknown severity:",
+          sev,
+        );
+        continue;
+      }
       alertCounts.total++;
     }
 

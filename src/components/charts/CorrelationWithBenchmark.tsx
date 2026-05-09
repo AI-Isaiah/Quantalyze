@@ -11,7 +11,10 @@ import {
   YAxis,
 } from "recharts";
 import type { StrategyAnalytics } from "@/lib/types";
-import { rollingCorrelation } from "@/lib/correlation-math";
+import {
+  CORRELATION_90D_MIN_DAYS,
+  insufficientHistoryMessage,
+} from "@/lib/min-history";
 import {
   CHART_ACCENT,
   CHART_AXIS_TICK,
@@ -21,14 +24,30 @@ import {
   CHART_TEXT_MUTED,
 } from "./chart-tokens";
 
-const ROLLING_WINDOW = 90;
-
 type CorrelationPoint = { date: string; value: number };
 
-export interface ResolvedBenchmarkCorrelation {
-  series: CorrelationPoint[];
-  message: string | null;
-}
+/**
+ * Discriminated outcome of resolving the 90-day BTC correlation series.
+ *
+ * Background (audit-2026-05-07 G11.A P64): the previous implementation had
+ * TWO correlation pipelines for the same strategy:
+ *   1. Server: Python `metrics.py:_rolling_correlation` writing
+ *      `metrics_json.btc_rolling_correlation_90d` (authoritative, true daily
+ *      aligned returns).
+ *   2. Client fallback: cumulative -> daily reconstruction with 6-decimal
+ *      rounding loss, then `rollingCorrelation` in JS.
+ *
+ * The two pipelines disagreed by ±0.02-0.05 in low-correlation regions —
+ * a senior allocator visually comparing chart vs. PDF would lose trust.
+ * Audit fix path (b): delete the client fallback entirely. When the server
+ * has not produced a valid precomputed series, surface a clean status
+ * state instead of recomputing.
+ */
+export type ResolvedBenchmarkCorrelation =
+  | { kind: "ok"; series: CorrelationPoint[] }
+  | { kind: "computing"; message: string }
+  | { kind: "insufficient"; message: string }
+  | { kind: "unavailable"; message: string };
 
 function isCorrelationPointArray(value: unknown): value is CorrelationPoint[] {
   if (!Array.isArray(value) || value.length === 0) return false;
@@ -44,135 +63,139 @@ function isCorrelationPointArray(value: unknown): value is CorrelationPoint[] {
 }
 
 /**
- * Pure helper that resolves the correlation series from a StrategyAnalytics
- * row. Exported for unit testing — the component itself is a thin wrapper
- * around this logic.
+ * Best-effort estimate of the actual aligned-history depth so the
+ * "insufficient history" message can include a real day count rather than
+ * a generic "not enough" string. We use `returns_series.length` (the
+ * cumulative strategy-side curve) as a proxy — it's the upper bound on
+ * aligned daily returns and what the user sees on the cumulative-returns
+ * panel, so the number is meaningful to them. The benchmark side may
+ * truncate this further, but quoting the strategy-side count matches what
+ * appears elsewhere on the page.
  *
- * Three-way outcome:
- *   - Server-side series present: returns it directly, message = null.
- *   - Benchmark data missing entirely: message = "Benchmark data unavailable."
- *   - Benchmark present but < 90 aligned daily-return pairs: message =
- *     "Insufficient data — 90 days needed, {N} days so far."
+ * Returns `null` when no count is inferable (caller falls back to a
+ * generic message).
  */
-export function resolveBenchmarkCorrelation(
-  analytics: Pick<StrategyAnalytics, "returns_series" | "metrics_json">,
-): ResolvedBenchmarkCorrelation {
-  // 1. Primary: server-side precomputed series.
-  const precomputed = analytics.metrics_json?.btc_rolling_correlation_90d;
-  if (isCorrelationPointArray(precomputed)) {
-    return { series: precomputed, message: null };
-  }
-
-  // 2. Pull the cumulative series for both strategy and benchmark.
-  const stratCumulative = analytics.returns_series ?? [];
-  const benchmarkCumulativeRaw = analytics.metrics_json?.benchmark_returns;
-
-  // No benchmark data at all → empty state. Validate entries if present —
-  // a malformed fallback series is equivalent to "no benchmark".
-  if (!isCorrelationPointArray(benchmarkCumulativeRaw)) {
-    return { series: [], message: "Benchmark data unavailable." };
-  }
-  const benchmarkCumulative = benchmarkCumulativeRaw;
-
-  // Empty strategy returns → empty state with "0 days".
-  if (stratCumulative.length === 0) {
-    return {
-      series: [],
-      message: `Insufficient data — ${ROLLING_WINDOW} days needed, 0 days so far.`,
-    };
-  }
-
-  // 3. Cumulative -> daily.
-  const stratDailyMap = cumulativeToDailyMap(stratCumulative);
-  const benchDailyMap = cumulativeToDailyMap(benchmarkCumulative);
-
-  // 4. Align by date-string intersection, sorted ascending.
-  const alignedDates: string[] = [];
-  const alignedStrat: number[] = [];
-  const alignedBench: number[] = [];
-  // Iterate the strategy side in order so the result is date-sorted.
-  const sortedStratDates = Array.from(stratDailyMap.keys()).sort();
-  for (const d of sortedStratDates) {
-    const sVal = stratDailyMap.get(d);
-    const bVal = benchDailyMap.get(d);
-    if (sVal !== undefined && bVal !== undefined) {
-      alignedDates.push(d);
-      alignedStrat.push(sVal);
-      alignedBench.push(bVal);
-    }
-  }
-
-  if (alignedStrat.length < ROLLING_WINDOW) {
-    return {
-      series: [],
-      message: `Insufficient data — ${ROLLING_WINDOW} days needed, ${alignedStrat.length} days so far.`,
-    };
-  }
-
-  // 5. Rolling correlation. `index` on the output maps back into
-  //    alignedDates to recover each window's right-edge date.
-  const rolled = rollingCorrelation(alignedStrat, alignedBench, ROLLING_WINDOW);
-  const series: CorrelationPoint[] = rolled.map(({ index, value }) => ({
-    date: alignedDates[index],
-    value,
-  }));
-
-  return { series, message: null };
+function inferActualDays(
+  analytics: Pick<StrategyAnalytics, "returns_series">,
+): number | null {
+  const series = analytics.returns_series;
+  if (!Array.isArray(series)) return null;
+  // returns_series is a cumulative curve seeded at value=1.0, so the number
+  // of daily-return samples is `length - 1` (n-1 differences from n points).
+  // Clamp at 0 — a 1-point or empty series has zero daily returns.
+  return Math.max(0, series.length - 1);
 }
 
 /**
- * Convert a cumulative-returns curve into a map keyed by date of the
- * corresponding daily simple return. Drops the first entry (no prior value)
- * and any point where the prior cumulative value is <= 0 (defensive: avoids
- * division by zero / negative when a strategy has wiped out).
- *
- * BOTH inputs to the fallback branch are CUMULATIVE `(1+r).cumprod()` curves,
- * so we must convert them back to daily returns before correlating —
- * correlating cumulative curves would be trivially ~1 and meaningless.
- * The conversion is `daily[i] = cum[i] / cum[i-1] - 1` (skip i=0).
+ * Input shape for the resolver. Two fields are always required
+ * (`returns_series`, `metrics_json`) because they are read unconditionally;
+ * `computation_status` is OPTIONAL so that lazy/sub-panel call-sites (which
+ * type their own narrower analytics subset, e.g.
+ * `ExposureAndGreeksPanel.tsx`'s `CorrelationAnalyticsSubset`) can pass an
+ * object that omits the field. When absent we conservatively fall through
+ * to the `unavailable` branch rather than `computing`.
  */
-function cumulativeToDailyMap(
-  cumulative: CorrelationPoint[],
-): Map<string, number> {
-  // Sort a shallow copy by date to be safe — the server writes ascending
-  // but we don't want to depend on that.
-  const sorted = [...cumulative].sort((a, b) => a.date.localeCompare(b.date));
-  const out = new Map<string, number>();
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[i - 1].value;
-    const cur = sorted[i].value;
-    if (prev <= 0 || !Number.isFinite(prev) || !Number.isFinite(cur)) continue;
-    out.set(sorted[i].date, cur / prev - 1);
+export type CorrelationResolverInput =
+  Pick<StrategyAnalytics, "returns_series" | "metrics_json"> &
+    Partial<Pick<StrategyAnalytics, "computation_status">>;
+
+/**
+ * Pure helper that resolves the correlation series from a StrategyAnalytics
+ * row. Exported for unit testing — the component itself is a thin wrapper.
+ *
+ * Outcomes (see {@link ResolvedBenchmarkCorrelation}):
+ *   - `ok`: server precomputed series is present and well-formed → render.
+ *   - `computing`: server has not yet produced output and the row is
+ *     `computation_status === 'computing'`.
+ *   - `insufficient`: server explicitly returned `[]` (history < threshold).
+ *   - `unavailable`: precomputed missing (and not computing), or malformed.
+ *
+ * No client-side fallback recomputation — see audit-2026-05-07 G11.A P64.
+ */
+export function resolveBenchmarkCorrelation(
+  analytics: CorrelationResolverInput,
+): ResolvedBenchmarkCorrelation {
+  const precomputed = analytics.metrics_json?.btc_rolling_correlation_90d;
+
+  // 1. Field absent (null/undefined) → either still computing or unavailable.
+  if (precomputed === null || precomputed === undefined) {
+    if (analytics.computation_status === "computing") {
+      return { kind: "computing", message: "Computing correlation…" };
+    }
+    return {
+      kind: "unavailable",
+      message: "Benchmark correlation unavailable.",
+    };
   }
-  return out;
+
+  // 2. Empty array → server decided no result (insufficient history).
+  //    Surface the institutional-grade min-history message (P69).
+  if (Array.isArray(precomputed) && precomputed.length === 0) {
+    const actualDays = inferActualDays(analytics);
+    return {
+      kind: "insufficient",
+      message:
+        actualDays !== null
+          ? insufficientHistoryMessage(
+              "90-day BTC correlation",
+              CORRELATION_90D_MIN_DAYS,
+              actualDays,
+            )
+          : `Insufficient history for institutional-grade 90-day BTC correlation (need ${CORRELATION_90D_MIN_DAYS} days).`,
+    };
+  }
+
+  // 3. Truthy but malformed → log (P67) and treat as unavailable.
+  if (!isCorrelationPointArray(precomputed)) {
+    // Stable prefix so this is greppable in the runtime-logs surface.
+    const sample = Array.isArray(precomputed)
+      ? JSON.stringify(precomputed.slice(0, 2))
+      : typeof precomputed;
+    // eslint-disable-next-line no-console
+    console.error(
+      `[CorrelationWithBenchmark] btc_rolling_correlation_90d malformed: ${sample}`,
+    );
+    return {
+      kind: "unavailable",
+      message: "Benchmark correlation unavailable.",
+    };
+  }
+
+  // 4. Well-formed precomputed series.
+  return { kind: "ok", series: precomputed };
 }
 
 interface CorrelationWithBenchmarkProps {
-  /** WR-02: narrowed to the two keys actually consumed by resolveBenchmarkCorrelation
-   * (line 58 signature). Using Pick<> instead of the full StrategyAnalytics prevents
-   * future required-field additions from hiding type errors behind a cast. */
-  analytics: Pick<StrategyAnalytics, "returns_series" | "metrics_json">;
+  /**
+   * Narrowed to the keys actually consumed by resolveBenchmarkCorrelation.
+   * `computation_status` is optional so lazy-panel call-sites with a
+   * narrower analytics subset (e.g. `ExposureAndGreeksPanel`'s
+   * `CorrelationAnalyticsSubset`) can still pass through. Full callers
+   * (e.g. `PerformanceReport`) include it and unlock the `computing`
+   * status copy.
+   */
+  analytics: CorrelationResolverInput;
 }
 
 export function CorrelationWithBenchmark({
   analytics,
 }: CorrelationWithBenchmarkProps) {
-  const { series, message } = useMemo(
+  const resolved = useMemo(
     () => resolveBenchmarkCorrelation(analytics),
     [analytics],
   );
 
-  if (message !== null) {
+  if (resolved.kind !== "ok") {
     return (
       <div className="flex h-[240px] items-center justify-center text-sm text-text-muted text-center px-6">
-        {message}
+        {resolved.message}
       </div>
     );
   }
 
   return (
     <ResponsiveContainer width="100%" height={240}>
-      <LineChart accessibilityLayer={false} data={series} margin={{ top: 5, right: 30, bottom: 5, left: 5 }}>
+      <LineChart accessibilityLayer={false} data={resolved.series} margin={{ top: 5, right: 30, bottom: 5, left: 5 }}>
         <XAxis
           dataKey="date"
           tick={{ fontSize: 11, fill: CHART_AXIS_TICK, fontFamily: CHART_FONT_MONO }}
@@ -196,7 +219,6 @@ export function CorrelationWithBenchmark({
             const n = Number(v);
             return [Number.isFinite(n) ? n.toFixed(3) : "—", "90d correlation"];
           }}
-          labelFormatter={(d) => d}
         />
         <Line
           type="monotone"
