@@ -13,6 +13,7 @@ import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail, getPercentiles } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
+import { parsePositionRows } from "@/lib/types";
 import { redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
@@ -114,7 +115,14 @@ export default async function StrategyDetailPage({
           <ComputeStatus status={analytics.computation_status} error={analytics.computation_error} />
         </div>
       )}
-      <PerformanceReport analytics={analytics} percentiles={percentiles} positions={positionsResult?.data ?? null} />
+      {/* G12.E.1 (audit 2026-05-07): runtime-validate raw Supabase rows
+          before casting to Position[]. Preserves the null-vs-empty signal
+          the consumers branch on by mapping a missing `data` to null. */}
+      <PerformanceReport
+        analytics={analytics}
+        percentiles={percentiles}
+        positions={positionsResult?.data ? parsePositionRows(positionsResult.data) : null}
+      />
       <Disclaimer variant="strategy" />
 
       {/* Sticky Request Intro CTA */}

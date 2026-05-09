@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { AlertSeverity } from "./utils";
 
 export type Role = "manager" | "allocator" | "both";
@@ -310,6 +311,67 @@ export interface Position {
   // Total economic P&L = realized_pnl + funding_pnl (computed client-side;
   // no generated DB column). NOT NULL DEFAULT 0 — rows without funding carry 0.
   funding_pnl: number;
+}
+
+/**
+ * G12.E.1 (audit 2026-05-07) — Runtime guard for Position rows fetched from
+ * Supabase. The TS `Position.side: 'long'|'short'` and
+ * `Position.status: 'open'|'closed'` unions are compile-time only; raw rows
+ * cast directly from `supabase.from('positions').select(...)` would satisfy
+ * the type even when the DB returns `'LONG'` (case drift) or a future enum
+ * addition like `'partial'`. This Zod schema validates each row at the trust
+ * boundary so violations are dropped + warned about, never silently rendered.
+ *
+ * Mirrors the schema-validation pattern already used in
+ * `src/lib/analytics-schemas.ts` for the Python service trust boundary.
+ */
+export const PositionRowSchema = z.object({
+  id: z.string(),
+  strategy_id: z.string(),
+  symbol: z.string(),
+  side: z.enum(["long", "short"]),
+  status: z.enum(["open", "closed"]),
+  entry_price_avg: z.number(),
+  exit_price_avg: z.number().nullable(),
+  size_base: z.number(),
+  size_peak: z.number(),
+  realized_pnl: z.number().nullable(),
+  fee_total: z.number().nullable(),
+  fill_count: z.number(),
+  opened_at: z.string(),
+  closed_at: z.string().nullable(),
+  duration_days: z.number().nullable(),
+  roi: z.number().nullable(),
+  funding_pnl: z.number(),
+}) satisfies z.ZodType<Position>;
+
+/**
+ * Parse an array of unknown rows (typically `positionsResult.data` from a
+ * Supabase select) into a typed `Position[]`. Rows that fail the schema are
+ * dropped and a `console.warn` is emitted with the row id (when present) and
+ * the Zod issues, so silent shape drift surfaces in server logs.
+ *
+ * Returning `Position[]` (never `null`) is intentional: the page-level call
+ * site is responsible for preserving the null-vs-empty distinction it cares
+ * about (see `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`).
+ */
+export function parsePositionRows(rows: unknown[]): Position[] {
+  const out: Position[] = [];
+  for (const row of rows) {
+    const parsed = PositionRowSchema.safeParse(row);
+    if (parsed.success) {
+      out.push(parsed.data);
+    } else {
+      const rowId = (row && typeof row === "object" && "id" in row)
+        ? (row as { id?: unknown }).id
+        : undefined;
+      console.warn(
+        "[parsePositionRows] dropping invalid position row",
+        { rowId, issues: parsed.error.issues },
+      );
+    }
+  }
+  return out;
 }
 
 /**
