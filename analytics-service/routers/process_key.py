@@ -290,6 +290,24 @@ async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
     )
     log.info("process_key.start")
 
+    # CT-4 (army2) — emit a structured WARN when a non-teaser flow lacks
+    # the X-User-Id header. The Vercel thin adapters MUST forward it (see
+    # src/lib/process-key-client.ts) so the 100/hour rate-limit window
+    # buckets per-tenant. teaser is the public/unauthenticated landing
+    # form and intentionally passes 'public' as a shared anon bucket.
+    # If a future caller drops the header, this WARN keeps it visible in
+    # observability before cross-tenant burst can starve other tenants.
+    if (
+        body.flow_type != "teaser"
+        and request.headers.get("X-User-Id") is None
+    ):
+        log.warning(
+            "process_key.x_user_id_header_missing",
+            flow_type=body.flow_type,
+            source=body.source,
+            wizard_session_id=body.context.get("wizard_session_id"),
+        )
+
     # Feature flag gate (BACKBONE-04 / BACKBONE-05) BEFORE any Supabase work.
     # H-3 — Supabase outage handling: is_unified_backbone_active() in
     # services/feature_flags.py keeps the in-process cache live across

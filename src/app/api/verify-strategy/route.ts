@@ -100,6 +100,10 @@ async function unifiedVerifyStrategyHandler(
     source: exchange,
     context: body,
     routeTag: "verify-strategy",
+    // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
+    // so the upstream rate limiter buckets all anonymous landing-page
+    // traffic to a shared key, isolated from authenticated tenants.
+    userId: "public",
   });
   if (!result.ok) return result.response;
 

@@ -228,6 +228,110 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("okx");
   });
 
+  // CT-4 (army2) — every thin adapter must forward X-User-Id on the
+  // upstream POST to /process-key. The Python rate limiter keys on
+  // (token_hash, X-User-Id) for cross-tenant isolation. Pre-fix the
+  // header was never sent, so every request bucketed to the same key
+  // and one tenant's burst could starve every other tenant. Public
+  // (unauthenticated) flows pass the literal 'public'.
+  it("verify-strategy unified path forwards X-User-Id='public' (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe("public");
+  });
+
+  it("keys/sync unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const { POST } = await import("@/app/api/keys/sync/route");
+    await POST(jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }));
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  it("strategies/finalize-wizard unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({ read: true, trade: false, withdraw: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
+    await POST(
+      jsonReq("/api/strategies/finalize-wizard", {
+        strategy_id: TEST_STRATEGY_ID,
+        name: "Alpha Centauri",
+        description: "A reasonable description that is at least 10 chars long.",
+        category_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  it("strategies/csv-validate unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File(["a,b\n1,2"], "test.csv", { type: "text/csv" }),
+    );
+    formData.append("fmt", "daily_returns");
+    formData.append(
+      "wizard_session_id",
+      "44444444-4444-4444-4444-444444444444",
+    );
+    const req = new NextRequest(
+      "http://localhost:3000/api/strategies/csv-validate",
+      { method: "POST", headers: VALID_ORIGIN, body: formData },
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    await POST(req);
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  it("strategies/csv-finalize unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    await POST(
+      jsonReq("/api/strategies/csv-finalize", {
+        wizard_session_id: "44444444-4444-4444-4444-444444444444",
+        fmt: "daily_returns",
+        strategy_name: "Apollo CSV",
+      }),
+    );
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
   // CT-3 (army2) — the unified verify-strategy path must mint a public_token
   // and persist it to strategy_verifications, then return BOTH verification_id
   // and public_token. Without this, landing-page <VerificationForm/> throws

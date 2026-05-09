@@ -553,6 +553,8 @@ async function unifiedFinalizeWizardHandler(args: {
       step: "finalize",
     },
     routeTag: "strategies/finalize-wizard",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
   });
   if (!result.ok) return result.response;
 

@@ -252,6 +252,8 @@ async function unifiedCsvFinalizeHandler(args: {
       step: "finalize",
     },
     routeTag: "strategies/csv-finalize",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
   });
   if (!result.ok) return result.response;
   return NextResponse.json(result.body);

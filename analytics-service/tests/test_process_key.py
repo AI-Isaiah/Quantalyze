@@ -1144,3 +1144,33 @@ def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
     assert "/internal/" in src, (
         "Sanity: middleware must still skip /internal/* (existing contract)."
     )
+
+
+def test_ct4_logs_warning_when_x_user_id_missing_on_non_teaser():
+    """CT-4 (army2) — when a non-teaser request arrives without an
+    X-User-Id header, the route must emit a structured WARNING so a
+    regressed thin adapter doesn't silently break the per-tenant
+    rate-limit isolation invariant.
+
+    Static-source check: the warning emit lives at the top of the
+    process_key handler (after correlation_id binding, before the flag
+    gate). A future refactor that drops the warning would fail this test
+    and force the author to either preserve the warning or document why
+    it's safe to remove.
+    """
+    import inspect
+
+    src = inspect.getsource(process_key_router.process_key)
+    assert "x_user_id_header_missing" in src, (
+        "CT-4 invariant: process_key must log "
+        "'process_key.x_user_id_header_missing' when X-User-Id is absent "
+        "on a non-teaser flow. Without the warning, a thin adapter that "
+        "drops the header silently breaks per-tenant rate-limit isolation."
+    )
+    # And the warning must be gated on flow_type != 'teaser' so the
+    # public/unauthenticated landing form (which legitimately has no
+    # X-User-Id matching to a real auth user) doesn't spam the log.
+    assert 'flow_type != "teaser"' in src or "flow_type != 'teaser'" in src, (
+        "CT-4: the X-User-Id missing warning must skip flow_type='teaser' "
+        "(the public landing form is authentic-anonymous)."
+    )

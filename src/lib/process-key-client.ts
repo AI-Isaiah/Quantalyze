@@ -42,6 +42,21 @@ export interface PostProcessKeyArgs {
   correlationId?: string;
   /** Optional caller tag used in the 503 log line so failures are grep-able. */
   routeTag?: string;
+  /**
+   * CT-4 (army2) — required tenant identifier forwarded as `X-User-Id`
+   * on the upstream POST. The Python rate limiter
+   * (analytics-service/routers/process_key.py:_process_key_rate_limit_key)
+   * keys on `(token_hash, X-User-Id)` so each user gets an isolated
+   * 100/hour window. Pre-fix the header was never sent, so every request
+   * bucketed to the same `process_key:<token_hash>:anon` key — one
+   * tenant's burst could starve every other tenant.
+   *
+   * For unauthenticated public flows (the landing-page teaser) callers
+   * MUST pass the literal string `'public'` so the limiter buckets all
+   * anonymous traffic to a shared `process_key:<token_hash>:public`
+   * window, isolated from any authenticated tenant.
+   */
+  userId: string;
 }
 
 export type PostProcessKeyResult =
@@ -78,6 +93,9 @@ export async function postProcessKey(
       "Content-Type": "application/json",
       Authorization: `Bearer ${internalToken}`,
       "X-Correlation-Id": correlationId,
+      // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
+      // isolation. See PostProcessKeyArgs.userId for the contract.
+      "X-User-Id": args.userId,
     },
     body: JSON.stringify({
       flow_type: args.flow_type,

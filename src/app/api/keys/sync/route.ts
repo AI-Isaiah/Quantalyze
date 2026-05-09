@@ -135,6 +135,8 @@ async function unifiedKeysSyncHandler(args: {
       user_id: args.userId,
     },
     routeTag: "keys/sync",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
   });
   if (!result.ok) return result.response;
 
