@@ -1,11 +1,151 @@
+import asyncio
 import ccxt.async_support as ccxt
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 logger = logging.getLogger("quantalyze.analytics")
+
+
+# Audit-2026-05-07 G12.B.5 — overlap window for late-arriving exchange fills.
+# Hardcoded to 1 hour (3_600_000 ms) because:
+#   * CCXT timestamps are normalized to UTC, but exchange-side propagation lag
+#     for fills (especially Binance futures) is documented up to ~30s; OKX has
+#     observed multi-minute lag during high-volume windows.
+#   * DST transitions don't affect UTC, but exchange timezone reporting can
+#     drift around boundaries — the buffer absorbs that without changing the
+#     dedup contract (partial unique index on exchange_fill_id is the source
+#     of truth; see migration 039).
+# Codified here so future changes are intentional, not buried as a magic
+# number. Tests in test_exchange.py pin the contract.
+OVERLAP_WINDOW_MS = 3_600_000
+
+
+class ColdStartSymbolDiscoveryError(Exception):
+    """Audit-2026-05-07 G12.B.1 — raised when Binance cold-start symbol
+    discovery (fetch_positions fallback) fails or yields no symbols.
+
+    Pre-fix, this branch silently returned an empty fills list and the
+    caller treated the sync_trades job as success (allocator's Trade
+    Volume tab stayed empty even with 90 days of trades on the account).
+    Raising a typed exception lets the caller mark the job for retry
+    instead of cementing a false-success state.
+    """
+
+
+class FillRow(TypedDict):
+    """Audit-2026-05-07 G12.B.4 — shared shape for a single normalized
+    fill row written into the ``trades`` table.
+
+    Three branches build this dict today (OKX direct API, Bybit direct
+    API, CCXT ``_normalize_fill``). Without a shared TypedDict, drift is
+    inevitable — e.g. only OKX preserves ``posSide`` so only OKX-traded
+    shorts are classified correctly downstream. ``_make_fill_dict`` is
+    the single factory all three branches go through.
+
+    Note: ``position_direction`` (long/short discriminator) is co-located
+    inside ``raw_data['position_direction']`` rather than as a top-level
+    column today — the ``trades`` table does not yet have that column,
+    so adding it to the persist shape would break the upsert. A future
+    migration can promote it.
+    """
+    exchange: str
+    symbol: str
+    side: str
+    price: float
+    quantity: float
+    fee: float
+    fee_currency: str
+    timestamp: str
+    order_type: str
+    exchange_order_id: str
+    exchange_fill_id: str
+    is_fill: bool
+    is_maker: bool
+    cost: float
+    raw_data: dict | None
+
+
+# Audit-2026-05-07 G12.B.4 — whitelist for OKX's posSide field. Anything
+# outside this set is logged + coerced to None so a malformed exchange
+# response can't smuggle an invalid value into the typed column.
+_OKX_VALID_POS_SIDES: frozenset[str] = frozenset({"long", "short", "net"})
+
+
+def _make_fill_dict(
+    *,
+    exchange: str,
+    symbol: str,
+    side: str,
+    price: float,
+    quantity: float,
+    fee: float,
+    fee_currency: str,
+    timestamp: str,
+    exchange_order_id: str,
+    exchange_fill_id: str,
+    is_maker: bool,
+    raw_data: dict | None,
+    position_direction: Literal["long", "short"] | None = None,
+    order_type: str = "fill",
+) -> FillRow:
+    """Audit-2026-05-07 G12.B.4 — single factory for the 16-key fill dict
+    persisted to ``trades``. OKX/Bybit/CCXT branches all delegate here.
+
+    Keeping construction in one place eliminates the drift risk flagged
+    by G12.B.4/G12.B.7 (three near-identical builders). ``cost`` is
+    computed from ``price * quantity`` so callers cannot accidentally
+    pass an inconsistent value.
+
+    ``position_direction`` is the typed long/short discriminator. The
+    ``trades`` table does not yet have a dedicated column for it
+    (a separate migration is required, out-of-scope for this audit
+    batch); for now we co-locate the validated value into
+    ``raw_data['position_direction']`` so downstream consumers
+    (position_reconstruction) can read it via raw_data without a
+    schema change. This keeps the persist path safe while still
+    constraining the value upstream.
+    """
+    # Adversarial-review hardening (security specialist, PR #137 follow-up):
+    # the CCXT `_normalize_fill` path passes `trade.get("info")` straight
+    # into raw_data with zero whitelisting — so a hostile exchange response
+    # could stuff arbitrary `posSide` values that bypass the OKX-direct-API
+    # whitelist. PR #140's consumer-side whitelist in
+    # _match_positions_fifo defends downstream, but defense-in-depth at
+    # ingest closes the door before raw_data is persisted. Always copy
+    # raw_data and scrub any `posSide` that isn't in the OKX whitelist.
+    if raw_data is not None:
+        raw_data = dict(raw_data)
+        if "posSide" in raw_data:
+            _ps = raw_data["posSide"]
+            if _ps not in _OKX_VALID_POS_SIDES and _ps not in ("", None):
+                logger.warning(
+                    "_make_fill_dict: scrubbing non-whitelisted posSide=%r "
+                    "from raw_data before persist (defense-in-depth)",
+                    _ps,
+                )
+                raw_data.pop("posSide", None)
+    if position_direction is not None:
+        if raw_data is None:
+            raw_data = {}
+        raw_data["position_direction"] = position_direction
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "side": side,
+        "price": price,
+        "quantity": quantity,
+        "fee": fee,
+        "fee_currency": fee_currency,
+        "timestamp": timestamp,
+        "order_type": order_type,
+        "exchange_order_id": exchange_order_id,
+        "exchange_fill_id": exchange_fill_id,
+        "is_fill": True,
+        "is_maker": is_maker,
+        "cost": price * quantity,
+        "raw_data": raw_data,
+    }
 
 
 EXCHANGE_CLASSES: dict[str, type] = {
@@ -441,23 +581,6 @@ async def fetch_daily_pnl(exchange: ccxt.Exchange, since_ms: int | None = None) 
     return daily_pnl
 
 
-@dataclass
-class RawFill:
-    exchange_order_id: str
-    exchange_fill_id: str
-    symbol: str
-    side: str  # "buy" or "sell"
-    price: Decimal
-    amount: Decimal
-    cost: Decimal
-    fee: Decimal
-    fee_currency: str
-    is_maker: bool
-    timestamp: datetime
-    exchange: str
-    raw_data: dict | None = None
-
-
 async def fetch_raw_trades(
     exchange: ccxt.Exchange,
     strategy_id: str,
@@ -474,10 +597,10 @@ async def fetch_raw_trades(
 
     fills: list[dict[str, Any]] = []
 
-    # Apply overlap window for late-arriving fills
+    # Apply overlap window for late-arriving fills (see OVERLAP_WINDOW_MS).
     effective_since = None
     if since_ms is not None:
-        effective_since = since_ms - 3_600_000  # subtract 1 hour
+        effective_since = since_ms - OVERLAP_WINDOW_MS
 
     try:
         if exchange.id == "binance":
@@ -536,8 +659,16 @@ async def _fetch_raw_trades_binance(
 
     symbols = await db_execute(_get_symbols)
 
-    # Cold start: fetch current positions to get symbols
-    if not symbols:
+    # Cold start: fetch current positions to get symbols.
+    #
+    # Audit-2026-05-07 G12.B.1 — pre-fix this except branch silently
+    # logged and continued with symbols=[]. The caller saw an empty fills
+    # list and treated the sync as "0 fills, success", so an allocator
+    # with 90 days of trades got an empty Trade Volume tab. Now we raise
+    # a typed ColdStartSymbolDiscoveryError so the caller can mark the
+    # sync_trades job for retry.
+    is_cold_start = not symbols
+    if is_cold_start:
         try:
             positions = await exchange.fetch_positions()
             for pos in positions:
@@ -552,31 +683,81 @@ async def _fetch_raw_trades_binance(
             )
         except Exception as e:
             logger.warning("Binance cold start position fetch failed: %s", str(e))
+            raise ColdStartSymbolDiscoveryError(str(e)) from e
 
-    fills: list[dict[str, Any]] = []
-    for symbol in symbols:
-        try:
-            # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
-            ccxt_symbol = symbol
-            if "/" not in ccxt_symbol:
-                # Try to find the symbol in loaded markets
-                if hasattr(exchange, "markets") and exchange.markets:
-                    for mkt_symbol, mkt in exchange.markets.items():
-                        normalized = mkt_symbol.replace("/", "").replace(":USDT", "").replace(":USD", "")
-                        if normalized == symbol:
-                            ccxt_symbol = mkt_symbol
-                            break
+        # G12.B.1 closed-position edge case: fetch_positions only returns
+        # currently-open positions, so a strategy that closed everything
+        # yesterday discovers 0 symbols. There's no `update_strategy_analytics`
+        # helper available at this layer; raise the typed error so the
+        # caller can stamp `cold_start_pending=true` (TODO: G12.B.8 covers
+        # the broader closed-position-history backfill via account-history
+        # endpoints — out of scope for this batch).
+        if not symbols:
+            raise ColdStartSymbolDiscoveryError(
+                "no symbols discovered on cold start; closed-position history "
+                "requires manual seed"
+            )
 
-            trades = await exchange.fetch_my_trades(
+    # Audit-2026-05-07 G12.B.3 — fan-out per-symbol fetch with bounded
+    # concurrency (Semaphore=5) instead of a sequential for-loop. CCXT's
+    # per-instance rate limiter is shared across coroutines and still
+    # throttles correctly; the semaphore caps in-flight requests so we
+    # don't trip 429s. ~5x speedup vs. the sequential path that motivated
+    # the 5→15 minute TIMEOUT_PER_KIND['sync_trades'] bump.
+    sem = asyncio.Semaphore(5)
+
+    async def _fetch_one(symbol: str):
+        # Normalize symbol for CCXT: BTCUSDT -> BTC/USDT:USDT
+        ccxt_symbol = symbol
+        if "/" not in ccxt_symbol:
+            if hasattr(exchange, "markets") and exchange.markets:
+                for mkt_symbol, _mkt in exchange.markets.items():
+                    normalized = (
+                        mkt_symbol.replace("/", "")
+                        .replace(":USDT", "")
+                        .replace(":USD", "")
+                    )
+                    if normalized == symbol:
+                        ccxt_symbol = mkt_symbol
+                        break
+
+        async with sem:
+            return symbol, await exchange.fetch_my_trades(
                 ccxt_symbol, since=since_ms, limit=1000
             )
-            for t in trades:
-                fills.append(_normalize_fill(t, exchange.id))
-        except Exception as e:
+
+    tasks = [_fetch_one(s) for s in symbols]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Adversarial-review hardening (PR #137 follow-up):
+    # `asyncio.gather(return_exceptions=True)` on Python 3.11+ captures
+    # CancelledError as a result item rather than re-raising it. This
+    # creates a silent-failure mode under parent cancellation (15-min
+    # handler timeout, worker shutdown, signal): every per-symbol task
+    # gets a CancelledError, the gather "succeeds" with N exception
+    # objects, and the function returns an empty fills list — same
+    # false-success outcome G12.B.1 was supposed to eliminate. Scan
+    # for CancelledError BEFORE classifying as per-symbol-failed and
+    # re-raise so the outer wait_for / shutdown propagates correctly.
+    if any(isinstance(item, asyncio.CancelledError) for item in results):
+        raise asyncio.CancelledError(
+            "Binance per-symbol gather cancelled (parent timeout / shutdown)"
+        )
+
+    fills: list[dict[str, Any]] = []
+    for idx, item in enumerate(results):
+        if isinstance(item, BaseException):
+            # Match prior log shape so existing log-archaeology queries
+            # (correlation_id grep on "Binance fetch_my_trades failed for")
+            # continue to fire.
+            symbol = symbols[idx] if idx < len(symbols) else "<unknown>"
             logger.warning(
-                "Binance fetch_my_trades failed for %s: %s", symbol, str(e)
+                "Binance fetch_my_trades failed for %s: %s", symbol, str(item)
             )
             continue
+        _symbol, trades = item
+        for t in trades:
+            fills.append(_normalize_fill(t, exchange.id))
 
     return fills
 
@@ -588,8 +769,11 @@ async def _fetch_raw_trades_okx(
     """OKX: private_get_trade_fills_history with cursor-based pagination."""
     fills: list[dict[str, Any]] = []
     cursor = ""
+    prev_cursor = ""
+    natural_break = False
 
-    for page in range(100):
+    PAGE_CAP = 100
+    for page in range(PAGE_CAP):
         params: dict[str, str] = {"instType": "SWAP", "limit": "100"}
         if cursor:
             params["before"] = cursor
@@ -600,6 +784,7 @@ async def _fetch_raw_trades_okx(
             result = await exchange.private_get_trade_fills_history(params)
             data = result.get("data", [])
             if not data:
+                natural_break = True
                 break
 
             for fill in data:
@@ -620,34 +805,96 @@ async def _fetch_raw_trades_okx(
                 is_maker = fill.get("execType", "") == "M"
 
                 raw_data = dict(fill)
-                # Include posSide for hedge mode
-                if fill.get("posSide"):
-                    raw_data["posSide"] = fill["posSide"]
+                # Audit-2026-05-07 G12.B.4 — populate position_direction
+                # via whitelist instead of raw passthrough. OKX's posSide
+                # is documented as long/short/net, but anything else
+                # would silently land in the typed column. Reject and
+                # log so contract violations are visible.
+                pos_side_raw = fill.get("posSide")
+                position_direction: Literal["long", "short"] | None = None
+                if pos_side_raw is None or pos_side_raw == "":
+                    position_direction = None
+                elif pos_side_raw in _OKX_VALID_POS_SIDES:
+                    # Preserve raw_data alignment with prior behavior.
+                    raw_data["posSide"] = pos_side_raw
+                    if pos_side_raw == "net":
+                        # 'net' is one-way mode — direction is implied by
+                        # side, not a long/short hedge flag.
+                        position_direction = None
+                    else:
+                        position_direction = pos_side_raw  # "long" | "short"
+                else:
+                    logger.warning(
+                        "invalid posSide value=%s, using None", pos_side_raw
+                    )
+                    position_direction = None
 
-                fills.append({
-                    "exchange": "okx",
-                    "symbol": symbol,
-                    "side": side,
-                    "price": price,
-                    "quantity": amount,
-                    "fee": fee,
-                    "fee_currency": fee_currency,
-                    "timestamp": ts_dt.isoformat(),
-                    "order_type": "fill",
-                    "exchange_order_id": fill.get("ordId", ""),
-                    "exchange_fill_id": fill.get("tradeId", ""),
-                    "is_fill": True,
-                    "is_maker": is_maker,
-                    "cost": price * amount,
-                    "raw_data": raw_data,
-                })
+                fills.append(_make_fill_dict(
+                    exchange="okx",
+                    symbol=symbol,
+                    side=side,
+                    price=price,
+                    quantity=amount,
+                    fee=fee,
+                    fee_currency=fee_currency,
+                    timestamp=ts_dt.isoformat(),
+                    exchange_order_id=fill.get("ordId", ""),
+                    exchange_fill_id=fill.get("tradeId", ""),
+                    is_maker=is_maker,
+                    raw_data=raw_data,
+                    position_direction=position_direction,
+                ))
 
-            cursor = data[-1].get("tradeId", "")
+            new_cursor = data[-1].get("tradeId", "")
+
+            # Adversarial-review hardening (PR #137 follow-up): a short
+            # final page that legitimately shares its trailing tradeId
+            # with the previous page's cursor would otherwise trip the
+            # stuck-cursor warning even though we're about to break
+            # naturally on `len(data) < 100`. Take the natural-break
+            # exit FIRST so short pages don't produce false-positive
+            # "stuck" warnings.
             if len(data) < 100:
+                prev_cursor = new_cursor
+                cursor = new_cursor
+                natural_break = True
                 break
+
+            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard (full pages
+            # only). If the exchange returns the same trailing tradeId
+            # twice on a FULL page, we'd otherwise loop until the page
+            # cap and yield 100 pages of duplicates. Empty tradeId is
+            # also a hard stop (the next request would re-issue with
+            # no `before`, restarting from the most recent).
+            if not new_cursor:
+                logger.warning(
+                    "Pagination stuck on cursor=%s for exchange=okx; terminating early",
+                    new_cursor,
+                )
+                natural_break = True
+                break
+            if prev_cursor and new_cursor == prev_cursor:
+                logger.warning(
+                    "Pagination stuck on cursor=%s for exchange=okx; terminating early",
+                    new_cursor,
+                )
+                natural_break = True
+                break
+
+            prev_cursor = new_cursor
+            cursor = new_cursor
         except Exception as e:
             logger.warning("OKX fills fetch failed page %d: %s", page, str(e))
             break
+
+    if not natural_break:
+        # Audit-2026-05-07 G12.B.6 — exhausted the 100-page cap without a
+        # natural break. Surface as a warning so possible truncation is
+        # visible in operator logs.
+        logger.warning(
+            "Pagination hit %d-page cap for okx; possible truncation",
+            PAGE_CAP,
+        )
 
     return fills
 
@@ -659,8 +906,10 @@ async def _fetch_raw_trades_bybit(
     """Bybit: private_get_v5_execution_list with cursor-based pagination."""
     fills: list[dict[str, Any]] = []
     cursor = ""
+    natural_break = False
 
-    for page in range(100):
+    PAGE_CAP = 100
+    for page in range(PAGE_CAP):
         params: dict[str, str] = {"category": "linear", "limit": "100"}
         if cursor:
             params["cursor"] = cursor
@@ -671,6 +920,7 @@ async def _fetch_raw_trades_bybit(
             result = await exchange.private_get_v5_execution_list(params)
             items = result.get("result", {}).get("list", [])
             if not items:
+                natural_break = True
                 break
 
             for fill in items:
@@ -688,63 +938,98 @@ async def _fetch_raw_trades_bybit(
                 amount = float(fill.get("execQty", 0))
                 fee = abs(float(fill.get("execFee", 0)))
                 fee_currency = fill.get("feeCurrency", "USDT")
-                is_maker = fill.get("isMaker", "false") == "true"
+                # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
+                # boolean true/false (post JSON decode) and sometimes
+                # capital "True"/"TRUE". Strict string equality silently
+                # mis-classifies maker fills as taker, distorting the
+                # maker_ratio analytic + fee analysis. Accept either
+                # boolean True or any case-insensitive "true" string.
+                _raw_is_maker = fill.get("isMaker")
+                is_maker = _raw_is_maker is True or (
+                    isinstance(_raw_is_maker, str)
+                    and _raw_is_maker.lower() == "true"
+                )
 
-                fills.append({
-                    "exchange": "bybit",
-                    "symbol": symbol,
-                    "side": side,
-                    "price": price,
-                    "quantity": amount,
-                    "fee": fee,
-                    "fee_currency": fee_currency,
-                    "timestamp": ts_dt.isoformat(),
-                    "order_type": "fill",
-                    "exchange_order_id": fill.get("orderId", ""),
-                    "exchange_fill_id": fill.get("execId", ""),
-                    "is_fill": True,
-                    "is_maker": is_maker,
-                    "cost": price * amount,
-                    "raw_data": dict(fill),
-                })
+                fills.append(_make_fill_dict(
+                    exchange="bybit",
+                    symbol=symbol,
+                    side=side,
+                    price=price,
+                    quantity=amount,
+                    fee=fee,
+                    fee_currency=fee_currency,
+                    timestamp=ts_dt.isoformat(),
+                    exchange_order_id=fill.get("orderId", ""),
+                    exchange_fill_id=fill.get("execId", ""),
+                    is_maker=is_maker,
+                    raw_data=dict(fill),
+                    # Audit-2026-05-07 G12.B.4 — Bybit-side direction
+                    # derivation (closeOnTrigger, hedge mode flag) is
+                    # not in this batch's scope. Leave None; downstream
+                    # consumers fall back to side-based inference.
+                    position_direction=None,
+                ))
 
             next_cursor = result.get("result", {}).get("nextPageCursor", "")
+            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard. If Bybit
+            # returns the SAME nextPageCursor on a subsequent call, we'd
+            # otherwise loop until the page cap. Falsy nextPageCursor is
+            # the documented natural-stop condition.
             if not next_cursor:
+                natural_break = True
+                break
+            if next_cursor == cursor:
+                logger.warning(
+                    "Pagination stuck on cursor=%s for exchange=bybit; terminating early",
+                    next_cursor,
+                )
+                natural_break = True
                 break
             cursor = next_cursor
         except Exception as e:
             logger.warning("Bybit execution list failed page %d: %s", page, str(e))
             break
 
+    if not natural_break:
+        # Audit-2026-05-07 G12.B.6 — exhausted the 100-page cap without a
+        # natural break.
+        logger.warning(
+            "Pagination hit %d-page cap for bybit; possible truncation",
+            PAGE_CAP,
+        )
+
     return fills
 
 
-def _normalize_fill(trade: dict, exchange_id: str) -> dict[str, Any]:
-    """Normalize a CCXT unified trade to our fill dict shape."""
+def _normalize_fill(trade: dict, exchange_id: str) -> FillRow:
+    """Normalize a CCXT unified trade to our fill dict shape.
+
+    Audit-2026-05-07 G12.B.4/G12.B.7 — delegates the dict construction
+    to ``_make_fill_dict`` so the OKX, Bybit, and CCXT branches all
+    share a single 16-key contract.
+    """
     fee_info = trade.get("fee") or {}
     fee_cost = abs(float(fee_info.get("cost", 0) or 0))
     fee_currency = fee_info.get("currency", "USDT") or "USDT"
     price = float(trade.get("price", 0))
     amount = float(trade.get("amount", 0))
 
-    return {
-        "exchange": exchange_id,
-        "symbol": (trade.get("symbol", "")
-                   .replace("/", "").replace(":USDT", "").replace(":USD", "")),
-        "side": trade.get("side", ""),
-        "price": price,
-        "quantity": amount,
-        "fee": fee_cost,
-        "fee_currency": fee_currency,
-        "timestamp": trade.get("datetime", ""),
-        "order_type": "fill",
-        "exchange_order_id": trade.get("order", ""),
-        "exchange_fill_id": trade.get("id", ""),
-        "is_fill": True,
-        "is_maker": trade.get("takerOrMaker") == "maker",
-        "cost": price * amount,
-        "raw_data": trade.get("info"),
-    }
+    return _make_fill_dict(
+        exchange=exchange_id,
+        symbol=(trade.get("symbol", "")
+                .replace("/", "").replace(":USDT", "").replace(":USD", "")),
+        side=trade.get("side", ""),
+        price=price,
+        quantity=amount,
+        fee=fee_cost,
+        fee_currency=fee_currency,
+        timestamp=trade.get("datetime", ""),
+        exchange_order_id=trade.get("order", ""),
+        exchange_fill_id=trade.get("id", ""),
+        is_maker=trade.get("takerOrMaker") == "maker",
+        raw_data=trade.get("info"),
+        position_direction=None,
+    )
 
 
 async def fetch_all_trades(exchange: ccxt.Exchange, symbol: str | None = None, since_ms: int | None = None) -> list[dict[str, Any]]:

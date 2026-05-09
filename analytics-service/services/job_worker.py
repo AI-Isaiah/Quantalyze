@@ -539,21 +539,15 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 )
             except Exception as e:
                 # Phase 2 failure should NOT fail Phase 1.
-                #
-                # KNOWN GAP (cross-PR with PR #137 / G12.B.1, follow-up
-                # tracked as v0.22.16.0): the typed
-                # `ColdStartSymbolDiscoveryError` raised by
-                # `services.exchange._fetch_raw_trades_binance` lands in
-                # PR 2 but the boundary handler that distinguishes it
-                # from generic Phase 2 failures lives here. The current
-                # broad `except Exception` swallows the typed exception
-                # and the job still returns DONE — same false-success
-                # outcome the original audit named. Distinguishing it
-                # requires PR 2 merged first (we'd `from services.exchange
-                # import ColdStartSymbolDiscoveryError`); landing the
-                # boundary handler on this branch would fail import
-                # against main. Tracked separately, NOT a regression of
-                # this PR's work.
+                # G12.B.1 typed ColdStartSymbolDiscoveryError still lands
+                # here intentionally — for sync_trades a cold-start
+                # discovery failure means no fills were fetched, which
+                # is the same effective outcome as any other Phase 2
+                # error (Phase 1 succeeded; cursor stays put per
+                # G12.A.7). The reconcile-job caller handles the typed
+                # exception specifically (informational reconciles
+                # should NOT alert on quiet accounts) — see
+                # run_reconcile_strategy_job below.
                 logger.warning(
                     "Raw fill ingestion failed for strategy %s (Phase 1 succeeded): %s",
                     strategy_id,
@@ -1214,7 +1208,7 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     since_ms = parse_since_ms(None, preferred=since_iso)
 
     # Step 1: fetch raw exchange fills (past 24h window).
-    from services.exchange import fetch_raw_trades
+    from services.exchange import ColdStartSymbolDiscoveryError, fetch_raw_trades
 
     try:
         exchange_fills = await fetch_raw_trades(
@@ -1223,6 +1217,29 @@ async def run_reconcile_strategy_job(job: dict) -> DispatchResult:
     except ccxt.RateLimitExceeded:
         await _stamp_429(ctx.supabase, ctx.key_row)
         raise
+    except ColdStartSymbolDiscoveryError as exc:
+        # Cross-PR specialist finding: ColdStartSymbolDiscoveryError
+        # (PR 2 / G12.B.1) is raised when fetch_positions() fails OR
+        # returns no symbols. For sync_trades, that's a real failure
+        # signal. For RECONCILE — which runs on a 24h window over an
+        # informational read — a Binance allocator with no open
+        # positions in the past 24h is normal (paused account, flat
+        # for >24h). Pre-fix, the broad `except Exception` at the
+        # dispatcher would treat this as a generic reconcile failure
+        # and emit a portfolio-level `sync_failure` alert. That's a
+        # user-visible UX bug for quiet accounts.
+        #
+        # Fix: treat ColdStart as "no fills to reconcile" — log NOTICE,
+        # return DONE with an empty exchange_fills list. The
+        # reconciliation diff against db_fills will still run and
+        # surface real discrepancies; we just don't synthesize fills
+        # we couldn't fetch.
+        logger.info(
+            "reconcile_strategy: strategy=%s — exchange returned no "
+            "open-position symbols (%s); reconciling against DB fills only",
+            strategy_id, exc,
+        )
+        exchange_fills = []
     finally:
         try:
             await ctx.exchange.close()
