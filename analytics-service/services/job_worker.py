@@ -620,28 +620,54 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
     if raw_fills:
         # Direct insert with ON CONFLICT DO NOTHING (dedup via partial unique index)
         # Cannot use sync_trades RPC — it DELETE+INSERTs, which would destroy Phase 1 daily_pnl
-        existing_fill_ids: set[str] = set()
+        #
+        # G12.A.6 amendment-detection SELECT — adversarial-review hardened
+        # (PR #136 follow-up):
+        #
+        #   1. The upsert dedup key is `(strategy_id, exchange, exchange_fill_id)`.
+        #      Pre-fix the SELECT only filtered `(strategy_id, exchange_fill_id)`
+        #      so cross-exchange tradeId collisions (Bybit `execId` and Binance
+        #      `id` namespaces are independent integer spaces) registered as
+        #      false-positive amendments. Bucket by exchange first, then SELECT
+        #      per-exchange so the predicate matches the upsert key exactly.
+        #
+        #   2. PostgREST `.in_()` URL-encodes the list. Backfills with thousands
+        #      of fills exceed the ~8KB query string limit and the request 414/500s
+        #      — silently swallowed at DEBUG, killing observability on exactly the
+        #      runs where it matters most. Chunk per-exchange in 100-id batches
+        #      matching the upsert chunk size so we stay well under the URL cap.
+        existing_pairs: set[tuple[str, str]] = set()
         try:
-            incoming_fill_ids = [
-                f.get("exchange_fill_id") for f in raw_fills
-                if f.get("exchange_fill_id")
-            ]
-            if incoming_fill_ids:
-                def _select_existing() -> set[str]:
-                    res = (
-                        ctx.supabase.table("trades")
-                        .select("exchange_fill_id")
-                        .eq("strategy_id", strategy_id)
-                        .in_("exchange_fill_id", incoming_fill_ids)
-                        .execute()
-                    )
-                    return {
-                        row.get("exchange_fill_id")
-                        for row in (res.data or [])
-                        if row.get("exchange_fill_id")
-                    }
+            incoming_by_exchange: dict[str, list[str]] = {}
+            for fill in raw_fills:
+                fill_id = fill.get("exchange_fill_id")
+                exch = fill.get("exchange")
+                if fill_id and exch:
+                    incoming_by_exchange.setdefault(exch, []).append(fill_id)
 
-                existing_fill_ids = await db_execute(_select_existing)
+            for exch, fill_ids in incoming_by_exchange.items():
+                for offset in range(0, len(fill_ids), 100):
+                    chunk = fill_ids[offset:offset + 100]
+
+                    def _select_existing(
+                        _exch: str = exch,
+                        _chunk: list[str] = chunk,
+                    ) -> set[tuple[str, str]]:
+                        res = (
+                            ctx.supabase.table("trades")
+                            .select("exchange,exchange_fill_id")
+                            .eq("strategy_id", strategy_id)
+                            .eq("exchange", _exch)
+                            .in_("exchange_fill_id", _chunk)
+                            .execute()
+                        )
+                        return {
+                            (row.get("exchange"), row.get("exchange_fill_id"))
+                            for row in (res.data or [])
+                            if row.get("exchange") and row.get("exchange_fill_id")
+                        }
+
+                    existing_pairs |= await db_execute(_select_existing)
         except Exception as exc:  # noqa: BLE001
             # Observability is best-effort — never block the upsert.
             logger.debug(
@@ -649,7 +675,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 "strategy %s (continuing): %s",
                 strategy_id, exc,
             )
-            existing_fill_ids = set()
+            existing_pairs = set()
 
         try:
             for i in range(0, len(raw_fills), 100):
@@ -676,7 +702,7 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
             )
 
         # G12.A.6 amendment-detection observability (best-effort).
-        amended_count = len(existing_fill_ids)
+        amended_count = len(existing_pairs)
         if amended_count > 0:
             logger.warning(
                 "fill_amendments_detected strategy=%s collisions=%d batch_size=%d "

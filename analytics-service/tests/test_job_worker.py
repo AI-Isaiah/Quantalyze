@@ -1089,23 +1089,26 @@ class TestSyncTradesPhase2AmendmentDetection:
 
         mock_ctx.supabase.rpc.side_effect = _rpc
 
-        # supabase.table('trades') chain:
-        #   .select('exchange_fill_id').eq(...).in_(...).execute() — returns
-        #     existing rows for the amendment-detection SELECT.
+        # supabase.table('trades') chain (post adversarial-review fix):
+        #   .select('exchange,exchange_fill_id').eq(strategy_id).eq(exchange).in_(fill_ids).execute()
+        #   — returns existing rows scoped by both strategy AND exchange.
         #   .upsert(...).execute() — Phase 2 batch upsert.
         # supabase.table('api_keys').update(...).eq(...).execute() — cursor
         # advance. Use the same mock_t for all and dispatch by chained verb.
         def _table(name: str) -> MagicMock:
             mock_t = MagicMock()
-            # SELECT chain — returns one collision (fill-amended-1 is in DB).
+            # SELECT chain — returns one collision (fill-amended-1 in DB on okx).
+            # Two .eq() calls (strategy_id, exchange) → one .in_(fill_ids).
             mock_select = MagicMock()
-            mock_eq_sel = MagicMock()
+            mock_eq_strat = MagicMock()
+            mock_eq_exch = MagicMock()
             mock_in = MagicMock()
             mock_in.execute.return_value = MagicMock(data=[
-                {"exchange_fill_id": "fill-amended-1"},
+                {"exchange": "okx", "exchange_fill_id": "fill-amended-1"},
             ])
-            mock_eq_sel.in_.return_value = mock_in
-            mock_select.eq.return_value = mock_eq_sel
+            mock_eq_exch.in_.return_value = mock_in
+            mock_eq_strat.eq.return_value = mock_eq_exch
+            mock_select.eq.return_value = mock_eq_strat
             mock_t.select.return_value = mock_select
 
             # UPSERT chain — succeeds.
@@ -1161,6 +1164,155 @@ class TestSyncTradesPhase2AmendmentDetection:
             f"Expected a `fill_amendments_detected` WARNING when Phase 2 "
             f"upsert collides with existing fills. "
             f"Warnings captured: {warning_msgs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_amendment_select_filters_by_exchange_no_cross_exchange_false_positive(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Adversarial-review regression (PR #136 follow-up).
+
+        Pre-fix the SELECT only filtered (strategy_id, exchange_fill_id),
+        so cross-exchange tradeId collisions (Bybit `execId` vs Binance `id`
+        are independent integer namespaces) registered as false-positive
+        amendments. The fix buckets incoming fills by exchange and SELECTs
+        per-exchange so the predicate matches the upsert's
+        (strategy_id, exchange, exchange_fill_id) ON CONFLICT key exactly.
+
+        Sets up: incoming fills from BOTH okx and binance with overlapping
+        exchange_fill_id "100" (legal in real life — independent ID spaces).
+        DB only has the binance row "100"; the okx row "100" is genuinely new.
+
+        Asserts: the .eq("exchange", ...) chain is called for each distinct
+        exchange in the incoming batch (proving the predicate exists).
+        """
+        from services.job_worker import run_sync_trades_job
+
+        # Cross-exchange overlapping fill IDs — legal because each exchange
+        # maintains its own integer ID namespace.
+        raw_fills = [
+            {
+                "exchange": "okx", "symbol": "BTC-USDT-SWAP",
+                "side": "buy", "price": "50000", "quantity": "0.1",
+                "fee": "0.5", "exchange_fill_id": "100",
+                "is_fill": True, "cost": "5000",
+                "timestamp": "2026-05-07T12:00:00Z",
+            },
+            {
+                "exchange": "binance", "symbol": "BTCUSDT",
+                "side": "sell", "price": "50100", "quantity": "0.1",
+                "fee": "0.51", "exchange_fill_id": "100",
+                "is_fill": True, "cost": "5010",
+                "timestamp": "2026-05-07T12:05:00Z",
+            },
+        ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-cross", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+        mock_ctx.supabase.rpc.return_value.execute.return_value = MagicMock(data=2)
+
+        # Track each .eq("exchange", ...) call so we can assert the chain
+        # is per-exchange (not a single SELECT).
+        seen_exchanges: list[str] = []
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            def _select_chain(*select_args, **select_kwargs):
+                mock_select = MagicMock()
+
+                def _eq_strategy(_strat_col, _strat_val):
+                    mock_eq_strat = MagicMock()
+
+                    def _eq_exchange(_exch_col, _exch_val):
+                        # Capture the per-exchange filter — proof the fix
+                        # narrows by exchange.
+                        if _exch_col == "exchange":
+                            seen_exchanges.append(_exch_val)
+                        mock_eq_exch = MagicMock()
+
+                        def _in(_col, _ids):
+                            mock_in = MagicMock()
+                            # Simulate: binance has fill "100" already
+                            # (a real prior persist), okx does not.
+                            if _exch_val == "binance" and "100" in _ids:
+                                mock_in.execute.return_value = MagicMock(data=[
+                                    {"exchange": "binance", "exchange_fill_id": "100"},
+                                ])
+                            else:
+                                mock_in.execute.return_value = MagicMock(data=[])
+                            return mock_in
+
+                        mock_eq_exch.in_.side_effect = _in
+                        return mock_eq_exch
+
+                    mock_eq_strat.eq.side_effect = _eq_exchange
+                    return mock_eq_strat
+
+                mock_select.eq.side_effect = _eq_strategy
+                return mock_select
+
+            mock_t.select.side_effect = _select_chain
+
+            # UPSERT chain — succeeds.
+            mock_upsert = MagicMock()
+            mock_upsert.execute.return_value = MagicMock(data=[])
+            mock_t.upsert.return_value = mock_upsert
+
+            # UPDATE chain — for cursor advance.
+            mock_update = MagicMock()
+            mock_eq_upd = MagicMock()
+            mock_eq_upd.execute.return_value = MagicMock(data=[])
+            mock_update.eq.return_value = mock_eq_upd
+            mock_t.update.return_value = mock_update
+
+            return mock_t
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        job = {
+            "id": "job-cross",
+            "kind": "sync_trades",
+            "strategy_id": "strat-cross",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(return_value=raw_fills),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # Both exchanges must have been queried independently. Order is
+        # dict-iteration order — sort to compare.
+        assert sorted(seen_exchanges) == ["binance", "okx"], (
+            f"Expected per-exchange SELECTs for both 'binance' and 'okx', "
+            f"got {seen_exchanges}. The pre-fix SELECT had no .eq('exchange', ...) "
+            f"so cross-exchange tradeId collisions registered as false amendments."
         )
 
 

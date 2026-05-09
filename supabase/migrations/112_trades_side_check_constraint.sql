@@ -33,12 +33,21 @@
 -- ---
 -- Add a CHECK constraint on trades.side admitting only {'buy','sell'}.
 -- Use NOT VALID + VALIDATE so the lock window is short on an existing
--- table — but only VALIDATE if no rows violate the contract today. If
--- non-{buy,sell} rows exist (e.g. legacy 'long'/'short' summary rows
--- or a typo'd batch), the migration RAISEs with a clear message so the
--- admin must clean the data first. We do NOT silently delete or coerce
--- — the audit trail of the bad data is more valuable than a silent
--- "passing" migration.
+-- table. The constraint is ALWAYS added (NOT VALID is a metadata-only
+-- ALTER — fast, no scan, blocks future bad writes immediately). The
+-- VALIDATE step (which scans existing rows) is conditional: if any
+-- existing row has side outside {'buy','sell'}, the migration emits a
+-- WARNING via RAISE NOTICE and leaves the constraint NOT VALID until
+-- an admin cleans the data and runs `ALTER TABLE trades VALIDATE
+-- CONSTRAINT trades_side_check;` manually.
+--
+-- Adversarial-review hardening (PR #136 follow-up): the original draft
+-- used RAISE EXCEPTION here, which would abort the whole migration in
+-- transaction — leaving the deploy pipeline halted in production until
+-- a human SSHes in to clean rows. Soft-fail with NOTICE is operationally
+-- safer: new writes are blocked immediately (the value of the audit row),
+-- and the historical audit trail is preserved for cleanup at the admin's
+-- own pace. We do NOT silently delete or coerce.
 --
 -- Idempotency
 -- -----------
@@ -84,27 +93,35 @@ BEGIN
      WHERE side IS NOT NULL
        AND side NOT IN ('buy', 'sell');
 
-    IF v_bad_count > 0 THEN
-      RAISE EXCEPTION
-        'Migration 112 cannot apply trades_side_check: % existing rows have side outside {buy,sell}. '
-        'Distinct violator values: [%]. '
-        'Clean these rows first (UPDATE to ''buy''/''sell'' or DELETE), then re-run migration 112. '
-        'Audit reference: G12.A.3 (audit-2026-05-07). '
-        'Suggested triage: SELECT side, count(*) FROM public.trades WHERE side NOT IN (''buy'',''sell'') GROUP BY side;',
-        v_bad_count, v_distinct_sides;
-    END IF;
-
-    -- Existing data is clean — add the constraint with NOT VALID first
-    -- (cheap metadata-only ALTER, no scan), then VALIDATE in a separate
-    -- statement so reads aren't blocked.
+    -- Always add the constraint NOT VALID first (cheap metadata-only
+    -- ALTER, no table scan). This blocks future bad writes immediately
+    -- regardless of whether existing rows violate the contract.
     ALTER TABLE public.trades
       ADD CONSTRAINT trades_side_check CHECK (side IN ('buy', 'sell')) NOT VALID;
 
-    ALTER TABLE public.trades
-      VALIDATE CONSTRAINT trades_side_check;
+    IF v_bad_count > 0 THEN
+      -- Soft-fail: emit a NOTICE (logged warning, deploy pipeline keeps
+      -- moving) and leave constraint NOT VALID. New writes are protected;
+      -- existing bad rows are tolerated until admin runs:
+      --   ALTER TABLE public.trades VALIDATE CONSTRAINT trades_side_check;
+      -- after cleaning the violator rows. Triage query is in the message.
+      RAISE NOTICE
+        'Migration 112: trades_side_check ADDED but NOT YET VALIDATED — % existing rows have side outside {buy,sell}. '
+        'Distinct violator values: [%]. '
+        'New writes are blocked. To validate against historical data, clean these rows '
+        '(UPDATE to ''buy''/''sell'' or DELETE), then run: ALTER TABLE public.trades VALIDATE CONSTRAINT trades_side_check; '
+        'Audit reference: G12.A.3 (audit-2026-05-07). '
+        'Triage: SELECT side, count(*) FROM public.trades WHERE side NOT IN (''buy'',''sell'') GROUP BY side;',
+        v_bad_count, v_distinct_sides;
+    ELSE
+      -- Existing data is clean — VALIDATE in a separate statement so
+      -- reads aren't blocked.
+      ALTER TABLE public.trades
+        VALIDATE CONSTRAINT trades_side_check;
 
-    RAISE NOTICE 'Migration 112: trades_side_check added + validated (% existing rows scanned).',
-      (SELECT count(*) FROM public.trades);
+      RAISE NOTICE 'Migration 112: trades_side_check added + validated (% existing rows scanned).',
+        (SELECT count(*) FROM public.trades);
+    END IF;
   END IF;
 END $$;
 
@@ -145,9 +162,14 @@ BEGIN
   END IF;
 
   IF NOT v_validated THEN
-    RAISE EXCEPTION
-      'Migration 112 verification failed: trades_side_check exists but is NOT VALID (not yet validated). '
-      'Existing data must satisfy the constraint before VALIDATE; check rows where '
-      'side NOT IN (buy, sell). Audit ref G12.A.3.';
+    -- Soft-fail (paired with the bad-data NOTICE above): NOT VALID
+    -- still enforces the constraint on new INSERTs/UPDATEs; the migration
+    -- is considered applied. A separate manual VALIDATE step runs after
+    -- admin cleanup.
+    RAISE NOTICE
+      'Migration 112 verification: trades_side_check exists but is NOT VALID. '
+      'New writes are protected. Existing rows are tolerated; clean them and '
+      'run ALTER TABLE public.trades VALIDATE CONSTRAINT trades_side_check; '
+      'when ready. Audit ref G12.A.3.';
   END IF;
 END $$;
