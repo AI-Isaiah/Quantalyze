@@ -21,12 +21,12 @@ import asyncio
 import os
 import secrets
 import time
-from typing import Any
+from typing import Annotated, Any
 
 import hashlib
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -284,7 +284,18 @@ async def _run_validate_only(
 
 @router.post("")
 @limiter.limit("100/hour", key_func=_process_key_rate_limit_key)
-async def process_key(request: Request, body: _ProcessKeyBody) -> dict:
+async def process_key(
+    request: Request,
+    body: Annotated[_ProcessKeyBody, Body()],
+) -> dict:
+    # `Annotated[_ProcessKeyBody, Body()]` — explicit Body marker. Without it,
+    # `from __future__ import annotations` (line 18) stringifies the type hint
+    # to "_ProcessKeyBody", and FastAPI 0.115.x's body-vs-query auto-detection
+    # falls back to query, producing 422s with `loc:["query","body"]`. Newer
+    # fastapi (0.135.x) auto-detects the BaseModel correctly, but the pinned
+    # version in requirements.txt does not — and this is the request-body
+    # contract surface, so explicit beats implicit.
+    #
     # Slowapi inspects the function signature for a parameter literally named
     # `request` (or `websocket`) to attach the limiter context — see
     # slowapi/extension.py:713. Renaming this parameter from `req` to
