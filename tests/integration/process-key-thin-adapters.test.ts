@@ -414,6 +414,61 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     ).toBe(TEST_USER.id);
   });
 
+  // CT-7 (army2) — the process-key client must abort a hung upstream
+  // fetch with AbortSignal.timeout(60s) so a stalled synchronous flow
+  // returns a clean UPSTREAM_TIMEOUT envelope (504) instead of dragging
+  // the whole Vercel function to maxDuration. Synchronous flows (teaser,
+  // csv, internal_report) run the full 5-method pipeline upstream so a
+  // stalled broker can hang the request indefinitely.
+  //
+  // Implementation note: AbortSignal.timeout uses real wall-clock time
+  // internally, so we can't usefully drive it with vitest fake timers.
+  // Instead we mock fetch with a stub that synchronously rejects with a
+  // TimeoutError if a signal is present — which is exactly what fetch
+  // would do at abort time. This proves the route handler correctly
+  // catches the TimeoutError and emits the UPSTREAM_TIMEOUT envelope.
+  it("postProcessKey returns UPSTREAM_TIMEOUT envelope on abort (CT-7)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const abortingFetch = vi.fn(
+      (_url: string | URL, init?: RequestInit) => {
+        // The route must set signal: AbortSignal.timeout(...). Verify
+        // the contract is wired BEFORE we simulate the abort.
+        const signal = init?.signal as AbortSignal | undefined;
+        if (!signal) {
+          throw new Error(
+            "CT-7: postProcessKey did not pass AbortSignal to fetch — " +
+              "no client-side timeout will fire on a hung upstream",
+          );
+        }
+        const err = new Error("The operation was aborted due to timeout");
+        err.name = "TimeoutError";
+        return Promise.reject(err);
+      },
+    );
+    globalThis.fetch = abortingFetch as unknown as typeof globalThis.fetch;
+
+    try {
+      const { POST } = await import("@/app/api/verify-strategy/route");
+      const res = await POST(
+        jsonReq("/api/verify-strategy", {
+          email: "test@example.com",
+          exchange: "okx",
+          api_key: "k",
+          api_secret: "s",
+        }),
+      );
+
+      expect(res.status).toBe(504);
+      const body = await res.json();
+      expect(body.code).toBe("UPSTREAM_TIMEOUT");
+      expect(body.recoverable).toBe(true);
+      expect(typeof body.human_message).toBe("string");
+    } finally {
+      // Restore the default mock for subsequent tests.
+      globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+    }
+  });
+
   // CT-3 (army2) — the unified verify-strategy path must mint a public_token
   // and persist it to strategy_verifications, then return BOTH verification_id
   // and public_token. Without this, landing-page <VerificationForm/> throws

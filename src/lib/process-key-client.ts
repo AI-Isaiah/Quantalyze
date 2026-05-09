@@ -87,23 +87,77 @@ export async function postProcessKey(
   }
 
   const correlationId = args.correlationId ?? (await getCorrelationId());
-  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${internalToken}`,
-      "X-Correlation-Id": correlationId,
-      // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
-      // isolation. See PostProcessKeyArgs.userId for the contract.
-      "X-User-Id": args.userId,
-    },
-    body: JSON.stringify({
-      flow_type: args.flow_type,
-      source: args.source,
-      context: args.context,
-    }),
-    cache: "no-store",
-  });
+
+  // CT-7 (army2) — wall-clock budget for the upstream POST. Synchronous
+  // flows (csv / teaser / internal_report) run the full 5-method pipeline
+  // server-side; without a client-side timeout the Vercel function hangs
+  // until maxDuration and returns a generic 504 with no clean envelope.
+  // 60s leaves slack for typical synchronous teaser runs (~10-25s) while
+  // bounding worst-case to a single Vercel concurrency slot's 5x retry
+  // budget instead of the full maxDuration.
+  let res: Response;
+  try {
+    res = await fetch(`${ANALYTICS_URL}/process-key`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${internalToken}`,
+        "X-Correlation-Id": correlationId,
+        // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
+        // isolation. See PostProcessKeyArgs.userId for the contract.
+        "X-User-Id": args.userId,
+      },
+      body: JSON.stringify({
+        flow_type: args.flow_type,
+        source: args.source,
+        context: args.context,
+      }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (err) {
+    const tag = args.routeTag ?? "process-key-client";
+    const isAbort =
+      err instanceof Error &&
+      (err.name === "AbortError" || err.name === "TimeoutError");
+    if (isAbort) {
+      console.error(
+        `[${tag}] /process-key upstream timed out after 60s (CT-7)`,
+        { correlation_id: correlationId },
+      );
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            ok: false,
+            code: "UPSTREAM_TIMEOUT",
+            human_message:
+              "The ingestion service did not respond in time. Please try again.",
+            correlation_id: correlationId,
+            recoverable: true,
+          },
+          { status: 504 },
+        ),
+      };
+    }
+    // Non-timeout network errors surface as 502 so the caller can
+    // distinguish "we never reached upstream" from "upstream rejected us".
+    const message = err instanceof Error ? err.message : "Network error";
+    console.error(`[${tag}] /process-key upstream fetch threw:`, message);
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "UPSTREAM_NETWORK_ERROR",
+          human_message: "Could not reach the ingestion service.",
+          correlation_id: correlationId,
+          recoverable: true,
+        },
+        { status: 502 },
+      ),
+    };
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
