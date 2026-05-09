@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.14.0] - 2026-05-09
+
+**audit-2026-05-07 G12.E.1 — Position TS runtime guard at the API boundary.** Closes 1 audit item (HIGH conf=9). PR 3 of 5 in the audit-2026-05-07 G12 split (parallel with PR 1 + PR 2). The Discovery `/strategy/[id]` page previously cast raw Supabase rows directly into the typed `Position[]` consumer with no runtime validation — any DB row with `side='LONG'` or a future-added `status='partial'` would satisfy TypeScript at the trust boundary while silently corrupting the consumer's exhaustive switches.
+
+### Added
+
+- **`PositionRowSchema` Zod schema + `parsePositionRows()` helper** in `src/lib/types.ts`. Schema kept in lockstep with the existing `Position` interface via `satisfies z.ZodType<Position>` — drift causes a compile error.
+- **8-test regression suite** at `src/__tests__/positions-runtime-guard-g12e.test.ts`.
+
+### Changed
+
+- **`src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`** replaces `positions = positionsResult?.data ?? null` with `positions = positionsResult?.data ? parsePositionRows(positionsResult.data) : null`.
+
 ## [0.22.15.0] - 2026-05-09
 
 **audit-2026-05-07 G12.D — positions/trades schema + RLS asymmetry.** Closes 4 audit items (1 CRITICAL + 1 HIGH + 1 MED + 1 LOW). PR 4 of 5 in the audit-2026-05-07 G12 split. The positions table previously published full-lifecycle PnL/fees/ROI/duration to ANY authenticated user for any published strategy — bypassing the disclosure-tier contract that limits what published strategies expose. Migration 114 brings positions RLS to parity with trades (owner-only by default), adds a natural-key uniqueness contract for the positions atomic-rebuild RPC (PR 5), high-precision `duration_seconds`, and a partial index for "recent open" queries.
