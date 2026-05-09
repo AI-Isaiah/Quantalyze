@@ -125,6 +125,12 @@ async function unifiedVerifyStrategyHandler(
 
   try {
     const admin = createAdminClient();
+    // @audit-skip: unauthenticated public endpoint (no user session). The
+    // strategy_verifications row carries no PII (only a public_token +
+    // status), and audit_log requires a user_id which the unauthenticated
+    // teaser caller cannot provide. Mirrors the legacy verify-strategy
+    // path's @audit-skip rationale; landing-page-lead audit lands in
+    // PostHog per ADR-0023 §3, not audit_log.
     const { error: persistError } = await admin
       .from("strategy_verifications")
       .update({ public_token: publicToken, expires_at: expiresAt })
