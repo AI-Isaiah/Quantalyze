@@ -539,6 +539,20 @@ def _match_positions_fifo(
                         close_time.replace("Z", "+00:00")
                     )
                     seconds = (close_dt - open_dt).total_seconds()
+                    # Adversarial-review hardening (PR #140 follow-up):
+                    # clock skew or out-of-order fills can make close_dt
+                    # < open_dt — pre-fix int(negative_seconds) would
+                    # persist a negative duration that downstream
+                    # dashboards inherit as garbage. Clamp to 0 and flag
+                    # the position so admin can triage.
+                    if seconds < 0:
+                        logger.warning(
+                            "Negative position duration detected — clamping to 0. "
+                            "open=%s close=%s seconds=%.2f. Likely cause: clock skew "
+                            "or out-of-order fills.",
+                            position_open_time, close_time, seconds,
+                        )
+                        seconds = 0.0
                     duration_days = round(seconds / 86400, 4)
                     duration_seconds = int(seconds)
                 except (ValueError, TypeError):

@@ -55,6 +55,19 @@
 BEGIN;
 
 -- --------------------------------------------------------------------
+-- positions.duration_seconds (paired with G12.C.9 + G12.D.3)
+-- --------------------------------------------------------------------
+-- Adversarial-review hardening (PR #140 follow-up): ensure the
+-- positions.duration_seconds column exists at migration-apply time so
+-- the RPC's INSERT projection below can write it. Migration 114
+-- (PR #139) also adds this column with IF NOT EXISTS — both migrations
+-- are idempotent, so whichever lands first wins and the other is a
+-- no-op for this column. Without this, the original 113 omitted the
+-- column from INSERT and the Python writer's duration_seconds value
+-- would be silently discarded forever (defeating G12.C.9).
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS duration_seconds BIGINT NULL;
+
+-- --------------------------------------------------------------------
 -- reconstruct_positions_atomic
 -- --------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION reconstruct_positions_atomic(
@@ -101,6 +114,7 @@ BEGIN
       fee_total,
       roi,
       duration_days,
+      duration_seconds,
       opened_at,
       closed_at,
       fill_count,
@@ -119,6 +133,7 @@ BEGIN
       NULLIF(elem->>'fee_total', '')::NUMERIC,
       NULLIF(elem->>'roi', '')::NUMERIC,
       NULLIF(elem->>'duration_days', '')::NUMERIC,
+      NULLIF(elem->>'duration_seconds', '')::BIGINT,
       (elem->>'opened_at')::TIMESTAMPTZ,
       NULLIF(elem->>'closed_at', '')::TIMESTAMPTZ,
       COALESCE((elem->>'fill_count')::INTEGER, 0),
