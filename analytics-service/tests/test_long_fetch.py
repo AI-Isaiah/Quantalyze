@@ -171,6 +171,57 @@ async def test_drain_missing_metadata_treated_as_legacy():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata,reason",
+    [
+        (
+            {
+                "unified_backbone_at_claim": "true",
+                "verification_id": "v-bad-flow",
+                "flow_type": "haxor",  # not in FlowType locked enum
+                "source": "okx",
+            },
+            "bad flow_type",
+        ),
+        (
+            {
+                "unified_backbone_at_claim": "true",
+                "verification_id": "v-bad-source",
+                "flow_type": "onboard",
+                "source": "ftx",  # not in Source locked enum (UC-B drops MT5/IBKR/FTX)
+            },
+            "bad source",
+        ),
+    ],
+    ids=["bad_flow_type", "bad_source"],
+)
+async def test_locked_enum_violation_returns_failed_permanent(
+    metadata: dict[str, Any], reason: str
+) -> None:
+    """Regression: long_fetch must reject flow_type / source values outside
+    the CONTEXT.md L72 locked enum with FAILED-permanent BEFORE the adapter
+    pipeline runs.
+
+    Pre-fix path was: dataclass construction succeeded silently (dataclasses
+    don't runtime-validate Literal annotations) and get_adapter(source) only
+    raised on bogus source — a typo'd flow_type would flow into adapter.validate
+    and burn the broker round-trip on a job that should have been dropped at
+    the gate. The CI gate (mypy --strict) catches the type-side; this test
+    pins the runtime narrowing that backs it up.
+    """
+    job = {"id": "job-bad-enum", "kind": "process_key_long", "metadata": metadata}
+    with patch("services.ingestion.long_fetch.get_adapter") as mock_get_adapter, \
+         patch("services.ingestion.long_fetch.get_supabase") as mock_get_sb:
+        result = await run_process_key_long_job(job)
+        mock_get_adapter.assert_not_called()
+        mock_get_sb.assert_not_called()
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert "locked enum violation" in result.error_message
+
+
+@pytest.mark.asyncio
 async def test_pipeline_idempotent_on_retry():
     """If verification_id is already at status='published', handler returns
     SUCCESS without re-running the pipeline (worker retry safety)."""

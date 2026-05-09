@@ -28,19 +28,22 @@ Pitfall 3 — Drain semantics
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 import structlog
 
 from services.db import get_supabase
 from services.ingestion import get_adapter
-from services.ingestion.adapter import KeySubmissionRequest
+from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
+
+if TYPE_CHECKING:
+    from services.job_worker import DispatchResult
 
 log = structlog.get_logger("quantalyze.analytics.long_fetch")
 
 
-async def run_process_key_long_job(job: dict) -> "DispatchResult":
+async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     """Phase 19 / BACKBONE-09 — long-fetch worker handler.
 
     Returns a DispatchResult; the calling job_worker dispatch loop handles
@@ -86,6 +89,25 @@ async def run_process_key_long_job(job: dict) -> "DispatchResult":
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message="process_key_long: missing verification_id or source in metadata",
+            error_kind="permanent",
+        )
+
+    # Narrow Any → Literal so the dataclass construction below is type-safe.
+    # The metadata blob is JSON, so flow_type / source can be anything; reject
+    # values outside the locked enum (CONTEXT.md L72) as permanent failures
+    # instead of letting them propagate into the adapter pipeline.
+    if flow_type not in get_args(FlowType) or source not in get_args(Source):
+        log.error(
+            "process_key_long.bad_enum",
+            flow_type=flow_type,
+            source=source,
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                f"process_key_long: invalid flow_type={flow_type!r} or "
+                f"source={source!r} (locked enum violation)"
+            ),
             error_kind="permanent",
         )
 
@@ -161,8 +183,8 @@ async def run_process_key_long_job(job: dict) -> "DispatchResult":
     # strategy_verifications.encrypted_credentials.
     context = metadata.get("context") or {}
     request = KeySubmissionRequest(
-        flow_type=flow_type,
-        source=source,
+        flow_type=cast(FlowType, flow_type),
+        source=cast(Source, source),
         context=context,
     )
 
@@ -217,7 +239,7 @@ async def run_process_key_long_job(job: dict) -> "DispatchResult":
     ).execute()
 
     # 3.5 encrypt_credentials (API path only — CSV has no creds)
-    encrypted: dict | None = None
+    encrypted: dict[str, Any] | None = None
     if source != "csv":
         from services.encryption import encrypt_credentials, get_kek
 

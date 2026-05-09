@@ -15,7 +15,7 @@ Re-patching here would silently shadow the canonical fix.
 """
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from services import exchange as exchange_service
 from services.ingestion.adapter import (
@@ -79,11 +79,9 @@ class BybitAdapter:
             await ex.close()
 
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
-        from services.equity_reconstruction import (  # type: ignore[attr-defined]
-            EquityCurveBuilder,
-        )
+        from services.equity_reconstruction import EquityCurveBuilder
 
-        return cast(MetricsSnapshot, EquityCurveBuilder(trades).to_metrics_snapshot())
+        return EquityCurveBuilder(trades).to_metrics_snapshot()
 
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
@@ -95,8 +93,6 @@ class BybitAdapter:
     async def reconstruct_positions(
         self, trades: list[Trade]
     ) -> list[Position]:
-        from services.equity_reconstruction import (  # type: ignore[attr-defined]
-            EquityCurveBuilder,
-        )
+        from services.equity_reconstruction import EquityCurveBuilder
 
-        return cast(list[Position], EquityCurveBuilder(trades).reconstruct_positions())
+        return EquityCurveBuilder(trades).reconstruct_positions()

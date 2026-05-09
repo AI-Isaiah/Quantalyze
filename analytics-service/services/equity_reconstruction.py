@@ -24,7 +24,7 @@ import json
 import logging
 from bisect import bisect_right
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import ccxt.async_support as ccxt
 import httpx
@@ -39,6 +39,9 @@ from services.job_worker import (
     _stamp_429,
     classify_exception,
 )
+
+if TYPE_CHECKING:
+    from services.ingestion.adapter import MetricsSnapshot, Position
 
 logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 
@@ -1687,7 +1690,7 @@ class EquityCurveBuilder:
     # Position reconstruction (in-memory, not persisted)
     # ------------------------------------------------------------------
 
-    def reconstruct_positions(self) -> list:
+    def reconstruct_positions(self) -> "list[Position]":
         """In-memory FIFO matching (NOT persisted to DB).
 
         Calls existing services.position_reconstruction._match_positions_fifo
@@ -1921,7 +1924,7 @@ class EquityCurveBuilder:
     # MetricsSnapshot composition
     # ------------------------------------------------------------------
 
-    def to_metrics_snapshot(self):
+    def to_metrics_snapshot(self) -> "MetricsSnapshot":
         """Compose into a services.ingestion.adapter.MetricsSnapshot."""
         from services.ingestion.adapter import MetricsSnapshot
 

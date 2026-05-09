@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any
+from typing import Any, cast
 
 
-def metrics_to_jsonb(m: Any) -> dict:
+def metrics_to_jsonb(m: Any) -> dict[str, Any]:
     """Type-aware serialisation for the MetricsSnapshot JSONB column.
 
     Contract — single source of truth, used in both:
@@ -34,7 +34,7 @@ def metrics_to_jsonb(m: Any) -> dict:
     if dataclasses.is_dataclass(m) and not isinstance(m, type):
         return dataclasses.asdict(m)
     if hasattr(m, "model_dump"):
-        return m.model_dump(mode="json")
+        return cast(dict[str, Any], m.model_dump(mode="json"))
     out = {k: v for k, v in m.__dict__.items() if not k.startswith("_")}
     json.dumps(out)  # raises TypeError on non-encodable values
     return out

@@ -19,7 +19,7 @@ disallows). Lazy imports inside the method bodies satisfy this.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any
 
 from services import exchange as exchange_service
 from services.ingestion.adapter import (
@@ -84,11 +84,9 @@ class OkxAdapter:
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
         # Lazy import: P8 ships EquityCurveBuilder in Wave 2; the adapter
         # cannot hard-import it without creating a Wave-1 → Wave-2 cycle.
-        from services.equity_reconstruction import (  # type: ignore[attr-defined]
-            EquityCurveBuilder,
-        )
+        from services.equity_reconstruction import EquityCurveBuilder
 
-        return cast(MetricsSnapshot, EquityCurveBuilder(trades).to_metrics_snapshot())
+        return EquityCurveBuilder(trades).to_metrics_snapshot()
 
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
@@ -106,11 +104,9 @@ class OkxAdapter:
         # BACKBONE-09 reuse: P8 EquityCurveBuilder.reconstruct_positions
         # wraps the existing position_reconstruction._match_positions_fifo
         # primitive without rewriting it.
-        from services.equity_reconstruction import (  # type: ignore[attr-defined]
-            EquityCurveBuilder,
-        )
+        from services.equity_reconstruction import EquityCurveBuilder
 
-        return cast(list[Position], EquityCurveBuilder(trades).reconstruct_positions())
+        return EquityCurveBuilder(trades).reconstruct_positions()
 
 
 def _normalize_trade(raw: dict[str, Any], exchange: str) -> Trade:

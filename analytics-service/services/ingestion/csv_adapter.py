@@ -31,7 +31,7 @@ from __future__ import annotations
 import base64
 import io
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any
 
 from services.ingestion.adapter import (
     Fingerprint,
@@ -157,11 +157,9 @@ class CsvAdapter:
 
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
         # Lazy import: P8 ships EquityCurveBuilder in Wave 2.
-        from services.equity_reconstruction import (  # type: ignore[attr-defined]
-            EquityCurveBuilder,
-        )
+        from services.equity_reconstruction import EquityCurveBuilder
 
-        return cast(MetricsSnapshot, EquityCurveBuilder(trades).to_metrics_snapshot())
+        return EquityCurveBuilder(trades).to_metrics_snapshot()
 
     def compute_fingerprint(
         self, trades: list[Trade], metrics: MetricsSnapshot
