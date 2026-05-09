@@ -681,9 +681,27 @@ const P5_OUTCOME_O1 = {
   // Synthesized embed fields — the mock chain returns these as-is for
   // bridge_outcomes rows; the queries.ts normalizer should carry them
   // through to payload.outcomes[i].match_decision / .replacement_strategy.
-  replacement_strategy: { id: "s-repl", name: "Crypto Momentum LP" },
+  //
+  // audit-2026-05-07 G8.A.2 (P35) follow-up: the bridge_outcomes embed
+  // now co-fetches `codename` + `disclosure_tier` and routes through
+  // `displayStrategyName`. Tests that want the canonical `name` to
+  // surface verbatim must seed `disclosure_tier: 'institutional'` (the
+  // tier where the resolver lets the canonical name through). Without
+  // it, the resolver falls back to the synthetic Strategy #<id> — which
+  // is exactly the leak-prevention behaviour for non-institutional rows.
+  replacement_strategy: {
+    id: "s-repl",
+    name: "Crypto Momentum LP",
+    codename: null,
+    disclosure_tier: "institutional",
+  },
   match_decision: {
-    original_strategy: { id: "s-orig", name: "Legacy Equity LP" },
+    original_strategy: {
+      id: "s-orig",
+      name: "Legacy Equity LP",
+      codename: null,
+      disclosure_tier: "institutional",
+    },
   },
 };
 

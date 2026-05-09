@@ -21,6 +21,8 @@
  * contract is the mitigation.
  */
 import { buildHoldingRef } from "./holding-outcome-adapter";
+import { displayStrategyName } from "@/lib/strategy-display";
+import type { DisclosureTier } from "@/lib/types";
 
 /**
  * Composite-score thresholds (Phase 09 D-06; see flag-threshold.ts + D-05
@@ -62,9 +64,17 @@ export interface HoldingsAdapterInputs {
   matchDecisionsByHoldingRef: Record<string, { id: string } | null>;
   strategies: Array<{
     id: string;
-    name: string;
+    /**
+     * audit-2026-05-07 G8.A.2 (P35): `name` is `null` server-side for
+     * non-institutional rows (the canonical name is no longer shipped to
+     * the client). Resolution falls through to alias → codename →
+     * synthetic id (see `displayStrategyName`); the adapter mirrors that
+     * priority.
+     */
+    name: string | null;
     alias?: string | null;
     codename?: string | null;
+    disclosure_tier?: string | null;
     strategy_types?: string[] | null;
     strategy_analytics?: {
       sharpe?: number | null;
@@ -200,7 +210,19 @@ export function toDesignHoldings(inputs: HoldingsAdapterInputs): DesignHoldingRo
       venue: h.venue,
       symbol: h.symbol,
       holding_type: h.holding_type,
-      strategy: strat ? strat.alias ?? strat.name : null,
+      // audit-2026-05-07 G8.A.10 (P43): route through `displayStrategyName`
+      // so a non-institutional row (where P35 sets `name = null`) falls
+      // back to codename → synthetic id rather than rendering as null.
+      // Allocator-supplied alias still wins.
+      strategy: strat
+        ? strat.alias?.trim() ||
+          displayStrategyName({
+            id: strat.id,
+            name: strat.name,
+            codename: strat.codename ?? null,
+            disclosure_tier: (strat.disclosure_tier ?? null) as DisclosureTier | null,
+          })
+        : null,
       manager: strat?.codename ?? null,
       tag: strat?.strategy_types?.[0] ?? null,
       alloc: h.value_usd,

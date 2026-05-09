@@ -1,5 +1,7 @@
 import type { TimeframeKey } from "@/components/ui/TimeframeSelector";
 import type { DailyPoint } from "@/lib/scenario";
+import { displayStrategyName } from "@/lib/strategy-display";
+import type { DisclosureTier } from "@/lib/types";
 
 export { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 
@@ -63,19 +65,34 @@ export function equitySnapshotsToDailyPoints(
 }
 
 /**
- * Pick the display name for an investment row. The allocator-provided
- * alias takes priority; otherwise the strategy's codename (for
- * exploratory-tier) or canonical name.
+ * Pick the display name for an investment row.
+ *
+ * audit-2026-05-07 G8.A.10 (P43): the previous body inverted the
+ * canonical disclosure-tier rule by using codename only on exploratory
+ * tier. The canonical resolver `displayStrategyName` says "codename
+ * wins at any tier" and falls back to a synthetic `Strategy #<id>`
+ * for missing data — and once G8.A.2 (P35) redacts `name` to `null`
+ * for non-institutional rows, the previous body would have returned
+ * `null` (typed as string!) for those. Route through the canonical
+ * resolver here; the allocator-provided alias remains a final
+ * override on top.
  */
 export function displayName(row: {
   alias: string | null;
-  strategy: { name: string; codename: string | null; disclosure_tier: string };
+  strategy: {
+    id?: string | null;
+    name?: string | null;
+    codename: string | null;
+    disclosure_tier: string;
+  };
 }): string {
   if (row.alias && row.alias.trim()) return row.alias.trim();
-  if (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) {
-    return row.strategy.codename;
-  }
-  return row.strategy.name;
+  return displayStrategyName({
+    id: row.strategy.id ?? "",
+    name: row.strategy.name ?? null,
+    codename: row.strategy.codename,
+    disclosure_tier: row.strategy.disclosure_tier as DisclosureTier,
+  });
 }
 
 function isoDate(d: Date): string {

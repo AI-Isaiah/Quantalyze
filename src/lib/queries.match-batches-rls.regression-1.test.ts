@@ -105,7 +105,19 @@ const authedRows: Record<string, unknown[]> = {
   match_batches: [],
   // strategies is readable by authed users (public status=published).
   strategies: [
-    { id: "strat-top-candidate", name: "Polaris Cross-Exchange Arb" },
+    {
+      id: "strat-top-candidate",
+      name: "Polaris Cross-Exchange Arb",
+      // audit-2026-05-07 G8.A.2 (P35) follow-up: candidate-strategies
+      // SELECT now co-fetches `codename` + `disclosure_tier` and routes
+      // through `displayStrategyName`, so the seeded fixture has to
+      // include the tier for institutional rendering. Without
+      // `disclosure_tier: 'institutional'`, the resolver falls back to
+      // the synthetic Strategy #<id-prefix> — which is exactly the
+      // leak-prevention behaviour for non-institutional rows.
+      codename: null,
+      disclosure_tier: "institutional",
+    },
   ],
 };
 
@@ -133,7 +145,19 @@ const adminRows: Record<string, unknown[]> = {
     },
   ],
   strategies: [
-    { id: "strat-top-candidate", name: "Polaris Cross-Exchange Arb" },
+    {
+      id: "strat-top-candidate",
+      name: "Polaris Cross-Exchange Arb",
+      // audit-2026-05-07 G8.A.2 (P35) follow-up: candidate-strategies
+      // SELECT now co-fetches `codename` + `disclosure_tier` and routes
+      // through `displayStrategyName`, so the seeded fixture has to
+      // include the tier for institutional rendering. Without
+      // `disclosure_tier: 'institutional'`, the resolver falls back to
+      // the synthetic Strategy #<id-prefix> — which is exactly the
+      // leak-prevention behaviour for non-institutional rows.
+      codename: null,
+      disclosure_tier: "institutional",
+    },
   ],
 };
 

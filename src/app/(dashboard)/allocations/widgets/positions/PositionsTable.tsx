@@ -18,6 +18,7 @@ import { AllocatedForm } from "../../components/AllocatedForm";
 import { RejectedForm } from "../../components/RejectedForm";
 import { OutcomeRecordedRow } from "../../components/OutcomeRecordedRow";
 import type { BridgeOutcome } from "@/lib/bridge-outcome-schema";
+import { displayName } from "@/lib/allocation-helpers";
 
 // ---------------------------------------------------------------------------
 // Row type — one row per strategy in the portfolio
@@ -376,7 +377,8 @@ export default function PositionsTable({ data, width }: WidgetProps) {
       eligible_for_outcome?: boolean;
       existing_outcome?: BridgeOutcome | null;
       strategy: {
-        name: string;
+        id: string;
+        name: string | null;
         codename: string | null;
         disclosure_tier: string;
         strategy_analytics: {
@@ -395,10 +397,11 @@ export default function PositionsTable({ data, width }: WidgetProps) {
 
     return strats.map((row) => {
       const a = row.strategy.strategy_analytics;
-      const name =
-        (row.alias && row.alias.trim()) ||
-        (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) ||
-        row.strategy.name;
+      // audit-2026-05-07 G8.A.10 (P43) — canonical resolver. After P35
+      // redacts `row.strategy.name` to null for non-institutional rows,
+      // direct reads here would render literal "null"; route through
+      // `displayName` so codename/synthetic id wins instead.
+      const name = displayName(row);
       return {
         name,
         weight: row.current_weight,

@@ -1,12 +1,19 @@
 "use client";
 
 import type { WidgetProps } from "../../lib/types";
+import { displayStrategyName } from "@/lib/strategy-display";
+import type { DisclosureTier } from "@/lib/types";
 
 interface StrategyRow {
   strategy_id: string;
+  alias?: string | null;
   strategy: {
-    name: string;
+    id: string;
+    // audit-2026-05-07 G8.A.2 (P35) — `name` is null server-side for
+    // non-institutional rows. Use `displayStrategyName` to resolve.
+    name: string | null;
     codename: string | null;
+    disclosure_tier: DisclosureTier;
     strategy_analytics: {
       computed_at?: string | null;
       cagr?: number | null;
@@ -58,7 +65,18 @@ export function StrategyHealth({ data }: WidgetProps) {
     <div className="flex flex-col gap-2">
       {strategies.map((row) => {
         const health = computeHealth(row.strategy.strategy_analytics);
-        const name = row.strategy.codename ?? row.strategy.name;
+        // audit-2026-05-07 G8.A.10 (P43) — codename wins at any tier;
+        // synthetic id fallback for missing data; institutional `name`
+        // wins only when codename is absent.
+        const aliasOverride = row.alias?.trim();
+        const name = aliasOverride
+          ? aliasOverride
+          : displayStrategyName({
+              id: row.strategy.id,
+              name: row.strategy.name,
+              codename: row.strategy.codename,
+              disclosure_tier: row.strategy.disclosure_tier,
+            });
         return (
           <div key={row.strategy_id} className="flex flex-col gap-1">
             <div className="flex items-center justify-between">

@@ -10,6 +10,10 @@ import {
   CHART_TEXT_SECONDARY,
   CHART_TICK_STYLE,
 } from "./chart-tokens";
+import {
+  ROLLING_SHARPE_MIN_DAYS,
+  insufficientHistoryMessage,
+} from "@/lib/min-history";
 
 interface RollingMetricsProps {
   data: Record<string, { date: string; value: number }[]>;
@@ -18,8 +22,29 @@ interface RollingMetricsProps {
    * renders as a dashed horizontal reference line labeled "avg" so
    * allocators can see whether the recent rolling window is above or
    * below the strategy's long-run average.
+   *
+   * Tri-state semantics:
+   *   - finite number   → render dashed avg ReferenceLine (subject to
+   *                       the min-history gate below).
+   *   - NaN / Infinity  → caller intended to show an avg but the value
+   *                       is unavailable for this strategy. Suppress the
+   *                       line and surface a small caption so allocators
+   *                       know the absence is signal, not noise (P71).
+   *   - null/undefined  → caller did not request the avg line at all.
+   *                       Stay silent — we cannot distinguish "feature
+   *                       off" from "data error" here.
    */
   overallSharpe?: number | null;
+  /**
+   * Days of usable daily history for this strategy. When provided and
+   * below {@link ROLLING_SHARPE_MIN_DAYS}, the dashed avg ReferenceLine
+   * is suppressed in favour of a caption that mirrors the
+   * `WorstDrawdowns`/`CorrelationWithBenchmark` insufficient-history
+   * pattern (P69). Optional: when omitted, the gate is skipped (the
+   * caller is asserting "we don't know history; trust the chart"), but
+   * `PerformanceReport` always passes it.
+   */
+  daysOfHistory?: number;
 }
 
 const STROKE_BY_KEY: Record<string, string> = {
@@ -34,7 +59,11 @@ const LABELS: Record<string, string> = {
   sharpe_365d: "365d",
 };
 
-export function RollingMetrics({ data, overallSharpe }: RollingMetricsProps) {
+export function RollingMetrics({
+  data,
+  overallSharpe,
+  daysOfHistory,
+}: RollingMetricsProps) {
   // Merge by date key (series have different lengths due to window sizes).
   // Memoized so the O(N·K) merge+sort runs once per `data` reference change
   // rather than on every parent render.
@@ -56,54 +85,87 @@ export function RollingMetrics({ data, overallSharpe }: RollingMetricsProps) {
   const keys = Object.keys(data);
   if (keys.length === 0) return null;
 
-  const hasAvg =
-    typeof overallSharpe === "number" && Number.isFinite(overallSharpe);
+  const sharpeProvided = typeof overallSharpe === "number";
+  const sharpeFinite = sharpeProvided && Number.isFinite(overallSharpe);
+  // P71: caller asked for the avg line but the value is mathematically
+  // unavailable (NaN / Infinity). Surface a caption rather than silently
+  // dropping the line.
+  const sharpeUnavailable = sharpeProvided && !sharpeFinite;
+
+  // P69: even when the value is finite, the long-run average is
+  // statistically meaningless on thin history. Gate the ReferenceLine on
+  // a one-year history floor; below threshold, swap the line for the
+  // same caption pattern.
+  const historyBelowFloor =
+    typeof daysOfHistory === "number" && daysOfHistory < ROLLING_SHARPE_MIN_DAYS;
+  const historyKnown = typeof daysOfHistory === "number";
+
+  const renderReferenceLine =
+    sharpeFinite && (!historyKnown || !historyBelowFloor);
+
+  let caption: string | null = null;
+  if (sharpeUnavailable) {
+    caption = "Long-run Sharpe unavailable for this strategy";
+  } else if (sharpeFinite && historyBelowFloor) {
+    caption = insufficientHistoryMessage(
+      "long-run Sharpe reference",
+      ROLLING_SHARPE_MIN_DAYS,
+      daysOfHistory ?? 0,
+    );
+  }
 
   return (
-    <ResponsiveContainer width="100%" height={250}>
-      <LineChart accessibilityLayer={false} data={merged} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-        <XAxis
-          dataKey="date"
-          tick={CHART_TICK_STYLE}
-          tickLine={false}
-          axisLine={{ stroke: CHART_BORDER }}
-          tickFormatter={(d: string) => d.slice(5)}
-          interval="preserveStartEnd"
-        />
-        <YAxis
-          tick={CHART_TICK_STYLE}
-          tickLine={false}
-          axisLine={false}
-        />
-        <Tooltip
-          contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
-          formatter={(v, name) => [Number(v).toFixed(2), LABELS[String(name)] ?? name]}
-        />
-        <Legend formatter={(name: string) => LABELS[name] ?? name} />
-        {hasAvg && (
-          <ReferenceLine
-            y={overallSharpe as number}
-            stroke={CHART_TEXT_MUTED}
-            strokeDasharray={CHART_REFERENCE_DASH}
-            label={{
-              value: "avg",
-              position: "right",
-              fontSize: 12,
-              fill: CHART_TEXT_SECONDARY,
-            }}
+    <div>
+      <ResponsiveContainer width="100%" height={250}>
+        <LineChart accessibilityLayer={false} data={merged} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+          <XAxis
+            dataKey="date"
+            tick={CHART_TICK_STYLE}
+            tickLine={false}
+            axisLine={{ stroke: CHART_BORDER }}
+            tickFormatter={(d: string) => d.slice(5)}
+            interval="preserveStartEnd"
           />
-        )}
-        {keys.map((key) => (
-          <Line
-            key={key}
-            type="monotone"
-            dataKey={key}
-            stroke={STROKE_BY_KEY[key] ?? CHART_TEXT_MUTED}
-            strokeWidth={1.5}
-            dot={false}
+          <YAxis
+            tick={CHART_TICK_STYLE}
+            tickLine={false}
+            axisLine={false}
           />
-        ))}
-      </LineChart>
-    </ResponsiveContainer>
+          <Tooltip
+            contentStyle={{ fontSize: 12, borderColor: CHART_BORDER }}
+            formatter={(v, name) => [Number(v).toFixed(2), LABELS[String(name)] ?? name]}
+          />
+          <Legend formatter={(name: string) => LABELS[name] ?? name} />
+          {renderReferenceLine && (
+            <ReferenceLine
+              y={overallSharpe as number}
+              stroke={CHART_TEXT_MUTED}
+              strokeDasharray={CHART_REFERENCE_DASH}
+              label={{
+                value: "avg",
+                position: "right",
+                fontSize: 12,
+                fill: CHART_TEXT_SECONDARY,
+              }}
+            />
+          )}
+          {keys.map((key) => (
+            <Line
+              key={key}
+              type="monotone"
+              dataKey={key}
+              stroke={STROKE_BY_KEY[key] ?? CHART_TEXT_MUTED}
+              strokeWidth={1.5}
+              dot={false}
+            />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+      {caption && (
+        <p className="mt-2 px-4 pb-2 text-xs text-text-muted">
+          {caption}
+        </p>
+      )}
+    </div>
   );
 }

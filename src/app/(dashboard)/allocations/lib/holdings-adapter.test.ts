@@ -52,6 +52,12 @@ function makeStrategy(partial: Partial<AdapterStrategy> = {}): AdapterStrategy {
     name: "Default Strategy",
     alias: null,
     codename: null,
+    // audit-2026-05-07 G8.A.10 (P43) — adapter routes through
+    // `displayStrategyName`, which only surfaces `name` for institutional
+    // tier. Tests that don't care about disclosure default to institutional
+    // so the legacy "name appears verbatim" assertions still pass; tests
+    // that exercise exploratory-tier redaction set their own tier.
+    disclosure_tier: "institutional",
     strategy_types: null,
     strategy_analytics: null,
     ...partial,
@@ -319,5 +325,97 @@ describe("toDesignHoldings (D-18 pure adapter)", () => {
     const out = toDesignHoldings(inputs);
     expect(out[0].age).toBe(30);
     expect(out[1].age).toBeNull();
+  });
+
+  // audit-2026-05-07 G8.A.10 (P43) — explicit exploratory-tier coverage.
+  // The shared `makeStrategy` helper defaults to `disclosure_tier:
+  // 'institutional'` so the legacy assertions still pass (the canonical
+  // `name` surfaces verbatim). These tests pin the fix's actual intent:
+  // when the row is non-institutional and `name` arrives redacted to
+  // null per P35, the adapter must fall through to codename → synthetic
+  // id rather than render literal "null". Each test fails against the
+  // pre-P43 adapter that read `strat.alias ?? strat.name` directly.
+  describe("P43 disclosure-tier display name resolution", () => {
+    it("renders codename for exploratory-tier rows when name is null", () => {
+      const h = makeHolding({ symbol: "BTC" });
+      const ref = buildHoldingRef(h);
+      const inputs = makeInputs({
+        holdingsSummary: [h],
+        strategies: [
+          makeStrategy({
+            id: "strat-1",
+            name: null,
+            codename: "Quasar",
+            alias: null,
+            disclosure_tier: "exploratory",
+          }),
+        ],
+        holdingToStrategyId: { [ref]: "strat-1" },
+      });
+      const out = toDesignHoldings(inputs);
+      expect(out[0].strategy).toBe("Quasar");
+    });
+
+    it("falls through to synthetic 'Strategy #<id-prefix>' when exploratory + no codename + no alias", () => {
+      const h = makeHolding({ symbol: "BTC" });
+      const ref = buildHoldingRef(h);
+      const inputs = makeInputs({
+        holdingsSummary: [h],
+        strategies: [
+          makeStrategy({
+            id: "abc12345-6789-0000-0000-000000000000",
+            name: null,
+            codename: null,
+            alias: null,
+            disclosure_tier: "exploratory",
+          }),
+        ],
+        holdingToStrategyId: { [ref]: "abc12345-6789-0000-0000-000000000000" },
+      });
+      const out = toDesignHoldings(inputs);
+      // displayStrategyName slices the first 8 characters of the id
+      expect(out[0].strategy).toBe("Strategy #abc12345");
+    });
+
+    it("alias still wins over both codename and synthetic-id fallback on exploratory rows", () => {
+      const h = makeHolding({ symbol: "BTC" });
+      const ref = buildHoldingRef(h);
+      const inputs = makeInputs({
+        holdingsSummary: [h],
+        strategies: [
+          makeStrategy({
+            id: "strat-1",
+            name: null,
+            codename: "Quasar",
+            alias: "  My Custom Label  ",
+            disclosure_tier: "exploratory",
+          }),
+        ],
+        holdingToStrategyId: { [ref]: "strat-1" },
+      });
+      const out = toDesignHoldings(inputs);
+      // alias is trimmed and wins over codename
+      expect(out[0].strategy).toBe("My Custom Label");
+    });
+
+    it("institutional-tier rows surface canonical name when codename is absent", () => {
+      const h = makeHolding({ symbol: "BTC" });
+      const ref = buildHoldingRef(h);
+      const inputs = makeInputs({
+        holdingsSummary: [h],
+        strategies: [
+          makeStrategy({
+            id: "strat-1",
+            name: "Long BTC Institutional",
+            codename: null,
+            alias: null,
+            disclosure_tier: "institutional",
+          }),
+        ],
+        holdingToStrategyId: { [ref]: "strat-1" },
+      });
+      const out = toDesignHoldings(inputs);
+      expect(out[0].strategy).toBe("Long BTC Institutional");
+    });
   });
 });

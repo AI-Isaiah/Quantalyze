@@ -91,9 +91,13 @@ export function HoldingsTableWidget({ data }: WidgetProps) {
     () =>
       strategies.map((s) => ({
         id: s.strategy.id,
+        // audit-2026-05-07 G8.A.10 (P43) — pass disclosure_tier so the
+        // adapter's `displayStrategyName` route surfaces institutional
+        // `name` correctly (without tier, all rows fall to synthetic id).
         name: s.strategy.name,
         alias: s.alias,
         codename: s.strategy.codename,
+        disclosure_tier: s.strategy.disclosure_tier,
         strategy_types: s.strategy.strategy_types,
         strategy_analytics: s.strategy.strategy_analytics
           ? {

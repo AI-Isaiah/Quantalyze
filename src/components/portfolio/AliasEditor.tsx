@@ -8,7 +8,12 @@ interface StrategyRow {
   strategy_id: string;
   strategy: {
     id: string;
-    name: string;
+    // audit-2026-05-07 G8.A.2 (P35) — non-institutional rows arrive
+    // with a redacted `null`; the consumer is responsible for resolving
+    // the display via `displayName`/`displayStrategyName` and passing
+    // the resolved string in via `canonical`. AliasEditor itself never
+    // re-renders raw `strategy.name`.
+    name: string | null;
     codename: string | null;
     disclosure_tier: string;
   };

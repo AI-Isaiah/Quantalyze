@@ -98,16 +98,23 @@ describe("StrategyHealth", () => {
             {
               strategy_id: "s1",
               strategy: {
+                // audit-2026-05-07 G8.A.10 (P43): StrategyHealth now
+                // routes through `displayStrategyName`, which needs
+                // id + disclosure_tier to surface institutional names.
+                id: "s1",
                 name: "Alpha Strategy",
                 codename: null,
+                disclosure_tier: "institutional",
                 strategy_analytics: { cagr: 0.12, sharpe: 1.5 },
               },
             },
             {
               strategy_id: "s2",
               strategy: {
+                id: "s2",
                 name: "Beta Strategy",
                 codename: "BETA",
+                disclosure_tier: "exploratory",
                 strategy_analytics: null,
               },
             },
