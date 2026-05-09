@@ -187,7 +187,10 @@ describe("PerformanceReport — computation_status gate (audit P70)", () => {
     ).toBeDefined();
   });
 
-  it("hides the chart suite and shows generic placeholder when status is 'pending'", () => {
+  it("hides the chart suite and shows pending-specific placeholder when status is 'pending'", () => {
+    // audit-2026-05-07 design follow-up: distinct copy for `pending` so an
+    // allocator can tell "never computed yet" from the unknown
+    // fall-through. Previously both collapsed to a single generic string.
     render(
       <PerformanceReport
         analytics={makeAnalytics({ computation_status: "pending" })}
@@ -197,7 +200,9 @@ describe("PerformanceReport — computation_status gate (audit P70)", () => {
     expect(screen.queryByText("CAGR")).toBeNull();
     expect(screen.queryByTestId("chart-worst-drawdowns")).toBeNull();
     expect(
-      screen.getByText("Charts will appear once computation completes."),
+      screen.getByText(
+        "Awaiting first compute — charts will appear once data is processed.",
+      ),
     ).toBeDefined();
   });
 });

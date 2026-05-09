@@ -119,7 +119,7 @@ describe("resolveBenchmarkCorrelation", () => {
     );
     expect(resolved.kind).toBe("computing");
     if (resolved.kind === "computing") {
-      expect(resolved.message).toBe("Computing correlation…");
+      expect(resolved.message).toBe("Computing analytics…");
     }
   });
 
@@ -272,7 +272,7 @@ describe("<CorrelationWithBenchmark />", () => {
     expect(screen.getByText(/unavailable/i)).toBeInTheDocument();
   });
 
-  it("renders 'Computing correlation…' when status is 'computing' and precomputed is absent", () => {
+  it("renders 'Computing analytics…' when status is 'computing' and precomputed is absent", () => {
     render(
       <CorrelationWithBenchmark
         analytics={buildAnalytics({
@@ -282,7 +282,7 @@ describe("<CorrelationWithBenchmark />", () => {
         })}
       />,
     );
-    expect(screen.getByText("Computing correlation…")).toBeInTheDocument();
+    expect(screen.getByText("Computing analytics…")).toBeInTheDocument();
   });
 
   it("renders the institutional-grade insufficient-history message when server returned []", () => {
@@ -346,6 +346,6 @@ describe("<CorrelationWithBenchmark />", () => {
     expect(container.firstChild).toBeTruthy();
     expect(screen.queryByText(/unavailable/i)).toBeNull();
     expect(screen.queryByText(/Insufficient history/i)).toBeNull();
-    expect(screen.queryByText(/Computing correlation/i)).toBeNull();
+    expect(screen.queryByText(/Computing analytics/i)).toBeNull();
   });
 });

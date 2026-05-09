@@ -96,9 +96,9 @@ export function RollingMetrics({
   // statistically meaningless on thin history. Gate the ReferenceLine on
   // a one-year history floor; below threshold, swap the line for the
   // same caption pattern.
-  const historyKnown = typeof daysOfHistory === "number";
   const historyBelowFloor =
-    historyKnown && daysOfHistory! < ROLLING_SHARPE_MIN_DAYS;
+    typeof daysOfHistory === "number" && daysOfHistory < ROLLING_SHARPE_MIN_DAYS;
+  const historyKnown = typeof daysOfHistory === "number";
 
   const renderReferenceLine =
     sharpeFinite && (!historyKnown || !historyBelowFloor);
@@ -162,7 +162,7 @@ export function RollingMetrics({
         </LineChart>
       </ResponsiveContainer>
       {caption && (
-        <p className="mt-2 px-4 pb-2 text-xs text-text-muted italic">
+        <p className="mt-2 px-4 pb-2 text-xs text-text-muted">
           {caption}
         </p>
       )}

@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.11.0] - 2026-05-09
+
+**audit-2026-05-07 G8.A + G11.A — allocator-trust + chart-pipeline correctness.** Closes 18 audit items (4 CRITICAL + 13 HIGH + 1 MEDIUM single-line + 1 INFO + 1 LOW dead-code drop). Two trust boundaries hardened: My Allocation queries no longer present infrastructure failures as the "no investments" empty state, and chart surfaces no longer ship institutional-fidelity output for thin data, malformed server output, or stale compute. After the first /ship review pass surfaced two residual P35 leak vectors and 5+ UI consumers still reading the redacted field directly, a second pass closed both leaks at the query layer and migrated every consumer through the canonical resolver.
+
+### Added
+
+- **`src/lib/min-history.ts`** with three institutional-grade thresholds (`CORRELATION_90D_MIN_DAYS=250`, `WORST_DRAWDOWNS_MIN_DAYS=365`, `ROLLING_SHARPE_MIN_DAYS=365`) and a shared `insufficientHistoryMessage(metric, requiredDays, actualDays)` helper. Every chart surface that previously rendered confident output below threshold now shows an explicit "Insufficient history" message instead.
+- **Server-side disclosure-tier redaction** for `MyAllocationDashboardPayload.strategies[].strategy.name`, `bridge_outcomes.replacement_strategy.name`, `bridge_outcomes.match_decision.original_strategy.name`, and `flaggedHoldings[].top_candidate_name`. Non-institutional rows surface their codename or a synthetic `Strategy #<id-prefix>` instead of the manager-given canonical name; institutional rows are unchanged.
+- **`PerformanceReport` computation_status gate.** When `computation_status !== 'complete'`, the hero metrics + chart suite are replaced with a status-aware placeholder Card. Tab strip stays so the page structure is still legible.
+- **Discriminated correlation state.** `CorrelationWithBenchmark.resolveBenchmarkCorrelation` now returns `{ kind: 'ok' | 'computing' | 'insufficient' | 'unavailable' }`. The previous client-side rolling-correlation fallback (a different code path that diverged from server output by ±0.02-0.05) is deleted entirely.
+- **Long-run Sharpe captions.** `RollingMetrics` surfaces "Long-run Sharpe unavailable for this strategy" when `overallSharpe` is non-finite, and an institutional-grade insufficient-history message when the history floor is missed.
+
+### Fixed
+
+- **(G8.A.1, CRITICAL — P34) `getMyAllocationDashboard` no longer presents Supabase failures as empty state.** Both Promise.all waves had `.error` channels silently coerced to `[]`/`null`. All 11 raw query results now flow through `assertOk`; `(dashboard)/error.tsx` catches and Sentry captures.
+- **(G8.A.2, CRITICAL — P35) Strategy `name` no longer leaks to the RSC payload for non-institutional tiers.** Type widened to `string | null`; cascades through 4 V2 widgets + `AllocationDonut` + `PositionsTable` + `StrategyHealth` + the holdings adapter; all readers route through `displayStrategyName` with allocator alias as a final override.
+- **(G11.A.1, CRITICAL — P64) Same strategy no longer renders two different correlation curves.** Server's authoritative `btc_rolling_correlation_90d` is the only source; client fallback is gone.
+- **(G11.A.2, CRITICAL — P65) Malformed server `drawdown_episodes` no longer fall through silently.** Logged with a sample, distinct from the below-floor filter case.
+- **(G8.A.9, HIGH — P42) `getRealPortfolio` throws on Supabase error.** Empty state is reserved for the genuinely-absent row.
+- **(G8.A.7, HIGH — P40)** Verified zero non-test callers of the buggy shared-count reduce in `getAllocatorAggregates`.
+- **(G8.A.8, HIGH — P41)** Closed by P34/P42 — query failures and `portfolio === null` are now distinct surfaces.
+- **(G8.A.10, HIGH — P43)** `displayName` routes through `displayStrategyName`. Codename wins at any tier; alias is the final override.
+- **(G8.A.11, HIGH — P44)** `alertCount.total === critical+high+medium+low` invariant restored.
+- **(G11.A.3, HIGH — P66)** `WorstDrawdowns` non-current episodes with null `recovery_date` render an em-dash; aria label loses the double-space.
+- **(G11.A.4, HIGH — P67)** Malformed precomputed correlation series logs `console.error` with a sample.
+- **(G11.A.5, HIGH — P69)** Each chart gates institutional-grade output behind `lib/min-history.ts` thresholds.
+- **(G11.A.6, HIGH — P68)** `cumulativeToDailyMap` deleted as a consequence of the P64 fallback removal.
+- **(G11.A.7, HIGH — P70)** `PerformanceReport` no longer renders prior compute as authoritative when status is `failed` / `computing` / `pending`.
+- **(G11.A.8, HIGH — P71)** `RollingMetrics` no longer silently drops the average reference line when `overallSharpe` is `NaN` / `Infinity`.
+- **(G8.A.24, MEDIUM — P57)** `portfolio_strategies` rows with a missing strategy embed are dropped + logged instead of crashing via `...null` spread.
+- **(G11.A.16/19, LOW — P79/P82)** Dead `labelFormatter={(d)=>d}` dropped; `normalizeServerEpisode` inlined.
+
+### Changed
+
+- **`MyAllocationDashboardPayload.strategies[].strategy.name`** widened to `string | null`. Consumers that read the field directly were migrated to `displayName` / `displayStrategyName`.
+- **Adapter input shape `HoldingsAdapterInputs.strategies[]`** now requires `disclosure_tier`. Without it, even institutional rows fall back to the synthetic id.
+- **Test fixtures** for `holdings-adapter`, `monitoring`, `queries.match-batches-rls.regression-1`, and `queries.my-allocation` default seeded strategies to `disclosure_tier: 'institutional'` so legacy "name appears verbatim" assertions still pass.
+
 ## [0.22.10.0] - 2026-05-09
 
 **audit-2026-05-07 critical batch 3 — compute_jobs queue surface (G10.B) + sync_trades data-loss closure.** Closes 4 CRITICAL + 13 HIGH items in surface G10.B (compute_jobs queue) flagged by audit-2026-05-07 and not addressed by Phase 19 / PR #133. Independent of the Phase-19 unified-backbone surface (`process_key_unified_backbone` flag still OFF; this batch touches `compute_jobs` + `sync_trades` + `update_api_key_rate_limit`, not `verification_requests` / `strategy_verifications` / `feature_flags`). Migration slots 109/110/111 do not collide with Phase 19's 103-108.

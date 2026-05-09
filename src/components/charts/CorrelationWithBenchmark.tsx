@@ -120,7 +120,9 @@ export function resolveBenchmarkCorrelation(
   // 1. Field absent (null/undefined) → either still computing or unavailable.
   if (precomputed === null || precomputed === undefined) {
     if (analytics.computation_status === "computing") {
-      return { kind: "computing", message: "Computing correlation…" };
+      // Aligns with the PerformanceReport / ComputeStatus banner copy
+      // so the same status reads identically across surfaces.
+      return { kind: "computing", message: "Computing analytics…" };
     }
     return {
       kind: "unavailable",

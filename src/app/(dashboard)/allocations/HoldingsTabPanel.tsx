@@ -102,9 +102,14 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
     () =>
       strategies.map((s) => ({
         id: s.strategy.id,
+        // audit-2026-05-07 G8.A.10 (P43) — adapter routes through
+        // `displayStrategyName`, which requires `disclosure_tier` to
+        // surface institutional `name` (without it, even institutional
+        // rows fall through to the synthetic id). Pass tier explicitly.
         name: s.strategy.name,
         alias: s.alias,
         codename: s.strategy.codename,
+        disclosure_tier: s.strategy.disclosure_tier,
         strategy_types: s.strategy.strategy_types,
         strategy_analytics: s.strategy.strategy_analytics
           ? {

@@ -58,7 +58,11 @@ interface StrategyRow {
   alias: string | null;
   strategy: {
     id: string;
-    name: string;
+    // audit-2026-05-07 G8.A.2 (P35) — server-side redaction for
+    // non-institutional rows ships `null` here; this file is dead (V2
+    // replaced it) but tsc still checks the local mirror type, so
+    // widen to keep the type contract consistent with the live payload.
+    name: string | null;
     codename: string | null;
     disclosure_tier: string;
     strategy_types: string[];
@@ -485,10 +489,12 @@ export function MyAllocationClient({
           <div className="divide-y divide-border border border-border rounded-lg overflow-hidden">
             {strategies.map((row) => {
               const a = row.strategy.strategy_analytics;
-              const canonical =
-                (row.strategy.disclosure_tier === "exploratory" &&
-                  row.strategy.codename) ||
-                row.strategy.name;
+              // audit-2026-05-07 G8.A.10 (P43) — route through the
+              // canonical resolver so non-institutional rows fall to
+              // codename → synthetic id rather than the literal `null`
+              // that P35 redaction now ships. This file is dead (V2
+              // replaced it) but keeping the type contract honest.
+              const canonical = displayName(row);
               return (
                 <div
                   key={row.strategy_id}

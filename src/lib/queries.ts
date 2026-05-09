@@ -31,6 +31,7 @@ import type {
   AnalyticsDataQualityFlags,
 } from "./types";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
+import { displayStrategyName } from "@/lib/strategy-display";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -1674,7 +1675,15 @@ export const getMyAllocationDashboard = cache(
       admin
         .from("bridge_outcomes")
         .select(
-          "id, strategy_id, match_decision_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, replacement_strategy:strategies!bridge_outcomes_strategy_id_fkey(id, name), match_decision:match_decisions!bridge_outcomes_match_decision_id_fkey(original_strategy:strategies!match_decisions_original_strategy_id_fkey(id, name))",
+          // audit-2026-05-07 G8.A.2 (P35) follow-up: co-select
+          // `disclosure_tier` + `codename` on both embedded strategy joins so
+          // the normaliser below can apply tier-aware redaction to
+          // `replacement_strategy.name` and
+          // `match_decision.original_strategy.name`. Without these columns,
+          // the canonical name leaked to the RSC payload regardless of tier
+          // (security specialist finding from /ship review). Same trust
+          // boundary as `MyAllocationDashboardPayload.strategies[].strategy`.
+          "id, strategy_id, match_decision_id, kind, percent_allocated, allocated_at, rejection_reason, note, delta_30d, delta_90d, delta_180d, estimated_delta_bps, estimated_days, needs_recompute, created_at, replacement_strategy:strategies!bridge_outcomes_strategy_id_fkey(id, name, codename, disclosure_tier), match_decision:match_decisions!bridge_outcomes_match_decision_id_fkey(original_strategy:strategies!match_decisions_original_strategy_id_fkey(id, name, codename, disclosure_tier))",
         )
         .eq("allocator_id", userId)
         .order("created_at", { ascending: false })
@@ -1686,12 +1695,39 @@ export const getMyAllocationDashboard = cache(
     // OR array depending on join inference, so normalize both the direct
     // (replacement_strategy) and nested (match_decision.original_strategy)
     // embeds. Phase 5 D-15 (revised).
+    //
+    // audit-2026-05-07 G8.A.2 (P35) follow-up: the wire shape now carries
+    // the four columns required for tier-aware redaction
+    // (id/name/codename/disclosure_tier); we resolve to the public
+    // `OutcomeRow.replacement_strategy = { id, name }` shape by routing
+    // through `displayStrategyName` and overwriting `name` with the
+    // tier-safe display string. The leaf type stays `{id, name}` so
+    // downstream consumers don't have to learn a new contract; the
+    // server-side resolver is the gate.
+    type EmbeddedStrategyRaw = {
+      id: string;
+      name: string | null;
+      codename: string | null;
+      disclosure_tier: DisclosureTier | null;
+    };
     type EmbeddedStrategy = { id: string; name: string };
     type RawRow = Record<string, unknown>;
     const normalizeEmbed = (v: unknown): EmbeddedStrategy | null => {
       if (v == null) return null;
-      if (Array.isArray(v)) return (v[0] as EmbeddedStrategy | undefined) ?? null;
-      return v as EmbeddedStrategy;
+      const raw = (Array.isArray(v) ? v[0] : v) as
+        | EmbeddedStrategyRaw
+        | undefined
+        | null;
+      if (!raw) return null;
+      return {
+        id: raw.id,
+        name: displayStrategyName({
+          id: raw.id,
+          name: raw.name ?? null,
+          codename: raw.codename ?? null,
+          disclosure_tier: raw.disclosure_tier ?? null,
+        }),
+      };
     };
     const outcomes: OutcomeRow[] = ((outcomesFullRes.data ?? []) as RawRow[]).map(
       (row) => {
@@ -1712,58 +1748,17 @@ export const getMyAllocationDashboard = cache(
       },
     );
 
-    // audit-2026-05-07 G8.A.1 (P34) — explicit error checks. The four raw
-    // Supabase queries from Step 1 had their `.error` channels silently
-    // ignored before this audit; promote them now so RLS / network /
-    // schema-drift surfaces as a real error instead of an empty array.
-    // `apiKeysCountRes` is intentionally left lenient — its `.count` is
-    // already a defensive `?? 0` below and we prefer to render the
-    // onboarding nudge over an error page when the count probe fails.
-    if (phase07EquityRes.error) {
-      console.error(
-        "[queries.getMyAllocationDashboard] allocator_equity_snapshots failed:",
-        phase07EquityRes.error.message,
-      );
-      throw new Error(
-        `getMyAllocationDashboard.allocator_equity_snapshots: ${phase07EquityRes.error.message}`,
-      );
-    }
-    if (phase07HoldingsRes.error) {
-      console.error(
-        "[queries.getMyAllocationDashboard] allocator_holdings failed:",
-        phase07HoldingsRes.error.message,
-      );
-      throw new Error(
-        `getMyAllocationDashboard.allocator_holdings: ${phase07HoldingsRes.error.message}`,
-      );
-    }
-    if (phase09MatchBatchRes.error) {
-      console.error(
-        "[queries.getMyAllocationDashboard] match_batches failed:",
-        phase09MatchBatchRes.error.message,
-      );
-      throw new Error(
-        `getMyAllocationDashboard.match_batches: ${phase09MatchBatchRes.error.message}`,
-      );
-    }
-    if (phase09MatchDecisionsRes.error) {
-      console.error(
-        "[queries.getMyAllocationDashboard] match_decisions failed:",
-        phase09MatchDecisionsRes.error.message,
-      );
-      throw new Error(
-        `getMyAllocationDashboard.match_decisions: ${phase09MatchDecisionsRes.error.message}`,
-      );
-    }
-    if (outcomesFullRes.error) {
-      console.error(
-        "[queries.getMyAllocationDashboard] bridge_outcomes failed:",
-        outcomesFullRes.error.message,
-      );
-      throw new Error(
-        `getMyAllocationDashboard.bridge_outcomes: ${outcomesFullRes.error.message}`,
-      );
-    }
+    // audit-2026-05-07 G8.A.1 (P34) — Step 1 explicit error checks.
+    // Same `assertOk` helper Step 2 uses below; we're a single function
+    // so DRY both waves through one helper. `apiKeysCountRes` is
+    // intentionally left lenient — its `.count` already coalesces to 0
+    // below and we prefer to render the onboarding nudge over an error
+    // page when the count probe fails.
+    assertOk(phase07EquityRes, "allocator_equity_snapshots");
+    assertOk(phase07HoldingsRes, "allocator_holdings");
+    assertOk(phase09MatchBatchRes, "match_batches");
+    assertOk(phase09MatchDecisionsRes, "match_decisions");
+    assertOk(outcomesFullRes, "bridge_outcomes");
 
     // Phase 11 / D-02 — server-side COUNT result (head:true returns no rows;
     // the `count` field is the authoritative integer). PostgREST can return
@@ -1818,7 +1813,16 @@ export const getMyAllocationDashboard = cache(
       (f) => f.flagged && f.top_candidate_strategy_id,
     );
 
-    // Resolve candidate strategy names from the strategies table.
+    // Resolve candidate strategy display names from the strategies table.
+    //
+    // audit-2026-05-07 G8.A.2 (P35) follow-up: the previous SELECT shipped
+    // raw `strategies.name` to the RSC payload as
+    // `flaggedHoldings[].top_candidate_name`, bypassing the disclosure-tier
+    // gate that the parallel `MyAllocationDashboardPayload.strategies[]`
+    // path enforces. Co-select `codename` + `disclosure_tier` and route
+    // through `displayStrategyName` so non-institutional candidates render
+    // their codename or a synthetic `Strategy #<id-prefix>` instead of the
+    // manager-given canonical name.
     const candidateIds = Array.from(
       new Set(flaggedRowsOnly.map((f) => f.top_candidate_strategy_id!)),
     );
@@ -1826,11 +1830,26 @@ export const getMyAllocationDashboard = cache(
       candidateIds.length > 0
         ? await supabase
             .from("strategies")
-            .select("id, name")
+            .select("id, name, codename, disclosure_tier")
             .in("id", candidateIds)
-        : { data: [] as Array<{ id: string; name: string }> };
+        : {
+            data: [] as Array<{
+              id: string;
+              name: string | null;
+              codename: string | null;
+              disclosure_tier: DisclosureTier | null;
+            }>,
+          };
     const nameById = new Map(
-      (candidateStrategies ?? []).map((s) => [s.id, s.name]),
+      (candidateStrategies ?? []).map((s) => [
+        s.id,
+        displayStrategyName({
+          id: s.id,
+          name: s.name ?? null,
+          codename: s.codename ?? null,
+          disclosure_tier: s.disclosure_tier ?? null,
+        }),
+      ]),
     );
 
     const flaggedHoldings: FlaggedHolding[] = flaggedRowsOnly

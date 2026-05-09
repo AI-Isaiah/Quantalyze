@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type { WidgetProps } from "../../lib/types";
 import { AllocationPie } from "@/components/portfolio/AllocationPie";
 import { STRATEGY_PALETTE } from "@/lib/utils";
+import { displayName } from "@/lib/allocation-helpers";
 
 /**
  * Allocation Donut — wraps the existing AllocationPie component.
@@ -24,12 +25,19 @@ export default function AllocationDonut({ data }: WidgetProps) {
       current_weight: number | null;
       allocated_amount: number | null;
       alias: string | null;
-      strategy: { name: string; codename: string | null; disclosure_tier: string };
+      strategy: {
+        id: string;
+        name: string | null;
+        codename: string | null;
+        disclosure_tier: string;
+      };
     }>).map((row, i) => {
-      const name =
-        row.alias?.trim() ||
-        (row.strategy.disclosure_tier === "exploratory" && row.strategy.codename) ||
-        row.strategy.name;
+      // audit-2026-05-07 G8.A.10 (P43) — route through the canonical
+      // resolver so non-institutional rows (where `name` is now redacted
+      // to null at the query layer per P35) render their codename or a
+      // synthetic Strategy #<id-prefix> instead of literal "null". The
+      // alias-takes-priority rule is preserved inside `displayName`.
+      const name = displayName(row);
       const amount =
         row.allocated_amount ??
         (row.current_weight != null && totalAum > 0

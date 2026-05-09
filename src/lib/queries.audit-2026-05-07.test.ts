@@ -320,3 +320,153 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.11 (P44)", () => {
     errSpy.mockRestore();
   });
 });
+
+describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: residual leak closures", () => {
+  beforeEach(() => {
+    buildResult.maybeSingleByTable["portfolios"] = {
+      data: {
+        id: "real-1",
+        user_id: "user-1",
+        name: "Active",
+        description: null,
+        created_at: "2024-06-01T00:00:00Z",
+        is_test: false,
+      },
+      error: null,
+    };
+  });
+
+  it("outcomes payload: replacement_strategy.name is redacted for exploratory tier (was: leaked canonical name)", async () => {
+    buildResult.byTable["bridge_outcomes"] = {
+      data: [
+        {
+          id: "o1",
+          strategy_id: "s-explor-repl",
+          match_decision_id: "md-1",
+          kind: "allocated",
+          percent_allocated: 25,
+          allocated_at: "2026-04-01",
+          rejection_reason: null,
+          note: null,
+          delta_30d: null,
+          delta_90d: null,
+          delta_180d: null,
+          estimated_delta_bps: null,
+          estimated_days: null,
+          needs_recompute: false,
+          created_at: "2026-04-15T00:00:00Z",
+          replacement_strategy: {
+            id: "s-explor-repl",
+            name: "Leaked Manager Name",
+            codename: "Pulsar",
+            disclosure_tier: "exploratory",
+          },
+          match_decision: {
+            original_strategy: {
+              id: "s-explor-orig",
+              name: "Original Leaked Name",
+              codename: "Vega",
+              disclosure_tier: "exploratory",
+            },
+          },
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+
+    const outcome = payload.outcomes[0];
+    expect(outcome).toBeDefined();
+    // Tier-aware redaction: codename surfaces, raw name does NOT.
+    expect(outcome.replacement_strategy?.name).toBe("Pulsar");
+    expect(outcome.replacement_strategy?.name).not.toBe("Leaked Manager Name");
+    expect(outcome.match_decision?.original_strategy.name).toBe("Vega");
+    expect(outcome.match_decision?.original_strategy.name).not.toBe(
+      "Original Leaked Name",
+    );
+  });
+
+  it("outcomes payload: institutional tier still surfaces canonical name verbatim", async () => {
+    buildResult.byTable["bridge_outcomes"] = {
+      data: [
+        {
+          id: "o2",
+          strategy_id: "s-inst-repl",
+          match_decision_id: null,
+          kind: "allocated",
+          percent_allocated: 25,
+          allocated_at: "2026-04-01",
+          rejection_reason: null,
+          note: null,
+          delta_30d: null,
+          delta_90d: null,
+          delta_180d: null,
+          estimated_delta_bps: null,
+          estimated_days: null,
+          needs_recompute: false,
+          created_at: "2026-04-15T00:00:00Z",
+          replacement_strategy: {
+            id: "s-inst-repl",
+            name: "Institutional Strategy",
+            codename: null,
+            disclosure_tier: "institutional",
+          },
+          match_decision: null,
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+
+    expect(payload.outcomes[0].replacement_strategy?.name).toBe(
+      "Institutional Strategy",
+    );
+  });
+
+  it("flaggedHoldings.top_candidate_name is redacted for exploratory candidate strategies (was: leaked canonical name)", async () => {
+    // Seed a flagged batch pointing at an exploratory candidate strategy.
+    buildResult.byTable["match_batches"] = {
+      data: [
+        {
+          id: "batch-1",
+          holding_flags: [
+            {
+              holding_ref: "holding:binance:BTC:spot",
+              value_usd: 50000,
+              weight: 0.4,
+              breach_reasons: ["max_weight"],
+              top_candidate_strategy_id: "s-explor-cand",
+              top_candidate_composite: 80,
+              flagged: true,
+            },
+          ],
+        },
+      ],
+      error: null,
+    };
+    buildResult.byTable["strategies"] = {
+      data: [
+        {
+          id: "s-explor-cand",
+          name: "Leaked Candidate Name",
+          codename: "Lyra",
+          disclosure_tier: "exploratory",
+        },
+      ],
+      error: null,
+    };
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const payload = await getMyAllocationDashboard("user-1");
+
+    expect(payload.flaggedHoldings.length).toBe(1);
+    expect(payload.flaggedHoldings[0].top_candidate_name).toBe("Lyra");
+    expect(payload.flaggedHoldings[0].top_candidate_name).not.toBe(
+      "Leaked Candidate Name",
+    );
+  });
+});

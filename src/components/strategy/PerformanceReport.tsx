@@ -87,6 +87,9 @@ export function PerformanceReport({ analytics, percentiles, positions }: { analy
 
       {!isComplete ? (
         <Card padding="sm">
+          <h3 className="px-4 pt-3 text-sm font-semibold text-text-primary mb-2">
+            Performance charts
+          </h3>
           <ChartsUnavailablePlaceholder status={analytics.computation_status} />
         </Card>
       ) : (
@@ -184,12 +187,17 @@ function ChartsUnavailablePlaceholder({
 }: {
   status: StrategyAnalytics["computation_status"];
 }) {
+  // Distinct copy per status so an allocator can tell "never computed
+  // yet" (pending) from "we don't know what state we're in" (unknown
+  // fall-through). Aligns with the ComputeStatus banner above.
   const copy =
     status === "failed"
       ? "Last computation failed — charts unavailable until the next compute run."
       : status === "computing"
         ? "Computing analytics… charts will appear once complete."
-        : "Charts will appear once computation completes.";
+        : status === "pending"
+          ? "Awaiting first compute — charts will appear once data is processed."
+          : "Charts will appear once computation completes.";
   return (
     <div className="text-sm text-text-muted p-6 text-center">{copy}</div>
   );
