@@ -41,9 +41,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import Literal
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -56,10 +58,25 @@ from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     create_exchange,
     fetch_all_trades,
+    fetch_raw_trades,
     fetch_usdt_balance,
     parse_since_ms,
 )
 from services.positions import fetch_positions, persist_position_snapshots
+
+
+# ---------------------------------------------------------------------------
+# Type aliases — G12.A.3
+# ---------------------------------------------------------------------------
+# Fill side ('buy'/'sell') and position direction ('long'/'short') were
+# previously conflated as bare `str` throughout the worker / runner. The
+# audit (G12.A.3, conf=10) flagged that downstream code branches on
+# `'buy'/'sell'/'long'/'short'` interchangeably and `_compute_volume_metrics`
+# historically aliased `long_volume_pct = buy_pct` — wrong for hedge-mode
+# shorts opened via 'sell'. Migration 112 enforces the DB-side CHECK; these
+# aliases enforce the same distinction at the type layer for future code.
+Side = Literal["buy", "sell"]
+PositionDirection = Literal["long", "short"]
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -513,16 +530,30 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
         account_balance = await fetch_usdt_balance(ctx.exchange)
 
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
-        import os
+        # G12.A.9: `os` and `fetch_raw_trades` are now imported at module
+        # top — no inline import here.
         if os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true":
             try:
-                from services.exchange import fetch_raw_trades
-
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
                 )
             except Exception as e:
-                # Phase 2 failure should NOT fail Phase 1
+                # Phase 2 failure should NOT fail Phase 1.
+                #
+                # KNOWN GAP (cross-PR with PR #137 / G12.B.1, follow-up
+                # tracked as v0.22.16.0): the typed
+                # `ColdStartSymbolDiscoveryError` raised by
+                # `services.exchange._fetch_raw_trades_binance` lands in
+                # PR 2 but the boundary handler that distinguishes it
+                # from generic Phase 2 failures lives here. The current
+                # broad `except Exception` swallows the typed exception
+                # and the job still returns DONE — same false-success
+                # outcome the original audit named. Distinguishing it
+                # requires PR 2 merged first (we'd `from services.exchange
+                # import ColdStartSymbolDiscoveryError`); landing the
+                # boundary handler on this branch would fail import
+                # against main. Tracked separately, NOT a regression of
+                # this PR's work.
                 logger.warning(
                     "Raw fill ingestion failed for strategy %s (Phase 1 succeeded): %s",
                     strategy_id,
@@ -571,39 +602,160 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                 strategy_id, str(e),
             )
 
-    # Persist raw fills (Phase 2, after exchange is closed)
+    # Persist raw fills (Phase 2, after exchange is closed).
+    #
+    # G12.A.7: previously the per-batch upsert had no error handling, so a
+    # mid-stream failure (network blip on batch 3 of 5) would silently leave
+    # batches 4-5 unpersisted while the cursor advance below moved
+    # `last_fetched_trade_timestamp` past the failed window. Re-running the
+    # job would not re-fetch the lost fills. We now track per-batch success
+    # and gate the fetched-cursor advance on `phase2_complete`. The
+    # last_sync_at cursor still advances (preserving prior daily-PnL
+    # checkpoint semantics) but the granular fill-level checkpoint is held
+    # back so the next run re-fetches the failed window.
+    #
+    # G12.A.6: `ignore_duplicates=True` silently discards exchange-amended
+    # fills (final fee, settlement updates) that re-use the same
+    # exchange_fill_id with mutated values. We don't change the persistence
+    # semantics here (changing them is a bigger discussion — pending the
+    # G12.A.6 follow-up), but we DO emit observability: a SELECT-and-compare
+    # pass would add ~40 LOC of complexity, so per the audit plan we instead
+    # emit a single warning per Phase 2 run with the count of fills that
+    # collided with existing exchange_fill_ids. This is an under-counter
+    # for amendments (it conflates true duplicates with amended fills) but
+    # it makes the invisible visible. TODO(G12.A.6): upgrade to fee/price
+    # diff detection if amendment volume justifies the round-trip.
+    phase2_complete = False
+    phase2_persisted = 0
+    # G12.A.8 — grouping by (symbol, exchange) for cross-exchange contamination
+    # is enforced in position_reconstruction.py per audit batch v0.22.12; this
+    # worker only persists fills with the `exchange` field intact (the trades
+    # table has an `exchange` column and we pass each fill dict through
+    # unchanged), so no pre-aggregation drops the exchange dimension here.
     if raw_fills:
         # Direct insert with ON CONFLICT DO NOTHING (dedup via partial unique index)
         # Cannot use sync_trades RPC — it DELETE+INSERTs, which would destroy Phase 1 daily_pnl
-        for i in range(0, len(raw_fills), 100):
-            batch = raw_fills[i:i + 100]
-            def _insert_fills(rows=batch):
-                ctx.supabase.table("trades").upsert(
-                    [{"strategy_id": strategy_id, **fill} for fill in rows],
-                    on_conflict="strategy_id,exchange,exchange_fill_id",
-                    ignore_duplicates=True,
-                ).execute()
-            await db_execute(_insert_fills)
-        logger.info(
-            "sync_trades Phase 2: persisted %d raw fills for strategy %s",
-            len(raw_fills), strategy_id,
-        )
+        #
+        # G12.A.6 amendment-detection SELECT — adversarial-review hardened
+        # (PR #136 follow-up):
+        #
+        #   1. The upsert dedup key is `(strategy_id, exchange, exchange_fill_id)`.
+        #      Pre-fix the SELECT only filtered `(strategy_id, exchange_fill_id)`
+        #      so cross-exchange tradeId collisions (Bybit `execId` and Binance
+        #      `id` namespaces are independent integer spaces) registered as
+        #      false-positive amendments. Bucket by exchange first, then SELECT
+        #      per-exchange so the predicate matches the upsert key exactly.
+        #
+        #   2. PostgREST `.in_()` URL-encodes the list. Backfills with thousands
+        #      of fills exceed the ~8KB query string limit and the request 414/500s
+        #      — silently swallowed at DEBUG, killing observability on exactly the
+        #      runs where it matters most. Chunk per-exchange in 100-id batches
+        #      matching the upsert chunk size so we stay well under the URL cap.
+        existing_pairs: set[tuple[str, str]] = set()
+        try:
+            incoming_by_exchange: dict[str, list[str]] = {}
+            for fill in raw_fills:
+                fill_id = fill.get("exchange_fill_id")
+                exch = fill.get("exchange")
+                if fill_id and exch:
+                    incoming_by_exchange.setdefault(exch, []).append(fill_id)
+
+            for exch, fill_ids in incoming_by_exchange.items():
+                for offset in range(0, len(fill_ids), 100):
+                    chunk = fill_ids[offset:offset + 100]
+
+                    def _select_existing(
+                        _exch: str = exch,
+                        _chunk: list[str] = chunk,
+                    ) -> set[tuple[str, str]]:
+                        res = (
+                            ctx.supabase.table("trades")
+                            .select("exchange,exchange_fill_id")
+                            .eq("strategy_id", strategy_id)
+                            .eq("exchange", _exch)
+                            .in_("exchange_fill_id", _chunk)
+                            .execute()
+                        )
+                        return {
+                            (row.get("exchange"), row.get("exchange_fill_id"))
+                            for row in (res.data or [])
+                            if row.get("exchange") and row.get("exchange_fill_id")
+                        }
+
+                    existing_pairs |= await db_execute(_select_existing)
+        except Exception as exc:  # noqa: BLE001
+            # Observability is best-effort — never block the upsert.
+            logger.debug(
+                "sync_trades Phase 2: amendment-detection SELECT failed for "
+                "strategy %s (continuing): %s",
+                strategy_id, exc,
+            )
+            existing_pairs = set()
+
+        try:
+            for i in range(0, len(raw_fills), 100):
+                batch = raw_fills[i:i + 100]
+                def _insert_fills(rows=batch):
+                    ctx.supabase.table("trades").upsert(
+                        [{"strategy_id": strategy_id, **fill} for fill in rows],
+                        on_conflict="strategy_id,exchange,exchange_fill_id",
+                        ignore_duplicates=True,
+                    ).execute()
+                await db_execute(_insert_fills)
+                phase2_persisted += len(batch)
+            phase2_complete = True
+        except Exception as exc:  # noqa: BLE001
+            # Per-batch failure: do NOT advance the granular cursor below.
+            # The next run will re-fetch the failed window and the
+            # ignore_duplicates upsert keeps already-persisted batches
+            # idempotent.
+            logger.warning(
+                "sync_trades Phase 2: partial batch failure for strategy %s "
+                "after %d/%d fills persisted — holding fetched-cursor so "
+                "next run re-fetches lost fills. Error: %s",
+                strategy_id, phase2_persisted, len(raw_fills), exc,
+            )
+
+        # G12.A.6 amendment-detection observability (best-effort).
+        amended_count = len(existing_pairs)
+        if amended_count > 0:
+            logger.warning(
+                "fill_amendments_detected strategy=%s collisions=%d batch_size=%d "
+                "(see G12.A.6 — ignore_duplicates may be hiding fee/price updates)",
+                strategy_id, amended_count, len(raw_fills),
+            )
+
+        if phase2_complete:
+            logger.info(
+                "sync_trades Phase 2: persisted %d raw fills for strategy %s "
+                "(%d collided with existing exchange_fill_ids)",
+                phase2_persisted, strategy_id, amended_count,
+            )
 
     # Checkpoint cursor after any successful fetch (empty or not). Survives
     # downstream analytics/reconstruction failure. Best-effort — a missed
     # stamp just means re-fetching one window next run.
-    def _update_fetched_cursor() -> None:
-        ctx.supabase.table("api_keys").update(
-            {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
-        ).eq("id", ctx.key_row["id"]).execute()
+    #
+    # G12.A.7: only advance the granular fetched-cursor if Phase 2 fully
+    # succeeded (or wasn't run). A partial-batch failure leaves the cursor
+    # untouched so the next run re-fetches the lost fills. Empty fetches
+    # (`raw_fills == []`) and feature-flag-disabled paths still advance —
+    # `phase2_complete` defaults False but `raw_fills` is also False so
+    # the gate falls through.
+    advance_fetched_cursor = (not raw_fills) or phase2_complete
+    if advance_fetched_cursor:
+        def _update_fetched_cursor() -> None:
+            ctx.supabase.table("api_keys").update(
+                {"last_fetched_trade_timestamp": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", ctx.key_row["id"]).execute()
 
-    try:
-        await db_execute(_update_fetched_cursor)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to stamp last_fetched_trade_timestamp for api_key %s: %s",
-            ctx.key_row.get("id"), exc,
-        )
+        try:
+            await db_execute(_update_fetched_cursor)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to stamp last_fetched_trade_timestamp for api_key %s: %s",
+                ctx.key_row.get("id"), exc,
+            )
 
     # Advance sync cursor always (even for empty fetches).
     def _update_cursor() -> None:

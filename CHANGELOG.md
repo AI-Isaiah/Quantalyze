@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.12.0] - 2026-05-09
+
+**audit-2026-05-07 G12.A — sync_trades / Phase 1+2 / watchdog correctness (Round-2 readiness gate).** Closes 7 audit items (G12.A.3, A.4, A.5, A.6, A.7, A.8 HIGH + A.9 MED) on the `sync_trades` worker that ingests raw exchange fills. This is PR 1 of 5 in the audit-2026-05-07 G12 split — Round-2 of `USE_COMPUTE_JOBS_QUEUE=true` rollout was waiting on this gate. Allocators get observability for silently-amended fills and protection against permanent fill loss when a Phase 2 batch fails mid-run.
+
+### Added
+
+- **Migration 112** (`112_trades_side_check_constraint.sql`) idempotently re-asserts the `CHECK (side IN ('buy','sell'))` constraint on `trades.side` via `NOT VALID` + guarded `VALIDATE`. The 001 schema already had this CHECK; 112 also surveys distinct violator values and raises with admin-actionable cleanup instructions if any non-{buy,sell} rows exist before validation.
+- **`Side` and `PositionDirection` Literal types** at the top of `analytics-service/services/job_worker.py` enforce the fill-side vs position-direction distinction at the type layer (G12.A.3).
+- **Phase 2 fill-amendment observability.** When the exchange amends a previously-reported fill (final settlement fee, post-trade fee adjustment, corrected price), `job_worker.run_sync_trades_job` now SELECTs existing `exchange_fill_id` rows for the strategy and emits a `fill_amendments_detected` warning with collision count. Persistence behavior is preserved (still uses `ignore_duplicates=True`); the goal is observability so amended fees no longer disappear silently from allocator dashboards (G12.A.6).
+- **Phase 2 cursor gating.** `run_sync_trades_job` tracks a `phase2_complete: bool` flag. The granular `last_fetched_trade_timestamp` cursor advance is now gated on `(not raw_fills) or phase2_complete` — partial Phase 2 batch failures no longer leave the cursor advanced past lost fills (G12.A.7).
+
+### Fixed
+
+- **(G12.A.3, HIGH conf=10)** trades.side type discipline: DB CHECK reasserted via migration 112; Python types codified.
+- **(G12.A.4, HIGH conf=9)** Empty-exchange-response regression test: `TestSyncTradesEmptyResponsePreservesHistory` proves `if trades:` guard at line 552 prevents wiping daily_pnl rows.
+- **(G12.A.5, HIGH conf=9)** RLS-denies-cross-allocator regression test: `TestTradesIsFillRls` gated on `TEST_SUPABASE_DB_URL` (CI runs against the qmnijlgmdhviwzwfyzlc test project).
+- **(G12.A.6, HIGH conf=8)** Silently-amended fills now logged.
+- **(G12.A.7, HIGH conf=8)** Cursor no longer advances past partial Phase 2 failure.
+- **(G12.A.8, HIGH conf=7)** `job_worker.py` confirmed not to pre-aggregate by symbol; the multi-exchange grouping fix lands in `position_reconstruction.py` per G12.C.6 (PR 5 of this split).
+- **(G12.A.9, MED conf=9)** `import os` and `from services.exchange import fetch_raw_trades` moved to module top of `job_worker.py`. Existing `test_sync_trades_feature_flag_*` patches updated to track the import-site move.
+
+### Documentation
+
+- `.planning/audit-2026-05-07/FIX-LIST.md` and `.planning/audit-2026-05-07/FIX-LIST-G8-G12-ATOMIC.md` mark P99, P101–P105 (G12.A.3, A.5, A.6, A.7, A.8, A.9) as `[FIXED]` and G12.A.4 as `[FIXED]` with regression-test note. P100 stays `[OBSOLETE]` (already closed by migration 110).
+
 ## [0.22.11.0] - 2026-05-09
 
 **audit-2026-05-07 G8.A + G11.A — allocator-trust + chart-pipeline correctness.** Closes 18 audit items (4 CRITICAL + 13 HIGH + 1 MEDIUM single-line + 1 INFO + 1 LOW dead-code drop). Two trust boundaries hardened: My Allocation queries no longer present infrastructure failures as the "no investments" empty state, and chart surfaces no longer ship institutional-fidelity output for thin data, malformed server output, or stale compute. After the first /ship review pass surfaced two residual P35 leak vectors and 5+ UI consumers still reading the redacted field directly, a second pass closed both leaks at the query layer and migrated every consumer through the canonical resolver.

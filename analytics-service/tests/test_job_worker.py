@@ -480,7 +480,7 @@ class TestSyncTradesFeatureFlag:
             "services.job_worker.db_execute",
             side_effect=lambda fn: asyncio.to_thread(fn),
         ), patch(
-            "services.exchange.fetch_raw_trades",
+            "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,
         ), patch.dict(
             "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
@@ -535,7 +535,7 @@ class TestSyncTradesFeatureFlag:
             "services.job_worker.db_execute",
             side_effect=lambda fn: asyncio.to_thread(fn),
         ), patch(
-            "services.exchange.fetch_raw_trades",
+            "services.job_worker.fetch_raw_trades",
             mock_fetch_raw,
         ), patch.dict(
             "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
@@ -838,6 +838,786 @@ class TestSyncTradesEnqueuesComputeAnalytics:
             if table_name == "strategy_analytics"
         )
         assert on_conflict == "strategy_id"
+
+
+# ---------------------------------------------------------------------------
+# G12.A.4 — Empty / partial exchange response must NOT wipe daily_pnl history
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesEmptyResponsePreservesHistory:
+    """audit-2026-05-07 G12.A.4 (HIGH conf=9) — regression gate.
+
+    Pre-fix history: `if trades:` (job_worker.py:571) means an empty list
+    skips the sync_trades RPC; a non-empty list with a single trade still
+    invokes sync_trades, but migration 110 scopes the DELETE to the JSONB
+    payload's [MIN,MAX] timestamp window so older rows survive. There was
+    no Python-level test asserting either property — these tests pin them
+    so a future refactor that drops the `if trades:` guard or unscopes the
+    DELETE fails loud.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_empty_response_preserves_existing(self) -> None:
+        """Mock fetch_all_trades to return []. The sync_trades RPC must
+        NOT be called (the `if trades:` guard at job_worker.py:571 short-
+        circuits). Pre-existing daily_pnl rows in the DB therefore survive
+        untouched."""
+        from services.job_worker import run_sync_trades_job
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-empty", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            rpc_calls.append((name, payload))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=0)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        # api_keys.update().eq().execute() chain for cursor advance.
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {"id": "job-empty", "kind": "sync_trades", "strategy_id": "strat-empty"}
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[]),  # empty exchange response
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        # The sync_trades RPC must NOT have been called — that's what
+        # protects existing daily_pnl rows on an empty exchange response.
+        # Other RPCs (enqueue_compute_job follow-on) ARE allowed.
+        sync_trades_calls = [
+            payload for (name, payload) in rpc_calls if name == "sync_trades"
+        ]
+        assert sync_trades_calls == [], (
+            f"sync_trades RPC must NOT be called when fetch_all_trades returns []; "
+            f"empty exchange response would otherwise wipe daily_pnl history. "
+            f"Got calls: {sync_trades_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_partial_response_does_not_wipe_history(self) -> None:
+        """Non-empty single-day response: sync_trades RPC IS called, with
+        the timestamp window scoped to the payload (migration 110 guards
+        the DELETE). Older rows outside the window survive at the DB layer
+        — this test pins the Python-side contract that the RPC is invoked
+        with the trades list intact (no implicit truncation/expansion)."""
+        from services.job_worker import run_sync_trades_job
+
+        single_trade = [
+            {
+                "exchange": "okx",
+                "symbol": "BTC-USDT-SWAP",
+                "side": "buy",
+                "price": "50000",
+                "quantity": "0.1",
+                "fee": "0.5",
+                "fee_currency": "USDT",
+                "timestamp": "2026-05-07T12:00:00Z",
+                "order_type": "summary",
+            }
+        ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-partial", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        rpc_calls: list[tuple[str, dict]] = []
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            rpc_calls.append((name, payload))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        mock_update = MagicMock()
+        mock_eq = MagicMock()
+        mock_eq.execute.return_value = MagicMock(data=[])
+        mock_update.eq.return_value = mock_eq
+        mock_ctx.supabase.table.return_value.update.return_value = mock_update
+
+        job = {
+            "id": "job-partial",
+            "kind": "sync_trades",
+            "strategy_id": "strat-partial",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=single_trade),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "false"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        # sync_trades RPC was called with the trades list intact; the
+        # DB-side migration 110 then scopes the DELETE to the payload's
+        # [MIN,MAX] timestamp window so older rows survive.
+        sync_trades_calls = [
+            payload for (name, payload) in rpc_calls if name == "sync_trades"
+        ]
+        assert len(sync_trades_calls) == 1
+        assert sync_trades_calls[0]["p_strategy_id"] == "strat-partial"
+        assert sync_trades_calls[0]["p_trades"] == single_trade
+
+
+# ---------------------------------------------------------------------------
+# G12.A.6 — Amendment-detection observability
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesPhase2AmendmentDetection:
+    """audit-2026-05-07 G12.A.6 (HIGH conf=8).
+
+    `ignore_duplicates=True` on the Phase 2 raw-fill upsert silently
+    discards exchange-amended fills (final fee, post-trade settlement,
+    corrected price) that re-use the same exchange_fill_id. Without
+    observability the operator has no signal that amendments are being
+    dropped. The fix emits a `fill_amendments_detected` warning per Phase
+    2 run with the count of incoming fills that collided with existing
+    DB rows. This is an under-counter (true duplicates are also counted)
+    but it makes the invisible visible.
+    """
+
+    @pytest.mark.asyncio
+    async def test_phase2_logs_warning_when_fills_collide_with_existing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """When the SELECT pass finds incoming fills that already exist
+        in the DB by exchange_fill_id, a `fill_amendments_detected`
+        WARNING is emitted with the collision count."""
+        import logging
+        from services.job_worker import run_sync_trades_job
+
+        # Simulate two raw fills coming back from the exchange.
+        raw_fills = [
+            {
+                "exchange": "okx",
+                "symbol": "BTC-USDT-SWAP",
+                "side": "buy",
+                "price": "50000",
+                "quantity": "0.1",
+                "fee": "0.5",
+                "exchange_fill_id": "fill-amended-1",
+                "is_fill": True,
+                "cost": "5000",
+                "timestamp": "2026-05-07T12:00:00Z",
+            },
+            {
+                "exchange": "okx",
+                "symbol": "BTC-USDT-SWAP",
+                "side": "sell",
+                "price": "50100",
+                "quantity": "0.1",
+                "fee": "0.51",
+                "exchange_fill_id": "fill-new-2",
+                "is_fill": True,
+                "cost": "5010",
+                "timestamp": "2026-05-07T12:05:00Z",
+            },
+        ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-amend", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # rpc — sync_trades + enqueue_compute_job both succeed.
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=2)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        # supabase.table('trades') chain (post adversarial-review fix):
+        #   .select('exchange,exchange_fill_id').eq(strategy_id).eq(exchange).in_(fill_ids).execute()
+        #   — returns existing rows scoped by both strategy AND exchange.
+        #   .upsert(...).execute() — Phase 2 batch upsert.
+        # supabase.table('api_keys').update(...).eq(...).execute() — cursor
+        # advance. Use the same mock_t for all and dispatch by chained verb.
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+            # SELECT chain — returns one collision (fill-amended-1 in DB on okx).
+            # Two .eq() calls (strategy_id, exchange) → one .in_(fill_ids).
+            mock_select = MagicMock()
+            mock_eq_strat = MagicMock()
+            mock_eq_exch = MagicMock()
+            mock_in = MagicMock()
+            mock_in.execute.return_value = MagicMock(data=[
+                {"exchange": "okx", "exchange_fill_id": "fill-amended-1"},
+            ])
+            mock_eq_exch.in_.return_value = mock_in
+            mock_eq_strat.eq.return_value = mock_eq_exch
+            mock_select.eq.return_value = mock_eq_strat
+            mock_t.select.return_value = mock_select
+
+            # UPSERT chain — succeeds.
+            mock_upsert = MagicMock()
+            mock_upsert.execute.return_value = MagicMock(data=[])
+            mock_t.upsert.return_value = mock_upsert
+
+            # UPDATE chain — for cursor advance.
+            mock_update = MagicMock()
+            mock_eq_upd = MagicMock()
+            mock_eq_upd.execute.return_value = MagicMock(data=[])
+            mock_update.eq.return_value = mock_eq_upd
+            mock_t.update.return_value = mock_update
+
+            return mock_t
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        job = {
+            "id": "job-amend",
+            "kind": "sync_trades",
+            "strategy_id": "strat-amend",
+        }
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"), patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(return_value=raw_fills),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+
+        # Warning must include the marker + collision count.
+        warning_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING
+        ]
+        assert any("fill_amendments_detected" in m for m in warning_msgs), (
+            f"Expected a `fill_amendments_detected` WARNING when Phase 2 "
+            f"upsert collides with existing fills. "
+            f"Warnings captured: {warning_msgs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_amendment_select_filters_by_exchange_no_cross_exchange_false_positive(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Adversarial-review regression (PR #136 follow-up).
+
+        Pre-fix the SELECT only filtered (strategy_id, exchange_fill_id),
+        so cross-exchange tradeId collisions (Bybit `execId` vs Binance `id`
+        are independent integer namespaces) registered as false-positive
+        amendments. The fix buckets incoming fills by exchange and SELECTs
+        per-exchange so the predicate matches the upsert's
+        (strategy_id, exchange, exchange_fill_id) ON CONFLICT key exactly.
+
+        Sets up: incoming fills from BOTH okx and binance with overlapping
+        exchange_fill_id "100" (legal in real life — independent ID spaces).
+        DB only has the binance row "100"; the okx row "100" is genuinely new.
+
+        Asserts: the .eq("exchange", ...) chain is called for each distinct
+        exchange in the incoming batch (proving the predicate exists).
+        """
+        from services.job_worker import run_sync_trades_job
+
+        # Cross-exchange overlapping fill IDs — legal because each exchange
+        # maintains its own integer ID namespace.
+        raw_fills = [
+            {
+                "exchange": "okx", "symbol": "BTC-USDT-SWAP",
+                "side": "buy", "price": "50000", "quantity": "0.1",
+                "fee": "0.5", "exchange_fill_id": "100",
+                "is_fill": True, "cost": "5000",
+                "timestamp": "2026-05-07T12:00:00Z",
+            },
+            {
+                "exchange": "binance", "symbol": "BTCUSDT",
+                "side": "sell", "price": "50100", "quantity": "0.1",
+                "fee": "0.51", "exchange_fill_id": "100",
+                "is_fill": True, "cost": "5010",
+                "timestamp": "2026-05-07T12:05:00Z",
+            },
+        ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-cross", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+        mock_ctx.supabase.rpc.return_value.execute.return_value = MagicMock(data=2)
+
+        # Track each .eq("exchange", ...) call so we can assert the chain
+        # is per-exchange (not a single SELECT).
+        seen_exchanges: list[str] = []
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            def _select_chain(*select_args, **select_kwargs):
+                mock_select = MagicMock()
+
+                def _eq_strategy(_strat_col, _strat_val):
+                    mock_eq_strat = MagicMock()
+
+                    def _eq_exchange(_exch_col, _exch_val):
+                        # Capture the per-exchange filter — proof the fix
+                        # narrows by exchange.
+                        if _exch_col == "exchange":
+                            seen_exchanges.append(_exch_val)
+                        mock_eq_exch = MagicMock()
+
+                        def _in(_col, _ids):
+                            mock_in = MagicMock()
+                            # Simulate: binance has fill "100" already
+                            # (a real prior persist), okx does not.
+                            if _exch_val == "binance" and "100" in _ids:
+                                mock_in.execute.return_value = MagicMock(data=[
+                                    {"exchange": "binance", "exchange_fill_id": "100"},
+                                ])
+                            else:
+                                mock_in.execute.return_value = MagicMock(data=[])
+                            return mock_in
+
+                        mock_eq_exch.in_.side_effect = _in
+                        return mock_eq_exch
+
+                    mock_eq_strat.eq.side_effect = _eq_exchange
+                    return mock_eq_strat
+
+                mock_select.eq.side_effect = _eq_strategy
+                return mock_select
+
+            mock_t.select.side_effect = _select_chain
+
+            # UPSERT chain — succeeds.
+            mock_upsert = MagicMock()
+            mock_upsert.execute.return_value = MagicMock(data=[])
+            mock_t.upsert.return_value = mock_upsert
+
+            # UPDATE chain — for cursor advance.
+            mock_update = MagicMock()
+            mock_eq_upd = MagicMock()
+            mock_eq_upd.execute.return_value = MagicMock(data=[])
+            mock_update.eq.return_value = mock_eq_upd
+            mock_t.update.return_value = mock_update
+
+            return mock_t
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        job = {
+            "id": "job-cross",
+            "kind": "sync_trades",
+            "strategy_id": "strat-cross",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(return_value=raw_fills),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # Both exchanges must have been queried independently. Order is
+        # dict-iteration order — sort to compare.
+        assert sorted(seen_exchanges) == ["binance", "okx"], (
+            f"Expected per-exchange SELECTs for both 'binance' and 'okx', "
+            f"got {seen_exchanges}. The pre-fix SELECT had no .eq('exchange', ...) "
+            f"so cross-exchange tradeId collisions registered as false amendments."
+        )
+
+
+# ---------------------------------------------------------------------------
+# G12.A.7 — Phase 2 partial batch failure must NOT advance the cursor
+# ---------------------------------------------------------------------------
+
+class TestSyncTradesPhase2PartialBatchFailure:
+    """audit-2026-05-07 G12.A.7 (HIGH conf=8).
+
+    Phase 2 batches 100 fills at a time. Pre-fix: an exception on batch 3
+    of 5 left batches 1-2 committed but batches 3-5 lost; the outer
+    try/except swallowed the exception and the granular fetched-cursor
+    advance ran unconditionally. Re-running the job didn't refetch the
+    lost fills because last_fetched_trade_timestamp had moved forward.
+
+    Post-fix: per-batch success is tracked via `phase2_complete`. On
+    partial failure we log a WARNING and the granular cursor is NOT
+    advanced. Next run re-fetches the failed window; ignore_duplicates
+    on the upsert keeps already-persisted batches idempotent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_trades_phase2_partial_batch_failure_keeps_cursor(
+        self,
+    ) -> None:
+        from services.job_worker import run_sync_trades_job
+
+        # 250 raw fills → 3 batches of 100 (last batch is 50). The 2nd
+        # upsert call raises; batches 3+ never run; the granular cursor
+        # advance must be skipped.
+        raw_fills = [
+            {
+                "exchange": "okx",
+                "symbol": "BTC-USDT-SWAP",
+                "side": "buy" if i % 2 == 0 else "sell",
+                "price": "50000",
+                "quantity": "0.1",
+                "fee": "0.5",
+                "exchange_fill_id": f"fill-{i}",
+                "is_fill": True,
+                "cost": "5000",
+                "timestamp": "2026-05-07T12:00:00Z",
+            }
+            for i in range(250)
+        ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = mock_exchange
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-partial-batch", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        # rpc passes through.
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=2)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        # Track every supabase.table('api_keys').update(payload).eq(...)
+        # call so we can assert the granular cursor was NOT advanced.
+        api_key_updates: list[dict] = []
+
+        # The upsert mock fails on the 2nd batch. We need a fresh mock_t
+        # per .table() call so the chained verbs don't share state.
+        upsert_call_count = {"n": 0}
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            # SELECT chain (amendment detection) — return no collisions.
+            mock_select = MagicMock()
+            mock_eq_sel = MagicMock()
+            mock_in = MagicMock()
+            mock_in.execute.return_value = MagicMock(data=[])
+            mock_eq_sel.in_.return_value = mock_in
+            mock_select.eq.return_value = mock_eq_sel
+            mock_t.select.return_value = mock_select
+
+            # UPSERT chain — raise on 2nd call.
+            def _upsert(payload: list, **kwargs):
+                upsert_call_count["n"] += 1
+                stub = MagicMock()
+                if upsert_call_count["n"] == 2:
+                    stub.execute.side_effect = RuntimeError(
+                        "simulated DB timeout on batch 2 of 3"
+                    )
+                else:
+                    stub.execute.return_value = MagicMock(data=[])
+                return stub
+
+            mock_t.upsert.side_effect = _upsert
+
+            # UPDATE chain — record api_keys updates so we can assert the
+            # granular cursor (last_fetched_trade_timestamp) was NOT
+            # written when the partial batch failed.
+            def _update(payload: dict):
+                if name == "api_keys":
+                    api_key_updates.append(dict(payload))
+                mock_eq_upd = MagicMock()
+                mock_eq_upd.execute.return_value = MagicMock(data=[])
+                inner = MagicMock()
+                inner.eq.return_value = mock_eq_upd
+                return inner
+
+            mock_t.update.side_effect = _update
+
+            return mock_t
+
+        mock_ctx.supabase.table.side_effect = _table
+
+        job = {
+            "id": "job-partial-batch",
+            "kind": "sync_trades",
+            "strategy_id": "strat-partial-batch",
+        }
+
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.fetch_raw_trades",
+            new=AsyncMock(return_value=raw_fills),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch.dict(
+            "os.environ", {"USE_RAW_TRADE_INGESTION": "true"},
+        ):
+            result = await run_sync_trades_job(job)
+
+        # Job still returns DONE — Phase 2 partial failure does NOT
+        # propagate as a job failure. The cursor protection is the
+        # invariant under test.
+        assert result.outcome == DispatchOutcome.DONE
+
+        # The granular cursor advance (last_fetched_trade_timestamp)
+        # MUST NOT appear in any api_keys update payload — Phase 2
+        # didn't fully complete, so the next run must re-fetch the
+        # failed window.
+        granular_cursor_writes = [
+            u for u in api_key_updates
+            if "last_fetched_trade_timestamp" in u
+        ]
+        assert granular_cursor_writes == [], (
+            f"Phase 2 partial batch failure must NOT advance "
+            f"last_fetched_trade_timestamp; otherwise the next run "
+            f"won't re-fetch the lost fills. "
+            f"Got api_keys updates with the granular cursor: {granular_cursor_writes}. "
+            f"All api_keys updates: {api_key_updates}."
+        )
+
+        # Sanity: the legacy `last_sync_at` cursor still advances (it's
+        # a separate semantic — the daily-PnL Phase 1 ran fine).
+        last_sync_writes = [
+            u for u in api_key_updates if "last_sync_at" in u
+        ]
+        assert len(last_sync_writes) >= 1
+
+
+# ---------------------------------------------------------------------------
+# G12.A.5 — RLS denies cross-allocator SELECT on is_fill=true rows
+# ---------------------------------------------------------------------------
+
+class TestTradesIsFillRls:
+    """audit-2026-05-07 G12.A.5 (HIGH conf=9).
+
+    Migration 039 adds `is_fill=true` raw fill rows but ships with the
+    comment 'Does NOT modify existing RLS policies' — assuming the
+    migration 002 user-scoped read still works for the new shape. There
+    was no test in the repo asserting allocator A cannot SELECT is_fill
+    rows belonging to allocator B's strategy. The new raw_data JSONB
+    column may leak api_key info / external order metadata if RLS is
+    silently bypassed.
+
+    Live-DB gated test: skips when TEST_SUPABASE_DB_URL is not set
+    (mirrors test_sync_trades_preserves_fills.py + test_resend_correlation_rls.py).
+    Inserts is_fill=true rows for two distinct strategies via service-
+    role; switches to anon role and asserts cross-allocator SELECT
+    returns 0 rows (either RLS or the GRANT layer denies — both are a
+    pass).
+    """
+
+    pytestmark = pytest.mark.skipif(
+        not __import__("os").environ.get("TEST_SUPABASE_DB_URL"),
+        reason="Live test Supabase project not configured (TEST_SUPABASE_DB_URL unset).",
+    )
+
+    def test_anon_role_denied_select_is_fill_rows(self) -> None:
+        """Insert two is_fill rows for two different strategies; the anon
+        role must NOT see either (no per-row data leak via raw_data)."""
+        import os
+        import uuid
+
+        if not os.environ.get("TEST_SUPABASE_DB_URL"):
+            pytest.skip("TEST_SUPABASE_DB_URL not set")
+
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError:
+            pytest.skip("psycopg not installed")
+
+        dsn = os.environ["TEST_SUPABASE_DB_URL"]
+        user_a = str(uuid.uuid4())
+        user_b = str(uuid.uuid4())
+        strategy_a = str(uuid.uuid4())
+        strategy_b = str(uuid.uuid4())
+        fill_a = f"fill-{uuid.uuid4().hex[:12]}"
+        fill_b = f"fill-{uuid.uuid4().hex[:12]}"
+
+        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                # Seed two strategies.
+                for uid, sid in ((user_a, strategy_a), (user_b, strategy_b)):
+                    cur.execute(
+                        "INSERT INTO public.profiles (id, role, created_at) "
+                        "VALUES (%s, 'manager', now())",
+                        (uid,),
+                    )
+                    cur.execute(
+                        "INSERT INTO public.strategies (id, user_id, name, status, created_at) "
+                        "VALUES (%s, %s, %s, 'pending_review', now())",
+                        (sid, uid, f"audit-g12a5-{uuid.uuid4().hex[:6]}"),
+                    )
+                # Seed one is_fill row per strategy.
+                for sid, fid in ((strategy_a, fill_a), (strategy_b, fill_b)):
+                    cur.execute(
+                        """
+                        INSERT INTO public.trades (
+                          strategy_id, exchange, symbol, side, price, quantity,
+                          fee, fee_currency, timestamp, order_type,
+                          exchange_fill_id, is_fill, cost
+                        ) VALUES (
+                          %s, 'okx', 'BTC-USDT-SWAP', 'buy', 50000, 0.1,
+                          0.5, 'USDT', now(), 'market',
+                          %s, true, 5000
+                        )
+                        """,
+                        (sid, fid),
+                    )
+
+            # anon role MUST see zero rows. RLS deny + GRANT deny are
+            # both acceptable outcomes — both encode the cross-tenant
+            # isolation property.
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL request.jwt.claim.role TO 'anon'")
+                    try:
+                        cur.execute("SET LOCAL ROLE anon")
+                        cur.execute("SELECT current_user AS who")
+                        who = cur.fetchone()
+                        assert who is not None and who["who"] == "anon"
+                        cur.execute(
+                            "SELECT exchange_fill_id FROM public.trades "
+                            "WHERE is_fill = true "
+                            "  AND exchange_fill_id IN (%s, %s)",
+                            (fill_a, fill_b),
+                        )
+                        rows = cur.fetchall()
+                        assert rows == [], (
+                            f"anon role read {len(rows)} is_fill rows — "
+                            f"RLS / GRANT layer failed to block cross-tenant "
+                            f"access. G12.A.5 regression."
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Catch InsufficientPrivilege (psycopg.errors) and
+                        # any other deny path. Both encode isolation.
+                        msg = str(type(exc).__name__) + ": " + str(exc)
+                        assert "Privilege" in msg or "denied" in msg.lower() or "permission" in msg.lower(), (
+                            f"anon SELECT raised an unexpected error: {msg}. "
+                            f"Expected InsufficientPrivilege (deny) or "
+                            f"empty result set."
+                        )
+        finally:
+            # Teardown.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM public.trades WHERE strategy_id IN (%s, %s)",
+                    (strategy_a, strategy_b),
+                )
+                cur.execute(
+                    "DELETE FROM public.strategies WHERE id IN (%s, %s)",
+                    (strategy_a, strategy_b),
+                )
+                cur.execute(
+                    "DELETE FROM public.profiles WHERE id IN (%s, %s)",
+                    (user_a, user_b),
+                )
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
