@@ -226,7 +226,7 @@ CREATE POLICY verification_requests_legacy_public_token_select ON verification_r
   );
 
 COMMENT ON POLICY verification_requests_legacy_public_token_select ON verification_requests_legacy IS
-  'M-6 — preserves the original verification_requests public_token-gated SELECT for the 90-day window after rename. Without this policy, every public verification status URL pointing at a pre-Phase-19 row would 404 for the public.';
+  'M-6 — service-role-only support read for the 90-day window after rename. The route handler at /api/verify-strategy/[id]/status uses createAdminClient (RLS bypass) so authenticated/anon do not need direct SELECT. The USING predicate is retained as a defense-in-depth filter and is gated by the explicit REVOKEs below; if a future change re-grants SELECT to anon or authenticated this policy alone is NOT sufficient — re-add a token match.';
 
 -- SEC-2 — REVOKE direct SELECT from anon on the legacy table. RLS alone is
 -- not enough on its own when the table grants base-level SELECT to anon
@@ -236,6 +236,26 @@ COMMENT ON POLICY verification_requests_legacy_public_token_select ON verificati
 -- (RLS bypass) to look up the row, so revoking anon's direct grant does
 -- not break the public-status feature.
 REVOKE SELECT ON verification_requests_legacy FROM anon;
+
+-- CT-2 (army2) — also REVOKE from authenticated. The M-6 policy USING
+-- clause has no token match, only `public_token IS NOT NULL AND expires_at
+-- > now() AND created_at > now() - interval '90 days'`. SEC-2 closed the
+-- anon hole but authenticated retained the default GRANT, so any logged-in
+-- user could SELECT every legacy teaser row including emails and ciphertext
+-- blobs. The public-status route uses createAdminClient (RLS bypass) and
+-- needs no authenticated path, so this REVOKE does not break the feature.
+REVOKE SELECT, INSERT, UPDATE, DELETE ON verification_requests_legacy FROM authenticated;
+
+-- CT-2 (army2) — assert authenticated really has no SELECT after the REVOKE.
+-- This catches any future change that re-grants SELECT (e.g. a blanket
+-- `GRANT SELECT ON ALL TABLES IN SCHEMA public TO authenticated`).
+DO $$
+BEGIN
+  IF has_table_privilege('authenticated', 'public.verification_requests_legacy', 'SELECT') THEN
+    RAISE EXCEPTION 'Migration 107 CT-2: authenticated still has SELECT on verification_requests_legacy after REVOKE';
+  END IF;
+  RAISE NOTICE 'Migration 107 CT-2: authenticated has no SELECT on verification_requests_legacy';
+END $$;
 
 -- ==========================================================================
 -- STEP 6 — Self-verifying DO block
