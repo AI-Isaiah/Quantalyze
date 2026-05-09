@@ -6,6 +6,8 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { postProcessKey } from "@/lib/process-key-client";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -17,6 +19,15 @@ import type { User } from "@supabase/supabase-js";
  * notification email via `after()`. Migration 031's guard trigger
  * enforces that the RPC is the only promotion path for wizard
  * drafts.
+ *
+ * Phase 19 / Open Question 1
+ * --------------------------
+ * The force-refresh permissions probe (fetchLivePermissions below) is
+ * RETAINED at the thin-adapter layer when the unified backbone path is
+ * active. The probe runs BEFORE delegating to /process-key so the
+ * scope-broadening defense is preserved end-to-end. Pushing the probe
+ * into IngestionAdapter.validate would lose the strategies.api_key_id
+ * lookup that resolves which key to probe.
  *
  * Scope-broadening defense
  * ------------------------
@@ -92,21 +103,39 @@ function validateStringArray(value: unknown): string[] {
     .slice(0, 20);
 }
 
-export const POST = withAuth(async (req: NextRequest, user: User) => {
-  const rl = await checkLimit(
-    userActionLimiter,
-    `strategies-finalize-wizard:${user.id}`,
-  );
-  if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
-  }
+/**
+ * M-18 — payload validator. Returns either a `{ ok: true, fields }` tuple of
+ * normalized values OR an early NextResponse for the first validation error.
+ * Pulled out of POST() so the validation gauntlet is testable in isolation
+ * and the route handler reads as flow control, not field-by-field checks.
+ */
+type ValidatedPayload = {
+  strategy_id: string;
+  name: string;
+  description: string;
+  category_id: string;
+  strategy_types: string[];
+  subtypes: string[];
+  markets: string[];
+  supported_exchanges: string[];
+  leverage_range: string | null;
+  aumNum: number | null;
+  maxCapacityNum: number | null;
+};
 
-  const body = await req.json().catch(() => null);
+function validatePayload(
+  body: Record<string, unknown> | null,
+):
+  | { ok: true; fields: ValidatedPayload }
+  | { ok: false; response: NextResponse } {
   if (!body || typeof body !== "object") {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Invalid request body" },
+        { status: 400 },
+      ),
+    };
   }
 
   const {
@@ -121,39 +150,55 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     leverage_range,
     aum,
     max_capacity,
-  } = body as Record<string, unknown>;
+  } = body;
 
   if (!isUuid(strategy_id)) {
-    return NextResponse.json(
-      { error: "strategy_id must be a valid UUID" },
-      { status: 400 },
-    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "strategy_id must be a valid UUID" },
+        { status: 400 },
+      ),
+    };
   }
-
   if (typeof name !== "string" || !STRATEGY_NAME_SET.has(name)) {
-    return NextResponse.json(
-      { error: "name must be one of the allowed codenames" },
-      { status: 400 },
-    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "name must be one of the allowed codenames" },
+        { status: 400 },
+      ),
+    };
   }
-
-  if (typeof description !== "string" || description.length < 10 || description.length > 5000) {
-    return NextResponse.json(
-      { error: "description must be 10-5000 characters" },
-      { status: 400 },
-    );
+  if (
+    typeof description !== "string" ||
+    description.length < 10 ||
+    description.length > 5000
+  ) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "description must be 10-5000 characters" },
+        { status: 400 },
+      ),
+    };
   }
-
   if (!isUuid(category_id)) {
-    return NextResponse.json(
-      { error: "category_id must be a valid UUID" },
-      { status: 400 },
-    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "category_id must be a valid UUID" },
+        { status: 400 },
+      ),
+    };
   }
 
   const MAX_DOLLAR_VALUE = 1_000_000_000_000;
   const aumNum =
-    typeof aum === "number" && Number.isFinite(aum) && aum >= 0 && aum < MAX_DOLLAR_VALUE
+    typeof aum === "number" &&
+    Number.isFinite(aum) &&
+    aum >= 0 &&
+    aum < MAX_DOLLAR_VALUE
       ? aum
       : null;
   const maxCapacityNum =
@@ -163,6 +208,99 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     max_capacity < MAX_DOLLAR_VALUE
       ? max_capacity
       : null;
+
+  return {
+    ok: true,
+    fields: {
+      strategy_id: strategy_id as string,
+      name,
+      description,
+      category_id: category_id as string,
+      strategy_types: validateStringArray(strategy_types),
+      subtypes: validateStringArray(subtypes),
+      markets: validateStringArray(markets),
+      supported_exchanges: validateStringArray(supported_exchanges),
+      leverage_range:
+        typeof leverage_range === "string" && leverage_range.length > 0
+          ? leverage_range
+          : null,
+      aumNum,
+      maxCapacityNum,
+    },
+  };
+}
+
+/**
+ * M-18 — force-refresh permissions probe runner. Returns either
+ * `{ ok: true }` (proceed to finalize) or an early NextResponse with the
+ * appropriate code (KEY_NETWORK_TIMEOUT / KEY_SCOPE_BROADENED). Encapsulates
+ * the fail-CLOSED + probe_error decoding logic so the caller is just flow
+ * control.
+ */
+async function runScopeBroadeningProbe(
+  apiKeyId: string,
+): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
+  let livePerms: LivePermissions;
+  try {
+    livePerms = await fetchLivePermissions(apiKeyId);
+  } catch (probeErr) {
+    console.error(
+      "[strategies/finalize-wizard] live permissions probe failed:",
+      probeErr,
+    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
+        { status: 502 },
+      ),
+    };
+  }
+  if (livePerms.probe_error) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: "Exchange permission probe failed",
+          code: "KEY_NETWORK_TIMEOUT",
+        },
+        { status: 502 },
+      ),
+    };
+  }
+  if (livePerms.trade === true || livePerms.withdraw === true) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: "Key has been broadened beyond read-only on the exchange.",
+          code: "KEY_SCOPE_BROADENED",
+        },
+        { status: 403 },
+      ),
+    };
+  }
+  return { ok: true };
+}
+
+export const POST = withAuth(async (req: NextRequest, user: User) => {
+  const rl = await checkLimit(
+    userActionLimiter,
+    `strategies-finalize-wizard:${user.id}`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+    );
+  }
+
+  const body = await req.json().catch(() => null);
+
+  // M-18: payload validation extracted so POST() reads as flow control.
+  const validation = validatePayload(body as Record<string, unknown> | null);
+  if (!validation.ok) return validation.response;
+  const fields = validation.fields;
 
   const supabase = await createClient();
 
@@ -181,7 +319,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
     .select("api_key_id")
-    .eq("id", strategy_id)
+    .eq("id", fields.strategy_id)
     .maybeSingle();
 
   if (strategyErr) {
@@ -200,69 +338,75 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const apiKeyId =
     typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
+
+  // M-18: scope-broadening probe extracted. Phase 19 / Open Question 1 —
+  // RETAINED at the thin-adapter layer; runs BEFORE both legacy and unified
+  // paths so the defense covers either code path.
   if (apiKeyId) {
-    let livePerms: LivePermissions;
-    try {
-      livePerms = await fetchLivePermissions(apiKeyId);
-    } catch (probeErr) {
-      // Fail-CLOSED: if we cannot prove the key is still read-only,
-      // we cannot let it become a published strategy. The wizard
-      // surfaces this through KEY_NETWORK_TIMEOUT copy ("we could
-      // not reach the exchange") rather than a generic 500.
-      console.error(
-        "[strategies/finalize-wizard] live permissions probe failed:",
-        probeErr,
-      );
-      return NextResponse.json(
-        { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
-        { status: 502 },
-      );
-    }
-
-    // The Python layer returns the fail-CLOSED default
-    // ({read,trade,withdraw}=true, probe_error=true) when the
-    // exchange call itself raised. That looks identical to a
-    // genuinely-broadened key in trade/withdraw flags but the
-    // probe_error bit lets us distinguish the two. We treat
-    // probe_error as a transient failure (KEY_NETWORK_TIMEOUT)
-    // rather than KEY_SCOPE_BROADENED so the user sees the right
-    // copy.
-    if (livePerms.probe_error) {
-      return NextResponse.json(
-        { error: "Exchange permission probe failed", code: "KEY_NETWORK_TIMEOUT" },
-        { status: 502 },
-      );
-    }
-
-    if (livePerms.trade === true || livePerms.withdraw === true) {
-      return NextResponse.json(
-        {
-          error: "Key has been broadened beyond read-only on the exchange.",
-          code: "KEY_SCOPE_BROADENED",
-        },
-        { status: 403 },
-      );
-    }
+    const probe = await runScopeBroadeningProbe(apiKeyId);
+    if (!probe.ok) return probe.response;
   }
 
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag. The
+  // force-refresh probe above ALREADY ran for both code paths.
+  if (await isUnifiedBackboneActive()) {
+    // API-8: resolve the actual exchange from the linked api_keys row so we
+    // don't hardcode `source: 'okx'` for non-OKX strategies. Falls back to
+    // 'okx' when the strategy has no api_key (CSV branch) — the unified
+    // router treats source as advisory in that case.
+    let resolvedSource = "okx";
+    if (apiKeyId) {
+      const admin = createAdminClient();
+      const { data: keyRow } = await admin
+        .from("api_keys")
+        .select("exchange")
+        .eq("id", apiKeyId)
+        .single();
+      if (keyRow?.exchange) {
+        resolvedSource = keyRow.exchange;
+      }
+    }
+    return await unifiedFinalizeWizardHandler({
+      strategy_id: fields.strategy_id,
+      userId: user.id,
+      payload: body as Record<string, unknown>,
+      apiKeyId,
+      source: resolvedSource,
+    });
+  }
+
+  // ── Legacy path ───────────────────────────────────────────────────
+  return await runLegacyFinalize({ supabase, user, fields });
+});
+
+/**
+ * M-18 — legacy finalize path. Calls the SECURITY DEFINER RPC, schedules the
+ * after() side-effect fan-out, and returns the legacy 200 envelope. Pulled
+ * out of POST() so the legacy code path is grep-able as `runLegacyFinalize`
+ * for the eventual M-9 cleanup.
+ */
+// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
+async function runLegacyFinalize(args: {
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  user: User;
+  fields: ValidatedPayload;
+}): Promise<NextResponse> {
+  const { supabase, user, fields } = args;
   const { data: finalizedId, error } = await supabase.rpc(
     "finalize_wizard_strategy",
     {
-      p_strategy_id: strategy_id,
+      p_strategy_id: fields.strategy_id,
       p_user_id: user.id,
-      p_name: name,
-      p_description: description,
-      p_category_id: category_id,
-      p_strategy_types: validateStringArray(strategy_types),
-      p_subtypes: validateStringArray(subtypes),
-      p_markets: validateStringArray(markets),
-      p_supported_exchanges: validateStringArray(supported_exchanges),
-      p_leverage_range:
-        typeof leverage_range === "string" && leverage_range.length > 0
-          ? leverage_range
-          : null,
-      p_aum: aumNum,
-      p_max_capacity: maxCapacityNum,
+      p_name: fields.name,
+      p_description: fields.description,
+      p_category_id: fields.category_id,
+      p_strategy_types: fields.strategy_types,
+      p_subtypes: fields.subtypes,
+      p_markets: fields.markets,
+      p_supported_exchanges: fields.supported_exchanges,
+      p_leverage_range: fields.leverage_range,
+      p_aum: fields.aumNum,
+      p_max_capacity: fields.maxCapacityNum,
     },
   );
 
@@ -287,7 +431,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  const resolvedId = typeof finalizedId === "string" ? finalizedId : strategy_id;
+  const resolvedId =
+    typeof finalizedId === "string" ? finalizedId : fields.strategy_id;
 
   // Both side effects are fire-and-forget: the row is already in
   // pending_review, so failures to notify or touch last_sync_at must
@@ -313,7 +458,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }> = [
       {
         label: "notify_founder_new_strategy",
-        run: () => notifyFounderNewStrategy(name, managerName),
+        run: () => notifyFounderNewStrategy(fields.name, managerName),
       },
       // @audit-skip: denormalization timestamp. api_keys.last_sync_at
       // is a sync-state hint, not a user-visible state change. The
@@ -375,5 +520,63 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
   });
 
-  return NextResponse.json({ strategy_id: resolvedId, status: "pending_review" });
-});
+  return NextResponse.json({
+    strategy_id: resolvedId,
+    status: "pending_review",
+  });
+}
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * `flow_type=onboard` (finalize step). The force-refresh permissions probe
+ * has already run in the caller (Open Question 1 — RETAINED at this layer).
+ */
+async function unifiedFinalizeWizardHandler(args: {
+  strategy_id: string;
+  userId: string;
+  payload: Record<string, unknown>;
+  apiKeyId: string | null;
+  source: string;
+}): Promise<NextResponse> {
+  const result = await postProcessKey({
+    flow_type: "onboard",
+    // API-8: actual exchange resolved from api_keys.exchange (or 'okx' for
+    // CSV-only strategies). The unified router still server-side resolves
+    // from strategies.api_keys.exchange when the linkage is present, but
+    // forwarding the resolved value here keeps the contract honest.
+    source: args.source,
+    context: {
+      ...args.payload,
+      strategy_id: args.strategy_id,
+      user_id: args.userId,
+      api_key_id: args.apiKeyId,
+      step: "finalize",
+    },
+    routeTag: "strategies/finalize-wizard",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
+  });
+  if (!result.ok) return result.response;
+
+  // API-9: translate the unified `{queued, verification_id}` shape back to the
+  // legacy `{strategy_id, status:'pending_review'}` shape that wizard chrome
+  // and downstream callers read off `body.strategy_id`. Preserve
+  // `verification_id` + `queued` as additive fields for callers that want them.
+  //
+  // CT-5 (army2) — also preserve `code` and `idempotent` when upstream
+  // returns the WIZARD_DUPLICATE envelope. Pre-fix the translation
+  // stripped both fields, so SubmitStep.tsx never rendered the
+  // wizardErrors WIZARD_DUPLICATE copy on the idempotent-resume path.
+  const upstream = (result.body ?? {}) as Record<string, unknown>;
+  if (upstream && typeof upstream === "object" && "queued" in upstream) {
+    return NextResponse.json({
+      strategy_id: args.strategy_id,
+      status: "pending_review",
+      verification_id: upstream.verification_id ?? null,
+      queued: upstream.queued ?? true,
+      ...(typeof upstream.code === "string" ? { code: upstream.code } : {}),
+      ...(upstream.idempotent === true ? { idempotent: true } : {}),
+    });
+  }
+  return NextResponse.json(upstream);
+}

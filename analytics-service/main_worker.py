@@ -46,6 +46,7 @@ load_dotenv()
 
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
+from services.feature_flags import is_unified_backbone_active
 from services.job_worker import DispatchOutcome, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
@@ -97,6 +98,13 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # reproducing the wizard-hang failure mode for allocator equity
     # reconstruction. Caught by /review cross-PR audit, 2026-04-30.
     "reconstruct_allocator_history": "35 minutes",  # handler timeout = 30 minutes
+    # Phase 19 / BACKBONE-09 / MC-6 — process_key_long handler timeout is
+    # 30 minutes (90-day OKX archive backfill). Watchdog threshold is set
+    # to 40 minutes (≥ handler timeout + 30% slack = 39 minutes minimum).
+    # Without this override, the global 10-minute default reclaims slow
+    # legitimate backfills mid-run and produces duplicate state-machine
+    # transitions through transition_strategy_verification.
+    "process_key_long": "40 minutes",  # handler timeout = 30 minutes
 }
 
 
@@ -125,10 +133,25 @@ async def dispatch_tick(worker_id: str) -> None:
     # Same atomic concurrency primitive (FOR UPDATE SKIP LOCKED) as the
     # legacy claim_compute_jobs (migration 032), so two replicas claiming
     # in parallel still get disjoint result sets.
+    #
+    # Phase 19 / BACKBONE-05 — drain semantics: read the unified-backbone
+    # flag once per tick and pass it as the third argument so migration
+    # 104's claim RPC stamps 'unified_backbone_at_claim' into
+    # compute_jobs.metadata at claim time. Workers later read that
+    # snapshot (NOT the live env var) to decide which code path to run,
+    # so a flag flip mid-tick doesn't split-brain in-flight jobs. The
+    # is_unified_backbone_active() call is cached for 30s in-process so
+    # this is effectively a free op on most ticks.
+    flag_active = await is_unified_backbone_active()
+
     def _claim():
         return supabase.rpc(
             "claim_compute_jobs_with_priority",
-            {"p_batch_size": 5, "p_worker_id": worker_id},
+            {
+                "p_batch_size": 5,
+                "p_worker_id": worker_id,
+                "p_unified_backbone_active": flag_active,
+            },
         ).execute()
 
     claim_result = await db_execute(_claim)

@@ -46,6 +46,11 @@ export type WizardErrorCode =
   | "CSV_NETWORK_TIMEOUT"
   | "CSV_SUBMIT_FAILED"
   | "CSV_SUBMIT_NO_STRATEGY_ID"
+  // Phase 19 / BACKBONE-08 — wizard double-submit idempotent return.
+  // /process-key returns the existing verification_id (not 23505 to the
+  // caller) when wizard_session_id was already submitted; the UI shows
+  // a friendly "you already submitted this" envelope.
+  | "WIZARD_DUPLICATE"
   // Fallback
   | "UNKNOWN";
 
@@ -506,6 +511,25 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // Phase 19 / BACKBONE-08 — wizard double-submit idempotent return.
+  // The unified /process-key router catches Postgres 23505 (unique
+  // violation on wizard_session_id) and returns the existing
+  // verification_id with semantically successful status. The wizard UI
+  // surfaces this code so the user knows their submission landed and
+  // where to find it, rather than seeing a generic "duplicate" error.
+  WIZARD_DUPLICATE: {
+    title: "You've already submitted this strategy.",
+    cause:
+      "We found an existing submission with the same wizard session. Your strategy is already on its way through the pipeline.",
+    fix: [
+      "Open your dashboard to see the strategy and its current status.",
+      "If you intended a fresh submission, start a new wizard session from /strategies/new.",
+      "If you think this is a mistake, contact security@quantalyze.com with your draft ID.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["leave_and_return", "request_call"],
   },
 
   UNKNOWN: {

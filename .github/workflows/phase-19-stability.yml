@@ -1,0 +1,48 @@
+# Phase 19 / BACKBONE-04 / H-8 — hourly stability-window legacy-write detector.
+#
+# After PR-B (flag flip), this cron runs hourly and asserts that NO direct
+# writes to `verification_requests` have happened since the recorded
+# `flag_flipped_at` timestamp in .planning/phase-19/stability-log.md. The
+# Postgres trigger `verification_requests_post_phase19_audit` (shipped in
+# PR-B's migration sub-step) logs every direct write to `audit_log` with
+# `entity_type='verification_requests_legacy_write'`; the script greps for
+# those rows.
+#
+# Blocking semantics: PR-D candidates run this cron in their PR-check
+# pipeline and MUST observe 168 contiguous clean hourly runs since
+# `flag_flipped_at`. Any non-zero count blocks PR-D until the write source
+# is identified (via correlation_id) and removed.
+#
+# Until PR-B ships, the script exits 2 (flag_flipped_at not yet recorded)
+# and the workflow is a no-op gate. Operators can manually trigger via
+# workflow_dispatch.
+#
+# Security note: this workflow does NOT read any event-payload inputs
+# (issue titles, PR descriptions, commit messages). The only env var is
+# the static SUPABASE_PROJECT_ID literal. No injection surface.
+name: Phase 19 stability — no legacy writes
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # hourly
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify no writes to legacy verification_requests since flag_flipped_at
+        # WR-01 fix (REVIEW.md 2026-05-08): SUPABASE_URL +
+        # SUPABASE_SERVICE_ROLE_KEY are wired (via repo secrets, NOT
+        # untrusted input) so verify-no-legacy-writes.sh actually executes
+        # the count query against the test project's PostgREST endpoint
+        # instead of merely printing it. The gate is pre-flip
+        # (flag_flipped_at=TODO in stability-log.md) until PR-B ships, at
+        # which point the script enforces the zero-row contract and the
+        # workflow fails the run on any detected legacy write.
+        run: bash scripts/verify-no-legacy-writes.sh
+        env:
+          SUPABASE_PROJECT_ID: qmnijlgmdhviwzwfyzlc
+          SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.TEST_SUPABASE_SERVICE_ROLE_KEY }}

@@ -7,8 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from dotenv import load_dotenv
 
@@ -26,6 +25,7 @@ logging.basicConfig(
 )
 
 from routers import analytics, cron, exchange, internal, match, portfolio, simulator, csv
+from routers import process_key as process_key_router
 from routers.debug_key_flow import router as debug_key_flow_router
 
 # Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
@@ -49,7 +49,13 @@ init_sentry()
 
 logger = logging.getLogger("quantalyze.analytics")
 
-limiter = Limiter(key_func=get_remote_address)
+# API-5 fix — single shared Limiter for the process. Routers that need rate
+# limits import the same instance from services.rate_limit so the
+# `@limiter.limit(...)` decorator and `app.state.limiter` reference the
+# same storage. Pre-fix, main.py and routers/process_key.py each owned a
+# separate Limiter() and the route's metrics were never visible on
+# app.state (and any future storage backend swap would only cover one).
+from services.rate_limit import limiter
 
 
 # --------------------------------------------------------------------------
@@ -191,6 +197,16 @@ async def verify_service_key(request: Request, call_next):
     if request.url.path.startswith("/internal/"):
         return await call_next(request)
 
+    # /process-key (Phase 19 / BACKBONE-01) authenticates via the same
+    # rotateable INTERNAL_API_TOKEN gate (Authorization: Bearer <token>)
+    # validated inside routers/process_key.py:_verify_internal_token. Without
+    # this skip the X-Service-Key middleware rejects every Vercel→FastAPI
+    # call with 401 Unauthorized BEFORE the route's own auth runs (API-1).
+    if request.url.path == "/process-key" or request.url.path.startswith(
+        "/process-key/"
+    ):
+        return await call_next(request)
+
     if not SERVICE_KEY:
         raise HTTPException(status_code=503, detail="Service not configured")
 
@@ -209,6 +225,11 @@ app.include_router(portfolio.router)
 app.include_router(simulator.router)
 app.include_router(internal.router)
 app.include_router(csv.router)
+# Phase 19 / BACKBONE-01 — unified key-submission backbone. Slots in AFTER
+# csv.router per CONTEXT.md §IngestionAdapter L58. M-21 — import moved to
+# the top with the other router imports; the noqa: E402 is no longer
+# needed.
+app.include_router(process_key_router.router)
 # Phase 16 / OBSERV-07 — admin-gated diagnostic SSE backend (founder-only)
 app.include_router(debug_key_flow_router)
 

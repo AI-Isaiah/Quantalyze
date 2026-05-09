@@ -189,8 +189,18 @@ def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> d
       - event['exception']['values'][*]['stacktrace']['frames'][*]['vars'] (local
         variables in the failing frame — wizard creds may live here as Pydantic
         model fields or local 'creds' dicts).
+
+    Phase 19 / H-6 — defense-in-depth: stamp event["environment"] from the same
+    fallback chain as init_sentry(). The init-time argument is authoritative for
+    the SDK; the per-event stamp guards against captures that take place before
+    init_sentry() ran (e.g. import-time exception in a fixture) or against future
+    refactors that call sentry_sdk.init() without environment=... .
     """
     try:
+        # H-6 defensive environment stamp — does not override an already-set
+        # value (e.g. test code seeding event["environment"] explicitly).
+        if not event.get("environment"):
+            event["environment"] = _resolve_environment()
         if isinstance(event.get("request"), dict):
             req = event["request"]
             if isinstance(req.get("headers"), dict):
@@ -244,6 +254,30 @@ def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> d
         return event
 
 
+def _resolve_environment() -> str:
+    """Phase 19 / H-6 — resolve the Sentry `environment` tag from a fallback
+    chain that mirrors the TS init in src/instrumentation.ts.
+
+    Order:
+      1. VERCEL_ENV — set by Vercel on every Next.js → analytics-service hop
+         when the FastAPI service is collocated or proxied through Vercel.
+      2. RAILWAY_ENVIRONMENT_NAME — set by Railway when analytics-service
+         runs as a separate Railway worker.
+      3. "development" — local dev fallback. Intentionally NOT "production"
+         to avoid Pitfall 8: tagging local errors as "production" would let
+         dev cassette runs trip the /api/cron/flag-monitor auto-rollback.
+
+    Phase 19 / BACKBONE-05 — the flag-monitor cron filters Sentry events on
+    `environment:production`. If this resolves to anything other than the
+    real prod string, the cron's denominator-vs-error ratio is wrong.
+    """
+    return (
+        os.getenv("VERCEL_ENV")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or "development"
+    )
+
+
 def init_sentry() -> None:
     """Initialize sentry-sdk with FastAPI/Starlette integrations + PII redactor.
 
@@ -259,5 +293,5 @@ def init_sentry() -> None:
         send_default_pii=False,
         integrations=[StarletteIntegration(), FastApiIntegration()],
         before_send=_redact_before_send,
-        environment=os.getenv("RAILWAY_ENVIRONMENT_NAME", "development"),
+        environment=_resolve_environment(),
     )

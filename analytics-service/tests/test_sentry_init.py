@@ -102,7 +102,16 @@ class TestRedactBeforeSend:
         assert result["request"]["headers"]["X-Harmless"] == "ok"
 
     def test_handles_empty_event(self):
-        assert sentry_init._redact_before_send({}, None) == {}
+        """Phase 19 / H-6 — empty event still round-trips without raising,
+        but H-6 defensive stamping adds `event['environment']` on the way
+        out. The original assertion (`== {}`) was correct pre-H-6; this
+        test is updated to codify the new contract: nothing scrubbed,
+        nothing spurious, exactly one new key (the defensive env stamp).
+        """
+        result = sentry_init._redact_before_send({}, None)
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"environment"}
+        assert isinstance(result["environment"], str)
 
     def test_pitfall_6_never_raises_on_malformed_event(self):
         event = {"request": "not-a-dict"}

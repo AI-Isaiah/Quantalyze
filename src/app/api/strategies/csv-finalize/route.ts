@@ -4,6 +4,8 @@ import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { postProcessKey } from "@/lib/process-key-client";
 
 /**
  * POST /api/strategies/csv-finalize — Phase 15 / CSV-01.
@@ -12,6 +14,13 @@ import { isUuid } from "@/lib/utils";
  * which atomically inserts a strategies row + a strategy_verifications
  * row with status='pending_review' and trust_tier='csv_uploaded',
  * returning the new strategy_id.
+ *
+ * Phase 19 / BACKBONE-10
+ * ----------------------
+ * When `isUnifiedBackboneActive()` is true the route delegates to
+ * `/process-key` with `flow_type=csv` (finalize step). The unified router
+ * runs the same RPC server-side. The legacy direct-RPC path stays as the
+ * flag=off fallback.
  *
  * Cross-AI revision 2026-04-30: the strategy NAME is provided by the
  * user (typed on the Upload step) and forwarded here in the request
@@ -133,6 +142,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
+  if (await isUnifiedBackboneActive()) {
+    return await unifiedCsvFinalizeHandler({
+      wizard_session_id,
+      fmt,
+      strategy_name: trimmedName,
+      userId: user.id,
+    });
+  }
+
   const supabase = await createClient();
   const { data: newStrategyId, error } = await supabase.rpc(
     "finalize_csv_strategy",
@@ -192,3 +211,50 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     status: "pending_review",
   });
 });
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * `flow_type=csv` (finalize step). The unified router runs
+ * `finalize_csv_strategy` server-side and returns the new strategy_id +
+ * status.
+ */
+async function unifiedCsvFinalizeHandler(args: {
+  wizard_session_id: string;
+  fmt: string;
+  strategy_name: string;
+  userId: string;
+}): Promise<NextResponse> {
+  // M-3: csv-finalize keeps a route-local INTERNAL_API_TOKEN check because
+  // the 503 envelope must use CSV_FINALIZE_FAIL shape, not the generic
+  // `{error: "Service unavailable"}` the shared helper returns.
+  if (!process.env.INTERNAL_API_TOKEN) {
+    console.error("[strategies/csv-finalize] INTERNAL_API_TOKEN not configured");
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_FINALIZE_FAIL",
+        human_message: "Service unavailable.",
+        debug_context: {},
+        correlation_id: null,
+      },
+      { status: 503 },
+    );
+  }
+
+  const result = await postProcessKey({
+    flow_type: "csv",
+    source: "csv",
+    context: {
+      wizard_session_id: args.wizard_session_id,
+      fmt: args.fmt,
+      strategy_name: args.strategy_name,
+      user_id: args.userId,
+      step: "finalize",
+    },
+    routeTag: "strategies/csv-finalize",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
+  });
+  if (!result.ok) return result.response;
+  return NextResponse.json(result.body);
+}

@@ -5,6 +5,8 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { verifyStrategy } from "@/lib/analytics-client";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import { isUnifiedBackboneActive } from "@/lib/feature-flags";
+import { postProcessKey } from "@/lib/process-key-client";
 
 const MAX_REQUESTS_PER_DAY = 5;
 
@@ -58,6 +60,122 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
+  // Public-route protections (CSRF + IP rate-limit + payload validation)
+  // run BEFORE the flag check so unified delegation cannot bypass them.
+  if (await isUnifiedBackboneActive()) {
+    return await unifiedVerifyStrategyHandler(body);
+  }
+
+  return await legacyVerifyStrategyHandler({
+    email,
+    exchange,
+    api_key,
+    api_secret,
+    passphrase,
+  });
+}
+
+/**
+ * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * `flow_type=teaser`. Source is the user-supplied exchange (already validated
+ * against SUPPORTED_EXCHANGES above).
+ *
+ * CT-3 (army2) — the upstream `/process-key` teaser flow returns
+ * `{verification_id, status, trust_tier, metrics_snapshot, fingerprint, ...}`
+ * but does NOT mint a public_token. The landing-page <VerificationForm/>
+ * (src/components/landing/VerificationForm.tsx:56) requires `data.public_token`
+ * and throws "invalid response" otherwise. Without minting+returning here,
+ * flipping the unified-backbone flag ON breaks the landing-page teaser flow
+ * end-to-end. Mint a 32-byte base64url token, persist to strategy_verifications
+ * with a 90-day expires_at (matching migration 107 M-6 policy window), and
+ * return both fields alongside whatever the upstream emits.
+ */
+async function unifiedVerifyStrategyHandler(
+  body: Record<string, unknown>,
+): Promise<NextResponse> {
+  const exchange = (body.exchange as string) ?? "okx";
+  const result = await postProcessKey({
+    flow_type: "teaser",
+    source: exchange,
+    context: body,
+    routeTag: "verify-strategy",
+    // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
+    // so the upstream rate limiter buckets all anonymous landing-page
+    // traffic to a shared key, isolated from authenticated tenants.
+    userId: "public",
+  });
+  if (!result.ok) return result.response;
+
+  const upstream = (result.body ?? {}) as Record<string, unknown>;
+  const verificationId =
+    typeof upstream.verification_id === "string" ? upstream.verification_id : null;
+  if (!verificationId) {
+    return NextResponse.json(
+      { error: "Verification service returned an invalid response" },
+      { status: 502 },
+    );
+  }
+
+  // CT-3: 32-byte base64url public_token + 90-day TTL persisted on the
+  // strategy_verifications row. Falls back to a 502 if the persist fails so
+  // the client never sees a token that isn't queryable.
+  const publicToken = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const admin = createAdminClient();
+    // @audit-skip: unauthenticated public endpoint (no user session). The
+    // strategy_verifications row carries no PII (only a public_token +
+    // status), and audit_log requires a user_id which the unauthenticated
+    // teaser caller cannot provide. Mirrors the legacy verify-strategy
+    // path's @audit-skip rationale; landing-page-lead audit lands in
+    // PostHog per ADR-0023 §3, not audit_log.
+    const { error: persistError } = await admin
+      .from("strategy_verifications")
+      .update({ public_token: publicToken, expires_at: expiresAt })
+      .eq("id", verificationId);
+    if (persistError) {
+      console.error(
+        "[verify-strategy] CT-3 public_token persist failed:",
+        persistError,
+      );
+      return NextResponse.json(
+        { error: "Failed to finalize verification" },
+        { status: 500 },
+      );
+    }
+  } catch (err) {
+    console.error("[verify-strategy] CT-3 public_token persist threw:", err);
+    return NextResponse.json(
+      { error: "Failed to finalize verification" },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({
+    ...upstream,
+    verification_id: verificationId,
+    public_token: publicToken,
+    expires_at: expiresAt,
+  });
+}
+
+/**
+ * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ * Runs when `isUnifiedBackboneActive()` returns false. Will be removed in a
+ * follow-up cleanup PR after the 7-day stability window passes.
+ */
+// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
+async function legacyVerifyStrategyHandler(args: {
+  email: string;
+  exchange: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string;
+}): Promise<NextResponse> {
+  const { email, exchange, api_key, api_secret, passphrase } = args;
+
   // Rate limit: max 5 requests per email per 24h
   const admin = createAdminClient();
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -106,19 +224,100 @@ export async function POST(req: NextRequest) {
   const publicToken = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
+  // Phase 19 / BACKBONE-04 step (a) — `phase-19-shim-step-a` repoint.
+  //
+  // The legacy verification_requests UPDATE (public_token + expires_at) is
+  // re-pointed to strategy_verifications. C-5: strategy_verifications has 5
+  // NOT NULL columns + a strategy_id FK to strategies(id) ON DELETE CASCADE,
+  // so the upsert constructs a complete row. The teaser flow has no caller-
+  // owned strategies row, so we resolve the FK using the same backfill
+  // pattern migration 107 STEP 2 uses (find the most recent strategies row).
+  // If no strategies row exists at all (cold-start prod), the upsert is
+  // skipped — the legacy verification_requests UPDATE preserves runtime
+  // correctness during the PR-A → PR-D window. After migration 107 ships
+  // (PR-D), the verification_requests VIEW reads from strategy_verifications
+  // and the legacy UPDATE becomes a no-op via INSTEAD OF triggers.
+  let strategyVerificationsUpserted = false;
+  try {
+    const { data: anchorStrategy } = await admin
+      .from("strategies")
+      .select("id")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (anchorStrategy?.id) {
+      // C-5: every NOT NULL column populated; FK satisfied via anchor row.
+      // @audit-skip: unauthenticated public endpoint (no user session). The
+      // strategy_verifications row is the canonical write target post-PR-A
+      // for the landing-page teaser flow; the row carries no PII (only a
+      // public_token + status), and audit_log requires a user_id which the
+      // unauthenticated caller cannot provide. Follow-up landing-page-lead
+      // audit lands in PostHog per ADR-0023 §3, not audit_log.
+      const { error: upsertError } = await admin
+        .from("strategy_verifications")
+        .upsert(
+          {
+            id: verificationId,
+            strategy_id: anchorStrategy.id,
+            wizard_session_id: crypto.randomUUID(),
+            status: "validated",
+            trust_tier: "self_reported",
+            flow_type: "teaser",
+            source: exchange,
+            public_token: publicToken,
+            expires_at: expiresAt,
+          },
+          { onConflict: "id" },
+        );
+      if (upsertError) {
+        // Don't fail the request — the legacy UPDATE below preserves
+        // correctness. Surface to Sentry via console.error so the
+        // stability-log can spot trends.
+        console.error(
+          "[verify-strategy] phase-19-shim-step-a strategy_verifications upsert failed:",
+          upsertError,
+        );
+      } else {
+        strategyVerificationsUpserted = true;
+      }
+    } else {
+      console.warn(
+        "[verify-strategy] phase-19-shim-step-a skipped — no strategies row available to anchor FK",
+      );
+    }
+  } catch (svErr) {
+    console.error(
+      "[verify-strategy] phase-19-shim-step-a strategy_verifications upsert threw:",
+      svErr,
+    );
+  }
+
+  // Phase 19 stability-window dual-write: keep the legacy UPDATE alive
+  // until migration 107 ships (PR-D). After that, this UPDATE hits the
+  // VIEW + INSTEAD OF UPDATE trigger which raises a guard error — by
+  // then the upsert above is canonical. The pragma below is the same
+  // ADR-0023 §3 reasoning as the upsert above (unauthenticated teaser).
   // @audit-skip: unauthenticated public endpoint (no user session). The
-  // `verification_requests` row is internal-state plumbing for the
-  // landing-page "verify my track record" flow; audit_log requires a
-  // user_id and this caller has none. Follow-up landing-page-lead audit
-  // would land in PostHog, not audit_log, per ADR-0023 §3.
+  // verification_requests row is internal-state plumbing for the landing-
+  // page "verify my track record" flow; audit_log requires a user_id and
+  // this caller has none. Follow-up landing-page-lead audit lands in
+  // PostHog per ADR-0023 §3, not audit_log.
   const { error: updateError } = await admin
     .from("verification_requests")
     .update({ public_token: publicToken, expires_at: expiresAt })
     .eq("id", verificationId);
 
-  if (updateError) {
+  if (updateError && !strategyVerificationsUpserted) {
+    // Only fail if BOTH writes failed — the strategy_verifications upsert
+    // is the new canonical target; if it succeeded, the request is fine.
     console.error("[verify-strategy] Failed to set public token:", updateError);
     return NextResponse.json({ error: "Failed to finalize verification" }, { status: 500 });
+  }
+  if (updateError) {
+    console.warn(
+      "[verify-strategy] legacy verification_requests UPDATE failed (strategy_verifications upsert OK):",
+      updateError,
+    );
   }
 
   return NextResponse.json({ verification_id: verificationId, public_token: publicToken });

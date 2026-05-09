@@ -991,6 +991,29 @@ export type Database = {
           },
         ]
       }
+      feature_flags: {
+        // Phase 19 / BACKBONE-05 (migration 104). Kill-switch row written by
+        // /api/cron/flag-monitor on auto-rollback. CHECK (value IN ('on','off')).
+        Row: {
+          flag_key: string
+          updated_at: string
+          updated_by: string | null
+          value: string
+        }
+        Insert: {
+          flag_key: string
+          updated_at?: string
+          updated_by?: string | null
+          value: string
+        }
+        Update: {
+          flag_key?: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: string
+        }
+        Relationships: []
+      }
       funding_fees: {
         Row: {
           amount: number
@@ -2854,7 +2877,16 @@ export type Database = {
         }
       }
       claim_compute_jobs_with_priority: {
-        Args: { p_batch_size: number; p_worker_id: string }
+        Args: {
+          p_batch_size: number
+          p_worker_id: string
+          // Phase 19 / BACKBONE-05 — migration 104 extends the signature
+          // with a 3rd BOOLEAN arg (DEFAULT NULL) so the claim RPC stamps
+          // 'unified_backbone_at_claim' into compute_jobs.metadata for
+          // drain semantics. Optional in the TS surface to keep
+          // backward-compat for any call sites added during the rollout.
+          p_unified_backbone_active?: boolean | null
+        }
         Returns: {
           allocator_id: string | null
           api_key_id: string | null
