@@ -109,8 +109,78 @@ describe("G12.E.1 — parsePositionRows runtime guard", () => {
     expect(PositionRowSchema.safeParse(incomplete).success).toBe(false);
   });
 
-  it("PositionRowSchema rejects wrong types (string entry_price_avg)", () => {
-    const bad = { ...validRow, entry_price_avg: "50000" };
+  it("PositionRowSchema rejects non-numeric entry_price_avg (truly garbage string)", () => {
+    // Adversarial-review hardening: schema now uses z.coerce.number() so
+    // PostgREST's "DECIMAL-as-string" output (e.g. "50000") parses cleanly
+    // — that's a feature, not a bug. But genuinely garbage strings still
+    // reject so silent shape drift doesn't slip past.
+    const bad = { ...validRow, entry_price_avg: "fifty thousand" };
     expect(PositionRowSchema.safeParse(bad).success).toBe(false);
+  });
+
+  // Adversarial-review regression tests (PR #138 follow-up)
+
+  it("PositionRowSchema accepts PostgREST DECIMAL-as-string via coercion", () => {
+    // PostgREST's documented behavior is to serialize NUMERIC as JSON
+    // strings to preserve arbitrary precision (configurable via Accept
+    // header / column-level casts). With z.coerce.number(), the schema
+    // accepts both shapes — so a future PostgREST cast change does NOT
+    // silently drop every row.
+    const stringNumeric = {
+      ...validRow,
+      entry_price_avg: "50000.123456789",
+      realized_pnl: "1234.56",
+      roi: "0.05",
+      funding_pnl: "-0.50",
+    };
+    const parsed = PositionRowSchema.safeParse(stringNumeric);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      // Coerced to number on the way out.
+      expect(typeof parsed.data.entry_price_avg).toBe("number");
+      expect(parsed.data.entry_price_avg).toBeCloseTo(50000.123456789);
+      expect(parsed.data.realized_pnl).toBe(1234.56);
+    }
+  });
+
+  it("PositionRowSchema rejects unknown extra fields (.strict() drift detection)", () => {
+    // Adversarial-review hardening: schema is .strict() so a future
+    // SELECT that picks up an extra column (e.g. `unrealized_pnl` from
+    // migration 040 currently NOT selected) is loudly dropped instead
+    // of silently passing through as schema drift.
+    const withExtra = { ...validRow, unrealized_pnl: 0 };
+    expect(PositionRowSchema.safeParse(withExtra).success).toBe(false);
+  });
+
+  it("PositionRowSchema rejects malformed opened_at ('' empty string)", () => {
+    // Adversarial-review hardening: TIMESTAMPTZ is now pinned via
+    // z.string().datetime({ offset: true }) — a corrupted '' would
+    // previously pass through and produce NaN durations.
+    const bad = { ...validRow, opened_at: "" };
+    expect(PositionRowSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("parsePositionRows warning payload omits raw row contents (PII safety)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const sensitive = {
+      ...validRow,
+      strategy_id: "secret-strategy-uuid-allocator-attributable",
+      realized_pnl: 999999.99,
+      side: "LONG", // forces validation failure
+    };
+    parsePositionRows([sensitive]);
+
+    // The console.warn call MUST NOT include the row's strategy_id or
+    // realized_pnl — only path/code per Zod issue.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const callArgs = warnSpy.mock.calls[0];
+    const serialized = JSON.stringify(callArgs);
+    expect(serialized).not.toContain("secret-strategy-uuid-allocator-attributable");
+    expect(serialized).not.toContain("999999.99");
+    // But the path that failed must be present so ops can debug.
+    expect(serialized).toContain("side");
+
+    warnSpy.mockRestore();
   });
 });

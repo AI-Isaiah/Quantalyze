@@ -325,25 +325,45 @@ export interface Position {
  * Mirrors the schema-validation pattern already used in
  * `src/lib/analytics-schemas.ts` for the Python service trust boundary.
  */
+// Adversarial-review hardening (PR #138 follow-up):
+//   1. PostgREST returns DECIMAL/NUMERIC columns as strings when arbitrary
+//      precision matters — supabase-js may or may not coerce depending on
+//      the column metadata pipeline. Use z.coerce.number() so the schema
+//      accepts BOTH number and string-encoded number; coercion produces a
+//      typed Position[] either way and the call site downstream stays
+//      number-shaped. Defensive against PostgREST shape drift.
+//   2. opened_at / closed_at are TIMESTAMPTZ strings — pin format with
+//      .datetime({ offset: true }) so a corrupted '' doesn't silently
+//      pass through and produce NaN durations downstream.
+//   3. .strict() on the object: if the SELECT later picks up a new column
+//      (e.g. unrealized_pnl from migration 040 — currently NOT selected
+//      but exists in the DB), the row gets dropped with a warning instead
+//      of silently passing through with shape drift. The whole point of
+//      the guard is to make schema drift loud, not invisible.
+const _coerceNumber = z.coerce.number();
+const _coerceNumberNullable = z.coerce.number().nullable();
+const _isoTimestamp = z.string().datetime({ offset: true });
+const _isoTimestampNullable = z.string().datetime({ offset: true }).nullable();
+
 export const PositionRowSchema = z.object({
   id: z.string(),
   strategy_id: z.string(),
   symbol: z.string(),
   side: z.enum(["long", "short"]),
   status: z.enum(["open", "closed"]),
-  entry_price_avg: z.number(),
-  exit_price_avg: z.number().nullable(),
-  size_base: z.number(),
-  size_peak: z.number(),
-  realized_pnl: z.number().nullable(),
-  fee_total: z.number().nullable(),
-  fill_count: z.number(),
-  opened_at: z.string(),
-  closed_at: z.string().nullable(),
-  duration_days: z.number().nullable(),
-  roi: z.number().nullable(),
-  funding_pnl: z.number(),
-}) satisfies z.ZodType<Position>;
+  entry_price_avg: _coerceNumber,
+  exit_price_avg: _coerceNumberNullable,
+  size_base: _coerceNumber,
+  size_peak: _coerceNumber,
+  realized_pnl: _coerceNumberNullable,
+  fee_total: _coerceNumberNullable,
+  fill_count: _coerceNumber,
+  opened_at: _isoTimestamp,
+  closed_at: _isoTimestampNullable,
+  duration_days: _coerceNumberNullable,
+  roi: _coerceNumberNullable,
+  funding_pnl: _coerceNumber,
+}).strict() satisfies z.ZodType<Position>;
 
 /**
  * Parse an array of unknown rows (typically `positionsResult.data` from a
@@ -362,12 +382,21 @@ export function parsePositionRows(rows: unknown[]): Position[] {
     if (parsed.success) {
       out.push(parsed.data);
     } else {
+      // Adversarial-review hardening (PR #138 follow-up): only log paths
+      // and codes — never the row contents or `received` values. Zod
+      // issue `received` may include allocator-attributable strategy_id
+      // and PnL numbers; warn payloads route to Vercel runtime logs
+      // visible to ops, so we strip down to schema-shape information only.
       const rowId = (row && typeof row === "object" && "id" in row)
         ? (row as { id?: unknown }).id
         : undefined;
+      const safeIssues = parsed.error.issues.map((i) => ({
+        path: i.path.join("."),
+        code: i.code,
+      }));
       console.warn(
         "[parsePositionRows] dropping invalid position row",
-        { rowId, issues: parsed.error.issues },
+        { rowId, issues: safeIssues },
       );
     }
   }
