@@ -128,4 +128,46 @@ describe("isUnifiedBackboneActive (Phase 19 / BACKBONE-05)", () => {
 
     expect(fromCalls).toHaveBeenCalledTimes(2);
   });
+
+  // CT-9 (army2) — on a cache miss, 100 concurrent callers must collapse
+  // to exactly ONE Supabase round-trip (single-flight). Pre-fix every
+  // caller fired its own admin-client read, hammering Supabase on
+  // cold-start spikes or after TTL expiry. Mirrors the asyncio.Lock
+  // single-flight already added on the Python side in CR-perf-3.
+  it("100 concurrent callers on cache miss collapse to one Supabase read (CT-9)", async () => {
+    process.env.PROCESS_KEY_UNIFIED_BACKBONE = "on";
+
+    // Build a controlled-delay maybeSingle so all 100 callers race.
+    let resolveSupabase: (() => void) | null = null;
+    const supabaseGate = new Promise<void>((resolve) => {
+      resolveSupabase = resolve;
+    });
+    const maybeSingle = vi.fn(async () => {
+      await supabaseGate;
+      return { data: null, error: null };
+    });
+    const eq = vi.fn().mockReturnValue({ maybeSingle });
+    const select = vi.fn().mockReturnValue({ eq });
+    const from = vi.fn().mockReturnValue({ select });
+    vi.mocked(createAdminClient).mockReturnValue(
+      { from } as unknown as ReturnType<typeof createAdminClient>,
+    );
+
+    // Fire 100 concurrent callers BEFORE the supabase mock resolves.
+    const callers = Array.from({ length: 100 }, () => isUnifiedBackboneActive());
+
+    // Yield to the event loop so each caller's first await lands.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Now release the supabase mock so the in-flight read finishes.
+    resolveSupabase!();
+    const results = await Promise.all(callers);
+
+    // All 100 must observe the same value.
+    expect(results.every((v) => v === true)).toBe(true);
+    // CT-9 invariant: only ONE Supabase round-trip across all 100 callers.
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(maybeSingle).toHaveBeenCalledTimes(1);
+  });
 });

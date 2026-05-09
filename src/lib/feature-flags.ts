@@ -54,10 +54,18 @@ function resolveCacheTtlMs(): number {
 
 let _cache: { value: boolean; expiresAt: number } | null = null;
 
-export async function isUnifiedBackboneActive(): Promise<boolean> {
-  const now = Date.now();
-  if (_cache && _cache.expiresAt > now) return _cache.value;
+// CT-9 (army2) — single-flight refresh. Mirrors the asyncio.Lock the
+// Python side already added in CR-perf-3. Without this, a Vercel
+// cold-start spike or a TTL-expiry stampede would cause every concurrent
+// request to fire its own Supabase admin-client read; with N=100
+// concurrent requests that's 100 round-trips for a single value.
+//
+// The variable holds the in-flight Promise; concurrent callers await it
+// instead of starting a new fetch. Cleared in `.finally()` so an
+// exception cannot permanently jam the seam.
+let _refreshing: Promise<{ value: boolean; expiresAt: number }> | null = null;
 
+async function _refreshCache(now: number): Promise<{ value: boolean; expiresAt: number }> {
   // I-API3: outage-aware cache. On Supabase failure, hold the previous cached
   // value (if any) for one TTL window so a flapping kill-switch row doesn't
   // cause unrelated callers to oscillate between env-on and env-off. Falls
@@ -89,18 +97,39 @@ export async function isUnifiedBackboneActive(): Promise<boolean> {
 
   if (supabaseErrored) {
     const heldValue = prevCache ? prevCache.value : envValue;
-    _cache = { value: heldValue, expiresAt: now + ttlMs };
-    return heldValue;
+    const entry = { value: heldValue, expiresAt: now + ttlMs };
+    _cache = entry;
+    return entry;
   }
 
   const value = envValue && !killSwitchOff;
-  _cache = { value, expiresAt: now + ttlMs };
-  return value;
+  const entry = { value, expiresAt: now + ttlMs };
+  _cache = entry;
+  return entry;
+}
+
+export async function isUnifiedBackboneActive(): Promise<boolean> {
+  const now = Date.now();
+  if (_cache && _cache.expiresAt > now) return _cache.value;
+
+  // CT-9 — single-flight: if a refresh is already in flight, await it
+  // instead of starting another one.
+  if (_refreshing) {
+    const entry = await _refreshing;
+    return entry.value;
+  }
+
+  _refreshing = _refreshCache(now).finally(() => {
+    _refreshing = null;
+  });
+  const entry = await _refreshing;
+  return entry.value;
 }
 
 /** Test-only: clear the in-process cache. Do NOT call from production code. */
 export function _resetCacheForTests(): void {
   _cache = null;
+  _refreshing = null;
 }
 
 // Internal — exported for D-4 tests in 19-07 P7-3 (and a defensive
