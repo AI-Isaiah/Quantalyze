@@ -538,7 +538,22 @@ async def run_sync_trades_job(job: dict) -> DispatchResult:
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
                 )
             except Exception as e:
-                # Phase 2 failure should NOT fail Phase 1
+                # Phase 2 failure should NOT fail Phase 1.
+                #
+                # KNOWN GAP (cross-PR with PR #137 / G12.B.1, follow-up
+                # tracked as v0.22.16.0): the typed
+                # `ColdStartSymbolDiscoveryError` raised by
+                # `services.exchange._fetch_raw_trades_binance` lands in
+                # PR 2 but the boundary handler that distinguishes it
+                # from generic Phase 2 failures lives here. The current
+                # broad `except Exception` swallows the typed exception
+                # and the job still returns DONE — same false-success
+                # outcome the original audit named. Distinguishing it
+                # requires PR 2 merged first (we'd `from services.exchange
+                # import ColdStartSymbolDiscoveryError`); landing the
+                # boundary handler on this branch would fail import
+                # against main. Tracked separately, NOT a regression of
+                # this PR's work.
                 logger.warning(
                     "Raw fill ingestion failed for strategy %s (Phase 1 succeeded): %s",
                     strategy_id,
