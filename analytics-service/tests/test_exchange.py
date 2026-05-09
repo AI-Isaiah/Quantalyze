@@ -826,6 +826,73 @@ class TestG12BBinanceConcurrency:
             for call in mock_warn.call_args_list
         )
 
+    @pytest.mark.asyncio
+    async def test_binance_per_symbol_cancellation_propagates(self) -> None:
+        """Adversarial-review regression (PR #137 follow-up).
+
+        On Python 3.11+, asyncio.gather(return_exceptions=True) captures
+        CancelledError as a result item rather than re-raising. If the
+        parent task gets cancelled (15-min handler timeout, worker
+        shutdown, signal), every per-symbol task receives CancelledError,
+        gather "succeeds" with N exception items, and pre-fix the
+        function returned an empty fills list — the same false-success
+        outcome the audit named.
+
+        Fix: scan results for CancelledError and re-raise so the outer
+        wait_for / shutdown propagates correctly. This test patches
+        asyncio.gather to return CancelledError items and asserts the
+        function re-raises CancelledError instead of swallowing it.
+        """
+        import asyncio
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                mock_eq2.execute.return_value = MagicMock(data=[
+                    {"symbol": "BTCUSDT"},
+                    {"symbol": "ETHUSDT"},
+                ])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        # Force gather to return CancelledError items as if the parent
+        # was cancelled mid-fan-out. This mirrors the Python 3.11+ behavior
+        # of asyncio.gather(return_exceptions=True).
+        cancellation_results = [
+            asyncio.CancelledError("simulated parent cancel"),
+            asyncio.CancelledError("simulated parent cancel"),
+        ]
+
+        async def _fake_gather(*tasks, return_exceptions=False):
+            # Drain the coroutines so they don't leak as 'never awaited'
+            # warnings during cleanup.
+            for t in tasks:
+                t.close()
+            return cancellation_results
+
+        with patch("services.exchange.asyncio.gather", new=_fake_gather):
+            with pytest.raises(asyncio.CancelledError):
+                await fetch_raw_trades(
+                    mock_exchange, "strat-1", mock_supabase
+                )
+
 
 class TestG12BFillRowFactory:
     """Audit-2026-05-07 G12.B.4 — _make_fill_dict + posSide whitelist."""
@@ -1127,14 +1194,94 @@ class TestG12BPaginationGuards:
         assert len(result) >= 1
 
     @pytest.mark.asyncio
-    async def test_fetch_raw_trades_okx_empty_tradeId_terminates(
+    async def test_fetch_raw_trades_okx_empty_tradeId_on_full_page_terminates(
         self,
     ) -> None:
-        """OKX fill with empty tradeId on the last row must trigger the
-        stuck-cursor guard and log a warning."""
+        """OKX with empty tradeId on the LAST row of a FULL (100-fill) page
+        must trigger the stuck-cursor guard and log a warning.
+
+        Adversarial-review hardening (PR #137 follow-up): the previous
+        test exercised this guard on a 1-fill page, but a short page is
+        a legitimate end-of-data signal — firing the stuck warning there
+        is a false positive. The guard now ONLY fires on full pages
+        (where stuck cursor would otherwise loop until the page cap).
+        """
         import logging
         from services.exchange import fetch_raw_trades
 
+        # Build a full 100-fill page where the last row has empty tradeId.
+        fills = []
+        for i in range(99):
+            fills.append({
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": "1700000000000",
+                "ordId": f"ord-{i}",
+                "tradeId": f"trade-{i}",
+                "execType": "T",
+            })
+        # Tail row carries empty tradeId — that's the stuck signal.
+        fills.append({
+            "instId": "BTC-USDT-SWAP",
+            "side": "buy",
+            "fillPx": "60000",
+            "fillSz": "0.1",
+            "fee": "-0.6",
+            "feeCcy": "USDT",
+            "ts": "1700000000000",
+            "ordId": "ord-tail",
+            "tradeId": "",
+            "execType": "T",
+        })
+        page = {"data": fills}
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "warning",
+        ) as mock_warn:
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # Only one call before bail-out (the stuck guard short-circuits).
+        assert mock_exchange.private_get_trade_fills_history.await_count == 1
+        # Stuck-cursor warning fired with okx tag.
+        assert any(
+            "Pagination stuck" in str(call) and "okx" in str(call)
+            for call in mock_warn.call_args_list
+        )
+        # All 100 fills captured before the guard fires.
+        assert len(result) == 100
+
+    @pytest.mark.asyncio
+    async def test_fetch_raw_trades_okx_short_page_no_false_stuck_warning(
+        self,
+    ) -> None:
+        """OKX short final page (<100 fills) sharing tradeId with prior
+        page's cursor must NOT fire the stuck-cursor warning. The
+        natural-break exit (`len(data) < 100`) takes precedence so we
+        don't poison operator logs with false-positive 'stuck' warnings
+        on legitimate end-of-data boundaries.
+
+        Adversarial-review regression (PR #137 follow-up). Pre-fix, a
+        legitimate short final page would log 'Pagination stuck' AND
+        also suppress the page-cap warning (because natural_break=True),
+        masking real truncation."""
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        # Single short page with 1 fill — natural end-of-data.
         page = {
             "data": [
                 {
@@ -1146,7 +1293,7 @@ class TestG12BPaginationGuards:
                     "feeCcy": "USDT",
                     "ts": "1700000000000",
                     "ordId": "ord-1",
-                    "tradeId": "",  # empty tradeId on tail row
+                    "tradeId": "",  # would have tripped pre-fix
                     "execType": "T",
                 },
             ]
@@ -1167,15 +1314,11 @@ class TestG12BPaginationGuards:
                 mock_exchange, "strat-1", mock_supabase
             )
 
-        # Only one call before bail-out.
-        assert mock_exchange.private_get_trade_fills_history.await_count == 1
-        # Stuck-cursor warning fired with okx tag.
-        assert any(
-            "Pagination stuck" in str(call) and "okx" in str(call)
-            for call in mock_warn.call_args_list
-        )
-        # The fill is still captured before the guard fires.
         assert len(result) == 1
+        # No stuck-cursor warning — short page is the natural exit, not a stuck signal.
+        assert not any(
+            "Pagination stuck" in str(call) for call in mock_warn.call_args_list
+        ), f"Short final page must not log stuck warning. Saw: {mock_warn.call_args_list}"
 
 
 class TestG12BBybitIsMaker:

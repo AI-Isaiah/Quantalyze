@@ -709,6 +709,21 @@ async def _fetch_raw_trades_binance(
     tasks = [_fetch_one(s) for s in symbols]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # Adversarial-review hardening (PR #137 follow-up):
+    # `asyncio.gather(return_exceptions=True)` on Python 3.11+ captures
+    # CancelledError as a result item rather than re-raising it. This
+    # creates a silent-failure mode under parent cancellation (15-min
+    # handler timeout, worker shutdown, signal): every per-symbol task
+    # gets a CancelledError, the gather "succeeds" with N exception
+    # objects, and the function returns an empty fills list — same
+    # false-success outcome G12.B.1 was supposed to eliminate. Scan
+    # for CancelledError BEFORE classifying as per-symbol-failed and
+    # re-raise so the outer wait_for / shutdown propagates correctly.
+    if any(isinstance(item, asyncio.CancelledError) for item in results):
+        raise asyncio.CancelledError(
+            "Binance per-symbol gather cancelled (parent timeout / shutdown)"
+        )
+
     fills: list[dict[str, Any]] = []
     for idx, item in enumerate(results):
         if isinstance(item, BaseException):
@@ -812,12 +827,25 @@ async def _fetch_raw_trades_okx(
 
             new_cursor = data[-1].get("tradeId", "")
 
-            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard. If the
-            # exchange returns the same trailing tradeId twice, we'd
-            # otherwise loop until the page cap and yield 100 pages of
-            # duplicates. Empty tradeId is also a hard stop (the next
-            # request would re-issue with no `before`, restarting from
-            # the most recent).
+            # Adversarial-review hardening (PR #137 follow-up): a short
+            # final page that legitimately shares its trailing tradeId
+            # with the previous page's cursor would otherwise trip the
+            # stuck-cursor warning even though we're about to break
+            # naturally on `len(data) < 100`. Take the natural-break
+            # exit FIRST so short pages don't produce false-positive
+            # "stuck" warnings.
+            if len(data) < 100:
+                prev_cursor = new_cursor
+                cursor = new_cursor
+                natural_break = True
+                break
+
+            # Audit-2026-05-07 G12.B.6 — stuck-cursor guard (full pages
+            # only). If the exchange returns the same trailing tradeId
+            # twice on a FULL page, we'd otherwise loop until the page
+            # cap and yield 100 pages of duplicates. Empty tradeId is
+            # also a hard stop (the next request would re-issue with
+            # no `before`, restarting from the most recent).
             if not new_cursor:
                 logger.warning(
                     "Pagination stuck on cursor=%s for exchange=okx; terminating early",
@@ -835,10 +863,6 @@ async def _fetch_raw_trades_okx(
 
             prev_cursor = new_cursor
             cursor = new_cursor
-
-            if len(data) < 100:
-                natural_break = True
-                break
         except Exception as e:
             logger.warning("OKX fills fetch failed page %d: %s", page, str(e))
             break
