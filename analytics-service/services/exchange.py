@@ -106,8 +106,28 @@ def _make_fill_dict(
     schema change. This keeps the persist path safe while still
     constraining the value upstream.
     """
+    # Adversarial-review hardening (security specialist, PR #137 follow-up):
+    # the CCXT `_normalize_fill` path passes `trade.get("info")` straight
+    # into raw_data with zero whitelisting — so a hostile exchange response
+    # could stuff arbitrary `posSide` values that bypass the OKX-direct-API
+    # whitelist. PR #140's consumer-side whitelist in
+    # _match_positions_fifo defends downstream, but defense-in-depth at
+    # ingest closes the door before raw_data is persisted. Always copy
+    # raw_data and scrub any `posSide` that isn't in the OKX whitelist.
+    if raw_data is not None:
+        raw_data = dict(raw_data)
+        if "posSide" in raw_data:
+            _ps = raw_data["posSide"]
+            if _ps not in _OKX_VALID_POS_SIDES and _ps not in ("", None):
+                logger.warning(
+                    "_make_fill_dict: scrubbing non-whitelisted posSide=%r "
+                    "from raw_data before persist (defense-in-depth)",
+                    _ps,
+                )
+                raw_data.pop("posSide", None)
     if position_direction is not None:
-        raw_data = dict(raw_data) if raw_data is not None else {}
+        if raw_data is None:
+            raw_data = {}
         raw_data["position_direction"] = position_direction
     return {
         "exchange": exchange,
