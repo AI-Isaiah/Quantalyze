@@ -170,4 +170,44 @@ describe("isUnifiedBackboneActive (Phase 19 / BACKBONE-05)", () => {
     expect(from).toHaveBeenCalledTimes(1);
     expect(maybeSingle).toHaveBeenCalledTimes(1);
   });
+
+  // TC-1 (army2 testing-specialist) — I-API3 outage prev-cache-hold has a
+  // semantically distinct branch: when supabase throws AND a prior cache
+  // entry exists, the held value comes from the prior cache, NOT the env
+  // var. Without this regression test, a future refactor that simplifies
+  // the outage branch to env-fallback (the Python sibling's behavior) would
+  // silently regress and every other TS test would still pass.
+  it("supabase outage with prior cache holds prev value, not env (TC-1 / I-API3)", async () => {
+    process.env.PROCESS_KEY_UNIFIED_BACKBONE = "on";
+
+    // Step 1: prime the cache with kill_switch=null (env=on → cached value=true).
+    const { client, fromCalls } = makeAdminMock(null);
+    vi.mocked(createAdminClient).mockReturnValue(
+      client as unknown as ReturnType<typeof createAdminClient>,
+    );
+    const primed = await isUnifiedBackboneActive();
+    expect(primed).toBe(true);
+    expect(fromCalls).toHaveBeenCalledTimes(1);
+
+    // Step 2: flip env=off AND swap supabase mock to throw. If the outage
+    // branch falls through to env (Python parity), next call returns false.
+    // If it holds prev cache (TS I-API3 invariant), next call returns true.
+    process.env.PROCESS_KEY_UNIFIED_BACKBONE = "off";
+    vi.mocked(createAdminClient).mockImplementation(() => {
+      throw new Error("Supabase outage");
+    });
+
+    // Step 3: advance time past the 30s TTL so the cache miss path runs.
+    const realDateNow = Date.now;
+    const advancedNow = realDateNow() + 31_000;
+    vi.spyOn(Date, "now").mockReturnValue(advancedNow);
+
+    const heldValue = await isUnifiedBackboneActive();
+
+    // I-API3 invariant: prev cached value (true) is held across the outage
+    // even though env is now off.
+    expect(heldValue).toBe(true);
+
+    vi.spyOn(Date, "now").mockRestore?.();
+  });
 });
