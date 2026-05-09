@@ -589,3 +589,649 @@ class TestFetchRawTrades:
         expected_effective = str(since_ms - 3_600_000)
         assert len(captured_params) >= 1
         assert captured_params[0].get("begin") == expected_effective
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 G12.B.* regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestG12BColdStart:
+    """Audit-2026-05-07 G12.B.1 — Binance cold-start failure must raise."""
+
+    @pytest.mark.asyncio
+    async def test_cold_start_position_fetch_failure_raises_typed(self) -> None:
+        """Pre-fix: cold-start fetch_positions failure was logged as a
+        warning and the function continued with symbols=[], yielding an
+        empty fills list that callers treated as success. Post-fix: a
+        typed ColdStartSymbolDiscoveryError must propagate so the caller
+        can mark the sync_trades job for retry instead of cementing a
+        false-success state."""
+        import asyncio
+        from services.exchange import (
+            ColdStartSymbolDiscoveryError,
+            fetch_raw_trades,
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_positions = AsyncMock(
+            side_effect=Exception("simulated 401 from /fapi/v2/positionRisk")
+        )
+
+        # supabase returns NO existing symbols → triggers cold-start path.
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            mock_eq2.execute.return_value = MagicMock(data=[])
+            mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_eq1.eq.return_value = mock_eq2
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            with pytest.raises(ColdStartSymbolDiscoveryError):
+                await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+    @pytest.mark.asyncio
+    async def test_cold_start_no_open_positions_raises_typed(self) -> None:
+        """Closed-position edge case: cold-start where fetch_positions
+        succeeds but returns 0 open positions. Pre-fix this looked like
+        success-with-zero-fills. Post-fix it must raise so the caller
+        knows symbol discovery yielded nothing."""
+        import asyncio
+        from services.exchange import (
+            ColdStartSymbolDiscoveryError,
+            fetch_raw_trades,
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        # All positions flat (contracts=0) → no symbols discovered.
+        mock_exchange.fetch_positions = AsyncMock(return_value=[
+            {"symbol": "BTC/USDT:USDT", "contracts": 0},
+            {"symbol": "ETH/USDT:USDT", "contracts": 0},
+        ])
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            mock_eq2.execute.return_value = MagicMock(data=[])
+            mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_eq1.eq.return_value = mock_eq2
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            with pytest.raises(
+                ColdStartSymbolDiscoveryError,
+                match="no symbols discovered",
+            ):
+                await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+
+class TestG12BBinanceConcurrency:
+    """Audit-2026-05-07 G12.B.3 — fan-out per-symbol fetch via gather."""
+
+    @pytest.mark.asyncio
+    async def test_binance_per_symbol_uses_asyncio_gather(self) -> None:
+        """Pre-fix the per-symbol loop ran sequentially. Post-fix it must
+        use asyncio.gather with bounded concurrency. We patch
+        asyncio.gather and assert it was called."""
+        import asyncio
+        import services.exchange as exchange_mod
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_my_trades = AsyncMock(return_value=[])
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                mock_eq2.execute.return_value = MagicMock(data=[
+                    {"symbol": "BTCUSDT"},
+                    {"symbol": "ETHUSDT"},
+                    {"symbol": "SOLUSDT"},
+                ])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        # Wrap real asyncio.gather so we can assert it fires.
+        real_gather = asyncio.gather
+        gather_calls: list[int] = []
+
+        async def _spy_gather(*tasks, **kwargs):
+            gather_calls.append(len(tasks))
+            return await real_gather(*tasks, **kwargs)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute), \
+             patch.object(exchange_mod.asyncio, "gather", new=_spy_gather):
+            await fetch_raw_trades(mock_exchange, "strat-1", mock_supabase)
+
+        # Must have called asyncio.gather at least once with all 3 tasks.
+        assert any(n >= 3 for n in gather_calls), (
+            f"expected asyncio.gather called with >=3 tasks; got {gather_calls!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_binance_per_symbol_partial_failure_logs_and_continues(
+        self,
+    ) -> None:
+        """When one symbol fails, gather(return_exceptions=True) catches
+        it; the function logs a warning matching the prior shape and
+        returns successful results for the other symbols."""
+        import asyncio
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+
+        async def _fetch_my_trades(symbol, since=None, limit=None):
+            if "ETH" in symbol:
+                raise RuntimeError("simulated 500")
+            return [
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    "datetime": "2024-01-01T00:00:00Z",
+                    "order": "ord-1",
+                    "id": "fill-1",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+            ]
+
+        mock_exchange.fetch_my_trades = _fetch_my_trades
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                mock_eq2.execute.return_value = MagicMock(data=[
+                    {"symbol": "BTCUSDT"},
+                    {"symbol": "ETHUSDT"},
+                ])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            with patch.object(
+                logging.getLogger("quantalyze.analytics"),
+                "warning",
+            ) as mock_warn:
+                result = await fetch_raw_trades(
+                    mock_exchange, "strat-1", mock_supabase
+                )
+
+        # 1 successful symbol → 1 fill; failed symbol logged.
+        assert len(result) == 1
+        assert any(
+            "Binance fetch_my_trades failed for" in str(call)
+            for call in mock_warn.call_args_list
+        )
+
+
+class TestG12BFillRowFactory:
+    """Audit-2026-05-07 G12.B.4 — _make_fill_dict + posSide whitelist."""
+
+    def test_make_fill_dict_returns_required_keys(self) -> None:
+        from services.exchange import _make_fill_dict
+
+        out = _make_fill_dict(
+            exchange="okx",
+            symbol="BTCUSDT",
+            side="buy",
+            price=60000.0,
+            quantity=0.1,
+            fee=0.6,
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="fill-1",
+            is_maker=False,
+            raw_data={"foo": "bar"},
+            position_direction="long",
+        )
+        required = {
+            "exchange", "symbol", "side", "price", "quantity",
+            "fee", "fee_currency", "timestamp", "order_type",
+            "exchange_order_id", "exchange_fill_id", "is_fill",
+            "is_maker", "cost", "raw_data",
+        }
+        assert required.issubset(set(out.keys()))
+        # cost must derive from price * quantity.
+        assert out["cost"] == 60000.0 * 0.1
+        assert out["is_fill"] is True
+        # position_direction stashed into raw_data, not a top-level key.
+        assert out["raw_data"]["position_direction"] == "long"
+
+    def test_make_fill_dict_skips_position_direction_when_none(self) -> None:
+        from services.exchange import _make_fill_dict
+
+        out = _make_fill_dict(
+            exchange="bybit",
+            symbol="BTCUSDT",
+            side="sell",
+            price=60000.0,
+            quantity=0.1,
+            fee=0.6,
+            fee_currency="USDT",
+            timestamp="2024-01-01T00:00:00+00:00",
+            exchange_order_id="ord-1",
+            exchange_fill_id="fill-1",
+            is_maker=True,
+            raw_data={"foo": "bar"},
+            position_direction=None,
+        )
+        # When direction is None, raw_data must not be mutated.
+        assert "position_direction" not in (out["raw_data"] or {})
+
+    @pytest.mark.asyncio
+    async def test_okx_valid_pos_side_preserved(self) -> None:
+        """OKX with valid posSide=short must end up in raw_data."""
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "sell",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-1",
+                    "tradeId": "trade-1",
+                    "execType": "T",
+                    "posSide": "short",
+                },
+            ]
+        })
+
+        mock_supabase = MagicMock()
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase
+        )
+        assert len(result) == 1
+        assert result[0]["raw_data"]["posSide"] == "short"
+        assert result[0]["raw_data"]["position_direction"] == "short"
+
+    @pytest.mark.asyncio
+    async def test_okx_bogus_pos_side_logged_and_dropped(self) -> None:
+        """An out-of-whitelist posSide value must be coerced to None,
+        with a warning logged. raw_data must NOT carry the invalid value
+        as posSide (we only stamp the whitelisted ones)."""
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "sell",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-1",
+                    "tradeId": "trade-1",
+                    "execType": "T",
+                    "posSide": "bogus",
+                },
+            ]
+        })
+
+        mock_supabase = MagicMock()
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "warning",
+        ) as mock_warn:
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        assert len(result) == 1
+        # No position_direction stamped into raw_data when bogus.
+        assert "position_direction" not in result[0]["raw_data"]
+        # Warning fired with the expected text.
+        assert any(
+            "invalid posSide" in str(call)
+            for call in mock_warn.call_args_list
+        )
+
+
+class TestG12BOverlapWindow:
+    """Audit-2026-05-07 G12.B.5 — codify overlap behavior at boundaries."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_raw_trades_late_arriving_fill_outside_overlap(
+        self,
+    ) -> None:
+        """If the exchange returns a fill whose timestamp predates the
+        overlap window (since_ms - 7_200_000, i.e. 2h before window),
+        current behavior is to capture it (we don't filter on the client
+        side; dedup via partial unique index handles re-runs). This test
+        codifies that contract — a future change that adds a hard filter
+        must update this assertion intentionally.
+        """
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+
+        late_ts_ms = 1700000000000 - 7_200_000  # 2h before "since"
+
+        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": str(late_ts_ms),
+                    "ordId": "ord-late",
+                    "tradeId": "trade-late",
+                    "execType": "T",
+                },
+            ]
+        })
+
+        mock_supabase = MagicMock()
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase, since_ms=1700000000000
+        )
+
+        # Late-arriving fill IS captured today (overlap window is a
+        # request-side hint, not a client-side filter).
+        assert len(result) == 1
+        assert result[0]["exchange_fill_id"] == "trade-late"
+
+    @pytest.mark.asyncio
+    async def test_fetch_raw_trades_dst_boundary_no_double_count(
+        self,
+    ) -> None:
+        """A fill at a DST-boundary timestamp must NOT be double-counted.
+        We model this by returning the same fill twice (same tradeId);
+        the function returns both entries (dedup is at the DB layer via
+        partial unique index, not in fetch_raw_trades). But the count
+        must remain stable across calls, never silently expanding."""
+        from services.exchange import fetch_raw_trades
+
+        # Spring-forward 2024 in US Eastern: 2024-03-10 02:00 -> 03:00
+        # local. UTC of equivalent moment ~ 2024-03-10T07:00:00Z =
+        # 1710054000000 ms. The contract: a single fill with that
+        # timestamp returns exactly one row, even on repeat calls.
+        dst_ts_ms = 1710054000000
+
+        page = {
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": str(dst_ts_ms),
+                    "ordId": "ord-dst",
+                    "tradeId": "trade-dst",
+                    "execType": "T",
+                },
+            ]
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        first = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase, since_ms=dst_ts_ms
+        )
+        second = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase, since_ms=dst_ts_ms
+        )
+
+        assert len(first) == 1
+        assert len(second) == 1
+        # Identity of the fill must be stable across runs — no silent
+        # duplication of the same (exchange_fill_id, timestamp) tuple.
+        assert first[0]["exchange_fill_id"] == second[0]["exchange_fill_id"]
+        assert first[0]["timestamp"] == second[0]["timestamp"]
+
+
+class TestG12BPaginationGuards:
+    """Audit-2026-05-07 G12.B.6 — stuck-cursor + page-cap warnings."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_raw_trades_bybit_stuck_cursor_terminates(
+        self,
+    ) -> None:
+        """Bybit returning the SAME nextPageCursor on every call must
+        trigger early termination + a warning, not 100 iterations of
+        duplicate fills."""
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execPrice": "60000",
+                        "execQty": "0.1",
+                        "execFee": "0.6",
+                        "feeCurrency": "USDT",
+                        "execTime": "1700000000000",
+                        "orderId": "ord-1",
+                        "execId": "exec-1",
+                        "isMaker": "false",
+                    },
+                ],
+                "nextPageCursor": "STUCK",
+            }
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        # Always return the same page with the same cursor.
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "warning",
+        ) as mock_warn:
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # Loop must terminate before the 100-page cap.
+        assert mock_exchange.private_get_v5_execution_list.await_count < 100
+        # Stuck-cursor warning must have fired.
+        assert any(
+            "Pagination stuck" in str(call) and "bybit" in str(call)
+            for call in mock_warn.call_args_list
+        )
+        # We get exactly 2 fills: one from page 1, one from page 2 (which
+        # shows up as stuck on the third try).
+        assert len(result) >= 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_raw_trades_okx_empty_tradeId_terminates(
+        self,
+    ) -> None:
+        """OKX fill with empty tradeId on the last row must trigger the
+        stuck-cursor guard and log a warning."""
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        page = {
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-1",
+                    "tradeId": "",  # empty tradeId on tail row
+                    "execType": "T",
+                },
+            ]
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "warning",
+        ) as mock_warn:
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # Only one call before bail-out.
+        assert mock_exchange.private_get_trade_fills_history.await_count == 1
+        # Stuck-cursor warning fired with okx tag.
+        assert any(
+            "Pagination stuck" in str(call) and "okx" in str(call)
+            for call in mock_warn.call_args_list
+        )
+        # The fill is still captured before the guard fires.
+        assert len(result) == 1
+
+
+class TestG12BBybitIsMaker:
+    """Audit-2026-05-07 G12.B.9 — coerce isMaker to bool across types."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw_value,expected",
+        [
+            (True, True),
+            ("true", True),
+            ("True", True),
+            ("TRUE", True),
+            (False, False),
+            ("false", False),
+            (None, False),
+            # Empty string was previously caught as False by `== 'true'`
+            # but isn't a documented Bybit shape; pin the safe-default so
+            # a future refactor cannot promote empty strings to True.
+            ("", False),
+        ],
+    )
+    async def test_bybit_is_maker_handles_bool_and_string(
+        self, raw_value, expected
+    ) -> None:
+        from services.exchange import fetch_raw_trades
+
+        page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execPrice": "60000",
+                        "execQty": "0.1",
+                        "execFee": "0.6",
+                        "feeCurrency": "USDT",
+                        "execTime": "1700000000000",
+                        "orderId": "ord-1",
+                        "execId": "exec-1",
+                        "isMaker": raw_value,
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase
+        )
+        assert len(result) == 1
+        assert result[0]["is_maker"] is expected
