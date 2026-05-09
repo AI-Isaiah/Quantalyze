@@ -114,16 +114,40 @@ async def run_process_key_long_job(job: dict) -> "DispatchResult":
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # I-perf-5 — broker-work short-circuit. If the verification has already
-    # advanced past metrics_captured (i.e. report_queued / encrypted /
-    # near-published), the broker fetch + metrics compute are wasted: the
-    # remaining work is post-fetch (encryption + fingerprint persistence
-    # + final transition). On a worker retry-after-transient-error this
-    # avoids hammering the broker for trades we already have. We still
-    # return DONE rather than re-running the post-fetch tail because
-    # those side effects already landed before the transient-failure
-    # checkpoint. A follow-up that resumes the tail from
-    # metrics_captured belongs in a separate plan.
-    advanced_statuses = {"encrypted", "report_queued"}
+    # advanced past draft (validated / metrics_captured / encrypted /
+    # report_queued / near-published), the validate + broker fetch +
+    # metrics compute are at minimum wasted, and on metrics_captured the
+    # subsequent `transition validated → metrics_captured` would RAISE
+    # because metrics_captured → validated is not a legal pair in
+    # migration 103. On a worker retry-after-transient-error this
+    # avoids hammering the broker for trades we already have AND
+    # avoids the illegal-transition crash. We still return DONE rather
+    # than re-running the post-fetch tail because those side effects
+    # already landed before the transient-failure checkpoint. A
+    # follow-up that resumes the tail from metrics_captured belongs in
+    # a separate plan.
+    #
+    # CT-6 (army2) — pre-fix this set was {'encrypted','report_queued'},
+    # missing 'validated' and 'metrics_captured'. A retry that landed on
+    # metrics_captured would re-run validate (transition validated→validated
+    # raises) + broker fetch (burning quota) and then crash on the
+    # transition_strategy_verification('metrics_captured' → 'validated').
+    # The crash poisoned the next retry. Source of truth: status CHECK in
+    # migration 093 (strategy_verifications).
+    #
+    # Any non-draft status short-circuits. The migration-093 status
+    # vocabulary is closed: {draft, validated, metrics_captured, encrypted,
+    # report_queued, published}. Published is already short-circuited by the
+    # `existing_data.status == 'published'` branch above; we keep it here too
+    # for symmetry against any future status value the closed-set CHECK
+    # constraint may add (so the worker fails closed, not open).
+    advanced_statuses = {
+        "validated",
+        "metrics_captured",
+        "encrypted",
+        "report_queued",
+        "published",
+    }
     if existing_data and existing_data.get("status") in advanced_statuses:
         log.info(
             "process_key_long.advanced_status_skip",

@@ -553,6 +553,8 @@ async function unifiedFinalizeWizardHandler(args: {
       step: "finalize",
     },
     routeTag: "strategies/finalize-wizard",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
   });
   if (!result.ok) return result.response;
 
@@ -560,6 +562,11 @@ async function unifiedFinalizeWizardHandler(args: {
   // legacy `{strategy_id, status:'pending_review'}` shape that wizard chrome
   // and downstream callers read off `body.strategy_id`. Preserve
   // `verification_id` + `queued` as additive fields for callers that want them.
+  //
+  // CT-5 (army2) — also preserve `code` and `idempotent` when upstream
+  // returns the WIZARD_DUPLICATE envelope. Pre-fix the translation
+  // stripped both fields, so SubmitStep.tsx never rendered the
+  // wizardErrors WIZARD_DUPLICATE copy on the idempotent-resume path.
   const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
     return NextResponse.json({
@@ -567,6 +574,8 @@ async function unifiedFinalizeWizardHandler(args: {
       status: "pending_review",
       verification_id: upstream.verification_id ?? null,
       queued: upstream.queued ?? true,
+      ...(typeof upstream.code === "string" ? { code: upstream.code } : {}),
+      ...(upstream.idempotent === true ? { idempotent: true } : {}),
     });
   }
   return NextResponse.json(upstream);

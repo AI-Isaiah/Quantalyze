@@ -135,6 +135,8 @@ async function unifiedKeysSyncHandler(args: {
       user_id: args.userId,
     },
     routeTag: "keys/sync",
+    // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
+    userId: args.userId,
   });
   if (!result.ok) return result.response;
 
@@ -142,8 +144,29 @@ async function unifiedKeysSyncHandler(args: {
   // 202 `{accepted, strategy_id, status:'syncing'}` shape so callers reading
   // `body.strategy_id` keep working. Preserve verification_id + queued as
   // additive fields.
+  //
+  // CT-5 (army2) — branch on queued: a real enqueue (`queued===true`)
+  // returns 202 syncing; an idempotent WIZARD_DUPLICATE
+  // (`queued===false && code==='WIZARD_DUPLICATE'`) returns 200 with the
+  // upstream's preserved status (e.g. 'validated' or whatever the
+  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE
+  // code so the wizardErrors copy can render even on a 200.
   const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
+    if (upstream.queued === false && upstream.code === "WIZARD_DUPLICATE") {
+      return NextResponse.json(
+        {
+          accepted: true,
+          strategy_id: args.strategy_id,
+          status: typeof upstream.status === "string" ? upstream.status : "syncing",
+          verification_id: upstream.verification_id ?? null,
+          queued: false,
+          code: "WIZARD_DUPLICATE",
+          idempotent: true,
+        },
+        { status: 200 },
+      );
+    }
     return NextResponse.json(
       {
         accepted: true,

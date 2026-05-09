@@ -80,6 +80,16 @@ export async function POST(req: NextRequest) {
  * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
  * `flow_type=teaser`. Source is the user-supplied exchange (already validated
  * against SUPPORTED_EXCHANGES above).
+ *
+ * CT-3 (army2) — the upstream `/process-key` teaser flow returns
+ * `{verification_id, status, trust_tier, metrics_snapshot, fingerprint, ...}`
+ * but does NOT mint a public_token. The landing-page <VerificationForm/>
+ * (src/components/landing/VerificationForm.tsx:56) requires `data.public_token`
+ * and throws "invalid response" otherwise. Without minting+returning here,
+ * flipping the unified-backbone flag ON breaks the landing-page teaser flow
+ * end-to-end. Mint a 32-byte base64url token, persist to strategy_verifications
+ * with a 90-day expires_at (matching migration 107 M-6 policy window), and
+ * return both fields alongside whatever the upstream emits.
  */
 async function unifiedVerifyStrategyHandler(
   body: Record<string, unknown>,
@@ -90,9 +100,65 @@ async function unifiedVerifyStrategyHandler(
     source: exchange,
     context: body,
     routeTag: "verify-strategy",
+    // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
+    // so the upstream rate limiter buckets all anonymous landing-page
+    // traffic to a shared key, isolated from authenticated tenants.
+    userId: "public",
   });
   if (!result.ok) return result.response;
-  return NextResponse.json(result.body);
+
+  const upstream = (result.body ?? {}) as Record<string, unknown>;
+  const verificationId =
+    typeof upstream.verification_id === "string" ? upstream.verification_id : null;
+  if (!verificationId) {
+    return NextResponse.json(
+      { error: "Verification service returned an invalid response" },
+      { status: 502 },
+    );
+  }
+
+  // CT-3: 32-byte base64url public_token + 90-day TTL persisted on the
+  // strategy_verifications row. Falls back to a 502 if the persist fails so
+  // the client never sees a token that isn't queryable.
+  const publicToken = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const admin = createAdminClient();
+    // @audit-skip: unauthenticated public endpoint (no user session). The
+    // strategy_verifications row carries no PII (only a public_token +
+    // status), and audit_log requires a user_id which the unauthenticated
+    // teaser caller cannot provide. Mirrors the legacy verify-strategy
+    // path's @audit-skip rationale; landing-page-lead audit lands in
+    // PostHog per ADR-0023 §3, not audit_log.
+    const { error: persistError } = await admin
+      .from("strategy_verifications")
+      .update({ public_token: publicToken, expires_at: expiresAt })
+      .eq("id", verificationId);
+    if (persistError) {
+      console.error(
+        "[verify-strategy] CT-3 public_token persist failed:",
+        persistError,
+      );
+      return NextResponse.json(
+        { error: "Failed to finalize verification" },
+        { status: 500 },
+      );
+    }
+  } catch (err) {
+    console.error("[verify-strategy] CT-3 public_token persist threw:", err);
+    return NextResponse.json(
+      { error: "Failed to finalize verification" },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({
+    ...upstream,
+    verification_id: verificationId,
+    public_token: publicToken,
+    expires_at: expiresAt,
+  });
 }
 
 /**

@@ -200,6 +200,59 @@ async def test_pipeline_idempotent_on_retry():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "advanced_status",
+    ["validated", "metrics_captured", "encrypted", "report_queued"],
+)
+async def test_short_circuit_skips_broker_on_non_draft_status(advanced_status):
+    """CT-6 (army2) — when a worker retry sees the row already past draft
+    (validated / metrics_captured / encrypted / report_queued), the
+    handler MUST short-circuit BEFORE invoking the broker adapter and
+    return DONE.
+
+    Pre-fix the short-circuit set was {'encrypted','report_queued'},
+    missing 'validated' and 'metrics_captured'. A retry that landed on
+    metrics_captured would (a) re-run validate (transition validated→
+    validated raises) + broker fetch_raw burning quota, AND (b) crash
+    when the worker called transition_strategy_verification(metrics_captured
+    → validated) because that pair is not in migration 103's legal_pairs.
+    The crash poisoned the next retry.
+
+    Sanity-tests for the full closed status set per migration 093.
+    """
+    job = {
+        "id": f"job-{advanced_status}",
+        "kind": "process_key_long",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-retry",
+            "source": "okx",
+            "flow_type": "onboard",
+            "correlation_id": "cid-retry",
+            "context": {"strategy_id": "s-retry"},
+        },
+    }
+    sb = _build_supabase_mock(existing_status=advanced_status)
+
+    with patch("services.ingestion.long_fetch.get_adapter") as mock_get_adapter, \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    # Pipeline MUST be skipped — broker adapter is never resolved.
+    mock_get_adapter.assert_not_called()
+    # And no transition_strategy_verification RPC calls — the worker
+    # leaves the post-fetch tail to a follow-up resume job.
+    rpc_names = [c.args[0] for c in sb.rpc.call_args_list]
+    assert "transition_strategy_verification" not in rpc_names, (
+        f"Worker must not attempt a transition from {advanced_status!r} — "
+        "the legal-pairs check in migration 103 only allows "
+        "draft→validated→metrics_captured→encrypted→report_queued→published"
+    )
+
+    assert result.outcome == DispatchOutcome.DONE
+
+
+@pytest.mark.asyncio
 async def test_dispatch_dict_routes_process_key_long():
     """The job_worker.dispatch chain routes kind='process_key_long' to
     run_process_key_long_job."""

@@ -138,6 +138,7 @@ DO $$
 DECLARE
   v_col_exists BOOLEAN;
   v_idx_exists BOOLEAN;
+  v_idx_is_gin BOOLEAN;
   v_check_exists BOOLEAN;
   v_func_volatile CHAR(1);
   v_func_parallel CHAR(1);
@@ -148,11 +149,20 @@ BEGIN
   ) INTO v_col_exists;
   IF NOT v_col_exists THEN RAISE EXCEPTION 'Migration 105: fingerprint column missing'; END IF;
 
+  -- CT-1 (army2): the self-verify originally checked the dropped
+  -- partial-btree index name, but I-perf-2 (this same migration) renamed
+  -- the index to strategies_fingerprint_gin_idx. Fresh applies would
+  -- always raise. Lock both the rename AND the index type (USING gin)
+  -- so a future regression cannot silently revert to a btree.
   SELECT EXISTS(
     SELECT 1 FROM pg_indexes
-     WHERE schemaname='public' AND indexname='strategies_fingerprint_partial_idx'
-  ) INTO v_idx_exists;
-  IF NOT v_idx_exists THEN RAISE EXCEPTION 'Migration 105: partial index missing'; END IF;
+     WHERE schemaname='public'
+       AND indexname='strategies_fingerprint_gin_idx'
+       AND indexdef LIKE '%USING gin%'
+  ) INTO v_idx_is_gin;
+  IF NOT v_idx_is_gin THEN
+    RAISE EXCEPTION 'Migration 105: strategies_fingerprint_gin_idx missing or not USING gin';
+  END IF;
 
   SELECT EXISTS(
     SELECT 1 FROM information_schema.check_constraints

@@ -228,6 +228,277 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("okx");
   });
 
+  // CT-4 (army2) — every thin adapter must forward X-User-Id on the
+  // upstream POST to /process-key. The Python rate limiter keys on
+  // (token_hash, X-User-Id) for cross-tenant isolation. Pre-fix the
+  // header was never sent, so every request bucketed to the same key
+  // and one tenant's burst could starve every other tenant. Public
+  // (unauthenticated) flows pass the literal 'public'.
+  it("verify-strategy unified path forwards X-User-Id='public' (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe("public");
+  });
+
+  it("keys/sync unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const { POST } = await import("@/app/api/keys/sync/route");
+    await POST(jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }));
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  it("strategies/finalize-wizard unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({ read: true, trade: false, withdraw: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
+    await POST(
+      jsonReq("/api/strategies/finalize-wizard", {
+        strategy_id: TEST_STRATEGY_ID,
+        name: "Alpha Centauri",
+        description: "A reasonable description that is at least 10 chars long.",
+        category_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  it("strategies/csv-validate unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new File(["a,b\n1,2"], "test.csv", { type: "text/csv" }),
+    );
+    formData.append("fmt", "daily_returns");
+    formData.append(
+      "wizard_session_id",
+      "44444444-4444-4444-4444-444444444444",
+    );
+    const req = new NextRequest(
+      "http://localhost:3000/api/strategies/csv-validate",
+      { method: "POST", headers: VALID_ORIGIN, body: formData },
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    await POST(req);
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  // CT-5 (army2) — when upstream returns the WIZARD_DUPLICATE envelope
+  // (queued=false + code=WIZARD_DUPLICATE + idempotent=true), the
+  // finalize-wizard translation must preserve `code` and `idempotent`,
+  // and keys/sync must return 200 (not 202) for the idempotent path.
+  it("finalize-wizard preserves code+idempotent on WIZARD_DUPLICATE upstream (CT-5)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    // First mockFetch (probe) — return read-only
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({ read: true, trade: false, withdraw: false }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+    // Second mockFetch — /process-key returns the WIZARD_DUPLICATE envelope
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            queued: false,
+            code: "WIZARD_DUPLICATE",
+            idempotent: true,
+            verification_id: "v-existing",
+            status: "pending_review",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+
+    const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
+    const res = await POST(
+      jsonReq("/api/strategies/finalize-wizard", {
+        strategy_id: TEST_STRATEGY_ID,
+        name: "Alpha Centauri",
+        description: "A reasonable description that is at least 10 chars long.",
+        category_id: "22222222-2222-2222-2222-222222222222",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.idempotent).toBe(true);
+    expect(body.strategy_id).toBe(TEST_STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+  });
+
+  it("keys/sync returns 200 (not 202) on WIZARD_DUPLICATE upstream (CT-5)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    mockFetch.mockImplementationOnce(
+      async (url: string | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            queued: false,
+            code: "WIZARD_DUPLICATE",
+            idempotent: true,
+            verification_id: "v-existing",
+            status: "validated",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    );
+
+    const { POST } = await import("@/app/api/keys/sync/route");
+    const res = await POST(jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }));
+
+    // Idempotent path → 200, NOT 202
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.idempotent).toBe(true);
+    expect(body.queued).toBe(false);
+    // Status preserved from upstream (was 'validated', not coerced to 'syncing')
+    expect(body.status).toBe("validated");
+  });
+
+  it("strategies/csv-finalize unified path forwards X-User-Id=user.id (CT-4)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    await POST(
+      jsonReq("/api/strategies/csv-finalize", {
+        wizard_session_id: "44444444-4444-4444-4444-444444444444",
+        fmt: "daily_returns",
+        strategy_name: "Apollo CSV",
+      }),
+    );
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    expect(
+      (call!.init.headers as Record<string, string>)["X-User-Id"],
+    ).toBe(TEST_USER.id);
+  });
+
+  // CT-7 (army2) — the process-key client must abort a hung upstream
+  // fetch with AbortSignal.timeout(60s) so a stalled synchronous flow
+  // returns a clean UPSTREAM_TIMEOUT envelope (504) instead of dragging
+  // the whole Vercel function to maxDuration. Synchronous flows (teaser,
+  // csv, internal_report) run the full 5-method pipeline upstream so a
+  // stalled broker can hang the request indefinitely.
+  //
+  // Implementation note: AbortSignal.timeout uses real wall-clock time
+  // internally, so we can't usefully drive it with vitest fake timers.
+  // Instead we mock fetch with a stub that synchronously rejects with a
+  // TimeoutError if a signal is present — which is exactly what fetch
+  // would do at abort time. This proves the route handler correctly
+  // catches the TimeoutError and emits the UPSTREAM_TIMEOUT envelope.
+  it("postProcessKey returns UPSTREAM_TIMEOUT envelope on abort (CT-7)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+    const abortingFetch = vi.fn(
+      (_url: string | URL, init?: RequestInit) => {
+        // The route must set signal: AbortSignal.timeout(...). Verify
+        // the contract is wired BEFORE we simulate the abort.
+        const signal = init?.signal as AbortSignal | undefined;
+        if (!signal) {
+          throw new Error(
+            "CT-7: postProcessKey did not pass AbortSignal to fetch — " +
+              "no client-side timeout will fire on a hung upstream",
+          );
+        }
+        const err = new Error("The operation was aborted due to timeout");
+        err.name = "TimeoutError";
+        return Promise.reject(err);
+      },
+    );
+    globalThis.fetch = abortingFetch as unknown as typeof globalThis.fetch;
+
+    try {
+      const { POST } = await import("@/app/api/verify-strategy/route");
+      const res = await POST(
+        jsonReq("/api/verify-strategy", {
+          email: "test@example.com",
+          exchange: "okx",
+          api_key: "k",
+          api_secret: "s",
+        }),
+      );
+
+      expect(res.status).toBe(504);
+      const body = await res.json();
+      expect(body.code).toBe("UPSTREAM_TIMEOUT");
+      expect(body.recoverable).toBe(true);
+      expect(typeof body.human_message).toBe("string");
+    } finally {
+      // Restore the default mock for subsequent tests.
+      globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+    }
+  });
+
+  // CT-3 (army2) — the unified verify-strategy path must mint a public_token
+  // and persist it to strategy_verifications, then return BOTH verification_id
+  // and public_token. Without this, landing-page <VerificationForm/> throws
+  // "invalid response" when the unified-backbone flag flips on.
+  it("verify-strategy unified path mints public_token + expires_at (CT-3)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const respBody = (await res.json()) as Record<string, unknown>;
+    expect(respBody.verification_id).toBe("v-thin-adapter");
+    // 32 random bytes → 43 base64url chars (no padding).
+    expect(typeof respBody.public_token).toBe("string");
+    expect(respBody.public_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(typeof respBody.expires_at).toBe("string");
+    // 90-day window matches migration 107 M-6 policy.
+    const expiresAt = new Date(respBody.expires_at as string).getTime();
+    const ninetyDaysFromNow = Date.now() + 90 * 24 * 60 * 60 * 1000;
+    expect(Math.abs(expiresAt - ninetyDaysFromNow)).toBeLessThan(60_000);
+  });
+
   // API-2: validate-and-encrypt is locked to the legacy code path even
   // when the unified-backbone flag is on, because the unified `/process-key`
   // validate step does not return the encryption envelope the allocator
