@@ -33,6 +33,20 @@ import pytest
 
 from services.metrics import MetricsResult
 
+# audit-2026-05-07 #9 (PR-7 consumer migration): the runner now imports
+# `trades_to_daily_returns_with_status` (returns `(returns, meta)` tuple).
+# Tests that previously patched the bare `trades_to_daily_returns` name
+# break under the new shape because the import no longer exists at the
+# old attribute. Use this default meta everywhere a clean (no-warnings)
+# transform output is the right test fixture; the helper at
+# _run_and_get_success_upsert lower in this file already accepts overrides
+# for the heuristic-capital/balance_error branches.
+_DEFAULT_RETURNS_META = {
+    "used_heuristic_capital": False,
+    "balance_error": False,
+    "computation_status_hint": "complete",
+}
+
 
 # ---------------------------------------------------------------------------
 # Regression: is_fill filter
@@ -186,17 +200,20 @@ class TestIsFillFilterRegression:
 
         with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
              patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-             patch("services.analytics_runner.trades_to_daily_returns") as mock_transform, \
+             patch("services.analytics_runner.trades_to_daily_returns_with_status") as mock_transform, \
              patch("services.analytics_runner.compute_all_metrics", return_value=mock_metrics), \
              patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
              patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
              patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
 
-            # trades_to_daily_returns needs to return a valid Series
+            # trades_to_daily_returns_with_status returns (Series, meta).
+            # audit-2026-05-07 #9 — meta is the no-warnings default; this
+            # test pins the is_fill filter, not the DQF branches.
             np.random.seed(42)
             dates = pd.bdate_range("2024-01-01", periods=10)
-            mock_transform.return_value = pd.Series(
-                np.random.normal(0.001, 0.01, 10), index=dates
+            mock_transform.return_value = (
+                pd.Series(np.random.normal(0.001, 0.01, 10), index=dates),
+                _DEFAULT_RETURNS_META,
             )
 
             result = await run_strategy_analytics("strat-test")
@@ -322,7 +339,7 @@ class TestGracefulDegradation:
 
         with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
              patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-             patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+             patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
              patch("services.analytics_runner.compute_all_metrics", return_value=mock_metrics), \
              patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
              patch("services.position_reconstruction.reconstruct_positions", side_effect=_failing_reconstruct), \
@@ -985,6 +1002,24 @@ def _build_balance_flag_mock_supabase(
             eq.single.return_value = single
             sel.eq.return_value = eq
             t.select.return_value = sel
+        elif name == "trades":
+            # Runner fetches raw fills at analytics_runner.py:756 via
+            # `.select("side, cost, is_maker, timestamp").eq("strategy_id", ...).eq("is_fill", True)`.
+            # Without an explicit stub the default MagicMock chain returns
+            # another MagicMock for `.data`, which pollutes
+            # `_compute_position_side_volume_pcts` and silently triggers
+            # `position_side_volume_failed=True` — a test artifact that
+            # contaminates the clean-path computation_status assertion
+            # added in the audit-2026-05-07 #9 consumer migration.
+            # Returning data=[] keeps fills_data empty so the runner
+            # short-circuits the side-volume helper entirely.
+            sel = MagicMock()
+            eq_strat_t = MagicMock()
+            eq_strat_t.execute.return_value = MagicMock(data=[])
+            eq_t = MagicMock()
+            eq_t.eq.return_value = eq_strat_t
+            sel.eq.return_value = eq_t
+            t.select.return_value = sel
         elif name == "position_snapshots":
             sel = MagicMock()
             eq = MagicMock()
@@ -1018,17 +1053,27 @@ def _build_balance_flag_mock_supabase(
     return mock
 
 
-async def _run_and_get_data_quality_flags(
-    mock_supabase, sa_upsert_calls: list[dict], *, daily_rows_count: int = 15,
+async def _run_and_get_success_upsert(
+    mock_supabase,
+    sa_upsert_calls: list[dict],
+    *,
+    daily_rows_count: int = 15,
+    used_heuristic_capital: bool = False,
+    balance_error: bool = False,
 ) -> dict:
     """Invoke run_strategy_analytics with the standard patches and return
-    data_quality_flags from the success-path upsert
-    (computation_status='complete'). Raises if the runner did not reach
-    the success-path upsert.
+    the full success-path upsert (computation_status='complete' OR
+    'complete_with_warnings' since the audit-2026-05-07 #9 consumer
+    migration). Raises if the runner did not reach a success-path upsert.
 
     `daily_rows_count` keeps the patched returns series the same length
     as the seeded daily rows so a future test that varies the row count
     doesn't silently get a 15-day returns series capping rolling helpers.
+
+    `used_heuristic_capital` / `balance_error` flow into the
+    ReturnsComputationMeta returned by the patched
+    trades_to_daily_returns_with_status — defaults reproduce the
+    pre-migration "no warnings" path.
     """
     from services.analytics_runner import run_strategy_analytics
 
@@ -1038,9 +1083,22 @@ async def _run_and_get_data_quality_flags(
     dates = pd.bdate_range("2024-01-01", periods=daily_rows_count)
     mock_returns = pd.Series([0.001] * daily_rows_count, index=dates)
 
+    if used_heuristic_capital or balance_error:
+        hint = "complete_with_warnings"
+    else:
+        hint = "complete"
+    mock_meta = {
+        "used_heuristic_capital": used_heuristic_capital,
+        "balance_error": balance_error,
+        "computation_status_hint": hint,
+    }
+
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch(
+             "services.analytics_runner.trades_to_daily_returns_with_status",
+             return_value=(mock_returns, mock_meta),
+         ), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
@@ -1052,12 +1110,24 @@ async def _run_and_get_data_quality_flags(
 
     completes = [
         u for u in sa_upsert_calls
-        if u.get("computation_status") == "complete"
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
     ]
     assert completes, (
         f"No success-path upsert captured. All upserts: {sa_upsert_calls!r}"
     )
-    return completes[-1].get("data_quality_flags") or {}
+    return completes[-1]
+
+
+async def _run_and_get_data_quality_flags(
+    mock_supabase, sa_upsert_calls: list[dict], *, daily_rows_count: int = 15,
+) -> dict:
+    """Backwards-compatible thin wrapper around _run_and_get_success_upsert
+    that returns just the data_quality_flags dict for the existing
+    balance-flag-routing tests below."""
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase, sa_upsert_calls, daily_rows_count=daily_rows_count,
+    )
+    return upsert.get("data_quality_flags") or {}
 
 
 @pytest.mark.asyncio
@@ -1144,6 +1214,202 @@ async def test_balance_flag_routing_exception_with_no_api_key_emits_no_linked():
     flags = await _run_and_get_data_quality_flags(mock_supabase, sa_upsert_calls)
     assert flags.get("no_linked_api_key") is True
     assert "account_balance_unavailable" not in flags
+
+
+# ---------------------------------------------------------------------------
+# audit-2026-05-07 #9 — PR-7 consumer migration regression
+# ---------------------------------------------------------------------------
+#
+# PR-7 added the `_with_status` API surface in transforms.py /
+# exchange.py to plumb (used_heuristic_capital, balance_error) flags
+# through to data_quality_flags + computation_status. PR-7's subagent
+# explicitly did NOT migrate the consumer (analytics_runner.py) because
+# it was outside that PR's allowlist. These tests pin the consumer-side
+# contract: the persisted DQF surfaces both flags and computation_status
+# upgrades to 'complete_with_warnings' when either fires.
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_used_heuristic_capital_surfaces_in_dqf_and_status():
+    """audit-2026-05-07 #9 — when transforms returns
+    used_heuristic_capital=True (heuristic-capital fallback fired
+    because account_balance was None / below dust threshold), the
+    runner must:
+
+      1. set data_quality_flags.used_heuristic_capital = True; AND
+      2. persist computation_status = 'complete_with_warnings'.
+
+    Pre-migration the runner threw away the flag and persisted
+    computation_status = 'complete', rendering the heuristic-derived
+    CAGR/Sharpe as canonical on the public factsheet (off by 5–10×
+    for volatile strategies).
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,  # account_balance available, so heuristic
+                                  # is NOT suppressed by the no-double-count
+                                  # rule — used_heuristic_capital surfaces.
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        used_heuristic_capital=True,
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("used_heuristic_capital") is True, (
+        f"DQF must surface used_heuristic_capital=True; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "computation_status must upgrade to 'complete_with_warnings' when "
+        f"transforms reports degraded inputs; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_balance_error_surfaces_in_dqf_and_status():
+    """audit-2026-05-07 #9 — when the upstream pipeline propagates
+    balance_error=True into trades_to_daily_returns_with_status, the
+    runner must surface DQF.balance_error AND upgrade
+    computation_status. Note: the runner itself currently passes
+    balance_error=False because analytics_runner reads
+    api_keys.account_balance_usdt (a DB column) rather than calling
+    the exchange API. Wiring the exchange-API error flag down to this
+    consumer requires a balance_error column on api_keys (PR-7c, see
+    the migration TODO inline at the call-site). This test uses the
+    helper to inject balance_error=True so the consumer's branch is
+    pinned; once PR-7c lands the call-site flips from
+    balance_error=False to the api_keys column read.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        balance_error=True,
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("balance_error") is True, (
+        f"DQF must surface balance_error=True; got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "computation_status must upgrade to 'complete_with_warnings' when "
+        f"balance_error fires; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_section_flag_alone_keeps_status_complete():
+    """Frontend-consumer compatibility pin: when ONLY a section-level
+    flag fires (no_linked_api_key in this case — set when api_key_id
+    is None) and used_heuristic_capital / balance_error are both
+    False, the runner MUST keep computation_status='complete'.
+
+    Eight frontend consumers gate exact-string on
+    `computation_status === "complete"` (factsheet PDFs, discovery,
+    strategy detail, portfolios, PerformanceReport, SyncProgress,
+    queries). Promoting status on every section flag would break
+    PDF rendering and hide metric grids on every demo strategy.
+    Migrating those consumers to accept both states is a separate
+    follow-up PR; until then ONLY the audit-2026-05-07 #9 consumer
+    flags (used_heuristic_capital, balance_error) upgrade status.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id=None,  # → no_linked_api_key flag fires
+    )
+    upsert = await _run_and_get_success_upsert(mock_supabase, sa_upsert_calls)
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("no_linked_api_key") is True
+    assert "used_heuristic_capital" not in flags
+    assert "balance_error" not in flags
+    assert upsert.get("computation_status") == "complete", (
+        "Section-level DQF flags must NOT promote computation_status "
+        "(would break frontend gates that exact-match 'complete'); "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_no_double_count_when_account_balance_unavailable():
+    """Red-team finding: when account_balance_unavailable fires AND
+    the heuristic-capital path also activates (because account_balance
+    is None as a downstream consequence), the runner must NOT
+    double-surface both flags. The factsheet would render two
+    redundant 'approximate' chips for one underlying state.
+
+    Suppression rule (analytics_runner.py:961+): used_heuristic_capital
+    is gated `not (account_balance_unavailable or no_linked_api_key)`.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=None,  # → account_balance_unavailable
+    )
+    # Inject heuristic-capital=True via the helper to simulate the
+    # downstream consequence — same shape as if production transforms
+    # fell into the heuristic branch because account_balance was None.
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase, sa_upsert_calls, used_heuristic_capital=True,
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("account_balance_unavailable") is True
+    assert "used_heuristic_capital" not in flags, (
+        "used_heuristic_capital must be suppressed when "
+        "account_balance_unavailable already fires (one root cause, "
+        f"not two). got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete", (
+        "computation_status stays 'complete' when only section flags "
+        f"fire; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_clean_path_does_not_leak_consumer_specific_keys():
+    """Negative regression: when transforms reports no warnings
+    (used_heuristic_capital=False, balance_error=False), the runner
+    must NOT surface either of the two new DQF keys. Guards against
+    the consumer leaking spurious 'used_heuristic_capital' /
+    'balance_error' chips on every successful run.
+
+    NOTE on computation_status: `_run_and_get_success_upsert` patches
+    `get_benchmark_returns` to `(None, True)` which sets
+    `benchmark_unavailable=True` in DQF. Per the contract documented
+    in transforms.py::_build_meta and implemented at
+    analytics_runner.py:971+ (the OR), ANY DQF flag promotes status
+    to 'complete_with_warnings'. So we cannot assert
+    status=='complete' here without also stubbing the benchmark; we
+    only assert the two consumer-specific keys are absent.
+    `test_consumer_migration_used_heuristic_capital_*` /
+    `..._balance_error_*` cover the positive paths.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    upsert = await _run_and_get_success_upsert(mock_supabase, sa_upsert_calls)
+    flags = upsert.get("data_quality_flags") or {}
+    assert "used_heuristic_capital" not in flags, (
+        f"Consumer must not set used_heuristic_capital on a clean run; got: {flags!r}"
+    )
+    assert "balance_error" not in flags, (
+        f"Consumer must not set balance_error on a clean run; got: {flags!r}"
+    )
 
 
 def test_volume_metrics_no_longer_aliases_long_to_buy():
@@ -1374,7 +1640,7 @@ async def test_run_strategy_analytics_writes_sibling_kinds() -> None:
 
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(mock_benchmark, False))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value=fake_exposure)):
@@ -1495,7 +1761,7 @@ async def test_run_strategy_analytics_derived_metrics_present() -> None:
 
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value=fake_position_metrics)), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
@@ -1575,7 +1841,7 @@ async def test_run_strategy_analytics_pins_fills_select_column_list() -> None:
 
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):

@@ -1071,15 +1071,73 @@ def parse_since_ms(
 
 
 async def fetch_usdt_balance(exchange: ccxt.Exchange) -> float | None:
-    """Fetch total USDT balance from exchange. Returns None on failure."""
+    """Fetch total USDT balance from exchange. Returns None on failure.
+
+    Audit-2026-05-07 #9 — this thin wrapper is preserved for backwards
+    compatibility with callers that don't yet care about the
+    distinction between "balance unavailable due to error" and "balance
+    legitimately not provided" (e.g. an account with zero USDT). New
+    code paths that feed `data_quality_flags` should call
+    `fetch_usdt_balance_with_status` instead and propagate the
+    `balance_error` flag through to `strategy_analytics.computation_status
+    = 'complete_with_warnings'` when the heuristic-capital fallback is
+    used. The two-state wrapper drops the error flag, so a transient
+    exchange-API failure here looks identical to a legitimate "no
+    balance" reading — exactly the silent-degradation surface the
+    audit flagged. See `fetch_usdt_balance_with_status` below.
+    """
+    balance, _err = await fetch_usdt_balance_with_status(exchange)
+    return balance
+
+
+async def fetch_usdt_balance_with_status(
+    exchange: ccxt.Exchange,
+) -> tuple[float | None, bool]:
+    """Audit-2026-05-07 #9 — fetch total USDT balance AND surface whether
+    an error prevented the read.
+
+    Returns a ``(balance, balance_error)`` tuple:
+
+        * ``(float, False)`` — successful read, positive USDT balance.
+        * ``(None, False)`` — successful read, zero / missing USDT
+          balance (drained or unfunded account). NOT an error condition.
+        * ``(None, True)`` — exchange API failure (network, rate-limit,
+          auth, malformed response). Caller MUST propagate this through
+          to `data_quality_flags.balance_error = True` AND set
+          `strategy_analytics.computation_status = 'complete_with_warnings'`
+          when the heuristic-capital fallback is used downstream.
+
+    Pre-fix `fetch_usdt_balance` collapsed both `(None, False)` and
+    `(None, True)` into a bare `None`, so a transient OKX 5xx during
+    the analytics window silently degraded a verified institutional
+    strategy's CAGR/Sharpe by 5–10× via the heuristic-capital path
+    (`transforms.py::trades_to_daily_returns`). The factsheet rendered
+    those degraded numbers as canonical, with no DQF chip and no
+    operator alert.
+    """
     try:
         balance = await exchange.fetch_balance()
+    except Exception as e:
+        # Use exception() to capture the full traceback so operators can
+        # tell auth failures (revoked key) from rate-limit surges from
+        # network drops without re-running the job. The pre-fix
+        # warning(str(e)) lost the stack and obscured root cause.
+        logger.exception("Could not fetch account balance: %s", str(e))
+        return None, True
+    try:
         usdt_total = balance.get("total", {}).get("USDT", 0)
         if usdt_total and float(usdt_total) > 0:
-            return float(usdt_total)
-    except Exception as e:
-        logger.warning("Could not fetch account balance: %s", str(e))
-    return None
+            return float(usdt_total), False
+    except (TypeError, ValueError, AttributeError) as e:
+        # Malformed response shape from a misbehaving exchange / mock —
+        # treat as an error read, not as a legitimate "no balance".
+        logger.exception(
+            "Malformed balance response shape: %s", str(e)
+        )
+        return None, True
+    # Successful read, but USDT balance is zero / absent. Legitimate
+    # state for a paper / drained account; not an error.
+    return None, False
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.17.0] - 2026-05-10
+
+**audit-2026-05-07 PR-7 — analytics-service Python correctness.** Closes 4 atomic items (3 HIGH + 1 MEDIUM): `#9` heuristic-capital DQF plumbing, `#26` + `#27` match_eval pagination index alignment, `#52` `PaginatedSelectTruncated` raises on hard-cap. Includes the `analytics_runner.py` consumer migration that closes the audit's `data_quality_flags.{used_heuristic_capital, balance_error}` chip-rendering gap end-to-end (except for the upstream `balance_error` DB column wiring, which moves to PR-7c).
+
+### Added
+
+- **`trades_to_daily_returns_with_status`** (`services/transforms.py`) returns a `(returns, ReturnsComputationMeta)` tuple. The meta TypedDict carries `used_heuristic_capital`, `balance_error`, and `computation_status_hint`. Pre-fix, a transient exchange-API failure on balance fetch was indistinguishable from a legitimate "no balance configured" reading, and the heuristic-capital fallback (off by 5–10× for volatile strategies) silently rendered as canonical CAGR/Sharpe on the public factsheet.
+- **`fetch_usdt_balance_with_status`** (`services/exchange.py`) returns `(balance, balance_error)` so callers can route exchange-API errors through `data_quality_flags.balance_error = True` instead of collapsing into `None`.
+- **`PaginatedSelectTruncated`** (`services/match_eval.py`) typed exception with `page_count`, `page_size`, `hint`. Raised when `_paginated_select` hits its hard cap so callers cannot accidentally aggregate over a partial window. Pre-fix the helper logged a warning and silently sliced.
+- **`/match/eval` 503 path** (`routers/match.py:807`) — explicit `PaginatedSelectTruncated` handler that surfaces `page_count × page_size` + `hint` in the response detail rather than flattening to a generic 500. External monitoring can now distinguish "data scale exceeded" from generic crashes.
+- **Suppression rule** (`services/analytics_runner.py:961`) — `used_heuristic_capital` is suppressed when `account_balance_unavailable` or `no_linked_api_key` is already set; the heuristic is the downstream consequence of those upstream states, not a distinct condition. Prevents two redundant "approximate" chips for one root cause.
+- **8 new pytest regression specs** in `tests/test_analytics_runner.py` covering DQF plumbing, the no-double-count rule, section-flag-alone keeping `complete`, and the consumer-flag-alone promoting to `complete_with_warnings`.
+
+### Changed
+
+- **`_paginated_select` ORDER BY shape** — accepts a tuple of `((column, desc), ...)` for composite ordering. The `match_batches` query now orders `(allocator_id ASC, computed_at DESC)` matching `idx_match_batches_allocator_recent`; pre-fix `order_by="id"` (UUIDv4 PK) defeated the index and forced O(M·B) per call instead of O(M·k). The `match_candidates` query orders `(batch_id, rank)` and pushes the `exclusion_reason IS NULL` predicate into PostgREST via `.is_("exclusion_reason", "null")` so the planner can ride the partial index `idx_match_cand_batch_rank`.
+- **`analytics_runner.run_strategy_analytics`** consumes `trades_to_daily_returns_with_status` and surfaces the new flags in `data_quality_flags` + upgrades `computation_status` to `"complete_with_warnings"` ONLY when one of the consumer-specific flags fires. Section-level flags (`benchmark_unavailable`, `account_balance_unavailable`, `no_linked_api_key`, `position_metrics_failed`, etc.) deliberately keep `status='complete'` because eight frontend consumers gate exact-string on `computation_status === "complete"` (factsheet PDFs, discovery, strategy detail, portfolios, PerformanceReport, SyncProgress, queries). Migrating those consumers to accept both states is a separate follow-up PR.
+- **Test mock helper** (`tests/test_analytics_runner.py::_build_balance_flag_mock_supabase`) now stubs the `trades` query so the default MagicMock chain doesn't pollute `fills_data` and trigger spurious `position_side_volume_failed=True` flags during clean-path assertions.
+
+### Fixed
+
+- Stale docstring on `PaginatedSelectTruncated` claiming an `allocator_ids` attribute that was never on the class.
+- Pre-existing test pollution where `tests/test_cron_recompute_is_test_filter.py` monkey-patched `sys.modules["fastapi"]` at module-load time, breaking `test_debug_key_flow_router` and `test_job_worker` under pytest's alphabetical collection order. The stubs were unnecessary defensive code (the test imports nothing from those modules) — removed.
+
 ## [0.22.16.0] - 2026-05-09
 
 **audit-2026-05-07 G12.C — position_reconstruction FIFO + fees (final PR of the G12 split).** Closes 8 audit items (2 CRITICAL + 5 HIGH + 1 MED). PR 5 of 5. Position rebuild is now atomic (no more mid-cron-tick allocator dashboard reads of an empty positions table), the FIFO matcher correctly prorates fees on flip-fills, multi-fill closes use VWAP, posSide injection is defanged, multi-exchange contamination is ruled out, and shared-api_key cross-strategy exposure is gated.
