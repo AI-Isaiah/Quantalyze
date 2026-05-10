@@ -339,6 +339,28 @@ export async function POST(req: NextRequest) {
   // successful POST (RequestCallModal handleSubmit) using its own
   // distinctId, mirroring how the click and view events are captured.
   after(async () => {
+    // audit-2026-05-07 G9.B.7 (PR-1b extension, migration 115):
+    // record the notify-attempt timestamp the moment we begin the
+    // founder-notify path. Pre-fix the founder CRM had no way to
+    // distinguish "lead inserted, founder never told (transient
+    // Resend outage / ADMIN_EMAIL unset)" from "lead inserted,
+    // founder notified" — a stuck queue rendered as "All caught
+    // up". The marker write itself is wrapped in try/catch because
+    // a marker-write failure must NEVER block the actual email send;
+    // worst case the operator sees a clean send with no marker (same
+    // pre-migration shape).
+    try {
+      await admin
+        .from("for_quants_leads")
+        .update({ notify_attempted_at: new Date().toISOString() })
+        .eq("id", leadId);
+    } catch (markerErr) {
+      console.warn(
+        "[for-quants-lead] notify_attempted_at marker write failed (non-blocking):",
+        markerErr,
+      );
+    }
+
     // G9.B.7: notifyFounderGeneric silently returns early when
     // ADMIN_EMAIL is unset (see src/lib/email.ts:55,685). A misconfig
     // would land every lead in the DB but never alert the founder, and
@@ -353,6 +375,22 @@ export async function POST(req: NextRequest) {
         founderEmailMissingWarned = true;
         captureFailure(null, "founder_email_unset", { lead_id: leadId });
       }
+      // Record the configuration error in notify_error so the founder
+      // CRM "stuck pending notify" badge fires on this row even though
+      // notifyFounderGeneric didn't throw. notify_succeeded_at stays
+      // NULL — the email never went out.
+      try {
+        await admin
+          .from("for_quants_leads")
+          .update({ notify_error: "ADMIN_EMAIL unset" })
+          .eq("id", leadId);
+      } catch (markerErr) {
+        console.warn(
+          "[for-quants-lead] notify_error marker write failed (non-blocking):",
+          markerErr,
+        );
+      }
+      return;
     }
 
     try {
@@ -368,9 +406,42 @@ export async function POST(req: NextRequest) {
          ${parsed.notes ? `<p><strong>Notes:</strong><br/>${escapeHtml(parsed.notes)}</p>` : ""}
          <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
       );
+      // Clean send — pair the attempt timestamp with a success
+      // timestamp so the CRM's "stuck pending notify" predicate
+      // (attempted IS NOT NULL AND succeeded IS NULL) flips false.
+      try {
+        await admin
+          .from("for_quants_leads")
+          .update({ notify_succeeded_at: new Date().toISOString() })
+          .eq("id", leadId);
+      } catch (markerErr) {
+        console.warn(
+          "[for-quants-lead] notify_succeeded_at marker write failed (non-blocking):",
+          markerErr,
+        );
+      }
     } catch (err) {
       console.warn("[for-quants-lead] founder notify failed (non-blocking):", err);
       captureFailure(err, "founder_notify", { lead_id: leadId });
+      // Persist a sanitized error string so the founder CRM can show
+      // why the send failed (auth vs network vs body validation)
+      // without forcing operators into Sentry archaeology. Truncated
+      // to 500 chars to keep the column from absorbing a huge stack.
+      const sanitized = (err instanceof Error ? err.message : String(err)).slice(
+        0,
+        500,
+      );
+      try {
+        await admin
+          .from("for_quants_leads")
+          .update({ notify_error: sanitized })
+          .eq("id", leadId);
+      } catch (markerErr) {
+        console.warn(
+          "[for-quants-lead] notify_error marker write failed (non-blocking):",
+          markerErr,
+        );
+      }
     }
   });
 

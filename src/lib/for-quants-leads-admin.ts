@@ -27,6 +27,17 @@ export interface ForQuantsLeadRow {
   created_at: string;
   processed_at: string | null;
   processed_by: string | null;
+  /** audit-2026-05-07 G9.B.7 / migration 115 — set when after()
+   *  begins the founder-notify path. NULL pre-attempt or for legacy
+   *  rows. */
+  notify_attempted_at: string | null;
+  /** Set when notifyFounderGeneric returned without throwing. NULL
+   *  while the send is in flight, the helper threw, or ADMIN_EMAIL
+   *  was unset. Pair-with-attempted indicates a clean send. */
+  notify_succeeded_at: string | null;
+  /** Sanitized error message (max 500 chars) when the send failed
+   *  OR ADMIN_EMAIL was unset. NULL on clean sends. */
+  notify_error: string | null;
 }
 
 /** Hard cap on the `?show=all` view so a growing table doesn't ship
@@ -35,7 +46,7 @@ export interface ForQuantsLeadRow {
 export const FOR_QUANTS_LEADS_FULL_VIEW_CAP = 500;
 
 const LEAD_SELECT =
-  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by";
+  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by, notify_attempted_at, notify_succeeded_at, notify_error";
 
 export interface ListForQuantsLeadsResult {
   rows: ForQuantsLeadRow[];

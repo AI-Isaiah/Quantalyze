@@ -69,10 +69,16 @@ const dbState = vi.hoisted(
     inserted: Array<Record<string, unknown>>;
     insertShouldFail: boolean;
     adminClientShouldThrow: boolean;
+    /** audit-2026-05-07 G9.B.7 / migration 115 — capture every
+     *  notify-marker update the route makes inside its after()
+     *  callback so regression tests can pin attempted/succeeded/error
+     *  semantics without touching the production admin client. */
+    updates: Array<{ id: string; payload: Record<string, unknown> }>;
   } => ({
     inserted: [],
     insertShouldFail: false,
     adminClientShouldThrow: false,
+    updates: [],
   }),
 );
 
@@ -102,6 +108,18 @@ vi.mock("@/lib/supabase/admin", () => ({
                 error: null,
               }),
             }),
+          };
+        },
+        update(payload: Record<string, unknown>) {
+          // audit-2026-05-07 G9.B.7 — return a thenable that resolves
+          // on `.eq("id", <leadId>)` so the route's `await admin.from(
+          // "for_quants_leads").update({...}).eq("id", leadId)` chain
+          // captures the marker write into dbState.updates.
+          return {
+            eq: (_col: string, leadId: string) => {
+              dbState.updates.push({ id: leadId, payload });
+              return Promise.resolve({ data: null, error: null });
+            },
           };
         },
       }),
@@ -192,6 +210,16 @@ describe("POST /api/for-quants-lead", () => {
     dbState.inserted = [];
     dbState.insertShouldFail = false;
     dbState.adminClientShouldThrow = false;
+    dbState.updates = [];
+    // audit-2026-05-07 G9.B.7 (migration 115): the route now
+    // short-circuits the founder-notify path when ADMIN_EMAIL is
+    // unset, writing notify_error='ADMIN_EMAIL unset' instead of
+    // calling notifyFounderGeneric. The local test runner inherits
+    // an empty ADMIN_EMAIL by default, so set a stub here to keep
+    // every test in this file on the "configured" code path.
+    // Tests that specifically need the unset path opt-out by
+    // setting process.env.ADMIN_EMAIL = "" inside the it() block.
+    process.env.ADMIN_EMAIL = "founder-stub@example.test";
     emailState.sends = 0;
     emailState.shouldThrow = false;
     analyticsState.captures = 0;
@@ -640,6 +668,115 @@ describe("POST /api/for-quants-lead", () => {
             (c) => c.stage === "founder_email_unset",
           ),
         ).toBe(true);
+      } finally {
+        if (prev === undefined) {
+          delete process.env.ADMIN_EMAIL;
+        } else {
+          process.env.ADMIN_EMAIL = prev;
+        }
+      }
+    });
+  });
+
+  /**
+   * audit-2026-05-07 G9.B.7 (PR-1b extension, migration 115)
+   * — notify-attempt markers regression. The founder CRM uses the
+   *   predicate `notify_attempted_at IS NOT NULL AND
+   *   notify_succeeded_at IS NULL` to surface stuck-pending-notify
+   *   rows. These tests pin the route's after() callback writes so a
+   *   future refactor that drops a marker (or writes the success
+   *   marker before the send) is caught here, not in production.
+   */
+  describe("notify-attempt markers (G9.B.7 / migration 115)", () => {
+    it("clean send → writes notify_attempted_at AND notify_succeeded_at, no notify_error", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(VALID_PAYLOAD));
+      expect(res.status).toBe(200);
+      await flushMicrotasks();
+
+      const updatesForLead = dbState.updates.filter(
+        (u) => u.id === "lead-1",
+      );
+      const attempted = updatesForLead.find(
+        (u) => "notify_attempted_at" in u.payload,
+      );
+      const succeeded = updatesForLead.find(
+        (u) => "notify_succeeded_at" in u.payload,
+      );
+      const errored = updatesForLead.find(
+        (u) => "notify_error" in u.payload,
+      );
+
+      expect(attempted).toBeDefined();
+      expect(typeof attempted!.payload.notify_attempted_at).toBe("string");
+      expect(succeeded).toBeDefined();
+      expect(typeof succeeded!.payload.notify_succeeded_at).toBe("string");
+      expect(errored).toBeUndefined();
+    });
+
+    it("notifyFounderGeneric throws → writes notify_attempted_at + notify_error, NO notify_succeeded_at", async () => {
+      emailState.shouldThrow = true;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(VALID_PAYLOAD));
+        expect(res.status).toBe(200);
+        await flushMicrotasks();
+
+        const updatesForLead = dbState.updates.filter(
+          (u) => u.id === "lead-1",
+        );
+        const attempted = updatesForLead.find(
+          (u) => "notify_attempted_at" in u.payload,
+        );
+        const succeeded = updatesForLead.find(
+          (u) => "notify_succeeded_at" in u.payload,
+        );
+        const errored = updatesForLead.find(
+          (u) => "notify_error" in u.payload,
+        );
+
+        expect(attempted).toBeDefined();
+        expect(succeeded).toBeUndefined(); // pair-with-attempted predicate fires → CRM badge
+        expect(errored).toBeDefined();
+        expect(errored!.payload.notify_error).toMatch(/simulated email failure/);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("ADMIN_EMAIL unset → writes notify_attempted_at + notify_error='ADMIN_EMAIL unset', NO notify_succeeded_at, helper never invoked", async () => {
+      const prev = process.env.ADMIN_EMAIL;
+      process.env.ADMIN_EMAIL = "";
+      try {
+        vi.resetModules();
+        const sendsBefore = emailState.sends;
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(VALID_PAYLOAD));
+        expect(res.status).toBe(200);
+        await flushMicrotasks();
+
+        const updatesForLead = dbState.updates.filter(
+          (u) => u.id === "lead-1",
+        );
+        const attempted = updatesForLead.find(
+          (u) => "notify_attempted_at" in u.payload,
+        );
+        const succeeded = updatesForLead.find(
+          (u) => "notify_succeeded_at" in u.payload,
+        );
+        const errored = updatesForLead.find(
+          (u) => "notify_error" in u.payload,
+        );
+
+        expect(attempted).toBeDefined();
+        expect(succeeded).toBeUndefined();
+        expect(errored).toBeDefined();
+        expect(errored!.payload.notify_error).toBe("ADMIN_EMAIL unset");
+        // notifyFounderGeneric MUST NOT be called when ADMIN_EMAIL is
+        // unset — the early-return short-circuits the send so the
+        // helper's lazy "no admin email" warning doesn't fire either.
+        expect(emailState.sends).toBe(sendsBefore);
       } finally {
         if (prev === undefined) {
           delete process.env.ADMIN_EMAIL;

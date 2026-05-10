@@ -127,6 +127,14 @@ export function ForQuantsLeadsTable({
             const wizard = lead.wizard_context;
             const isProcessed = lead.processed_at !== null;
             const isLoading = loadingId === lead.id;
+            // audit-2026-05-07 G9.B.7 / migration 115 — surface
+            // "founder notification attempted but never succeeded" so
+            // the operator sees stuck rows instead of trusting the
+            // pre-fix "All caught up" implication. Predicate matches
+            // the partial index shipped in migration 115.
+            const isStuckPendingNotify =
+              lead.notify_attempted_at !== null &&
+              lead.notify_succeeded_at === null;
             const timeLabel =
               now === null
                 ? formatAbsoluteDate(lead.created_at)
@@ -151,6 +159,18 @@ export function ForQuantsLeadsTable({
                       {wizard?.step && (
                         <span className="inline-flex items-center rounded-md bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                           from wizard · {wizard.step}
+                        </span>
+                      )}
+                      {isStuckPendingNotify && (
+                        <span
+                          className="inline-flex items-center rounded-md bg-warning/10 px-2 py-0.5 text-[10px] font-medium text-warning"
+                          title={
+                            lead.notify_error
+                              ? `Founder notify failed: ${lead.notify_error}`
+                              : "Founder notify attempted but never confirmed."
+                          }
+                        >
+                          stuck pending notify
                         </span>
                       )}
                       {isProcessed && (
