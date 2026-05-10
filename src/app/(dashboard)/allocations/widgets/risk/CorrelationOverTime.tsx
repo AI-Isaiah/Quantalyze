@@ -100,7 +100,13 @@ export function CorrelationOverTime({ data }: WidgetProps) {
       for (let i = ROLLING_WINDOW - 1; i < aligned.length; i++) {
         const windowA = aligned.slice(i - ROLLING_WINDOW + 1, i + 1).map((x) => x.a);
         const windowB = aligned.slice(i - ROLLING_WINDOW + 1, i + 1).map((x) => x.b);
-        points.push({ date: aligned[i].date, corr: pearson(windowA, windowB) });
+        // Audit 2026-05-07 G11.E.5: pearson() returns null when one of
+        // the windows has zero variance (correlation undefined). Skip
+        // those rows so the line chart renders a gap rather than
+        // plotting a misleading 0.
+        const corr = pearson(windowA, windowB);
+        if (corr === null) continue;
+        points.push({ date: aligned[i].date, corr });
       }
 
       const avgAbs =
