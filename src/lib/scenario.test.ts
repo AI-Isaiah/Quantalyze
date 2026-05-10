@@ -575,3 +575,163 @@ describe("computeFavoritesOverlayCurve", () => {
     expect(lastPoint.value).toBeCloseTo(expectedFinal, 2);
   });
 });
+
+// =========================================================================
+// audit-2026-05-07 G8.E.6 / G8.E.7 / G8.E.8 — scenario math polish
+// =========================================================================
+
+describe("computeScenario — [G8.E.6] Sortino returns null instead of fallback to Sharpe when downsideVol === 0", () => {
+  it("strategy with no negative days → sortino: null (NOT silent Sharpe substitution)", () => {
+    // All-positive constant-return strategy. downsideSumSq = 0, so
+    // downsideVol = 0. Pre-fix this returned `sharpe ?? 0` and the UI
+    // displayed Sharpe relabeled as Sortino — misleading the
+    // allocator. Post-fix, sortino === null and the UI's
+    // formatNumber path renders an em-dash.
+    const dates = buildDates("2024-01-02", 60);
+    const strategies = [constantReturnStrategy("a", dates, 0.001)];
+
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    expect(metrics.sortino).toBeNull();
+    // Sharpe is also null in this constant-return case (volatility ===
+    // 0 → Sharpe null). The point of this test is purely the Sortino
+    // null contract.
+  });
+});
+
+describe("computeScenario — [G8.E.7] NaN/Infinity guard on cumulative wealth", () => {
+  it("daily_returns containing NaN → all KPIs return null (no NaN poison)", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const dr: DailyPoint[] = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? NaN : 0.001,
+    }));
+    const strategies = [
+      { ...constantReturnStrategy("a", dates, 0), daily_returns: dr },
+    ];
+
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    // Pre-fix, NaN poisoned the cumulative product (NaN < Infinity is
+    // false, so the catastrophic-day guard never tripped) and TWR
+    // came out NaN. Post-fix, the new Number.isFinite scan triggers
+    // the null-KPI return.
+    expect(metrics.twr).toBeNull();
+    expect(metrics.cagr).toBeNull();
+    expect(metrics.volatility).toBeNull();
+    expect(metrics.sharpe).toBeNull();
+    expect(metrics.sortino).toBeNull();
+    expect(metrics.max_drawdown).toBeNull();
+    expect(metrics.equity_curve).toEqual([]);
+  });
+
+  it("daily_returns containing Infinity → all KPIs return null", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const dr: DailyPoint[] = dates.map((date, i) => ({
+      date,
+      value: i === 10 ? Infinity : 0.001,
+    }));
+    const strategies = [
+      { ...constantReturnStrategy("a", dates, 0), daily_returns: dr },
+    ];
+
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    expect(metrics.twr).toBeNull();
+    expect(metrics.equity_curve).toEqual([]);
+  });
+
+  it("daily_returns containing -Infinity → catastrophic-day guard catches it", () => {
+    // -Infinity ≤ -1, so 1 + -Infinity = -Infinity. The cumulative
+    // product becomes ±Infinity which is NOT finite. Either the
+    // catastrophic-day guard (minCumulative <= 0) or the new
+    // anyNonFinite check fires; both return null KPIs.
+    const dates = buildDates("2024-01-02", 30);
+    const dr: DailyPoint[] = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? -Infinity : 0.001,
+    }));
+    const strategies = [
+      { ...constantReturnStrategy("a", dates, 0), daily_returns: dr },
+    ];
+
+    const cache = buildDateMapCache(strategies);
+    const metrics = computeScenario(strategies, defaultState(strategies), cache);
+
+    expect(metrics.twr).toBeNull();
+    expect(metrics.equity_curve).toEqual([]);
+  });
+});
+
+describe("computeFavoritesOverlayCurve — [G8.E.8] weight=0 + favorites edge cases", () => {
+  it("real strategies all weight=0 + favorites non-empty → curve is finite (no NaN/Infinity)", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const real = [constantReturnStrategy("a", dates, 0.002)];
+    const fav = constantReturnStrategy("f", dates, 0.005);
+
+    // Allocator hasn't set weights yet — all NULL → coerced to 0
+    // (real-world path: a freshly created portfolio with no weights
+    // configured, with favorites toggled on for exploration).
+    const curve = computeFavoritesOverlayCurve(
+      real,
+      { a: 0 },
+      [fav],
+      dates[0],
+    );
+
+    expect(curve.length).toBeGreaterThan(0);
+    for (const point of curve) {
+      expect(Number.isFinite(point.value)).toBe(true);
+      expect(point.value).toBeGreaterThan(0);
+    }
+  });
+
+  it("sleevePercent=0 + favorites non-empty → curve equals baseline (favorites contribute zero)", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const real = [constantReturnStrategy("a", dates, 0.002)];
+    const fav = constantReturnStrategy("f", dates, 0.010);
+
+    const baseline = computeCompositeCurve(real, { a: 1 }, dates[0]);
+    const curve = computeFavoritesOverlayCurve(
+      real,
+      { a: 1 },
+      [fav],
+      dates[0],
+      0, // sleevePercent
+    );
+
+    // sleevePercent=0 means the favorite gets zero weight in the
+    // combined book; the curve must match the baseline pointwise.
+    expect(curve.length).toBe(baseline.length);
+    for (let i = 0; i < curve.length; i++) {
+      expect(curve[i].date).toBe(baseline[i].date);
+      expect(curve[i].value).toBeCloseTo(baseline[i].value, 6);
+    }
+  });
+
+  it("sleevePercent=1 + favorites non-empty → curve equals favorites-only composite", () => {
+    const dates = buildDates("2024-01-02", 30);
+    const real = [constantReturnStrategy("a", dates, 0.002)];
+    const fav = constantReturnStrategy("f", dates, 0.010);
+
+    // sleevePercent=1 carves out 100% of the book for the favorite,
+    // 0% for the real strategy. The resulting curve should match
+    // the favorite's standalone composite (compounded daily).
+    const curve = computeFavoritesOverlayCurve(
+      real,
+      { a: 1 },
+      [fav],
+      dates[0],
+      1,
+    );
+    const favOnly = computeCompositeCurve([fav], { f: 1 }, dates[0]);
+
+    expect(curve.length).toBe(favOnly.length);
+    const last = curve[curve.length - 1];
+    const favLast = favOnly[favOnly.length - 1];
+    expect(last.value).toBeCloseTo(favLast.value, 4);
+  });
+});
