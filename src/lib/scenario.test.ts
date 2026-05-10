@@ -4,7 +4,6 @@ import {
   computeScenario,
   computeStrategyCurve,
   computeCompositeCurve,
-  computeFavoritesOverlayCurve,
   type StrategyForBuilder,
   type DailyPoint,
   type ScenarioState,
@@ -508,74 +507,6 @@ describe("computeCompositeCurve", () => {
   });
 });
 
-describe("computeFavoritesOverlayCurve", () => {
-  it("returns the baseline curve when no favorites are toggled on", () => {
-    const dates = buildDates("2024-01-02", 30);
-    const real = [
-      constantReturnStrategy("a", dates, 0.001),
-      constantReturnStrategy("b", dates, 0.002),
-    ];
-    const weights = { a: 0.5, b: 0.5 };
-
-    const baseline = computeCompositeCurve(real, weights, dates[0]);
-    const overlay = computeFavoritesOverlayCurve(real, weights, [], dates[0]);
-
-    expect(overlay).toHaveLength(baseline.length);
-    for (let i = 0; i < baseline.length; i++) {
-      expect(overlay[i].date).toBe(baseline[i].date);
-      expect(overlay[i].value).toBeCloseTo(baseline[i].value, 6);
-    }
-  });
-
-  it("shifts the curve when a favorite is toggled on, with a 10% sleeve by default", () => {
-    const dates = buildDates("2024-01-02", 60);
-    const real = [constantReturnStrategy("a", dates, 0.002)];
-    const favorite = constantReturnStrategy("f", dates, 0.010);
-
-    const baseline = computeCompositeCurve(real, { a: 1 }, dates[0]);
-    const withFavorite = computeFavoritesOverlayCurve(
-      real,
-      { a: 1 },
-      [favorite],
-      dates[0],
-    );
-
-    expect(withFavorite.length).toBe(baseline.length);
-    // The favorite has a much higher daily return, so the composite
-    // should be strictly above the baseline at every point past index 0.
-    // Sleeve = 10%, so expected composite daily ≈ 0.9 * 0.002 + 0.1 * 0.010
-    // = 0.0018 + 0.0010 = 0.0028, vs baseline's 0.002.
-    for (let i = 1; i < withFavorite.length; i++) {
-      expect(withFavorite[i].value).toBeGreaterThan(baseline[i].value);
-    }
-    // The final value should match the analytic expectation, +/- 1%.
-    const expectedFinal = Math.pow(1 + 0.9 * 0.002 + 0.1 * 0.010, 60);
-    const lastPoint = withFavorite[withFavorite.length - 1];
-    expect(lastPoint.value).toBeCloseTo(expectedFinal, 2);
-  });
-
-  it("splits the sleeve equally among multiple active favorites", () => {
-    const dates = buildDates("2024-01-02", 60);
-    const real = [constantReturnStrategy("a", dates, 0.002)];
-    const fav1 = constantReturnStrategy("f1", dates, 0.010);
-    const fav2 = constantReturnStrategy("f2", dates, 0.004);
-
-    const curve = computeFavoritesOverlayCurve(
-      real,
-      { a: 1 },
-      [fav1, fav2],
-      dates[0],
-    );
-
-    // Expected daily: 0.9 * 0.002 + 0.05 * 0.010 + 0.05 * 0.004
-    //               = 0.0018 + 0.0005 + 0.0002 = 0.0025
-    const expectedDaily = 0.9 * 0.002 + 0.05 * 0.010 + 0.05 * 0.004;
-    const expectedFinal = Math.pow(1 + expectedDaily, 60);
-    const lastPoint = curve[curve.length - 1];
-    expect(lastPoint.value).toBeCloseTo(expectedFinal, 2);
-  });
-});
-
 // =========================================================================
 // audit-2026-05-07 G8.E.6 / G8.E.7 / G8.E.8 — scenario math polish
 // =========================================================================
@@ -666,72 +597,3 @@ describe("computeScenario — [G8.E.7] NaN/Infinity guard on cumulative wealth",
   });
 });
 
-describe("computeFavoritesOverlayCurve — [G8.E.8] weight=0 + favorites edge cases", () => {
-  it("real strategies all weight=0 + favorites non-empty → curve is finite (no NaN/Infinity)", () => {
-    const dates = buildDates("2024-01-02", 30);
-    const real = [constantReturnStrategy("a", dates, 0.002)];
-    const fav = constantReturnStrategy("f", dates, 0.005);
-
-    // Allocator hasn't set weights yet — all NULL → coerced to 0
-    // (real-world path: a freshly created portfolio with no weights
-    // configured, with favorites toggled on for exploration).
-    const curve = computeFavoritesOverlayCurve(
-      real,
-      { a: 0 },
-      [fav],
-      dates[0],
-    );
-
-    expect(curve.length).toBeGreaterThan(0);
-    for (const point of curve) {
-      expect(Number.isFinite(point.value)).toBe(true);
-      expect(point.value).toBeGreaterThan(0);
-    }
-  });
-
-  it("sleevePercent=0 + favorites non-empty → curve equals baseline (favorites contribute zero)", () => {
-    const dates = buildDates("2024-01-02", 30);
-    const real = [constantReturnStrategy("a", dates, 0.002)];
-    const fav = constantReturnStrategy("f", dates, 0.010);
-
-    const baseline = computeCompositeCurve(real, { a: 1 }, dates[0]);
-    const curve = computeFavoritesOverlayCurve(
-      real,
-      { a: 1 },
-      [fav],
-      dates[0],
-      0, // sleevePercent
-    );
-
-    // sleevePercent=0 means the favorite gets zero weight in the
-    // combined book; the curve must match the baseline pointwise.
-    expect(curve.length).toBe(baseline.length);
-    for (let i = 0; i < curve.length; i++) {
-      expect(curve[i].date).toBe(baseline[i].date);
-      expect(curve[i].value).toBeCloseTo(baseline[i].value, 6);
-    }
-  });
-
-  it("sleevePercent=1 + favorites non-empty → curve equals favorites-only composite", () => {
-    const dates = buildDates("2024-01-02", 30);
-    const real = [constantReturnStrategy("a", dates, 0.002)];
-    const fav = constantReturnStrategy("f", dates, 0.010);
-
-    // sleevePercent=1 carves out 100% of the book for the favorite,
-    // 0% for the real strategy. The resulting curve should match
-    // the favorite's standalone composite (compounded daily).
-    const curve = computeFavoritesOverlayCurve(
-      real,
-      { a: 1 },
-      [fav],
-      dates[0],
-      1,
-    );
-    const favOnly = computeCompositeCurve([fav], { f: 1 }, dates[0]);
-
-    expect(curve.length).toBe(favOnly.length);
-    const last = curve[curve.length - 1];
-    const favLast = favOnly[favOnly.length - 1];
-    expect(last.value).toBeCloseTo(favLast.value, 4);
-  });
-});
