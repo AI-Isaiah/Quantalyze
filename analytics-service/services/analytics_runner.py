@@ -954,37 +954,61 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # Audit-2026-05-07 #9 (PR-7 consumer migration) — surface
         # used_heuristic_capital and balance_error from the
         # ReturnsComputationMeta returned by trades_to_daily_returns_with_status.
-        # The factsheet UI uses these keys to render a "approximate"
+        # The factsheet UI uses these keys to render an "approximate"
         # chip on CAGR/Sharpe rather than presenting them as canonical.
-        if returns_meta["used_heuristic_capital"]:
+        #
+        # Suppress used_heuristic_capital when account_balance_unavailable
+        # OR no_linked_api_key already fires — the heuristic is the
+        # downstream consequence of those upstream states, not a distinct
+        # condition. Surfacing both would render two redundant
+        # "approximate" chips on the factsheet for one underlying state.
+        if returns_meta["used_heuristic_capital"] and not (
+            account_balance_unavailable or no_linked_api_key
+        ):
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["used_heuristic_capital"] = True
         if returns_meta["balance_error"]:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["balance_error"] = True
 
-        # Upgrade the run's computation_status to 'complete_with_warnings'
-        # whenever ANY data-quality flag is set — both the
-        # transforms.py-sourced flags (used_heuristic_capital,
-        # balance_error) and the section-level flags
-        # (position_metrics_failed, fills_fetch_failed,
+        # Upgrade computation_status to 'complete_with_warnings' ONLY when
+        # one of the consumer-specific flags above fires
+        # (used_heuristic_capital, balance_error). The section-level
+        # flags (position_metrics_failed, fills_fetch_failed,
         # position_side_volume_failed, trade_mix_approximation,
-        # account_balance_unavailable, no_linked_api_key). Per the
-        # project-wide convention documented in
-        # transforms.py::_build_meta, the consumer ORs the transforms
-        # hint with its per-section flags so the final
-        # computation_status reflects every degraded surface — not
-        # just the heuristic-capital path. Pre-fix this branch
-        # silently rendered position-metrics failures as
-        # status='complete' on the public factsheet, defeating the
-        # chip-rendering branch the audit added for #9.
-        # (sibling_kinds_failed is set later, post-upsert; that one
-        # path is intentionally not OR-ed here because the upsert
-        # below establishes the parent row first.)
-        if data_quality_flags:
-            computation_status_value = "complete_with_warnings"
-        else:
-            computation_status_value = returns_meta["computation_status_hint"]
+        # account_balance_unavailable, no_linked_api_key,
+        # benchmark_unavailable) deliberately KEEP status='complete'
+        # because eight downstream frontend consumers gate exact-string
+        # on `computation_status === "complete"`:
+        #   - src/app/api/factsheet/[id]/pdf/route.ts:90
+        #   - src/app/api/factsheet/[id]/tearsheet.pdf/route.ts:61
+        #   - src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx:113
+        #   - src/app/strategy/[id]/page.tsx:134
+        #   - src/app/(dashboard)/portfolios/[id]/page.tsx:484
+        #   - src/components/strategy/PerformanceReport.tsx:50
+        #   - src/components/strategy/SyncProgress.tsx:139
+        #   - src/lib/queries.ts:509
+        # Promoting those flags would cause demo strategies (no api_key
+        # linked) and any strategy with a stale benchmark to fail PDF
+        # rendering, hide metric grids, and trip warning chips on every
+        # public surface. Migrating the consumers to accept both states
+        # is its own follow-up PR (tracked in FIX-LIST follow-up backlog
+        # alongside PR-7c). Until then, stay narrow: only the audit-#9
+        # producer/consumer pair upgrades status.
+        consumer_specific_flags = (
+            (data_quality_flags or {}).get("used_heuristic_capital")
+            or (data_quality_flags or {}).get("balance_error")
+        )
+        # When the consumer flag is suppressed (because the upstream
+        # account_balance_unavailable / no_linked_api_key already
+        # captures the same root cause), status MUST stay 'complete' —
+        # do NOT fall back to the meta hint, which would still read
+        # 'complete_with_warnings' from transforms.py and silently
+        # promote section-flag-only runs the frontend gates can't
+        # handle.
+        computation_status_value = (
+            "complete_with_warnings" if consumer_specific_flags else "complete"
+        )
 
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure

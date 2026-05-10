@@ -198,11 +198,25 @@ def _build_meta(
 ) -> ReturnsComputationMeta:
     """Build the ``ReturnsComputationMeta`` returned to the caller.
 
-    The ``computation_status_hint`` rule is the project-wide convention:
-    if ANY data-quality flag is set the run is "complete_with_warnings",
-    otherwise "complete". `analytics_runner.py` will OR this hint with
-    its own per-section flags (position_metrics_failed, etc.) so the
-    final computation_status reflects every degraded surface.
+    The ``computation_status_hint`` is "complete_with_warnings" when
+    either ``used_heuristic_capital`` or ``balance_error`` is set,
+    otherwise "complete". The consumer in ``analytics_runner.py``
+    promotes ``strategy_analytics.computation_status`` to
+    "complete_with_warnings" specifically when one of these two
+    consumer-migration flags fires.
+
+    Section-level flags (position_metrics_failed,
+    position_side_volume_failed, trade_mix_approximation,
+    account_balance_unavailable, no_linked_api_key,
+    benchmark_unavailable, etc.) deliberately keep
+    computation_status='complete' even when their corresponding DQF
+    keys fire — eight frontend consumers gate exact-string on
+    `computation_status === "complete"` (factsheet PDFs, discovery
+    page, strategy detail, portfolios, queries, PerformanceReport,
+    SyncProgress). Promoting those flags would break PDF rendering
+    and metric grids on every demo strategy and every strategy with
+    a stale benchmark. Migrating the consumers to accept both states
+    is a separate follow-up PR.
     """
     if used_heuristic_capital or balance_error:
         hint = "complete_with_warnings"

@@ -1249,7 +1249,9 @@ async def test_consumer_migration_used_heuristic_capital_surfaces_in_dqf_and_sta
         daily_pnl_rows=_minimal_daily_rows(),
         sa_upsert_calls=sa_upsert_calls,
         strategy_api_key_id="00000000-0000-0000-0000-000000000001",
-        api_key_balance=None,
+        api_key_balance=10000.0,  # account_balance available, so heuristic
+                                  # is NOT suppressed by the no-double-count
+                                  # rule — used_heuristic_capital surfaces.
     )
     upsert = await _run_and_get_success_upsert(
         mock_supabase,
@@ -1304,19 +1306,20 @@ async def test_consumer_migration_balance_error_surfaces_in_dqf_and_status():
 
 
 @pytest.mark.asyncio
-async def test_consumer_migration_section_flag_alone_upgrades_status():
-    """audit-2026-05-07 G9.B.7-style contract pin: when ONLY a
-    section-level flag fires (no_linked_api_key in this case — set
-    when api_key_id is None) and used_heuristic_capital /
-    balance_error are both False, the runner must still upgrade
-    computation_status to 'complete_with_warnings'.
+async def test_consumer_migration_section_flag_alone_keeps_status_complete():
+    """Frontend-consumer compatibility pin: when ONLY a section-level
+    flag fires (no_linked_api_key in this case — set when api_key_id
+    is None) and used_heuristic_capital / balance_error are both
+    False, the runner MUST keep computation_status='complete'.
 
-    This pins the OR documented in transforms.py::_build_meta:
-    "analytics_runner.py will OR this hint with its own per-section
-    flags so the final computation_status reflects every degraded
-    surface." Pre-fix, the consumer assigned the hint directly,
-    leaving status='complete' for any run with only section flags —
-    a silent-degradation surface the audit was supposed to close.
+    Eight frontend consumers gate exact-string on
+    `computation_status === "complete"` (factsheet PDFs, discovery,
+    strategy detail, portfolios, PerformanceReport, SyncProgress,
+    queries). Promoting status on every section flag would break
+    PDF rendering and hide metric grids on every demo strategy.
+    Migrating those consumers to accept both states is a separate
+    follow-up PR; until then ONLY the audit-2026-05-07 #9 consumer
+    flags (used_heuristic_capital, balance_error) upgrade status.
     """
     sa_upsert_calls: list[dict] = []
     mock_supabase = _build_balance_flag_mock_supabase(
@@ -1329,9 +1332,47 @@ async def test_consumer_migration_section_flag_alone_upgrades_status():
     assert flags.get("no_linked_api_key") is True
     assert "used_heuristic_capital" not in flags
     assert "balance_error" not in flags
-    assert upsert.get("computation_status") == "complete_with_warnings", (
-        "Section-level DQF flags must promote computation_status per the "
-        f"_build_meta contract; got: {upsert.get('computation_status')!r}"
+    assert upsert.get("computation_status") == "complete", (
+        "Section-level DQF flags must NOT promote computation_status "
+        "(would break frontend gates that exact-match 'complete'); "
+        f"got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_no_double_count_when_account_balance_unavailable():
+    """Red-team finding: when account_balance_unavailable fires AND
+    the heuristic-capital path also activates (because account_balance
+    is None as a downstream consequence), the runner must NOT
+    double-surface both flags. The factsheet would render two
+    redundant 'approximate' chips for one underlying state.
+
+    Suppression rule (analytics_runner.py:961+): used_heuristic_capital
+    is gated `not (account_balance_unavailable or no_linked_api_key)`.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=None,  # → account_balance_unavailable
+    )
+    # Inject heuristic-capital=True via the helper to simulate the
+    # downstream consequence — same shape as if production transforms
+    # fell into the heuristic branch because account_balance was None.
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase, sa_upsert_calls, used_heuristic_capital=True,
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("account_balance_unavailable") is True
+    assert "used_heuristic_capital" not in flags, (
+        "used_heuristic_capital must be suppressed when "
+        "account_balance_unavailable already fires (one root cause, "
+        f"not two). got: {flags!r}"
+    )
+    assert upsert.get("computation_status") == "complete", (
+        "computation_status stays 'complete' when only section flags "
+        f"fire; got: {upsert.get('computation_status')!r}"
     )
 
 
