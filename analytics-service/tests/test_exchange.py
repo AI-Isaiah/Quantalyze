@@ -1378,3 +1378,126 @@ class TestG12BBybitIsMaker:
         )
         assert len(result) == 1
         assert result[0]["is_maker"] is expected
+
+
+# ─── audit-2026-05-07 #9 — fetch_usdt_balance_with_status regression ────
+
+
+class TestFetchUsdtBalanceWithStatus:
+    """Audit-2026-05-07 #9 — pre-fix `fetch_usdt_balance` collapsed
+    "balance unavailable due to error" and "balance legitimately not
+    provided" into a bare None. The new `fetch_usdt_balance_with_status`
+    distinguishes them so the caller can set
+    `data_quality_flags.balance_error = True` AND
+    `strategy_analytics.computation_status = 'complete_with_warnings'`
+    when a transient exchange-API failure forces the heuristic-capital
+    fallback path. These tests lock the contract."""
+
+    @pytest.mark.asyncio
+    async def test_success_returns_balance_and_no_error(self):
+        from services.exchange import fetch_usdt_balance_with_status
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"USDT": 12345.67}}
+        )
+        balance, balance_error = await fetch_usdt_balance_with_status(
+            mock_exchange
+        )
+        assert balance == 12345.67
+        assert balance_error is False
+
+    @pytest.mark.asyncio
+    async def test_exchange_api_exception_returns_none_with_error_true(
+        self,
+    ):
+        """The audit's headline case: a transient OKX 5xx must NOT look
+        identical to a paper account with zero balance. Pre-fix both
+        landed on a bare None and the factsheet rendered the heuristic-
+        capital result as canonical CAGR/Sharpe."""
+        from services.exchange import fetch_usdt_balance_with_status
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_balance = AsyncMock(
+            side_effect=RuntimeError("OKX 5xx during balance read")
+        )
+        balance, balance_error = await fetch_usdt_balance_with_status(
+            mock_exchange
+        )
+        assert balance is None
+        assert balance_error is True, (
+            "fetch_usdt_balance_with_status MUST propagate "
+            "balance_error=True on any exchange-API exception so the "
+            "caller can stamp data_quality_flags.balance_error and "
+            "computation_status='complete_with_warnings'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_legitimate_zero_balance_returns_none_with_error_false(
+        self,
+    ):
+        """A successful read against a drained / paper account is NOT an
+        error. Caller treats this as legitimate-no-balance (different
+        UI text from the degraded path)."""
+        from services.exchange import fetch_usdt_balance_with_status
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"USDT": 0}}
+        )
+        balance, balance_error = await fetch_usdt_balance_with_status(
+            mock_exchange
+        )
+        assert balance is None
+        assert balance_error is False
+
+    @pytest.mark.asyncio
+    async def test_missing_usdt_field_returns_none_with_error_false(self):
+        """An account without a USDT key is also a legitimate state —
+        e.g. a futures-only account holding margin in a different
+        currency. Must not be treated as a balance_error."""
+        from services.exchange import fetch_usdt_balance_with_status
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_balance = AsyncMock(
+            return_value={"total": {"BTC": 0.5}}
+        )
+        balance, balance_error = await fetch_usdt_balance_with_status(
+            mock_exchange
+        )
+        assert balance is None
+        assert balance_error is False
+
+    @pytest.mark.asyncio
+    async def test_malformed_response_shape_returns_balance_error(self):
+        """A misbehaving exchange that returns an unexpected shape
+        (e.g. None, list, string) must surface as balance_error=True
+        rather than silently inheriting the heuristic path. Tests the
+        defensive try/except around the .get(...).get(...) chain."""
+        from services.exchange import fetch_usdt_balance_with_status
+
+        mock_exchange = MagicMock()
+        # `total` field is None instead of a dict — `.get("USDT", 0)`
+        # against None raises AttributeError.
+        mock_exchange.fetch_balance = AsyncMock(
+            return_value={"total": None}
+        )
+        balance, balance_error = await fetch_usdt_balance_with_status(
+            mock_exchange
+        )
+        assert balance is None
+        assert balance_error is True
+
+    @pytest.mark.asyncio
+    async def test_fetch_usdt_balance_wrapper_drops_error_flag(self):
+        """The legacy `fetch_usdt_balance` wrapper is preserved for
+        backwards compatibility. Confirm it still returns None on
+        exception (loses the flag — that's the point of the new API)."""
+        from services.exchange import fetch_usdt_balance
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_balance = AsyncMock(
+            side_effect=RuntimeError("transient")
+        )
+        balance = await fetch_usdt_balance(mock_exchange)
+        assert balance is None
