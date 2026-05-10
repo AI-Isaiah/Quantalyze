@@ -103,7 +103,6 @@ export function segmentDrawdowns(
   // call (not per point) keeps the console quiet under repeated
   // re-renders while still surfacing the data-quality issue.
   if (positiveCount > 0 && firstPositiveSample !== null) {
-    // eslint-disable-next-line no-console
     console.warn(
       `[segmentDrawdowns] received ${positiveCount} positive value(s) in drawdown series — ` +
         `quantstats convention is value <= 0. Treating as not-in-drawdown. ` +
