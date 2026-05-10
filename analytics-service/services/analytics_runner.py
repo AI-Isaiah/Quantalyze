@@ -45,7 +45,7 @@ from fastapi import HTTPException
 from services.benchmark import get_benchmark_returns
 from services.db import db_execute, get_supabase
 from services.metrics import compute_all_metrics
-from services.transforms import trades_to_daily_returns
+from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
 
@@ -640,9 +640,30 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             else:
                 no_linked_api_key = True
 
-        # Transform trades to daily returns
-        returns = trades_to_daily_returns(
-            trades, account_balance=account_balance
+        # Transform trades to daily returns.
+        #
+        # Audit-2026-05-07 #9 (PR-7 consumer migration) — use the
+        # _with_status form so the heuristic-capital fallback is
+        # surfaced through data_quality_flags + computation_status.
+        # Pre-fix the bare returns shape collapsed three states:
+        #   * accurate compute (real account_balance, no fallback);
+        #   * approximate compute (heuristic capital, off by 5–10×);
+        #   * errored compute (exchange-API balance fetch failed).
+        # The factsheet rendered the second and third as canonical
+        # CAGR/Sharpe with no DQF chip.
+        #
+        # `balance_error` from the runner side is NOT plumbed through
+        # yet — analytics_runner reads `api_keys.account_balance_usdt`
+        # (a DB column populated by the cron / process-key path), not
+        # the exchange API directly. The exchange-API error flag from
+        # `fetch_usdt_balance_with_status` lives on the cron path; to
+        # carry it down to the analytics consumer requires either a
+        # `balance_error` column on `api_keys` or a dedicated DQF
+        # plumbing table — both PR-5 territory. Track as PR-7c
+        # (DB schema add). For now the runner passes balance_error=False
+        # and only surfaces `used_heuristic_capital` in DQF.
+        returns, returns_meta = trades_to_daily_returns_with_status(
+            trades, account_balance=account_balance, balance_error=False
         )
 
         if len(returns) < 2:
@@ -930,6 +951,25 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["no_linked_api_key"] = True
 
+        # Audit-2026-05-07 #9 (PR-7 consumer migration) — surface
+        # used_heuristic_capital and balance_error from the
+        # ReturnsComputationMeta returned by trades_to_daily_returns_with_status.
+        # The factsheet UI uses these keys to render a "approximate"
+        # chip on CAGR/Sharpe rather than presenting them as canonical.
+        if returns_meta["used_heuristic_capital"]:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["used_heuristic_capital"] = True
+        if returns_meta["balance_error"]:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["balance_error"] = True
+
+        # When transforms.py signals degraded inputs, upgrade the run's
+        # computation_status from 'complete' to 'complete_with_warnings'
+        # so the strategy detail page can route to the chip-rendering
+        # branch. Section-level failure flags (position_metrics_failed,
+        # sibling_kinds_failed, etc.) handled separately above/below.
+        computation_status_value = returns_meta["computation_status_hint"]
+
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure
         # aggregates (without exposure_series, which moved to sibling_kinds).
@@ -937,7 +977,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             lambda: supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
-                    "computation_status": "complete",
+                    "computation_status": computation_status_value,
                     "computation_error": None,
                     "data_quality_flags": data_quality_flags,
                     **metrics_result.metrics_json,
