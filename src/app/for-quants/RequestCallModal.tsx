@@ -59,6 +59,12 @@ export function RequestCallModal({
   ctaLocation,
   wizardContext,
 }: RequestCallModalProps) {
+  // Guard ensures RequestCallForm mounts on each open and unmounts on
+  // close — the form's useEffect at L94 must fire per-open (the click
+  // tracker), and unmount-on-close gives a fresh useState on the next
+  // open. Removing this guard while leaving Modal open={open} would
+  // change useEffect timing from "on modal open" to "on page load",
+  // silently breaking the click event semantics. See G9.B.19.
   if (!open) return null;
   return (
     <Modal open={open} onClose={onClose} title="Request a Call">
