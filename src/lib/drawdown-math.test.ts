@@ -1,6 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { segmentDrawdowns } from "./drawdown-math";
 import type { TimeSeriesPoint } from "./types";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 // Helper: build a drawdown series from (date, value) tuples so tests stay
 // readable. Values follow the quantstats `to_drawdown_series` convention
@@ -236,6 +240,13 @@ describe("segmentDrawdowns", () => {
     // point blip or a mislabeled series — positive values must NOT be
     // treated as being in a drawdown episode. The only genuine dip below
     // the 0.5% threshold here is -0.02 → one episode, not two.
+    //
+    // Audit 2026-05-07 G11.E.18: positive values still get the legacy
+    // not-in-drawdown treatment, but a console.warn is emitted once per
+    // call so operators have a signal to investigate the upstream data
+    // quality issue. Test asserts both behaviours.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
     const episodes = segmentDrawdowns(
       series(
         ["2024-01-01", 0],
@@ -248,5 +259,30 @@ describe("segmentDrawdowns", () => {
     expect(episodes).toHaveLength(1);
     expect(episodes[0].depthPct).toBeCloseTo(-0.02, 10);
     expect(episodes[0].troughDate).toBe("2024-01-04");
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/segmentDrawdowns/);
+    expect(warn.mock.calls[0][0]).toMatch(/positive/);
+  });
+
+  /**
+   * Audit 2026-05-07 G11.E.18 regression: clean drawdown series (only
+   * zero/negative values) MUST NOT emit any console.warn. The warning is
+   * reserved for the corruption signal — emitting it on every render
+   * would spam the console and dilute the signal.
+   */
+  it("does NOT warn for a clean drawdown series with no positive values (G11.E.18)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    segmentDrawdowns(
+      series(
+        ["2024-01-01", 0],
+        ["2024-01-02", -0.05],
+        ["2024-01-03", -0.10],
+        ["2024-01-04", 0],
+      ),
+    );
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });

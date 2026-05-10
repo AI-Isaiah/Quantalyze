@@ -25,6 +25,15 @@ const MS_PER_DAY = 86_400_000;
  *
  * Tiny drawdowns (|depth| < minDepth) are filtered so the list stays actionable
  * for allocators. Default threshold is 0.5%.
+ *
+ * Audit 2026-05-07 G11.E.18: when an input point has a positive value
+ * (impossible per the quantstats `to_drawdown_series` convention — a
+ * drawdown series is never above its prior peak), we now log a single
+ * console.warn with a sample so corrupted inputs surface during dev /
+ * staging instead of producing degenerate-but-plausible output. The
+ * function still treats positive values as out-of-episode (the legacy
+ * defensive behaviour) so a one-off floating-point blip doesn't crash
+ * the chart — but the warn gives operators a signal to investigate.
  */
 export function segmentDrawdowns(
   series: TimeSeriesPoint[],
@@ -38,10 +47,22 @@ export function segmentDrawdowns(
   let peakIdx = -1;
   let troughIdx = -1;
   let troughValue = 0;
+  let positiveCount = 0;
+  let firstPositiveSample: TimeSeriesPoint | null = null;
 
   for (let i = 0; i < series.length; i++) {
     const point = series[i];
     const value = point.value;
+
+    // Audit 2026-05-07 G11.E.18: track positive values so we can emit a
+    // single corruption warning at the end of the loop. Quantstats
+    // convention: drawdown series values are <= 0; a positive value is
+    // impossible without upstream corruption (sign-flip, equity curve
+    // mislabelled as drawdown, etc.).
+    if (value > 0) {
+      positiveCount += 1;
+      if (firstPositiveSample === null) firstPositiveSample = point;
+    }
 
     if (!inEpisode) {
       if (value < 0) {
@@ -75,6 +96,18 @@ export function segmentDrawdowns(
   if (inEpisode) {
     episodes.push(
       makeEpisode(series, peakIdx, troughIdx, series.length - 1, true),
+    );
+  }
+
+  // Audit 2026-05-07 G11.E.18: corrupted-input signal. One warning per
+  // call (not per point) keeps the console quiet under repeated
+  // re-renders while still surfacing the data-quality issue.
+  if (positiveCount > 0 && firstPositiveSample !== null) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[segmentDrawdowns] received ${positiveCount} positive value(s) in drawdown series — ` +
+        `quantstats convention is value <= 0. Treating as not-in-drawdown. ` +
+        `First sample: { date: ${firstPositiveSample.date}, value: ${firstPositiveSample.value} }`,
     );
   }
 
