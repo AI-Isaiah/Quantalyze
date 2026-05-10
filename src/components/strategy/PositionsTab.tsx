@@ -89,8 +89,20 @@ export function PositionsTab({
     );
   }
 
-  // Empty state (AFTER all hooks — react-hooks/rules-of-hooks)
-  if ((!positions || positions.length === 0) && !tm) {
+  // Audit 2026-05-07 G12.G.7: snapshot-inconsistency guard. The
+  // pre-audit guard required BOTH `positions` empty AND `tm` null —
+  // which let stale `tm` (computed by a prior analytics run) hide an
+  // empty `positions` table mid-recompute. Result: dashboard renders
+  // "Total Positions: 23" with empty Best/Worst tables — visibly
+  // contradictory state with no detection path. Flipping to OR means
+  // either signal of inconsistency triggers the empty state.
+  // Operators see "no positions reconstructed yet" until both sides
+  // are populated, which is the safer default than mixed UI.
+  //
+  // Full fix (single-RPC transaction or snapshot_id assertion) needs a
+  // migration in PR-5; this guard is the recipe-(c) bandaid that
+  // unblocks the user-visible dashboard inconsistency without DB work.
+  if (!positions || positions.length === 0 || !tm) {
     return (
       <div className="flex items-center justify-center py-16">
         <p className="text-sm text-text-muted text-center">
