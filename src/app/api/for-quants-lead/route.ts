@@ -172,20 +172,29 @@ export async function POST(req: NextRequest) {
   // requires a user_id; this caller has no user session. Lead-capture
   // funnel metrics live in PostHog (trackForQuantsEventServer below)
   // per ADR-0023 §3.
+  //
+  // `wizard_context` is set on the insert ONLY when the caller actually
+  // passes one (in-wizard leads). The column was added in migration 031;
+  // omitting the key when null lets the route's common landing-page
+  // path stay green even on a hypothetical fresh DB where 031 hasn't
+  // applied yet, instead of 500ing every lead with
+  // `column "wizard_context" does not exist`. See G9.B.5.
+  const insertPayload: Record<string, unknown> = {
+    name: parsed.name,
+    firm: parsed.firm,
+    email: parsed.email,
+    preferred_time: parsed.preferred_time || null,
+    notes: parsed.notes || null,
+    source_ip: sanitizeInetForDb(ip),
+    user_agent: req.headers.get("user-agent"),
+  };
+  if (parsed.wizard_context) {
+    insertPayload.wizard_context = parsed.wizard_context;
+  }
+
   const { data: inserted, error: insertErr } = await admin
     .from("for_quants_leads")
-    .insert({
-      name: parsed.name,
-      firm: parsed.firm,
-      email: parsed.email,
-      preferred_time: parsed.preferred_time || null,
-      notes: parsed.notes || null,
-      source_ip: sanitizeInetForDb(ip),
-      user_agent: req.headers.get("user-agent"),
-      // Migration 031 added this column. NULL for landing-page leads,
-      // populated for leads captured from inside the wizard.
-      wizard_context: parsed.wizard_context ?? null,
-    })
+    .insert(insertPayload)
     .select("id")
     .single();
 
