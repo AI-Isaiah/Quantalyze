@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { createClient } from "@/lib/supabase/client";
 import type { CtaLocation } from "@/lib/analytics";
 import { RequestCallModal } from "./RequestCallModal";
 
@@ -68,11 +69,17 @@ function markViewEventFiredThisTab(): void {
 
 interface ForQuantsCtasProps {
   location: CtaLocation;
-  isLoggedIn: boolean;
 }
 
-export function ForQuantsCtas({ location, isLoggedIn }: ForQuantsCtasProps) {
+export function ForQuantsCtas({ location }: ForQuantsCtasProps) {
   const [modalOpen, setModalOpen] = useState(false);
+  // `null` = haven't resolved yet; treat the page as logged-out for the
+  // first render so the static-rendered shell shows the unauthenticated
+  // CTA (the optimistic majority case — 95%+ of marketing-page visitors
+  // are anonymous). Flip to `true` if Supabase reports a session, which
+  // re-renders the CTA href + label without ever round-tripping the
+  // server. See G9.B.8.
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   // Stable identity so the modal's Escape listener effect doesn't
   // re-subscribe on every parent re-render.
   const closeModal = useCallback(() => setModalOpen(false), []);
@@ -87,6 +94,32 @@ export function ForQuantsCtas({ location, isLoggedIn }: ForQuantsCtasProps) {
     trackForQuantsEventClient("for_quants_view", {
       referrer: typeof document !== "undefined" ? document.referrer : null,
     });
+  }, []);
+
+  useEffect(() => {
+    // Client-side session probe — replaces the server-side
+    // supabase.auth.getUser() that used to force the page to be
+    // dynamically rendered. The browser client reads the session from
+    // the auth cookie locally; only when a cookie is present does it
+    // round-trip Supabase to validate, and that round-trip happens
+    // AFTER the static shell already paints. G9.B.8.
+    let cancelled = false;
+    const supabase = createClient();
+    void supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (cancelled) return;
+        setIsLoggedIn(Boolean(data.session));
+      })
+      .catch(() => {
+        // Auth probe failed — keep the optimistic logged-out CTA. The
+        // logged-out CTA still works for authenticated users (it just
+        // routes them through /signup which the proxy will redirect to
+        // their actual destination).
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const primaryHref = isLoggedIn ? LOGGED_IN_CTA_HREF : LOGGED_OUT_CTA_HREF;

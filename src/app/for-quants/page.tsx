@@ -1,6 +1,5 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { createClient } from "@/lib/supabase/server";
 import {
   FactsheetPreview,
   type FactsheetPreviewMetric,
@@ -13,9 +12,20 @@ import { ForQuantsCtas } from "./ForQuantsCtas";
  *
  * Section order: Hero → Trust → How It Works → Factsheet Sample → CTA.
  *
- * Server Component for SEO (hero + trust in initial HTML) and to read
- * auth state without a client round-trip. Interactivity lives in
- * `<ForQuantsCtas>`.
+ * No `force-dynamic` segment override and no server-side Supabase
+ * auth round-trip — the auth-conditional CTA branching now happens
+ * client-side inside <ForQuantsCtas> via the browser Supabase client
+ * (G9.B.8 partial). The page is still ƒ (Dynamic) at the Next.js
+ * level because the ROOT layout (src/app/layout.tsx) sets
+ * `export const dynamic = "force-dynamic"` as a belt-and-braces
+ * platform default. Lifting that root-level setting is the rest of
+ * G9.B.8 and is tracked separately — it touches every page on the
+ * site and is out of this PR's file allowlist (allowlist guards
+ * blast radius for the audit-2026-05-07 batch).
+ *
+ * Even at this scope, the change kills the per-request Supabase auth
+ * round-trip on every visitor (the dominant cold-path cost) and
+ * unblocks the root-layout flip whenever the broader scope is taken.
  *
  * PostHog `for_quants_view` fires from the client, not the server.
  * Server-side tracking with an IP-hash distinctId would:
@@ -26,10 +36,6 @@ import { ForQuantsCtas } from "./ForQuantsCtas";
  *   - run as a render side effect (RSC purity violation).
  * PostHog's cookie-based anonymous ID on the client handles all of this.
  */
-
-// Per-request rendering for the session check + to prevent any future
-// cache wrapper from serving a stale logged-in/logged-out CTA variant.
-export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "For Crypto Quant Teams | Quantalyze",
@@ -66,16 +72,9 @@ const SAMPLE_SPARKLINE = [
   1.61, 1.58, 1.63, 1.68,
 ];
 
-export default async function ForQuantsPage() {
-  // Session check — determines whether the primary CTA goes to the signup
-  // handoff (/signup?role=manager) or an in-app route. The Server
-  // Component can do this without a client bundle bump.
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const isLoggedIn = Boolean(user);
-
+export default function ForQuantsPage() {
+  // Static page — no server-side auth round-trip. <ForQuantsCtas>
+  // resolves logged-in vs logged-out state on the client (G9.B.8).
   return (
     <>
       {/* 1. Hero */}
@@ -95,7 +94,7 @@ export default async function ForQuantsPage() {
               allocator intros. Free to list.
             </p>
 
-            <ForQuantsCtas location="hero" isLoggedIn={isLoggedIn} />
+            <ForQuantsCtas location="hero" />
 
             {/* Trust badge row (3 inline facts, no vanity counts) */}
             <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-3 text-sm text-text-muted">
@@ -252,7 +251,7 @@ export default async function ForQuantsPage() {
               selection, and founder review in a single session.
             </p>
 
-            <ForQuantsCtas location="footer" isLoggedIn={isLoggedIn} />
+            <ForQuantsCtas location="footer" />
 
             <p className="mt-8 text-sm text-text-muted">
               Already have an account?{" "}
