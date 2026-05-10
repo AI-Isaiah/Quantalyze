@@ -12,6 +12,43 @@ import { notifyFounderGeneric, escapeHtml } from "@/lib/email";
 import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
+ * Lazy-import @sentry/nextjs and capture an exception with route +
+ * stage tags. Lazy so that local dev / unit tests / sentry-disabled
+ * preview deploys don't pull the SDK into the route's cold path. The
+ * .catch() prevents an SDK-load failure (network blip, ad-blocker on
+ * preview) from itself surfacing as an unhandled rejection. Mirrors
+ * the pattern in src/app/error.tsx and src/instrumentation.ts.
+ */
+function captureFailure(
+  err: unknown,
+  stage: "admin_init" | "db_insert" | "founder_notify" | "founder_email_unset",
+  extra: Record<string, unknown> = {},
+): void {
+  void import("@sentry/nextjs")
+    .then((Sentry) => {
+      if (stage === "founder_email_unset") {
+        Sentry.captureMessage(
+          "[for-quants-lead] ADMIN_EMAIL is unset — founder will not be notified",
+          {
+            level: "error",
+            tags: { route: "for-quants-lead", stage },
+            extra,
+          },
+        );
+        return;
+      }
+      Sentry.captureException(err, {
+        tags: { route: "for-quants-lead", stage },
+        extra,
+      });
+    })
+    .catch(() => {
+      // Sentry import failed — already logged via console.* in the
+      // calling catch arm. Do not crash the route.
+    });
+}
+
+/**
  * POST /api/for-quants-lead — public Request-a-Call endpoint.
  *
  * Writes a lead to `for_quants_leads` via the service-role client and
@@ -161,6 +198,7 @@ export async function POST(req: NextRequest) {
     admin = createAdminClient();
   } catch (err) {
     console.error("[for-quants-lead] admin client init failed:", err);
+    captureFailure(err, "admin_init");
     return NextResponse.json(
       { error: "Service unavailable. Email security@quantalyze.com directly." },
       { status: 503 },
@@ -199,6 +237,9 @@ export async function POST(req: NextRequest) {
 
   if (insertErr || !inserted) {
     console.error("[for-quants-lead] insert failed:", insertErr);
+    captureFailure(insertErr ?? new Error("insert returned no row"), "db_insert", {
+      email: parsed.email,
+    });
     return NextResponse.json(
       {
         error:
@@ -238,6 +279,7 @@ export async function POST(req: NextRequest) {
       );
     } catch (err) {
       console.warn("[for-quants-lead] founder notify failed (non-blocking):", err);
+      captureFailure(err, "founder_notify", { lead_id: leadId });
     }
   });
 

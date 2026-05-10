@@ -131,6 +131,24 @@ vi.mock("@/lib/analytics", () => ({
   }),
 }));
 
+const sentryState = vi.hoisted(
+  (): { captures: Array<{ stage: string; message?: string }> } => ({
+    captures: [],
+  }),
+);
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (_err: unknown, ctx: { tags: { stage: string } }) => {
+    sentryState.captures.push({ stage: ctx.tags.stage });
+  },
+  captureMessage: (
+    message: string,
+    ctx: { tags: { stage: string }; level: string },
+  ) => {
+    sentryState.captures.push({ stage: ctx.tags.stage, message });
+  },
+}));
+
 const rateLimitState = vi.hoisted(
   (): {
     shouldRateLimit: boolean;
@@ -174,7 +192,19 @@ describe("POST /api/for-quants-lead", () => {
     analyticsState.captures = 0;
     rateLimitState.shouldRateLimit = false;
     rateLimitState.retryAfter = 60;
+    sentryState.captures = [];
   });
+
+  /**
+   * Helper: drain the microtask queue so fire-and-forget after()
+   * callbacks (founder notify + dynamic-imported Sentry capture) have
+   * a chance to run before the assertion checks them. Two awaits cover
+   * the chained promise (after → import('@sentry/nextjs').then(...)).
+   */
+  async function flushMicrotasks(): Promise<void> {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 
   describe("happy path", () => {
     it("validates, inserts, and returns 200 with { ok: true } (no internal id leaked)", async () => {
@@ -395,6 +425,33 @@ describe("POST /api/for-quants-lead", () => {
       expect(res.status).toBe(500);
       const body = await res.json();
       expect(body.error).toContain("security@quantalyze.com");
+    });
+  });
+
+  /**
+   * G9.B.6 regression — every failure path must reach Sentry, not
+   * just console. Pre-fix the route logged via console.error/warn
+   * only and Vercel runtime logs are not alerted on.
+   */
+  describe("Sentry coverage (G9.B.6)", () => {
+    it("captures admin_init failures in Sentry", async () => {
+      dbState.adminClientShouldThrow = true;
+      const { POST } = await import("./route");
+      await POST(makeRequest(VALID_PAYLOAD));
+      await flushMicrotasks();
+      expect(sentryState.captures.some((c) => c.stage === "admin_init")).toBe(
+        true,
+      );
+    });
+
+    it("captures db_insert failures in Sentry", async () => {
+      dbState.insertShouldFail = true;
+      const { POST } = await import("./route");
+      await POST(makeRequest(VALID_PAYLOAD));
+      await flushMicrotasks();
+      expect(sentryState.captures.some((c) => c.stage === "db_insert")).toBe(
+        true,
+      );
     });
   });
 });
