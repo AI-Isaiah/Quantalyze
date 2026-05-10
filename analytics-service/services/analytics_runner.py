@@ -154,13 +154,30 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
     `_compute_position_side_volume_pcts` so they reflect what the field
     name promises (volume attributed to long-side vs short-side positions
     via timestamp window), not a buy/sell alias.
+
+    Audit 2026-05-07 G12.G.4 hardening:
+    - cost is taken as `abs(...)` so a rebate / exchange-side adjustment
+      (negative cost) doesn't asymmetrically inflate one side and skew
+      percentages outside [0, 1]. Volume is a magnitude, not a signed PnL.
+    - non-numeric / missing cost defaults to 0.
+    - side is lower-cased (case-insensitive match), so 'Buy'/'BUY' fold
+      into 'buy'.
+    - empty / unknown side contributes to total_volume_usd but neither
+      buy nor sell, so percentages can sum to <1.0 (the residual is
+      attributable to fills with unparseable sides — caller can detect
+      via `1 - buy_pct - sell_pct`).
+    - total_volume_usd is the absolute sum, never negative.
     """
     total_cost = 0.0
     buy_cost = 0.0
     sell_cost = 0.0
 
     for fill in fills:
-        cost = float(fill.get("cost", 0) or 0)
+        raw_cost = fill.get("cost", 0)
+        try:
+            cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
+        except (TypeError, ValueError):
+            cost = 0.0
         side = (fill.get("side") or "").lower()
         total_cost += cost
         if side == "buy":
