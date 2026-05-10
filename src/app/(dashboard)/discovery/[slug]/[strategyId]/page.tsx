@@ -51,6 +51,24 @@ export default async function StrategyDetailPage({
     notFound();
   }
 
+  // Audit 2026-05-07 G12.G.5: surface positions-fetch failures. The pre-
+  // audit code ignored `positionsResult.error` and let PositionsTab render
+  // its "No positions reconstructed yet" empty state — indistinguishable
+  // from a genuine no-positions strategy. Operators had no signal to
+  // investigate column-shape drift, RLS regressions, or transient DB
+  // failures. Now: log to the server console with the strategyId so the
+  // event is searchable, and pass an explicit `positionsError` flag to
+  // PerformanceReport so the UI can show a banner instead.
+  const positionsError = positionsResult?.error ?? null;
+  if (positionsError) {
+    console.error("[discovery] positions fetch failed", {
+      strategyId,
+      slug,
+      message: positionsError.message,
+      code: positionsError.code,
+    });
+  }
+
   const { strategy, analytics, manager, disclosureTier } = result;
   const percentiles = percentileMap?.[strategyId] ?? null;
   const displayName = displayStrategyName(strategy);
@@ -122,11 +140,14 @@ export default async function StrategyDetailPage({
       )}
       {/* G12.E.1 (audit 2026-05-07): runtime-validate raw Supabase rows
           before casting to Position[]. Preserves the null-vs-empty signal
-          the consumers branch on by mapping a missing `data` to null. */}
+          the consumers branch on by mapping a missing `data` to null.
+          G12.G.5 (audit 2026-05-07): forward `positionsError` so a fetch
+          failure renders a banner instead of the silent empty state. */}
       <PerformanceReport
         analytics={analytics}
         percentiles={percentiles}
         positions={positionsResult?.data ? parsePositionRows(positionsResult.data) : null}
+        positionsError={positionsError != null}
       />
       <Disclaimer variant="strategy" />
 

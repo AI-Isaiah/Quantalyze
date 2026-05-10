@@ -109,6 +109,42 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
     expect(tooltip.textContent).toContain("Funding:");
   });
 
+  /**
+   * Audit 2026-05-07 G12.G.5 regression: when the server-side positions
+   * fetch fails, PositionsTab MUST render an explicit error banner — never
+   * the silent "No positions reconstructed yet" placeholder, which is
+   * indistinguishable from a truly empty result and gives operators no
+   * signal to investigate. The page wires up `positionsError` based on the
+   * `error` field of the Supabase response (previously ignored entirely).
+   */
+  it("renders an error banner when positionsError=true (audit G12.G.5)", () => {
+    const analytics = makeAnalytics({ trade_metrics: null });
+    render(
+      <PositionsTab
+        analytics={analytics}
+        positions={null}
+        positionsError={true}
+      />,
+    );
+
+    expect(screen.getByText(/Couldn.+t load positions/)).toBeDefined();
+    // The silent empty-state copy must not appear when an error is in
+    // flight — that's the whole bug.
+    expect(
+      screen.queryByText(/No positions reconstructed yet/),
+    ).toBeNull();
+  });
+
+  it("does NOT show the error banner when positionsError is unset (legacy path stays empty)", () => {
+    const analytics = makeAnalytics({ trade_metrics: null });
+    render(<PositionsTab analytics={analytics} positions={null} />);
+
+    expect(screen.queryByText(/Couldn.+t load positions/)).toBeNull();
+    expect(
+      screen.getByText(/No positions reconstructed yet/),
+    ).toBeDefined();
+  });
+
   it("falls back to 'ROI' heading when positions list is empty (no funding to report)", () => {
     const analytics = makeAnalytics({
       trade_metrics: {

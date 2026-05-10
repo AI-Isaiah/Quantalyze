@@ -7,9 +7,18 @@ import type { StrategyAnalytics, Position } from "@/lib/types";
 export function PositionsTab({
   analytics,
   positions,
+  positionsError,
 }: {
   analytics: StrategyAnalytics;
   positions: Position[] | null;
+  /**
+   * Audit 2026-05-07 G12.G.5: server-side positions fetch failed (DB
+   * unreachable, RLS regression, column-shape drift). When `true`, the
+   * tab renders an explicit error banner — never the silent "no positions
+   * reconstructed yet" placeholder, which is indistinguishable from a
+   * truly empty result and gave operators no signal to investigate.
+   */
+  positionsError?: boolean;
 }) {
   const dqf = analytics.data_quality_flags ?? null;
   const positionMetricsFailed = dqf?.position_metrics_failed === true;
@@ -61,6 +70,24 @@ export function PositionsTab({
     const max = durations[durations.length - 1];
     return { mean, median, max };
   }, [closedPositions]);
+
+  // Audit 2026-05-07 G12.G.5: server-side positions fetch failed. Render
+  // an explicit error state — operators get a signal, allocators see a
+  // banner asking them to refresh, and on-call has a searchable
+  // signature distinct from the genuine "no positions yet" empty state.
+  if (positionsError) {
+    return (
+      <div className="rounded-lg border border-warning/30 bg-warning/5 px-4 py-6">
+        <p className="text-sm font-medium text-warning mb-1">
+          Couldn&apos;t load positions.
+        </p>
+        <p className="text-xs text-text-secondary">
+          The positions table is temporarily unavailable. Refresh the page,
+          or contact support if the problem persists.
+        </p>
+      </div>
+    );
+  }
 
   // Empty state (AFTER all hooks — react-hooks/rules-of-hooks)
   if ((!positions || positions.length === 0) && !tm) {
