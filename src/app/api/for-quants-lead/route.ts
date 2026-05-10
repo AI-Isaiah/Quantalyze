@@ -349,6 +349,9 @@ export async function POST(req: NextRequest) {
     // a marker-write failure must NEVER block the actual email send;
     // worst case the operator sees a clean send with no marker (same
     // pre-migration shape).
+    // @audit-skip: founder-CRM internal state marker on unauthenticated
+    // lead row. Same rationale as the insert pragma at line 303 — no
+    // user_id available because this is the public Request-a-Call form.
     try {
       await admin
         .from("for_quants_leads")
@@ -379,6 +382,8 @@ export async function POST(req: NextRequest) {
       // CRM "stuck pending notify" badge fires on this row even though
       // notifyFounderGeneric didn't throw. notify_succeeded_at stays
       // NULL — the email never went out.
+      // @audit-skip: founder-CRM internal state marker on unauthenticated
+      // lead row. See pragma at line 303.
       try {
         await admin
           .from("for_quants_leads")
@@ -409,6 +414,8 @@ export async function POST(req: NextRequest) {
       // Clean send — pair the attempt timestamp with a success
       // timestamp so the CRM's "stuck pending notify" predicate
       // (attempted IS NOT NULL AND succeeded IS NULL) flips false.
+      // @audit-skip: founder-CRM internal state marker on unauthenticated
+      // lead row. See pragma at line 303.
       try {
         await admin
           .from("for_quants_leads")
@@ -431,6 +438,8 @@ export async function POST(req: NextRequest) {
         0,
         500,
       );
+      // @audit-skip: founder-CRM internal state marker on unauthenticated
+      // lead row. See pragma at line 303.
       try {
         await admin
           .from("for_quants_leads")
