@@ -14,15 +14,20 @@ vi.mock("next/server", async () => {
   );
   return {
     ...actual,
+    /**
+     * Production `after()` runs the callback after the response is
+     * sent and propagates errors to Vercel error monitoring + Sentry.
+     * The route's own try/catch wrappers (route.ts:after callback)
+     * are the contract under test — they MUST swallow side-effect
+     * failures so the response is never poisoned. Pre-fix, this mock
+     * wrapped cb() in its own try/catch, which was redundant AND
+     * silenced the route's console.warn so tests couldn't observe
+     * whether the inner try/catch ran. G9.B.13 — let exceptions
+     * surface here so a regression in the route's resilience is
+     * visible to tests instead of being masked by the mock.
+     */
     after: (cb: () => void | Promise<void>) => {
-      void Promise.resolve().then(async () => {
-        try {
-          await cb();
-        } catch {
-          // Match the production semantic: side effects must never
-          // escape into the caller.
-        }
-      });
+      void Promise.resolve().then(() => cb());
     },
   };
 });
