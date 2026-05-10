@@ -14,7 +14,7 @@ import { getStrategyDetail, getPercentiles } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
 import { parsePositionRows } from "@/lib/types";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
   params,
@@ -27,8 +27,17 @@ export default async function StrategyDetailPage({
 
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
+  // Audit 2026-05-07 G11.E.7: unknown slug → 404 immediately. Avoids
+  // even firing the strategy fetch for slugs not on the published list.
+  if (!cat) notFound();
+
+  // Audit 2026-05-07 G11.E.7: pass the slug to getStrategyDetail so the
+  // `discovery_categories!inner(slug)` filter rejects strategy/slug
+  // mismatches at the SQL layer (returns null → not-found UI). Without
+  // this, /discovery/<wrong-slug>/<strategyId> renders the full chart
+  // suite + RSC payload for any published strategy.
   const [result, percentileMap, positionsResult] = await Promise.all([
-    getStrategyDetail(strategyId),
+    getStrategyDetail(strategyId, slug),
     getPercentiles(slug),
     supabase
       .from("positions")
@@ -39,11 +48,7 @@ export default async function StrategyDetailPage({
   ]);
 
   if (!result) {
-    return (
-      <div className="text-center py-16 text-text-muted">
-        Strategy not found.
-      </div>
-    );
+    notFound();
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
