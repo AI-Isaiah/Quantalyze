@@ -300,10 +300,15 @@ export async function POST(req: NextRequest) {
     insertPayload.wizard_context = parsed.wizard_context;
   }
 
+  // @audit-skip-anchor:lead-insert
   // @audit-skip: unauthenticated public landing-page form. audit_log
   // requires a user_id; this caller has no user session. Lead-capture
   // funnel metrics live in PostHog (client-side trackForQuantsEventClient
   // — server-side capture was removed in G9.B.1). Per ADR-0023 §3.
+  // The 4 marker-write @audit-skips inside the after() callback below
+  // share this rationale; they reference @audit-skip-anchor:lead-insert
+  // by anchor name so a future refactor that reorders this file does
+  // not silently desync the back-references.
   const { data: inserted, error: insertErr } = await admin
     .from("for_quants_leads")
     .insert(insertPayload)
@@ -349,17 +354,28 @@ export async function POST(req: NextRequest) {
     // a marker-write failure must NEVER block the actual email send;
     // worst case the operator sees a clean send with no marker (same
     // pre-migration shape).
+    // supabase-js returns Postgres errors (42703 column missing,
+    // 42501 RLS denied, etc.) as `{ error }` on the response — it
+    // does NOT throw. Capture both response-level errors and the
+    // network-level throw so a genuinely failed marker write is
+    // visible to operators (the founder CRM will still render the
+    // row, just without the badge).
     // @audit-skip: founder-CRM internal state marker on unauthenticated
-    // lead row. Same rationale as the insert pragma at line 303 — no
-    // user_id available because this is the public Request-a-Call form.
+    // lead row. See @audit-skip-anchor:lead-insert.
     try {
-      await admin
+      const { error: markerErr } = await admin
         .from("for_quants_leads")
         .update({ notify_attempted_at: new Date().toISOString() })
         .eq("id", leadId);
+      if (markerErr) {
+        console.warn(
+          "[for-quants-lead] notify_attempted_at marker write failed (non-blocking):",
+          markerErr,
+        );
+      }
     } catch (markerErr) {
       console.warn(
-        "[for-quants-lead] notify_attempted_at marker write failed (non-blocking):",
+        "[for-quants-lead] notify_attempted_at marker write threw (non-blocking):",
         markerErr,
       );
     }
@@ -383,15 +399,21 @@ export async function POST(req: NextRequest) {
       // notifyFounderGeneric didn't throw. notify_succeeded_at stays
       // NULL — the email never went out.
       // @audit-skip: founder-CRM internal state marker on unauthenticated
-      // lead row. See pragma at line 303.
+      // lead row. See @audit-skip-anchor:lead-insert.
       try {
-        await admin
+        const { error: markerErr } = await admin
           .from("for_quants_leads")
           .update({ notify_error: "ADMIN_EMAIL unset" })
           .eq("id", leadId);
+        if (markerErr) {
+          console.warn(
+            "[for-quants-lead] notify_error (ADMIN_EMAIL unset) marker write failed (non-blocking):",
+            markerErr,
+          );
+        }
       } catch (markerErr) {
         console.warn(
-          "[for-quants-lead] notify_error marker write failed (non-blocking):",
+          "[for-quants-lead] notify_error (ADMIN_EMAIL unset) marker write threw (non-blocking):",
           markerErr,
         );
       }
@@ -415,15 +437,21 @@ export async function POST(req: NextRequest) {
       // timestamp so the CRM's "stuck pending notify" predicate
       // (attempted IS NOT NULL AND succeeded IS NULL) flips false.
       // @audit-skip: founder-CRM internal state marker on unauthenticated
-      // lead row. See pragma at line 303.
+      // lead row. See @audit-skip-anchor:lead-insert.
       try {
-        await admin
+        const { error: markerErr } = await admin
           .from("for_quants_leads")
           .update({ notify_succeeded_at: new Date().toISOString() })
           .eq("id", leadId);
+        if (markerErr) {
+          console.warn(
+            "[for-quants-lead] notify_succeeded_at marker write failed (non-blocking):",
+            markerErr,
+          );
+        }
       } catch (markerErr) {
         console.warn(
-          "[for-quants-lead] notify_succeeded_at marker write failed (non-blocking):",
+          "[for-quants-lead] notify_succeeded_at marker write threw (non-blocking):",
           markerErr,
         );
       }
@@ -439,15 +467,21 @@ export async function POST(req: NextRequest) {
         500,
       );
       // @audit-skip: founder-CRM internal state marker on unauthenticated
-      // lead row. See pragma at line 303.
+      // lead row. See @audit-skip-anchor:lead-insert.
       try {
-        await admin
+        const { error: markerErr } = await admin
           .from("for_quants_leads")
           .update({ notify_error: sanitized })
           .eq("id", leadId);
+        if (markerErr) {
+          console.warn(
+            "[for-quants-lead] notify_error (send threw) marker write failed (non-blocking):",
+            markerErr,
+          );
+        }
       } catch (markerErr) {
         console.warn(
-          "[for-quants-lead] notify_error marker write failed (non-blocking):",
+          "[for-quants-lead] notify_error (send threw) marker write threw (non-blocking):",
           markerErr,
         );
       }
@@ -469,6 +503,16 @@ export async function POST(req: NextRequest) {
 }
 
 /**
+ * Hex chars retained from the SHA-256 digest. 32 hex chars = 128 bits of
+ * entropy — collision-resistant on the per-day, per-email scope this
+ * token is bucketed by (the (lower(email), UTC-day) keyspace is far
+ * smaller than 2^64). The token is non-secret so a longer prefix would
+ * only bloat the response; a shorter one would risk birthday
+ * collisions if the lead pipeline grew by orders of magnitude.
+ */
+const IDEMPOTENCY_TOKEN_HEX_LEN = 32;
+
+/**
  * Stable, non-secret token clients can use to dedupe network retries
  * of the same logical submission. SHA-256 of `email|UTC-YYYY-MM-DD`.
  * Web Crypto is available in both Edge and Node Function runtimes on
@@ -482,5 +526,5 @@ async function computeIdempotencyToken(email: string): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
-    .slice(0, 32);
+    .slice(0, IDEMPOTENCY_TOKEN_HEX_LEN);
 }

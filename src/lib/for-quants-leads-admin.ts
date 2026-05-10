@@ -1,6 +1,7 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
  * Server-role chokepoint for `for_quants_leads`. Migration 030 made
@@ -10,9 +11,18 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * the table access here lets pages and routes stay user-scoped.
  */
 
+/**
+ * `step` is the canonical WizardStepKey union — same source of truth
+ * as the route's `WIZARD_STEP_KEYS as const satisfies readonly
+ * WizardStepKey[]` enum (G9.B.4) and RequestCallModal's
+ * `RequestCallWizardContext.step: WizardStepKey` prop type (G9.B.18).
+ * Importing rather than re-listing prevents the admin/reader
+ * projection from drifting out of sync with what the route accepts —
+ * the same class of bug G9.B.4 fixed at the API boundary.
+ */
 export type WizardContext = {
   draft_strategy_id?: string | null;
-  step?: "connect_key" | "sync_preview" | "metadata" | "submit";
+  step?: WizardStepKey;
   wizard_session_id?: string;
 } | null;
 

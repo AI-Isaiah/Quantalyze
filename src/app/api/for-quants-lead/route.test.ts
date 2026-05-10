@@ -74,11 +74,22 @@ const dbState = vi.hoisted(
      *  callback so regression tests can pin attempted/succeeded/error
      *  semantics without touching the production admin client. */
     updates: Array<{ id: string; payload: Record<string, unknown> }>;
+    /**
+     * Inject a Postgres-shaped response error on the next .update().eq()
+     * call. supabase-js does NOT throw on Postgres errors (42703 column
+     * missing, 42501 RLS denied, etc.) — it returns `{ error }` on the
+     * response object. Pre-fix, the route's `try/catch` around marker
+     * writes only caught network throws, so DB-level errors slipped
+     * through silently. The test extension consumes one queued error
+     * per call so the fix can be pinned end-to-end.
+     */
+    updateResponseErrorQueue: Array<{ message: string }>;
   } => ({
     inserted: [],
     insertShouldFail: false,
     adminClientShouldThrow: false,
     updates: [],
+    updateResponseErrorQueue: [],
   }),
 );
 
@@ -118,6 +129,10 @@ vi.mock("@/lib/supabase/admin", () => ({
           return {
             eq: (_col: string, leadId: string) => {
               dbState.updates.push({ id: leadId, payload });
+              const responseError = dbState.updateResponseErrorQueue.shift();
+              if (responseError) {
+                return Promise.resolve({ data: null, error: responseError });
+              }
               return Promise.resolve({ data: null, error: null });
             },
           };
@@ -211,6 +226,7 @@ describe("POST /api/for-quants-lead", () => {
     dbState.insertShouldFail = false;
     dbState.adminClientShouldThrow = false;
     dbState.updates = [];
+    dbState.updateResponseErrorQueue = [];
     // audit-2026-05-07 G9.B.7 (migration 115): the route now
     // short-circuits the founder-notify path when ADMIN_EMAIL is
     // unset, writing notify_error='ADMIN_EMAIL unset' instead of
@@ -783,6 +799,130 @@ describe("POST /api/for-quants-lead", () => {
         } else {
           process.env.ADMIN_EMAIL = prev;
         }
+      }
+    });
+  });
+
+  /**
+   * audit-2026-05-07 specialist regression — `founderEmailMissingWarned`
+   * MUST be a once-per-process flag, not once-per-request. A regression
+   * that flipped the guard from `if (!founderEmailMissingWarned)` to
+   * always-fire would spam Sentry with thousands of duplicate
+   * captures the moment the misconfig hit. Pre-fix the suite only
+   * called POST once with ADMIN_EMAIL='' so the load-bearing "second
+   * call MUST NOT re-capture" semantic was unverified.
+   */
+  describe("once-per-process founder_email_unset flag", () => {
+    it("captures founder_email_unset exactly once across multiple POSTs on the same warm instance", async () => {
+      const prev = process.env.ADMIN_EMAIL;
+      process.env.ADMIN_EMAIL = "";
+      try {
+        // Reset the module so the in-memory `founderEmailMissingWarned`
+        // flag starts at false for this test, simulating a cold start.
+        vi.resetModules();
+        const { POST } = await import("./route");
+        await POST(makeRequest(VALID_PAYLOAD));
+        await POST(makeRequest(VALID_PAYLOAD));
+        await POST(makeRequest(VALID_PAYLOAD));
+        await flushMicrotasks();
+        const captures = sentryState.captures.filter(
+          (c) => c.stage === "founder_email_unset",
+        );
+        expect(captures).toHaveLength(1);
+      } finally {
+        if (prev === undefined) {
+          delete process.env.ADMIN_EMAIL;
+        } else {
+          process.env.ADMIN_EMAIL = prev;
+        }
+      }
+    });
+  });
+
+  /**
+   * audit-2026-05-07 specialist regression — G9.B.17 idempotency_key
+   * day-boundary. The route docblock at computeIdempotencyToken claims
+   * the token is stable per (email, UTC-day) — different DAY → different
+   * key. Without fake timers the test suite can never reach the
+   * day-rollover branch. A regression that dropped `day` from the
+   * hash input (e.g., used only the email) would still pass the
+   * existing "same-day same-email" test.
+   */
+  describe("idempotency_key day-boundary (G9.B.17)", () => {
+    it("produces a different idempotency_key for the same email across UTC midnight", async () => {
+      vi.useFakeTimers();
+      try {
+        // 2026-05-10 23:59 UTC → key A
+        vi.setSystemTime(new Date("2026-05-10T23:59:00Z"));
+        const { POST } = await import("./route");
+        const res1 = await POST(makeRequest(VALID_PAYLOAD));
+        const body1 = (await res1.json()) as { idempotency_key: string };
+        // 2026-05-11 00:01 UTC → key B (different day, same email)
+        vi.setSystemTime(new Date("2026-05-11T00:01:00Z"));
+        const res2 = await POST(makeRequest(VALID_PAYLOAD));
+        const body2 = (await res2.json()) as { idempotency_key: string };
+        expect(body1.idempotency_key).toMatch(/^[a-f0-9]{32}$/);
+        expect(body2.idempotency_key).toMatch(/^[a-f0-9]{32}$/);
+        expect(body1.idempotency_key).not.toBe(body2.idempotency_key);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  /**
+   * audit-2026-05-07 specialist regression — supabase-js returns
+   * Postgres errors (42703 column missing, 42501 RLS denied, …) on
+   * the response object as `{ error }`, NOT as a thrown exception.
+   * Pre-fix the route's `try/catch` around the four marker-write
+   * blocks only caught network-level throws, so DB-level errors
+   * during the rolling-deploy window (new code, old schema) would
+   * slip through silently with NO console.warn. Post-fix the route
+   * captures the response error explicitly and warns. This test
+   * pins the warn AND the contract that the email send still
+   * happens AND the response remains 200.
+   */
+  describe("marker-write response-error visibility (specialist regression)", () => {
+    it("logs a warn AND still sends the founder email AND returns 200 when notify_attempted_at update returns a response error", async () => {
+      // Queue ONE response error — only the notify_attempted_at update
+      // (the FIRST .update().eq() in after()) sees it. The subsequent
+      // notify_succeeded_at update gets a clean response. This pins the
+      // load-bearing claim: a marker-write failure must NEVER block the
+      // actual email send, and the response must remain 200.
+      dbState.updateResponseErrorQueue.push({
+        message:
+          'column "notify_attempted_at" of relation "for_quants_leads" does not exist',
+      });
+      const sendsBefore = emailState.sends;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(VALID_PAYLOAD));
+        expect(res.status).toBe(200);
+        await flushMicrotasks();
+
+        // Email send MUST have happened.
+        expect(emailState.sends).toBe(sendsBefore + 1);
+
+        // Warn for the failed attempted-marker write MUST have fired.
+        const calls = warnSpy.mock.calls.map((args) => args.join(" "));
+        const warnedAttempted = calls.some((c) =>
+          c.includes("notify_attempted_at marker write failed"),
+        );
+        expect(warnedAttempted).toBe(true);
+
+        // The success marker MUST still be written (post-error
+        // operation continues — single failed marker doesn't unwind
+        // subsequent writes).
+        const updatesForLead = dbState.updates.filter(
+          (u) => u.id === "lead-1",
+        );
+        const succeeded = updatesForLead.find(
+          (u) => "notify_succeeded_at" in u.payload,
+        );
+        expect(succeeded).toBeDefined();
+      } finally {
+        warnSpy.mockRestore();
       }
     });
   });
