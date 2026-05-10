@@ -10,6 +10,7 @@ import {
 } from "@/lib/ratelimit";
 import { notifyFounderGeneric, escapeHtml } from "@/lib/email";
 import { trackForQuantsEventServer } from "@/lib/analytics";
+import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
  * POST /api/for-quants-lead — public Request-a-Call endpoint.
@@ -40,12 +41,29 @@ import { trackForQuantsEventServer } from "@/lib/analytics";
  *   - PostHog unconfigured → event silently dropped, lead still lands.
  */
 
+/**
+ * Step keys the wizard uses for funnel telemetry. Mirrors `WizardStepKey`
+ * in `src/lib/wizard/localStorage.ts`. The `satisfies readonly WizardStepKey[]`
+ * assertion guarantees that any future drift between the wizard's step
+ * union and this enum fails at typecheck — historically the CSV-branch
+ * keys (`csv_upload`, `csv_preview`, `csv_submit`) were missing here, which
+ * 400'd every CSV-wizard lead with a `wizard_context.step` Zod error
+ * (G9.B.4).
+ */
+const WIZARD_STEP_KEYS = [
+  "connect_key",
+  "sync_preview",
+  "metadata",
+  "submit",
+  "csv_upload",
+  "csv_preview",
+  "csv_submit",
+] as const satisfies readonly WizardStepKey[];
+
 const WIZARD_CONTEXT_SCHEMA = z
   .object({
     draft_strategy_id: z.string().uuid().nullable().optional(),
-    step: z
-      .enum(["connect_key", "sync_preview", "metadata", "submit"])
-      .optional(),
+    step: z.enum(WIZARD_STEP_KEYS).optional(),
     wizard_session_id: z.string().min(8).max(64).optional(),
   })
   .nullable()

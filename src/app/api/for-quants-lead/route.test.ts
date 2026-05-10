@@ -292,6 +292,36 @@ describe("POST /api/for-quants-lead", () => {
       expect(res.status).toBe(400);
     });
 
+    /**
+     * G9.B.4 regression — the `wizard_context.step` enum used to only
+     * include the API-branch keys (connect_key, sync_preview, metadata,
+     * submit). CSV-branch leads (csv_upload, csv_preview, csv_submit)
+     * were silently 400'd by Zod. The enum is now sourced from
+     * WIZARD_STEP_KEYS which `satisfies readonly WizardStepKey[]` so any
+     * future drift fails at typecheck. This test fires every CSV-branch
+     * key through the full POST handler to lock the contract end-to-end.
+     */
+    it("accepts CSV-branch wizard_context.step values (G9.B.4)", async () => {
+      const { POST } = await import("./route");
+      for (const step of ["csv_upload", "csv_preview", "csv_submit"]) {
+        const res = await POST(
+          makeRequest({
+            ...VALID_PAYLOAD,
+            wizard_context: {
+              draft_strategy_id: null,
+              step,
+              wizard_session_id: "sess-1234",
+            },
+          }),
+        );
+        expect(res.status, `step=${step}`).toBe(200);
+      }
+      expect(dbState.inserted).toHaveLength(3);
+      expect(dbState.inserted[0].wizard_context).toMatchObject({
+        step: "csv_upload",
+      });
+    });
+
     it("returns 400 for malformed JSON body", async () => {
       const { POST } = await import("./route");
       const req = new NextRequest(
