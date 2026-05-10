@@ -95,7 +95,15 @@ function makeEpisode(
   const endDate = series[endIdx].date;
   const peakMs = parseUtcDate(peakDate);
   const endMs = parseUtcDate(endDate);
-  const durationDays = Math.round((endMs - peakMs) / MS_PER_DAY);
+  // Audit 2026-05-07 G11.E.15: parseUtcDate now returns null for
+  // malformed inputs instead of NaN. Propagate null → 0 days so the
+  // episode renders with a sane duration rather than 'NaN' or empty
+  // text in the WorstDrawdowns chart. The trough/peak dates remain on
+  // the episode for debugging.
+  const durationDays =
+    peakMs !== null && endMs !== null
+      ? Math.round((endMs - peakMs) / MS_PER_DAY)
+      : 0;
   return {
     peakDate,
     troughDate,
@@ -112,8 +120,25 @@ function makeEpisode(
  * that a malformed input like `"2024-01-01T00:00:00"` (no zone suffix)
  * cannot drift into local-time parsing and produce timezone-dependent
  * durationDays under DST boundaries.
+ *
+ * Audit 2026-05-07 G11.E.15: returns `null` instead of NaN for inputs
+ * that don't match the YYYY-MM-DD prefix (e.g. `''`, `'2024'`,
+ * `'2024-02'`, `'not-a-date'`). The pre-audit code emitted NaN that
+ * silently propagated into `durationDays` and rendered as an empty
+ * cell — masking upstream data corruption (e.g. an analytics row with
+ * a malformed peakDate). Callers explicitly check for null and degrade
+ * to a duration of 0 days.
  */
-function parseUtcDate(dateStr: string): number {
+function parseUtcDate(dateStr: string): number | null {
+  if (typeof dateStr !== "string") return null;
+  if (!/^\d{4}-\d{2}-\d{2}/.test(dateStr)) return null;
   const [y, m, d] = dateStr.split("-").map((s) => parseInt(s, 10));
+  if (
+    !Number.isInteger(y) ||
+    !Number.isInteger(m) ||
+    !Number.isInteger(d)
+  ) {
+    return null;
+  }
   return Date.UTC(y, m - 1, d);
 }

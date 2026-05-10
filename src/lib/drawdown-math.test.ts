@@ -209,6 +209,27 @@ describe("segmentDrawdowns", () => {
     expect(episodes[0].recoveryDate).toBe("2024-01-04");
   });
 
+  /**
+   * Audit 2026-05-07 G11.E.15 regression: parseUtcDate (used internally
+   * by makeEpisode for durationDays) returns null on malformed YYYY-MM-DD
+   * inputs instead of NaN. The episode's durationDays must be a finite
+   * integer (0 fallback) — not NaN — so the chart UI doesn't render an
+   * empty / "NaN" cell.
+   */
+  it("returns finite durationDays even when peakDate is malformed (G11.E.15)", () => {
+    const episodes = segmentDrawdowns([
+      // Malformed peakDate triggers the parseUtcDate null path. The
+      // segmenter still produces an episode (the trough is real) — but
+      // durationDays falls back to 0 instead of NaN.
+      { date: "not-a-date", value: 0 },
+      { date: "2024-01-02", value: -0.10 },
+      { date: "2024-01-03", value: 0 },
+    ]);
+    expect(episodes).toHaveLength(1);
+    expect(Number.isFinite(episodes[0].durationDays)).toBe(true);
+    expect(Number.isNaN(episodes[0].durationDays)).toBe(false);
+  });
+
   it("treats positive values as not-in-drawdown (defensive)", () => {
     // Drawdown series should never contain positive values (quantstats
     // convention is value <= 0). But if one slips in — e.g. a floating
