@@ -221,6 +221,9 @@ describe("POST /api/for-quants-lead", () => {
       expect(body.ok).toBe(true);
       // The internal lead UUID must NOT be returned to the client.
       expect(body.id).toBeUndefined();
+      // G9.B.17: opaque idempotency token returned so retries dedupe.
+      expect(typeof body.idempotency_key).toBe("string");
+      expect(body.idempotency_key).toMatch(/^[a-f0-9]{32}$/);
       expect(dbState.inserted).toHaveLength(1);
       expect(dbState.inserted[0]).toMatchObject({
         name: "Jane Doe",
@@ -229,6 +232,26 @@ describe("POST /api/for-quants-lead", () => {
         preferred_time: "Tue morning PT",
         notes: "Running a market-neutral book on Binance.",
       });
+    });
+
+    /**
+     * G9.B.17 — same email submitted twice the same day must produce
+     * the same idempotency_key so a client can dedupe a flaky network
+     * retry. Different email or different day yields a different key.
+     */
+    it("returns the same idempotency_key for the same email on the same day (G9.B.17)", async () => {
+      const { POST } = await import("./route");
+      const res1 = await POST(makeRequest(VALID_PAYLOAD));
+      const res2 = await POST(makeRequest(VALID_PAYLOAD));
+      const body1 = await res1.json();
+      const body2 = await res2.json();
+      expect(body1.idempotency_key).toBe(body2.idempotency_key);
+
+      const res3 = await POST(
+        makeRequest({ ...VALID_PAYLOAD, email: "other@acme.example" }),
+      );
+      const body3 = await res3.json();
+      expect(body3.idempotency_key).not.toBe(body1.idempotency_key);
     });
 
     it("accepts minimal payload without optional fields", async () => {

@@ -375,7 +375,33 @@ export async function POST(req: NextRequest) {
     }
   });
 
-  // Do not return the lead id — it's an internal identifier the UI
-  // doesn't need.
-  return NextResponse.json({ ok: true });
+  // Return an opaque idempotency token (SHA-256 of `email|YYYY-MM-DD`)
+  // so a flaky network where the response was dropped after a
+  // successful insert lets the client recognize a retry as the same
+  // logical submission rather than treating it as a fresh one. The
+  // token is NOT a secret — it's stable for the (email, day) pair on
+  // purpose. Server-side dedup via a UNIQUE constraint is tracked
+  // separately (PR-5 owns migrations). G9.B.17.
+  //
+  // The lead id is still NOT returned — it's an internal identifier
+  // the UI doesn't need.
+  const idempotencyKey = await computeIdempotencyToken(parsed.email);
+  return NextResponse.json({ ok: true, idempotency_key: idempotencyKey });
+}
+
+/**
+ * Stable, non-secret token clients can use to dedupe network retries
+ * of the same logical submission. SHA-256 of `email|UTC-YYYY-MM-DD`.
+ * Web Crypto is available in both Edge and Node Function runtimes on
+ * Vercel (per the Next.js docs node_modules/next/dist/docs/...) so no
+ * polyfill needed. G9.B.17.
+ */
+async function computeIdempotencyToken(email: string): Promise<string> {
+  const day = new Date().toISOString().slice(0, 10);
+  const data = new TextEncoder().encode(`${email.toLowerCase()}|${day}`);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 32);
 }
