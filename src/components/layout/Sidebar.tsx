@@ -143,7 +143,12 @@ export function Sidebar({
       className={
         variant === "desktop"
           ? "fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text"
-          : "flex h-full w-[260px] flex-col bg-sidebar text-sidebar-text"
+          : // Audit 2026-05-07 G11.C.3: drawer variant lacked overflow-y-auto.
+            // On 320×667 viewports with admin nav (MY WORKSPACE + 5 DISCOVERY
+            // sub-groups + 5 ADMIN items + ACCOUNT) the content exceeds 100vh
+            // and the bottom items are unreachable. Adding overflow-y-auto
+            // lets the drawer scroll inside the overlay panel.
+            "flex h-full w-[260px] flex-col bg-sidebar text-sidebar-text overflow-y-auto"
       }
     >
       <div className="flex h-16 items-center px-6">
