@@ -268,7 +268,13 @@ function RequestCallForm({
           href={MAILTO_HREF}
           className="underline hover:text-text-primary"
           onClick={() =>
-            trackForQuantsEventClient("for_quants_lead_submit", {
+            // Mailto opens the user's email client — there's no guarantee
+            // they actually compose or send anything. Fire the
+            // `_request_call_click` *intent* event with `source: "mailto"`,
+            // NOT `_lead_submit` which is reserved for paths that hit the
+            // DB. Conflating click → conversion silently inflated CTR
+            // (G9.B.20).
+            trackForQuantsEventClient("for_quants_request_call_click", {
               source: "mailto",
               cta_location: ctaLocation,
             })
