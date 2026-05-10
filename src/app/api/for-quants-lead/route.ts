@@ -281,11 +281,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // @audit-skip: unauthenticated public landing-page form. audit_log
-  // requires a user_id; this caller has no user session. Lead-capture
-  // funnel metrics live in PostHog (trackForQuantsEventServer below)
-  // per ADR-0023 §3.
-  //
   // `wizard_context` is set on the insert ONLY when the caller actually
   // passes one (in-wizard leads). The column was added in migration 031;
   // omitting the key when null lets the route's common landing-page
@@ -305,6 +300,10 @@ export async function POST(req: NextRequest) {
     insertPayload.wizard_context = parsed.wizard_context;
   }
 
+  // @audit-skip: unauthenticated public landing-page form. audit_log
+  // requires a user_id; this caller has no user session. Lead-capture
+  // funnel metrics live in PostHog (client-side trackForQuantsEventClient
+  // — server-side capture was removed in G9.B.1). Per ADR-0023 §3.
   const { data: inserted, error: insertErr } = await admin
     .from("for_quants_leads")
     .insert(insertPayload)
