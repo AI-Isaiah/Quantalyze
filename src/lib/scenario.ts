@@ -481,6 +481,18 @@ export function computeCompositeCurve(
  * If `favorites` is empty, returns the real portfolio's baseline curve
  * (identity state) — the Favorites panel calls this with an empty array
  * when all toggles are off.
+ *
+ * audit-2026-05-07 G8.E.3 / FIX-LIST P340 — RESERVED EXPORT.
+ * No production callsite today: PR #41 removed the FavoritesPanel UI
+ * that consumed this function. Kept (rather than deleted) per the
+ * project's dead-code policy (`feedback_dead_code_askuser`) because
+ * the math primitive is correct, has regression tests
+ * (`scenario.test.ts: computeFavoritesOverlayCurve` + the
+ * G8.E.8 edge-case suite), and is the natural home for the
+ * portfolio-optimizer surface flagged in TODOS.md ("Replace the
+ * hardcoded 10% favorites sleeve with the portfolio optimizer").
+ * The 10% default is documented as a placeholder; callers MUST
+ * pass an explicit `sleevePercent` once the optimizer ships.
  */
 export function computeFavoritesOverlayCurve(
   realStrategies: StrategyForBuilder[],
