@@ -25,6 +25,25 @@ import type { WizardStepKey } from "@/lib/wizard/localStorage";
 let founderEmailMissingWarned = false;
 
 /**
+ * Cheap stable hash for user-agent strings, used to scope the
+ * rate-limit bucket when the IP is "unknown" (no x-real-ip /
+ * x-forwarded-for). Not cryptographic — just enough variability that
+ * one no-IP attacker doesn't share a bucket with every other no-IP
+ * caller. djb2 variant; collisions are fine because the consequence
+ * of a collision is the same as the pre-fix behavior (shared bucket).
+ * G9.B.15.
+ */
+function hashUserAgent(ua: string | null): string {
+  const input = ua ?? "no-ua";
+  let h = 5381;
+  for (let i = 0; i < input.length; i += 1) {
+    h = ((h << 5) + h + input.charCodeAt(i)) | 0;
+  }
+  // Convert to unsigned hex for a compact bucket key.
+  return (h >>> 0).toString(16);
+}
+
+/**
  * Lazy-import @sentry/nextjs and capture an exception with route +
  * stage tags. Lazy so that local dev / unit tests / sentry-disabled
  * preview deploys don't pull the SDK into the route's cold path. The
@@ -160,9 +179,21 @@ export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
 
-  // Layer 2: rate limit by IP (public endpoint — no user.id to scope on)
+  // Layer 2: rate limit by IP (public endpoint — no user.id to scope on).
+  //
+  // `getClientIp` returns the literal string 'unknown' when no IP
+  // headers are set. Pre-fix, every unidentified caller shared the
+  // same `for-quants-lead:unknown` bucket — a single attacker stripping
+  // x-real-ip + x-forwarded-for could burn the 10/min/IP budget for
+  // every other unidentified caller. Now we scope by user-agent hash
+  // when the IP is unknown so one no-ip attacker only DoS's its own
+  // UA bucket. G9.B.15.
   const ip = getClientIp(req.headers);
-  const rl = await checkLimit(publicIpLimiter, `for-quants-lead:${ip}`);
+  const rateLimitKey =
+    ip === "unknown"
+      ? `for-quants-lead:unknown:${hashUserAgent(req.headers.get("user-agent"))}`
+      : `for-quants-lead:${ip}`;
+  const rl = await checkLimit(publicIpLimiter, rateLimitKey);
   if (!rl.success) {
     return NextResponse.json(
       {
