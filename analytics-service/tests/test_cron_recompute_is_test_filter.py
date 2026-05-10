@@ -10,52 +10,25 @@ v0.4.0 pivot hid from the allocator sidebar. That wasted compute,
 inflated portfolio_alerts, and triggered email dispatches via
 notification_dispatches for hypothetical positions.
 
-This test stubs out the heavy deps (supabase / fastapi / slowapi /
-ccxt) and exercises the recompute branch by patching `supabase` +
-`_compute_portfolio_analytics`. It pins the contract:
+This test does NOT import cron.py directly. It exercises the filter
+contract by:
+  * inlining the recompute branch shape against a chained-call
+    supabase MagicMock, asserting only is_test=false portfolios are
+    recomputed; and
+  * a static-source pin asserting cron.py contains the
+    `.eq("is_test", False)` predicate.
 
-  * `portfolios.is_test=true` portfolios → NEVER passed to
-    `_compute_portfolio_analytics`.
-  * `portfolios.is_test=false` portfolios → passed exactly once.
-
-Mirrors the pattern in test_portfolio_router_logic.py.
+Both halves are pure stdlib + pytest — no fastapi/slowapi/ccxt/supabase
+imports happen here. Earlier revisions monkey-patched sys.modules at
+module load to stub those deps for a local venv that lacked them; that
+pollution caused 24 unrelated CI failures (test_debug_key_flow_router,
+test_job_worker) when collected alongside this file. The stubs are not
+needed because no real-module imports exist in this file.
 """
 
-import sys
-import types
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-
-
-def _install_stubs() -> None:
-    """Stub out heavy deps that aren't installed in the local test env."""
-    stubs = [
-        "supabase",
-        "slowapi",
-        "slowapi.util",
-        "fastapi",
-        "fastapi.routing",
-        "ccxt",
-        "ccxt.async_support",
-    ]
-    for name in stubs:
-        if name not in sys.modules:
-            sys.modules[name] = MagicMock()
-
-    sys.modules["supabase"].create_client = MagicMock()
-    sys.modules["supabase"].Client = MagicMock()
-
-    sys.modules["slowapi"].Limiter = MagicMock(return_value=MagicMock())
-    sys.modules["slowapi.util"].get_remote_address = MagicMock()
-
-    mock_router = MagicMock()
-    sys.modules["fastapi"].APIRouter = MagicMock(return_value=mock_router)
-    sys.modules["fastapi"].HTTPException = Exception
-    sys.modules["fastapi"].Request = MagicMock()
-
-
-_install_stubs()
 
 
 def _build_supabase_mock(
