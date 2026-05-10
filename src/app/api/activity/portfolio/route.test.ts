@@ -143,4 +143,132 @@ describe("GET /api/activity/portfolio", () => {
     expect(body.activity).toEqual([]);
     expect(body.volumeByDay).toEqual([]);
   });
+
+  /**
+   * Audit 2026-05-07 G12.G.6 regression: the pre-audit route ignored the
+   * `error` field on every Supabase response, so an RLS regression or a
+   * transient DB failure silently returned `{ activity: [], volumeByDay:
+   * [], has_fills: false }` — indistinguishable from a portfolio that
+   * genuinely has no strategies. The widget hid its "Now showing fills"
+   * footnote inappropriately and operators got no signal. After the fix,
+   * each query checks .error and bails to a structured 500.
+   */
+  it("returns 500 when portfolio_strategies query errors (audit G12.G.6)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    mockAdminFrom.mockImplementation((table: string) => {
+      if (table === "portfolio_strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              data: null,
+              error: { message: "rls denied", code: "PGRST301" },
+            }),
+          }),
+        };
+      }
+      return { select: () => ({ eq: () => ({ data: null, error: null }) }) };
+    });
+
+    const { GET } = await import("./route");
+    const res = await GET(makeReq({ portfolio_id: PORTFOLIO_ID }));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBeTruthy();
+    // Operators MUST see the error in the server log so on-call has a
+    // searchable signature distinct from the empty-portfolio path.
+    expect(consoleErr).toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("returns 500 when fill-count query errors (audit G12.G.6)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    mockAdminFrom.mockImplementation((table: string) => {
+      if (table === "portfolio_strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              data: [{ strategy_id: "s1", strategies: { name: "Alpha" } }],
+              error: null,
+            }),
+          }),
+        };
+      }
+      if (table === "trades") {
+        return {
+          select: () => ({
+            in: () => ({
+              eq: () => ({
+                count: null,
+                error: { message: "DB unreachable", code: "PGRST500" },
+              }),
+            }),
+          }),
+        };
+      }
+      return { select: () => ({ eq: () => ({ data: null, error: null }) }) };
+    });
+
+    const { GET } = await import("./route");
+    const res = await GET(makeReq({ portfolio_id: PORTFOLIO_ID }));
+
+    expect(res.status).toBe(500);
+    expect(consoleErr).toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("returns 500 when trades query errors (audit G12.G.6)", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    mockAdminFrom.mockImplementation((table: string) => {
+      if (table === "portfolio_strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              data: [{ strategy_id: "s1", strategies: { name: "Alpha" } }],
+              error: null,
+            }),
+          }),
+        };
+      }
+      if (table === "trades") {
+        return {
+          select: (...args: unknown[]) => {
+            // Fill count query (head: true) succeeds; the main trades
+            // query is the one that fails.
+            if (args.length >= 2 && typeof args[1] === "object" && args[1] && "count" in args[1]) {
+              return {
+                in: () => ({ eq: () => ({ count: 0, error: null }) }),
+              };
+            }
+            return {
+              in: () => ({
+                eq: () => ({
+                  order: () => ({
+                    limit: () => ({
+                      data: null,
+                      error: { message: "timeout", code: "PGRST504" },
+                    }),
+                  }),
+                }),
+              }),
+            };
+          },
+        };
+      }
+      return { select: () => ({ eq: () => ({ data: null, error: null }) }) };
+    });
+
+    const { GET } = await import("./route");
+    const res = await GET(makeReq({ portfolio_id: PORTFOLIO_ID }));
+
+    expect(res.status).toBe(500);
+    expect(consoleErr).toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
 });
