@@ -136,7 +136,7 @@ describe("POST /api/for-quants-lead — gap coverage", () => {
   });
 
   describe("rate-limit bucket scoping when IP is unknown (G9.B.15)", () => {
-    it("uses `for-quants-lead:unknown:<ua-hash>` as the bucket key when no IP headers are present", async () => {
+    it("uses `for-quants-lead:unknown:<ua-hash>` as the per-UA bucket key AND a `_aggregate` cap when no IP headers are present", async () => {
       const { POST } = await import("./route");
       const res = await POST(
         makeRequest(VALID_PAYLOAD, {
@@ -146,15 +146,19 @@ describe("POST /api/for-quants-lead — gap coverage", () => {
         }),
       );
       expect(res.status).toBe(200);
-      expect(rlState.identifiers).toHaveLength(1);
-      const key = rlState.identifiers[0];
-      // Shape is documented in route.ts:192-195 — UA-hashed suffix
-      // when IP is "unknown" so one no-ip attacker can't DoS every
-      // other no-ip caller.
-      expect(key).toMatch(/^for-quants-lead:unknown:[a-f0-9]+$/);
+      // Two checkLimit calls when IP is unknown: per-UA AND aggregate.
+      // Per-UA fairness alone leaves the route open to a UA-rotating
+      // botnet; the aggregate cap is the red-team-specialist regression.
+      expect(rlState.identifiers).toHaveLength(2);
+      expect(rlState.identifiers[0]).toMatch(
+        /^for-quants-lead:unknown:[a-f0-9]+$/,
+      );
+      expect(rlState.identifiers[1]).toBe(
+        "for-quants-lead:unknown:_aggregate",
+      );
     });
 
-    it("two different user-agents on missing IP produce different bucket keys", async () => {
+    it("two different user-agents on missing IP produce different per-UA bucket keys (BOTH share the aggregate cap)", async () => {
       const { POST } = await import("./route");
       await POST(
         makeRequest(VALID_PAYLOAD, {
@@ -170,14 +174,25 @@ describe("POST /api/for-quants-lead — gap coverage", () => {
           "user-agent": "Mozilla/5.0 (FixtureBotB/2.0)",
         }),
       );
-      expect(rlState.identifiers).toHaveLength(2);
-      // Different UAs MUST land in different buckets (the load-bearing
-      // property of G9.B.15: stripping IP must not equal sharing a
-      // bucket with every other no-IP caller).
-      expect(rlState.identifiers[0]).not.toBe(rlState.identifiers[1]);
+      // Each request emits TWO checkLimit calls: per-UA + aggregate.
+      // Order: [reqA-perUA, reqA-aggregate, reqB-perUA, reqB-aggregate].
+      expect(rlState.identifiers).toHaveLength(4);
+      // Different UAs MUST land in different per-UA buckets (the
+      // load-bearing property of G9.B.15: stripping IP must not equal
+      // sharing a bucket with every other no-IP caller).
+      expect(rlState.identifiers[0]).not.toBe(rlState.identifiers[2]);
+      // Both requests MUST share the same aggregate cap key (the
+      // red-team property: rotating UAs cannot bypass the global
+      // unknown-IP ceiling).
+      expect(rlState.identifiers[1]).toBe(
+        "for-quants-lead:unknown:_aggregate",
+      );
+      expect(rlState.identifiers[3]).toBe(
+        "for-quants-lead:unknown:_aggregate",
+      );
     });
 
-    it("uses `for-quants-lead:<ip>` (no UA suffix) when x-real-ip is set", async () => {
+    it("uses `for-quants-lead:<ip>` (no UA suffix, no aggregate cap) when x-real-ip is set", async () => {
       const { POST } = await import("./route");
       await POST(
         makeRequest(VALID_PAYLOAD, {
@@ -187,6 +202,9 @@ describe("POST /api/for-quants-lead — gap coverage", () => {
           "user-agent": "Mozilla/5.0 (UA-shouldnt-matter)",
         }),
       );
+      // Known-IP path: ONE checkLimit call. Aggregate cap is scoped
+      // to the unknown-IP family because real visitors with IPs are
+      // already scoped per-IP and don't need a second ceiling.
       expect(rlState.identifiers).toEqual(["for-quants-lead:203.0.113.42"]);
     });
   });
@@ -254,6 +272,55 @@ describe("POST /api/for-quants-lead — gap coverage", () => {
       );
       expect(res.status).toBe(200);
       expect(dbState.inserted[0].wizard_context).toMatchObject(wizardCtx);
+    });
+  });
+
+  /**
+   * Red-team specialist regression — same-person retries with different
+   * casing must canonicalize to the same DB row form so PR-5's future
+   * UNIQUE (lower(email), date_trunc('day', created_at)) constraint
+   * dedupes correctly. The lowercase transform happens at the Zod
+   * schema layer so all downstream consumers (DB row, future PR-5
+   * UNIQUE, eventual idempotency token re-introduction) see the same
+   * canonical form.
+   *
+   * The original idempotency_key contract was REVERTED in this PR after
+   * the red-team flagged that without server-side UNIQUE the token did
+   * the OPPOSITE of what its docblock claimed (concurrent retries got
+   * the same token but BOTH inserted + BOTH emailed the founder). The
+   * lowercase fix stays because PR-5 needs it.
+   */
+  describe("email canonicalization (red-team regression)", () => {
+    it("inserts the lowercase email regardless of caller casing", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({
+          ...VALID_PAYLOAD,
+          email: "Jane.DOE@Acme.Example",
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(dbState.inserted).toHaveLength(1);
+      // Row email MUST be lowercase — matches the future PR-5 UNIQUE
+      // constraint shape `lower(email)`.
+      expect(dbState.inserted[0].email).toBe("jane.doe@acme.example");
+    });
+
+    it("two retries with different email casing both store the canonical lowercase form", async () => {
+      const { POST } = await import("./route");
+      await POST(
+        makeRequest({ ...VALID_PAYLOAD, email: "JANE@ACME.EXAMPLE" }),
+      );
+      await POST(
+        makeRequest({ ...VALID_PAYLOAD, email: "jane@acme.example" }),
+      );
+      // Both DB rows store the canonical lowercase form so PR-5's
+      // future UNIQUE (lower(email), date_trunc('day', created_at))
+      // constraint will collapse them to one row server-side. Until
+      // PR-5 lands, we still get two rows here — that's accepted.
+      expect(dbState.inserted).toHaveLength(2);
+      expect(dbState.inserted[0].email).toBe("jane@acme.example");
+      expect(dbState.inserted[1].email).toBe("jane@acme.example");
     });
   });
 });

@@ -119,6 +119,14 @@ export type SetLeadProcessedResult =
 
 // Filters on the opposite state so double-clicks are idempotent and
 // the returned row count distinguishes real toggles from no-ops.
+//
+// Operator triage clears `notify_error` because the operator has now
+// acknowledged the underlying state (the lead is being followed up on
+// out-of-band). Without the clear, a row that's later flipped back to
+// unprocessed via unmarkLeadProcessed would re-render the historical
+// "Founder notify failed: <stale message>" badge with no temporal
+// context — the operator would see a fresh-looking error for an issue
+// resolved hours ago. Red-team specialist regression.
 export async function markLeadProcessed(
   id: string,
   client?: SupabaseClient,
@@ -126,7 +134,10 @@ export async function markLeadProcessed(
   const admin = client ?? createAdminClient();
   const { data, error } = await admin
     .from("for_quants_leads")
-    .update({ processed_at: new Date().toISOString() })
+    .update({
+      processed_at: new Date().toISOString(),
+      notify_error: null,
+    })
     .eq("id", id)
     .is("processed_at", null)
     .select("id");

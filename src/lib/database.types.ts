@@ -931,6 +931,14 @@ export type Database = {
         }
         Relationships: []
       }
+      // HAND-PATCHED — do not regenerate this section without verifying
+      // migration 115 (notify_attempted_at, notify_succeeded_at,
+      // notify_error) is present in the source the regenerator targets.
+      // `supabase gen types typescript --linked` reads from the
+      // CURRENTLY-LINKED project; if linked to a project that hasn't
+      // applied 115, the regen will silently revert these three columns
+      // and break tsc on route.ts's `.update({ notify_attempted_at })`
+      // calls. audit-2026-05-07 G9.B.7 / red-team specialist regression.
       for_quants_leads: {
         Row: {
           created_at: string

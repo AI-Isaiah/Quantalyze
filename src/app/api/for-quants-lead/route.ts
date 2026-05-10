@@ -111,12 +111,15 @@ function captureFailure(
 
 /**
  * Step keys the wizard uses for funnel telemetry. Mirrors `WizardStepKey`
- * in `src/lib/wizard/localStorage.ts`. The `satisfies readonly WizardStepKey[]`
- * assertion guarantees that any future drift between the wizard's step
- * union and this enum fails at typecheck — historically the CSV-branch
- * keys (`csv_upload`, `csv_preview`, `csv_submit`) were missing here, which
- * 400'd every CSV-wizard lead with a `wizard_context.step` Zod error
- * (G9.B.4).
+ * in `src/lib/wizard/localStorage.ts`.
+ *
+ * `satisfies readonly WizardStepKey[]` (extra-keys check) catches typos
+ * — adding `"connet_key"` here would fail typecheck. But it does NOT
+ * catch missing-keys drift: if a new wizard step is added to
+ * WizardStepKey, this array can stay short and the API silently 400s
+ * the new step (the exact regression class G9.B.4 fixed for the
+ * pre-fix 4-key enum). Red-team specialist regression — pin BOTH
+ * directions of drift at compile time.
  */
 const WIZARD_STEP_KEYS = [
   "connect_key",
@@ -127,6 +130,24 @@ const WIZARD_STEP_KEYS = [
   "csv_preview",
   "csv_submit",
 ] as const satisfies readonly WizardStepKey[];
+
+/**
+ * Compile-time exhaustiveness check: if WizardStepKey gains a new
+ * variant and this array doesn't, `_MissingWizardStep` becomes a
+ * non-`never` union and the `extends never ? true : never` resolves
+ * to `never`, breaking the assignment. The next `npm run typecheck`
+ * fails with a clear "Type 'never' is not assignable" error pointing
+ * here. Zero runtime cost — `_check` is a type-only assertion.
+ */
+type _MissingWizardStep = Exclude<
+  WizardStepKey,
+  (typeof WIZARD_STEP_KEYS)[number]
+>;
+const _wizardStepKeysExhaustivenessCheck: _MissingWizardStep extends never
+  ? true
+  : never = true;
+// Reference the binding so `noUnusedLocals` doesn't strip it.
+void _wizardStepKeysExhaustivenessCheck;
 
 const WIZARD_CONTEXT_SCHEMA = z
   .object({
@@ -152,7 +173,16 @@ const LEAD_SCHEMA = z.object({
     .string()
     .trim()
     .email("Enter a valid email")
-    .max(320, "Email is too long"),
+    .max(320, "Email is too long")
+    // Canonicalize to lowercase so the DB row, the idempotency token,
+    // AND the future PR-5 UNIQUE constraint all key on the same string.
+    // Pre-fix the row stored 'Jane@Acme.com' as-typed but the token
+    // hashed 'jane@acme.com', so two same-person retries with different
+    // casing produced the same token but two distinct rows. Per RFC 5321
+    // local-parts may be case-sensitive, but no real-world provider
+    // (Gmail, Outlook, ProtonMail, etc.) treats them as such. Red-team
+    // specialist regression.
+    .transform((v) => v.toLowerCase()),
   preferred_time: z
     .string()
     .trim()
@@ -205,6 +235,31 @@ export async function POST(req: NextRequest) {
         headers: { "Retry-After": String(rl.retryAfter) },
       },
     );
+  }
+
+  // Defense against rotating-UA attacks: a botnet that strips the IP
+  // headers AND rotates user-agents would get a fresh 10/min slot per
+  // UA, bypassing the per-UA bucket above. Layer a cheap aggregate
+  // ceiling on the entire unknown-IP family so the total no-IP budget
+  // is bounded regardless of UA rotation. Real visitors with IPs are
+  // unaffected. Red-team specialist regression.
+  if (ip === "unknown") {
+    const aggregateRl = await checkLimit(
+      publicIpLimiter,
+      "for-quants-lead:unknown:_aggregate",
+    );
+    if (!aggregateRl.success) {
+      return NextResponse.json(
+        {
+          error:
+            "Too many requests. Try again in a few minutes, or email security@quantalyze.com directly.",
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": String(aggregateRl.retryAfter) },
+        },
+      );
+    }
   }
 
   // Layer 3: parse + validate body. Read raw text first and gate on
@@ -488,43 +543,21 @@ export async function POST(req: NextRequest) {
     }
   });
 
-  // Return an opaque idempotency token (SHA-256 of `email|YYYY-MM-DD`)
-  // so a flaky network where the response was dropped after a
-  // successful insert lets the client recognize a retry as the same
-  // logical submission rather than treating it as a fresh one. The
-  // token is NOT a secret — it's stable for the (email, day) pair on
-  // purpose. Server-side dedup via a UNIQUE constraint is tracked
-  // separately (PR-5 owns migrations). G9.B.17.
+  // The lead id is NOT returned — it's an internal identifier the UI
+  // doesn't need.
   //
-  // The lead id is still NOT returned — it's an internal identifier
-  // the UI doesn't need.
-  const idempotencyKey = await computeIdempotencyToken(parsed.email);
-  return NextResponse.json({ ok: true, idempotency_key: idempotencyKey });
-}
-
-/**
- * Hex chars retained from the SHA-256 digest. 32 hex chars = 128 bits of
- * entropy — collision-resistant on the per-day, per-email scope this
- * token is bucketed by (the (lower(email), UTC-day) keyspace is far
- * smaller than 2^64). The token is non-secret so a longer prefix would
- * only bloat the response; a shorter one would risk birthday
- * collisions if the lead pipeline grew by orders of magnitude.
- */
-const IDEMPOTENCY_TOKEN_HEX_LEN = 32;
-
-/**
- * Stable, non-secret token clients can use to dedupe network retries
- * of the same logical submission. SHA-256 of `email|UTC-YYYY-MM-DD`.
- * Web Crypto is available in both Edge and Node Function runtimes on
- * Vercel (per the Next.js docs node_modules/next/dist/docs/...) so no
- * polyfill needed. G9.B.17.
- */
-async function computeIdempotencyToken(email: string): Promise<string> {
-  const day = new Date().toISOString().slice(0, 10);
-  const data = new TextEncoder().encode(`${email.toLowerCase()}|${day}`);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, IDEMPOTENCY_TOKEN_HEX_LEN);
+  // G9.B.17 was originally scoped to return an opaque idempotency_key
+  // here (SHA-256 of `email|UTC-YYYY-MM-DD`) so clients could dedupe
+  // network retries. Red-team specialist (conf 9/10) flagged that
+  // without a server-side UNIQUE constraint on (lower(email),
+  // date_trunc('day', created_at)) — which lives in a migration owned
+  // by PR-5 — two concurrent same-email retries BOTH insert separate
+  // rows AND BOTH fire founder emails AND BOTH receive the same token.
+  // A client trusting the token would silently discard real leads from
+  // its retry buffer while the founder still received duplicates. The
+  // token thus did the OPPOSITE of what its docblock claimed for the
+  // only failure mode where idempotency matters. Drop the token from
+  // the response now; PR-5 will re-add it alongside the UNIQUE
+  // constraint that ACTUALLY enforces dedup.
+  return NextResponse.json({ ok: true });
 }
