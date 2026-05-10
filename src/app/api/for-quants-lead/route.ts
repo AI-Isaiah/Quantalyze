@@ -239,13 +239,20 @@ export async function POST(req: NextRequest) {
     parsed = LEAD_SCHEMA.parse(body);
   } catch (err) {
     if (err instanceof z.ZodError) {
-      // Flatten to a single field->message map so the client can show
-      // inline errors without walking a nested Zod error tree.
-      const fieldErrors: Record<string, string> = {};
+      // Flatten to a `field -> message[]` map so the client can show
+      // every issue per field. Pre-fix, the route stored only the
+      // first issue per field — for a field with multiple rules
+      // (e.g., email has both `email()` and `max(320)`), the user
+      // saw one error at a time and had to fix-and-retry. G9.B.16.
+      const fieldErrors: Record<string, string[]> = {};
       for (const issue of err.issues) {
         const path = issue.path.join(".");
-        if (path && !fieldErrors[path]) {
-          fieldErrors[path] = issue.message;
+        if (!path) continue;
+        const bucket = fieldErrors[path];
+        if (bucket) {
+          bucket.push(issue.message);
+        } else {
+          fieldErrors[path] = [issue.message];
         }
       }
       return NextResponse.json(

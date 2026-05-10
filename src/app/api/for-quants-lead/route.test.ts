@@ -282,7 +282,9 @@ describe("POST /api/for-quants-lead", () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.fieldErrors).toBeDefined();
-      expect(body.fieldErrors.name).toBeTruthy();
+      // G9.B.16: fieldErrors is an array per field.
+      expect(Array.isArray(body.fieldErrors.name)).toBe(true);
+      expect(body.fieldErrors.name.length).toBeGreaterThan(0);
       expect(dbState.inserted).toHaveLength(0);
     });
 
@@ -297,7 +299,7 @@ describe("POST /api/for-quants-lead", () => {
       );
       expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.fieldErrors.email).toBeTruthy();
+      expect(body.fieldErrors.email[0]).toBeTruthy();
       expect(dbState.inserted).toHaveLength(0);
     });
 
@@ -312,7 +314,7 @@ describe("POST /api/for-quants-lead", () => {
       );
       expect(res.status).toBe(400);
       const body = await res.json();
-      expect(body.fieldErrors.name).toBeTruthy();
+      expect(body.fieldErrors.name[0]).toBeTruthy();
     });
 
     it("rejects notes longer than 2000 chars", async () => {

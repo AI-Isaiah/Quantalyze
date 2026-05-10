@@ -91,7 +91,16 @@ function RequestCallForm({
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Server returns `Record<string, string[]>` per field so callers can
+  // show every Zod issue (e.g., email is both invalid format AND too
+  // long). For inline rendering we surface the FIRST issue per field
+  // — the most actionable — and fall back to undefined when there are
+  // no issues for that field. G9.B.16.
+  const [fieldErrors, setFieldErrors] = useState<
+    Record<string, string[] | undefined>
+  >({});
+  const firstFieldError = (key: string): string | undefined =>
+    fieldErrors[key]?.[0];
   const firstFieldRef = useRef<HTMLInputElement>(null);
   // Must be a ref, not state — synchronous gate against double-click
   // within one React render tick (see docblock).
@@ -133,7 +142,7 @@ function RequestCallForm({
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
-        fieldErrors?: Record<string, string>;
+        fieldErrors?: Record<string, string[]>;
       };
 
       if (!res.ok) {
@@ -215,7 +224,7 @@ function RequestCallForm({
         placeholder="Jane Doe"
         required
         autoComplete="name"
-        error={fieldErrors.name}
+        error={firstFieldError("name")}
       />
       <Input
         label="Firm"
@@ -224,7 +233,7 @@ function RequestCallForm({
         placeholder="Firm or team name"
         required
         autoComplete="organization"
-        error={fieldErrors.firm}
+        error={firstFieldError("firm")}
       />
       <Input
         label="Email"
@@ -234,14 +243,14 @@ function RequestCallForm({
         placeholder="you@firm.com"
         required
         autoComplete="email"
-        error={fieldErrors.email}
+        error={firstFieldError("email")}
       />
       <Input
         label="Preferred time (optional)"
         value={preferredTime}
         onChange={(e) => setPreferredTime(e.target.value)}
         placeholder="e.g. Tue morning PT"
-        error={fieldErrors.preferred_time}
+        error={firstFieldError("preferred_time")}
       />
       <Textarea
         label="Notes (optional)"
@@ -249,7 +258,7 @@ function RequestCallForm({
         onChange={(e) => setNotes(e.target.value)}
         placeholder="Anything we should know before the call"
         rows={3}
-        error={fieldErrors.notes}
+        error={firstFieldError("notes")}
       />
 
       {error && (
