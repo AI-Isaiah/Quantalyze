@@ -12,6 +12,19 @@ import { notifyFounderGeneric, escapeHtml } from "@/lib/email";
 import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
+ * Once-per-process flag for the missing-FOUNDER_EMAIL warning. We only
+ * want to notify Sentry once per cold start, not once per request, so
+ * a silent misconfig still surfaces but doesn't spam the issue tracker.
+ * Module-scope so the flag is shared across all in-flight requests on
+ * the same warm instance. G9.B.7.
+ *
+ * Tests reset this via `vi.resetModules()` + a fresh `await import('./route')`
+ * — Next.js route files MUST only export the HTTP-method handlers and
+ * route segment config (no test-only exports).
+ */
+let founderEmailMissingWarned = false;
+
+/**
  * Lazy-import @sentry/nextjs and capture an exception with route +
  * stage tags. Lazy so that local dev / unit tests / sentry-disabled
  * preview deploys don't pull the SDK into the route's cold path. The
@@ -264,6 +277,22 @@ export async function POST(req: NextRequest) {
   // successful POST (RequestCallModal handleSubmit) using its own
   // distinctId, mirroring how the click and view events are captured.
   after(async () => {
+    // G9.B.7: notifyFounderGeneric silently returns early when
+    // ADMIN_EMAIL is unset (see src/lib/email.ts:55,685). A misconfig
+    // would land every lead in the DB but never alert the founder, and
+    // the inner try/catch would not fire (the helper doesn't throw).
+    // Detect the misconfig once per process and surface it via Sentry
+    // so the silent path stops being invisible.
+    if (!process.env.ADMIN_EMAIL) {
+      console.warn(
+        "[for-quants-lead] ADMIN_EMAIL is unset — founder notification skipped",
+      );
+      if (!founderEmailMissingWarned) {
+        founderEmailMissingWarned = true;
+        captureFailure(null, "founder_email_unset", { lead_id: leadId });
+      }
+    }
+
     try {
       await notifyFounderGeneric(
         `Request a Call: ${parsed.name} at ${parsed.firm}`,

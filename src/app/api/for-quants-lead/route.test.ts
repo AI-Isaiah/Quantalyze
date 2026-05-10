@@ -202,8 +202,14 @@ describe("POST /api/for-quants-lead", () => {
    * the chained promise (after → import('@sentry/nextjs').then(...)).
    */
   async function flushMicrotasks(): Promise<void> {
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    // The chain is: after() → cb-wrapped promise → captureFailure →
+    // import('@sentry/nextjs').then(captureException). Each `then`
+    // costs one microtask hop; mocked imports add a queueMicrotask
+    // step too. Four awaits is comfortably more than enough but
+    // cheap — vitest finishes a single test in <100ms either way.
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
   }
 
   describe("happy path", () => {
@@ -452,6 +458,53 @@ describe("POST /api/for-quants-lead", () => {
       expect(sentryState.captures.some((c) => c.stage === "db_insert")).toBe(
         true,
       );
+    });
+
+    it("captures founder_notify failures in Sentry", async () => {
+      emailState.shouldThrow = true;
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(VALID_PAYLOAD));
+      expect(res.status).toBe(200);
+      await flushMicrotasks();
+      expect(
+        sentryState.captures.some((c) => c.stage === "founder_notify"),
+      ).toBe(true);
+    });
+  });
+
+  /**
+   * G9.B.7 regression — notifyFounderGeneric silently returns early
+   * when ADMIN_EMAIL is unset. Pre-fix: every lead landed in the DB
+   * but the founder was never notified and there was no Sentry
+   * breadcrumb. Post-fix: the route detects the misconfig itself and
+   * surfaces it via Sentry once per process while still returning 200.
+   */
+  describe("missing ADMIN_EMAIL warning (G9.B.7)", () => {
+    it("captures founder_email_unset in Sentry when ADMIN_EMAIL is empty + still returns 200", async () => {
+      const prev = process.env.ADMIN_EMAIL;
+      process.env.ADMIN_EMAIL = "";
+      try {
+        // Reset the module so the once-per-process flag in route.ts
+        // doesn't leak between tests. Next.js route files can't export
+        // a test-only reset helper, so vi.resetModules + a fresh import
+        // is the supported workaround.
+        vi.resetModules();
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(VALID_PAYLOAD));
+        expect(res.status).toBe(200);
+        await flushMicrotasks();
+        expect(
+          sentryState.captures.some(
+            (c) => c.stage === "founder_email_unset",
+          ),
+        ).toBe(true);
+      } finally {
+        if (prev === undefined) {
+          delete process.env.ADMIN_EMAIL;
+        } else {
+          process.env.ADMIN_EMAIL = prev;
+        }
+      }
     });
   });
 });
