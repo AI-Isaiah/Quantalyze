@@ -149,6 +149,16 @@ function RequestCallForm({
         return;
       }
 
+      // Fire the conversion event from the CLIENT (not the server)
+      // so its distinctId is the visitor's PostHog cookie ID — joining
+      // view → click → submit on the same person. Server-side capture
+      // would use a synthetic `lead:<uuid>` distinctId and split the
+      // funnel across three unrelated IDs (G9.B.1).
+      trackForQuantsEventClient("for_quants_lead_submit", {
+        source: "modal",
+        cta_location: ctaLocation,
+      });
+
       setSubmitted(true);
       setSubmitting(false);
       // Leave inFlight true — the form is replaced by the success view

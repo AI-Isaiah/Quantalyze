@@ -9,7 +9,6 @@ import {
   sanitizeInetForDb,
 } from "@/lib/ratelimit";
 import { notifyFounderGeneric, escapeHtml } from "@/lib/email";
-import { trackForQuantsEventServer } from "@/lib/analytics";
 import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
@@ -214,6 +213,15 @@ export async function POST(req: NextRequest) {
   // Fire-and-forget via `after()` — Next.js keeps the function alive
   // until this callback resolves. A raw `Promise.resolve().then()`
   // would be abandoned when the function suspends on Vercel.
+  //
+  // Server-side `for_quants_lead_submit` capture was removed (G9.B.1):
+  // the synthetic `lead:<uuid>` distinctId collided with the cookie-based
+  // anonymous ID PostHog had used for the visitor's view → click events
+  // — every form-submit became a brand-new PostHog person disconnected
+  // from its parent visitor and the QQAR/CTR funnel could never
+  // reconstruct. The client now fires the conversion event after a
+  // successful POST (RequestCallModal handleSubmit) using its own
+  // distinctId, mirroring how the click and view events are captured.
   after(async () => {
     try {
       await notifyFounderGeneric(
@@ -230,15 +238,6 @@ export async function POST(req: NextRequest) {
       );
     } catch (err) {
       console.warn("[for-quants-lead] founder notify failed (non-blocking):", err);
-    }
-
-    try {
-      await trackForQuantsEventServer("for_quants_lead_submit", `lead:${leadId}`, {
-        source: "modal",
-        user_agent: req.headers.get("user-agent"),
-      });
-    } catch (err) {
-      console.warn("[for-quants-lead] analytics failed (non-blocking):", err);
     }
   });
 
