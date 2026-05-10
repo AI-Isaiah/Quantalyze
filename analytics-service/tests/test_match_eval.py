@@ -81,6 +81,13 @@ def _passthrough_chain(final_data):
     chain.gte.return_value = chain
     chain.in_.return_value = chain
     chain.lt.return_value = chain
+    # audit-2026-05-07 #27 follow-up: match_candidates query now appends
+    # `.is_("exclusion_reason", "null")` so the planner can ride the
+    # partial index `idx_match_cand_batch_rank` (WHERE exclusion_reason
+    # IS NULL). The mock must passthrough `.is_()` so existing tests
+    # that build a chain via `_passthrough_chain` for match_candidates
+    # don't break when the runner adds the new chain element.
+    chain.is_.return_value = chain
     chain.order.return_value = chain
     chain.limit.return_value = chain
 
@@ -468,6 +475,11 @@ def _capture_chain(final_data, recorded_orders: list[tuple[str, bool]]):
     chain.gte.return_value = chain
     chain.in_.return_value = chain
     chain.lt.return_value = chain
+    # audit-2026-05-07 #27 follow-up: match_candidates query now appends
+    # `.is_("exclusion_reason", "null")` for partial-index alignment.
+    # The capture chain must passthrough `.is_()` so the order recorder
+    # still sees the composite ORDER BY downstream.
+    chain.is_.return_value = chain
     chain.limit.return_value = chain
 
     def _order_side_effect(column, *, desc=False, **_kw):
@@ -564,6 +576,12 @@ def test_compute_hit_rate_issues_one_match_batches_query_per_call():
         chain.gte.return_value = chain
         chain.in_.return_value = chain
         chain.lt.return_value = chain
+        # audit-2026-05-07 #27 follow-up: match_candidates query now appends
+        # `.is_("exclusion_reason", "null")` so the planner can ride the
+        # partial index `idx_match_cand_batch_rank` (WHERE exclusion_reason
+        # IS NULL). Counting chain must passthrough `.is_()` so the chain
+        # walks all the way to `.range()` for the pagination counter.
+        chain.is_.return_value = chain
         chain.limit.return_value = chain
         chain.order.return_value = chain
 

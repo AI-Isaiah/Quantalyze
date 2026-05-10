@@ -1002,6 +1002,24 @@ def _build_balance_flag_mock_supabase(
             eq.single.return_value = single
             sel.eq.return_value = eq
             t.select.return_value = sel
+        elif name == "trades":
+            # Runner fetches raw fills at analytics_runner.py:756 via
+            # `.select("side, cost, is_maker, timestamp").eq("strategy_id", ...).eq("is_fill", True)`.
+            # Without an explicit stub the default MagicMock chain returns
+            # another MagicMock for `.data`, which pollutes
+            # `_compute_position_side_volume_pcts` and silently triggers
+            # `position_side_volume_failed=True` — a test artifact that
+            # contaminates the clean-path computation_status assertion
+            # added in the audit-2026-05-07 #9 consumer migration.
+            # Returning data=[] keeps fills_data empty so the runner
+            # short-circuits the side-volume helper entirely.
+            sel = MagicMock()
+            eq_strat_t = MagicMock()
+            eq_strat_t.execute.return_value = MagicMock(data=[])
+            eq_t = MagicMock()
+            eq_t.eq.return_value = eq_strat_t
+            sel.eq.return_value = eq_t
+            t.select.return_value = sel
         elif name == "position_snapshots":
             sel = MagicMock()
             eq = MagicMock()
@@ -1286,13 +1304,56 @@ async def test_consumer_migration_balance_error_surfaces_in_dqf_and_status():
 
 
 @pytest.mark.asyncio
-async def test_consumer_migration_clean_path_persists_complete_no_dqf_keys():
+async def test_consumer_migration_section_flag_alone_upgrades_status():
+    """audit-2026-05-07 G9.B.7-style contract pin: when ONLY a
+    section-level flag fires (no_linked_api_key in this case — set
+    when api_key_id is None) and used_heuristic_capital /
+    balance_error are both False, the runner must still upgrade
+    computation_status to 'complete_with_warnings'.
+
+    This pins the OR documented in transforms.py::_build_meta:
+    "analytics_runner.py will OR this hint with its own per-section
+    flags so the final computation_status reflects every degraded
+    surface." Pre-fix, the consumer assigned the hint directly,
+    leaving status='complete' for any run with only section flags —
+    a silent-degradation surface the audit was supposed to close.
+    """
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id=None,  # → no_linked_api_key flag fires
+    )
+    upsert = await _run_and_get_success_upsert(mock_supabase, sa_upsert_calls)
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("no_linked_api_key") is True
+    assert "used_heuristic_capital" not in flags
+    assert "balance_error" not in flags
+    assert upsert.get("computation_status") == "complete_with_warnings", (
+        "Section-level DQF flags must promote computation_status per the "
+        f"_build_meta contract; got: {upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_migration_clean_path_does_not_leak_consumer_specific_keys():
     """Negative regression: when transforms reports no warnings
     (used_heuristic_capital=False, balance_error=False), the runner
-    must still persist computation_status='complete' and must NOT
-    surface either of the two new DQF keys. Guards against the
-    consumer leaking spurious 'used_heuristic_capital'/'balance_error'
-    chips on every successful run."""
+    must NOT surface either of the two new DQF keys. Guards against
+    the consumer leaking spurious 'used_heuristic_capital' /
+    'balance_error' chips on every successful run.
+
+    NOTE on computation_status: `_run_and_get_success_upsert` patches
+    `get_benchmark_returns` to `(None, True)` which sets
+    `benchmark_unavailable=True` in DQF. Per the contract documented
+    in transforms.py::_build_meta and implemented at
+    analytics_runner.py:971+ (the OR), ANY DQF flag promotes status
+    to 'complete_with_warnings'. So we cannot assert
+    status=='complete' here without also stubbing the benchmark; we
+    only assert the two consumer-specific keys are absent.
+    `test_consumer_migration_used_heuristic_capital_*` /
+    `..._balance_error_*` cover the positive paths.
+    """
     sa_upsert_calls: list[dict] = []
     mock_supabase = _build_balance_flag_mock_supabase(
         daily_pnl_rows=_minimal_daily_rows(),
@@ -1302,9 +1363,12 @@ async def test_consumer_migration_clean_path_persists_complete_no_dqf_keys():
     )
     upsert = await _run_and_get_success_upsert(mock_supabase, sa_upsert_calls)
     flags = upsert.get("data_quality_flags") or {}
-    assert "used_heuristic_capital" not in flags
-    assert "balance_error" not in flags
-    assert upsert.get("computation_status") == "complete"
+    assert "used_heuristic_capital" not in flags, (
+        f"Consumer must not set used_heuristic_capital on a clean run; got: {flags!r}"
+    )
+    assert "balance_error" not in flags, (
+        f"Consumer must not set balance_error on a clean run; got: {flags!r}"
+    )
 
 
 def test_volume_metrics_no_longer_aliases_long_to_buy():

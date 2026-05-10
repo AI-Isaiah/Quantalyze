@@ -963,12 +963,28 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["balance_error"] = True
 
-        # When transforms.py signals degraded inputs, upgrade the run's
-        # computation_status from 'complete' to 'complete_with_warnings'
-        # so the strategy detail page can route to the chip-rendering
-        # branch. Section-level failure flags (position_metrics_failed,
-        # sibling_kinds_failed, etc.) handled separately above/below.
-        computation_status_value = returns_meta["computation_status_hint"]
+        # Upgrade the run's computation_status to 'complete_with_warnings'
+        # whenever ANY data-quality flag is set — both the
+        # transforms.py-sourced flags (used_heuristic_capital,
+        # balance_error) and the section-level flags
+        # (position_metrics_failed, fills_fetch_failed,
+        # position_side_volume_failed, trade_mix_approximation,
+        # account_balance_unavailable, no_linked_api_key). Per the
+        # project-wide convention documented in
+        # transforms.py::_build_meta, the consumer ORs the transforms
+        # hint with its per-section flags so the final
+        # computation_status reflects every degraded surface — not
+        # just the heuristic-capital path. Pre-fix this branch
+        # silently rendered position-metrics failures as
+        # status='complete' on the public factsheet, defeating the
+        # chip-rendering branch the audit added for #9.
+        # (sibling_kinds_failed is set later, post-upsert; that one
+        # path is intentionally not OR-ed here because the upsert
+        # below establishes the parent row first.)
+        if data_quality_flags:
+            computation_status_value = "complete_with_warnings"
+        else:
+            computation_status_value = returns_meta["computation_status_hint"]
 
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure

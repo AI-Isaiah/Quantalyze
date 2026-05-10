@@ -216,15 +216,18 @@ def compute_hit_rate_metrics(
     candidates_by_batch_and_strategy: dict[tuple[str, str], int | None] = {}
     if needed_batch_ids:
         # audit-2026-05-07 #27: order by (batch_id, rank) so the query rides
-        # `idx_match_cand_batch_rank` instead of the UUIDv4 `id` PK. The pair
-        # is unique-enough in practice for the .range() slice to be stable
-        # — a duplicate (batch_id, strategy_id) would already be flagged by
-        # the warning below, and a duplicate (batch_id, rank) is a writer
-        # bug that should fail loudly rather than silently scrambling pages.
+        # `idx_match_cand_batch_rank` (partial index WHERE exclusion_reason
+        # IS NULL). The `.is_("exclusion_reason", "null")` predicate below
+        # pushes the partial-index filter into the query so the planner can
+        # actually use the partial index — without it the predicate sits in
+        # Python and the planner falls back to a sort. In-memory `continue`
+        # still defends against any post-write race that surfaces an excluded
+        # row through a stale snapshot.
         for row in _paginated_select(
             supabase.table("match_candidates")
             .select("batch_id, strategy_id, rank, exclusion_reason")
-            .in_("batch_id", sorted(needed_batch_ids)),
+            .in_("batch_id", sorted(needed_batch_ids))
+            .is_("exclusion_reason", "null"),
             order_by=(("batch_id", False), ("rank", False)),
             truncation_hint=f"match_candidates in_(batch_id, n={len(needed_batch_ids)})",
         ):
@@ -372,8 +375,10 @@ class PaginatedSelectTruncated(RuntimeError):
     forces the caller to either (a) raise to the operator (default), or
     (b) explicitly catch and decide a degraded path is acceptable.
 
-    Carries ``allocator_ids`` (the filter values, when known to the caller
-    chain via the builder description) and ``page_count`` for log triage.
+    Carries ``page_count``, ``page_size``, and a ``hint`` string for log
+    triage. The hint is built by callers (e.g. ``"compute_hit_rate
+    n_allocators=N"``) and is intentionally count-only — never the
+    allocator UUIDs themselves — so log volume stays bounded.
     """
 
     def __init__(self, page_count: int, page_size: int, hint: str | None = None) -> None:
