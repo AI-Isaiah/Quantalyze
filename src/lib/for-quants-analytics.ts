@@ -53,6 +53,13 @@ export function initForQuantsClient(): Promise<PostHogModule | null> {
  * Fire a /for-quants event from a Client Component. Awaits the cached
  * init promise before calling `capture`, so events are never dropped
  * against an uninitialized instance.
+ *
+ * Defense-in-depth: a `.catch()` is attached to the void chain so a
+ * rejected init promise (dynamic import failure, ad blocker, CSP,
+ * CDN outage) cannot surface as an unhandled promise rejection. The
+ * rejection itself should already be neutered inside
+ * `initForQuantsClient` (G9.B.14), but this catch keeps the route
+ * safe even if a future refactor regresses that. G9.B.11.
  */
 export function trackForQuantsEventClient(
   event: ForQuantsEvent,
@@ -60,18 +67,25 @@ export function trackForQuantsEventClient(
 ): void {
   if (typeof window === "undefined") return;
 
-  void initForQuantsClient().then((posthog) => {
-    if (!posthog) return;
-    try {
-      posthog.capture(event, {
-        ...props,
-        source_layer: "client",
-      });
-    } catch (err) {
+  void initForQuantsClient()
+    .then((posthog) => {
+      if (!posthog) return;
+      try {
+        posthog.capture(event, {
+          ...props,
+          source_layer: "client",
+        });
+      } catch (err) {
+        console.warn(
+          "[analytics] client capture failed (non-blocking):",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    })
+    .catch((err) => {
       console.warn(
-        "[analytics] client capture failed (non-blocking):",
+        "[analytics] client init failed (non-blocking):",
         err instanceof Error ? err.message : String(err),
       );
-    }
-  });
+    });
 }
