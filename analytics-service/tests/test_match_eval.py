@@ -453,3 +453,218 @@ def test_find_rank_in_batch_returns_rank_value():
         sb, "alloc-1", "strat-1", "2026-04-07T10:00:00Z"
     )
     assert result == 7
+
+
+# ─── audit-2026-05-07 #27 + #52 regression tests ──────────────────────
+
+
+def _capture_chain(final_data, recorded_orders: list[tuple[str, bool]]):
+    """Like ``_passthrough_chain`` but records every ``.order(column, desc=)``
+    call so the test can assert the composite ORDER BY is what we expect.
+    Default ``desc`` mirrors the real postgrest signature (False)."""
+    chain = MagicMock()
+    chain.select.return_value = chain
+    chain.eq.return_value = chain
+    chain.gte.return_value = chain
+    chain.in_.return_value = chain
+    chain.lt.return_value = chain
+    chain.limit.return_value = chain
+
+    def _order_side_effect(column, *, desc=False, **_kw):
+        recorded_orders.append((column, bool(desc)))
+        return chain
+
+    chain.order.side_effect = _order_side_effect
+
+    def _range_side_effect(start, end):
+        sliced = MagicMock()
+        sliced.execute.return_value = MagicMock(data=final_data[start:end + 1])
+        return sliced
+
+    chain.range.side_effect = _range_side_effect
+    chain.execute.return_value = MagicMock(data=final_data)
+    return chain
+
+
+def test_compute_hit_rate_orders_match_batches_by_allocator_id_and_computed_at_desc():
+    """audit-2026-05-07 #27 regression — pre-fix the helper paginated
+    `match_batches` ordered by `id` (UUIDv4 PK), defeating
+    `idx_match_batches_allocator_recent` AND racing concurrent inserts.
+    Lock the composite ordering shape so anyone reverting it triggers
+    a failing test BEFORE the silently-corrupted hit-rate metrics ship."""
+    intros = [_make_intro(allocator_id="alloc-1")]
+    batches = [_batch("batch-1", "alloc-1", "2026-04-06T10:00:00Z")]
+    candidates = [_candidate("batch-1", "strat-1", rank=1)]
+
+    batches_orders: list[tuple[str, bool]] = []
+    candidates_orders: list[tuple[str, bool]] = []
+
+    chains = {
+        "match_decisions": _passthrough_chain(intros),
+        "match_batches": _capture_chain(batches, batches_orders),
+        "match_candidates": _capture_chain(candidates, candidates_orders),
+    }
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: chains[name]
+
+    with patch("services.db.get_supabase", return_value=sb):
+        result = compute_hit_rate_metrics(lookback_days=28)
+
+    # Sanity: the pipeline still yields the expected hit so we know the
+    # ordering change didn't accidentally drop the candidate.
+    assert result["hits_top_3"] == 1
+    # match_batches MUST be ordered by (allocator_id ASC, computed_at DESC).
+    assert batches_orders == [
+        ("allocator_id", False),
+        ("computed_at", True),
+    ], (
+        "match_batches pagination must order by (allocator_id, computed_at "
+        f"DESC) to ride idx_match_batches_allocator_recent; got {batches_orders}"
+    )
+    # match_candidates MUST be ordered by (batch_id, rank) so the query
+    # rides idx_match_cand_batch_rank.
+    assert candidates_orders == [
+        ("batch_id", False),
+        ("rank", False),
+    ], (
+        "match_candidates pagination must order by (batch_id, rank) to ride "
+        f"idx_match_cand_batch_rank; got {candidates_orders}"
+    )
+
+
+def test_compute_hit_rate_issues_one_match_batches_query_per_call():
+    """audit-2026-05-07 #26/#27 regression — the audit's correctness concern
+    is that long-lived allocators were forcing a per-batch query. Lock the
+    one-query-per-call contract: regardless of intro/batch fan-out,
+    `compute_hit_rate_metrics` must hit `match_batches` via a single
+    `.in_("allocator_id", [...])` call (then paginate via `.range()`),
+    NOT once per batch.
+
+    Counts `chain.execute()` calls on the match_batches branch and asserts
+    it equals the number of pagination pages (1 here, since the test data
+    fits in <1000 rows). Anything >1 means we re-introduced the N+1."""
+    intros = [
+        _make_intro(allocator_id=f"alloc-{i}", strategy_id=f"strat-{i}")
+        for i in range(5)
+    ]
+    batches = [
+        _batch(f"batch-{i}", f"alloc-{i}", "2026-04-06T10:00:00Z")
+        for i in range(5)
+    ]
+    candidates = [_candidate(f"batch-{i}", f"strat-{i}", rank=2) for i in range(5)]
+
+    # Track how many times `.range(...).execute()` is invoked against
+    # match_batches. Each pagination page = one call. <1000 rows => 1 call.
+    range_call_count = {"match_batches": 0, "match_candidates": 0}
+
+    def _make_counting_chain(name, final_data):
+        chain = MagicMock()
+        chain.select.return_value = chain
+        chain.eq.return_value = chain
+        chain.gte.return_value = chain
+        chain.in_.return_value = chain
+        chain.lt.return_value = chain
+        chain.limit.return_value = chain
+        chain.order.return_value = chain
+
+        def _range_side_effect(start, end):
+            range_call_count[name] += 1
+            sliced = MagicMock()
+            sliced.execute.return_value = MagicMock(data=final_data[start:end + 1])
+            return sliced
+
+        chain.range.side_effect = _range_side_effect
+        chain.execute.return_value = MagicMock(data=final_data)
+        return chain
+
+    chains = {
+        "match_decisions": _passthrough_chain(intros),
+        "match_batches": _make_counting_chain("match_batches", batches),
+        "match_candidates": _make_counting_chain("match_candidates", candidates),
+    }
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: chains[name]
+
+    with patch("services.db.get_supabase", return_value=sb):
+        compute_hit_rate_metrics(lookback_days=28)
+
+    # 5 allocators, all in a single .in_() filter; pagination is 1 page
+    # because the test data is well under page_size=1000. If anyone
+    # reverts to per-batch lookups, this becomes >=5.
+    assert range_call_count["match_batches"] == 1, (
+        f"match_batches should be one query (then 1 pagination page) "
+        f"per call to compute_hit_rate_metrics; got "
+        f"{range_call_count['match_batches']} pages — possible N+1 regression"
+    )
+    assert range_call_count["match_candidates"] == 1, (
+        f"match_candidates should be one query (then 1 pagination page) "
+        f"per call; got {range_call_count['match_candidates']} pages"
+    )
+
+
+def test_paginated_select_raises_on_hard_cap():
+    """audit-2026-05-07 #52 regression — pre-fix the helper logged a
+    warning and silently sliced. We now raise PaginatedSelectTruncated so
+    callers cannot accidentally aggregate over a partial window."""
+    from services.match_eval import _paginated_select, PaginatedSelectTruncated
+
+    full_page_data = [{"id": f"row-{i}"} for i in range(2)]
+
+    builder = MagicMock()
+    builder.order.return_value = builder
+
+    def _range_always_returns_full_page(start, end):
+        sliced = MagicMock()
+        # Always return a full page so the natural-stop branch never fires
+        sliced.execute.return_value = MagicMock(data=full_page_data)
+        return sliced
+
+    builder.range.side_effect = _range_always_returns_full_page
+
+    with pytest.raises(PaginatedSelectTruncated) as exc_info:
+        # Use tiny page_size and hard_cap_pages so the test runs fast
+        _paginated_select(
+            builder,
+            order_by="id",
+            page_size=2,
+            hard_cap_pages=3,
+            truncation_hint="test_hint",
+        )
+    assert exc_info.value.page_count == 3
+    assert exc_info.value.page_size == 2
+    assert exc_info.value.hint == "test_hint"
+    assert "test_hint" in str(exc_info.value)
+
+
+def test_paginated_select_accepts_composite_order_by():
+    """audit-2026-05-07 #27 — the helper must accept a tuple-of-tuples
+    ordering shape so callers can ride composite indexes
+    (e.g. (allocator_id ASC, computed_at DESC) -> idx_match_batches_allocator_recent).
+    Lock that the helper applies each .order() in sequence with the right
+    desc flag."""
+    from services.match_eval import _paginated_select
+
+    recorded: list[tuple[str, bool]] = []
+    builder = MagicMock()
+
+    def _order_side_effect(column, *, desc=False, **_kw):
+        recorded.append((column, bool(desc)))
+        return builder
+
+    builder.order.side_effect = _order_side_effect
+
+    def _range_returns_short_page(start, end):
+        sliced = MagicMock()
+        sliced.execute.return_value = MagicMock(data=[])  # short page → stop
+        return sliced
+
+    builder.range.side_effect = _range_returns_short_page
+
+    rows = _paginated_select(
+        builder,
+        order_by=(("allocator_id", False), ("computed_at", True)),
+        page_size=10,
+        hard_cap_pages=3,
+    )
+    assert rows == []
+    assert recorded == [("allocator_id", False), ("computed_at", True)]
