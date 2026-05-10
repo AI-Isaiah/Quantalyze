@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
+import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
  * Request a Call modal for /for-quants. Structured fields (not a
@@ -32,10 +33,15 @@ const MAILTO_HREF =
  * founder can tell a lead came from inside the /strategies/new/wizard
  * flow and at which step. Shape matches `for_quants_leads.wizard_context`
  * JSONB column added in migration 031.
+ *
+ * `step` is typed as `WizardStepKey` (not `string`) so a caller passing
+ * an arbitrary value fails at compile time instead of 400ing at the API
+ * boundary — the server's WIZARD_CONTEXT_SCHEMA enum and this type now
+ * agree. See G9.B.18.
  */
 export interface RequestCallWizardContext {
   draft_strategy_id: string | null;
-  step: string;
+  step: WizardStepKey;
   wizard_session_id: string;
 }
 
