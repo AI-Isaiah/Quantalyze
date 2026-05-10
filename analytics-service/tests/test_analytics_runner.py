@@ -33,6 +33,20 @@ import pytest
 
 from services.metrics import MetricsResult
 
+# audit-2026-05-07 #9 (PR-7 consumer migration): the runner now imports
+# `trades_to_daily_returns_with_status` (returns `(returns, meta)` tuple).
+# Tests that previously patched the bare `trades_to_daily_returns` name
+# break under the new shape because the import no longer exists at the
+# old attribute. Use this default meta everywhere a clean (no-warnings)
+# transform output is the right test fixture; the helper at
+# _run_and_get_success_upsert lower in this file already accepts overrides
+# for the heuristic-capital/balance_error branches.
+_DEFAULT_RETURNS_META = {
+    "used_heuristic_capital": False,
+    "balance_error": False,
+    "computation_status_hint": "complete",
+}
+
 
 # ---------------------------------------------------------------------------
 # Regression: is_fill filter
@@ -186,17 +200,20 @@ class TestIsFillFilterRegression:
 
         with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
              patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-             patch("services.analytics_runner.trades_to_daily_returns") as mock_transform, \
+             patch("services.analytics_runner.trades_to_daily_returns_with_status") as mock_transform, \
              patch("services.analytics_runner.compute_all_metrics", return_value=mock_metrics), \
              patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
              patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
              patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
 
-            # trades_to_daily_returns needs to return a valid Series
+            # trades_to_daily_returns_with_status returns (Series, meta).
+            # audit-2026-05-07 #9 — meta is the no-warnings default; this
+            # test pins the is_fill filter, not the DQF branches.
             np.random.seed(42)
             dates = pd.bdate_range("2024-01-01", periods=10)
-            mock_transform.return_value = pd.Series(
-                np.random.normal(0.001, 0.01, 10), index=dates
+            mock_transform.return_value = (
+                pd.Series(np.random.normal(0.001, 0.01, 10), index=dates),
+                _DEFAULT_RETURNS_META,
             )
 
             result = await run_strategy_analytics("strat-test")
@@ -322,7 +339,7 @@ class TestGracefulDegradation:
 
         with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
              patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-             patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+             patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
              patch("services.analytics_runner.compute_all_metrics", return_value=mock_metrics), \
              patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
              patch("services.position_reconstruction.reconstruct_positions", side_effect=_failing_reconstruct), \
@@ -1518,7 +1535,7 @@ async def test_run_strategy_analytics_writes_sibling_kinds() -> None:
 
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(mock_benchmark, False))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value=fake_exposure)):
@@ -1639,7 +1656,7 @@ async def test_run_strategy_analytics_derived_metrics_present() -> None:
 
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value=fake_position_metrics)), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
@@ -1719,7 +1736,7 @@ async def test_run_strategy_analytics_pins_fills_select_column_list() -> None:
 
     with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
          patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
-         patch("services.analytics_runner.trades_to_daily_returns", return_value=mock_returns), \
+         patch("services.analytics_runner.trades_to_daily_returns_with_status", return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
          patch("services.analytics_runner.get_benchmark_returns", new=AsyncMock(return_value=(None, True))), \
          patch("services.position_reconstruction.reconstruct_positions", new=AsyncMock(return_value={})), \
          patch("services.position_reconstruction.compute_exposure_metrics", new=AsyncMock(return_value={})):
