@@ -554,6 +554,67 @@ describe("POST /api/for-quants-lead", () => {
   });
 
   /**
+   * G9.B.3 regression batch — the test docblock at the top of this
+   * file claimed "Fire-and-forget side effects — founder email +
+   * PostHog do NOT block the response even if they throw" but no
+   * test actually exercised the throwing path. These tests close
+   * that gap: the lead row MUST still land and the response MUST
+   * still be 200 even when the side-effect helpers reject.
+   */
+  describe("fire-and-forget side-effect resilience (G9.B.3)", () => {
+    it("returns 200 + inserts the lead even when notifyFounderGeneric throws", async () => {
+      emailState.shouldThrow = true;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(VALID_PAYLOAD));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.ok).toBe(true);
+        expect(dbState.inserted).toHaveLength(1);
+        await flushMicrotasks();
+        // The route's own try/catch wraps notifyFounderGeneric and
+        // emits a console.warn with the [for-quants-lead] founder
+        // notify failed prefix. Pre-fix this was claimed but never
+        // asserted.
+        expect(
+          warnSpy.mock.calls.some((args) =>
+            String(args[0]).includes("founder notify failed"),
+          ),
+        ).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("returns 200 + 1 row + Sentry capture when notifyFounderGeneric throws (G9.B.3 joined contract)", async () => {
+      // Joined contract: a non-blocking failure path must (a) not
+      // poison the response, (b) leave evidence in Sentry AND warn
+      // logs for ops. Pre-fix this was claimed in the docblock but
+      // never tested in one shot.
+      emailState.shouldThrow = true;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(VALID_PAYLOAD));
+        expect(res.status).toBe(200);
+        expect(dbState.inserted).toHaveLength(1);
+        await flushMicrotasks();
+        expect(
+          sentryState.captures.some((c) => c.stage === "founder_notify"),
+        ).toBe(true);
+        expect(
+          warnSpy.mock.calls.some((args) =>
+            String(args[0]).includes("founder notify failed"),
+          ),
+        ).toBe(true);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
+  /**
    * G9.B.7 regression — notifyFounderGeneric silently returns early
    * when ADMIN_EMAIL is unset. Pre-fix: every lead landed in the DB
    * but the founder was never notified and there was no Sentry
