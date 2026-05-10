@@ -939,6 +939,9 @@ export type Database = {
           id: string
           name: string
           notes: string | null
+          notify_attempted_at: string | null
+          notify_error: string | null
+          notify_succeeded_at: string | null
           preferred_time: string | null
           processed_at: string | null
           processed_by: string | null
@@ -953,6 +956,9 @@ export type Database = {
           id?: string
           name: string
           notes?: string | null
+          notify_attempted_at?: string | null
+          notify_error?: string | null
+          notify_succeeded_at?: string | null
           preferred_time?: string | null
           processed_at?: string | null
           processed_by?: string | null
@@ -967,6 +973,9 @@ export type Database = {
           id?: string
           name?: string
           notes?: string | null
+          notify_attempted_at?: string | null
+          notify_error?: string | null
+          notify_succeeded_at?: string | null
           preferred_time?: string | null
           processed_at?: string | null
           processed_by?: string | null
