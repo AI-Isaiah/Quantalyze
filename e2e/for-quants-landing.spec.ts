@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { seedTestAllocator } from "./helpers/seed-test-project";
 
 /**
  * E2E smoke tests for /for-quants landing page (Sprint 1 Task 1.1).
@@ -8,14 +9,19 @@ import { test, expect } from "@playwright/test";
  *   2. Primary CTA "Start Wizard" routes to /signup?role=manager.
  *   3. "Request a Call" opens a modal, submits the form, closes cleanly.
  *
+ * Audit-2026-05-07 expansion (G9.B.9 + G9.B.10):
+ *   - Form-submit path with API success → success view renders.
+ *   - Form-submit path with server validation error → fieldErrors render.
+ *   - Logged-in CTA branching (proxy exemption + branch href / label).
+ *
  * Bonus coverage:
  *   - /security page loads and has the security contact.
  *   - public/security.txt serves at the root (RFC 9116 compliance).
- *   - Proxy exemption for /for-quants works (no redirect to
- *     /discovery/crypto-sma when logged in). The "logged in" part is
- *     covered by full-flow.spec.ts once it lands; this spec asserts the
- *     unauth path only.
  */
+
+const HAS_SEED_ENV =
+  !!process.env.TEST_SUPABASE_URL &&
+  !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY;
 
 test.describe("/for-quants landing page", () => {
   test("loads unauthenticated with all 5 sections visible", async ({ page }) => {
@@ -119,6 +125,127 @@ test.describe("/for-quants landing page", () => {
     // The proxy keeps /for-quants in PUBLIC_ROUTES — ensure no auth bounce.
     await page.goto("/for-quants");
     expect(page.url()).toContain("/for-quants");
+  });
+
+  /**
+   * G9.B.9 — full submit flow. Pre-fix the spec only verified the
+   * modal opens with the form fields visible; the actual fetch →
+   * success view → echoed-email render path was uncovered. We mock
+   * the API response with playwright's route() interceptor so the
+   * spec runs in CI without a live DB, mirroring the ship-criteria
+   * docblock at the top of the file.
+   */
+  test("submits the Request-a-Call form successfully (G9.B.9)", async ({
+    page,
+  }) => {
+    await page.route("**/api/for-quants-lead", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          idempotency_key: "deadbeefdeadbeefdeadbeefdeadbeef",
+        }),
+      });
+    });
+
+    await page.goto("/for-quants");
+    await page.getByRole("button", { name: /Request a Call/ }).first().click();
+    await expect(
+      page.getByRole("heading", { name: /Request a Call/, level: 2 }),
+    ).toBeVisible();
+
+    await page.getByLabel("Name").fill("Jane Doe");
+    await page.getByLabel("Firm").fill("Acme Quant");
+    await page.getByLabel("Email").fill("jane@acme.example");
+
+    await page.getByRole("button", { name: /Send request/ }).click();
+
+    await expect(page.getByText(/Request received/)).toBeVisible();
+    await expect(page.getByText("jane@acme.example")).toBeVisible();
+  });
+
+  test("renders inline fieldErrors when the API returns 400 (G9.B.9)", async ({
+    page,
+  }) => {
+    await page.route("**/api/for-quants-lead", async (route) => {
+      await route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Invalid submission",
+          // G9.B.16: fieldErrors is now an array per field.
+          fieldErrors: { email: ["Enter a valid email"] },
+        }),
+      });
+    });
+
+    await page.goto("/for-quants");
+    await page.getByRole("button", { name: /Request a Call/ }).first().click();
+    await page.getByLabel("Name").fill("Jane Doe");
+    await page.getByLabel("Firm").fill("Acme Quant");
+    await page.getByLabel("Email").fill("jane@acme.example");
+    await page.getByRole("button", { name: /Send request/ }).click();
+
+    await expect(page.getByText(/Enter a valid email/)).toBeVisible();
+    // Submit button is re-enabled so the user can correct + retry.
+    await expect(
+      page.getByRole("button", { name: /Send request/ }),
+    ).toBeEnabled();
+  });
+});
+
+/**
+ * G9.B.10 — logged-in /for-quants behavior. The proxy exemption added
+ * with this PR keeps logged-in managers on /for-quants instead of
+ * bouncing them to /discovery/crypto-sma, AND the page's CTA href
+ * branches on isLoggedIn (logged-out → /signup?role=manager,
+ * logged-in → /strategies/new/wizard). Pre-fix only the logged-out
+ * path was tested.
+ *
+ * Skipped when seed env vars are absent — mirrors the pattern in
+ * admin-csv-status-axe.spec.ts.
+ */
+test.describe("/for-quants logged-in behavior (G9.B.10)", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "logged-in /for-quants spec: seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY)",
+  );
+
+  test("logged-in user is NOT redirected away from /for-quants and sees the logged-in CTA label", async ({
+    page,
+  }) => {
+    if (!HAS_SEED_ENV) return;
+    const allocator = await seedTestAllocator();
+    await page.goto("/login");
+    await page.fill(
+      'input[name="email"], input[placeholder*="email" i]',
+      allocator.email,
+    );
+    await page.fill('input[type="password"]', allocator.password);
+    await page.click('button:has-text("Sign in")');
+    await page.waitForURL(
+      /\/(discovery|strategies|allocations|dashboard|admin)/,
+      { timeout: 10_000 },
+    );
+
+    await page.goto("/for-quants");
+
+    // Proxy exemption: stays on /for-quants.
+    await expect(page).toHaveURL(/\/for-quants$/, { timeout: 5_000 });
+
+    // CTA branches to the logged-in copy. The browser-side auth
+    // probe is async, so use a generous wait.
+    await expect(
+      page.getByRole("link", { name: /Connect your strategy/ }).first(),
+    ).toBeVisible({ timeout: 10_000 });
+
+    const ctaHref = await page
+      .getByRole("link", { name: /Connect your strategy/ })
+      .first()
+      .getAttribute("href");
+    expect(ctaHref).toContain("/strategies/new/wizard");
   });
 });
 
