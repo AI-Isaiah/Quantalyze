@@ -47,6 +47,14 @@ describe("GET /api/activity/portfolio", () => {
     });
 
     // Admin client: portfolio_strategies query
+    //
+    // Audit 2026-05-07 G12.G.3: the route now issues up to THREE queries
+    // against `trades`:
+    //   1. fill-strategies probe: .select("strategy_id").in().eq("is_fill", true)
+    //   2. fills subset: .select(<cols>).in().eq("is_fill", true).order().limit()
+    //   3. daily subset: .select(<cols>).in().eq("is_fill", false).order().limit()
+    // Each strategy belongs to exactly one of #2 or #3 based on the
+    // probe — no cross-strategy data cliff anymore.
     mockAdminFrom.mockImplementation((table: string) => {
       if (table === "portfolio_strategies") {
         return {
@@ -71,12 +79,22 @@ describe("GET /api/activity/portfolio", () => {
           },
         ];
         return {
-          select: (...args: unknown[]) => {
-            // fill count query: .select("id", { count: "exact", head: true }).in().eq()
-            if (args.length >= 2 && typeof args[1] === "object" && args[1] && "count" in args[1]) {
-              return { in: () => ({ eq: () => ({ count: 0, error: null }) }) };
+          select: (cols: string) => {
+            // Probe query: select("strategy_id").in().eq("is_fill", true).
+            // Identifies which strategies have any fills. By default the
+            // probe returns no rows, so all strategies fall through to
+            // the daily (is_fill=false) subset query.
+            if (typeof cols === "string" && cols === "strategy_id") {
+              return {
+                in: () => ({
+                  eq: () => ({
+                    data: [],
+                    error: null,
+                  }),
+                }),
+              };
             }
-            // normal trades query: .select().in().eq().order().limit()
+            // Trades subset query: .select(<cols>).in().eq().order().limit()
             return {
               in: () => ({
                 eq: () => ({
@@ -183,8 +201,7 @@ describe("GET /api/activity/portfolio", () => {
     consoleErr.mockRestore();
   });
 
-  it("returns 500 when fill-count query errors (audit G12.G.6)", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  it("returns 500 when fill-strategies probe query errors (audit G12.G.6)", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
     mockAdminFrom.mockImplementation((table: string) => {
@@ -200,14 +217,27 @@ describe("GET /api/activity/portfolio", () => {
       }
       if (table === "trades") {
         return {
-          select: () => ({
-            in: () => ({
-              eq: () => ({
-                count: null,
-                error: { message: "DB unreachable", code: "PGRST500" },
+          select: (cols: string) => {
+            if (typeof cols === "string" && cols === "strategy_id") {
+              return {
+                in: () => ({
+                  eq: () => ({
+                    data: null,
+                    error: { message: "DB unreachable", code: "PGRST500" },
+                  }),
+                }),
+              };
+            }
+            return {
+              in: () => ({
+                eq: () => ({
+                  order: () => ({
+                    limit: () => ({ data: [], error: null }),
+                  }),
+                }),
               }),
-            }),
-          }),
+            };
+          },
         };
       }
       return { select: () => ({ eq: () => ({ data: null, error: null }) }) };
@@ -221,8 +251,7 @@ describe("GET /api/activity/portfolio", () => {
     consoleErr.mockRestore();
   });
 
-  it("returns 500 when trades query errors (audit G12.G.6)", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  it("returns 500 when trades subset query errors (audit G12.G.6)", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
     mockAdminFrom.mockImplementation((table: string) => {
@@ -238,12 +267,13 @@ describe("GET /api/activity/portfolio", () => {
       }
       if (table === "trades") {
         return {
-          select: (...args: unknown[]) => {
-            // Fill count query (head: true) succeeds; the main trades
-            // query is the one that fails.
-            if (args.length >= 2 && typeof args[1] === "object" && args[1] && "count" in args[1]) {
+          select: (cols: string) => {
+            // Probe succeeds (no fills); subsequent daily-subset query fails.
+            if (typeof cols === "string" && cols === "strategy_id") {
               return {
-                in: () => ({ eq: () => ({ count: 0, error: null }) }),
+                in: () => ({
+                  eq: () => ({ data: [], error: null }),
+                }),
               };
             }
             return {
@@ -270,5 +300,106 @@ describe("GET /api/activity/portfolio", () => {
     expect(res.status).toBe(500);
     expect(consoleErr).toHaveBeenCalled();
     consoleErr.mockRestore();
+  });
+
+  /**
+   * Audit 2026-05-07 G12.G.3 regression: pre-audit code computed a single
+   * portfolio-level `hasFills` and applied `.eq("is_fill", hasFills)` to
+   * the entire IN list of strategies. The moment ONE strategy ingested
+   * its first fill, the API stopped returning legacy daily_pnl rows for
+   * ALL other strategies in the same portfolio — a sudden data cliff in
+   * the TradingActivityLog and TradeVolume widgets.
+   *
+   * After the fix, the route partitions strategies into "with fills"
+   * and "without fills" subsets and runs two queries: each strategy
+   * gets its appropriate trade rows.
+   *
+   * Test setup: portfolio has strategy 's1' (with fills) and 's2'
+   * (without fills, only legacy daily_pnl rows). Both should appear in
+   * the response. Pre-audit code would have returned only 's1' rows.
+   */
+  it("returns rows for both fill-mode and daily_pnl-mode strategies in same portfolio (audit G12.G.3)", async () => {
+    mockAdminFrom.mockImplementation((table: string) => {
+      if (table === "portfolio_strategies") {
+        return {
+          select: () => ({
+            eq: () => ({
+              data: [
+                { strategy_id: "s1", strategies: { name: "FillStrategy" } },
+                { strategy_id: "s2", strategies: { name: "DailyStrategy" } },
+              ],
+              error: null,
+            }),
+          }),
+        };
+      }
+      if (table === "trades") {
+        return {
+          select: (cols: string) => {
+            // Probe: s1 has fills, s2 does not.
+            if (typeof cols === "string" && cols === "strategy_id") {
+              return {
+                in: () => ({
+                  eq: () => ({
+                    data: [{ strategy_id: "s1" }],
+                    error: null,
+                  }),
+                }),
+              };
+            }
+            // Subset queries: track the eq() arg to differentiate.
+            // The fills subset (.eq("is_fill", true)) returns s1's row.
+            // The daily subset (.eq("is_fill", false)) returns s2's row.
+            return {
+              in: () => ({
+                eq: (col: string, val: boolean) => ({
+                  order: () => ({
+                    limit: () => ({
+                      data:
+                        col === "is_fill" && val === true
+                          ? [
+                              {
+                                timestamp: "2026-04-10T12:00:00Z",
+                                strategy_id: "s1",
+                                symbol: "BTCUSDT",
+                                realized_pnl: 200,
+                                exchange: "binance",
+                              },
+                            ]
+                          : [
+                              {
+                                timestamp: "2026-04-09T12:00:00Z",
+                                strategy_id: "s2",
+                                symbol: "ETHUSDT",
+                                realized_pnl: 50,
+                                exchange: "binance",
+                              },
+                            ],
+                      error: null,
+                    }),
+                  }),
+                }),
+              }),
+            };
+          },
+        };
+      }
+      return { select: () => ({ eq: () => ({ data: null, error: null }) }) };
+    });
+
+    const { GET } = await import("./route");
+    const res = await GET(makeReq({ portfolio_id: PORTFOLIO_ID }));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Both strategies must have rows in the response. Pre-audit code
+    // would have dropped s2 entirely once s1 had any fills.
+    const strategyIdsInResponse = new Set(
+      body.activity.map((row: { strategy_id: string }) => row.strategy_id),
+    );
+    expect(strategyIdsInResponse.has("s1")).toBe(true);
+    expect(strategyIdsInResponse.has("s2")).toBe(true);
+    // has_fills aggregate stays true because at least one strategy has fills.
+    expect(body.has_fills).toBe(true);
   });
 });
