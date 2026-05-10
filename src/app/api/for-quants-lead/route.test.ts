@@ -374,6 +374,57 @@ describe("POST /api/for-quants-lead", () => {
       const res = await POST(req);
       expect(res.status).toBe(400);
     });
+
+    /**
+     * G9.B.12 — body size limit. Pre-fix, `await req.json()` ran
+     * before the Zod field caps, so an attacker could send a 100MB
+     * body and burn Lambda memory before Zod ever rejected it. Now
+     * the route reads raw text and rejects > 8KB with 413 before any
+     * JSON.parse allocation happens.
+     */
+    it("rejects bodies larger than 8KB with 413 (G9.B.12)", async () => {
+      const { POST } = await import("./route");
+      const big = JSON.stringify({
+        name: "Jane",
+        firm: "Acme",
+        email: "jane@acme.example",
+        notes: "x".repeat(9000),
+      });
+      const req = new NextRequest(
+        "http://localhost:3000/api/for-quants-lead",
+        {
+          method: "POST",
+          headers: {
+            origin: "http://localhost:3000",
+            "content-type": "application/json",
+          },
+          body: big,
+        },
+      );
+      const res = await POST(req);
+      expect(res.status).toBe(413);
+      const body = await res.json();
+      expect(body.error).toMatch(/too large/i);
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("rejects bodies whose Content-Length declares > 8KB with 413 (G9.B.12)", async () => {
+      const { POST } = await import("./route");
+      const req = new NextRequest(
+        "http://localhost:3000/api/for-quants-lead",
+        {
+          method: "POST",
+          headers: {
+            origin: "http://localhost:3000",
+            "content-type": "application/json",
+            "content-length": "1048576",
+          },
+          body: JSON.stringify(VALID_PAYLOAD),
+        },
+      );
+      const res = await POST(req);
+      expect(res.status).toBe(413);
+    });
   });
 
   describe("CSRF enforcement", () => {

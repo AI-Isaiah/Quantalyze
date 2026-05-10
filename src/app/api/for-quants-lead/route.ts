@@ -176,10 +176,35 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Layer 3: parse + validate body
+  // Layer 3: parse + validate body. Read raw text first and gate on
+  // length BEFORE JSON.parse so an attacker can't burn Lambda memory
+  // with a huge body that Zod would only reject after the parse
+  // already allocated. The Zod schema caps each field at <2KB total;
+  // 8KB raw is a 4x safety margin for whitespace + future fields.
+  // Vercel's outer Function body limit is configurable to 4.5MB on
+  // serverless and 100MB streaming — both far above what this route
+  // ever needs. G9.B.12.
+  const MAX_BODY_BYTES = 8192;
   let parsed: z.infer<typeof LEAD_SCHEMA>;
   try {
-    const body = await req.json();
+    const contentLength = req.headers.get("content-length");
+    if (contentLength) {
+      const declared = Number.parseInt(contentLength, 10);
+      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+        return NextResponse.json(
+          { error: "Request body is too large." },
+          { status: 413 },
+        );
+      }
+    }
+    const rawBody = await req.text();
+    if (rawBody.length > MAX_BODY_BYTES) {
+      return NextResponse.json(
+        { error: "Request body is too large." },
+        { status: 413 },
+      );
+    }
+    const body = rawBody.length === 0 ? {} : JSON.parse(rawBody);
     parsed = LEAD_SCHEMA.parse(body);
   } catch (err) {
     if (err instanceof z.ZodError) {
