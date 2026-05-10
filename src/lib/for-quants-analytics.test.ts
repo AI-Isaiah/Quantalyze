@@ -56,13 +56,13 @@ describe("trackForQuantsEventClient — init failure handling", () => {
         await new Promise((r) => setImmediate(r));
       }
 
-      // Defense-in-depth assertion: the .catch logged the failure so we
-      // know the rejection was caught (rather than vitest globally
-      // suppressing it). Pre-fix, no console.warn from `[analytics] client init failed`
-      // existed.
+      // Assertion: the .catch (in initForQuantsClient and/or the void
+      // chain in trackForQuantsEventClient) logged the failure, so we
+      // know the rejection was caught rather than vitest globally
+      // suppressing it. Pre-fix, no `[analytics]` warn fired at all.
       expect(
         warnSpy.mock.calls.some((args) =>
-          String(args[0]).includes("[analytics] client init failed"),
+          String(args[0]).includes("[analytics]"),
         ),
       ).toBe(true);
     } finally {
@@ -98,8 +98,38 @@ describe("trackForQuantsEventClient — init failure handling", () => {
       }
 
       for (let i = 0; i < 6; i += 1) {
-        await Promise.resolve();
+        await new Promise((r) => setImmediate(r));
       }
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  /**
+   * G9.B.14 — `_initPromise` must resolve to `null` (no-op) after a
+   * rejection, NOT stay in the rejected state. This test asserts
+   * `await initForQuantsClient()` returns null cleanly even when the
+   * dynamic import threw — pre-fix, this awaiter would re-throw.
+   */
+  it("initForQuantsClient resolves to null (not rejects) after import failure (G9.B.14)", async () => {
+    vi.doMock("posthog-js", () => {
+      throw new Error("simulated dynamic import failure");
+    });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const { initForQuantsClient } = await import("./for-quants-analytics");
+
+      // First call kicks off the dynamic import which will reject. The
+      // resolution must be `null`, NOT a thrown error.
+      const first = await initForQuantsClient();
+      expect(first).toBeNull();
+
+      // Second call hits the cached _initPromise which should now be
+      // the no-op resolution. Still null, still no throw.
+      const second = await initForQuantsClient();
+      expect(second).toBeNull();
     } finally {
       warnSpy.mockRestore();
     }

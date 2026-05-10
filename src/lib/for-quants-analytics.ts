@@ -32,19 +32,47 @@ export function initForQuantsClient(): Promise<PostHogModule | null> {
     return _initPromise;
   }
 
-  _initPromise = import("posthog-js").then((mod) => {
-    const posthog = mod.default;
-    posthog.init(key, {
-      api_host:
-        process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com",
-      person_profiles: "identified_only",
-      // We fire canonical page/view events from explicit calls, not
-      // PostHog's auto-capture.
-      capture_pageview: false,
-      capture_pageleave: true,
+  _initPromise = import("posthog-js")
+    .then((mod) => {
+      const posthog = mod.default;
+      try {
+        posthog.init(key, {
+          api_host:
+            process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com",
+          person_profiles: "identified_only",
+          // We fire canonical page/view events from explicit calls, not
+          // PostHog's auto-capture.
+          capture_pageview: false,
+          capture_pageleave: true,
+        });
+      } catch (err) {
+        // posthog.init can throw on corrupt local state, ad-blocker
+        // mid-init injection, etc. Reset the cached promise to the
+        // no-op resolution so subsequent track calls cheaply no-op
+        // (matching the no-key path) instead of forever returning a
+        // posthog instance that's only half-initialized. G9.B.14.
+        console.warn(
+          "[analytics] posthog.init failed (non-blocking):",
+          err instanceof Error ? err.message : String(err),
+        );
+        _initPromise = Promise.resolve(null);
+        return null;
+      }
+      return posthog;
+    })
+    .catch((err) => {
+      // Dynamic-import rejection (ad blocker, CSP, CDN outage). Log
+      // once, then reset to the no-op resolution so future track calls
+      // skip cleanly instead of perpetually re-awaiting the rejected
+      // promise. Without this reset, the page silently emits zero
+      // events for the rest of the visitor's session. G9.B.14.
+      console.warn(
+        "[analytics] posthog-js dynamic import failed (non-blocking):",
+        err instanceof Error ? err.message : String(err),
+      );
+      _initPromise = Promise.resolve(null);
+      return null;
     });
-    return posthog;
-  });
 
   return _initPromise;
 }
