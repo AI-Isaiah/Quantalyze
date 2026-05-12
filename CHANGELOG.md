@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.19.0] - 2026-05-12
+
+**audit-2026-05-07 PR-4 — allocator dashboard correctness (G8.B + G8.E + G8.F).** Test portfolios no longer leak into production analytics. Alias route gets hardening and RLS coverage. Scenario math gets `Number.isFinite` guards and a cleaned-up Sortino fallback.
+
+### Fixed
+
+- **`is_test=true` default on CreatePortfolioForm** (G8.F.1) — new portfolios created from the allocator wizard now default to `is_test: true`, preventing accidental production-data pollution.
+- **Intro snapshot filters `is_test=false`** (G8.E.1) — the LP intro snapshot query no longer returns test portfolios.
+- **Cron recompute skips test portfolios** (G8.F.2) — `recompute_all_portfolios` now pre-filters `is_test=false` before dispatching recompute jobs, so test portfolios never consume cron cycles.
+- **Scenario `Number.isFinite` guards** (G8.E.6 + G8.E.7 + G8.E.8) — `calculateSortinoRatio`, `calculateMaxDrawdown`, and related scenario helpers guard against `NaN`/`Infinity` propagation with explicit finite checks and documented fallback values.
+
+### Changed
+
+- **Alias route hardening** (G8.B.3 + G8.B.6 + G8.B.7) — CSRF validation, rate limiting, ownership verification, and `.select()` on UPDATE to return the modified row.
+
+### Removed
+
+- **`computeFavoritesOverlayCurve` dead code** (G8.E.3) — unreachable overlay helper deleted after being marked RESERVED in a prior commit.
+
+### Added
+
+- **13 alias-route tests** (G8.B.2), **AliasEditor concurrent-edit + error tests** (G8.B.4), **alias column RLS live-DB tests** (G8.B.5), **cron is_test regression test** (G8.F.2), **scenario.ts edge-case tests** (G8.E.6–E.8). Total: 3 207 → 3 207+ tests (exact count reflects merged-main baseline).
+
 ## [0.22.18.0] - 2026-05-10
 
 **audit-2026-05-07 PR-1 — /for-quants public landing page funnel hardening.** Closes 19/20 atomic items (12 HIGH + 7 MEDIUM, G9.B.1 through G9.B.20) plus 7 specialist-review findings and 6 red-team findings on top. Migration 115 adds founder-CRM notify-attempt markers. The lead-capture pipeline now fails loud on every failure mode it used to swallow — Sentry coverage on all paths, founder-CRM badge for stuck-pending sends, and bidirectional type-drift guards between the wizard and the API.
