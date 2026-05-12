@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.25.1] - 2026-05-12
+
+### Fixed
+
+- **Review fixes for v0.22.25.0 — see PR #149 review comments.** 9 CRITICAL + 9 INFORMATIONAL findings closed. Migration 117: `DROP FUNCTION IF EXISTS` on the prior 1-arg/3-arg `mark_compute_job_*` overloads BEFORE `CREATE OR REPLACE` on the new fenced signatures (otherwise the prior overloads survive and PostgREST silently routes legacy callers to the un-fenced path); explicit-arglist `COMMENT ON FUNCTION` to avoid "function not unique"; DO-block self-checks pin signatures via `pg_get_function_identity_arguments` and use whitespace-tolerant POSIX regex; mig-090 STEP 2 partition-key dedupe restored verbatim into `claim_compute_jobs_with_priority` body; throttle-probe asymmetry fixed (`status='pending'` only); STEP 1.5 backfill stamps `claim_token` for pre-existing `running` rows so the fence engages immediately. `database.types.ts` regenerated for the new `claim_token` column + fenced mark RPC signatures. Admin compute-jobs page security warning + grep gate test (`compute-jobs-claim-token-not-leaked.test.ts`). `_is_serialization_failure` tightened to `.code == '40001'` OR our specific RAISE message literal (drops fuzzy substring matches that collided with unrelated 40001 sources). `dispatch_tick` 3 try/except blocks consolidated into `_safe_mark` helper that preserves the original dispatch exception when the fallback path also 40001s. `caplog` assertions for `LATE_MARK_IGNORED`. Live-DB tests for the "unexpected status" guard branches and the per-kind override reclaim path. Live-DB tests now FAIL (not skip) in CI when `SUPABASE_TEST_URL`/`SUPABASE_TEST_SERVICE_KEY` are unset.
+- **Deploy runbook for migration 117** — `docs/runbooks/deploy-mig-117-claim-token-fence.md` covers pre-deploy drain, schema verification queries, worker redeploy, the rollout-window fence-bypass edge case (closed by STEP 1.5 backfill except for in-flight workers that haven't redeployed), `LATE_MARK_IGNORED` baseline (~10/day) + alert threshold (>100/day), full rollback script, and an explicit "Race B cursor regression NOT closed by this PR" gap doc with a metric to watch (`api_keys.last_fetched_trade_timestamp` regression count).
+
 ## [0.22.25.0] - 2026-05-12
 
 ### Fixed
