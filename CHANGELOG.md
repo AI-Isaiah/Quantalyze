@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.25.2] - 2026-05-12
+
+### Fixed
+
+- **Second-pass review fixes for v0.22.25.0 — see PR #149 second-pass red-team comments.** 1 CRITICAL + 3 HIGH (conf >=7) closed. (1) CI: `.github/workflows/ci.yml` `python:` job now wires `SUPABASE_TEST_URL` / `SUPABASE_TEST_SERVICE_KEY` from the existing `TEST_SUPABASE_*` repo secrets, gated on `vars.E2E_TEST_DB_CONFIGURED`. The first-pass tightening of `_need_supabase()` to `pytest.fail()` under `CI=true` was correct in spirit but unwired in the workflow — every push to PR #149 fell into the new fail path and went red. When the variable is unset (forks, repos without test-DB setup) the explicit `CI=''` override demotes GHA's implicit `CI=true` so the live-DB path skips locally-style. (2) Migration 117 `mark_compute_job_done` idempotent-retry branch now checks the claim_token; W2 finishing first followed by W1's stale-token mark_done used to fall into `IF v_current_status = 'done' THEN RETURN;` and silently bypass the fence. New regression test `test_late_mark_done_after_w2_completed_raises_serialization_failure` covers the race. (3) Migration 117 deploy runbook (`docs/runbooks/deploy-mig-117-claim-token-fence.md`) gains a §1.5 "Drain LIVE workers" section: ACCESS EXCLUSIVE on `compute_jobs` is held for the entire migration block (~5-30s under load); workers must be scaled to 0 replicas first to avoid stalling behind the lock and triggering watchdog cascade-reclaims. (4) `_safe_mark` now returns bool indicating whether it swallowed a 40001; the LATE_MARK_IGNORED log record carries `event_type="preempted_after_dispatch_error"` in its `extra` dict when called from the outer-fallback path, and the redundant `logger.error("dispatch_tick: unhandled error...")` line is deferred so it only fires when the late-mark wasn't swallowed. Closes the cascade triplet (ERROR + cascade WARNING + LATE_MARK_IGNORED WARNING) that mis-classified benign preemptions as critical dispatch failures in Sentry's severity-based alert pipelines. New mocked test asserts `event_type` tag and absence of the redundant ERROR line.
+
 ## [0.22.25.1] - 2026-05-12
 
 ### Fixed

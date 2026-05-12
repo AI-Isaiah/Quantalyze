@@ -1,6 +1,6 @@
 {
   "name": "quantalyze",
-  "version": "0.22.25.1",
+  "version": "0.22.25.2",
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
