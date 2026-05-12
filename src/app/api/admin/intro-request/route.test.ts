@@ -1,20 +1,26 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { NextRequest } from "next/server";
+import { vi } from "vitest";
+import type { NextRequest } from "next/server";
 
 /**
  * audit-2026-05-07 P197 + P200 — route-level coverage for the CSRF +
  * rate-limit sweep on /api/admin/intro-request.
  *
- * The outer POST(req) handler runs assertSameOrigin + adminActionLimiter
- * BEFORE delegating to the withAdminAuth-wrapped admin handler. These tests
- * prove both gates short-circuit at the outer layer (so `withAdminAuth`'s
- * isAdminUser query is never reached on a bad-origin or rate-limited
- * request). Companion grep gate: src/__tests__/admin-csrf-ratelimit-grep.test.ts.
+ * The outer POST(req) handler runs assertSameOrigin + admin auth +
+ * adminActionLimiter BEFORE delegating to the withAdminAuth-wrapped
+ * admin handler (see v0.22.24.1 review-fix C4/I1/I2 reorder). These
+ * tests prove the gates short-circuit at the outer layer (so the
+ * inner withAdminAuth never runs on a bad-origin / unauth /
+ * rate-limited request). Companion grep gate:
+ * src/__tests__/admin-csrf-ratelimit-grep.test.ts.
+ *
+ * Review-fix v0.22.24.1 (I5 — maintainability): the per-route CSRF +
+ * rate-limit suite is now lifted into a shared helper because all
+ * three withAdminAuth-using admin POST tests (intro-request,
+ * strategy-review, allocator-approve) were ~90% identical. Mocks
+ * stay here (per-route Supabase from() shapes vary).
  */
 
 vi.mock("server-only", () => ({}));
-
-const VALID_ORIGIN = { origin: "http://localhost:3000" };
 
 const TEST_USER = vi.hoisted(() => ({
   id: "00000000-0000-0000-0000-000000000124",
@@ -64,79 +70,15 @@ vi.mock("@/lib/email", () => ({
   notifyAllocatorIntroStatus: async () => undefined,
 }));
 
-describe("POST /api/admin/intro-request", () => {
-  beforeEach(() => {
-    supabaseState.callCount = 0;
-    delete process.env.UPSTASH_REDIS_REST_URL;
-    delete process.env.UPSTASH_REDIS_REST_TOKEN;
-    vi.resetModules();
-  });
+import { runAdminPostCsrfRateLimitSuite } from "@/__tests__/helpers/adminPostCsrfRateLimit";
 
-  describe("CSRF (P197 + P200)", () => {
-    it("returns 403 when no Origin or Referer header is present", async () => {
-      const { POST } = await import("./route");
-      const req = new NextRequest(
-        "http://localhost:3000/api/admin/intro-request",
-        {
-          method: "POST",
-          body: JSON.stringify({ id: "abc", status: "intro_made" }),
-        },
-      );
-      const res = await POST(req);
-      expect(res.status).toBe(403);
-      expect(supabaseState.callCount).toBe(0);
-    });
-
-    it("returns 403 when Origin host is not in the allowlist", async () => {
-      const { POST } = await import("./route");
-      const req = new NextRequest(
-        "http://localhost:3000/api/admin/intro-request",
-        {
-          method: "POST",
-          headers: { origin: "https://evil.example.com" },
-          body: JSON.stringify({ id: "abc", status: "intro_made" }),
-        },
-      );
-      const res = await POST(req);
-      expect(res.status).toBe(403);
-      expect(supabaseState.callCount).toBe(0);
-    });
-  });
-
-  describe("rate limit (P197)", () => {
-    it("at least one of 100 rapid requests as the same user is rate-limited", async () => {
-      // Simulate an exhausted bucket — see strategy-review/route.test.ts
-      // for the rationale on denying every call rather than modelling a
-      // first-20-succeed bucket.
-      vi.doMock("@/lib/ratelimit", async () => {
-        const actual = await vi.importActual<typeof import("@/lib/ratelimit")>(
-          "@/lib/ratelimit",
-        );
-        return {
-          ...actual,
-          checkLimit: async () => ({ success: false, retryAfter: 60 }),
-        };
-      });
-      const { POST } = await import("./route");
-      const statuses: number[] = [];
-      for (let i = 0; i < 100; i++) {
-        const req = new NextRequest(
-          "http://localhost:3000/api/admin/intro-request",
-          {
-            method: "POST",
-            headers: VALID_ORIGIN,
-            body: JSON.stringify({ id: "abc", status: "intro_made" }),
-          },
-        );
-        const res = await POST(req);
-        statuses.push(res.status);
-      }
-      const denied = statuses.filter((s) => s === 429).length;
-      // Review-fix v0.22.24.1 (I3): tightened from `denied > 0`. With the
-      // mock denying every call, ALL 100 must come back 429 — anything
-      // less means the route bypassed the gate at least once and the
-      // assertion is no longer covering the contract.
-      expect(denied).toBe(100);
-    });
-  });
+runAdminPostCsrfRateLimitSuite({
+  path: "/api/admin/intro-request",
+  pNumber: "P197 + P200",
+  validBody: { id: "abc", status: "intro_made" },
+  importRoute: async () => {
+    const mod = await import("./route");
+    return { POST: mod.POST as (req: NextRequest) => Promise<Response> };
+  },
+  supabaseCallCount: supabaseState,
 });
