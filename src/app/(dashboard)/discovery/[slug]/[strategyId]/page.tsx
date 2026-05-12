@@ -14,7 +14,7 @@ import { getStrategyDetail, getPercentiles } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
 import { parsePositionRows } from "@/lib/types";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
   params,
@@ -27,8 +27,17 @@ export default async function StrategyDetailPage({
 
   const { slug, strategyId } = await params;
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
+  // Audit 2026-05-07 G11.E.7: unknown slug → 404 immediately. Avoids
+  // even firing the strategy fetch for slugs not on the published list.
+  if (!cat) notFound();
+
+  // Audit 2026-05-07 G11.E.7: pass the slug to getStrategyDetail so the
+  // `discovery_categories!inner(slug)` filter rejects strategy/slug
+  // mismatches at the SQL layer (returns null → not-found UI). Without
+  // this, /discovery/<wrong-slug>/<strategyId> renders the full chart
+  // suite + RSC payload for any published strategy.
   const [result, percentileMap, positionsResult] = await Promise.all([
-    getStrategyDetail(strategyId),
+    getStrategyDetail(strategyId, slug),
     getPercentiles(slug),
     supabase
       .from("positions")
@@ -39,11 +48,25 @@ export default async function StrategyDetailPage({
   ]);
 
   if (!result) {
-    return (
-      <div className="text-center py-16 text-text-muted">
-        Strategy not found.
-      </div>
-    );
+    notFound();
+  }
+
+  // Audit 2026-05-07 G12.G.5: surface positions-fetch failures. The pre-
+  // audit code ignored `positionsResult.error` and let PositionsTab render
+  // its "No positions reconstructed yet" empty state — indistinguishable
+  // from a genuine no-positions strategy. Operators had no signal to
+  // investigate column-shape drift, RLS regressions, or transient DB
+  // failures. Now: log to the server console with the strategyId so the
+  // event is searchable, and pass an explicit `positionsError` flag to
+  // PerformanceReport so the UI can show a banner instead.
+  const positionsError = positionsResult?.error ?? null;
+  if (positionsError) {
+    console.error("[discovery] positions fetch failed", {
+      strategyId,
+      slug,
+      message: positionsError.message,
+      code: positionsError.code,
+    });
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
@@ -117,11 +140,14 @@ export default async function StrategyDetailPage({
       )}
       {/* G12.E.1 (audit 2026-05-07): runtime-validate raw Supabase rows
           before casting to Position[]. Preserves the null-vs-empty signal
-          the consumers branch on by mapping a missing `data` to null. */}
+          the consumers branch on by mapping a missing `data` to null.
+          G12.G.5 (audit 2026-05-07): forward `positionsError` so a fetch
+          failure renders a banner instead of the silent empty state. */}
       <PerformanceReport
         analytics={analytics}
         percentiles={percentiles}
         positions={positionsResult?.data ? parsePositionRows(positionsResult.data) : null}
+        positionsError={positionsError != null}
       />
       <Disclaimer variant="strategy" />
 

@@ -23,7 +23,21 @@ import type { StrategyAnalytics, Position } from "@/lib/types";
 const TABS = ["Overview", "Returns", "Risk", "Volume & Exposure", "Positions"] as const;
 type Tab = (typeof TABS)[number];
 
-export function PerformanceReport({ analytics, percentiles, positions }: { analytics: StrategyAnalytics; percentiles?: Percentiles; positions?: Position[] | null }) {
+export function PerformanceReport({
+  analytics,
+  percentiles,
+  positions,
+  positionsError,
+}: {
+  analytics: StrategyAnalytics;
+  percentiles?: Percentiles;
+  positions?: Position[] | null;
+  /** Audit 2026-05-07 G12.G.5: when the positions fetch errored on the
+   *  server, pass `true` so PositionsTab can render an explicit error
+   *  banner instead of the silent "no positions reconstructed yet"
+   *  empty state. */
+  positionsError?: boolean;
+}) {
   const [tab, setTab] = useState<Tab>("Overview");
 
   const benchmarkSeries = useMemo(() => {
@@ -169,7 +183,7 @@ export function PerformanceReport({ analytics, percentiles, positions }: { analy
             <VolumeExposureTab analytics={analytics} />
           )}
           {tab === "Positions" && (
-            <PositionsTab analytics={analytics} positions={positions || null} />
+            <PositionsTab analytics={analytics} positions={positions || null} positionsError={positionsError} />
           )}
         </>
       )}

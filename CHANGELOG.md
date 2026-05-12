@@ -6,13 +6,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
-## [0.22.18.1] - 2026-05-12
+## [0.22.20.0] - 2026-05-12
 
-**phase-19 pre-PR-D prep (PR-X1 of 2).** Narrows migration 107's M-5 preflight from `flow_type<>'teaser'` to `flow_type<>'teaser' AND public_token IS NOT NULL`. The original wording aborted on any non-teaser row in `strategy_verifications`; live prod has 7 csv/csv rows from Phase 15 CSV-01 that have NULL `public_token` and are unreachable via the legacy `/api/verify-strategy/[id]/status` route either way (it requires non-NULL `public_token` + a constant-time `safeCompare` match). The narrower preflight encodes the real invariant, so PR-D can apply migration 107 cleanly next week without a hotfix.
+**audit-2026-05-07 PR-6 — charts, discovery, activity API, and mobile a11y.** 14 atomic items across G11 (charts + discovery) and G12 (positions + activity). Math helpers get null-safety guards. Activity API surfaces DB errors instead of swallowing them. Mobile sidebar gets focus trap and scroll fix.
+
+### Fixed
+
+- **`pearson()` returns null on zero variance** (G11.E.5) — prevents NaN correlation values from propagating to the UI.
+- **`parseUtcDate` returns null on malformed inputs** (G11.E.15) — guards against invalid date strings crashing chart rendering.
+- **`segmentDrawdowns` warns on positive-value corruption** (G11.E.18) — logs when cumulative-return data contains impossible positive drawdown values.
+- **Discovery detail slug-shuffle bypass** (G11.E.7) — prevents unnecessary re-fetches when navigating between strategy detail pages.
+- **PositionsTab empty-state guard flipped to OR** (G12.G.7) — shows empty state when either positions or trades are missing, not only when both are.
+- **Activity portfolio API surfaces DB errors as 500** (G12.G.6) — was silently returning empty results on Supabase failures.
+- **Positions-fetch errors surfaced on detail page** (G12.G.5) — error boundary now renders instead of blank screen.
+- **`data_quality_flags` error strings sanitized** (G12.G.10) — prevents user-facing leak of internal error details.
+- **`_finalize_rolling` logs when > 10% of points dropped** (G11.E.17) — observability for silent data loss in rolling-window computation.
 
 ### Changed
 
-- **Migration 107 M-5 preflight scope** (`supabase/migrations/107_verification_requests_view_shim.sql`). Comments + `RAISE EXCEPTION` message + `COMMENT ON VIEW` text updated to reflect "non-teaser rows reachable via public-token path" as the real invariant. Zero behavioral change in any environment — migration 107 is still pending in both `khslejtfbuezsmvmtsdn` (prod) and `qmnijlgmdhviwzwfyzlc` (test). Dry-run of the new `WHERE` clause returns 0 in both databases.
+- **Trades partitioned by per-strategy fill mode** (G12.G.3) — volume metrics now respect each strategy's fill-mode setting instead of using a global default.
+- **Mobile sidebar drawer: focus trap + overflow-y-auto** (G11.C.2 + G11.C.3) — keyboard navigation stays inside the drawer; long menus scroll.
+- **E2E credentials read from env** (G12.G.8) — removed hardcoded test credentials from spec files.
+
+### Removed
+
+- **Unused eslint-disable directive** (G11.E.18) — dead suppression comment cleaned up.
+
+### Added
+
+- **`TestComputeVolumeMetrics` + volume helper hardening** (G12.G.4) — regression tests for the per-strategy fill-mode partition logic.
+
+## [0.22.19.0] - 2026-05-12
+
+**audit-2026-05-07 PR-4 — allocator dashboard correctness (G8.B + G8.E + G8.F).** Test portfolios no longer leak into production analytics. Alias route gets hardening and RLS coverage. Scenario math gets `Number.isFinite` guards and a cleaned-up Sortino fallback.
+
+### Fixed
+
+- **`is_test=true` default on CreatePortfolioForm** (G8.F.1) — new portfolios created from the allocator wizard now default to `is_test: true`, preventing accidental production-data pollution.
+- **Intro snapshot filters `is_test=false`** (G8.E.1) — the LP intro snapshot query no longer returns test portfolios.
+- **Cron recompute skips test portfolios** (G8.F.2) — `recompute_all_portfolios` now pre-filters `is_test=false` before dispatching recompute jobs, so test portfolios never consume cron cycles.
+- **Scenario `Number.isFinite` guards** (G8.E.6 + G8.E.7 + G8.E.8) — `calculateSortinoRatio`, `calculateMaxDrawdown`, and related scenario helpers guard against `NaN`/`Infinity` propagation with explicit finite checks and documented fallback values.
+
+### Changed
+
+- **Alias route hardening** (G8.B.3 + G8.B.6 + G8.B.7) — CSRF validation, rate limiting, ownership verification, and `.select()` on UPDATE to return the modified row.
+
+### Removed
+
+- **`computeFavoritesOverlayCurve` dead code** (G8.E.3) — unreachable overlay helper deleted after being marked RESERVED in a prior commit.
+
+### Added
+
+- **13 alias-route tests** (G8.B.2), **AliasEditor concurrent-edit + error tests** (G8.B.4), **alias column RLS live-DB tests** (G8.B.5), **cron is_test regression test** (G8.F.2), **scenario.ts edge-case tests** (G8.E.6–E.8). Total: 3 207 → 3 207+ tests (exact count reflects merged-main baseline).
 
 ## [0.22.18.0] - 2026-05-10
 
