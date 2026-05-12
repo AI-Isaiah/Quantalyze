@@ -813,3 +813,103 @@ def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
         )
     finally:
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+# ----------------------------------------------------------------------------
+# Second-pass review fix #2 (HIGH conf 7): silent fence bypass when W2
+# completes BEFORE W1 marks done.
+# ----------------------------------------------------------------------------
+# The first-pass fence only checked the token on a still-running row. If W2
+# raced ahead and marked the row done before W1's late mark arrived, W1's
+# call fell into the mig 109 P6 idempotent-retry branch and returned
+# silently — bypassing the fence and the observability story. mig 117
+# second-pass moves the token check INTO that branch.
+# ----------------------------------------------------------------------------
+
+
+def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, strategy_id):
+    """The fence must engage even on the already-done branch. Sequence:
+      W1 claims        → token1
+      Watchdog reclaims → token NULLed
+      W2 claims         → token2 (≠ token1)
+      **W2 marks done first** → row.status='done', row.claim_token=token2
+      W1 calls mark_compute_job_done(job_id, p_claim_token=token1)
+        → MUST raise SQLSTATE 40001 (serialization_failure), NOT silently
+        return via the mig 109 P6 idempotent branch.
+
+    PR #149 second-pass review fix #2. Without this guard the prior
+    shape returned cleanly here, swallowing the late mark — the
+    observability story was inconsistent (a late mark on a still-running
+    row was rejected; a late mark on a done row was silently accepted)
+    and the LATE_MARK_IGNORED log line never fired.
+    """
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        # W1 claim
+        w1 = _claim_one(admin, "p97-w1-w2-faster")
+        assert w1 is not None and w1["id"] == job_id
+        token1 = w1["claim_token"]
+        assert token1 is not None
+
+        # Watchdog reclaim
+        admin.table("compute_jobs").update({
+            "claimed_at": "2020-01-01T00:00:00Z",
+        }).eq("id", job_id).execute()
+        admin.rpc("reset_stalled_compute_jobs", {
+            "p_stale_threshold": "1 second",
+        }).execute()
+
+        # W2 claim → token2
+        w2 = _claim_one(admin, "p97-w2-w2-faster")
+        assert w2 is not None and w2["id"] == job_id
+        token2 = w2["claim_token"]
+        assert token2 != token1
+
+        # W2 finishes FIRST.
+        admin.rpc("mark_compute_job_done", {
+            "p_job_id": job_id,
+            "p_claim_token": token2,
+        }).execute()
+        row = admin.table("compute_jobs").select("status,claim_token").eq("id", job_id).single().execute().data
+        assert row["status"] == "done"
+        assert row["claim_token"] == token2
+
+        # W1's late mark MUST raise, even though row is already 'done'.
+        late_mark_failed = False
+        try:
+            admin.rpc("mark_compute_job_done", {
+                "p_job_id": job_id,
+                "p_claim_token": token1,
+            }).execute()
+        except Exception as exc:  # noqa: BLE001
+            err_str = str(exc)
+            assert (
+                "40001" in err_str
+                or "serialization_failure" in err_str
+                or "preempted" in err_str
+            ), (
+                f"W1's late mark_done on done row raised the wrong "
+                f"exception: {exc!r}. Expected SQLSTATE 40001 / "
+                "serialization_failure / 'preempted' in the message."
+            )
+            late_mark_failed = True
+        assert late_mark_failed, (
+            "W1's mark_compute_job_done(token1) after W2 marked done MUST "
+            "raise — instead it returned cleanly via the mig 109 P6 "
+            "idempotent branch. The fence is silently bypassed on the "
+            "done-row path."
+        )
+
+        # Sanity: row still owned by W2 (token2).
+        row = admin.table("compute_jobs").select("status,claim_token").eq("id", job_id).single().execute().data
+        assert row["status"] == "done"
+        assert row["claim_token"] == token2
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()

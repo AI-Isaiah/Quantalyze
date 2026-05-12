@@ -411,11 +411,27 @@ BEGIN
         USING ERRCODE = 'no_data_found';
     END IF;
 
-    -- mig 109 P6: idempotent retry on already-done row. Fence does not
-    -- apply because the row was successfully marked done by some prior
-    -- caller; children were advanced and the bridge fired.
+    -- mig 109 P6: idempotent retry on already-done row.
+    -- mig 117 second-pass review fix #2 (HIGH conf 7): the token MUST be
+    -- checked even on the already-done branch. Race that bypasses the
+    -- fence without this check: W1 starts, watchdog reclaims, W2 takes
+    -- over, W2 finishes faster than W1, W2 marks done. W1 then calls
+    -- mark_done(J, token_W1). Row is now in 'done' state — the prior
+    -- shape returned silently here, swallowing the late mark. With the
+    -- token guard the late mark from a stale worker raises
+    -- serialization_failure even when the row has already advanced to
+    -- 'done', so the caller's LATE_MARK_IGNORED path runs and the
+    -- observability story stays consistent with the running-row case.
+    -- p_claim_token IS NULL preserves the back-compat path: legacy
+    -- callers that don't carry a token (pre-mig-117) still hit the
+    -- idempotent return as before.
     IF v_current_status = 'done' THEN
-      RETURN;
+      IF p_claim_token IS NULL OR v_current_token IS NOT DISTINCT FROM p_claim_token THEN
+        RETURN;
+      END IF;
+      RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',
+        p_job_id, p_claim_token, v_current_token
+        USING ERRCODE = 'serialization_failure';
     END IF;
 
     -- mig 117 P97: token mismatch on a still-running row means the
