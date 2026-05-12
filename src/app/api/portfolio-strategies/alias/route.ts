@@ -111,7 +111,8 @@ export async function PATCH(req: NextRequest) {
     .eq("user_id", user.id)
     .maybeSingle();
   if (pfErr) {
-    return NextResponse.json({ error: pfErr.message }, { status: 500 });
+    console.error("[api/portfolio-strategies/alias] portfolio lookup failed:", pfErr.message);
+    return NextResponse.json({ error: "internal error" }, { status: 500 });
   }
   if (!portfolio) {
     return NextResponse.json({ error: "portfolio not found" }, { status: 404 });
@@ -133,7 +134,8 @@ export async function PATCH(req: NextRequest) {
     .select("strategy_id");
 
   if (updateErr) {
-    return NextResponse.json({ error: updateErr.message }, { status: 500 });
+    console.error("[api/portfolio-strategies/alias] update failed:", updateErr.message);
+    return NextResponse.json({ error: "internal error" }, { status: 500 });
   }
   if (!updatedRows || updatedRows.length === 0) {
     return NextResponse.json(
