@@ -281,14 +281,26 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION _enqueue_compute_job_internal IS
+-- NOTE: explicit arg-list qualification is REQUIRED here because migration 066
+-- (allocator_holdings) extended this function via DROP+CREATE to a 10-param
+-- signature. After mig 109's CREATE OR REPLACE adds back the original 7-param
+-- variant, two overloads coexist in pg_proc and any unqualified COMMENT/REVOKE
+-- would fail with SQLSTATE 42725 (ambiguous_function) and silently break the
+-- migration under `supabase db push`. See migration 118 for the retroactive
+-- remediation that closes the gap on databases where 109 already landed with
+-- this defect (production prior to 2026-05-12).
+COMMENT ON FUNCTION public._enqueue_compute_job_internal(
+  uuid, uuid, text, text, uuid[], text, jsonb
+) IS
   'Private shared idempotent enqueue. Inserts new rows with status='
   '''done_pending_children'' when parent_job_ids is non-empty (mig 109 P12), '
   'else status=''pending''. Race-loser re-read uses plain SELECT INTO; if the '
   'winner already advanced past in-flight statuses, raises serialization_failure '
   'so the caller can retry vs. surfacing a 500 (mig 109 P3). See mig 109.';
 
-REVOKE ALL ON FUNCTION _enqueue_compute_job_internal FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._enqueue_compute_job_internal(
+  uuid, uuid, text, text, uuid[], text, jsonb
+) FROM PUBLIC, anon, authenticated;
 
 -- --------------------------------------------------------------------
 -- P17: check_fan_in_ready — RAISE NOTICE on missing child
