@@ -88,7 +88,13 @@ SHUTDOWN = asyncio.Event()
 # iterates TIMEOUT_PER_KIND (the source of truth) — adding a new long
 # handler without an override fails CI.
 WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
-    "sync_trades": "20 minutes",       # handler timeout = 15 minutes
+    # audit-2026-05-07 P97 / G12.A.2 (mig 117): bumped sync_trades 20→30
+    # min so OKX backfills (legitimately 12+ min) don't routinely trip
+    # the watchdog and trigger the Race A 2-worker overlap that the
+    # claim-token fence detects but doesn't prevent. INVEST-P97
+    # §Recommendation pairs the fence with this override:
+    # `.planning/audit-2026-05-07/INVEST-P97.md`.
+    "sync_trades": "30 minutes",       # handler timeout = 15 minutes (mig 117)
     "compute_analytics": "20 minutes", # handler timeout = 15 minutes
     "poll_positions": "5 minutes",     # handler timeout = 3 minutes
     "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
@@ -106,6 +112,24 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # transitions through transition_strategy_verification.
     "process_key_long": "40 minutes",  # handler timeout = 30 minutes
 }
+
+
+# ---------------------------------------------------------------------------
+# Late-mark detection (audit-2026-05-07 P97 / G12.A.2 — claim-token fence)
+# ---------------------------------------------------------------------------
+# Migration 117 raises `serialization_failure` (PostgreSQL SQLSTATE 40001)
+# from mark_compute_job_done / mark_compute_job_failed when the caller's
+# p_claim_token doesn't match the row's current claim_token. This means
+# the watchdog reclaimed the row and a second worker has taken over —
+# the late mark is expected behavior, not a failure. Detect by sniffing
+# the PostgREST APIError code; fall back to a string contains check on
+# generic Exceptions for transports that don't surface code cleanly.
+def _is_serialization_failure(exc: BaseException) -> bool:
+    code = getattr(exc, "code", None)
+    if code == "40001":
+        return True
+    msg = str(exc) if exc is not None else ""
+    return "40001" in msg or "serialization_failure" in msg or "preempted by watchdog reclaim" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -171,23 +195,43 @@ async def dispatch_tick(worker_id: str) -> None:
     logger.info("Claimed %d jobs: %s", len(jobs), [j["id"] for j in jobs])
 
     for job in jobs:
+        # audit-2026-05-07 P97 / G12.A.2 (mig 117): claim-token fence.
+        # The claim RPC stamps a fresh UUID into compute_jobs.claim_token at
+        # claim time; we read it from the row here and pass it through to the
+        # mark RPCs. If the watchdog reclaims this row mid-handler and a
+        # second worker takes over, our late mark RPC raises
+        # serialization_failure — that's the expected late-mark-ignored path,
+        # not a failure. INVEST-P97 §Recommendation point 2.
+        claim_token = job.get("claim_token")
         try:
             result = await dispatch(job)
 
             if result.outcome == DispatchOutcome.DONE:
-                def _mark_done(jid=job["id"]):
+                def _mark_done(jid=job["id"], tok=claim_token):
                     supabase.rpc(
-                        "mark_compute_job_done", {"p_job_id": jid}
+                        "mark_compute_job_done",
+                        {"p_job_id": jid, "p_claim_token": tok},
                     ).execute()
 
-                await db_execute(_mark_done)
-                logger.info("Job %s done (trade_count=%s)", job["id"], result.trade_count)
+                try:
+                    await db_execute(_mark_done)
+                    logger.info("Job %s done (trade_count=%s)", job["id"], result.trade_count)
+                except Exception as mark_exc:  # noqa: BLE001
+                    if _is_serialization_failure(mark_exc):
+                        logger.warning(
+                            "LATE_MARK_IGNORED: job %s mark_done preempted by watchdog reclaim "
+                            "(claimed_at=%s, claim_token=%s, worker=%s) — another worker has taken over",
+                            job["id"], job.get("claimed_at"), claim_token, worker_id,
+                        )
+                    else:
+                        raise
 
             elif result.outcome == DispatchOutcome.FAILED:
                 def _mark_failed(
                     jid=job["id"],
                     err=result.error_message,
                     kind=result.error_kind,
+                    tok=claim_token,
                 ):
                     supabase.rpc(
                         "mark_compute_job_failed",
@@ -195,16 +239,27 @@ async def dispatch_tick(worker_id: str) -> None:
                             "p_job_id": jid,
                             "p_error": err or "Unknown error",
                             "p_error_kind": kind or "unknown",
+                            "p_claim_token": tok,
                         },
                     ).execute()
 
-                await db_execute(_mark_failed)
-                logger.warning(
-                    "Job %s failed (%s): %s",
-                    job["id"],
-                    result.error_kind,
-                    result.error_message,
-                )
+                try:
+                    await db_execute(_mark_failed)
+                    logger.warning(
+                        "Job %s failed (%s): %s",
+                        job["id"],
+                        result.error_kind,
+                        result.error_message,
+                    )
+                except Exception as mark_exc:  # noqa: BLE001
+                    if _is_serialization_failure(mark_exc):
+                        logger.warning(
+                            "LATE_MARK_IGNORED: job %s mark_failed preempted by watchdog reclaim "
+                            "(claimed_at=%s, claim_token=%s, worker=%s) — another worker has taken over",
+                            job["id"], job.get("claimed_at"), claim_token, worker_id,
+                        )
+                    else:
+                        raise
 
             elif result.outcome == DispatchOutcome.DEFERRED:
                 logger.info("Job %s deferred (handler already called defer_compute_job)", job["id"])
@@ -220,7 +275,7 @@ async def dispatch_tick(worker_id: str) -> None:
             )
             try:
                 def _mark_failed_fallback(
-                    jid=job["id"], err=str(exc)[:500]
+                    jid=job["id"], err=str(exc)[:500], tok=claim_token,
                 ):
                     supabase.rpc(
                         "mark_compute_job_failed",
@@ -228,16 +283,24 @@ async def dispatch_tick(worker_id: str) -> None:
                             "p_job_id": jid,
                             "p_error": err,
                             "p_error_kind": "unknown",
+                            "p_claim_token": tok,
                         },
                     ).execute()
 
                 await db_execute(_mark_failed_fallback)
             except Exception as mark_exc:  # noqa: BLE001
-                logger.error(
-                    "dispatch_tick: could not mark job %s failed: %s",
-                    job.get("id"),
-                    mark_exc,
-                )
+                if _is_serialization_failure(mark_exc):
+                    logger.warning(
+                        "LATE_MARK_IGNORED: job %s mark_failed (fallback) preempted by watchdog "
+                        "reclaim (claim_token=%s, worker=%s) — another worker has taken over",
+                        job.get("id"), claim_token, worker_id,
+                    )
+                else:
+                    logger.error(
+                        "dispatch_tick: could not mark job %s failed: %s",
+                        job.get("id"),
+                        mark_exc,
+                    )
 
 
 async def watchdog_tick() -> None:
