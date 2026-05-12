@@ -9,6 +9,10 @@ import { parseCsvWithSchema } from "@/lib/csv";
 import { ensureAuthUser } from "@/lib/supabase/admin-users";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
+import {
+  validateDisplayName,
+  ProfileValidationError,
+} from "@/lib/profile-validation";
 import type { DisclosureTier } from "@/lib/types";
 
 // POST /api/admin/partner-import
@@ -239,11 +243,22 @@ export async function POST(request: Request): Promise<NextResponse> {
       // admin.partner_import audit event after the whole import completes.
       // Per-row events would generate O(N) audit log rows with no forensic
       // gain over the summary event.
+      // Audit-2026-05-07 P325: validate display_name BEFORE the upsert.
+      // displayNameFromEmail() generates a clean string from the email
+      // local-part for partner-import, but a malformed email column in
+      // the CSV (CR/LF/NUL embedded — possible if a hostile partner
+      // uploaded the file) would propagate straight into profiles.
+      // Throwing here aborts the import for that row's batch and is
+      // caught by the existing try/catch around the partner-import
+      // pipeline, which returns a 4xx with the offending row.
+      const managerDisplayName = validateDisplayName(
+        displayNameFromEmail(row.manager_email),
+      );
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
           id: userId,
           email: row.manager_email,
-          display_name: displayNameFromEmail(row.manager_email),
+          display_name: managerDisplayName,
           role: "manager",
           partner_tag,
         },
@@ -287,11 +302,16 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
 
       // @audit-skip: bulk-import row; rolled up into admin.partner_import.
+      // Audit-2026-05-07 P325: validate display_name at insert boundary.
+      // See partner-import phase-1 comment for rationale.
+      const allocatorDisplayName = validateDisplayName(
+        displayNameFromEmail(row.allocator_email),
+      );
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
           id: userId,
           email: row.allocator_email,
-          display_name: displayNameFromEmail(row.allocator_email),
+          display_name: allocatorDisplayName,
           role: "allocator",
           allocator_status: "verified",
           partner_tag,
@@ -316,6 +336,23 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   } catch (err) {
     console.error("[api/admin/partner-import] failed:", err);
+    // Audit-2026-05-07 P325: ProfileValidationError is a bad-input signal
+    // (CSV row contained CR/LF/NUL or an over-long display_name), not a
+    // server fault — return 400 with the structured field/reason so the
+    // admin UI can highlight the offending row.
+    if (err instanceof ProfileValidationError) {
+      return NextResponse.json(
+        {
+          error: err.message,
+          field: err.field,
+          reason: err.reason,
+          managers_created,
+          strategies_created,
+          allocators_created,
+        },
+        { status: 400 },
+      );
+    }
     return NextResponse.json(
       {
         error: err instanceof Error ? err.message : "Import failed",
