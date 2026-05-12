@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.23.0] - 2026-05-12
+
+### Fixed
+
+- **Email recipient header-injection guard (P324)** — `src/lib/email.ts` `send()` now strips CR/LF/comma from the `to` field via a new `sanitizeEmailRecipient()` helper before handing it to Resend; addresses that don't shape-check (zero or 2+ `@`) abort the send before either an audit row is written or the SMTP boundary is crossed.
+- **`profiles.display_name` insert-time validator (P325)** — new `src/lib/profile-validation.ts` rejects CR/LF/NUL and caps length at 200 chars (hard reject, no silent truncate). Wired into the partner-import upsert site; `ProfileValidationError` returns 400 with structured `field`/`reason`.
+- **Demo CDN cache hardening (P334)** — `next.config.ts` `/demo/:path*` `Cache-Control` tightened from `s-maxage=60` to `s-maxage=10` and `Vary: Cookie` added so per-session demo state is keyed correctly at the edge.
+- **`/api/demo/match` CDN headers (P335)** — `Cache-Control: public, s-maxage=10, stale-while-revalidate=60` + `Vary: Cookie` added to the JSON response so viral / burst traffic is absorbed at the edge without leaking cached state across sessions.
+- **Profiles RLS + grant hardening (P336, P337)** — migration 116 REVOKEs `INSERT, UPDATE, DELETE` on `profiles` from `anon` and replaces the legacy `profiles_own` ALL policy with explicit per-verb policies (`profiles_self_insert`, `profiles_self_update`, `profiles_self_delete`), each with `auth.uid() = id` in both `USING` and `WITH CHECK`. DO-block at the end asserts both the grant revocation (`pg_catalog.has_table_privilege`) and the absence of OR-true escapes in the new policy clauses (`pg_catalog.pg_policies`).
+
 ## [0.22.22.0] - 2026-05-12
 
 ### Fixed

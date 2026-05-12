@@ -146,11 +146,25 @@ async function send(
 ): Promise<void> {
   if (!to) return;
 
+  // Audit-2026-05-07 P324: strip CR/LF/comma from the recipient before
+  // either auditing or sending. A null result means the address can't
+  // be made safe (header-injection attempt, malformed input) — abort
+  // the send entirely rather than write a tainted audit row or hand
+  // the dirty string to Resend.
+  const safeTo = sanitizeEmailRecipient(to);
+  if (!safeTo) {
+    console.warn(
+      "[email] recipient rejected by sanitizeEmailRecipient (header-injection guard):",
+      JSON.stringify(to),
+    );
+    return;
+  }
+
   const admin = getAuditAdminClient();
 
   const dispatchRow = {
     notification_type: notificationType,
-    recipient_email: to,
+    recipient_email: safeTo,
     subject,
     status: "queued" as const,
     metadata: cc ? { cc } : null,
@@ -181,7 +195,7 @@ async function send(
   }
 
   if (!resend) {
-    console.warn("[email] Resend not configured — skipping send to", to);
+    console.warn("[email] Resend not configured — skipping send to", safeTo);
     // Fire-and-forget: audit trail updates must never block the caller.
     void markDispatch(admin, dispatchId, {
       status: "failed",
@@ -209,7 +223,7 @@ async function send(
     try {
       const result = await resend.emails.send({
         from: FROM,
-        to,
+        to: safeTo,
         cc,
         subject,
         html,
@@ -353,6 +367,52 @@ export function escapeHtml(input: string): string {
  */
 function safeSubject(input: string): string {
   return input.replace(/[\r\n\t\v\f]+/g, " ").slice(0, 250);
+}
+
+/**
+ * Audit-2026-05-07 P324: defense-in-depth sanitizer for the `to` field
+ * passed to `resend.emails.send()`. CR/LF/comma in a recipient address
+ * is the classic header-injection vector — attacker-controlled input
+ * that smuggles a Bcc: header or extra recipients onto the SMTP
+ * envelope. Resend's API treats the `to` field as parsed structure
+ * rather than raw header text, so the practical exploit surface is
+ * narrow, but stripping these characters at the boundary is cheap and
+ * removes the attack class entirely.
+ *
+ * Rules:
+ *  - Strip CR (\r), LF (\n), and comma (,) — these are the only
+ *    characters with header-injection semantics in an address. Other
+ *    whitespace is preserved (a stray space is at worst a Resend
+ *    400, not a security boundary).
+ *  - Validate the trimmed result against `^[^\r\n,@]+@[^\r\n,@]+$` —
+ *    must contain EXACTLY one `@` with non-empty, injection-free
+ *    local and domain parts. Anything else (zero or 2+ `@`, or
+ *    surviving CR/LF/comma) returns null and the send is aborted
+ *    upstream. The exclusion of `@` from both character classes is
+ *    load-bearing: a payload like `"a@b.com\nBcc: c@d.com"` strips
+ *    to `"a@b.comBcc: c@d.com"` which has TWO `@` signs — without
+ *    the `@` exclusion the greedy regex would match it.
+ *
+ * Returns the cleaned address on success, or null when the input
+ * cannot be made safe (empty after strip, no `@`, multiple `@`, etc.).
+ * Callers should treat null as "skip the send" — the same semantics
+ * as the existing `if (!to) return` guard in `send()`.
+ */
+export function sanitizeEmailRecipient(input: string | null | undefined): string | null {
+  if (!input) return null;
+  // Strip the three header-injection characters. Note: we intentionally do
+  // NOT strip tabs / vertical tabs / form feeds — those don't have
+  // header-injection semantics in an SMTP address, and stripping them
+  // could mask a malformed-input bug at the call site.
+  const cleaned = input.replace(/[\r\n,]/g, "");
+  if (!cleaned) return null;
+  // Strict shape check: exactly one `@`, non-empty local + non-empty
+  // domain, with no surviving CR/LF/comma. The `@`-exclusion in the
+  // character classes prevents a smuggled second address slipping
+  // through after the strip removed the separator. Defensive — the
+  // strip already removed CR/LF/comma, but the regex re-asserts.
+  if (!/^[^\r\n,@]+@[^\r\n,@]+$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 function escapeHref(input: string): string {

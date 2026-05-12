@@ -28,7 +28,19 @@ export async function GET(
 
   try {
     const payload = await getAllocatorMatchPayload(admin, allocator_id);
-    return NextResponse.json(payload);
+    const res = NextResponse.json(payload);
+    // Audit-2026-05-07 P335: CDN-cache for 10s with 60s SWR. The route is
+    // hard-locked to ALLOCATOR_ACTIVE_ID, so the response is a constant
+    // function of (route, seed UUID, db state). Caching at the edge for
+    // 10 seconds absorbs viral / burst traffic without keeping a stale
+    // snapshot around long enough to mislead the next reviewer. `Vary:
+    // Cookie` is defensive — the route doesn't currently personalize on
+    // cookies, but if a future PR threads any session state through, the
+    // CDN must key on it instead of serving the same response to all
+    // visitors.
+    res.headers.set("Cache-Control", "public, s-maxage=10, stale-while-revalidate=60");
+    res.headers.set("Vary", "Cookie");
+    return res;
   } catch (err) {
     console.error("[api/demo/match/[allocator_id]] error:", err);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });

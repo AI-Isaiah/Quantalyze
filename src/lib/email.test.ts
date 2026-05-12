@@ -413,3 +413,150 @@ describe("resolveManagerName — manager fallback ladder", () => {
     expect(name).toBe("Unknown");
   });
 });
+
+/**
+ * Audit-2026-05-07 P324 regression tests for sanitizeEmailRecipient.
+ *
+ * The sanitizer is the boundary between caller-supplied addresses (which
+ * may originate from CSV uploads, profile fields, or auth metadata) and
+ * the Resend SDK. Each assertion pins one attack class. A future refactor
+ * that loosens the rules has to re-justify each rejection by editing the
+ * test, not by silently dropping a check.
+ */
+describe("sanitizeEmailRecipient — header-injection guard for the `to` field", () => {
+  it("returns the address unchanged for a normal email", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    expect(sanitizeEmailRecipient("alice@example.com")).toBe(
+      "alice@example.com",
+    );
+  });
+
+  it("rejects null / undefined / empty string", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    expect(sanitizeEmailRecipient(null)).toBeNull();
+    expect(sanitizeEmailRecipient(undefined)).toBeNull();
+    expect(sanitizeEmailRecipient("")).toBeNull();
+  });
+
+  it("rejects CR (header-injection)", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    // After strip the address is "alice@example.com\nBcc: attacker@evil.com"
+    // → no, after strip both \r and \n are gone but the comma between
+    // attacker addresses remains, then the regex check picks up the comma
+    // -> wait, comma is also stripped. Let's verify the post-strip shape
+    // is rejected because it has TWO `@` separated by no separator.
+    expect(
+      sanitizeEmailRecipient("alice@example.com\rBcc: attacker@evil.com"),
+    ).toBeNull();
+  });
+
+  it("rejects LF (canonical SMTP terminator injection)", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    expect(
+      sanitizeEmailRecipient("alice@example.com\nBcc: attacker@evil.com"),
+    ).toBeNull();
+  });
+
+  it("rejects comma (multi-recipient smuggling)", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    expect(
+      sanitizeEmailRecipient("alice@example.com, attacker@evil.com"),
+    ).toBeNull();
+  });
+
+  it("rejects an address with no @ after sanitation", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    expect(sanitizeEmailRecipient("not-an-email")).toBeNull();
+    expect(sanitizeEmailRecipient("@example.com")).toBeNull();
+    expect(sanitizeEmailRecipient("alice@")).toBeNull();
+  });
+
+  it("rejects an address that becomes empty after stripping", async () => {
+    const { sanitizeEmailRecipient } = await import("./email");
+    // All chars are stripped → empty string → null.
+    expect(sanitizeEmailRecipient("\r\n,,,")).toBeNull();
+  });
+
+  it("preserves regular whitespace (tabs, spaces) — not header-injection chars", async () => {
+    // Resend will reject the address as malformed, but that's a 4xx from
+    // their side, not a security boundary. The sanitizer only intercepts
+    // the actual injection chars; spaces are passed through.
+    const { sanitizeEmailRecipient } = await import("./email");
+    expect(sanitizeEmailRecipient("alice space@example.com")).toBe(
+      "alice space@example.com",
+    );
+  });
+});
+
+describe("send() — P324 header-injection guard at the Resend boundary", () => {
+  beforeEach(() => {
+    state.rows = [];
+    state.insertShouldFail = false;
+    state.insertShouldThrow = false;
+    state.updateShouldThrow = false;
+    state.resendShouldFail = false;
+    state.resendError = "Resend rejected the message";
+    state.sendCalls = [];
+    vi.restoreAllMocks();
+    vi.stubEnv("RESEND_API_KEY", "re_test_key");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key");
+    vi.stubEnv("ADMIN_EMAIL", "founder@example.com");
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("CRLF in recipient: NO Resend call, NO dispatch row — fully aborts", async () => {
+    // The classic header-injection payload: smuggle a Bcc via \r\n on the
+    // `to` field. Pre-fix, this would land in Resend. Post-fix, the send
+    // is aborted before either the audit insert OR the Resend call.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { notifyManagerIntroRequest } = await import("./email");
+
+    await notifyManagerIntroRequest(
+      "manager@example.com\r\nBcc: attacker@evil.com",
+      "Acme Capital",
+      "Long Vol Macro",
+    );
+
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("recipient rejected by sanitizeEmailRecipient"),
+      expect.any(String),
+    );
+  });
+
+  it("comma in recipient: blocks multi-recipient smuggling", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { notifyManagerIntroRequest } = await import("./email");
+
+    await notifyManagerIntroRequest(
+      "manager@example.com, attacker@evil.com",
+      "Acme Capital",
+      "Long Vol Macro",
+    );
+
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it("clean recipient still works after the sanitizer is in the path", async () => {
+    // Regression for the obvious failure mode: don't break the happy path.
+    const { notifyManagerIntroRequest } = await import("./email");
+    await notifyManagerIntroRequest(
+      "manager@example.com",
+      "Acme Capital",
+      "Long Vol Macro",
+    );
+    expect(state.sendCalls).toHaveLength(1);
+    expect(state.sendCalls[0].to).toBe("manager@example.com");
+    expect(state.rows).toHaveLength(1);
+    expect(state.rows[0].recipient_email).toBe("manager@example.com");
+  });
+});

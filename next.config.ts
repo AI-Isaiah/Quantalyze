@@ -34,18 +34,26 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        // CDN-cache the public /demo pages for 60 seconds with 5-minute
-        // stale-while-revalidate. The page is `force-dynamic` (ISR prerenders
-        // at build time, which crashes CI without SUPABASE_SERVICE_ROLE_KEY),
-        // but response-level Cache-Control still lets Vercel's edge CDN
-        // absorb viral traffic without hitting Supabase on every request.
-        // /demo/founder-view inherits the same policy since it's the
-        // founder-side read-only twin of /demo.
+        // Audit-2026-05-07 P334: tightened from s-maxage=60 to s-maxage=10
+        // and added `Vary: Cookie` so per-session demo state (sb-* auth
+        // cookies that gate the founder-view route) is keyed correctly
+        // at the CDN. With s-maxage=60 a logged-in founder's response
+        // could be served to a logged-out visitor for up to a minute,
+        // since Vercel keys on URL only by default. 10 seconds is a tight
+        // burst-absorber — enough to catch the 100 RPS thunder you get
+        // when a /demo link is shared on Twitter, not so long that a
+        // stale snapshot misleads the next reviewer. /demo/founder-view
+        // inherits the same policy since it's the founder-side
+        // read-only twin of /demo.
         source: "/demo/:path*",
         headers: [
           {
             key: "Cache-Control",
-            value: "public, s-maxage=60, stale-while-revalidate=300",
+            value: "public, s-maxage=10, stale-while-revalidate=300",
+          },
+          {
+            key: "Vary",
+            value: "Cookie",
           },
         ],
       },
