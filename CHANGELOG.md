@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.20.0] - 2026-05-12
+
+**audit-2026-05-07 PR-6 — charts, discovery, activity API, and mobile a11y.** 14 atomic items across G11 (charts + discovery) and G12 (positions + activity). Math helpers get null-safety guards. Activity API surfaces DB errors instead of swallowing them. Mobile sidebar gets focus trap and scroll fix.
+
+### Fixed
+
+- **`pearson()` returns null on zero variance** (G11.E.5) — prevents NaN correlation values from propagating to the UI.
+- **`parseUtcDate` returns null on malformed inputs** (G11.E.15) — guards against invalid date strings crashing chart rendering.
+- **`segmentDrawdowns` warns on positive-value corruption** (G11.E.18) — logs when cumulative-return data contains impossible positive drawdown values.
+- **Discovery detail slug-shuffle bypass** (G11.E.7) — prevents unnecessary re-fetches when navigating between strategy detail pages.
+- **PositionsTab empty-state guard flipped to OR** (G12.G.7) — shows empty state when either positions or trades are missing, not only when both are.
+- **Activity portfolio API surfaces DB errors as 500** (G12.G.6) — was silently returning empty results on Supabase failures.
+- **Positions-fetch errors surfaced on detail page** (G12.G.5) — error boundary now renders instead of blank screen.
+- **`data_quality_flags` error strings sanitized** (G12.G.10) — prevents user-facing leak of internal error details.
+- **`_finalize_rolling` logs when > 10% of points dropped** (G11.E.17) — observability for silent data loss in rolling-window computation.
+
+### Changed
+
+- **Trades partitioned by per-strategy fill mode** (G12.G.3) — volume metrics now respect each strategy's fill-mode setting instead of using a global default.
+- **Mobile sidebar drawer: focus trap + overflow-y-auto** (G11.C.2 + G11.C.3) — keyboard navigation stays inside the drawer; long menus scroll.
+- **E2E credentials read from env** (G12.G.8) — removed hardcoded test credentials from spec files.
+
+### Removed
+
+- **Unused eslint-disable directive** (G11.E.18) — dead suppression comment cleaned up.
+
+### Added
+
+- **`TestComputeVolumeMetrics` + volume helper hardening** (G12.G.4) — regression tests for the per-strategy fill-mode partition logic.
+
 ## [0.22.19.0] - 2026-05-12
 
 **audit-2026-05-07 PR-4 — allocator dashboard correctness (G8.B + G8.E + G8.F).** Test portfolios no longer leak into production analytics. Alias route gets hardening and RLS coverage. Scenario math gets `Number.isFinite` guards and a cleaned-up Sortino fallback.

@@ -109,6 +109,86 @@ describe("PositionsTab — ROI label + tooltip (Sprint 5.6 funding cutover)", ()
     expect(tooltip.textContent).toContain("Funding:");
   });
 
+  /**
+   * Audit 2026-05-07 G12.G.5 regression: when the server-side positions
+   * fetch fails, PositionsTab MUST render an explicit error banner — never
+   * the silent "No positions reconstructed yet" placeholder, which is
+   * indistinguishable from a truly empty result and gives operators no
+   * signal to investigate. The page wires up `positionsError` based on the
+   * `error` field of the Supabase response (previously ignored entirely).
+   */
+  it("renders an error banner when positionsError=true (audit G12.G.5)", () => {
+    const analytics = makeAnalytics({ trade_metrics: null });
+    render(
+      <PositionsTab
+        analytics={analytics}
+        positions={null}
+        positionsError={true}
+      />,
+    );
+
+    expect(screen.getByText(/Couldn.+t load positions/)).toBeDefined();
+    // The silent empty-state copy must not appear when an error is in
+    // flight — that's the whole bug.
+    expect(
+      screen.queryByText(/No positions reconstructed yet/),
+    ).toBeNull();
+  });
+
+  it("does NOT show the error banner when positionsError is unset (legacy path stays empty)", () => {
+    const analytics = makeAnalytics({ trade_metrics: null });
+    render(<PositionsTab analytics={analytics} positions={null} />);
+
+    expect(screen.queryByText(/Couldn.+t load positions/)).toBeNull();
+    expect(
+      screen.getByText(/No positions reconstructed yet/),
+    ).toBeDefined();
+  });
+
+  /**
+   * Audit 2026-05-07 G12.G.7 regression: snapshot-inconsistency. The
+   * worker writes `trade_metrics` AFTER deleting+reinserting positions,
+   * so mid-window the API can return tm.total_positions=23 alongside
+   * an empty positions list. Pre-audit guard required BOTH
+   * positions-empty AND tm-null to render the empty state, so the
+   * dashboard rendered "Total: 23" with empty Best/Worst tables —
+   * visibly self-contradictory state with no detection path. After the
+   * fix (recipe option c), EITHER signal of inconsistency triggers the
+   * empty state. Operators see a clean placeholder until both sides
+   * align — safer default than mixed UI.
+   */
+  it("renders empty state when positions=[] but tm is non-null (audit G12.G.7)", () => {
+    const analytics = makeAnalytics({
+      trade_metrics: {
+        total_positions: 23,
+        closed_positions: 23,
+        open_positions: 0,
+        win_rate: 0.5,
+        long_count: 12,
+        short_count: 11,
+        avg_duration_days: 2,
+        avg_roi: 0.05,
+        best_trade_roi: 0.2,
+        worst_trade_roi: -0.1,
+        expectancy: null,
+        risk_reward_ratio: null,
+        weighted_risk_reward_ratio: null,
+        sqn: null,
+        profit_factor_long: null,
+        profit_factor_short: null,
+        trade_mix: undefined,
+      },
+    });
+    // Stale tm (Total: 23) + empty positions (mid-window state).
+    render(<PositionsTab analytics={analytics} positions={[]} />);
+    expect(
+      screen.getByText(/No positions reconstructed yet/),
+    ).toBeDefined();
+    // The "Total: 23" hero MUST NOT render — that was the visibly
+    // contradictory state the pre-audit guard allowed.
+    expect(screen.queryByText("23")).toBeNull();
+  });
+
   it("falls back to 'ROI' heading when positions list is empty (no funding to report)", () => {
     const analytics = makeAnalytics({
       trade_metrics: {

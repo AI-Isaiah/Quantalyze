@@ -154,13 +154,30 @@ def _compute_volume_metrics(fills: list[dict]) -> dict:
     `_compute_position_side_volume_pcts` so they reflect what the field
     name promises (volume attributed to long-side vs short-side positions
     via timestamp window), not a buy/sell alias.
+
+    Audit 2026-05-07 G12.G.4 hardening:
+    - cost is taken as `abs(...)` so a rebate / exchange-side adjustment
+      (negative cost) doesn't asymmetrically inflate one side and skew
+      percentages outside [0, 1]. Volume is a magnitude, not a signed PnL.
+    - non-numeric / missing cost defaults to 0.
+    - side is lower-cased (case-insensitive match), so 'Buy'/'BUY' fold
+      into 'buy'.
+    - empty / unknown side contributes to total_volume_usd but neither
+      buy nor sell, so percentages can sum to <1.0 (the residual is
+      attributable to fills with unparseable sides — caller can detect
+      via `1 - buy_pct - sell_pct`).
+    - total_volume_usd is the absolute sum, never negative.
     """
     total_cost = 0.0
     buy_cost = 0.0
     sell_cost = 0.0
 
     for fill in fills:
-        cost = float(fill.get("cost", 0) or 0)
+        raw_cost = fill.get("cost", 0)
+        try:
+            cost = abs(float(raw_cost)) if raw_cost is not None else 0.0
+        except (TypeError, ValueError):
+            cost = 0.0
         side = (fill.get("side") or "").lower()
         total_cost += cost
         if side == "buy":
@@ -721,7 +738,12 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             logger.warning(
                 "Position reconstruction failed for %s: %s", strategy_id, str(exc)
             )
-            position_reconstruction_error = str(exc)[:200]
+            # Audit 2026-05-07 G12.G.10: store a stable enum code in the
+            # data_quality_flags blob (which leaks to allocators via
+            # PostgREST) — never the raw exception message, which may
+            # contain table names, column names, or query fragments. The
+            # full message is in the worker log (above) for operators.
+            position_reconstruction_error = "RECONSTRUCTION_FAILED"
 
         # H-A1: position_snapshots is the canonical source for
         # positions+prices+NAV (no historical_prices table exists per
@@ -741,7 +763,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             logger.warning(
                 "Position snapshots load failed for %s: %s", strategy_id, str(exc)
             )
-            position_snapshots_error = str(exc)[:200]
+            # Audit 2026-05-07 G12.G.10: stable enum code, not raw exc text.
+            position_snapshots_error = "SNAPSHOTS_LOAD_FAILED"
 
         # Fetch fills once, feed volume helpers + trade_mix. The trades
         # table only stores side / cost / is_maker / timestamp; the prior
@@ -776,7 +799,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             )
             fills_data = []
             fills_fetch_failed = True
-            fills_fetch_error = str(exc)[:200]
+            # Audit 2026-05-07 G12.G.10: stable enum code, not raw exc text.
+            fills_fetch_error = "FILLS_FETCH_FAILED"
 
         # B-01 path (b) merge: volume_metrics + volume_aggregator + derived +
         # trade_mix all flow into the trade_metrics JSONB before the upsert.
@@ -821,7 +845,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                     strategy_id, str(exc),
                 )
                 position_side_volume_failed = True
-                position_side_volume_error = str(exc)[:200]
+                # Audit 2026-05-07 G12.G.10: stable enum code, not raw exc text.
+                position_side_volume_error = "POSITION_SIDE_VOLUME_FAILED"
         # KPI-17: 4-bucket Trade Mix gated on (env flag) AND (per-strategy
         # is_maker coverage ≥99% on this strategy's actual fills). The
         # env flag is the global kill switch; the per-strategy coverage
@@ -1057,7 +1082,8 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 try:
                     existing = data_quality_flags or {}
                     existing["sibling_kinds_failed"] = True
-                    existing["sibling_kinds_error"] = str(exc)[:200]
+                    # Audit 2026-05-07 G12.G.10: stable enum code, not raw exc.
+                    existing["sibling_kinds_error"] = "SIBLING_BATCH_UPSERT_FAILED"
                     await db_execute(
                         lambda: supabase.table("strategy_analytics")
                         .upsert(

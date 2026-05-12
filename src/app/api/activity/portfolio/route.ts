@@ -39,10 +39,29 @@ export async function GET(request: NextRequest) {
   const admin = createAdminClient();
 
   // Get portfolio's strategy IDs
-  const { data: psRows } = await admin
+  // Audit 2026-05-07 G12.G.6: destructure error and surface as 500. The
+  // pre-audit code ignored the error field entirely, so an RLS regression
+  // or a transient DB failure returned `{ ok: true, items: [] }` —
+  // indistinguishable from a portfolio that genuinely has no strategies.
+  // Operators got no signal; the widget hid its "Now showing fills"
+  // footnote inappropriately. Now: every Supabase call checks .error and
+  // bails to a structured 500.
+  const { data: psRows, error: psError } = await admin
     .from("portfolio_strategies")
     .select("strategy_id, strategies(name)")
     .eq("portfolio_id", portfolioId);
+
+  if (psError) {
+    console.error("[activity/portfolio] portfolio_strategies query failed", {
+      portfolioId,
+      message: psError.message,
+      code: psError.code,
+    });
+    return NextResponse.json(
+      { error: "Failed to load portfolio strategies" },
+      { status: 500 },
+    );
+  }
 
   if (!psRows || psRows.length === 0) {
     return NextResponse.json({ activity: [], volumeByDay: [], has_fills: false });
@@ -57,25 +76,106 @@ export async function GET(request: NextRequest) {
     nameMap[r.strategy_id as string] = strat?.name ?? "Unknown";
   }
 
-  // Check if any fills exist for these strategies
-  const { count: fillCount } = await admin
+  // Audit 2026-05-07 G12.G.3: identify which strategies in the portfolio
+  // have ingested fills under USE_RAW_TRADE_INGESTION, so we can route
+  // each strategy's trade query to the right is_fill filter. The pre-
+  // audit code computed a single portfolio-level hasFills and applied
+  // `.eq("is_fill", hasFills)` to the entire IN list. The moment ONE
+  // strategy ingested its first fill, the API stopped returning legacy
+  // daily_pnl rows for ALL strategies in the portfolio — a sudden data
+  // cliff in the TradingActivityLog and TradeVolume widgets.
+  //
+  // PostgREST: select strategy_ids that have any is_fill=true row.
+  // Cap at strategyIds.length to avoid fetching unbounded duplicate rows.
+  const { data: fillStrategiesRows, error: fillStrategiesError } = await admin
     .from("trades")
-    .select("id", { count: "exact", head: true })
+    .select("strategy_id")
     .in("strategy_id", strategyIds)
-    .eq("is_fill", true);
+    .eq("is_fill", true)
+    .limit(strategyIds.length);
 
-  const hasFills = (fillCount ?? 0) > 0;
+  if (fillStrategiesError) {
+    console.error("[activity/portfolio] fill-strategies query failed", {
+      portfolioId,
+      message: fillStrategiesError.message,
+      code: fillStrategiesError.code,
+    });
+    return NextResponse.json(
+      { error: "Failed to identify strategies with fills" },
+      { status: 500 },
+    );
+  }
 
-  // Query trades — prefer fills when available, fall back to legacy daily_pnl rows
-  const { data: trades } = await admin
-    .from("trades")
-    .select("timestamp, strategy_id, symbol, realized_pnl, exchange")
-    .in("strategy_id", strategyIds)
-    .eq("is_fill", hasFills)
-    .order("timestamp", { ascending: false })
-    .limit(5000);
+  const strategiesWithFills = new Set<string>(
+    (fillStrategiesRows ?? []).map(
+      (r: Record<string, unknown>) => r.strategy_id as string,
+    ),
+  );
+  const strategiesWithoutFills = strategyIds.filter(
+    (id) => !strategiesWithFills.has(id),
+  );
+  const hasFills = strategiesWithFills.size > 0;
 
-  if (!trades || trades.length === 0) {
+  // Audit 2026-05-07 G12.G.3: run up to two trade queries — one for the
+  // fill-mode subset, one for the legacy daily_pnl subset — so each
+  // strategy gets its appropriate trade rows. Either subset may be
+  // empty (skip the query in that case).
+  const fillsQuery = strategiesWithFills.size > 0
+    ? admin
+        .from("trades")
+        .select("timestamp, strategy_id, symbol, realized_pnl, exchange")
+        .in("strategy_id", Array.from(strategiesWithFills))
+        .eq("is_fill", true)
+        .order("timestamp", { ascending: false })
+        .limit(5000)
+    : null;
+  const dailyQuery = strategiesWithoutFills.length > 0
+    ? admin
+        .from("trades")
+        .select("timestamp, strategy_id, symbol, realized_pnl, exchange")
+        .in("strategy_id", strategiesWithoutFills)
+        .eq("is_fill", false)
+        .order("timestamp", { ascending: false })
+        .limit(5000)
+    : null;
+
+  const [fillsResult, dailyResult] = await Promise.all([
+    fillsQuery,
+    dailyQuery,
+  ]);
+
+  if (fillsResult?.error) {
+    console.error("[activity/portfolio] trades (fill subset) query failed", {
+      portfolioId,
+      message: fillsResult.error.message,
+      code: fillsResult.error.code,
+    });
+    return NextResponse.json(
+      { error: "Failed to load trades" },
+      { status: 500 },
+    );
+  }
+
+  if (dailyResult?.error) {
+    console.error("[activity/portfolio] trades (daily subset) query failed", {
+      portfolioId,
+      message: dailyResult.error.message,
+      code: dailyResult.error.code,
+    });
+    return NextResponse.json(
+      { error: "Failed to load trades" },
+      { status: 500 },
+    );
+  }
+
+  const trades = [
+    ...(fillsResult?.data ?? []),
+    ...(dailyResult?.data ?? []),
+  ].sort((a, b) =>
+    (b.timestamp as string).localeCompare(a.timestamp as string),
+  );
+
+  if (trades.length === 0) {
     return NextResponse.json({ activity: [], volumeByDay: [], has_fills: hasFills });
   }
 

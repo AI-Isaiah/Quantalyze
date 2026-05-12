@@ -10,12 +10,12 @@ describe("pearson", () => {
     expect(pearson([1, 2, 3], [3, 2, 1])).toBeCloseTo(-1, 10);
   });
 
-  it("returns 0 for empty arrays", () => {
-    expect(pearson([], [])).toBe(0);
+  it("returns null for empty arrays (correlation undefined)", () => {
+    expect(pearson([], [])).toBeNull();
   });
 
-  it("returns 0 when n < 2 (single pair)", () => {
-    expect(pearson([1], [1])).toBe(0);
+  it("returns null when n < 2 (single pair, correlation undefined)", () => {
+    expect(pearson([1], [1])).toBeNull();
   });
 
   it("uses Math.min(a.length, b.length) for mismatched lengths", () => {
@@ -23,8 +23,21 @@ describe("pearson", () => {
     expect(pearson([1, 2, 3], [1, 2])).toBeCloseTo(1, 10);
   });
 
-  it("returns 0 (not NaN) when variance is zero", () => {
-    expect(pearson([1, 1, 1], [2, 3, 4])).toBe(0);
+  /**
+   * Audit 2026-05-07 G11.E.5 regression: zero-variance series MUST return
+   * null (correlation mathematically undefined), NOT 0. The pre-audit
+   * behaviour conflated "no correlation" with "correlation cannot be
+   * measured" — for a flat-for-90-days strategy, allocators saw a clean
+   * 0.000 line indistinguishable from a genuinely uncorrelated window.
+   * Test asserts the null return so the chart layer can render a gap
+   * with the "flat window — correlation undefined" tooltip.
+   */
+  it("returns null (NOT 0) when variance is zero — correlation undefined (G11.E.5)", () => {
+    expect(pearson([1, 1, 1], [2, 3, 4])).toBeNull();
+    // And the symmetric case: zero variance on the second array.
+    expect(pearson([2, 3, 4], [1, 1, 1])).toBeNull();
+    // And both flat → still undefined.
+    expect(pearson([1, 1, 1], [5, 5, 5])).toBeNull();
   });
 });
 
@@ -48,5 +61,24 @@ describe("rollingCorrelation", () => {
   it("emits the absolute index of the window's right edge", () => {
     const out = rollingCorrelation([1, 2, 3, 4, 5], [1, 2, 3, 4, 5], 3);
     expect(out.map((p) => p.index)).toEqual([2, 3, 4]);
+  });
+
+  /**
+   * Audit 2026-05-07 G11.E.5: rolling correlation must propagate the
+   * undefined-variance signal as `null` per window so consumers can
+   * render a gap instead of plotting a misleading 0.
+   */
+  it("emits null for windows where one series is flat (G11.E.5)", () => {
+    // Window @ index 2 (slice [0..2]): a=[1,1,1] flat → undefined → null.
+    // Window @ index 3 (slice [1..3]): a=[1,1,2] non-flat, b=[2,3,4]
+    // monotone-increasing — both have variance, correlation is defined.
+    const out = rollingCorrelation([1, 1, 1, 2, 5], [1, 2, 3, 4, 5], 3);
+    expect(out).toHaveLength(3);
+    expect(out[0].value).toBeNull();
+    // The remaining windows should be real numbers (not null) — the
+    // exact value isn't load-bearing for this test, just that pearson()
+    // returned something defined.
+    expect(typeof out[1].value === "number").toBe(true);
+    expect(typeof out[2].value === "number").toBe(true);
   });
 });

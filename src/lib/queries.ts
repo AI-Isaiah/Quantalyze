@@ -310,7 +310,26 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
   };
 }
 
-export async function getStrategyDetail(strategyId: string): Promise<{
+export async function getStrategyDetail(
+  strategyId: string,
+  /**
+   * Audit 2026-05-07 G11.E.7: optional category-slug guard.
+   *
+   * The discovery URL pattern `/discovery/[slug]/[strategyId]` lets any
+   * authenticated user shuffle the slug component to view ANY published
+   * strategy, even ones whose category they wouldn't naturally browse to
+   * (the populated-slugs gate is only enforced on the discovery LIST page,
+   * not on this DETAIL page). Passing a slug here adds a server-side
+   * `discovery_categories!inner(slug)` filter so a slug/strategy mismatch
+   * returns null and the page renders the not-found state instead of
+   * leaking the full chart suite + RSC payload.
+   *
+   * When omitted, behaves identically to the pre-audit query — kept
+   * undefined for callers like the factsheet route that already gate by
+   * other means.
+   */
+  expectedCategorySlug?: string,
+): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;
   manager: ManagerIdentity | null;
@@ -329,10 +348,25 @@ export async function getStrategyDetail(strategyId: string): Promise<{
   // (flow_type admits 'resync' + 'onboard'). Encoding "latest only" at
   // the DB layer rather than relying on JS-side sort+[0] keeps the
   // factsheet read O(1) once the second insert lands.
-  const { data: strategy, error } = await supabase
+  //
+  // Audit 2026-05-07 G11.E.7: when expectedCategorySlug is supplied, embed
+  // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
+  // …)` predicate. PostgREST drops the row entirely when the inner-join
+  // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
+  const baseSelect = expectedCategorySlug
+    ? "*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)"
+    : "*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)";
+
+  let query = supabase
     .from("strategies")
-    .select("*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)")
-    .eq("id", strategyId)
+    .select(baseSelect)
+    .eq("id", strategyId);
+
+  if (expectedCategorySlug) {
+    query = query.eq("discovery_categories.slug", expectedCategorySlug);
+  }
+
+  const { data: strategy, error } = await query
     .order("created_at", {
       referencedTable: "strategy_verifications",
       ascending: false,
