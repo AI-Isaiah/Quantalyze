@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.21.0] - 2026-05-12
+
+### Fixed
+
+- **Migration 107 M-5 preflight relaxed** — verification-requests view shim now scopes the preflight check to public-token-reachable rows, unblocking phase-19 deploys that previously failed on private strategies without public tokens.
+
 ## [0.22.20.0] - 2026-05-12
 
 **audit-2026-05-07 PR-6 — charts, discovery, activity API, and mobile a11y.** 14 atomic items across G11 (charts + discovery) and G12 (positions + activity). Math helpers get null-safety guards. Activity API surfaces DB errors instead of swallowing them. Mobile sidebar gets focus trap and scroll fix.
