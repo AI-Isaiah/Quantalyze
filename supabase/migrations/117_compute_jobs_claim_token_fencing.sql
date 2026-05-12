@@ -103,6 +103,34 @@ COMMENT ON COLUMN compute_jobs.claim_token IS
   'See migration 117 + .planning/audit-2026-05-07/INVEST-P97.md.';
 
 -- --------------------------------------------------------------------------
+-- STEP 1.5: backfill claim_token for pre-existing running rows
+-- --------------------------------------------------------------------------
+-- audit-2026-05-07 P97 / G12.A.2 — close the deploy-window fence-bypass
+-- edge case (red-team conf 7). Any row in status='running' at migration
+-- time has claim_token IS NULL until it finishes; without this UPDATE the
+-- fence is a no-op for those in-flight rows because the new mark RPCs
+-- treat `claim_token IS NULL OR claim_token = p_claim_token` as a match
+-- when the row's claim_token is NULL.
+--
+-- The one-shot backfill stamps a fresh UUID into every running row that
+-- pre-dates this migration. The original worker (pre-deploy) doesn't
+-- carry a token in its in-process state, so its first mark call after
+-- migration deploy will hit p_claim_token=NULL and the WHERE clause
+-- accepts that (back-compat). The watchdog reclaim path NULLs the
+-- backfilled token on reclaim — defense in depth. New claims after this
+-- point use the regular gen_random_uuid() flow from STEPs 2 + 3.
+--
+-- See DEPLOY-117.md "Rollout window risk" section for the operational
+-- consequence: the very first mark call from each pre-existing in-flight
+-- worker arrives with p_claim_token=NULL (legacy callers + workers that
+-- haven't redeployed) and is accepted; the next claim by a redeployed
+-- worker rotates the token and the fence is fully engaged.
+UPDATE compute_jobs
+   SET claim_token = gen_random_uuid()
+ WHERE status = 'running'
+   AND claim_token IS NULL;
+
+-- --------------------------------------------------------------------------
 -- STEP 2: claim_compute_jobs (legacy non-priority) — stamp claim_token
 -- --------------------------------------------------------------------------
 -- Body mirrors migration 090 STEP 1 verbatim (partition-key dedupe, FOR
@@ -192,9 +220,22 @@ REVOKE ALL ON FUNCTION claim_compute_jobs FROM PUBLIC, anon, authenticated;
 --
 -- IMPORTANT — partition dedupe vs. mig 104 body: mig 104's CREATE OR
 -- REPLACE eliminated the migration-090 partition dedupe by mistake. This
--- migration restores it AND keeps mig 104's metadata-stamping. We confirmed
--- the merge is consistent by reading both bodies (see DO-block assertions
--- at end of file).
+-- migration restores it AND keeps mig 104's metadata-stamping. The ranked
+-- /deduped CTE shape below is copied verbatim from migration 090 STEP 2
+-- — without it, two `failed_retry` rows sharing a partition can 23505 on
+-- the partial inflight unique indices inside the batch UPDATE. The DO-block
+-- STEP 7 below asserts the row_number() PARTITION BY shape on every
+-- deploy so a future replace cannot silently drop it again.
+--
+-- Throttle filter (C5): the probe and the inner WHERE both filter on
+-- `status = 'pending'` only. Mig 090's body widened the inner WHERE to
+-- `status IN ('pending','failed_retry')` after mig 089 made failed_retry
+-- claimable, but mig 104 narrowed the inner WHERE back to pending-only
+-- without narrowing the probe. We preserve mig 104's narrow inner WHERE
+-- exactly here and narrow the probe to match it. Restoring failed_retry-
+-- claimable behavior is a separate decision (would also need the inner
+-- WHERE re-widened together with the throttle probe — out of scope for
+-- mig 117 which is purely the P97 fence + dedupe restore).
 CREATE OR REPLACE FUNCTION claim_compute_jobs_with_priority(
   p_batch_size INTEGER,
   p_worker_id  TEXT,
@@ -223,15 +264,58 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
-  -- Throttle probe: count normal/high jobs that are ready to claim.
-  -- Includes failed_retry rows whose backoff has elapsed (per migration 089).
+  -- Throttle probe: mirrors migration 104 STEP 3 throttle filter exactly
+  -- (status = 'pending') + adds claim_token; does NOT restore mig-090
+  -- failed_retry claim (out of scope). Counting failed_retry here while
+  -- the inner WHERE only takes 'pending' would throttle low-priority
+  -- pending jobs forever without draining a failed_retry backlog.
   SELECT count(*) INTO v_high_pending
     FROM compute_jobs
    WHERE priority IN ('normal','high')
-     AND status IN ('pending', 'failed_retry')
+     AND status = 'pending'
      AND next_attempt_at <= now();
 
+  -- Partition-key dedupe restored from migration 090 STEP 2. Without
+  -- this the batch UPDATE can 23505 on the partial inflight unique
+  -- indices when two rows for the same (kind, partition_id) become
+  -- claim-eligible at the same time. tie-break on priority then
+  -- next_attempt_at matches mig 090 verbatim.
   RETURN QUERY
+  WITH ranked AS (
+    SELECT id, kind, priority, portfolio_id, strategy_id, allocator_id, api_key_id,
+           next_attempt_at,
+           row_number() OVER (
+             PARTITION BY kind, portfolio_id
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                      next_attempt_at
+           ) AS rn_p,
+           row_number() OVER (
+             PARTITION BY kind, strategy_id
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                      next_attempt_at
+           ) AS rn_s,
+           row_number() OVER (
+             PARTITION BY kind, allocator_id
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                      next_attempt_at
+           ) AS rn_a,
+           row_number() OVER (
+             PARTITION BY kind, api_key_id
+             ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                      next_attempt_at
+           ) AS rn_k
+    FROM compute_jobs
+    WHERE status = 'pending'
+      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND (v_high_pending = 0 OR priority IN ('normal','high'))
+  ),
+  deduped AS (
+    SELECT id FROM ranked
+    WHERE (portfolio_id IS NULL OR rn_p = 1)
+      AND (strategy_id  IS NULL OR rn_s = 1)
+      AND (allocator_id IS NULL OR rn_a = 1)
+      AND (api_key_id   IS NULL OR rn_k = 1)
+  )
   UPDATE compute_jobs
      SET status      = 'running',
          claimed_at  = now(),
@@ -249,15 +333,13 @@ BEGIN
                     END)
          )
    WHERE id IN (
-     SELECT id FROM compute_jobs
-       WHERE status = 'pending'
-         AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-         AND (v_high_pending = 0 OR priority IN ('normal','high'))
-       ORDER BY
-         CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-         next_attempt_at
-       LIMIT p_batch_size
-       FOR UPDATE SKIP LOCKED
+     SELECT cj.id FROM compute_jobs cj
+      WHERE cj.id IN (SELECT id FROM deduped)
+      ORDER BY
+        CASE cj.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+        cj.next_attempt_at
+      LIMIT p_batch_size
+      FOR UPDATE SKIP LOCKED
    )
    RETURNING *;
 END;
@@ -282,6 +364,15 @@ REVOKE ALL ON FUNCTION claim_compute_jobs_with_priority(INTEGER, TEXT, BOOLEAN) 
 -- The mig 109 P6 idempotent-retry branch is preserved: if the row is
 -- already 'done' OR missing entirely, behavior is unchanged.
 -- The mig 099 Phase-18 atomic UI status bridge is preserved.
+--
+-- IMPORTANT: DROP the prior 1-arg overload from mig 109 first. CREATE OR
+-- REPLACE on a different signature creates a NEW overload — the old
+-- 1-arg `mark_compute_job_done(p_job_id UUID)` would survive and the
+-- subsequent COMMENT ON FUNCTION (without arglist) would raise "function
+-- is not unique" → migration HALT. Even worse, PostgREST routes 1-arg
+-- callers to the surviving un-fenced overload → fence silently bypassed.
+DROP FUNCTION IF EXISTS mark_compute_job_done(UUID);
+
 CREATE OR REPLACE FUNCTION mark_compute_job_done(
   p_job_id     UUID,
   p_claim_token UUID DEFAULT NULL    -- mig 117: P97 fence
@@ -369,7 +460,12 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION mark_compute_job_done IS
+-- COMMENT must specify the explicit arg list — without it the call
+-- raises "function is not unique" if any other overload exists. Migration
+-- 117 drops the prior overload above so this is currently unambiguous,
+-- but the explicit arg list also documents intent and survives any
+-- future overload accidentally being added.
+COMMENT ON FUNCTION mark_compute_job_done(UUID, UUID) IS
   'Terminal success transition. Migration 117 / P97 fence: p_claim_token (default NULL) verified against compute_jobs.claim_token; mismatch on a still-running row raises serialization_failure (preempted by watchdog reclaim). Preserves mig 109 P6 idempotent-retry on already-done rows AND mig 099 Phase-18 atomic UI status bridge. See migration 117 + .planning/audit-2026-05-07/INVEST-P97.md.';
 
 REVOKE ALL ON FUNCTION mark_compute_job_done(UUID, UUID) FROM PUBLIC, anon, authenticated;
@@ -385,6 +481,13 @@ REVOKE ALL ON FUNCTION mark_compute_job_done(UUID, UUID) FROM PUBLIC, anon, auth
 --       (non-NULL) claim_token, RAISE serialization_failure.
 -- The mig 109 P4 ELSE-arm RAISE NOTICE is preserved.
 -- The mig 099 Phase-18 atomic UI status bridge is preserved.
+--
+-- Same overload trap as STEP 4: DROP the mig 109 3-arg overload first.
+-- Otherwise CREATE OR REPLACE on the new 4-arg signature creates a NEW
+-- overload, the subsequent COMMENT raises "function is not unique", and
+-- PostgREST routes 3-arg callers to the surviving un-fenced overload.
+DROP FUNCTION IF EXISTS mark_compute_job_failed(UUID, TEXT, TEXT);
+
 CREATE OR REPLACE FUNCTION mark_compute_job_failed(
   p_job_id     UUID,
   p_error      TEXT,
@@ -483,7 +586,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION mark_compute_job_failed IS
+-- Same explicit-arglist policy as mark_compute_job_done's COMMENT above.
+COMMENT ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) IS
   'Migration 117 / P97 fence: p_claim_token (default NULL) verified against compute_jobs.claim_token; mismatch on a still-running row raises serialization_failure. Preserves mig 109 P4 backoff schedule + ELSE-arm NOTICE AND mig 099 Phase-18 atomic UI status bridge. See migration 117 + .planning/audit-2026-05-07/INVEST-P97.md.';
 
 REVOKE ALL ON FUNCTION mark_compute_job_failed(UUID, TEXT, TEXT, UUID) FROM PUBLIC, anon, authenticated;
@@ -573,10 +677,42 @@ REVOKE ALL ON FUNCTION reset_stalled_compute_jobs FROM PUBLIC, anon, authenticat
 -- --------------------------------------------------------------------------
 -- STEP 7: self-verifying DO block
 -- --------------------------------------------------------------------------
+-- All body-shape checks below use whitespace-tolerant POSIX regex (~*)
+-- instead of ILIKE so a future formatter that inserts or strips spaces
+-- around `=` doesn't silently break the gate.
+-- All pg_proc lookups filter on the explicit argument signature so the
+-- gate stays effective if a future migration accidentally creates another
+-- overload — that's the C1+C2 regression we close here.
 DO $$
 DECLARE
-  v_body TEXT;
+  v_body  TEXT;
+  v_count INTEGER;
 BEGIN
+  -- 0. ENFORCE EXACTLY ONE OVERLOAD per mark RPC. This is the C1+C2 gate:
+  --    a future migration that adds a mark_compute_job_done(UUID) overload
+  --    silently re-introduces the un-fenced 1-arg PostgREST route.
+  SELECT count(*) INTO v_count
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname = 'mark_compute_job_done';
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION
+      'Migration 117 verification failed: expected exactly 1 mark_compute_job_done overload, got %',
+      v_count;
+  END IF;
+
+  SELECT count(*) INTO v_count
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname = 'mark_compute_job_failed';
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION
+      'Migration 117 verification failed: expected exactly 1 mark_compute_job_failed overload, got %',
+      v_count;
+  END IF;
+
   -- 1. claim_token column exists on compute_jobs
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -593,23 +729,43 @@ BEGIN
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
-     AND p.proname = 'claim_compute_jobs';
-  IF v_body IS NULL OR v_body NOT ILIKE '%claim_token = gen_random_uuid()%' THEN
+     AND p.proname = 'claim_compute_jobs'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_batch_size integer, p_worker_id text';
+  IF v_body IS NULL OR v_body !~* 'claim_token\s*=\s*gen_random_uuid\(\)' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: claim_compute_jobs body does not stamp claim_token';
+  END IF;
+  -- mig 090 partition-key dedupe must remain (STEP 1)
+  IF v_body !~* 'row_number\(\)\s+OVER' THEN
+    RAISE EXCEPTION 'Migration 117 verification failed: claim_compute_jobs lost mig 090 partition-key dedupe';
   END IF;
 
   -- 3. claim_compute_jobs_with_priority body stamps claim_token AND
   --    preserves the Phase 19 unified_backbone_at_claim metadata snapshot
+  --    AND preserves the mig 090 partition-key dedupe shape (C4 gate).
   SELECT pg_get_functiondef(p.oid) INTO v_body
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
-     AND p.proname = 'claim_compute_jobs_with_priority';
-  IF v_body IS NULL OR v_body NOT ILIKE '%claim_token = gen_random_uuid()%' THEN
+     AND p.proname = 'claim_compute_jobs_with_priority'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_batch_size integer, p_worker_id text, p_unified_backbone_active boolean';
+  IF v_body IS NULL OR v_body !~* 'claim_token\s*=\s*gen_random_uuid\(\)' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: claim_compute_jobs_with_priority body does not stamp claim_token';
   END IF;
-  IF v_body NOT ILIKE '%unified_backbone_at_claim%' THEN
+  IF v_body !~* 'unified_backbone_at_claim' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: claim_compute_jobs_with_priority body lost the Phase 19 unified_backbone_at_claim metadata snapshot';
+  END IF;
+  -- mig 090 STEP 2 partition-key dedupe — this is the C4 regression gate.
+  -- Without these row_number() PARTITION BY assertions, mig 117 can silently
+  -- drop the dedupe (as mig 104 did) and re-open the 23505 batch-claim
+  -- regression on partial inflight unique indices.
+  IF v_body !~* 'row_number\(\)\s+OVER' THEN
+    RAISE EXCEPTION 'Migration 117 verification failed: claim_compute_jobs_with_priority lost mig 090 STEP 2 dedupe (row_number)';
+  END IF;
+  IF v_body !~* 'PARTITION\s+BY\s+kind,\s*portfolio_id'
+     OR v_body !~* 'PARTITION\s+BY\s+kind,\s*strategy_id'
+     OR v_body !~* 'PARTITION\s+BY\s+kind,\s*allocator_id'
+     OR v_body !~* 'PARTITION\s+BY\s+kind,\s*api_key_id' THEN
+    RAISE EXCEPTION 'Migration 117 verification failed: claim_compute_jobs_with_priority missing one or more mig 090 partition window definitions';
   END IF;
 
   -- 4. mark_compute_job_done body has fence + serialization_failure raise
@@ -617,19 +773,20 @@ BEGIN
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
-     AND p.proname = 'mark_compute_job_done';
-  IF v_body IS NULL OR v_body NOT ILIKE '%p_claim_token%' THEN
+     AND p.proname = 'mark_compute_job_done'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_job_id uuid, p_claim_token uuid';
+  IF v_body IS NULL OR v_body !~* 'p_claim_token' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_done body lacks p_claim_token parameter';
   END IF;
-  IF v_body NOT ILIKE '%serialization_failure%' THEN
+  IF v_body !~* 'serialization_failure' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_done body lacks serialization_failure raise';
   END IF;
   -- Preservation: mig 109 P6 idempotent-retry branch must remain
-  IF v_body NOT ILIKE '%v_current_status = ''done''%' THEN
+  IF v_body !~* 'v_current_status\s*=\s*''done''' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_done lost mig 109 P6 idempotent-retry branch';
   END IF;
   -- Preservation: mig 099 Phase-18 atomic UI bridge must remain
-  IF v_body NOT ILIKE '%sync_strategy_analytics_status%' THEN
+  IF v_body !~* 'sync_strategy_analytics_status' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_done lost mig 099 Phase-18 atomic UI bridge';
   END IF;
 
@@ -638,19 +795,20 @@ BEGIN
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
-     AND p.proname = 'mark_compute_job_failed';
-  IF v_body IS NULL OR v_body NOT ILIKE '%p_claim_token%' THEN
+     AND p.proname = 'mark_compute_job_failed'
+     AND pg_get_function_identity_arguments(p.oid) = 'p_job_id uuid, p_error text, p_error_kind text, p_claim_token uuid';
+  IF v_body IS NULL OR v_body !~* 'p_claim_token' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_failed body lacks p_claim_token parameter';
   END IF;
-  IF v_body NOT ILIKE '%serialization_failure%' THEN
+  IF v_body !~* 'serialization_failure' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_failed body lacks serialization_failure raise';
   END IF;
   -- Preservation: mig 109 P4 ELSE-arm NOTICE must remain
-  IF v_body NOT ILIKE '%safety-net ELSE arm%' THEN
+  IF v_body !~* 'safety-net ELSE arm' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_failed lost mig 109 P4 ELSE-arm NOTICE';
   END IF;
   -- Preservation: mig 099 Phase-18 atomic UI bridge must remain
-  IF v_body NOT ILIKE '%sync_strategy_analytics_status%' THEN
+  IF v_body !~* 'sync_strategy_analytics_status' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: mark_compute_job_failed lost mig 099 Phase-18 atomic UI bridge';
   END IF;
 
@@ -660,7 +818,7 @@ BEGIN
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public'
      AND p.proname = 'reset_stalled_compute_jobs';
-  IF v_body IS NULL OR v_body NOT ILIKE '%claim_token     = NULL%' THEN
+  IF v_body IS NULL OR v_body !~* 'claim_token\s*=\s*NULL' THEN
     RAISE EXCEPTION 'Migration 117 verification failed: reset_stalled_compute_jobs body does not NULL claim_token';
   END IF;
 END $$;
