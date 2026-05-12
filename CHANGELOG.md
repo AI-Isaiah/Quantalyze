@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.25.3] - 2026-05-12
+
+### Fixed
+
+- **Migration 109 root-cause fix + 118 retroactive ACL remediation** — migration 109's unqualified `COMMENT ON FUNCTION _enqueue_compute_job_internal IS …` and `REVOKE ALL ON FUNCTION` statements silently failed in production because migration 066 had already extended the function to a second overload. The CLI tool recorded 109 as applied but skipped the failing statements, leaving both overloads with default ACL (public/anon/authenticated could execute the queue's internal enqueue helper). Migration 109 is now arg-qualified so future fresh deploys apply cleanly. New migration 118 idempotently re-applies the COMMENT/REVOKE/GRANT to both overloads, closing the production gap.
+- **Migration 114 root-cause fix + 119 retroactive constraint install** — migration 114 used `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...) NOT VALID`, which is not valid PostgreSQL syntax (only CHECK and FOREIGN KEY support `NOT VALID`; UNIQUE raises SQLSTATE 0A000 "feature_not_supported"). The constraint silently failed to install on both production and test even though 114 recorded as applied — leaving `positions_natural_key` missing and `reconstruct_positions_atomic` as the only defense against duplicate (strategy_id, symbol, side, opened_at) rows. Migration 114 is rewritten to use the correct pattern (count dups, install inline when zero, NOTICE otherwise). New migration 119 installs the constraint on existing databases: test cleanly (0 duplicates); production was found to carry 8 duplicate groups and is therefore left with the constraint MISSING and a NOTICE pointing at the `reconstruct_positions_atomic` cleanup runbook (operator-driven follow-up).
+- **Test Supabase project caught up** — applied migrations 093, 094, 099, 100, 101, 102, 107, 109 (fixed), 110-117, 118, 119 to the test project (`qmnijlgmdhviwzwfyzlc`). Live-DB fence tests now have a database that matches main.
+- **`_need_supabase()` restored to `pytest.fail`** — previous TODO closed; CI now hard-fails when SUPABASE_TEST_URL secrets are unset, so live-DB regression cannot silently skip.
+
 ## [0.22.25.2] - 2026-05-12
 
 ### Fixed
