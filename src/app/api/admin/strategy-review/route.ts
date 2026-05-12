@@ -1,11 +1,63 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { withAdminAuth } from "@/lib/api/withAdminAuth";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { isAdminUser } from "@/lib/admin";
+import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
 import { checkStrategyGate } from "@/lib/strategyGate";
 import { logAuditEvent } from "@/lib/audit";
 
-export const POST = withAdminAuth(async (body, admin) => {
+// audit-2026-05-07 P198 + P200 — see intro-request/route.ts for the rationale.
+// v0.22.24.2 review-fix: handler body inlined to drop the withAdminAuth
+// indirection (avoids a second createClient + getUser + isAdminUser round-trip
+// per request — red-team HIGH conf 7).
+export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!(await isAdminUser(supabase, user))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:strategy-review`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    const parsed = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json(
+        { error: "Request body must be a JSON object" },
+        { status: 400 },
+      );
+    }
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  const admin = createAdminClient();
+
   const { id, action, review_note } = body;
   if (!id || !["approve", "reject"].includes(action as string)) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
@@ -54,20 +106,11 @@ export const POST = withAdminAuth(async (body, admin) => {
     return NextResponse.json({ error: "Update failed" }, { status: 500 });
   }
 
-  // Sprint 6 Task 7.1b — audit the approve/reject decision. Use a
-  // user-scoped client so log_audit_event resolves auth.uid() to the
-  // acting admin (withAdminAuth hands us the service-role `admin` client
-  // only). The outer handler has already verified the caller is admin.
-  //
-  // /review follow-up (T4-M3): truncate review_note to 2000 chars
-  // before stashing it in metadata. audit_log.metadata is JSONB and
-  // practically unbounded, but an admin pasting a 500KB review note
-  // would bloat the audit table and break the small-row assumption the
-  // rest of the audit tooling makes. We record whether truncation
-  // happened in `review_note_truncated` so forensic analysis can flag
-  // "the full note lives in [elsewhere]" if one ever shows up.
+  // Sprint 6 Task 7.1b — audit the approve/reject decision. Use the user-scoped
+  // `supabase` client so log_audit_event resolves auth.uid() to the acting
+  // admin. /review follow-up (T4-M3): truncate review_note to 2000 chars to
+  // bound the audit row size.
   const REVIEW_NOTE_AUDIT_CAP = 2000;
-  const auditSupabase = await createClient();
   const rawReviewNote = (review_note as string) || null;
   const reviewNoteForAudit =
     rawReviewNote !== null
@@ -75,7 +118,7 @@ export const POST = withAdminAuth(async (body, admin) => {
       : null;
   const reviewNoteTruncated =
     rawReviewNote !== null && rawReviewNote.length > REVIEW_NOTE_AUDIT_CAP;
-  logAuditEvent(auditSupabase, {
+  logAuditEvent(supabase, {
     action: action === "approve" ? "strategy.approve" : "strategy.reject",
     entity_type: "strategy",
     entity_id: id as string,
@@ -108,4 +151,4 @@ export const POST = withAdminAuth(async (body, admin) => {
   }
 
   return NextResponse.json({ success: true });
-});
+}

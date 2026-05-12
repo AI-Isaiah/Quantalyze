@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.24.2] - 2026-05-12
+
+### Fixed
+
+- **Second-pass review fixes for v0.22.24.0 — see PR #148 review comments.** Closes 2 HIGH conf>=7 findings from the fresh-context red-team: (a) reclassifies `/api/admin/notify-submission` as a user-mutation route — the route lives under `/api/admin/` for historical reasons but enforces auth via `.eq("user_id", user.id)`, not `isAdminUser`; bucket key renamed to `notify-submission:${user.id}` and limiter switched to the user-mutation default. (b) Inlines the body-parse + admin-client setup directly into `intro-request`, `strategy-review`, and `allocator-approve` POST handlers, dropping the `withAdminAuth` indirection — net 4 fewer DB/auth round-trips per admin POST since `withAdminAuth` was re-running the same checks the outer handler already performed.
+
+## [0.22.24.1] - 2026-05-12
+
+### Changed
+
+- **Review fixes for v0.22.24.0 — see PR #148 review comments.** Closes 4 CRITICAL + 5 INFORMATIONAL conf>=8 findings: hardens the admin CSRF+rate-limit grep gate (now requires invocation, not just import; matches POST/PUT/PATCH/DELETE; no longer treats `@/lib/auth` as proof of rate-limit since `withRole` does NOT enforce a limiter); adds `adminActionLimiter` to `/api/admin/users/[id]/roles` (highest-risk grep-bypassed route per red-team finding) with a new route test; reorders the four sibling admin POST routes so auth runs BEFORE rate-limit (closes timing oracle on admin-status, prevents bucket pollution by non-admin user_ids, denies bucket bypass by unauthenticated callers); tightens the "100 rapid requests" assertion from `denied > 0` to `denied === 100`; extracts the shared admin POST CSRF+rate-limit suite into `src/__tests__/helpers/adminPostCsrfRateLimit.ts`.
+
+## [0.22.24.0] - 2026-05-12
+
+### Changed
+
+- **Admin POST surface CSRF + rate-limit sweep** (audit-2026-05-07 P197/P198/P199/P200/P203) — `intro-request`, `strategy-review`, `allocator-approve`, and `notify-submission` now bind `assertSameOrigin` + `adminActionLimiter` directly in their route files, and a new vitest grep gate (`src/__tests__/admin-csrf-ratelimit-grep.test.ts`) fails any future admin POST that ships without both defenses.
+
 ## [0.22.23.0] - 2026-05-12
 
 ### Fixed
