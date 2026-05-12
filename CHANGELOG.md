@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.25.0] - 2026-05-12
+
+### Fixed
+
+- **CRITICAL — `compute_jobs` claim-token fencing (audit-2026-05-07 P97 / G12.A.2)** — migration 117 adds a `claim_token UUID` column and threads it through `claim_compute_jobs[_with_priority]`, `mark_compute_job_done`, `mark_compute_job_failed`, and `reset_stalled_compute_jobs`. A watchdog reclaim now invalidates the prior worker's token, so the original worker's late `mark_done` rejects with PostgreSQL `serialization_failure` (SQLSTATE 40001) instead of marking the new worker's run done. Closes the Race A 3-way overlap traced in `.planning/audit-2026-05-07/INVEST-P97.md`.
+- **`sync_trades` watchdog override bumped 20→30 min** — OKX backfills routinely take 12+ min; the prior 20-min default was triggering reclaims faster than the work could complete, *causing* Race A more often than it was resolving genuinely-stuck workers.
+- **`dispatch_tick` `LATE_MARK_IGNORED` handling** — `analytics-service/main_worker.py` now catches `serialization_failure` from `mark_compute_job_done`/`_failed`, logs a structured `LATE_MARK_IGNORED` line, and returns without retrying. Late-marks from preempted workers are expected behavior.
+
+> v0.22.24.0 reserved for in-flight admin CSRF sweep (PR #148).
+
 ## [0.22.23.0] - 2026-05-12
 
 ### Fixed
