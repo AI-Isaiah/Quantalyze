@@ -85,12 +85,14 @@ export async function GET(request: NextRequest) {
   // daily_pnl rows for ALL strategies in the portfolio — a sudden data
   // cliff in the TradingActivityLog and TradeVolume widgets.
   //
-  // PostgREST: select distinct strategy_ids that have any is_fill=true row.
+  // PostgREST: select strategy_ids that have any is_fill=true row.
+  // Cap at strategyIds.length to avoid fetching unbounded duplicate rows.
   const { data: fillStrategiesRows, error: fillStrategiesError } = await admin
     .from("trades")
     .select("strategy_id")
     .in("strategy_id", strategyIds)
-    .eq("is_fill", true);
+    .eq("is_fill", true)
+    .limit(strategyIds.length);
 
   if (fillStrategiesError) {
     console.error("[activity/portfolio] fill-strategies query failed", {
@@ -169,7 +171,9 @@ export async function GET(request: NextRequest) {
   const trades = [
     ...(fillsResult?.data ?? []),
     ...(dailyResult?.data ?? []),
-  ];
+  ].sort((a, b) =>
+    (b.timestamp as string).localeCompare(a.timestamp as string),
+  );
 
   if (trades.length === 0) {
     return NextResponse.json({ activity: [], volumeByDay: [], has_fills: hasFills });

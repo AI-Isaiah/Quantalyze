@@ -88,8 +88,10 @@ describe("GET /api/activity/portfolio", () => {
               return {
                 in: () => ({
                   eq: () => ({
-                    data: [],
-                    error: null,
+                    limit: () => ({
+                      data: [],
+                      error: null,
+                    }),
                   }),
                 }),
               };
@@ -222,8 +224,10 @@ describe("GET /api/activity/portfolio", () => {
               return {
                 in: () => ({
                   eq: () => ({
-                    data: null,
-                    error: { message: "DB unreachable", code: "PGRST500" },
+                    limit: () => ({
+                      data: null,
+                      error: { message: "DB unreachable", code: "PGRST500" },
+                    }),
                   }),
                 }),
               };
@@ -272,7 +276,9 @@ describe("GET /api/activity/portfolio", () => {
             if (typeof cols === "string" && cols === "strategy_id") {
               return {
                 in: () => ({
-                  eq: () => ({ data: [], error: null }),
+                  eq: () => ({
+                    limit: () => ({ data: [], error: null }),
+                  }),
                 }),
               };
             }
@@ -341,8 +347,10 @@ describe("GET /api/activity/portfolio", () => {
               return {
                 in: () => ({
                   eq: () => ({
-                    data: [{ strategy_id: "s1" }],
-                    error: null,
+                    limit: () => ({
+                      data: [{ strategy_id: "s1" }],
+                      error: null,
+                    }),
                   }),
                 }),
               };
