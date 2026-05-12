@@ -132,7 +132,11 @@ describe("POST /api/admin/intro-request", () => {
         statuses.push(res.status);
       }
       const denied = statuses.filter((s) => s === 429).length;
-      expect(denied).toBeGreaterThan(0);
+      // Review-fix v0.22.24.1 (I3): tightened from `denied > 0`. With the
+      // mock denying every call, ALL 100 must come back 429 — anything
+      // less means the route bypassed the gate at least once and the
+      // assertion is no longer covering the contract.
+      expect(denied).toBe(100);
     });
   });
 });
