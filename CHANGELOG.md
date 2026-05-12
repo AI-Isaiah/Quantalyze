@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.24.1] - 2026-05-12
+
+### Changed
+
+- **Review fixes for v0.22.24.0 — see PR #148 review comments.** Closes 4 CRITICAL + 5 INFORMATIONAL conf>=8 findings: hardens the admin CSRF+rate-limit grep gate (now requires invocation, not just import; matches POST/PUT/PATCH/DELETE; no longer treats `@/lib/auth` as proof of rate-limit since `withRole` does NOT enforce a limiter); adds `adminActionLimiter` to `/api/admin/users/[id]/roles` (highest-risk grep-bypassed route per red-team finding) with a new route test; reorders the four sibling admin POST routes so auth runs BEFORE rate-limit (closes timing oracle on admin-status, prevents bucket pollution by non-admin user_ids, denies bucket bypass by unauthenticated callers); tightens the "100 rapid requests" assertion from `denied > 0` to `denied === 100`; extracts the shared admin POST CSRF+rate-limit suite into `src/__tests__/helpers/adminPostCsrfRateLimit.ts`.
+
 ## [0.22.24.0] - 2026-05-12
 
 ### Changed
