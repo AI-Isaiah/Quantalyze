@@ -164,12 +164,21 @@ def _is_serialization_failure(exc: BaseException) -> bool:
 # `outer_exc` is set when called from the outer-catch fallback path
 # (I6): the original dispatch exception that triggered the
 # `_mark_failed_fallback`. If `_safe_mark` itself swallows a 40001 in
-# that path, we log the ORIGINAL exception at WARNING with full context
-# BEFORE the LATE_MARK_IGNORED line, so a 40001 cascade doesn't bury
-# the dispatch-side failure invisibly. Pre-I6 behavior: silent
-# failure-chain — the dispatch error was logged via logger.error() but
-# the cascade to LATE_MARK_IGNORED erased its connection to the late
-# mark.
+# that path, the LATE_MARK_IGNORED log line carries
+# `event_type="preempted_after_dispatch_error"` and includes the outer
+# exception context — so the late-mark line subsumes the original
+# error log instead of triplicating it.
+#
+# Returns: True iff `_safe_mark` swallowed a 40001 (LATE_MARK_IGNORED
+# fired). False iff the mark succeeded normally. Re-raises any other
+# exception. PR #149 second-pass review fix #4 (HIGH conf 8): callers
+# in the outer-catch fallback path use the return value to decide
+# whether to log the original `dispatch_tick: unhandled error` line —
+# when LATE_MARK_IGNORED fired with `event_type="preempted_after_
+# dispatch_error"`, the late-mark line ALREADY carries the outer
+# context via the `extra` dict and the redundant error line would
+# triplicate the same conceptual event for Sentry's severity-based
+# alert pipeline.
 async def _safe_mark(
     invoke_rpc,
     *,
@@ -178,27 +187,41 @@ async def _safe_mark(
     worker_id: str,
     label: str,
     outer_exc: BaseException | None = None,
-) -> None:
+) -> bool:
     try:
         await db_execute(invoke_rpc)
+        return False
     except Exception as mark_exc:  # noqa: BLE001
         if _is_serialization_failure(mark_exc):
-            if outer_exc is not None:
-                # I6: surface the original dispatch failure that drove us
-                # into the fallback path. Without this, a 40001 cascade
-                # buries the actual cause of the job's failure.
-                logger.warning(
-                    "LATE_MARK_IGNORED cascade: outer dispatch error was %r "
-                    "(job=%s, label=%s, worker=%s) — preserving context "
-                    "before LATE_MARK_IGNORED",
-                    outer_exc, job_id, label, worker_id,
-                )
+            # event_type lets Sentry/log routing distinguish a clean
+            # late-mark (worker preempted, nothing else wrong) from a
+            # late-mark-after-dispatch-error (worker preempted AND the
+            # original dispatch threw). The latter is structurally a
+            # single conceptual event — the dispatch error is
+            # explained by "another worker took over". Severity
+            # pipelines that key on the latest log line will see
+            # WARNING + the outer context together, not a stale
+            # ERROR line that's already been superseded.
+            event_type = (
+                "preempted_after_dispatch_error" if outer_exc is not None else "preempted"
+            )
             logger.warning(
                 "LATE_MARK_IGNORED: job %s %s preempted by watchdog reclaim "
                 "(claim_token=%s, worker=%s) — another worker has taken over",
                 job_id, label, claim_token, worker_id,
+                extra={
+                    "event_type": event_type,
+                    "job_id": job_id,
+                    "label": label,
+                    "worker_id": worker_id,
+                    "claim_token": claim_token,
+                    # repr() so structured-logging exporters get a
+                    # stable string even when outer_exc carries
+                    # non-serializable attrs (PostgREST APIError etc.).
+                    "outer_exc": repr(outer_exc) if outer_exc is not None else None,
+                },
             )
-            return
+            return True
         raise
 
 
@@ -329,12 +352,18 @@ async def dispatch_tick(worker_id: str) -> None:
         except Exception as exc:  # noqa: BLE001
             # dispatch() itself crashed — this should not normally happen
             # because dispatch has its own try-except. Defense in depth.
-            logger.error(
-                "dispatch_tick: unhandled error for job %s: %s",
-                job.get("id"),
-                exc,
-                exc_info=True,
-            )
+            #
+            # PR #149 second-pass review fix #4 (HIGH conf 8): defer the
+            # "dispatch_tick: unhandled error" log line until AFTER the
+            # fallback mark resolves. If the mark swallows a 40001
+            # (LATE_MARK_IGNORED with event_type="preempted_after_
+            # dispatch_error"), the late-mark line already carries the
+            # outer_exc context via its `extra` dict — logging the
+            # original error here would triplicate the same conceptual
+            # event for Sentry's severity-based alert pipelines (ERROR
+            # → WARNING cascade → WARNING) and the most-recent-severity
+            # router would mis-classify a benign preemption as a
+            # critical dispatch failure.
             try:
                 def _mark_failed_fallback(
                     jid=job["id"], err=str(exc)[:500], tok=claim_token,
@@ -349,10 +378,7 @@ async def dispatch_tick(worker_id: str) -> None:
                         },
                     ).execute()
 
-                # I6: pass `outer_exc=exc` so the LATE_MARK_IGNORED cascade
-                # log line preserves the original dispatch failure context
-                # instead of silently chaining.
-                await _safe_mark(
+                late_mark_swallowed = await _safe_mark(
                     _mark_failed_fallback,
                     job_id=job["id"],
                     claim_token=claim_token,
@@ -360,10 +386,34 @@ async def dispatch_tick(worker_id: str) -> None:
                     label="mark_failed (fallback)",
                     outer_exc=exc,
                 )
+                if not late_mark_swallowed:
+                    # mark_failed succeeded normally — the outer dispatch
+                    # error is real and unattributed by any LATE_MARK_IGNORED
+                    # line. Log it now at ERROR with the full traceback.
+                    logger.error(
+                        "dispatch_tick: unhandled error for job %s "
+                        "(mark_failed succeeded): %s",
+                        job.get("id"),
+                        exc,
+                        exc_info=exc,
+                    )
+                # else: LATE_MARK_IGNORED fired with
+                # event_type="preempted_after_dispatch_error" and the
+                # outer exc context lives in that record's `extra`
+                # dict. Don't double-log.
             except Exception as mark_exc:  # noqa: BLE001
                 # `_safe_mark` only re-raises NON-40001 exceptions, so we
                 # reach this branch when the fallback mark itself failed
-                # for a reason unrelated to the P97 fence.
+                # for a reason unrelated to the P97 fence. The original
+                # dispatch error is also unattributed — log BOTH so the
+                # operator sees the full chain.
+                logger.error(
+                    "dispatch_tick: unhandled error for job %s "
+                    "(mark_failed also raised): %s",
+                    job.get("id"),
+                    exc,
+                    exc_info=exc,
+                )
                 logger.error(
                     "dispatch_tick: could not mark job %s failed: %s",
                     job.get("id"),

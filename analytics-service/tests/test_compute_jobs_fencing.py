@@ -333,6 +333,108 @@ class TestDispatchTickThreadsClaimToken:
             "LATE_MARK_IGNORED" in r.getMessage() for r in caplog.records
         )
 
+    @pytest.mark.asyncio
+    async def test_late_mark_from_outer_fallback_tagged_with_event_type(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """PR #149 second-pass review fix #4 (HIGH conf 8): when dispatch()
+        raises AND the outer-catch fallback's mark_failed itself swallows
+        a 40001, the resulting LATE_MARK_IGNORED log record MUST carry
+        `event_type="preempted_after_dispatch_error"` in its `extra`
+        dict.
+
+        Why: pre-fix the cascade produced THREE log lines for ONE
+        conceptual event (logger.error("dispatch_tick: unhandled
+        error...") + cascade WARNING + LATE_MARK_IGNORED WARNING).
+        Sentry alert pipelines keying on the most recent severity
+        would mis-classify a benign preemption as a critical dispatch
+        failure. The new contract: the LATE_MARK_IGNORED line is the
+        single source of truth for this event, the outer_exc context
+        rides on its `extra` dict, and the original logger.error()
+        line is deferred until AFTER _safe_mark returns (and only
+        fires when mark_failed succeeded — i.e. the dispatch error
+        was real and unattributed).
+        """
+        tok = str(uuid.uuid4())
+        jobs = [
+            {
+                "id": "job-cascade",
+                "kind": "sync_trades",
+                "strategy_id": "s-cascade",
+                "claim_token": tok,
+            }
+        ]
+        mock_supabase = MagicMock()
+
+        def _rpc_side_effect(name: str, params: dict):
+            chain = MagicMock()
+            if name == "claim_compute_jobs_with_priority":
+                chain.execute.return_value = MagicMock(data=jobs)
+            elif name == "mark_compute_job_failed":
+                # The outer-catch's _mark_failed_fallback hits 40001 too —
+                # this is the cascade scenario.
+                chain.execute.side_effect = APIError({
+                    "code": "40001",
+                    "message": "preempted by watchdog reclaim",
+                })
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        # dispatch() itself raises — drives execution into the outer-catch
+        # path that builds _mark_failed_fallback with outer_exc=exc.
+        outer_exc = RuntimeError("dispatch handler exploded")
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(side_effect=outer_exc),
+             ), \
+             caplog.at_level(logging.WARNING, logger="quantalyze.analytics.worker"):
+            await dispatch_tick("worker-cascade")
+
+        late_mark_records = [
+            r for r in caplog.records
+            if "LATE_MARK_IGNORED" in r.getMessage()
+        ]
+        assert len(late_mark_records) == 1, (
+            f"expected exactly one LATE_MARK_IGNORED record, got "
+            f"{len(late_mark_records)} — the cascade is producing "
+            "redundant log lines again"
+        )
+        rec = late_mark_records[0]
+        # event_type distinguishes the cascade case from the simple
+        # "running row preempted" case. Sentry/log routers key on this
+        # to suppress redundant alerts.
+        assert getattr(rec, "event_type", None) == "preempted_after_dispatch_error", (
+            "LATE_MARK_IGNORED record from the outer-fallback path must "
+            "carry event_type='preempted_after_dispatch_error' in its "
+            "extra dict so the dispatch error context is preserved "
+            "WITHOUT a redundant logger.error() line."
+        )
+        # outer_exc context must be on the record (repr form so structured
+        # exporters get a stable string).
+        assert "dispatch handler exploded" in getattr(rec, "outer_exc", "") or "", (
+            "outer_exc context must be preserved on the LATE_MARK_IGNORED "
+            "record so operators can trace the dispatch failure that drove "
+            "us into the fallback path"
+        )
+
+        # The redundant `logger.error("dispatch_tick: unhandled error...")`
+        # line MUST NOT fire when LATE_MARK_IGNORED subsumes it.
+        error_records = [
+            r for r in caplog.records
+            if r.levelname == "ERROR"
+            and "dispatch_tick: unhandled error" in r.getMessage()
+        ]
+        assert error_records == [], (
+            "logger.error('dispatch_tick: unhandled error...') fired even "
+            "though LATE_MARK_IGNORED subsumes it. Sentry will see "
+            f"ERROR + WARNING for the same conceptual event: {error_records!r}"
+        )
+
 
 # ----------------------------------------------------------------------------
 # Live-DB integration tests (skip when test Supabase isn't configured)
