@@ -1,9 +1,14 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
+import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 
-export const POST = withAdminAuth(async (body, admin) => {
+// audit-2026-05-07 P199 + P200 — see intro-request/route.ts for the rationale
+// on keeping the CSRF + rate-limit imports + calls in this file alongside the
+// `withAdminAuth` wrapper.
+const adminHandler = withAdminAuth(async (body, admin) => {
   const { id } = body;
   if (!id) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
@@ -32,3 +37,30 @@ export const POST = withAdminAuth(async (body, admin) => {
 
   return NextResponse.json({ success: true });
 });
+
+export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    const rl = await checkLimit(
+      adminActionLimiter,
+      `admin:${user.id}:allocator-approve`,
+    );
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+  }
+
+  return adminHandler(req);
+}

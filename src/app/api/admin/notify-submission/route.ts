@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 
 export async function POST(req: NextRequest) {
@@ -15,6 +16,24 @@ export async function POST(req: NextRequest) {
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // audit-2026-05-07 P203 — admin POST surface needs cross-lambda rate
+  // limit alongside the existing CSRF gate. 20/min per user (the
+  // adminActionLimiter default) is well above the realistic
+  // strategy-submission notification cadence and well below abuse.
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:notify-submission`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
+    );
   }
 
   const { strategy_id } = await req.json();

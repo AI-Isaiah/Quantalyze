@@ -1,12 +1,21 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
+import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyAllocatorIntroStatus } from "@/lib/email";
 import { logAuditEvent } from "@/lib/audit";
 
 const VALID_STATUSES = ["pending", "intro_made", "completed", "declined"] as const;
 
-export const POST = withAdminAuth(async (body, admin) => {
+// audit-2026-05-07 P197 + P200 — admin POST surface keeps the CSRF + rate-limit
+// imports + calls directly in the route file (in addition to the duplicate CSRF
+// check inside `withAdminAuth`) so the CI grep gate in
+// src/__tests__/admin-csrf-ratelimit-grep.test.ts can verify defense-in-depth
+// at the route layer. The outer handler runs the rate limit BEFORE the inner
+// admin gate so abusive callers don't get an unbounded budget against
+// `isAdminUser`.
+const adminHandler = withAdminAuth(async (body, admin) => {
   const { id, status, admin_note } = body;
   if (!id || !VALID_STATUSES.includes(status as (typeof VALID_STATUSES)[number])) {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
@@ -69,3 +78,30 @@ export const POST = withAdminAuth(async (body, admin) => {
 
   return NextResponse.json({ success: true });
 });
+
+export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    const rl = await checkLimit(
+      adminActionLimiter,
+      `admin:${user.id}:intro-request`,
+    );
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+  }
+
+  return adminHandler(req);
+}

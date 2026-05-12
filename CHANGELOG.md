@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.24.0] - 2026-05-12
+
+### Changed
+
+- **Admin POST surface CSRF + rate-limit sweep** (audit-2026-05-07 P197/P198/P199/P200/P203) — `intro-request`, `strategy-review`, `allocator-approve`, and `notify-submission` now bind `assertSameOrigin` + `adminActionLimiter` directly in their route files, and a new vitest grep gate (`src/__tests__/admin-csrf-ratelimit-grep.test.ts`) fails any future admin POST that ships without both defenses.
+
 ## [0.22.23.0] - 2026-05-12
 
 ### Fixed
