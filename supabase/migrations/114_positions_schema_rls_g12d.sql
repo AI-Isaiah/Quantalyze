@@ -80,37 +80,51 @@ COMMENT ON COLUMN positions.duration_seconds IS
 -- --------------------------------------------------------------------------
 -- G12.D.2 — natural-key uniqueness
 -- --------------------------------------------------------------------------
--- Created NOT VALID so creation never blocks on stale duplicates. We then
--- count duplicates and only VALIDATE if zero. Future writes via the
--- migration-113 RPC delete-then-insert per strategy and cannot violate
--- the key. Without VALIDATE, the constraint enforces only on new rows
--- (Postgres semantics) — that is the intended behavior here.
-ALTER TABLE positions
-  DROP CONSTRAINT IF EXISTS positions_natural_key;
-
-ALTER TABLE positions
-  ADD CONSTRAINT positions_natural_key
-  UNIQUE (strategy_id, symbol, side, opened_at)
-  NOT VALID;
-
+-- The original (2026-05-09) authoring of this section attempted
+-- `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...) NOT VALID` followed
+-- by a conditional `VALIDATE CONSTRAINT`. That syntax is NOT valid
+-- PostgreSQL — UNIQUE constraints cannot be marked NOT VALID (SQLSTATE
+-- 0A000, "feature_not_supported"; only CHECK and FOREIGN KEY support
+-- deferred validation). Under `supabase db push` the failing statement
+-- was swallowed and 114 was recorded as applied on prod + test with
+-- the constraint missing.
+--
+-- Corrected pattern: detect duplicates first, install the constraint
+-- straight (PG validates inline) when zero duplicates, otherwise leave
+-- the constraint uninstalled and surface a NOTICE so the operator can
+-- clean up. Migration 119 is the retroactive remediation for databases
+-- where 114 already shipped with the broken statement.
 DO $$
 DECLARE
-  v_dup_groups INTEGER;
+  v_constraint_exists BOOLEAN;
+  v_dup_groups        INTEGER;
 BEGIN
-  SELECT COUNT(*)
-    INTO v_dup_groups
-    FROM (
-      SELECT strategy_id, symbol, side, opened_at, COUNT(*) AS c
-        FROM positions
-        GROUP BY strategy_id, symbol, side, opened_at
-        HAVING COUNT(*) > 1
-    ) AS d;
+  SELECT EXISTS (
+    SELECT 1 FROM pg_constraint
+      WHERE conname = 'positions_natural_key'
+        AND conrelid = 'public.positions'::regclass
+  ) INTO v_constraint_exists;
 
-  IF v_dup_groups = 0 THEN
-    ALTER TABLE positions VALIDATE CONSTRAINT positions_natural_key;
-    RAISE NOTICE 'Migration 114: positions_natural_key validated (no existing duplicates).';
+  IF v_constraint_exists THEN
+    RAISE NOTICE 'Migration 114: positions_natural_key already installed — no-op.';
   ELSE
-    RAISE NOTICE 'Migration 114: positions has % duplicate (strategy_id,symbol,side,opened_at) group(s); positions_natural_key left NOT VALID. Re-run reconstruct_positions_atomic per affected strategy to clean up, then ALTER TABLE positions VALIDATE CONSTRAINT positions_natural_key;', v_dup_groups;
+    SELECT COUNT(*)
+      INTO v_dup_groups
+      FROM (
+        SELECT strategy_id, symbol, side, opened_at
+          FROM positions
+          GROUP BY strategy_id, symbol, side, opened_at
+          HAVING COUNT(*) > 1
+      ) AS d;
+
+    IF v_dup_groups = 0 THEN
+      EXECUTE 'ALTER TABLE public.positions
+                 ADD CONSTRAINT positions_natural_key
+                 UNIQUE (strategy_id, symbol, side, opened_at)';
+      RAISE NOTICE 'Migration 114: positions_natural_key installed (zero pre-existing duplicates).';
+    ELSE
+      RAISE NOTICE 'Migration 114: positions has % duplicate (strategy_id,symbol,side,opened_at) group(s); positions_natural_key NOT installed. Re-run reconstruct_positions_atomic per affected strategy, then re-apply migration 119.', v_dup_groups;
+    END IF;
   END IF;
 END
 $$;
@@ -161,13 +175,19 @@ BEGIN
     RAISE EXCEPTION 'Migration 114 invariant violated: positions.duration_seconds column missing or not nullable.';
   END IF;
 
-  -- 2. natural-key uniqueness constraint installed (validated state varies)
+  -- 2. natural-key uniqueness constraint installed.
+  -- Soft assertion: when pre-existing duplicates block the in-line
+  -- ADD CONSTRAINT above, the constraint is intentionally left missing
+  -- and the operator gets a NOTICE pointing at migration 119 + the
+  -- reconstruct_positions_atomic cleanup path. Emitting a NOTICE here
+  -- rather than RAISE EXCEPTION keeps the rest of 114 (RLS policy +
+  -- index) committed instead of rolling back over a known-soft state.
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
       WHERE conname = 'positions_natural_key'
         AND conrelid = 'public.positions'::regclass
   ) THEN
-    RAISE EXCEPTION 'Migration 114 invariant violated: positions_natural_key constraint missing.';
+    RAISE NOTICE 'Migration 114 soft-state: positions_natural_key constraint missing — pre-existing duplicates present; see migration 119.';
   END IF;
 
   -- 3. positions_read recreated as owner-only (USING clause must reference
