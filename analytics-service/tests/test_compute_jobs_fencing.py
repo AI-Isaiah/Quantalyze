@@ -38,6 +38,7 @@ Verification of "test fails without the migration":
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from typing import Any
@@ -66,10 +67,18 @@ except ImportError:  # pragma: no cover — only when postgrest isn't on path
 
 
 class TestSerializationFailureDetector:
-    """_is_serialization_failure must classify both:
-      (a) PostgREST APIError with .code == '40001', and
-      (b) bare exceptions whose str contains the SQLSTATE / our message
-          (defense for transports that don't surface .code cleanly).
+    """_is_serialization_failure must classify ONLY:
+      (a) PostgREST APIError with .code == '40001', AND
+      (b) bare exceptions whose str contains our specific RAISE message
+          literal 'preempted by watchdog reclaim'.
+
+    PR #149 review I4 (maintainability conf 8 + security conf 6):
+    tightened from the previous fuzzy detection that ALSO matched
+    bare '40001' or 'serialization_failure' anywhere in the message.
+    That collided with unrelated 40001 sources (other SERIALIZABLE
+    isolation conflicts, advisory-lock contention surfacing as 40001,
+    third-party library messages embedding '40001' for unrelated
+    reasons). Tighter = P97-specific.
     """
 
     def test_apierror_with_code_40001_detected(self) -> None:
@@ -80,16 +89,30 @@ class TestSerializationFailureDetector:
         exc = APIError({"code": "23505", "message": "unique violation"})
         assert _is_serialization_failure(exc) is False
 
-    def test_bare_exception_with_40001_in_message_detected(self) -> None:
-        exc = RuntimeError("PostgrestException: 40001 preempted by watchdog reclaim")
-        assert _is_serialization_failure(exc) is True
-
     def test_bare_exception_with_message_text_detected(self) -> None:
-        exc = RuntimeError("preempted by watchdog reclaim")
+        """The literal RAISE message from migration 117 STEP 4/STEP 5."""
+        exc = RuntimeError("preempted by watchdog reclaim (caller token=...)")
         assert _is_serialization_failure(exc) is True
 
     def test_unrelated_exception_not_detected(self) -> None:
         exc = RuntimeError("some other error")
+        assert _is_serialization_failure(exc) is False
+
+    def test_bare_40001_in_message_NOT_detected_when_no_p97_marker(self) -> None:
+        """I4 regression: a 40001 from elsewhere (SERIALIZABLE conflict,
+        advisory-lock contention, or any library that embeds '40001' in
+        a message) must NOT be classified as a P97 preemption.
+        Pre-I4 the fuzzy 'in msg' branch swallowed these silently,
+        burying the real error. Without .code AND without our literal
+        message, this is NOT a fence event."""
+        exc = RuntimeError("PostgrestException: 40001 from some unrelated path")
+        assert _is_serialization_failure(exc) is False
+
+    def test_bare_serialization_failure_in_message_NOT_detected_when_no_p97_marker(self) -> None:
+        """I4 regression: same as above for the 'serialization_failure'
+        literal — a generic SERIALIZABLE-isolation conflict elsewhere in
+        the stack must not be misclassified as a P97 fence event."""
+        exc = RuntimeError("RPC raised: serialization_failure (some other source)")
         assert _is_serialization_failure(exc) is False
 
 
@@ -196,11 +219,18 @@ class TestDispatchTickThreadsClaimToken:
         assert params["p_claim_token"] == tok
 
     @pytest.mark.asyncio
-    async def test_late_mark_done_serialization_failure_swallowed(self) -> None:
+    async def test_late_mark_done_serialization_failure_swallowed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """When mark_compute_job_done raises APIError(code='40001'), the
         exception is logged as LATE_MARK_IGNORED and dispatch_tick
         returns cleanly. No retry, no re-raise — another worker is
-        legitimately handling the row."""
+        legitimately handling the row.
+
+        I3: assert the LATE_MARK_IGNORED log line actually fires. Without
+        this assertion the LATE_MARK_IGNORED contract is unverified — a
+        future refactor could swallow the exception silently and the
+        test would still pass."""
         tok = str(uuid.uuid4())
         jobs = [
             {
@@ -231,7 +261,8 @@ class TestDispatchTickThreadsClaimToken:
              patch(
                  "main_worker.dispatch",
                  new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
-             ):
+             ), \
+             caplog.at_level(logging.WARNING, logger="quantalyze.analytics.worker"):
             # Must NOT raise. Must NOT re-attempt mark_failed as a fallback —
             # that would treat a preemption as a failure and burn the row's
             # retry budget on the new worker's run.
@@ -241,10 +272,22 @@ class TestDispatchTickThreadsClaimToken:
         rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
         assert rpc_names.count("mark_compute_job_done") == 1
         assert rpc_names.count("mark_compute_job_failed") == 0
+        # I3: LATE_MARK_IGNORED log line must fire so operators see the
+        # preemption (and the alert pipeline can baseline / threshold it).
+        assert any(
+            "LATE_MARK_IGNORED" in r.getMessage() for r in caplog.records
+        ), (
+            "expected a LATE_MARK_IGNORED log line — the contract is that "
+            "preempted late marks ARE logged, not silently swallowed"
+        )
 
     @pytest.mark.asyncio
-    async def test_late_mark_failed_serialization_failure_swallowed(self) -> None:
-        """Same contract as DONE → APIError 40001 swallowed, no re-raise."""
+    async def test_late_mark_failed_serialization_failure_swallowed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Same contract as DONE → APIError 40001 swallowed, no re-raise.
+
+        I3: includes the same caplog assertion as the DONE-equivalent."""
         tok = str(uuid.uuid4())
         jobs = [
             {
@@ -277,7 +320,8 @@ class TestDispatchTickThreadsClaimToken:
             error_kind="transient",
         )
         with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock(return_value=result)):
+             patch("main_worker.dispatch", new=AsyncMock(return_value=result)), \
+             caplog.at_level(logging.WARNING, logger="quantalyze.analytics.worker"):
             await dispatch_tick("worker-fp")
 
         # Exactly one mark_failed attempt — the swallowed 40001 must NOT
@@ -285,6 +329,9 @@ class TestDispatchTickThreadsClaimToken:
         # 40001 and obscure the LATE_MARK_IGNORED log line).
         rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
         assert rpc_names.count("mark_compute_job_failed") == 1
+        assert any(
+            "LATE_MARK_IGNORED" in r.getMessage() for r in caplog.records
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -302,8 +349,40 @@ SUPABASE_KEY = os.getenv("SUPABASE_TEST_SERVICE_KEY")
 
 
 def _need_supabase():
-    if not SUPABASE_URL or not SUPABASE_KEY or create_client is None:
-        pytest.skip("test Supabase project not configured")
+    """Skip live-DB tests when the test Supabase project isn't configured.
+
+    PR #149 review I1 (testing conf 9): in CI, missing SUPABASE_TEST_URL /
+    SUPABASE_TEST_SERVICE_KEY is NOT a "skip" — it's a config error. CI
+    must run these regression tests against the seeded test project; a
+    silent skip means the P97 fence has no live-DB regression coverage in
+    CI and the gate is a façade.
+
+    Local dev: env unset → skip (most contributors don't have the test
+    project configured locally — running these tests is opt-in).
+
+    CI (CI=true env var): env unset → FAIL with a clear message instead
+    of skipping. This forces the fix to be "wire up the secrets in the
+    workflow", not "shrug and merge a green build that didn't actually
+    run the regression".
+    """
+    if create_client is None:
+        pytest.skip("supabase-py not installed in this environment")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        # GitHub Actions sets CI=true unconditionally; many other CI
+        # systems do too (CircleCI, Jenkins via plugin, etc.). The check
+        # uses string equality with the canonical 'true' to avoid
+        # treating a stray 'false' / '0' / '' as truthy.
+        if os.getenv("CI", "").lower() == "true":
+            pytest.fail(
+                "P97 live-DB fence tests require SUPABASE_TEST_URL + "
+                "SUPABASE_TEST_SERVICE_KEY in CI. Without them this "
+                "regression has no coverage. Wire the secrets into the "
+                "workflow (see .github/workflows/ — the test Supabase "
+                "project is qmnijlgmdhviwzwfyzlc per "
+                "MEMORY.md::reference_test_supabase_project).",
+                pytrace=False,
+            )
+        pytest.skip("test Supabase project not configured (local dev)")
 
 
 @pytest.fixture
@@ -563,5 +642,174 @@ def test_mark_done_without_token_back_compat(admin, strategy_id):
         admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
         row = admin.table("compute_jobs").select("status").eq("id", job_id).single().execute().data
         assert row["status"] == "done"
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+# ----------------------------------------------------------------------------
+# I7: "unexpected status" guard branch coverage (live-DB).
+# ----------------------------------------------------------------------------
+# mig 117 STEP 4 + STEP 5 contain a branch that RAISEs SQLSTATE P0002
+# ('no_data_found' / 'unexpected status') when a mark RPC is called on a
+# row in any non-running, non-done state. PR #149 review I7 (testing 8):
+# this branch was untested. These tests enumerate the live-DB paths.
+# ----------------------------------------------------------------------------
+
+def _expect_unexpected_status_error(exc: BaseException) -> None:
+    """Helper: assert the exception is the mig 117 'unexpected status' raise.
+    Accepts either the SQLSTATE code (P0002) or the message literal — the
+    PostgREST wire format varies by client/version."""
+    err_str = str(exc)
+    assert (
+        "unexpected status" in err_str
+        or "P0002" in err_str
+        or "no_data_found" in err_str
+    ), f"expected 'unexpected status' / P0002 raise, got: {exc!r}"
+
+
+@pytest.mark.parametrize("status", ["failed_retry", "failed_final", "done_pending_children"])
+def test_mark_done_unexpected_status_raises(admin, strategy_id, status):
+    """mark_compute_job_done on a row in any non-running, non-done state
+    must raise the mig 117 'unexpected status' guard. Without this gate
+    a caller-side bug could mark a failed_retry / failed_final / fan-in-
+    pending row done and corrupt the queue's state machine.
+
+    Note: 'done' is the IDEMPOTENT-RETURN branch (mig 109 P6) — not an
+    error — and is covered separately below."""
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": status,
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        raised = False
+        try:
+            admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
+        except Exception as exc:  # noqa: BLE001
+            _expect_unexpected_status_error(exc)
+            raised = True
+        assert raised, (
+            f"mark_compute_job_done on status={status!r} must raise the "
+            f"mig 117 'unexpected status' guard (got silent success — "
+            f"queue state machine is corrupt)"
+        )
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+def test_mark_done_idempotent_on_already_done(admin, strategy_id):
+    """mig 109 P6 contract: mark_compute_job_done on an already-done row
+    is idempotent (returns cleanly, no raise). This is the one non-error
+    non-running branch — verify it survives mig 117."""
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "done",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        # Must NOT raise.
+        admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
+        row = admin.table("compute_jobs").select("status").eq("id", job_id).single().execute().data
+        assert row["status"] == "done"
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+def test_mark_failed_on_done_raises(admin, strategy_id):
+    """mark_compute_job_failed on an already-done row must raise (the
+    runner believes the row is in retryable failure but it has already
+    succeeded — surfacing this loudly is the contract). mig 117 STEP 5
+    preserves this from mig 109 P4."""
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "done",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        raised = False
+        try:
+            admin.rpc("mark_compute_job_failed", {
+                "p_job_id": job_id,
+                "p_error": "should-not-flip-done-to-failed",
+                "p_error_kind": "transient",
+            }).execute()
+        except Exception as exc:  # noqa: BLE001
+            err_str = str(exc)
+            assert (
+                "not running" in err_str
+                or "P0002" in err_str
+                or "no_data_found" in err_str
+            ), f"expected 'not running' guard, got: {exc!r}"
+            raised = True
+        assert raised
+        # Done remains done — the RPC did not flip the row.
+        row = admin.table("compute_jobs").select("status").eq("id", job_id).single().execute().data
+        assert row["status"] == "done"
+    finally:
+        admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+# ----------------------------------------------------------------------------
+# I8: per-kind override reclaim path covers claim_token NULL-out (live-DB).
+# ----------------------------------------------------------------------------
+
+def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
+    """reset_stalled_compute_jobs has TWO update branches: the per-kind
+    overrides loop (one UPDATE per kind in p_per_kind_overrides) and the
+    default-threshold UPDATE for kinds NOT in the map. mig 117 adds
+    `claim_token = NULL` to BOTH. PR #149 review I8 (testing 7): the
+    default branch is covered by test_reclaim_invalidates_claim_token
+    above, but the per-kind override branch was untested — adding this
+    test guarantees a future mig that drops the NULL-out from one branch
+    fails CI."""
+    job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    job_id = job["id"]
+    try:
+        claimed = _claim_one(admin, "p97-w1-perkind")
+        assert claimed is not None and claimed["id"] == job_id
+        token1 = claimed["claim_token"]
+        assert token1 is not None
+
+        # Backdate so the 1-second per-kind override DEFINITELY reclaims.
+        admin.table("compute_jobs").update({
+            "claimed_at": "2020-01-01T00:00:00Z",
+        }).eq("id", job_id).execute()
+
+        # Per-kind override path: pass {sync_trades: '1 second'} so this
+        # row routes through the FOR LOOP branch in
+        # reset_stalled_compute_jobs (NOT the default-threshold tail).
+        # Set the global threshold to 10 minutes so a kind WITHOUT an
+        # override would NOT reclaim — this proves we're exercising the
+        # per-kind path, not the default.
+        admin.rpc("reset_stalled_compute_jobs", {
+            "p_stale_threshold": "10 minutes",
+            "p_per_kind_overrides": {"sync_trades": "1 second"},
+        }).execute()
+
+        row = admin.table("compute_jobs").select("status,claim_token").eq("id", job_id).single().execute().data
+        assert row["status"] == "pending", (
+            "per-kind override should have reclaimed the row at 1-second threshold"
+        )
+        assert row["claim_token"] is None, (
+            "per-kind override branch must NULL claim_token (mig 117 "
+            "defense-in-depth) — without this a late mark from the "
+            "preempted worker would still match if the new worker hadn't "
+            "claimed yet"
+        )
     finally:
         admin.table("compute_jobs").delete().eq("id", job_id).execute()

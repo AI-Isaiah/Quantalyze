@@ -121,15 +121,85 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
 # from mark_compute_job_done / mark_compute_job_failed when the caller's
 # p_claim_token doesn't match the row's current claim_token. This means
 # the watchdog reclaimed the row and a second worker has taken over —
-# the late mark is expected behavior, not a failure. Detect by sniffing
-# the PostgREST APIError code; fall back to a string contains check on
-# generic Exceptions for transports that don't surface code cleanly.
+# the late mark is expected behavior, not a failure. Detect by:
+#   (a) sniffing the PostgREST APIError `.code` attribute for the
+#       SQLSTATE '40001', OR
+#   (b) for transports that don't surface .code cleanly, checking for our
+#       specific RAISE message literal 'preempted by watchdog reclaim'
+#       (set in migration 117 STEP 4 + STEP 5).
+#
+# PR #149 review I4 (maintainability conf 8 + security conf 6): the
+# previous version also matched the bare strings '40001' and
+# 'serialization_failure' anywhere in the message. That collides with
+# any OTHER source of a serialization conflict (manual SERIALIZABLE
+# isolation, advisory-lock contention surfacing as 40001, third-party
+# library messages embedding '40001' for unrelated reasons). Tighten to:
+# either .code == '40001' OR our specific message literal. This makes
+# the detection P97-specific and prevents silent swallowing of unrelated
+# 40001s.
+_PREEMPTED_MESSAGE_LITERAL = "preempted by watchdog reclaim"
+
+
 def _is_serialization_failure(exc: BaseException) -> bool:
     code = getattr(exc, "code", None)
     if code == "40001":
         return True
     msg = str(exc) if exc is not None else ""
-    return "40001" in msg or "serialization_failure" in msg or "preempted by watchdog reclaim" in msg
+    return _PREEMPTED_MESSAGE_LITERAL in msg
+
+
+# ---------------------------------------------------------------------------
+# Safe mark wrapper (DRY for the 3 try/except blocks in dispatch_tick)
+# ---------------------------------------------------------------------------
+# PR #149 review I5 (maintainability conf 9) + I6 (red-team conf 8):
+# extract the "call mark RPC, swallow 40001, log LATE_MARK_IGNORED, re-
+# raise anything else" pattern that was repeated 3 times in dispatch_tick.
+# Single source of truth = single place to fix any future bug in the
+# late-mark detection / logging contract.
+#
+# `label` is the short tag that appears in the log line — typically the
+# RPC name ('mark_done' / 'mark_failed' / 'mark_failed (fallback)') so an
+# operator scanning logs can tell which code path fired the late-mark.
+#
+# `outer_exc` is set when called from the outer-catch fallback path
+# (I6): the original dispatch exception that triggered the
+# `_mark_failed_fallback`. If `_safe_mark` itself swallows a 40001 in
+# that path, we log the ORIGINAL exception at WARNING with full context
+# BEFORE the LATE_MARK_IGNORED line, so a 40001 cascade doesn't bury
+# the dispatch-side failure invisibly. Pre-I6 behavior: silent
+# failure-chain — the dispatch error was logged via logger.error() but
+# the cascade to LATE_MARK_IGNORED erased its connection to the late
+# mark.
+async def _safe_mark(
+    invoke_rpc,
+    *,
+    job_id: str,
+    claim_token: str | None,
+    worker_id: str,
+    label: str,
+    outer_exc: BaseException | None = None,
+) -> None:
+    try:
+        await db_execute(invoke_rpc)
+    except Exception as mark_exc:  # noqa: BLE001
+        if _is_serialization_failure(mark_exc):
+            if outer_exc is not None:
+                # I6: surface the original dispatch failure that drove us
+                # into the fallback path. Without this, a 40001 cascade
+                # buries the actual cause of the job's failure.
+                logger.warning(
+                    "LATE_MARK_IGNORED cascade: outer dispatch error was %r "
+                    "(job=%s, label=%s, worker=%s) — preserving context "
+                    "before LATE_MARK_IGNORED",
+                    outer_exc, job_id, label, worker_id,
+                )
+            logger.warning(
+                "LATE_MARK_IGNORED: job %s %s preempted by watchdog reclaim "
+                "(claim_token=%s, worker=%s) — another worker has taken over",
+                job_id, label, claim_token, worker_id,
+            )
+            return
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -213,18 +283,14 @@ async def dispatch_tick(worker_id: str) -> None:
                         {"p_job_id": jid, "p_claim_token": tok},
                     ).execute()
 
-                try:
-                    await db_execute(_mark_done)
-                    logger.info("Job %s done (trade_count=%s)", job["id"], result.trade_count)
-                except Exception as mark_exc:  # noqa: BLE001
-                    if _is_serialization_failure(mark_exc):
-                        logger.warning(
-                            "LATE_MARK_IGNORED: job %s mark_done preempted by watchdog reclaim "
-                            "(claimed_at=%s, claim_token=%s, worker=%s) — another worker has taken over",
-                            job["id"], job.get("claimed_at"), claim_token, worker_id,
-                        )
-                    else:
-                        raise
+                await _safe_mark(
+                    _mark_done,
+                    job_id=job["id"],
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    label="mark_done",
+                )
+                logger.info("Job %s done (trade_count=%s)", job["id"], result.trade_count)
 
             elif result.outcome == DispatchOutcome.FAILED:
                 def _mark_failed(
@@ -243,23 +309,19 @@ async def dispatch_tick(worker_id: str) -> None:
                         },
                     ).execute()
 
-                try:
-                    await db_execute(_mark_failed)
-                    logger.warning(
-                        "Job %s failed (%s): %s",
-                        job["id"],
-                        result.error_kind,
-                        result.error_message,
-                    )
-                except Exception as mark_exc:  # noqa: BLE001
-                    if _is_serialization_failure(mark_exc):
-                        logger.warning(
-                            "LATE_MARK_IGNORED: job %s mark_failed preempted by watchdog reclaim "
-                            "(claimed_at=%s, claim_token=%s, worker=%s) — another worker has taken over",
-                            job["id"], job.get("claimed_at"), claim_token, worker_id,
-                        )
-                    else:
-                        raise
+                await _safe_mark(
+                    _mark_failed,
+                    job_id=job["id"],
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    label="mark_failed",
+                )
+                logger.warning(
+                    "Job %s failed (%s): %s",
+                    job["id"],
+                    result.error_kind,
+                    result.error_message,
+                )
 
             elif result.outcome == DispatchOutcome.DEFERRED:
                 logger.info("Job %s deferred (handler already called defer_compute_job)", job["id"])
@@ -287,20 +349,26 @@ async def dispatch_tick(worker_id: str) -> None:
                         },
                     ).execute()
 
-                await db_execute(_mark_failed_fallback)
+                # I6: pass `outer_exc=exc` so the LATE_MARK_IGNORED cascade
+                # log line preserves the original dispatch failure context
+                # instead of silently chaining.
+                await _safe_mark(
+                    _mark_failed_fallback,
+                    job_id=job["id"],
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    label="mark_failed (fallback)",
+                    outer_exc=exc,
+                )
             except Exception as mark_exc:  # noqa: BLE001
-                if _is_serialization_failure(mark_exc):
-                    logger.warning(
-                        "LATE_MARK_IGNORED: job %s mark_failed (fallback) preempted by watchdog "
-                        "reclaim (claim_token=%s, worker=%s) — another worker has taken over",
-                        job.get("id"), claim_token, worker_id,
-                    )
-                else:
-                    logger.error(
-                        "dispatch_tick: could not mark job %s failed: %s",
-                        job.get("id"),
-                        mark_exc,
-                    )
+                # `_safe_mark` only re-raises NON-40001 exceptions, so we
+                # reach this branch when the fallback mark itself failed
+                # for a reason unrelated to the P97 fence.
+                logger.error(
+                    "dispatch_tick: could not mark job %s failed: %s",
+                    job.get("id"),
+                    mark_exc,
+                )
 
 
 async def watchdog_tick() -> None:
