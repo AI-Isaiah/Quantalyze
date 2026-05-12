@@ -1,6 +1,7 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
  * Server-role chokepoint for `for_quants_leads`. Migration 030 made
@@ -10,9 +11,18 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * the table access here lets pages and routes stay user-scoped.
  */
 
+/**
+ * `step` is the canonical WizardStepKey union — same source of truth
+ * as the route's `WIZARD_STEP_KEYS as const satisfies readonly
+ * WizardStepKey[]` enum (G9.B.4) and RequestCallModal's
+ * `RequestCallWizardContext.step: WizardStepKey` prop type (G9.B.18).
+ * Importing rather than re-listing prevents the admin/reader
+ * projection from drifting out of sync with what the route accepts —
+ * the same class of bug G9.B.4 fixed at the API boundary.
+ */
 export type WizardContext = {
   draft_strategy_id?: string | null;
-  step?: "connect_key" | "sync_preview" | "metadata" | "submit";
+  step?: WizardStepKey;
   wizard_session_id?: string;
 } | null;
 
@@ -27,6 +37,17 @@ export interface ForQuantsLeadRow {
   created_at: string;
   processed_at: string | null;
   processed_by: string | null;
+  /** audit-2026-05-07 G9.B.7 / migration 115 — set when after()
+   *  begins the founder-notify path. NULL pre-attempt or for legacy
+   *  rows. */
+  notify_attempted_at: string | null;
+  /** Set when notifyFounderGeneric returned without throwing. NULL
+   *  while the send is in flight, the helper threw, or ADMIN_EMAIL
+   *  was unset. Pair-with-attempted indicates a clean send. */
+  notify_succeeded_at: string | null;
+  /** Sanitized error message (max 500 chars) when the send failed
+   *  OR ADMIN_EMAIL was unset. NULL on clean sends. */
+  notify_error: string | null;
 }
 
 /** Hard cap on the `?show=all` view so a growing table doesn't ship
@@ -35,7 +56,7 @@ export interface ForQuantsLeadRow {
 export const FOR_QUANTS_LEADS_FULL_VIEW_CAP = 500;
 
 const LEAD_SELECT =
-  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by";
+  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by, notify_attempted_at, notify_succeeded_at, notify_error";
 
 export interface ListForQuantsLeadsResult {
   rows: ForQuantsLeadRow[];
@@ -98,6 +119,14 @@ export type SetLeadProcessedResult =
 
 // Filters on the opposite state so double-clicks are idempotent and
 // the returned row count distinguishes real toggles from no-ops.
+//
+// Operator triage clears `notify_error` because the operator has now
+// acknowledged the underlying state (the lead is being followed up on
+// out-of-band). Without the clear, a row that's later flipped back to
+// unprocessed via unmarkLeadProcessed would re-render the historical
+// "Founder notify failed: <stale message>" badge with no temporal
+// context — the operator would see a fresh-looking error for an issue
+// resolved hours ago. Red-team specialist regression.
 export async function markLeadProcessed(
   id: string,
   client?: SupabaseClient,
@@ -105,7 +134,10 @@ export async function markLeadProcessed(
   const admin = client ?? createAdminClient();
   const { data, error } = await admin
     .from("for_quants_leads")
-    .update({ processed_at: new Date().toISOString() })
+    .update({
+      processed_at: new Date().toISOString(),
+      notify_error: null,
+    })
     .eq("id", id)
     .is("processed_at", null)
     .select("id");

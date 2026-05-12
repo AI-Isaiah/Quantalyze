@@ -6,6 +6,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.18.0] - 2026-05-10
+
+**audit-2026-05-07 PR-1 — /for-quants public landing page funnel hardening.** Closes 19/20 atomic items (12 HIGH + 7 MEDIUM, G9.B.1 through G9.B.20) plus 7 specialist-review findings and 6 red-team findings on top. Migration 115 adds founder-CRM notify-attempt markers. The lead-capture pipeline now fails loud on every failure mode it used to swallow — Sentry coverage on all paths, founder-CRM badge for stuck-pending sends, and bidirectional type-drift guards between the wizard and the API.
+
+### Added
+
+- **Idempotent founder-CRM markers** (`supabase/migrations/115_for_quants_leads_notify_markers.sql`, G9.B.7) — `notify_attempted_at`, `notify_succeeded_at`, `notify_error` columns on `for_quants_leads` plus a partial index for the operator's "stuck pending notify" view. Pre-fix a transient Resend outage left the lead in the DB but the founder was never told and the CRM rendered "All caught up" with the in-flight failure invisible.
+- **Sentry coverage on every failure path** of `/api/for-quants-lead` (G9.B.6 + G9.B.7) — `admin_init` / `db_insert` / `founder_notify` / `founder_email_unset` reach Sentry via lazy-imported `@sentry/nextjs`. Missing `ADMIN_EMAIL` is detected once-per-process and surfaced as `level=error` so misconfigs surface even though the helper silently early-returns.
+- **8 KB body-size limit** before `JSON.parse` (G9.B.12) — `Content-Length` header gate + `req.text()` length check returning 413 short-circuits a memory-burn attack against an unauthenticated POST.
+- **Per-UA rate-limit scoping** when client IP is unknown (G9.B.15) — bucket key suffixed with a djb2 user-agent hash so one no-IP attacker stripping headers cannot DoS every other no-IP visitor.
+- **Aggregate rate-limit ceiling** for the unknown-IP family (red-team RT#5) — second `checkLimit` call against `for-quants-lead:unknown:_aggregate` so a UA-rotating botnet cannot bypass the per-UA bucket. Real visitors with IPs are unaffected.
+- **Bidirectional type-drift guard** for `WIZARD_STEP_KEYS` (G9.B.4 + red-team RT#1) — extended the enum to all 7 `WizardStepKey` values and added a compile-time exhaustiveness check (`Exclude<WizardStepKey, …> extends never`) so a future addition to the union that isn't mirrored in the array fails `npm run typecheck` instead of silently 400-ing the new step at runtime.
+- **18 atomic-ID regression tests** plus 16 new specialist + red-team regression tests (rate-limit aggregate-cap shape, marker-write response-error visibility, once-per-process Sentry flag, multi-issue `fieldErrors`, mailto event-rename, sessionStorage view-event guard, auth-probe rejection optimistic CTA, email canonicalization). Total: 3 175 → 3 187 tests, 0 failures.
+- **`founderEmail()` runtime helper** in `src/lib/email.ts` (red-team RT#6) replaces the module-import-time `FOUNDER_EMAIL` snapshot so a delayed `process.env.ADMIN_EMAIL` injection is observed by every caller, closing a race that would have re-created the exact silent-failure G9.B.7 was meant to prevent.
+
+### Changed
+
+- **`fieldErrors` is `Record<string, string[]>`** end-to-end (G9.B.16) — every Zod issue per field is returned. The modal renders the first issue per field (most actionable) so a user fixing a bad email sees both "invalid format" and "too long" at once instead of fix-and-retry whack-a-mole.
+- **`for_quants_lead_submit` fires from the client post-200**, not from the server (G9.B.1) — the synthetic `lead:<uuid>` distinctId pre-fix split the funnel from the visitor's PostHog cookie ID, breaking view → click → submit reconstruction. The client now fires the conversion event with its own distinctId, mirroring view + click capture.
+- **`for_quants_view` dedup is sessionStorage-scoped**, not module-scope (G9.B.2) — soft navigations back to /for-quants in the same tab no longer drop the view event, but the page also no longer re-fires it on repeat soft re-entries within the same tab. Safari private-mode `setItem` throws are swallowed and the event still fires (over-counting beats crashing).
+- **Mailto link fires `for_quants_request_call_click`** (intent), not `for_quants_lead_submit` (conversion) (G9.B.20) — pre-fix every mailto click inflated the conversion funnel.
+- **Email canonicalization at the schema layer** (red-team RT#3) — `LEAD_SCHEMA.email` `.transform((v) => v.toLowerCase())` so the DB row, the future PR-5 UNIQUE constraint, and any eventual idempotency token all key on the same canonical form. Pre-fix `Jane@Acme.com` and `jane@acme.com` would have produced two distinct rows.
+- **`/for-quants` page no longer round-trips Supabase server-side** (G9.B.8 partial) — segment-level `force-dynamic` removed, auth probe moved to `<ForQuantsCtas>` client component. ROOT-layout `force-dynamic` is the remaining piece — out of this PR's allowlist; tracked for follow-up.
+- **`RequestCallWizardContext.step: WizardStepKey`** (G9.B.18) — was `string`, so a caller passing arbitrary text typechecked clean and 400'd at runtime.
+- **`isStuckPendingNotify` JS predicate matches the SQL partial-index predicate** (specialist T10) — added the `processed_at === null` clause, otherwise a row the operator had already triaged kept rendering the "stuck" badge indefinitely.
+- **`markLeadProcessed` clears `notify_error`** alongside `processed_at` (red-team RT#7) — operator triage acknowledges the underlying state, so a debug-mode `unmarkLeadProcessed` no longer resurrects an hours-stale "Founder notify failed" badge with no temporal context.
+- **Every founder-email helper** in `src/lib/email.ts` now reads `ADMIN_EMAIL` at call time via `founderEmail()` instead of the module-import snapshot.
+
+### Fixed
+
+- **`@sentry/nextjs` dynamic-import failure no longer throws an unhandled rejection** (G9.B.11) — `void import().then().catch()` chain plus reset of `_initPromise` so subsequent calls retry instead of caching the rejection forever.
+- **`_initPromise` resets to `Promise.resolve(null)` on `posthog.init()` throw** (G9.B.14) — pre-fix a single init failure permanently broke all client-side analytics for the page.
+- **Marker-write `try/catch` blocks now capture `{ error }` from the Supabase response** (specialist D2) — `supabase-js` returns Postgres errors (42703 column missing, 42501 RLS denied) on the response object, NOT as thrown exceptions. Pre-fix a 42703 during the rolling-deploy window slipped through silently with no `console.warn` visible to operators. Post-fix the route warns on both response-level errors AND throws.
+- **`@audit-skip` pragmas for the four marker-write mutation chains** (audit-coverage gate fix, plus comment-anchor cleanup) — references now point at the named anchor `@audit-skip-anchor:lead-insert` instead of a fragile `line 303` line-number reference that any future edit above L303 would have silently desynced.
+- **`database.types.ts` for `for_quants_leads`** (specialist A2) — added the three notify_* columns so the route's `.update({ notify_attempted_at: ... })` calls have a typed surface and a future strict-typed caller doesn't silently break. The hand-edit is marked with a HAND-PATCHED warning so a future `supabase gen types typescript --linked` regen doesn't silently revert it.
+- **`WizardContext.step` import in the admin/reader projection** (specialist A1) — `for-quants-leads-admin.ts` now imports `WizardStepKey` instead of inlining a 4-key union that drifted from the route's enum every time CSV-branch keys were added.
+
+### Removed
+
+- **`idempotency_key` from the `/api/for-quants-lead` 200 response** (G9.B.17 DEFERRED, red-team RT#2). The pre-revert contract returned an opaque SHA-256 token clients could use to dedupe network retries — but with no server-side `UNIQUE (lower(email), date_trunc('day', created_at))` constraint (deferred to PR-5), two concurrent same-email retries both inserted separate rows AND both fired founder emails AND both received the same token. A client trusting the token would have silently discarded real leads from its retry buffer while the founder still got duplicates. The token thus did the OPPOSITE of what its docblock claimed for the only failure mode where idempotency matters. The 200 envelope is back to `{ ok: true }`. PR-5 will re-add the token alongside the UNIQUE constraint that ACTUALLY enforces dedup. The email canonicalization stays — that's correct hygiene for when PR-5 lands.
+- **`computeIdempotencyToken` function** + `IDEMPOTENCY_TOKEN_HEX_LEN` constant + the day-boundary regression test — all rolled back with the `idempotency_key` revert above.
+
+### Operations note
+
+**Migration 115 must be applied to production BEFORE merging this PR.** Vercel auto-deploys on merge but `supabase-migrate.yml` gates `supabase db push` on manual approval; during the gap, the admin CRM `LEAD_SELECT` requests columns that don't exist and `listForQuantsLeads` returns `{ rows: [], error: '42703 column ... does not exist' }`. Apply migration 115 via `gh workflow run supabase-migrate.yml` (or the Supabase dashboard SQL editor) on the branch first. Defense-in-depth: the route's marker writes now capture the response error and `console.warn`, so during the window operators see warns instead of silent drops, but the founder CRM page itself depends on the schema being in place.
+
+## [0.22.17.0] - 2026-05-10
+
+**audit-2026-05-07 PR-7 — analytics-service Python correctness.** Closes 4 atomic items (3 HIGH + 1 MEDIUM): `#9` heuristic-capital DQF plumbing, `#26` + `#27` match_eval pagination index alignment, `#52` `PaginatedSelectTruncated` raises on hard-cap. Includes the `analytics_runner.py` consumer migration that closes the audit's `data_quality_flags.{used_heuristic_capital, balance_error}` chip-rendering gap end-to-end (except for the upstream `balance_error` DB column wiring, which moves to PR-7c).
+
+### Added
+
+- **`trades_to_daily_returns_with_status`** (`services/transforms.py`) returns a `(returns, ReturnsComputationMeta)` tuple. The meta TypedDict carries `used_heuristic_capital`, `balance_error`, and `computation_status_hint`. Pre-fix, a transient exchange-API failure on balance fetch was indistinguishable from a legitimate "no balance configured" reading, and the heuristic-capital fallback (off by 5–10× for volatile strategies) silently rendered as canonical CAGR/Sharpe on the public factsheet.
+- **`fetch_usdt_balance_with_status`** (`services/exchange.py`) returns `(balance, balance_error)` so callers can route exchange-API errors through `data_quality_flags.balance_error = True` instead of collapsing into `None`.
+- **`PaginatedSelectTruncated`** (`services/match_eval.py`) typed exception with `page_count`, `page_size`, `hint`. Raised when `_paginated_select` hits its hard cap so callers cannot accidentally aggregate over a partial window. Pre-fix the helper logged a warning and silently sliced.
+- **`/match/eval` 503 path** (`routers/match.py:807`) — explicit `PaginatedSelectTruncated` handler that surfaces `page_count × page_size` + `hint` in the response detail rather than flattening to a generic 500. External monitoring can now distinguish "data scale exceeded" from generic crashes.
+- **Suppression rule** (`services/analytics_runner.py:961`) — `used_heuristic_capital` is suppressed when `account_balance_unavailable` or `no_linked_api_key` is already set; the heuristic is the downstream consequence of those upstream states, not a distinct condition. Prevents two redundant "approximate" chips for one root cause.
+- **8 new pytest regression specs** in `tests/test_analytics_runner.py` covering DQF plumbing, the no-double-count rule, section-flag-alone keeping `complete`, and the consumer-flag-alone promoting to `complete_with_warnings`.
+
+### Changed
+
+- **`_paginated_select` ORDER BY shape** — accepts a tuple of `((column, desc), ...)` for composite ordering. The `match_batches` query now orders `(allocator_id ASC, computed_at DESC)` matching `idx_match_batches_allocator_recent`; pre-fix `order_by="id"` (UUIDv4 PK) defeated the index and forced O(M·B) per call instead of O(M·k). The `match_candidates` query orders `(batch_id, rank)` and pushes the `exclusion_reason IS NULL` predicate into PostgREST via `.is_("exclusion_reason", "null")` so the planner can ride the partial index `idx_match_cand_batch_rank`.
+- **`analytics_runner.run_strategy_analytics`** consumes `trades_to_daily_returns_with_status` and surfaces the new flags in `data_quality_flags` + upgrades `computation_status` to `"complete_with_warnings"` ONLY when one of the consumer-specific flags fires. Section-level flags (`benchmark_unavailable`, `account_balance_unavailable`, `no_linked_api_key`, `position_metrics_failed`, etc.) deliberately keep `status='complete'` because eight frontend consumers gate exact-string on `computation_status === "complete"` (factsheet PDFs, discovery, strategy detail, portfolios, PerformanceReport, SyncProgress, queries). Migrating those consumers to accept both states is a separate follow-up PR.
+- **Test mock helper** (`tests/test_analytics_runner.py::_build_balance_flag_mock_supabase`) now stubs the `trades` query so the default MagicMock chain doesn't pollute `fills_data` and trigger spurious `position_side_volume_failed=True` flags during clean-path assertions.
+
+### Fixed
+
+- Stale docstring on `PaginatedSelectTruncated` claiming an `allocator_ids` attribute that was never on the class.
+- Pre-existing test pollution where `tests/test_cron_recompute_is_test_filter.py` monkey-patched `sys.modules["fastapi"]` at module-load time, breaking `test_debug_key_flow_router` and `test_job_worker` under pytest's alphabetical collection order. The stubs were unnecessary defensive code (the test imports nothing from those modules) — removed.
+
 ## [0.22.16.0] - 2026-05-09
 
 **audit-2026-05-07 G12.C — position_reconstruction FIFO + fees (final PR of the G12 split).** Closes 8 audit items (2 CRITICAL + 5 HIGH + 1 MED). PR 5 of 5. Position rebuild is now atomic (no more mid-cron-tick allocator dashboard reads of an empty positions table), the FIFO matcher correctly prorates fees on flip-fills, multi-fill closes use VWAP, posSide injection is defanged, multi-exchange contamination is ruled out, and shared-api_key cross-strategy exposure is gated.

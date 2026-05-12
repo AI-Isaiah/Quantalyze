@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Textarea } from "@/components/ui/Textarea";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
+import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
  * Request a Call modal for /for-quants. Structured fields (not a
@@ -32,10 +33,15 @@ const MAILTO_HREF =
  * founder can tell a lead came from inside the /strategies/new/wizard
  * flow and at which step. Shape matches `for_quants_leads.wizard_context`
  * JSONB column added in migration 031.
+ *
+ * `step` is typed as `WizardStepKey` (not `string`) so a caller passing
+ * an arbitrary value fails at compile time instead of 400ing at the API
+ * boundary — the server's WIZARD_CONTEXT_SCHEMA enum and this type now
+ * agree. See G9.B.18.
  */
 export interface RequestCallWizardContext {
   draft_strategy_id: string | null;
-  step: string;
+  step: WizardStepKey;
   wizard_session_id: string;
 }
 
@@ -53,6 +59,12 @@ export function RequestCallModal({
   ctaLocation,
   wizardContext,
 }: RequestCallModalProps) {
+  // Guard ensures RequestCallForm mounts on each open and unmounts on
+  // close — the form's useEffect at L94 must fire per-open (the click
+  // tracker), and unmount-on-close gives a fresh useState on the next
+  // open. Removing this guard while leaving Modal open={open} would
+  // change useEffect timing from "on modal open" to "on page load",
+  // silently breaking the click event semantics. See G9.B.19.
   if (!open) return null;
   return (
     <Modal open={open} onClose={onClose} title="Request a Call">
@@ -85,7 +97,16 @@ function RequestCallForm({
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Server returns `Record<string, string[]>` per field so callers can
+  // show every Zod issue (e.g., email is both invalid format AND too
+  // long). For inline rendering we surface the FIRST issue per field
+  // — the most actionable — and fall back to undefined when there are
+  // no issues for that field. G9.B.16.
+  const [fieldErrors, setFieldErrors] = useState<
+    Record<string, string[] | undefined>
+  >({});
+  const firstFieldError = (key: string): string | undefined =>
+    fieldErrors[key]?.[0];
   const firstFieldRef = useRef<HTMLInputElement>(null);
   // Must be a ref, not state — synchronous gate against double-click
   // within one React render tick (see docblock).
@@ -127,7 +148,7 @@ function RequestCallForm({
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
-        fieldErrors?: Record<string, string>;
+        fieldErrors?: Record<string, string[]>;
       };
 
       if (!res.ok) {
@@ -142,6 +163,16 @@ function RequestCallForm({
         inFlight.current = false;
         return;
       }
+
+      // Fire the conversion event from the CLIENT (not the server)
+      // so its distinctId is the visitor's PostHog cookie ID — joining
+      // view → click → submit on the same person. Server-side capture
+      // would use a synthetic `lead:<uuid>` distinctId and split the
+      // funnel across three unrelated IDs (G9.B.1).
+      trackForQuantsEventClient("for_quants_lead_submit", {
+        source: "modal",
+        cta_location: ctaLocation,
+      });
 
       setSubmitted(true);
       setSubmitting(false);
@@ -199,7 +230,7 @@ function RequestCallForm({
         placeholder="Jane Doe"
         required
         autoComplete="name"
-        error={fieldErrors.name}
+        error={firstFieldError("name")}
       />
       <Input
         label="Firm"
@@ -208,7 +239,7 @@ function RequestCallForm({
         placeholder="Firm or team name"
         required
         autoComplete="organization"
-        error={fieldErrors.firm}
+        error={firstFieldError("firm")}
       />
       <Input
         label="Email"
@@ -218,14 +249,14 @@ function RequestCallForm({
         placeholder="you@firm.com"
         required
         autoComplete="email"
-        error={fieldErrors.email}
+        error={firstFieldError("email")}
       />
       <Input
         label="Preferred time (optional)"
         value={preferredTime}
         onChange={(e) => setPreferredTime(e.target.value)}
         placeholder="e.g. Tue morning PT"
-        error={fieldErrors.preferred_time}
+        error={firstFieldError("preferred_time")}
       />
       <Textarea
         label="Notes (optional)"
@@ -233,7 +264,7 @@ function RequestCallForm({
         onChange={(e) => setNotes(e.target.value)}
         placeholder="Anything we should know before the call"
         rows={3}
-        error={fieldErrors.notes}
+        error={firstFieldError("notes")}
       />
 
       {error && (
@@ -252,7 +283,13 @@ function RequestCallForm({
           href={MAILTO_HREF}
           className="underline hover:text-text-primary"
           onClick={() =>
-            trackForQuantsEventClient("for_quants_lead_submit", {
+            // Mailto opens the user's email client — there's no guarantee
+            // they actually compose or send anything. Fire the
+            // `_request_call_click` *intent* event with `source: "mailto"`,
+            // NOT `_lead_submit` which is reserved for paths that hit the
+            // DB. Conflating click → conversion silently inflated CTR
+            // (G9.B.20).
+            trackForQuantsEventClient("for_quants_request_call_click", {
               source: "mailto",
               cta_location: ctaLocation,
             })

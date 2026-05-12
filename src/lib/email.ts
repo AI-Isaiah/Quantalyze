@@ -52,7 +52,20 @@ function getAuditAdminClient(): ReturnType<typeof createAdminClient> | null {
 const PLATFORM_NAME = process.env.PLATFORM_NAME ?? "Quantalyze";
 const PLATFORM_EMAIL = process.env.PLATFORM_EMAIL ?? "notifications@quantalyze.com";
 const FROM = `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`;
-const FOUNDER_EMAIL = process.env.ADMIN_EMAIL ?? "";
+/**
+ * Runtime read of the founder/admin email so a delayed env-var injection
+ * (a race between Vercel's runtime-env wiring and module init, or a test
+ * that sets ADMIN_EMAIL between imports) is observed by every caller —
+ * NOT the module-import-time snapshot. Pre-fix the module captured this
+ * once at import; the for-quants-lead route's `if (!process.env.ADMIN_EMAIL)`
+ * gate would pass on a re-read, but `notifyFounderGeneric` would then
+ * silently early-return on the stale empty value, recreating the exact
+ * silent-failure G9.B.7 was meant to prevent. Red-team specialist
+ * regression.
+ */
+function founderEmail(): string {
+  return process.env.ADMIN_EMAIL ?? "";
+}
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 const BRAND_COLOR = "#1B6B5A"; // muted teal, per DESIGN.md
 const SIGNATURE = `<p style="color:#666;font-size:13px;">— ${PLATFORM_NAME}</p>`;
@@ -447,11 +460,12 @@ export async function notifyFounderNewStrategy(
   strategyName: string,
   managerName: string,
 ) {
-  if (!FOUNDER_EMAIL) return;
+  const founder = founderEmail();
+  if (!founder) return;
   const safeStrategy = escapeHtml(strategyName);
   const safeManager = escapeHtml(managerName);
   await send(
-    FOUNDER_EMAIL,
+    founder,
     safeSubject(`New strategy submitted: ${strategyName}`),
     `<p>A new strategy has been submitted for review.</p>
      <p><strong>Strategy:</strong> ${safeStrategy}<br/>
@@ -465,11 +479,12 @@ export async function notifyFounderIntroRequest(
   allocatorName: string,
   strategyName: string,
 ) {
-  if (!FOUNDER_EMAIL) return;
+  const founder = founderEmail();
+  if (!founder) return;
   const safeAllocator = escapeHtml(allocatorName);
   const safeStrategy = escapeHtml(strategyName);
   await send(
-    FOUNDER_EMAIL,
+    founder,
     safeSubject(`New intro request: ${allocatorName} → ${strategyName}`),
     `<p>A new introduction has been requested.</p>
      <p><strong>Allocator:</strong> ${safeAllocator}<br/>
@@ -552,7 +567,7 @@ export async function notifyAllocatorOfAdminIntro(
   strategyId: string,
   founderNote: string,
 ) {
-  const cc = FOUNDER_EMAIL || undefined;
+  const cc = founderEmail() || undefined;
   await send(
     allocatorEmail,
     safeSubject(`Introduction: ${managerDisplayName(manager)} — ${strategyName}`),
@@ -581,7 +596,7 @@ export async function notifyManagerOfAdminIntro(
   strategyName: string,
   founderNote: string,
 ) {
-  const cc = FOUNDER_EMAIL || undefined;
+  const cc = founderEmail() || undefined;
   await send(
     managerEmail,
     safeSubject(`Allocator introduction: ${allocatorName} → ${strategyName}`),
@@ -683,9 +698,10 @@ export async function sendAlertDigest(
  * interpolate into bodyHtml. The subject is sanitized here for header safety.
  */
 export async function notifyFounderGeneric(subject: string, bodyHtml: string) {
-  if (!FOUNDER_EMAIL) return;
+  const founder = founderEmail();
+  if (!founder) return;
   await send(
-    FOUNDER_EMAIL,
+    founder,
     safeSubject(subject),
     `<div style="font-family:'DM Sans',sans-serif;max-width:600px;">${bodyHtml}${SIGNATURE}</div>`,
     "founder_generic",

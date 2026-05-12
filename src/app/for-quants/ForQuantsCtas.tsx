@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState, useEffect, useCallback } from "react";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { createClient } from "@/lib/supabase/client";
 import type { CtaLocation } from "@/lib/analytics";
 import { RequestCallModal } from "./RequestCallModal";
 
@@ -17,10 +18,15 @@ import { RequestCallModal } from "./RequestCallModal";
  * user. Server-side tracking with an IP hash as distinctId would collide
  * with the client ID and split the funnel across three unrelated IDs.
  *
- * Why the view event uses a module-scope guard: the component mounts
- * twice per page (hero + footer), and we want exactly one view per
- * page load. Module state resets on full navigation, which is the
- * correct granularity.
+ * Why sessionStorage instead of a module-scope guard: the component
+ * mounts twice per page (hero + footer), and we want exactly one view
+ * per browser-tab visit. A module-scope `let` only resets on hard
+ * navigation — Next.js App Router soft navigation (Link, router.back)
+ * keeps module state alive, so a user re-entering /for-quants would
+ * register zero view events on the second visit. sessionStorage
+ * resets on tab close (the right granularity) and survives soft nav
+ * the right way (one event per tab visit, not one event per soft
+ * re-entry to the page). See G9.B.2.
  *
  * Auth-aware routing:
  *   - Unauthenticated → /signup?role=manager
@@ -31,25 +37,89 @@ const LOGGED_OUT_CTA_HREF = "/signup?role=manager";
 // land directly on the wizard instead of the legacy StrategyForm.
 const LOGGED_IN_CTA_HREF = "/strategies/new/wizard";
 
-let viewEventFired = false;
+const VIEW_EVENT_SESSION_KEY = "for_quants_view_fired_v1";
+
+/**
+ * Returns true if `for_quants_view` has already fired in this browser
+ * tab visit. Probes sessionStorage so the guard survives Next.js soft
+ * navigation (re-entering /for-quants via Link / router.back) without
+ * silently dropping every subsequent view event. Falls back to a
+ * fire-once guard when sessionStorage is unavailable (Safari private,
+ * SSR, etc.).
+ */
+function hasViewEventFiredThisTab(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.sessionStorage.getItem(VIEW_EVENT_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markViewEventFiredThisTab(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(VIEW_EVENT_SESSION_KEY, "1");
+  } catch {
+    // sessionStorage unavailable — best-effort, the worst case is one
+    // duplicate view event on the same page-load (the second mount of
+    // ForQuantsCtas), which the in-memory ref below absorbs.
+  }
+}
 
 interface ForQuantsCtasProps {
   location: CtaLocation;
-  isLoggedIn: boolean;
 }
 
-export function ForQuantsCtas({ location, isLoggedIn }: ForQuantsCtasProps) {
+export function ForQuantsCtas({ location }: ForQuantsCtasProps) {
   const [modalOpen, setModalOpen] = useState(false);
+  // `null` = haven't resolved yet; treat the page as logged-out for the
+  // first render so the static-rendered shell shows the unauthenticated
+  // CTA (the optimistic majority case — 95%+ of marketing-page visitors
+  // are anonymous). Flip to `true` if Supabase reports a session, which
+  // re-renders the CTA href + label without ever round-tripping the
+  // server. See G9.B.8.
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   // Stable identity so the modal's Escape listener effect doesn't
   // re-subscribe on every parent re-render.
   const closeModal = useCallback(() => setModalOpen(false), []);
 
   useEffect(() => {
-    if (viewEventFired) return;
-    viewEventFired = true;
+    // sessionStorage guard handles tab-scoped dedup across Next.js soft
+    // navigations. Both mounts of ForQuantsCtas (hero + footer) on the
+    // same page-load also see this guard, so only the first effect to
+    // run flips the marker and fires the event. See G9.B.2.
+    if (hasViewEventFiredThisTab()) return;
+    markViewEventFiredThisTab();
     trackForQuantsEventClient("for_quants_view", {
       referrer: typeof document !== "undefined" ? document.referrer : null,
     });
+  }, []);
+
+  useEffect(() => {
+    // Client-side session probe — replaces the server-side
+    // supabase.auth.getUser() that used to force the page to be
+    // dynamically rendered. The browser client reads the session from
+    // the auth cookie locally; only when a cookie is present does it
+    // round-trip Supabase to validate, and that round-trip happens
+    // AFTER the static shell already paints. G9.B.8.
+    let cancelled = false;
+    const supabase = createClient();
+    void supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (cancelled) return;
+        setIsLoggedIn(Boolean(data.session));
+      })
+      .catch(() => {
+        // Auth probe failed — keep the optimistic logged-out CTA. The
+        // logged-out CTA still works for authenticated users (it just
+        // routes them through /signup which the proxy will redirect to
+        // their actual destination).
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const primaryHref = isLoggedIn ? LOGGED_IN_CTA_HREF : LOGGED_OUT_CTA_HREF;
