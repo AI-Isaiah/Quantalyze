@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.18.1] - 2026-05-12
+
+**phase-19 pre-PR-D prep (PR-X1 of 2).** Narrows migration 107's M-5 preflight from `flow_type<>'teaser'` to `flow_type<>'teaser' AND public_token IS NOT NULL`. The original wording aborted on any non-teaser row in `strategy_verifications`; live prod has 7 csv/csv rows from Phase 15 CSV-01 that have NULL `public_token` and are unreachable via the legacy `/api/verify-strategy/[id]/status` route either way (it requires non-NULL `public_token` + a constant-time `safeCompare` match). The narrower preflight encodes the real invariant, so PR-D can apply migration 107 cleanly next week without a hotfix.
+
+### Changed
+
+- **Migration 107 M-5 preflight scope** (`supabase/migrations/107_verification_requests_view_shim.sql`). Comments + `RAISE EXCEPTION` message + `COMMENT ON VIEW` text updated to reflect "non-teaser rows reachable via public-token path" as the real invariant. Zero behavioral change in any environment — migration 107 is still pending in both `khslejtfbuezsmvmtsdn` (prod) and `qmnijlgmdhviwzwfyzlc` (test). Dry-run of the new `WHERE` clause returns 0 in both databases.
+
 ## [0.22.18.0] - 2026-05-10
 
 **audit-2026-05-07 PR-1 — /for-quants public landing page funnel hardening.** Closes 19/20 atomic items (12 HIGH + 7 MEDIUM, G9.B.1 through G9.B.20) plus 7 specialist-review findings and 6 red-team findings on top. Migration 115 adds founder-CRM notify-attempt markers. The lead-capture pipeline now fails loud on every failure mode it used to swallow — Sentry coverage on all paths, founder-CRM badge for stuck-pending sends, and bidirectional type-drift guards between the wizard and the API.
