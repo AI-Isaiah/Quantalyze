@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.22.0] - 2026-05-12
+
+### Fixed
+
+- **Remove `verification_requests` writes from Python verify-strategy** — the analytics-service verify-strategy endpoint no longer writes to the deprecated `verification_requests` table, unblocking phase-19 migration 107's view shim.
+
 ## [0.22.21.0] - 2026-05-12
 
 ### Fixed
