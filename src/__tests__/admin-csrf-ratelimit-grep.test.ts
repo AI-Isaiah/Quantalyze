@@ -78,8 +78,6 @@ const RATE_LIMIT_EXEMPTIONS: Record<string, string> = {
     "out-of-scope for Lane 5 (review-fix P-followup, I4 discovery); POST handler wrapped by withRole (CSRF only — withRole does NOT enforce rate-limit). Follow-up sweep should add adminActionLimiter at the route layer.",
   "src/app/api/admin/deletion-requests/[id]/reject/route.ts":
     "out-of-scope for Lane 5 (review-fix P-followup, I4 discovery); POST handler wrapped by withRole (CSRF only — withRole does NOT enforce rate-limit). Follow-up sweep should add adminActionLimiter at the route layer.",
-  "src/app/api/admin/users/[id]/roles/route.ts":
-    "out-of-scope for Lane 5 (review-fix transient — see next commit, I4 fix); POST handler wrapped by withRole (CSRF only). The very next commit adds adminActionLimiter at the route layer and removes this entry — kept temporarily so the gate passes between bisectable commits.",
 };
 
 /**
