@@ -281,7 +281,24 @@ jobs:
       # local to the new package; the legacy untyped surface migrates
       # incrementally.
       - run: mypy --strict --follow-imports=silent services/ingestion/
+      # PR #149 second-pass review fix #1 (CRITICAL conf 10): wire the
+      # test-Supabase secrets into the python job so
+      # tests/test_compute_jobs_fencing.py's `_need_supabase()` doesn't
+      # `pytest.fail()` in CI. Reuses the same `vars.E2E_TEST_DB_CONFIGURED`
+      # gate as the e2e job — when the variable is unset (forks, repos
+      # without test-DB setup) we deliberately blank out CI so the live-DB
+      # test path skips locally-style instead of hard-failing the gate. When
+      # the variable IS set, GitHub Actions' implicit `CI=true` propagates
+      # via the explicit assignment below and the tests run against the
+      # seeded test project (qmnijlgmdhviwzwfyzlc per
+      # MEMORY.md::reference_test_supabase_project). Maps the existing
+      # TEST_SUPABASE_* secret names to the SUPABASE_TEST_* env var names
+      # the python suite reads.
       - run: pytest --cov=services --cov-report=term-missing --cov-fail-under=80
+        env:
+          SUPABASE_TEST_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || '' }}
+          SUPABASE_TEST_SERVICE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || '' }}
+          CI: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && 'true' || '' }}
 
   e2e:
     # Runs a small Playwright suite against a placeholder-env Next.js build.
