@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.24.2] - 2026-05-12
+
+### Fixed
+
+- **Second-pass review fixes for v0.22.24.0 — see PR #148 review comments.** Closes 2 HIGH conf>=7 findings from the fresh-context red-team: (a) reclassifies `/api/admin/notify-submission` as a user-mutation route — the route lives under `/api/admin/` for historical reasons but enforces auth via `.eq("user_id", user.id)`, not `isAdminUser`; bucket key renamed to `notify-submission:${user.id}` and limiter switched to the user-mutation default. (b) Inlines the body-parse + admin-client setup directly into `intro-request`, `strategy-review`, and `allocator-approve` POST handlers, dropping the `withAdminAuth` indirection — net 4 fewer DB/auth round-trips per admin POST since `withAdminAuth` was re-running the same checks the outer handler already performed.
+
 ## [0.22.24.1] - 2026-05-12
 
 ### Changed
