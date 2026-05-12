@@ -47,6 +47,14 @@ import { join, relative } from "node:path";
  *      Wrappers do NOT count here — neither withAdminAuth nor withRole
  *      runs a rate-limit check today. A future wrapper that wraps a
  *      verified limiter could be added to `RATE_LIMIT_WRAPPERS` below.
+ *
+ * Carve-out note (v0.22.24.2): /api/admin/notify-submission is the ONLY
+ * admin/ route that is NOT admin-role-gated. It lives under /api/admin/
+ * for historical reasons but enforces auth via .eq("user_id", user.id)
+ * on the strategy lookup, and uses userActionLimiter (not
+ * adminActionLimiter) with a `notify-submission:<uid>` bucket key. The
+ * CSRF + rate-limit invocation checks below still apply normally; only
+ * the choice of limiter differs from its admin-gated siblings.
  */
 
 const ADMIN_ROUTES_DIR = join(__dirname, "..", "app", "api", "admin");

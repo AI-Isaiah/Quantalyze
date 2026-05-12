@@ -6,9 +6,12 @@ import { NextRequest } from "next/server";
  * sweep on /api/admin/notify-submission.
  *
  * The handler short-circuits on missing/wrong Origin (via assertSameOrigin)
- * and on bucket-exhaustion (via adminActionLimiter). These tests prove
- * both gates are actually wired up, not just imported. Companion grep gate:
- * src/__tests__/admin-csrf-ratelimit-grep.test.ts.
+ * and on bucket-exhaustion (via userActionLimiter — see the second-pass
+ * reclassification in v0.22.24.2: this route lives under /api/admin/ for
+ * historical reasons but is open to any authenticated user, so the
+ * limiter + bucket key reflect a user-mutation contract). These tests
+ * prove both gates are actually wired up, not just imported. Companion
+ * grep gate: src/__tests__/admin-csrf-ratelimit-grep.test.ts.
  */
 
 vi.mock("server-only", () => ({}));
@@ -110,7 +113,7 @@ describe("POST /api/admin/notify-submission", () => {
   });
 
   describe("rate limit (P203)", () => {
-    it("surfaces 429 (with Retry-After) when adminActionLimiter denies", async () => {
+    it("surfaces 429 (with Retry-After) when userActionLimiter denies", async () => {
       // Force the limiter to deny by stubbing checkLimit. Done via vi.doMock
       // so the route module picks up the stub on its dynamic import.
       vi.doMock("@/lib/ratelimit", async () => {
