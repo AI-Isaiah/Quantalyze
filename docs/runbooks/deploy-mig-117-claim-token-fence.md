@@ -37,6 +37,73 @@ UPDATE compute_jobs
 
 This is optional but reduces the rollout-window noise window (see §5).
 
+## 1.5. Drain LIVE workers (lock-contention guard)
+
+PR #149 second-pass review fix #3 (HIGH conf 8). Migration 117 holds
+`ACCESS EXCLUSIVE` on `compute_jobs` for the duration of the column
+add (STEP 1) + backfill UPDATE (STEP 1.5) + four function replacements
+(STEPs 2–6) — all in one `BEGIN; … COMMIT;` block. Estimated lock
+window:
+
+| Queue load                | Estimated ACCESS EXCLUSIVE window |
+| ------------------------- | --------------------------------- |
+| Quiet (< 1k jobs total)   | ~2–5 seconds                      |
+| Steady (10k–100k jobs)    | ~5–15 seconds (STEP 1.5 backfill scales with running rows) |
+| Surge (heavy backfill)    | up to 30 seconds                  |
+
+Live workers polling `claim_compute_jobs_with_priority` block on the
+lock for the duration. When the lock releases they all stampede the
+queue at once, and the watchdog may cascade-reclaim rows that were
+mid-process before the lock — both noisy and avoidable.
+
+### Procedure
+
+1. **Scale `analytics-service` to 0 replicas** before applying §2.
+
+   ```sh
+   railway service scale analytics-service --replicas=0
+   # OR via Railway dashboard:
+   #   services → analytics-service → settings → Scale to 0
+   ```
+
+   Note the original replica count first (Railway dashboard → service →
+   metrics, or `railway service info analytics-service`) so you can
+   restore it in step 4.
+
+2. **Verify scale-down took effect** (no new claims for 60s):
+
+   ```sql
+   SELECT count(*) AS recent_claims
+     FROM compute_jobs
+    WHERE status = 'running'
+      AND claimed_at > now() - interval '60 seconds';
+   -- expect 0
+   ```
+
+   If non-zero, re-check Railway: a stalled deploy can leave a replica
+   running. Wait an additional 30s and re-query — only proceed when the
+   count is 0 for two consecutive checks.
+
+3. **Once verified empty, proceed to §2** (apply migration). Total
+   ACCESS EXCLUSIVE window is now bounded by the migration steps alone
+   (no claim contention).
+
+4. **After §3 verifies post-migration state, scale back up**:
+
+   ```sh
+   railway service scale analytics-service --replicas=2  # or original count
+   ```
+
+   Within ~30s the new replicas come up, redeployed with the §4 worker
+   code, and start claiming with fresh tokens. The fence is now fully
+   engaged on every new claim.
+
+The migration is NOT being split into multiple transactions because
+splitting introduces rollback complexity (a half-applied function set
+where one mark RPC is fenced and the other isn't is worse than the
+brief lock window). The right answer is to drain live workers first,
+which this section formalizes.
+
 ## 2. Apply migration 117
 
 ```bash
