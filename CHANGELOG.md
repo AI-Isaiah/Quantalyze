@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.18.2] - 2026-05-12
+
+**phase-19 pre-PR-D prep (PR-X2 of 2).** Removes the `verification_requests` INSERT and UPDATE writes from `analytics-service/routers/portfolio.py`'s legacy `verify_strategy` endpoint. After migration 107 (PR-D) ships next week, `verification_requests` becomes a read-only VIEW with INSTEAD OF triggers that raise SQLSTATE 42501 on any write. The BACKBONE-05 D-4 kill-switch auto-rollback path falls back to this endpoint when the unified-backbone flag flips OFF on a Sentry error-rate breach, so a Python write raising 42501 would turn the rollback target into a kill-loop. The TS caller at `src/app/api/verify-strategy/route.ts` (Phase 19 BACKBONE-04 step (a)) upserts the `strategy_verifications` row directly with the verification_id this endpoint returns; Python stays on the compute path and returns the metrics in its response.
+
+### Changed
+
+- **Python `verify_strategy` endpoint** (`analytics-service/routers/portfolio.py`). Generates `verification_id` locally via `uuid.uuid4()` (was: read from `vr_insert.data[0].id` after a `verification_requests` INSERT). Removes the legacy INSERT, the `_fail_vr` UPDATE on failure, and the final UPDATE on success. Adds `results` to the response payload so callers have the metrics blob; `VerifyStrategyResponseSchema` uses `.passthrough()` so the new field is non-breaking on the TS side.
+- **Phase 19 stability-log exit criteria** (`.planning/phase-19/stability-log.md`). Adds PR-X1 (M-5 preflight relaxation) and PR-X2 (this PR) as required-merged prereqs for PR-D so the soak window can't close without both prereqs landing.
+
+### Added
+
+- **Regression test** (`analytics-service/tests/test_verify_strategy_no_legacy_writes.py`). Static-AST inspection of the `verify_strategy` function body asserts no `supabase.table("verification_requests")` chain remains. Failure mode confirmed by simulating the pre-PR-X2 source: the test catches both the INSERT and the final UPDATE. Same testing pattern as `test_legacy_table_rls.py` — no DB / FastAPI client required.
+
 ## [0.22.18.0] - 2026-05-10
 
 **audit-2026-05-07 PR-1 — /for-quants public landing page funnel hardening.** Closes 19/20 atomic items (12 HIGH + 7 MEDIUM, G9.B.1 through G9.B.20) plus 7 specialist-review findings and 6 red-team findings on top. Migration 115 adds founder-CRM notify-attempt markers. The lead-capture pipeline now fails loud on every failure mode it used to swallow — Sentry coverage on all paths, founder-CRM badge for stuck-pending sends, and bidirectional type-drift guards between the wizard and the API.
