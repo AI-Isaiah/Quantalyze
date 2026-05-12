@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withRole, APP_ROLES } from "@/lib/auth";
+import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 
 /**
@@ -47,6 +48,31 @@ export const POST = withRole<{ id: string }>("admin")(
     req: NextRequest,
     { user, supabase, params },
   ) => {
+    // audit-2026-05-07 review fix I4 (red-team conf 9) — withRole runs
+    // assertSameOrigin + the admin role check but enforces NO rate limit.
+    // A compromised admin session would otherwise spam role grants
+    // unbounded. adminActionLimiter (20/min/user) is well above
+    // legitimate operator cadence and well below abuse.
+    //
+    // Key is the verified admin's id (withRole has already proven
+    // `user.id` holds the admin role), so the bucket cannot be polluted
+    // by unauthenticated or non-admin callers and the gate sits AFTER
+    // auth — no timing oracle on admin-status (mirrors the C4 reorder
+    // applied to the other admin POST routes).
+    const rl = await checkLimit(
+      adminActionLimiter,
+      `admin:${user.id}:users-roles`,
+    );
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: "Too many requests" },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rl.retryAfter) },
+        },
+      );
+    }
+
     const targetUserId = params?.id;
 
     if (!targetUserId) {
