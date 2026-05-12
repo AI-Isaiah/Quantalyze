@@ -6,18 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
-## [0.22.18.2] - 2026-05-12
+## [0.22.21.0] - 2026-05-12
 
-**phase-19 pre-PR-D prep (PR-X2 of 2).** Removes the `verification_requests` INSERT and UPDATE writes from `analytics-service/routers/portfolio.py`'s legacy `verify_strategy` endpoint. After migration 107 (PR-D) ships next week, `verification_requests` becomes a read-only VIEW with INSTEAD OF triggers that raise SQLSTATE 42501 on any write. The BACKBONE-05 D-4 kill-switch auto-rollback path falls back to this endpoint when the unified-backbone flag flips OFF on a Sentry error-rate breach, so a Python write raising 42501 would turn the rollback target into a kill-loop. The TS caller at `src/app/api/verify-strategy/route.ts` (Phase 19 BACKBONE-04 step (a)) upserts the `strategy_verifications` row directly with the verification_id this endpoint returns; Python stays on the compute path and returns the metrics in its response.
+### Fixed
+
+- **Migration 107 M-5 preflight relaxed** — verification-requests view shim now scopes the preflight check to public-token-reachable rows, unblocking phase-19 deploys that previously failed on private strategies without public tokens.
+
+## [0.22.20.0] - 2026-05-12
+
+**audit-2026-05-07 PR-6 — charts, discovery, activity API, and mobile a11y.** 14 atomic items across G11 (charts + discovery) and G12 (positions + activity). Math helpers get null-safety guards. Activity API surfaces DB errors instead of swallowing them. Mobile sidebar gets focus trap and scroll fix.
+
+### Fixed
+
+- **`pearson()` returns null on zero variance** (G11.E.5) — prevents NaN correlation values from propagating to the UI.
+- **`parseUtcDate` returns null on malformed inputs** (G11.E.15) — guards against invalid date strings crashing chart rendering.
+- **`segmentDrawdowns` warns on positive-value corruption** (G11.E.18) — logs when cumulative-return data contains impossible positive drawdown values.
+- **Discovery detail slug-shuffle bypass** (G11.E.7) — prevents unnecessary re-fetches when navigating between strategy detail pages.
+- **PositionsTab empty-state guard flipped to OR** (G12.G.7) — shows empty state when either positions or trades are missing, not only when both are.
+- **Activity portfolio API surfaces DB errors as 500** (G12.G.6) — was silently returning empty results on Supabase failures.
+- **Positions-fetch errors surfaced on detail page** (G12.G.5) — error boundary now renders instead of blank screen.
+- **`data_quality_flags` error strings sanitized** (G12.G.10) — prevents user-facing leak of internal error details.
+- **`_finalize_rolling` logs when > 10% of points dropped** (G11.E.17) — observability for silent data loss in rolling-window computation.
 
 ### Changed
 
-- **Python `verify_strategy` endpoint** (`analytics-service/routers/portfolio.py`). Generates `verification_id` locally via `uuid.uuid4()` (was: read from `vr_insert.data[0].id` after a `verification_requests` INSERT). Removes the legacy INSERT, the `_fail_vr` UPDATE on failure, and the final UPDATE on success. Adds `results` to the response payload so callers have the metrics blob; `VerifyStrategyResponseSchema` uses `.passthrough()` so the new field is non-breaking on the TS side.
-- **Phase 19 stability-log exit criteria** (`.planning/phase-19/stability-log.md`). Adds PR-X1 (M-5 preflight relaxation) and PR-X2 (this PR) as required-merged prereqs for PR-D so the soak window can't close without both prereqs landing.
+- **Trades partitioned by per-strategy fill mode** (G12.G.3) — volume metrics now respect each strategy's fill-mode setting instead of using a global default.
+- **Mobile sidebar drawer: focus trap + overflow-y-auto** (G11.C.2 + G11.C.3) — keyboard navigation stays inside the drawer; long menus scroll.
+- **E2E credentials read from env** (G12.G.8) — removed hardcoded test credentials from spec files.
+
+### Removed
+
+- **Unused eslint-disable directive** (G11.E.18) — dead suppression comment cleaned up.
 
 ### Added
 
-- **Regression test** (`analytics-service/tests/test_verify_strategy_no_legacy_writes.py`). Static-AST inspection of the `verify_strategy` function body asserts no `supabase.table("verification_requests")` chain remains. Failure mode confirmed by simulating the pre-PR-X2 source: the test catches both the INSERT and the final UPDATE. Same testing pattern as `test_legacy_table_rls.py` — no DB / FastAPI client required.
+- **`TestComputeVolumeMetrics` + volume helper hardening** (G12.G.4) — regression tests for the per-strategy fill-mode partition logic.
+
+## [0.22.19.0] - 2026-05-12
+
+**audit-2026-05-07 PR-4 — allocator dashboard correctness (G8.B + G8.E + G8.F).** Test portfolios no longer leak into production analytics. Alias route gets hardening and RLS coverage. Scenario math gets `Number.isFinite` guards and a cleaned-up Sortino fallback.
+
+### Fixed
+
+- **`is_test=true` default on CreatePortfolioForm** (G8.F.1) — new portfolios created from the allocator wizard now default to `is_test: true`, preventing accidental production-data pollution.
+- **Intro snapshot filters `is_test=false`** (G8.E.1) — the LP intro snapshot query no longer returns test portfolios.
+- **Cron recompute skips test portfolios** (G8.F.2) — `recompute_all_portfolios` now pre-filters `is_test=false` before dispatching recompute jobs, so test portfolios never consume cron cycles.
+- **Scenario `Number.isFinite` guards** (G8.E.6 + G8.E.7 + G8.E.8) — `calculateSortinoRatio`, `calculateMaxDrawdown`, and related scenario helpers guard against `NaN`/`Infinity` propagation with explicit finite checks and documented fallback values.
+
+### Changed
+
+- **Alias route hardening** (G8.B.3 + G8.B.6 + G8.B.7) — CSRF validation, rate limiting, ownership verification, and `.select()` on UPDATE to return the modified row.
+
+### Removed
+
+- **`computeFavoritesOverlayCurve` dead code** (G8.E.3) — unreachable overlay helper deleted after being marked RESERVED in a prior commit.
+
+### Added
+
+- **13 alias-route tests** (G8.B.2), **AliasEditor concurrent-edit + error tests** (G8.B.4), **alias column RLS live-DB tests** (G8.B.5), **cron is_test regression test** (G8.F.2), **scenario.ts edge-case tests** (G8.E.6–E.8). Total: 3 207 → 3 207+ tests (exact count reflects merged-main baseline).
 
 ## [0.22.18.0] - 2026-05-10
 

@@ -9,19 +9,39 @@ import { test, expect } from "@playwright/test";
  * These tests navigate to a real strategy via the discovery table, then
  * verify tab presence, click-through stability, empty states for the two
  * new tabs, and regression on the three original tabs.
+ *
+ * Audit 2026-05-07 G12.G.8: credentials are read from env vars at test
+ * time, never committed to the repo. Local devs source from the macOS
+ * Keychain via `security find-generic-password -s quantalyze-test -a
+ * <role>@quantalyze.test -w` (see `feedback_test_credentials.md`); CI
+ * injects them through the existing E2E_TEST_EMAIL / E2E_TEST_PASSWORD
+ * pipeline. When the env is not present the suite skips rather than
+ * authenticating with stale committed credentials.
  */
 
 const TABS = ["Overview", "Returns", "Risk", "Volume & Exposure", "Positions"] as const;
 
+const E2E_EMAIL = process.env.E2E_TEST_EMAIL;
+const E2E_PASSWORD = process.env.E2E_TEST_PASSWORD;
+const HAS_E2E_CREDS = !!E2E_EMAIL && !!E2E_PASSWORD;
+
 test.describe("Strategy Detail Tabs", () => {
   test.beforeEach(async ({ page }) => {
-    // Login with test account
+    test.skip(
+      !HAS_E2E_CREDS,
+      "E2E_TEST_EMAIL/E2E_TEST_PASSWORD not set — see feedback_test_credentials.md " +
+        "for the macOS-Keychain pattern (security find-generic-password -s " +
+        "quantalyze-test -a <role>@quantalyze.test -w)",
+    );
+
+    // Login with test account — credentials sourced from env, never
+    // hardcoded in the repo (audit 2026-05-07 G12.G.8).
     await page.goto("/login");
     await page.fill(
       'input[name="email"], input[placeholder*="email" i]',
-      "matratzentester24@gmail.com",
+      E2E_EMAIL!,
     );
-    await page.fill('input[type="password"]', "Test12");
+    await page.fill('input[type="password"]', E2E_PASSWORD!);
     await page.click('button:has-text("Sign in")');
     await page.waitForURL(/\/(discovery|strategies)/, { timeout: 10000 });
 

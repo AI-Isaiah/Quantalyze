@@ -253,14 +253,53 @@ async def cron_sync():
             f" error={r['error']}" if r.get("error") else "",
         )
 
-    # Recompute analytics for portfolios affected by synced strategies
+    # Recompute analytics for portfolios affected by synced strategies.
+    #
+    # audit-2026-05-07 G8.F.2 / FIX-LIST P164 — filter on is_test=false
+    # before triggering recompute. Post-v0.4.0 pivot, allocators can
+    # save what-if scenarios as is_test=true portfolios that share
+    # strategy ids with their real book. Without this filter, cron
+    # recomputes analytics for every scenario portfolio on every tick:
+    #   * wastes compute proportional to saved-scenarios per allocator
+    #   * inflates portfolio_analytics row volume
+    #   * fires portfolio_alerts (rebalance drift, etc.) for hypothetical
+    #     positions that nobody is monitoring
+    #   * triggers email dispatches via notification_dispatches for
+    #     scenario books — alert spam to the allocator's inbox
+    # The Test Portfolios surface was hidden from the allocator sidebar
+    # in the v0.4.0 pivot specifically because scenario books are
+    # exploratory; the cron path was overlooked at that time.
     synced_strategy_ids = [r["strategy_id"] for r in all_results if r["status"] == "ok" and r.get("strategy_id")]
     if synced_strategy_ids:
-        portfolio_rows = supabase.table("portfolio_strategies") \
+        ps_rows = supabase.table("portfolio_strategies") \
             .select("portfolio_id") \
             .in_("strategy_id", synced_strategy_ids) \
             .execute()
-        portfolio_ids = list(set(r["portfolio_id"] for r in (portfolio_rows.data or [])))
+        candidate_portfolio_ids = list(
+            set(r["portfolio_id"] for r in (ps_rows.data or []))
+        )
+
+        # Second round-trip filters out is_test=true portfolios. We
+        # could in principle do this in one query via PostgREST's
+        # embedded-resource filter, but a simple .in_() on the
+        # already-deduped candidate id list is clearer and survives
+        # supabase-py syntax churn.
+        portfolio_ids: list[str] = []
+        if candidate_portfolio_ids:
+            real_rows = supabase.table("portfolios") \
+                .select("id") \
+                .in_("id", candidate_portfolio_ids) \
+                .eq("is_test", False) \
+                .execute()
+            portfolio_ids = [r["id"] for r in (real_rows.data or [])]
+
+        skipped_test = len(candidate_portfolio_ids) - len(portfolio_ids)
+        if skipped_test > 0:
+            logger.info(
+                "cron_recompute skipped %d is_test=true portfolio(s); recomputing %d real portfolio(s)",
+                skipped_test,
+                len(portfolio_ids),
+            )
 
         for pid in portfolio_ids:
             try:

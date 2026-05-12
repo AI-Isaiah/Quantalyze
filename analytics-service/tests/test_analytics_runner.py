@@ -1432,6 +1432,163 @@ def test_volume_metrics_no_longer_aliases_long_to_buy():
 
 
 # ---------------------------------------------------------------------------
+# Audit 2026-05-07 G12.G.4 — _compute_volume_metrics edge-case coverage
+# ---------------------------------------------------------------------------
+
+
+class TestComputeVolumeMetrics:
+    """Audit 2026-05-07 G12.G.4 regression: the helper had zero test
+    coverage for the data-quality cases that come up in production
+    (negative cost from rebates / exchange adjustments, zero cost from
+    a price=0 or qty=0 fill, missing 'cost' key, capitalized 'Buy',
+    empty side string). All paths must produce sane percentages bounded
+    [0, 1] and a non-negative total_volume_usd.
+    """
+
+    def test_basic_buy_sell_split(self) -> None:
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": 100.0},
+                {"side": "sell", "cost": 100.0},
+            ],
+        )
+        assert result["buy_volume_pct"] == 0.5
+        assert result["sell_volume_pct"] == 0.5
+        assert result["total_volume_usd"] == 200.0
+        assert result["total_fills"] == 2
+
+    def test_empty_fills_list(self) -> None:
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics([])
+        # No division-by-zero, all percentages 0, total 0.
+        assert result["buy_volume_pct"] == 0.0
+        assert result["sell_volume_pct"] == 0.0
+        assert result["total_volume_usd"] == 0.0
+        assert result["total_fills"] == 0
+
+    def test_negative_cost_does_not_skew_percentages_above_one(self) -> None:
+        """Negative cost (rebate / exchange-side adjustment) MUST NOT
+        produce buy_pct or sell_pct outside [0, 1]. Pre-audit code summed
+        the signed cost: a fill with cost=-50 inflated the side
+        asymmetrically and could yield percentages > 1 or < 0. The fix
+        takes abs(cost) so volume is treated as a magnitude.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": 100.0},
+                {"side": "sell", "cost": -50.0},  # rebate
+            ],
+        )
+        # Each percentage is in [0, 1].
+        assert 0.0 <= result["buy_volume_pct"] <= 1.0
+        assert 0.0 <= result["sell_volume_pct"] <= 1.0
+        # Sum of buy + sell <= 1.0 (no over-attribution).
+        assert (
+            result["buy_volume_pct"] + result["sell_volume_pct"]
+            <= 1.0 + 1e-9
+        )
+        # total_volume_usd is the absolute sum of magnitudes (100 + 50).
+        assert result["total_volume_usd"] >= 0
+        assert result["total_volume_usd"] == 150.0
+
+    def test_zero_cost_fills_dont_break_totals(self) -> None:
+        """Fills with cost=0 (price=0 or qty=0) MUST NOT cause a
+        division-by-zero. Total_volume stays correct.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": 0.0},
+                {"side": "sell", "cost": 0.0},
+            ],
+        )
+        # Percentages collapse to 0 (no volume to attribute).
+        assert result["buy_volume_pct"] == 0.0
+        assert result["sell_volume_pct"] == 0.0
+        assert result["total_volume_usd"] == 0.0
+        assert result["total_fills"] == 2
+
+    def test_missing_cost_key_defaults_to_zero(self) -> None:
+        """Fills with no 'cost' key (upstream parser bug, missing column)
+        MUST NOT raise KeyError or crash the analytics run.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy"},  # missing cost
+                {"side": "sell", "cost": 100.0},
+            ],
+        )
+        # The fill with missing cost contributes 0 to total/buy.
+        assert result["buy_volume_pct"] == 0.0
+        assert result["sell_volume_pct"] == 1.0
+        assert result["total_volume_usd"] == 100.0
+
+    def test_capitalized_side_is_normalized(self) -> None:
+        """'Buy', 'BUY', 'sell', 'SELL' all fold into the lowercase
+        comparison branches.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "Buy", "cost": 100.0},
+                {"side": "SELL", "cost": 100.0},
+            ],
+        )
+        assert result["buy_volume_pct"] == 0.5
+        assert result["sell_volume_pct"] == 0.5
+        assert result["total_volume_usd"] == 200.0
+
+    def test_empty_side_contributes_to_total_but_neither_bucket(self) -> None:
+        """Fills with empty/unknown side strings contribute volume to the
+        total (so the figure stays accurate) but to neither buy nor sell.
+        Caller can detect the residual via 1 - buy_pct - sell_pct.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": 100.0},
+                {"side": "", "cost": 50.0},  # unknown side
+                {"side": None, "cost": 25.0},  # null side
+            ],
+        )
+        # Buy is 100/175 ≈ 0.5714; sell is 0; residual is 75/175 ≈ 0.4286.
+        assert 0.0 <= result["buy_volume_pct"] <= 1.0
+        assert result["sell_volume_pct"] == 0.0
+        assert (
+            result["buy_volume_pct"] + result["sell_volume_pct"]
+            <= 1.0 + 1e-9
+        )
+        assert result["total_volume_usd"] == 175.0
+
+    def test_non_numeric_cost_defaults_to_zero(self) -> None:
+        """A string cost from a malformed upstream payload MUST NOT crash
+        the runner. It defaults to 0 and the fill contributes nothing to
+        the totals.
+        """
+        from services.analytics_runner import _compute_volume_metrics
+
+        result = _compute_volume_metrics(
+            [
+                {"side": "buy", "cost": "garbage"},
+                {"side": "sell", "cost": 100.0},
+            ],
+        )
+        assert result["buy_volume_pct"] == 0.0
+        assert result["sell_volume_pct"] == 1.0
+        assert result["total_volume_usd"] == 100.0
+
+
+# ---------------------------------------------------------------------------
 # Phase 12 Plan 06 / METRICS-15 / METRICS-17 — runner integration smoke tests
 # ---------------------------------------------------------------------------
 # These verify the full B-01 + H-A1 + M-Grok-1 wiring inside

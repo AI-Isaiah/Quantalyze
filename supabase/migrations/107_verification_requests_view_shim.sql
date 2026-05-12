@@ -22,10 +22,23 @@
 -- migration plan so callers know exactly where to update.
 --
 -- M-5 fix — VIEW filter scope: legacy `[id]/status/route.ts` queries by
--- `id` alone for ANY flow_type. Filtering `WHERE flow_type='teaser'` would
--- return 404 for non-teaser rows that previously worked through the legacy
--- table. Pre-flight asserts no non-teaser rows exist; if any do, abort
--- migration so we can widen the filter.
+-- `id` alone for ANY flow_type, but it ALSO requires a non-NULL `public_token`
+-- + a constant-time `safeCompare(public_token, token)` match. The actual
+-- invariant the VIEW filter protects is therefore narrower than the original
+-- draft: only non-teaser rows WITH `public_token IS NOT NULL` would be
+-- silently hidden from the legacy read path. Non-teaser rows with NULL
+-- public_token (e.g. Phase 15 CSV-01 flow_type='csv' rows) are unreachable
+-- via the legacy path either way — they fail the token check before they
+-- reach the VIEW. Pre-flight asserts no non-teaser rows with a populated
+-- public_token exist; if any do, abort migration so we can widen the filter
+-- or migrate those specific rows.
+--
+-- Pre-prerelaxation (PR-X1, 2026-05-12): original wording asserted
+-- `WHERE flow_type <> 'teaser'` only — that fired on a real production
+-- snapshot containing 7 csv/csv rows (all public_token=NULL, all written by
+-- /api/strategies/csv-validate via Phase 15 BACKBONE-10) which were never
+-- exposed through the legacy path. The narrowed preflight unblocks PR-D
+-- apply without changing the VIEW's runtime semantics.
 --
 -- M-6 fix — preserve public_token-gated reads on legacy table. Original
 -- `verification_requests` allowed unauthenticated reads gated by the
@@ -40,20 +53,27 @@ BEGIN;
 SET lock_timeout = '3s';
 
 -- ==========================================================================
--- M-5 PRE-FLIGHT — abort if non-teaser rows present in strategy_verifications
+-- M-5 PRE-FLIGHT — abort if non-teaser rows REACHABLE VIA LEGACY PATH exist
 -- ==========================================================================
--- M-5: pre-flight assertion that no non-teaser rows currently exist in
--- strategy_verifications (which would be hidden by the VIEW filter and break
--- the legacy [id]/status/route.ts read path). Aborts migration if any.
+-- M-5: pre-flight assertion that no non-teaser rows with a populated
+-- public_token currently exist in strategy_verifications. Those — and ONLY
+-- those — would be silently hidden by the VIEW filter and break the legacy
+-- /api/verify-strategy/[id]/status read path (which requires
+-- `public_token IS NOT NULL` + a constant-time safeCompare match to return
+-- the row). Non-teaser rows with NULL public_token (e.g. Phase 15 CSV-01
+-- flow_type='csv' rows) are unreachable through the legacy path either way,
+-- so hiding them from the VIEW is a no-op. Aborts migration if any
+-- reachable non-teaser row exists.
 DO $$
 DECLARE
   v_non_teaser_count INT;
 BEGIN
   SELECT count(*) INTO v_non_teaser_count
     FROM strategy_verifications
-   WHERE flow_type <> 'teaser';
+   WHERE flow_type <> 'teaser'
+     AND public_token IS NOT NULL;
   IF v_non_teaser_count > 0 THEN
-    RAISE EXCEPTION 'Migration 107 M-5 ABORT: % non-teaser rows in strategy_verifications would be hidden by VIEW filter; widen filter or migrate non-teaser flow_types separately', v_non_teaser_count;
+    RAISE EXCEPTION 'Migration 107 M-5 ABORT: % non-teaser rows in strategy_verifications have public_token IS NOT NULL and would be hidden by VIEW filter; widen filter or migrate those rows separately', v_non_teaser_count;
   END IF;
 END $$;
 
@@ -118,7 +138,9 @@ END $$;
 -- Per Pitfall 7 mitigation, public_token and expires_at are first-class
 -- columns on strategy_verifications (added in migration 103), NOT nested
 -- in JSONB.
--- M-5: filter retained as 'teaser' (preflight asserted no non-teaser rows present).
+-- M-5: filter retained as 'teaser' (preflight asserted no non-teaser rows with
+-- populated public_token exist — those are the only rows the legacy public
+-- status path could ever resolve).
 -- I-DM6 invariant: teaser-row public_token uniqueness is enforced by the
 -- partial UNIQUE INDEX strategy_verifications_public_token_unique_idx
 -- (migration 103 STEP 1 — `WHERE public_token IS NOT NULL`). The VIEW
@@ -156,7 +178,7 @@ FROM strategy_verifications sv
 WHERE sv.flow_type = 'teaser';
 
 COMMENT ON VIEW verification_requests IS
-  'Phase 19 / BACKBONE-04 step (d). Read-only VIEW backed by strategy_verifications WHERE flow_type=teaser (M-5 — verified at apply time that no non-teaser rows exist). Writes rejected by INSTEAD OF triggers. New code MUST write to strategy_verifications directly. SEC-1 — WITH (security_invoker = true) forces RLS on strategy_verifications to evaluate against the calling role.';
+  'Phase 19 / BACKBONE-04 step (d). Read-only VIEW backed by strategy_verifications WHERE flow_type=teaser (M-5 — verified at apply time that no non-teaser rows with public_token IS NOT NULL exist; non-teaser rows with NULL public_token cannot be resolved by the legacy public-status path regardless). Writes rejected by INSTEAD OF triggers. New code MUST write to strategy_verifications directly. SEC-1 — WITH (security_invoker = true) forces RLS on strategy_verifications to evaluate against the calling role.';
 
 -- SEC-1 defense-in-depth — REVOKE direct SELECT from anon/authenticated;
 -- only service_role and the underlying RLS policies on

@@ -25,6 +25,15 @@ const MS_PER_DAY = 86_400_000;
  *
  * Tiny drawdowns (|depth| < minDepth) are filtered so the list stays actionable
  * for allocators. Default threshold is 0.5%.
+ *
+ * Audit 2026-05-07 G11.E.18: when an input point has a positive value
+ * (impossible per the quantstats `to_drawdown_series` convention — a
+ * drawdown series is never above its prior peak), we now log a single
+ * console.warn with a sample so corrupted inputs surface during dev /
+ * staging instead of producing degenerate-but-plausible output. The
+ * function still treats positive values as out-of-episode (the legacy
+ * defensive behaviour) so a one-off floating-point blip doesn't crash
+ * the chart — but the warn gives operators a signal to investigate.
  */
 export function segmentDrawdowns(
   series: TimeSeriesPoint[],
@@ -38,10 +47,22 @@ export function segmentDrawdowns(
   let peakIdx = -1;
   let troughIdx = -1;
   let troughValue = 0;
+  let positiveCount = 0;
+  let firstPositiveSample: TimeSeriesPoint | null = null;
 
   for (let i = 0; i < series.length; i++) {
     const point = series[i];
     const value = point.value;
+
+    // Audit 2026-05-07 G11.E.18: track positive values so we can emit a
+    // single corruption warning at the end of the loop. Quantstats
+    // convention: drawdown series values are <= 0; a positive value is
+    // impossible without upstream corruption (sign-flip, equity curve
+    // mislabelled as drawdown, etc.).
+    if (value > 0) {
+      positiveCount += 1;
+      if (firstPositiveSample === null) firstPositiveSample = point;
+    }
 
     if (!inEpisode) {
       if (value < 0) {
@@ -78,6 +99,17 @@ export function segmentDrawdowns(
     );
   }
 
+  // Audit 2026-05-07 G11.E.18: corrupted-input signal. One warning per
+  // call (not per point) keeps the console quiet under repeated
+  // re-renders while still surfacing the data-quality issue.
+  if (positiveCount > 0 && firstPositiveSample !== null) {
+    console.warn(
+      `[segmentDrawdowns] received ${positiveCount} positive value(s) in drawdown series — ` +
+        `quantstats convention is value <= 0. Treating as not-in-drawdown. ` +
+        `First sample: { date: ${firstPositiveSample.date}, value: ${firstPositiveSample.value} }`,
+    );
+  }
+
   return episodes
     .filter((e) => Math.abs(e.depthPct) >= minDepth)
     .sort((a, b) => Math.abs(b.depthPct) - Math.abs(a.depthPct));
@@ -95,7 +127,15 @@ function makeEpisode(
   const endDate = series[endIdx].date;
   const peakMs = parseUtcDate(peakDate);
   const endMs = parseUtcDate(endDate);
-  const durationDays = Math.round((endMs - peakMs) / MS_PER_DAY);
+  // Audit 2026-05-07 G11.E.15: parseUtcDate now returns null for
+  // malformed inputs instead of NaN. Propagate null → 0 days so the
+  // episode renders with a sane duration rather than 'NaN' or empty
+  // text in the WorstDrawdowns chart. The trough/peak dates remain on
+  // the episode for debugging.
+  const durationDays =
+    peakMs !== null && endMs !== null
+      ? Math.round((endMs - peakMs) / MS_PER_DAY)
+      : 0;
   return {
     peakDate,
     troughDate,
@@ -112,8 +152,25 @@ function makeEpisode(
  * that a malformed input like `"2024-01-01T00:00:00"` (no zone suffix)
  * cannot drift into local-time parsing and produce timezone-dependent
  * durationDays under DST boundaries.
+ *
+ * Audit 2026-05-07 G11.E.15: returns `null` instead of NaN for inputs
+ * that don't match the YYYY-MM-DD prefix (e.g. `''`, `'2024'`,
+ * `'2024-02'`, `'not-a-date'`). The pre-audit code emitted NaN that
+ * silently propagated into `durationDays` and rendered as an empty
+ * cell — masking upstream data corruption (e.g. an analytics row with
+ * a malformed peakDate). Callers explicitly check for null and degrade
+ * to a duration of 0 days.
  */
-function parseUtcDate(dateStr: string): number {
+function parseUtcDate(dateStr: string): number | null {
+  if (typeof dateStr !== "string") return null;
+  if (!/^\d{4}-\d{2}-\d{2}/.test(dateStr)) return null;
   const [y, m, d] = dateStr.split("-").map((s) => parseInt(s, 10));
+  if (
+    !Number.isInteger(y) ||
+    !Number.isInteger(m) ||
+    !Number.isInteger(d)
+  ) {
+    return null;
+  }
   return Date.UTC(y, m - 1, d);
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent } from "@testing-library/react";
 import { useRef } from "react";
 import { MobileSidebarDrawer } from "./MobileSidebarDrawer";
 
@@ -37,21 +37,35 @@ vi.mock("next/navigation", () => ({
 vi.mock("./Sidebar", () => ({
   Sidebar: () => (
     <nav data-testid="sidebar-stub">
-      <a href="/holdings">First focusable</a>
+      <a href="/first" data-testid="first-link">First focusable</a>
+      <a href="/middle" data-testid="middle-link">Middle</a>
+      <a href="/last" data-testid="last-link">Last focusable</a>
     </nav>
   ),
 }));
 
-function Harness({ open }: { open: boolean }) {
+function Harness({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose?: () => void;
+}) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   return (
     <div>
       <button ref={triggerRef} type="button" data-testid="trigger">
         Hamburger
       </button>
+      {/* Audit 2026-05-07 G11.C.2: a sibling outside the drawer that
+          would receive focus if the trap leaked. The focus-trap test
+          asserts focus never lands here. */}
+      <button type="button" data-testid="outside-button">
+        Outside the drawer
+      </button>
       <MobileSidebarDrawer
         open={open}
-        onClose={() => {}}
+        onClose={onClose ?? (() => {})}
         triggerRef={triggerRef}
         flaggedCount={0}
       />
@@ -84,5 +98,64 @@ describe("MobileSidebarDrawer — WR-03 focus restoration only on close transiti
     // keyboard users return to the hamburger.
     rerender(<Harness open={false} />);
     expect(document.activeElement).toBe(trigger);
+  });
+});
+
+/**
+ * Audit 2026-05-07 G11.C.2 regression: the dialog declares
+ * aria-modal="true" so WCAG 2.1.2 (No Keyboard Trap) and the ARIA
+ * Authoring Practices for modal dialogs both require focus
+ * containment when the dialog is open. Pre-audit code only handled
+ * Escape — Tab leaked to the underlying-page elements behind the
+ * backdrop. After the fix, Tab and Shift+Tab cycle within the panel.
+ */
+describe("MobileSidebarDrawer — G11.C.2 focus trap", () => {
+  it("Tab from the LAST focusable wraps to the first (audit G11.C.2)", () => {
+    const { getByTestId } = render(<Harness open={true} />);
+    const lastLink = getByTestId("last-link") as HTMLAnchorElement;
+    const firstLink = getByTestId("first-link") as HTMLAnchorElement;
+    const outside = getByTestId("outside-button") as HTMLButtonElement;
+
+    // Move focus to the last link in the drawer.
+    lastLink.focus();
+    expect(document.activeElement).toBe(lastLink);
+
+    // Tab forward should wrap to the first link, NOT escape to the
+    // outside-button (the bug pre-audit).
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: false });
+    expect(document.activeElement).toBe(firstLink);
+    expect(document.activeElement).not.toBe(outside);
+  });
+
+  it("Shift+Tab from the FIRST focusable wraps to the last (audit G11.C.2)", () => {
+    const { getByTestId } = render(<Harness open={true} />);
+    const firstLink = getByTestId("first-link") as HTMLAnchorElement;
+    const lastLink = getByTestId("last-link") as HTMLAnchorElement;
+    const trigger = getByTestId("trigger") as HTMLButtonElement;
+
+    firstLink.focus();
+    expect(document.activeElement).toBe(firstLink);
+
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(lastLink);
+    // Specifically MUST NOT escape backwards to the trigger (the
+    // pre-fix Tab leak direction).
+    expect(document.activeElement).not.toBe(trigger);
+  });
+
+  it("focus trap is inactive when the drawer is closed (audit G11.C.2)", () => {
+    // When the drawer is closed (open=false) the keydown handler is
+    // unbound; Tab behaves natively. We verify by sending Tab and
+    // asserting focus stays where the user left it (the focus trap
+    // would have moved focus inside the panel).
+    const { getByTestId } = render(<Harness open={false} />);
+    const outside = getByTestId("outside-button") as HTMLButtonElement;
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: false });
+    // No drawer-bound handler should have fired; focus is unmoved.
+    // (Native Tab traversal in jsdom doesn't move focus on its own.)
+    expect(document.activeElement).toBe(outside);
   });
 });

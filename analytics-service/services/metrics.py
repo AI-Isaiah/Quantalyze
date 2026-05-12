@@ -606,8 +606,34 @@ def compute_qstats_scalars(
 
 
 def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
-    """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size."""
+    """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size.
+
+    Audit 2026-05-07 G11.E.17: when a significant fraction of points are
+    dropped (NaN/Inf — usually persistent zero-variance windows for
+    rolling sharpe/correlation), allocators see a chart with silent
+    gaps and no indication that half the windows had undefined output.
+    Now we log a WARNING when the drop ratio exceeds 10%, including the
+    dropped count + total — operators can spot strategies whose
+    rolling charts are mostly noise. The output shape is unchanged
+    (list[{date, value}]); the per-series dropped count is intentionally
+    not surfaced in metrics_json here because the caller already
+    has multiple finalize_rolling sites and threading a tuple through
+    each would balloon the diff. The frontend warning gate is left as
+    a follow-up: this fix surfaces the signal in server logs.
+    """
+    total = len(series)
     cleaned = series.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    dropped = total - len(cleaned)
+    # 10% threshold — below that, the legitimate window-warmup phase of
+    # any rolling indicator dominates and we'd spam the log on every
+    # healthy strategy.
+    if total > 0 and dropped / total > 0.10:
+        logger.warning(
+            "rolling-series finalize: dropped %d/%d (%.1f%%) NaN/Inf points",
+            dropped,
+            total,
+            100.0 * dropped / total,
+        )
     result = [
         {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
         for d, v in cleaned.items()
