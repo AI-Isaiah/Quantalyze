@@ -51,9 +51,11 @@ describe("computePortfolioSnapshot — empty allocator", () => {
         return {
           select: () => ({
             eq: () => ({
-              order: () => ({
-                limit: () => ({
-                  maybeSingle: async () => ({ data: null, error: null }),
+              eq: () => ({
+                order: () => ({
+                  limit: () => ({
+                    maybeSingle: async () => ({ data: null, error: null }),
+                  }),
                 }),
               }),
             }),
@@ -75,6 +77,53 @@ describe("computePortfolioSnapshot — empty allocator", () => {
     // Schema parses cleanly — guards against the writer drifting away from the
     // shape /api/intro stores.
     expect(() => PortfolioSnapshotSchema.parse(snap)).not.toThrow();
+  });
+});
+
+describe("computePortfolioSnapshot — G8.E.1 is_test filter", () => {
+  it("only matches portfolios where is_test=false (excludes saved scenarios)", async () => {
+    // Pre-fix this query landed on the most-recently-created portfolio
+    // regardless of is_test. After the v0.4.0 pivot, allocators can save
+    // what-if scenarios as is_test=true portfolios — and the snapshot
+    // would then leak hypothetical KPIs to the manager. This test pins
+    // the .eq('is_test', false) filter at the mock layer: the chain
+    // builder counts how many .eq() calls land before the order/limit/
+    // maybeSingle terminator and what columns they target.
+    const eqCalls: Array<[string, unknown]> = [];
+
+    mockState.fromImpl = (table) => {
+      if (table === "portfolios") {
+        const buildChain = () => {
+          const api: {
+            eq: (col: string, val: unknown) => typeof api;
+            order: () => typeof orderApi;
+          } = {
+            eq(col, val) {
+              eqCalls.push([col, val]);
+              return api;
+            },
+            order: () => orderApi,
+          };
+          const orderApi = {
+            limit: () => ({
+              maybeSingle: async () => ({ data: null, error: null }),
+            }),
+          };
+          return api;
+        };
+        return {
+          select: () => buildChain(),
+        };
+      }
+      throw new Error(`unexpected from(${table})`);
+    };
+
+    const snap = await computePortfolioSnapshot(USER_ID);
+    // Both filters fired in the right shape — user_id AND is_test=false.
+    expect(eqCalls).toContainEqual(["user_id", USER_ID]);
+    expect(eqCalls).toContainEqual(["is_test", false]);
+    // No portfolio → empty-shape snapshot.
+    expect(snap.top_3_strategies).toEqual([]);
   });
 });
 
@@ -113,9 +162,11 @@ describe("computePortfolioSnapshot — full happy path", () => {
         return {
           select: () => ({
             eq: () => ({
-              order: () => ({
-                limit: () => ({
-                  maybeSingle: async () => ({ data: { id: portfolioId }, error: null }),
+              eq: () => ({
+                order: () => ({
+                  limit: () => ({
+                    maybeSingle: async () => ({ data: { id: portfolioId }, error: null }),
+                  }),
                 }),
               }),
             }),
@@ -203,9 +254,11 @@ describe("computePortfolioSnapshot — HHI fallback to allocated_amount", () => 
         return {
           select: () => ({
             eq: () => ({
-              order: () => ({
-                limit: () => ({
-                  maybeSingle: async () => ({ data: { id: portfolioId }, error: null }),
+              eq: () => ({
+                order: () => ({
+                  limit: () => ({
+                    maybeSingle: async () => ({ data: { id: portfolioId }, error: null }),
+                  }),
                 }),
               }),
             }),

@@ -44,24 +44,40 @@ export type PortfolioSnapshotJSON = z.infer<typeof PORTFOLIO_SNAPSHOT_SCHEMA>;
 export type PortfolioSnapshotStrategy = z.infer<typeof STRATEGY_REF>;
 
 /**
- * Compute the snapshot for the given user's primary portfolio (most recent
- * for that user_id). Returns a Zod-validated object; throws if the shape is
- * unexpectedly broken — the /api/intro caller catches and treats as failed,
- * not pending.
+ * Compute the snapshot for the given user's primary portfolio. The
+ * "primary" portfolio is the most-recently-created REAL (`is_test=false`)
+ * portfolio — scenario / what-if portfolios saved by the allocator on
+ * /scenarios are excluded so the manager receiving the intro never
+ * reads a hypothetical book.
+ *
+ * Returns a Zod-validated object; throws if the shape is unexpectedly
+ * broken — the /api/intro caller catches and treats as failed, not
+ * pending.
  *
  * Uses the service-role admin client because this runs server-side after
  * auth + allocator role check has already happened.
+ *
+ * audit-2026-05-07 G8.E.1 / FIX-LIST P338 — pre-fix, the query did NOT
+ * filter on `is_test`. After the v0.4.0 pivot allowed allocators to
+ * save what-if scenarios as `is_test=true` portfolios, the "most
+ * recently created" pick could land on a scenario book and leak fake
+ * KPIs (Sharpe / MaxDD / top-3 / bottom-3) to the manager via
+ * `contact_requests.portfolio_snapshot`. The `.eq('is_test', false)`
+ * predicate below is the explicit invariant; ordering is incidental.
  */
 export async function computePortfolioSnapshot(
   userId: string,
 ): Promise<PortfolioSnapshotJSON> {
   const admin = createAdminClient();
 
-  // 1. Primary portfolio = most recently created for this user.
+  // 1. Primary portfolio = most recently created REAL portfolio for
+  //    this user. Scenarios (`is_test=true`) are explicitly excluded —
+  //    see G8.E.1 docblock above.
   const { data: portfolio, error: portfolioErr } = await admin
     .from("portfolios")
     .select("id")
     .eq("user_id", userId)
+    .eq("is_test", false)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

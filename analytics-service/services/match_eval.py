@@ -123,23 +123,32 @@ def compute_hit_rate_metrics(
     # limit, and a single `.limit(50000)` would silently drop any rows
     # beyond that page. Pagination keeps us correct at every scale.
     batches_by_allocator: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    # audit-2026-05-07 #27: order by (allocator_id, computed_at DESC) so the
+    # query rides `idx_match_batches_allocator_recent`. Pre-fix the helper
+    # ordered by `id` (UUIDv4 PK), which produces a random scan + ignores the
+    # composite index AND races with concurrent writes — newly-inserted batches
+    # could land in any UUID bucket, so a row-index-based pagination would skip
+    # or duplicate them. The composite ordering is stable because writers
+    # never mutate `(allocator_id, computed_at)` post-insert.
     for row in _paginated_select(
         supabase.table("match_batches")
         .select("id, allocator_id, computed_at")
         .in_("allocator_id", allocator_ids),
-        order_by="id",
+        order_by=(("allocator_id", False), ("computed_at", True)),
+        truncation_hint=f"match_batches in_(allocator_id, n={len(allocator_ids)})",
     ):
         aid = row.get("allocator_id")
         if aid:
             batches_by_allocator[aid].append(row)
 
-    # We did NOT use a server-side ORDER BY because the pagination helper
-    # slices by row index; global ordering across pages would require a
-    # stable sort column that doesn't tie, which we don't have. Sort each
-    # allocator's batches most-recent-first in-memory. The per-intro
-    # comparison below parses each timestamp via datetime.fromisoformat so
-    # the chosen batch is always chronologically correct regardless of
-    # string format.
+    # The server-side ORDER BY is `(allocator_id ASC, computed_at DESC)` so
+    # the helper's `.range()` pagination is index-friendly. Within an
+    # allocator the rows arrive most-recent-first, but we still re-sort
+    # in-memory so the per-allocator slice is robust against tied
+    # `computed_at` values (which would be PostgREST-undefined otherwise).
+    # The per-intro comparison below parses each timestamp via
+    # datetime.fromisoformat so the chosen batch is always chronologically
+    # correct regardless of string format.
     def _sort_key(row: dict[str, Any]) -> datetime:
         ts = row.get("computed_at")
         if not ts:
@@ -206,11 +215,21 @@ def compute_hit_rate_metrics(
     # log a warning so the next operator sees the corruption.
     candidates_by_batch_and_strategy: dict[tuple[str, str], int | None] = {}
     if needed_batch_ids:
+        # audit-2026-05-07 #27: order by (batch_id, rank) so the query rides
+        # `idx_match_cand_batch_rank` (partial index WHERE exclusion_reason
+        # IS NULL). The `.is_("exclusion_reason", "null")` predicate below
+        # pushes the partial-index filter into the query so the planner can
+        # actually use the partial index — without it the predicate sits in
+        # Python and the planner falls back to a sort. In-memory `continue`
+        # still defends against any post-write race that surfaces an excluded
+        # row through a stale snapshot.
         for row in _paginated_select(
             supabase.table("match_candidates")
             .select("batch_id, strategy_id, rank, exclusion_reason")
-            .in_("batch_id", sorted(needed_batch_ids)),
-            order_by="id",
+            .in_("batch_id", sorted(needed_batch_ids))
+            .is_("exclusion_reason", "null"),
+            order_by=(("batch_id", False), ("rank", False)),
+            truncation_hint=f"match_candidates in_(batch_id, n={len(needed_batch_ids)})",
         ):
             if row.get("exclusion_reason") is not None:
                 continue
@@ -346,11 +365,40 @@ def _find_strategy_rank_in_latest_batch_before(
     return cand_result.data.get("rank")
 
 
+class PaginatedSelectTruncated(RuntimeError):
+    """Audit-2026-05-07 #52 — raised when ``_paginated_select`` exhausts its
+    hard-cap of pages without seeing a short page (the natural-stop signal).
+
+    Pre-fix the helper silently sliced at 1M rows and returned what it had,
+    so hit-rate metrics computed over a partially-loaded window reported
+    stable-looking numbers from corrupt data. Surfacing as a typed exception
+    forces the caller to either (a) raise to the operator (default), or
+    (b) explicitly catch and decide a degraded path is acceptable.
+
+    Carries ``page_count``, ``page_size``, and a ``hint`` string for log
+    triage. The hint is built by callers (e.g. ``"compute_hit_rate
+    n_allocators=N"``) and is intentionally count-only — never the
+    allocator UUIDs themselves — so log volume stays bounded.
+    """
+
+    def __init__(self, page_count: int, page_size: int, hint: str | None = None) -> None:
+        self.page_count = page_count
+        self.page_size = page_size
+        self.hint = hint
+        super().__init__(
+            f"_paginated_select hit hard cap of {page_count} pages "
+            f"× {page_size} rows ({page_count * page_size:,} rows); "
+            f"truncation would corrupt downstream aggregates"
+            + (f" (hint: {hint})" if hint else "")
+        )
+
+
 def _paginated_select(
     builder,
-    order_by: str,
+    order_by: str | tuple[tuple[str, bool], ...],
     page_size: int = 1000,
     hard_cap_pages: int = 1000,
+    truncation_hint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Drain a PostgREST SELECT in fixed-size pages via `.range(start, end)`.
 
@@ -361,19 +409,36 @@ def _paginated_select(
     truncate beyond that ceiling — pagination keeps us correct at every
     scale.
 
-    `order_by` is REQUIRED: Postgres makes no guarantee about row order
+    ``order_by`` is REQUIRED: Postgres makes no guarantee about row order
     without an explicit ORDER BY, so paginating without it can skip or
-    duplicate rows across pages. Callers must pass a stable sort key
-    (typically the primary key) so every page is evaluated against the
-    same ordering.
+    duplicate rows across pages. Callers must pass a stable sort key.
+    Two shapes are accepted:
 
-    `hard_cap_pages` is a sanity belt: 1000 pages × 1000 rows = 1M rows
-    per query, well above any realistic working set. If we ever hit it we
-    log a warning and stop, so an unbounded query can't wedge the
-    analytics service.
+      * ``str`` — single-column ascending sort (legacy shape).
+      * ``tuple[tuple[str, bool], ...]`` — composite sort, where each
+        ``(column, desc)`` tuple is applied in order. Use the composite
+        shape when the caller wants the helper's pagination to ride a
+        specific composite Postgres index (e.g. ``match_batches`` ->
+        ``idx_match_batches_allocator_recent`` is keyed
+        ``(allocator_id, computed_at DESC)``). UUIDv4 primary keys defeat
+        such indexes — see audit-2026-05-07 ``#27`` for the regression
+        that motivated this signature.
+
+    ``hard_cap_pages`` is a sanity belt: 1000 pages × 1000 rows = 1M rows
+    per query. Pre-fix (audit-2026-05-07 ``#52``) hitting this limit
+    logged a warning and silently returned partial data. We now raise
+    ``PaginatedSelectTruncated`` so the caller cannot accidentally
+    aggregate over a truncated window. Pass ``truncation_hint`` to
+    annotate the exception with caller-side context (e.g. the table
+    name + filter values).
     """
     rows: list[dict[str, Any]] = []
-    ordered = builder.order(order_by)
+    if isinstance(order_by, str):
+        ordered = builder.order(order_by)
+    else:
+        ordered = builder
+        for column, desc in order_by:
+            ordered = ordered.order(column, desc=desc)
     for page in range(hard_cap_pages):
         start = page * page_size
         end = start + page_size - 1
@@ -382,12 +447,21 @@ def _paginated_select(
         rows.extend(chunk)
         if len(chunk) < page_size:
             return rows
-    logger.warning(
-        "_paginated_select: hit hard cap of %d pages × %d rows — stopping early",
+    # Hard-cap exhausted without a natural break. Pre-fix this was a
+    # silent-truncation point (audit-2026-05-07 #52); raise so hit-rate
+    # metrics never report stable-looking numbers from a partial window.
+    logger.error(
+        "_paginated_select: hit hard cap of %d pages × %d rows — raising "
+        "PaginatedSelectTruncated (hint=%s)",
         hard_cap_pages,
         page_size,
+        truncation_hint,
     )
-    return rows
+    raise PaginatedSelectTruncated(
+        page_count=hard_cap_pages,
+        page_size=page_size,
+        hint=truncation_hint,
+    )
 
 
 def _week_start_iso(timestamp_str: str) -> str:

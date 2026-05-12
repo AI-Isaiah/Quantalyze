@@ -113,14 +113,15 @@ the next Sprint lead can see the last-verified timestamp.
 
 Run `rg 'security@quantalyze\.com' src` to regenerate this list
 whenever you touch auth, onboarding, or error messaging. As of
-Sprint 1 ship (2026-04-11) the alias appears in:
+audit-2026-05-07 PR-1 ship (v0.22.18.0, 2026-05-10) the alias appears in:
 
-- `src/app/security/page.tsx` (×3 — Request Call + Responsible
-  Disclosure + generic contact)
+- `src/app/security/page.tsx` (×7 — Request Call + Responsible
+  Disclosure + generic contact + per-exchange setup blocks)
 - `src/app/for-quants/page.tsx` (security commitments block)
-- `src/app/for-quants/RequestCallModal.tsx` (×3 — mailto, 429 fallback,
-  500 fallback)
-- `src/app/api/for-quants-lead/route.ts` (×3 — 429/500/503 copy)
+- `src/app/for-quants/RequestCallModal.tsx` (×4 — mailto, generic
+  failure, network error, on-screen contact line)
+- `src/app/api/for-quants-lead/route.ts` (×4 — per-UA 429,
+  aggregate-cap 429, 503, 500 copy)
 - `src/app/api/for-quants-lead/route.test.ts` (×2 — regression)
 - `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx`
 - `src/app/(dashboard)/strategies/new/wizard/steps/MetadataStep.tsx`

@@ -45,7 +45,7 @@ from fastapi import HTTPException
 from services.benchmark import get_benchmark_returns
 from services.db import db_execute, get_supabase
 from services.metrics import compute_all_metrics
-from services.transforms import trades_to_daily_returns
+from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
 
@@ -657,9 +657,30 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             else:
                 no_linked_api_key = True
 
-        # Transform trades to daily returns
-        returns = trades_to_daily_returns(
-            trades, account_balance=account_balance
+        # Transform trades to daily returns.
+        #
+        # Audit-2026-05-07 #9 (PR-7 consumer migration) — use the
+        # _with_status form so the heuristic-capital fallback is
+        # surfaced through data_quality_flags + computation_status.
+        # Pre-fix the bare returns shape collapsed three states:
+        #   * accurate compute (real account_balance, no fallback);
+        #   * approximate compute (heuristic capital, off by 5–10×);
+        #   * errored compute (exchange-API balance fetch failed).
+        # The factsheet rendered the second and third as canonical
+        # CAGR/Sharpe with no DQF chip.
+        #
+        # `balance_error` from the runner side is NOT plumbed through
+        # yet — analytics_runner reads `api_keys.account_balance_usdt`
+        # (a DB column populated by the cron / process-key path), not
+        # the exchange API directly. The exchange-API error flag from
+        # `fetch_usdt_balance_with_status` lives on the cron path; to
+        # carry it down to the analytics consumer requires either a
+        # `balance_error` column on `api_keys` or a dedicated DQF
+        # plumbing table — both PR-5 territory. Track as PR-7c
+        # (DB schema add). For now the runner passes balance_error=False
+        # and only surfaces `used_heuristic_capital` in DQF.
+        returns, returns_meta = trades_to_daily_returns_with_status(
+            trades, account_balance=account_balance, balance_error=False
         )
 
         if len(returns) < 2:
@@ -955,6 +976,65 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["no_linked_api_key"] = True
 
+        # Audit-2026-05-07 #9 (PR-7 consumer migration) — surface
+        # used_heuristic_capital and balance_error from the
+        # ReturnsComputationMeta returned by trades_to_daily_returns_with_status.
+        # The factsheet UI uses these keys to render an "approximate"
+        # chip on CAGR/Sharpe rather than presenting them as canonical.
+        #
+        # Suppress used_heuristic_capital when account_balance_unavailable
+        # OR no_linked_api_key already fires — the heuristic is the
+        # downstream consequence of those upstream states, not a distinct
+        # condition. Surfacing both would render two redundant
+        # "approximate" chips on the factsheet for one underlying state.
+        if returns_meta["used_heuristic_capital"] and not (
+            account_balance_unavailable or no_linked_api_key
+        ):
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["used_heuristic_capital"] = True
+        if returns_meta["balance_error"]:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["balance_error"] = True
+
+        # Upgrade computation_status to 'complete_with_warnings' ONLY when
+        # one of the consumer-specific flags above fires
+        # (used_heuristic_capital, balance_error). The section-level
+        # flags (position_metrics_failed, fills_fetch_failed,
+        # position_side_volume_failed, trade_mix_approximation,
+        # account_balance_unavailable, no_linked_api_key,
+        # benchmark_unavailable) deliberately KEEP status='complete'
+        # because eight downstream frontend consumers gate exact-string
+        # on `computation_status === "complete"`:
+        #   - src/app/api/factsheet/[id]/pdf/route.ts:90
+        #   - src/app/api/factsheet/[id]/tearsheet.pdf/route.ts:61
+        #   - src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx:113
+        #   - src/app/strategy/[id]/page.tsx:134
+        #   - src/app/(dashboard)/portfolios/[id]/page.tsx:484
+        #   - src/components/strategy/PerformanceReport.tsx:50
+        #   - src/components/strategy/SyncProgress.tsx:139
+        #   - src/lib/queries.ts:509
+        # Promoting those flags would cause demo strategies (no api_key
+        # linked) and any strategy with a stale benchmark to fail PDF
+        # rendering, hide metric grids, and trip warning chips on every
+        # public surface. Migrating the consumers to accept both states
+        # is its own follow-up PR (tracked in FIX-LIST follow-up backlog
+        # alongside PR-7c). Until then, stay narrow: only the audit-#9
+        # producer/consumer pair upgrades status.
+        consumer_specific_flags = (
+            (data_quality_flags or {}).get("used_heuristic_capital")
+            or (data_quality_flags or {}).get("balance_error")
+        )
+        # When the consumer flag is suppressed (because the upstream
+        # account_balance_unavailable / no_linked_api_key already
+        # captures the same root cause), status MUST stay 'complete' —
+        # do NOT fall back to the meta hint, which would still read
+        # 'complete_with_warnings' from transforms.py and silently
+        # promote section-flag-only runs the frontend gates can't
+        # handle.
+        computation_status_value = (
+            "complete_with_warnings" if consumer_specific_flags else "complete"
+        )
+
         # B-01: single strategy_analytics upsert spreads metrics_result.metrics_json
         # AND attaches the merged trade_metrics + volume_aggregator + exposure
         # aggregates (without exposure_series, which moved to sibling_kinds).
@@ -962,7 +1042,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             lambda: supabase.table("strategy_analytics").upsert(
                 {
                     "strategy_id": strategy_id,
-                    "computation_status": "complete",
+                    "computation_status": computation_status_value,
                     "computation_error": None,
                     "data_quality_flags": data_quality_flags,
                     **metrics_result.metrics_json,

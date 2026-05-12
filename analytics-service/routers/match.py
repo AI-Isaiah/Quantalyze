@@ -24,7 +24,10 @@ from services.match_engine import (
     WEIGHTS_VERSION,
     score_candidates,
 )
-from services.match_eval import compute_hit_rate_metrics
+from services.match_eval import (
+    PaginatedSelectTruncated,
+    compute_hit_rate_metrics,
+)
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -805,6 +808,22 @@ async def eval_metrics(
         return await asyncio.to_thread(
             compute_hit_rate_metrics, lookback_days, partner_tag
         )
+    except PaginatedSelectTruncated as err:
+        # audit-2026-05-07 #52 — fail loud at the route boundary.
+        # `compute_hit_rate_metrics` raises this typed exception when
+        # `_paginated_select` hits its hard cap (would otherwise have
+        # silently sliced and aggregated over a partial window). 503
+        # signals "data scale exceeded" to monitoring rather than a
+        # generic 500 crash; the structured `page_count` / `page_size` /
+        # `hint` fields land in the detail string for operator triage.
+        logger.exception("match_engine eval truncated at hard cap: %s", err)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Eval truncated at {err.page_count} pages × {err.page_size} rows"
+                + (f" (hint: {err.hint})" if err.hint else "")
+            ),
+        ) from err
     except Exception as err:
         logger.exception("match_engine eval failed")
         raise HTTPException(status_code=500, detail=f"Eval failed: {err}") from err

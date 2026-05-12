@@ -127,6 +127,22 @@ export function ForQuantsLeadsTable({
             const wizard = lead.wizard_context;
             const isProcessed = lead.processed_at !== null;
             const isLoading = loadingId === lead.id;
+            // audit-2026-05-07 G9.B.7 / migration 115 — surface
+            // "founder notification attempted but never succeeded" so
+            // the operator sees stuck rows instead of trusting the
+            // pre-fix "All caught up" implication. Predicate matches
+            // the partial index shipped in migration 115:
+            //   notify_attempted_at IS NOT NULL
+            //   AND notify_succeeded_at IS NULL
+            //   AND processed_at IS NULL
+            // The processed_at clause prevents the badge rendering on
+            // rows the founder has already manually triaged — without
+            // it, every historically-stuck row that was later marked
+            // processed would still flash the warning indefinitely.
+            const isStuckPendingNotify =
+              lead.notify_attempted_at !== null &&
+              lead.notify_succeeded_at === null &&
+              lead.processed_at === null;
             const timeLabel =
               now === null
                 ? formatAbsoluteDate(lead.created_at)
@@ -151,6 +167,18 @@ export function ForQuantsLeadsTable({
                       {wizard?.step && (
                         <span className="inline-flex items-center rounded-md bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
                           from wizard · {wizard.step}
+                        </span>
+                      )}
+                      {isStuckPendingNotify && (
+                        <span
+                          className="inline-flex items-center rounded-md bg-warning/10 px-2 py-0.5 text-[10px] font-medium text-warning"
+                          title={
+                            lead.notify_error
+                              ? `Founder notify failed: ${lead.notify_error}`
+                              : "Founder notify attempted but never confirmed."
+                          }
+                        >
+                          stuck pending notify
                         </span>
                       )}
                       {isProcessed && (

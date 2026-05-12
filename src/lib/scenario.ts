@@ -204,22 +204,41 @@ export function computeScenario(
     cumulative[i] = c;
   }
 
-  // Bug-guard: cumulative wealth must stay strictly positive. If any
-  // single day's portfolio return ≤ -1 (catastrophic single-day loss
-  // exceeding 100%, which is impossible for real long-only positions
-  // and signals a data-quality issue — bad return units, mis-stamped
-  // returns_series, or stablecoin price feed glitch), the wealth chain
-  // flips sign and downstream metrics (twr = wealth - 1, max_dd via
-  // wealth/peak - 1, sharpe via mean/std) all become mathematically
-  // meaningless. Return null KPIs so the UI renders honest em-dashes
-  // instead of astronomical garbage like -79,017% TWR. The equity_curve
-  // is also suppressed because plotting nonsensical values misleads
-  // more than empty state.
-  const minCumulative = cumulative.reduce(
-    (m, v) => (v < m ? v : m),
-    Infinity,
-  );
-  if (minCumulative <= 0) {
+  // Bug-guard: cumulative wealth must stay strictly positive AND
+  // finite. Two failure modes are caught here:
+  //
+  //   1. Catastrophic single-day loss — any daily portfolio return
+  //      ≤ -1 (i.e., -100% or worse, impossible for real long-only
+  //      positions). Signals a data-quality issue: bad return units,
+  //      mis-stamped returns_series, or a stablecoin price feed
+  //      glitch. The wealth chain flips sign and downstream metrics
+  //      (twr = wealth - 1, max_dd via wealth/peak - 1, sharpe via
+  //      mean/std) become mathematically meaningless.
+  //
+  //   2. NaN / non-finite contamination — any daily_returns entry
+  //      with NaN, Infinity, or -Infinity poisons the cumulative
+  //      product. NaN is NEVER less-than any number under JS
+  //      comparison, so a `minCumulative <= 0` check ALONE does
+  //      not catch it (audit-2026-05-07 G8.E.7 / FIX-LIST P344).
+  //      We additionally short-circuit if any cumulative value is
+  //      not finite. Real-world: returns_series ingestion can
+  //      occasionally produce NaN from upstream parser bugs.
+  //
+  // In either case, return null KPIs so the UI renders honest
+  // em-dashes instead of astronomical garbage like -79,017% TWR.
+  // The equity_curve is also suppressed because plotting nonsensical
+  // values misleads more than empty state.
+  let minCumulative = Infinity;
+  let anyNonFinite = false;
+  for (let i = 0; i < cumulative.length; i++) {
+    const v = cumulative[i];
+    if (!Number.isFinite(v)) {
+      anyNonFinite = true;
+      break;
+    }
+    if (v < minCumulative) minCumulative = v;
+  }
+  if (anyNonFinite || minCumulative <= 0) {
     return {
       n,
       twr: null,
@@ -251,13 +270,23 @@ export function computeScenario(
 
   // Sortino: downside RMS divides by TOTAL observations (n), not by the
   // count of negative days. See the file-level behavior notes.
+  //
+  // audit-2026-05-07 G8.E.6 / FIX-LIST P343 — when downsideVol === 0
+  // (a strategy with no down days in the window), the previous fallback
+  // silently returned `sharpe ?? 0`. The KPI card then displayed e.g.
+  // "Sortino: 1.42" when the value was actually Sharpe-relabeled, which
+  // misleads an allocator making a real allocation decision.  Return
+  // `null` so the UI renders "—" through its existing `formatNumber`
+  // path; allocators interpret the dash as "insufficient data" rather
+  // than the wrong metric.
   const downsideSumSq = portDaily.reduce(
     (s, r) => s + (r < 0 ? r * r : 0),
     0,
   );
   const downsideVar = downsideSumSq / n;
   const downsideVol = Math.sqrt(downsideVar) * Math.sqrt(252);
-  const sortino = downsideVol > 0 ? (meanR * 252) / downsideVol : (sharpe ?? 0);
+  const sortino: number | null =
+    downsideVol > 0 ? (meanR * 252) / downsideVol : null;
 
   // Max drawdown + duration.
   let peak = cumulative[0];
@@ -351,7 +380,7 @@ export function computeScenario(
     cagr: cagr !== null ? Number(cagr.toFixed(5)) : null,
     volatility: Number(volatility.toFixed(5)),
     sharpe: sharpe !== null ? Number(sharpe.toFixed(3)) : null,
-    sortino: Number(sortino.toFixed(3)),
+    sortino: sortino !== null ? Number(sortino.toFixed(3)) : null,
     max_drawdown: Number(maxDD.toFixed(5)),
     max_dd_days: maxDuration,
     correlation_matrix,
@@ -439,56 +468,3 @@ export function computeCompositeCurve(
   }));
 }
 
-/**
- * Compute the "real + favorites overlay" composite curve.
- *
- * Takes the real portfolio's strategies with their current weights and a
- * list of toggled-on favorites, combines them so the favorites collectively
- * occupy `sleevePercent` of the total book (default 10%) split equally,
- * and the real strategies fill the remaining (1 - sleevePercent) pro-rata
- * to their existing weights. Returns a single cumulative curve suitable
- * for the overlay line on PortfolioEquityCurve.
- *
- * If `favorites` is empty, returns the real portfolio's baseline curve
- * (identity state) — the Favorites panel calls this with an empty array
- * when all toggles are off.
- */
-export function computeFavoritesOverlayCurve(
-  realStrategies: StrategyForBuilder[],
-  realWeightsById: Record<string, number>,
-  favorites: StrategyForBuilder[],
-  inceptionDate: string,
-  sleevePercent = 0.1,
-): DailyPoint[] {
-  if (favorites.length === 0) {
-    return computeCompositeCurve(
-      realStrategies,
-      realWeightsById,
-      inceptionDate,
-    );
-  }
-
-  // Real strategies get (1 - sleevePercent) of the book, pro-rata to
-  // their existing weights. Favorites split the sleeve equally.
-  const realWeightSum = realStrategies.reduce(
-    (s, x) => s + (realWeightsById[x.id] ?? 0),
-    0,
-  );
-  const combinedWeights: Record<string, number> = {};
-  if (realWeightSum > 0) {
-    for (const s of realStrategies) {
-      combinedWeights[s.id] =
-        ((realWeightsById[s.id] ?? 0) / realWeightSum) * (1 - sleevePercent);
-    }
-  }
-  const perFavoriteWeight = sleevePercent / favorites.length;
-  for (const f of favorites) {
-    combinedWeights[f.id] = perFavoriteWeight;
-  }
-
-  return computeCompositeCurve(
-    [...realStrategies, ...favorites],
-    combinedWeights,
-    inceptionDate,
-  );
-}
