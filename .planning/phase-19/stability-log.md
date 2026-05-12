@@ -32,6 +32,8 @@
 - ≥168h between flag_flipped_at and commit (d)
 - Daily cassette refresh succeeded all 7 days
 - Customer-feedback file (`.planning/phase-19/customer-feedback.md`) has ≥1 verbatim entry
+- **PR-X1 merged** (`prep/phase-19-m5-preflight-relax` / PR #145) — narrows migration 107's M-5 preflight to `WHERE flow_type<>'teaser' AND public_token IS NOT NULL`. Without this PR, the live snapshot of 7 csv/csv rows with `public_token=NULL` in `strategy_verifications` would trigger the abort at apply time and force a hotfix.
+- **PR-X2 merged** (`prep/phase-19-python-verify-strategy-repoint`) — removes the `verification_requests` INSERT/UPDATE writes from `analytics-service/routers/portfolio.py`'s `verify_strategy` endpoint. Without this PR, the BACKBONE-05 D-4 kill-switch rollback path raises SQLSTATE 42501 from the INSTEAD OF triggers on every fallback request (the auto-rollback target becomes a kill-loop). The TS caller's `strategy_verifications` upsert (BACKBONE-04 step (a)) owns the row's state-machine for the legacy path; Python stays on the compute path and returns the metrics in its response.
 
 ## Auto-Rollback SLA (BACKBONE-05 — D-4)
 

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -935,12 +936,24 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
 @router.post("/verify-strategy")
 @limiter.limit("5/hour")
 async def verify_strategy(request: Request, req: VerifyStrategyRequest):
-    """Verify a strategy from exchange API keys (landing page flow)."""
-    try:
-        kek = get_kek()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Encryption not configured")
+    """Verify a strategy from exchange API keys (landing page flow).
 
+    Phase 19 / PR-X2 (pre-BACKBONE-04 step (d)) — this endpoint no longer
+    writes to ``verification_requests``. Migration 107 (the VIEW shim, PR-D)
+    renames that table to ``verification_requests_legacy`` and replaces it
+    with a read-only VIEW backed by ``strategy_verifications``; any INSERT
+    or UPDATE here would hit the INSTEAD OF triggers and raise 42501,
+    breaking the kill-switch auto-rollback path (BACKBONE-05 D-4) that
+    falls back to this endpoint when the unified-backbone flag flips off
+    on a Sentry error-rate breach.
+
+    The TS caller at ``src/app/api/verify-strategy/route.ts``
+    (Phase 19 BACKBONE-04 step (a)) upserts the ``strategy_verifications``
+    row directly with the verification_id this endpoint returns. We just
+    own the compute path: validate the keys, fetch trades, score the
+    portfolio, and return the metrics. The verification_id is generated
+    locally via uuid.uuid4().
+    """
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as exc:
@@ -962,26 +975,16 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     if validation.get("error"):
         raise HTTPException(status_code=400, detail=validation["error"])
 
-    encrypted = encrypt_credentials(req.api_key, req.api_secret, req.passphrase, kek)
-
+    verification_id = str(uuid.uuid4())
     supabase = get_supabase()
 
-    vr_insert = supabase.table("verification_requests").insert({
-        "email": req.email,
-        "exchange": req.exchange,
-        "status": "processing",
-        **encrypted,
-    }).execute()
-
-    if not vr_insert.data:
-        raise HTTPException(status_code=500, detail="Failed to create verification request")
-
-    verification_id = vr_insert.data[0]["id"]
-
     def _fail_vr(msg: str):
-        supabase.table("verification_requests").update(
-            {"status": "failed", "error_message": msg}
-        ).eq("id", verification_id).execute()
+        # Phase 19 / PR-X2 — no-op. The legacy state-machine UPDATE on
+        # ``verification_requests`` is gone (migration 107 makes it a
+        # read-only VIEW). The TS caller's ``strategy_verifications``
+        # upsert owns the row's state-machine; we log here so failures
+        # still surface in service logs / Sentry breadcrumbs.
+        logger.warning("verify_strategy %s failed: %s", verification_id, msg)
 
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
@@ -1059,18 +1062,18 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
             "trade_count": len(trades),
         })
 
-        supabase.table("verification_requests").update({
-            "status": "complete",
-            "error_message": None,
-            "matched_strategy_id": matched_strategy_id,
-            "results": results_payload,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", verification_id).execute()
-
+        # Phase 19 / PR-X2 — the legacy ``verification_requests`` UPDATE
+        # has been removed (migration 107 makes the table a read-only
+        # VIEW; any UPDATE here would raise 42501). The TS caller owns
+        # the strategy_verifications row's state-machine transitions
+        # and persists public_token / expires_at on its side. We return
+        # the computed metrics in the response so the caller can stamp
+        # them onto strategy_verifications.metrics_snapshot if desired.
         return {
             "status": "complete",
             "verification_id": verification_id,
             "matched_strategy_id": matched_strategy_id,
+            "results": results_payload,
             "twr": twr,
             "sharpe": sharpe,
             **{k: period_returns.get(k) for k in ("return_24h", "return_mtd", "return_ytd")},
