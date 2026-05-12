@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { withAdminAuth } from "@/lib/api/withAdminAuth";
+import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyAllocatorIntroStatus } from "@/lib/email";
@@ -12,9 +13,24 @@ const VALID_STATUSES = ["pending", "intro_made", "completed", "declined"] as con
 // imports + calls directly in the route file (in addition to the duplicate CSRF
 // check inside `withAdminAuth`) so the CI grep gate in
 // src/__tests__/admin-csrf-ratelimit-grep.test.ts can verify defense-in-depth
-// at the route layer. The outer handler runs the rate limit BEFORE the inner
-// admin gate so abusive callers don't get an unbounded budget against
-// `isAdminUser`.
+// at the route layer.
+//
+// Review-fix v0.22.24.1 (C4 / I1 / I2): the outer handler now runs auth
+// BEFORE rate-limit. Order is:
+//   1. assertSameOrigin            (cheap reject, no DB)
+//   2. createClient + getUser      (one auth round-trip; withAdminAuth
+//                                   will redo this — see I1; refactoring
+//                                   the wrapper is out of scope)
+//   3. unauth → 401 immediately    (no rate-limit consumed by anonymous
+//                                   callers — addresses I2)
+//   4. isAdminUser → non-admin 403 (closes the timing oracle on
+//                                   admin-status — addresses C4)
+//   5. checkLimit keyed on verified admin user.id (bucket can no longer
+//                                   be polluted by non-admin user_ids —
+//                                   addresses C4)
+//   6. adminHandler (withAdminAuth re-runs the auth checks defense-in-
+//                                   depth; the rate-limit budget is now
+//                                   guaranteed to belong to a real admin)
 const adminHandler = withAdminAuth(async (body, admin) => {
   const { id, status, admin_note } = body;
   if (!id || !VALID_STATUSES.includes(status as (typeof VALID_STATUSES)[number])) {
@@ -87,20 +103,35 @@ export async function POST(req: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (user) {
-    const rl = await checkLimit(
-      adminActionLimiter,
-      `admin:${user.id}:intro-request`,
+
+  // Unauth shortcut — must happen BEFORE the limiter so anonymous
+  // callers cannot consume bucket capacity (I2). Matches the pattern
+  // already in use by /api/admin/notify-submission.
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Verify admin BEFORE the rate-limit so (a) the bucket is keyed
+  // against an established admin identity (no pollution by random
+  // signed-in non-admins) and (b) non-admins do not observe a timing
+  // transition between the limiter response and the inner auth response
+  // that would leak admin-status (C4).
+  if (!(await isAdminUser(supabase, user))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+  }
+
+  const rl = await checkLimit(
+    adminActionLimiter,
+    `admin:${user.id}:intro-request`,
+  );
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: "Too many requests" },
+      {
+        status: 429,
+        headers: { "Retry-After": String(rl.retryAfter) },
+      },
     );
-    if (!rl.success) {
-      return NextResponse.json(
-        { error: "Too many requests" },
-        {
-          status: 429,
-          headers: { "Retry-After": String(rl.retryAfter) },
-        },
-      );
-    }
   }
 
   return adminHandler(req);
