@@ -4,9 +4,47 @@
  * `strategies` row is the source of truth for the draft data itself —
  * this module only remembers which draft and which step. Secrets are
  * never persisted.
+ *
+ * P473 — tamper / replay defense
+ * -------------------------------
+ * Plain JSON in localStorage is mutable by any script running on the
+ * page (including a future XSS payload or a curious user via DevTools).
+ * Without integrity the wizard would happily resume against any
+ * strategyId an attacker drops into the entry — replaying a victim's
+ * draft id, or swapping to a strategy they own to bypass guard checks
+ * downstream. Pre-fix coverage was zero.
+ *
+ * The fix is an HMAC-SHA256 envelope:
+ *
+ *   stored payload = { v: 2, p: <JSON state>, h: <truncated hex hmac> }
+ *
+ * The HMAC key is derived from a per-tab nonce held in sessionStorage
+ * (which is scoped per tab and never persists across tab close). The
+ * nonce is generated lazily on first save and reused for the lifetime
+ * of the tab. This means:
+ *   - A tampered payload (different `p`, original `h`) verifies false.
+ *   - A cross-tab replay (`p` + `h` copied into another tab) verifies
+ *     false because the new tab has a fresh sessionStorage nonce.
+ *   - A cross-user replay between machines verifies false for the same
+ *     reason (nonce-bound).
+ *
+ * The Web Crypto API (`crypto.subtle.sign`) is async, so `saveWizardState`
+ * and `loadWizardState` are async. Callers in WizardClient.tsx await
+ * them; the only one where the result matters is the post-mount
+ * `loadWizardState` (autosave writes are fire-and-forget).
+ *
+ * v1 payloads (unsigned) from pre-fix sessions are treated as cold-start
+ * (loadWizardState returns null) so a half-deployed environment cannot
+ * resume an unsigned wizard.
  */
 
 const STORAGE_KEY = "quantalyze_wizard_state_v1";
+/** sessionStorage key for the per-tab HMAC nonce. */
+const NONCE_KEY = "quantalyze_wizard_signing_nonce_v1";
+/** Truncated hex hmac length — 16 hex chars = 64 bits, fine for tamper. */
+const HMAC_HEX_LEN = 16;
+/** Envelope schema version. v2 = HMAC-signed. v1 was plaintext (rejected). */
+const ENVELOPE_VERSION = 2;
 
 export type WizardStepKey =
   | "connect_key"
@@ -57,15 +95,133 @@ function hasLocalStorage(): boolean {
   }
 }
 
+/** Returns true when sessionStorage is reachable. */
+function hasSessionStorage(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return typeof window.sessionStorage !== "undefined";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true when Web Crypto's subtle API is available. jsdom + all
+ * modern browsers provide it; the fallback below returns null so callers
+ * treat the environment as "no integrity available" and discard saved
+ * state on read. Storage still proceeds (best-effort) so an upgraded
+ * environment doesn't lose the user's resume pointer.
+ */
+function hasSubtleCrypto(): boolean {
+  return (
+    typeof crypto !== "undefined" &&
+    typeof crypto.subtle !== "undefined" &&
+    typeof crypto.subtle.sign === "function"
+  );
+}
+
+/**
+ * Get-or-create the per-tab signing nonce. Stored in sessionStorage so
+ * (a) it is scoped to the tab — copying the localStorage payload to a
+ * different tab produces a different HMAC and verification fails, and
+ * (b) it never persists past tab close. The nonce is purely an HMAC key
+ * — it doesn't appear in any URL, isn't transmitted, and isn't
+ * cryptographically secret (anyone with DOM access can read it from
+ * the same tab). Its job is to BIND the payload to the tab, not to
+ * encrypt anything.
+ */
+function getOrCreateTabNonce(): string | null {
+  if (!hasSessionStorage()) return null;
+  try {
+    const existing = window.sessionStorage.getItem(NONCE_KEY);
+    if (existing && typeof existing === "string" && existing.length >= 32) {
+      return existing;
+    }
+    // 32 random bytes -> 64 hex chars. crypto.randomUUID gives 32 hex
+    // chars (after stripping dashes); double up for 256 bits of entropy.
+    const fresh =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? `${crypto.randomUUID().replace(/-/g, "")}${crypto.randomUUID().replace(/-/g, "")}`
+        : `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+    window.sessionStorage.setItem(NONCE_KEY, fresh);
+    return fresh;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compute an HMAC-SHA256 of `payload` using `key` (utf-8 strings),
+ * truncated to HMAC_HEX_LEN hex chars. Returns null when subtle crypto
+ * isn't available so callers can fail-closed.
+ *
+ * Exported for tests that need to forge a valid envelope (the round-trip
+ * assertion below). Production callers should not import this directly.
+ */
+export async function computeWizardHmac(
+  payload: string,
+  key: string,
+): Promise<string | null> {
+  if (!hasSubtleCrypto()) return null;
+  try {
+    const enc = new TextEncoder();
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(key),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sigBuf = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(payload));
+    const bytes = new Uint8Array(sigBuf);
+    let hex = "";
+    for (const b of bytes) {
+      hex += b.toString(16).padStart(2, "0");
+    }
+    return hex.slice(0, HMAC_HEX_LEN);
+  } catch {
+    return null;
+  }
+}
+
+/** Constant-time-ish hex string compare. */
+function hexEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 /**
  * Save the current wizard state. Overwrites any prior state. No-ops
- * during SSR or when localStorage is unavailable.
+ * during SSR or when localStorage is unavailable. Writes an
+ * HMAC-signed envelope (v2) tying the payload to the current tab via
+ * sessionStorage nonce.
  */
-export function saveWizardState(state: Omit<WizardLocalState, "savedAt">): void {
+export async function saveWizardState(
+  state: Omit<WizardLocalState, "savedAt">,
+): Promise<void> {
   if (!hasLocalStorage()) return;
   try {
     const payload: WizardLocalState = { ...state, savedAt: Date.now() };
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    const payloadJson = JSON.stringify(payload);
+    const nonce = getOrCreateTabNonce();
+    let envelope: string;
+    if (nonce) {
+      const h = await computeWizardHmac(payloadJson, nonce);
+      // If subtle crypto failed mid-call, drop the save rather than
+      // write an unsigned envelope that loadWizardState would reject.
+      if (!h) return;
+      envelope = JSON.stringify({ v: ENVELOPE_VERSION, p: payloadJson, h });
+    } else {
+      // No sessionStorage (Safari private, etc.) — without a per-tab
+      // nonce there is no integrity story, so refuse to persist. The
+      // server-side draft is still the source of truth.
+      return;
+    }
+    window.localStorage.setItem(STORAGE_KEY, envelope);
   } catch (err) {
     // Storage full, Safari private mode, or user-denied. Non-fatal:
     // the server-side draft is still the source of truth.
@@ -75,22 +231,58 @@ export function saveWizardState(state: Omit<WizardLocalState, "savedAt">): void 
 
 /**
  * Read the current wizard state. Returns `null` when no state is
- * saved, storage is unavailable, or the payload is malformed.
+ * saved, storage is unavailable, or the payload is malformed,
+ * unsigned, or has a mismatched HMAC.
+ *
+ * On HMAC mismatch (tamper/replay) we log `localStorage_signature_mismatch`
+ * and treat as cold-start so a forged entry cannot resume the wizard.
  */
-export function loadWizardState(): WizardLocalState | null {
+export async function loadWizardState(): Promise<WizardLocalState | null> {
   if (!hasLocalStorage()) return null;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const envelope = JSON.parse(raw) as unknown;
     if (
-      typeof parsed?.strategyId !== "string" ||
-      typeof parsed?.wizardSessionId !== "string" ||
-      typeof parsed?.step !== "string" ||
-      typeof parsed?.savedAt !== "number"
+      !envelope ||
+      typeof envelope !== "object" ||
+      (envelope as Record<string, unknown>).v !== ENVELOPE_VERSION ||
+      typeof (envelope as Record<string, unknown>).p !== "string" ||
+      typeof (envelope as Record<string, unknown>).h !== "string"
+    ) {
+      // v1 (unsigned) or anything else — treat as cold-start.
+      console.warn("[wizard] localStorage_signature_mismatch: missing envelope");
+      return null;
+    }
+    const payloadJson = (envelope as Record<string, unknown>).p as string;
+    const storedHmac = (envelope as Record<string, unknown>).h as string;
+
+    const nonce = getOrCreateTabNonce();
+    if (!nonce) {
+      // No nonce means we cannot verify integrity — refuse to resume
+      // a stored payload rather than trust it blindly.
+      console.warn("[wizard] localStorage_signature_mismatch: no tab nonce");
+      return null;
+    }
+    const computed = await computeWizardHmac(payloadJson, nonce);
+    if (!computed || !hexEquals(computed, storedHmac)) {
+      // Tamper, replay, or fresh-tab. Either way, do not resume.
+      console.warn("[wizard] localStorage_signature_mismatch: HMAC verify failed");
+      return null;
+    }
+
+    const parsed = JSON.parse(payloadJson) as unknown;
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      typeof (parsed as Record<string, unknown>).strategyId !== "string" ||
+      typeof (parsed as Record<string, unknown>).wizardSessionId !== "string" ||
+      typeof (parsed as Record<string, unknown>).step !== "string" ||
+      typeof (parsed as Record<string, unknown>).savedAt !== "number"
     ) {
       return null;
     }
+    const obj = parsed as Record<string, unknown>;
     const validSteps: readonly WizardStepKey[] = [
       "connect_key",
       "sync_preview",
@@ -100,24 +292,20 @@ export function loadWizardState(): WizardLocalState | null {
       "csv_preview",
       "csv_submit",
     ];
-    if (!validSteps.includes(parsed.step as WizardStepKey)) {
+    if (!validSteps.includes(obj.step as WizardStepKey)) {
       return null;
     }
     // Phase 15: optional `source` discriminator. Absent ⇒ 'api'
     // (back-compat). Anything else is a malformed payload.
-    if (
-      parsed.source !== undefined &&
-      parsed.source !== "api" &&
-      parsed.source !== "csv"
-    ) {
+    if (obj.source !== undefined && obj.source !== "api" && obj.source !== "csv") {
       return null;
     }
     // Cross-AI revision 2026-04-30: optional `strategyName` must be a
     // string ≤ 80 chars. Absent on the API branch.
-    if (parsed.strategyName !== undefined) {
+    if (obj.strategyName !== undefined) {
       if (
-        typeof parsed.strategyName !== "string" ||
-        parsed.strategyName.length > 80
+        typeof obj.strategyName !== "string" ||
+        (obj.strategyName as string).length > 80
       ) {
         return null;
       }
