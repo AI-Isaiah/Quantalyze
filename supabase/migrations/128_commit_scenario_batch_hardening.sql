@@ -64,19 +64,47 @@ SET lock_timeout = '3s';
 
 -- --------------------------------------------------------------------------
 -- STEP 1: bridge_outcomes.percent_allocated range CHECK (P1956 defense in
---         depth). NOT VALID + VALIDATE so existing rows are not re-checked
---         in a single pass — Phase 10 invariants treat existing rows as
---         clean. If VALIDATE fails (a stale dual-encoded row sneaked through
---         before this migration applied), the wrapping transaction rolls
---         back so the DO block at STEP 3 never runs.
+--         depth). NOT VALID + VALIDATE-in-same-tx pattern: the ADD
+--         CONSTRAINT acquires ACCESS EXCLUSIVE briefly to flip catalog
+--         state without scanning rows; VALIDATE CONSTRAINT then does the
+--         scan under SHARE UPDATE EXCLUSIVE which permits concurrent
+--         reads. Both run in this BEGIN/COMMIT so the migration is
+--         atomic. Existing rows are scanned, but readers are not blocked
+--         during the scan window. If VALIDATE fails (a stale dual-encoded
+--         row sneaked through before this migration applied), the
+--         wrapping transaction rolls back so the DO block at STEP 3 never
+--         runs. Both ALTERs are wrapped in pg_constraint guards so a
+--         re-apply (DR recovery, manual replay) no-ops instead of
+--         42710-aborting before the function-replacement work runs.
 -- --------------------------------------------------------------------------
-ALTER TABLE bridge_outcomes
-  ADD CONSTRAINT bridge_outcomes_percent_allocated_range_check
-  CHECK (percent_allocated IS NULL OR (percent_allocated >= 0 AND percent_allocated <= 100))
-  NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'bridge_outcomes_percent_allocated_range_check'
+       AND conrelid = 'public.bridge_outcomes'::regclass
+  ) THEN
+    ALTER TABLE bridge_outcomes
+      ADD CONSTRAINT bridge_outcomes_percent_allocated_range_check
+      CHECK (percent_allocated IS NULL OR (percent_allocated >= 0 AND percent_allocated <= 100))
+      NOT VALID;
+  END IF;
+END
+$$;
 
-ALTER TABLE bridge_outcomes
-  VALIDATE CONSTRAINT bridge_outcomes_percent_allocated_range_check;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'bridge_outcomes_percent_allocated_range_check'
+       AND conrelid = 'public.bridge_outcomes'::regclass
+       AND convalidated = false
+  ) THEN
+    ALTER TABLE bridge_outcomes
+      VALIDATE CONSTRAINT bridge_outcomes_percent_allocated_range_check;
+  END IF;
+END
+$$;
 
 COMMENT ON CONSTRAINT bridge_outcomes_percent_allocated_range_check ON bridge_outcomes IS
   'Migration 128 / audit-2026-05-07 round 2 (P1956). Defense-in-depth range '

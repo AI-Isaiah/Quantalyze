@@ -179,8 +179,9 @@ GRANT EXECUTE ON FUNCTION public.cutover_strategy_metrics_keys_atomic(uuid) TO s
 DROP FUNCTION IF EXISTS public.cutover_strategy_metrics_keys(uuid, jsonb);
 
 -- --------------------------------------------------------------------------
--- STEP 3: Self-verifying DO block. Four assertions (a-d), all of which
+-- STEP 3: Self-verifying DO block. Five assertions (a-e), all of which
 --         raise EXCEPTION on failure (rolls back the wrapping transaction).
+--         (e) is the H-B search_path hardening assertion.
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
