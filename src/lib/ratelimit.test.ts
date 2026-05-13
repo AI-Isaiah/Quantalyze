@@ -22,10 +22,13 @@ import type { Ratelimit } from "@upstash/ratelimit";
  */
 
 describe("checkLimit", () => {
-  // Snapshot + restore NODE_ENV across the suite. The P709 tests flip
-  // NODE_ENV to 'production' to exercise fail-CLOSED; without an explicit
+  // Snapshot + restore VERCEL_ENV across the suite. The P709 tests flip
+  // VERCEL_ENV to 'production' to exercise fail-CLOSED; without an explicit
   // restore the next file's tests (or the next test in this file) would
-  // see the wrong env.
+  // see the wrong env. NODE_ENV is also restored for the CI-regression
+  // case below which asserts that NODE_ENV=production + VERCEL_ENV unset
+  // still fails-OPEN.
+  const ORIGINAL_VERCEL_ENV = process.env.VERCEL_ENV;
   const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
   beforeEach(() => {
@@ -34,6 +37,11 @@ describe("checkLimit", () => {
 
   afterEach(() => {
     const env = process.env as Record<string, string | undefined>;
+    if (ORIGINAL_VERCEL_ENV === undefined) {
+      delete env.VERCEL_ENV;
+    } else {
+      env.VERCEL_ENV = ORIGINAL_VERCEL_ENV;
+    }
     if (ORIGINAL_NODE_ENV === undefined) {
       delete env.NODE_ENV;
     } else {
@@ -42,9 +50,9 @@ describe("checkLimit", () => {
   });
 
   it("returns success when limiter is null (no Upstash configured, non-prod)", async () => {
-    // Force a non-production NODE_ENV so the missing-limiter branch
+    // Force a non-production VERCEL_ENV so the missing-limiter branch
     // exercises the fail-OPEN dev path.
-    (process.env as Record<string, string | undefined>).NODE_ENV = "test";
+    delete (process.env as Record<string, string | undefined>).VERCEL_ENV;
     const result = await checkLimit(null, "user:abc");
     expect(result).toEqual({ success: true });
   });
@@ -87,7 +95,7 @@ describe("checkLimit", () => {
   });
 
   it("fails open if the limiter throws in non-production", async () => {
-    (process.env as Record<string, string | undefined>).NODE_ENV = "test";
+    delete (process.env as Record<string, string | undefined>).VERCEL_ENV;
     // Suppress the expected error log so the test output stays clean.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const mockLimiter = {
@@ -111,7 +119,7 @@ describe("checkLimit", () => {
   // audit-log export). Pre-P709 both branches returned {success: true}.
 
   it("P709 — fails CLOSED in production when limiter is null (missing Upstash env)", async () => {
-    (process.env as Record<string, string | undefined>).NODE_ENV =
+    (process.env as Record<string, string | undefined>).VERCEL_ENV =
       "production";
     const result = await checkLimit(null, "user:abc");
     expect(result.success).toBe(false);
@@ -122,7 +130,7 @@ describe("checkLimit", () => {
   });
 
   it("P709 — fails CLOSED in production when the limiter throws", async () => {
-    (process.env as Record<string, string | undefined>).NODE_ENV =
+    (process.env as Record<string, string | undefined>).VERCEL_ENV =
       "production";
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const mockLimiter = {
@@ -142,7 +150,7 @@ describe("checkLimit", () => {
     // throw, NOT on a healthy allow path. A bug that hard-failed every
     // production request would also pass the two tests above, so this
     // companion test guards against that regression.
-    (process.env as Record<string, string | undefined>).NODE_ENV =
+    (process.env as Record<string, string | undefined>).VERCEL_ENV =
       "production";
     const mockLimiter = {
       limit: vi.fn().mockResolvedValue({
@@ -158,7 +166,7 @@ describe("checkLimit", () => {
     // The other half of the production sanity check: a real over-limit
     // deny must remain a 429 (retryAfter), not get converted into a
     // 503 misconfig.
-    (process.env as Record<string, string | undefined>).NODE_ENV =
+    (process.env as Record<string, string | undefined>).VERCEL_ENV =
       "production";
     const future = Date.now() + 30_000;
     const mockLimiter = {
@@ -170,6 +178,46 @@ describe("checkLimit", () => {
     if (!result.success && "retryAfter" in result) {
       expect(result.retryAfter).toBeGreaterThan(0);
     }
+  });
+
+  // ── PR #150 audit-2026-05-07 round-1 regression — CI fail-OPEN ──
+  // `next start` sets NODE_ENV=production unconditionally, including in
+  // the GitHub Actions e2e job where Upstash is intentionally unwired.
+  // The first cut of P709 gated fail-CLOSED on NODE_ENV, which converted
+  // every audit-log/GDPR-export call into a 503 and broke the
+  // onboarding-funnel playwright spec at the "Download CSV (last 90
+  // days)" step. The gate now keys off VERCEL_ENV — set to 'production'
+  // only on real Vercel prod deploys, unset in CI / local `next start`.
+  // This test fails without that switch.
+  it("CI regression — NODE_ENV=production + VERCEL_ENV unset fails-OPEN (limiter null)", async () => {
+    const env = process.env as Record<string, string | undefined>;
+    env.NODE_ENV = "production";
+    delete env.VERCEL_ENV;
+    const result = await checkLimit(null, "user:abc");
+    expect(result).toEqual({ success: true });
+  });
+
+  it("CI regression — NODE_ENV=production + VERCEL_ENV unset fails-OPEN on limiter throw", async () => {
+    const env = process.env as Record<string, string | undefined>;
+    env.NODE_ENV = "production";
+    delete env.VERCEL_ENV;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockRejectedValue(new Error("Redis unavailable")),
+    } as unknown as Ratelimit;
+    const result = await checkLimit(mockLimiter, "user:abc");
+    expect(result).toEqual({ success: true });
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it("CI regression — VERCEL_ENV=preview fails-OPEN (limiter null)", async () => {
+    // Vercel preview deploys should NOT fail-CLOSED on misconfig: they
+    // are routinely spun up for PRs that may legitimately ship without
+    // an Upstash binding. Real prod is gated on 'production' exactly.
+    (process.env as Record<string, string | undefined>).VERCEL_ENV =
+      "preview";
+    const result = await checkLimit(null, "user:abc");
+    expect(result).toEqual({ success: true });
   });
 });
 

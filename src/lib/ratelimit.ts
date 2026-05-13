@@ -12,8 +12,8 @@ import { Redis } from "@upstash/redis";
  *   production       | yes                | yes            | fail-CLOSED → 503
  *   production       | no                 | n/a            | fail-CLOSED → 503
  *   non-prod (dev,   | yes                | no             | enforce limiter
- *   preview, test)   | yes                | yes            | fail-OPEN + warn
- *                    | no                 | n/a            | fail-OPEN + warn
+ *   preview, test,   | yes                | yes            | fail-OPEN + warn
+ *   CI)              | no                 | n/a            | fail-OPEN + warn
  *
  * Rationale: a misconfigured production deploy must NOT silently disable
  * rate limiting on cost-sensitive endpoints (GDPR export 1/day, CSV
@@ -27,6 +27,17 @@ import { Redis } from "@upstash/redis";
  * Upstash account, with a console.warn so devs notice during the first
  * request rather than silently sailing through.
  *
+ * "Production" is gated on `VERCEL_ENV === 'production'`, NOT
+ * `NODE_ENV === 'production'`. `next start` always sets NODE_ENV=production
+ * — including in the GitHub Actions e2e job where Upstash is intentionally
+ * unwired — so the NODE_ENV gate would convert every audit-log/GDPR-export
+ * call into a 503 and break the playwright download specs. `VERCEL_ENV`
+ * is Vercel's authoritative deploy-target marker: `production` on real
+ * prod deploys, `preview` on PR previews, `development` for `vercel dev`,
+ * and unset in CI / local `next start` runs. See the regression test
+ * `fails OPEN in CI (next start with NODE_ENV=production but VERCEL_ENV
+ * unset)` in ratelimit.test.ts.
+ *
  * Complementary to the in-memory `acquirePdfSlot` semaphore in
  * `src/lib/puppeteer.ts`. The semaphore caps per-lambda Chromium concurrency
  * (OOM protection); these limiters cap cross-lambda request rate (abuse
@@ -34,7 +45,7 @@ import { Redis } from "@upstash/redis";
  */
 
 function isProduction(): boolean {
-  return process.env.NODE_ENV === "production";
+  return process.env.VERCEL_ENV === "production";
 }
 
 const redis =
