@@ -19,8 +19,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
+  // P444 (audit-2026-05-07) — split 401 (unauthenticated) from 403
+  // (authenticated-but-not-admin). The pre-fix single check returned 403
+  // for both, conflating auth and authz per RFC 7235.
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   let body: {
@@ -99,8 +105,12 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
+  // P444 (audit-2026-05-07) — split 401/403, see POST handler note.
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const url = new URL(req.url);
