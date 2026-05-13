@@ -10,7 +10,7 @@
 --      eliminated). The migration's self-verifying DO block asserts (f)
 --      this at apply time; we re-assert here so any future CREATE OR
 --      REPLACE that re-introduces new_weight is caught.
---   3. A direct INSERT into bridge_outcomes with percent_allocated = 5000
+--   3. A direct INSERT into bridge_outcomes with percent_allocated = 500
 --      (the value previously produced by dual-encoding 50 → 50 * 100) is
 --      REJECTED with ERRCODE 23514 (check_violation). This proves the
 --      defense-in-depth backstop actually fires — the migration's DO
@@ -98,7 +98,12 @@ END $$;
 -- The point of P1956's defense-in-depth backstop is that even if some
 -- future code path BYPASSES commit_scenario_batch and writes directly to
 -- bridge_outcomes (a service_role migration, a backfill script), a value
--- of 5000 (the bad-dual-encoded form) is still rejected at the row level.
+-- of 500 (above-range but inside NUMERIC(5,2) capacity) is rejected by the
+-- CHECK rather than a numeric_value_out_of_range. We can NOT use 5000 here:
+-- the column is NUMERIC(5,2) (max 999.99), so 5000 trips ERRCODE 22003
+-- before any CHECK fires. 500 is the cleanest test — fits the column,
+-- exceeds mig-128's new [0,100] CHECK AND mig-059's [0.1,50] inline CHECK,
+-- so we get a clean 23514 from whichever fires first.
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -153,7 +158,7 @@ BEGIN
       percent_allocated, allocated_at
     ) VALUES (
       test_uid, test_sid, test_md_id, 'allocated',
-      5000, CURRENT_DATE
+      500, CURRENT_DATE
     );
   EXCEPTION WHEN OTHERS THEN
     raised := TRUE;
@@ -162,7 +167,7 @@ BEGIN
 
   IF NOT raised THEN
     RAISE EXCEPTION
-      'Test 3 failed (P1956): bridge_outcomes INSERT with percent_allocated=5000 was ACCEPTED — defense-in-depth CHECK not enforced';
+      'Test 3 failed (P1956): bridge_outcomes INSERT with percent_allocated=500 was ACCEPTED — defense-in-depth CHECK not enforced';
   END IF;
 
   -- Either mig-059 (>=0.1 AND <=50) OR mig-128 (>=0 AND <=100) catches it;
@@ -174,7 +179,7 @@ BEGIN
       'Test 3 failed (P1956): expected ERRCODE 23514 (check_violation), got %', err_state;
   END IF;
 
-  RAISE NOTICE 'Test 3 passed: percent_allocated=5000 rejected with ERRCODE 23514';
+  RAISE NOTICE 'Test 3 passed: percent_allocated=500 rejected with ERRCODE 23514';
 
   -- Cleanup
   DELETE FROM match_decisions WHERE id = test_md_id;
