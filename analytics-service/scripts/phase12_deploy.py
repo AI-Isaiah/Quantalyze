@@ -200,9 +200,12 @@ async def main() -> int:
     # Step 4 (M-02): backfill enqueue with duplicate-job guard.
     rc = await phase12_backfill_enqueue.main()
     if rc != 0:
+        # P2025: surface a clear INCOMPLETE marker rather than letting the
+        # operator skim past a non-zero RC and assume "complete".
         print(
-            f"phase12_deploy: backfill enqueue returned {rc} — backfill may be partial"
+            f"phase12_deploy: backfill enqueue returned {rc} — backfill is partial"
         )
+        print("=== Phase 12 deploy: INCOMPLETE ===")
         return rc
 
     print("=== Phase 12 deploy: complete ===")

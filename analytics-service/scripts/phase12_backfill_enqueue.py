@@ -55,31 +55,51 @@ async def main() -> int:
         .execute()
     )
     strategies = rows.data or []
-    n = len(strategies)
+    total = len(strategies)
     print(
-        f"phase12_backfill_enqueue: enqueueing {n} published strategies as "
+        f"phase12_backfill_enqueue: enqueueing {total} published strategies as "
         f"priority='low'"
     )
 
+    # P2025: track per-row outcomes. The old loop had no try/except — a partial-
+    # unique-index violation on row K would raise and leave the caller thinking
+    # K-1 rows were enqueued, while the final message lied about `total`.
     now_iso = datetime.now(timezone.utc).isoformat()
+    inserted = 0
+    failures: list[tuple[str, str]] = []
     for r in strategies:
-        await db_execute(
-            lambda strategy_id=r["id"]: supabase.table("compute_jobs").insert(
-                {
-                    "strategy_id": strategy_id,
-                    "kind": "compute_analytics",
-                    "status": "pending",
-                    "priority": "low",
-                    "next_attempt_at": now_iso,
-                    "metadata": {"phase": "12-backfill"},
-                }
-            ).execute()
-        )
+        sid = r["id"]
+        try:
+            await db_execute(
+                lambda strategy_id=sid: supabase.table("compute_jobs").insert(
+                    {
+                        "strategy_id": strategy_id,
+                        "kind": "compute_analytics",
+                        "status": "pending",
+                        "priority": "low",
+                        "next_attempt_at": now_iso,
+                        "metadata": {"phase": "12-backfill"},
+                    }
+                ).execute()
+            )
+            inserted += 1
+        except Exception as exc:  # pragma: no cover — exercised by tests
+            failures.append((sid, repr(exc)))
+            print(
+                f"phase12_backfill_enqueue: WARNING — insert failed for strategy "
+                f"{sid}: {exc!r} (continuing)"
+            )
 
     print(
-        f"phase12_backfill_enqueue: enqueued {n} jobs. Throttle "
+        f"phase12_backfill_enqueue: enqueued {inserted}/{total} jobs. Throttle "
         f"(claim_compute_jobs_with_priority RPC, ~5/min when sync_trades queued) will pace."
     )
+    if failures:
+        print(
+            f"phase12_backfill_enqueue: {len(failures)} per-row failures — "
+            f"see WARNING lines above"
+        )
+        return 1
     return 0
 
 
