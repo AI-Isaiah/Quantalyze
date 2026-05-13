@@ -919,3 +919,232 @@ class TestDurationSecondsWritten:
         # is stripped before sending to the RPC, since positions table
         # has no such column).
         assert "data_quality_flags" not in rows[0]
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 round-2 / Block A — P1994
+# ---------------------------------------------------------------------------
+# avg_winning_trade / avg_losing_trade contract change: bucket by sign of
+# `realized_pnl` (dollars) instead of `roi` (ratio); sum dollars instead of
+# ratios; surface breakeven positions and None-PnL closed positions in
+# data_quality_flags rather than silently bucketing them as losers via the
+# `roi or 0 <= 0` path. See PLAN-ROUND-2-CRITICAL.md Task A.1.
+
+
+class TestAvgWinningLosingTradeDollars:
+    """P1994: avg_winning_trade / avg_losing_trade must be DOLLAR sums of
+    `realized_pnl`, not averages of `roi` ratios.
+
+    Four compounding bugs in the prior code:
+      1) Sums ratios where _compute_derived_trade_metrics expects dollars
+         (R:R, expectancy, SQN all keyed off these values).
+      2) `roi <= 0` lumped breakevens (roi=0) into the losers bucket.
+      3) `(p.get("roi") or 0) > 0` / <= 0 coerced roi=None silently into
+         the losers bucket instead of flagging the missing-data case.
+      4) `realized_pnl_per_trade` used `float(p.get("realized_pnl") or 0.0)`,
+         emitting phantom-zero breakeven rows whenever realized_pnl was None.
+    """
+
+    @pytest.mark.asyncio
+    async def test_avg_winning_trade_is_dollar_sum_not_roi_ratio(self) -> None:
+        """Two winners with realized_pnl=+$500 and +$200 → avg_winning_trade
+        must be 350.0 (dollar mean), NOT a ratio like 0.45."""
+        # First trade: buy 1@100, sell 1@600 → realized_pnl=+500, roi=5.0
+        # Second trade: buy 1@100, sell 1@300 → realized_pnl=+200, roi=2.0
+        # If avg_winning_trade averaged ROIs, we'd see ~3.5. If it sums
+        # dollars and divides by count, we'd see 350.0.
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 600.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-03T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 300.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-04T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        assert result["winners_count"] == 2
+        assert result["losers_count"] == 0
+        # Dollar mean: (500 + 200) / 2 = 350.0. NOT a ratio mean (~3.5).
+        assert abs(result["avg_winning_trade"] - 350.0) < 1e-4, (
+            f"expected dollar mean 350.0, got {result['avg_winning_trade']} "
+            f"(if ~3.5, you're still averaging ROI ratios)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_breakeven_position_excluded_from_winners_and_losers(self) -> None:
+        """A position with realized_pnl=0.0 (exit==entry, no fees) is a
+        BREAKEVEN — not a winner, not a loser. The pre-fix code's
+        `roi <= 0` bucketing lumped breakevens into losers, polluting
+        avg_losing_trade with zeros and depressing the average.
+
+        Post-fix: breakevens are excluded from both buckets and counted
+        in data_quality_flags['breakeven_positions'] for surfacing."""
+        # One winner ($100), one breakeven (0), one loser (-$50).
+        # Patch _match_positions_fifo to return crafted positions so we
+        # can hit the bucketing logic deterministically without depending
+        # on FIFO arithmetic.
+        crafted_positions = [
+            {
+                "strategy_id": "strat-1", "symbol": "BTCUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 200.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": 100.0, "fee_total": 0.0, "roi": 1.0,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+            {
+                "strategy_id": "strat-1", "symbol": "ETHUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 100.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": 0.0, "fee_total": 0.0, "roi": 0.0,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+            {
+                "strategy_id": "strat-1", "symbol": "SOLUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 50.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": -50.0, "fee_total": 0.0, "roi": -0.5,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+        ]
+        # Supabase just needs SOMETHING in fills to enter the loop.
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ), patch(
+            "services.position_reconstruction._match_positions_fifo",
+            return_value=crafted_positions,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        assert result["winners_count"] == 1
+        assert result["losers_count"] == 1
+        # Win rate denominator excludes the breakeven (1 of 2, not 1 of 3).
+        assert abs(result["win_rate"] - 0.5) < 1e-9, (
+            f"expected win_rate 0.5 (1 winner / 2 decided), got {result['win_rate']}"
+        )
+        # avg_winning_trade = $100 (sum of winner dollars / 1).
+        assert abs(result["avg_winning_trade"] - 100.0) < 1e-6
+        # avg_losing_trade = -$50 (loser-only — breakeven NOT included).
+        assert abs(result["avg_losing_trade"] - (-50.0)) < 1e-6
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("breakeven_positions") == 1, (
+            f"breakeven position must surface in data_quality_flags, got {flags}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_closed_position_missing_realized_pnl_is_surfaced(self) -> None:
+        """A closed position with realized_pnl=None / roi=None is a data
+        integrity hole — surfacing it as `positions_missing_realized_pnl`
+        is correct. The pre-fix `or 0` coalescing silently bucketed it
+        into losers (because 0 <= 0) and added a phantom breakeven row
+        to realized_pnl_per_trade."""
+        crafted_positions = [
+            # Real winner so the metrics dict has populated buckets too.
+            {
+                "strategy_id": "strat-1", "symbol": "BTCUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 110.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": 10.0, "fee_total": 0.0, "roi": 0.1,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+            # Closed but missing realized_pnl / roi (a data integrity hole).
+            {
+                "strategy_id": "strat-1", "symbol": "ETHUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": None,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": None, "fee_total": 0.0, "roi": None,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+        ]
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ), patch(
+            "services.position_reconstruction._match_positions_fifo",
+            return_value=crafted_positions,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        # Missing-PnL row must NOT have been bucketed as a loser via `or 0`.
+        assert result["winners_count"] == 1
+        assert result["losers_count"] == 0
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("positions_missing_realized_pnl") == 1, (
+            f"closed position with None realized_pnl must surface in "
+            f"data_quality_flags['positions_missing_realized_pnl'], got {flags}"
+        )
+        # And realized_pnl_per_trade must NOT phantom-coerce the None to 0.0.
+        rpt = result["realized_pnl_per_trade"]
+        assert len(rpt) == 2
+        # Find the ETHUSDT row (the missing one) — its realized_pnl must
+        # be None, not 0.0 (which would be a phantom breakeven).
+        # Note: realized_pnl_per_trade rows only contain `side` and
+        # `realized_pnl`. The order matches `closed` (the BTC winner first,
+        # ETH missing-pnl second).
+        assert rpt[0]["realized_pnl"] == 10.0
+        assert rpt[1]["realized_pnl"] is None, (
+            f"missing-PnL position should emit None, not phantom 0.0; got "
+            f"{rpt[1]['realized_pnl']}"
+        )

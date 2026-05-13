@@ -127,19 +127,55 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
 
     # Compute trade_metrics
     closed = [p for p in all_positions if p.get("status") == "closed"]
-    winners = [p for p in closed if (p.get("roi") or 0) > 0]
-    # Phase 12 Plan 05 (B-01 path b): segment closed by ROI sign so the
-    # downstream `_compute_derived_trade_metrics(volume_metrics, trade_metrics)`
-    # in `analytics_runner.py` can produce expectancy / R:R / weighted R:R / SQN /
-    # profit_factor_long / profit_factor_short. Plan 12-06 wires both into the
-    # orchestrator.
-    losers = [p for p in closed if (p.get("roi") or 0) <= 0]
+
+    # Audit-2026-05-07 round-2 / P1994: avg_winning_trade and
+    # avg_losing_trade must be DOLLAR sums (realized_pnl), not ratio
+    # averages (roi). The downstream `_compute_derived_trade_metrics` in
+    # analytics_runner.py expects dollars to derive R:R, expectancy,
+    # weighted R:R, SQN, profit_factor — feeding ratios produced
+    # nonsense values silently.
+    #
+    # Bucketing also moves from `roi` sign to `realized_pnl` sign so:
+    #   - breakevens (realized_pnl == 0) are excluded from both buckets
+    #     and surfaced via data_quality_flags['breakeven_positions']
+    #     rather than depressing avg_losing_trade as the prior
+    #     `(roi or 0) <= 0` lumped them
+    #   - closed positions with realized_pnl=None are NOT silently
+    #     coerced via `or 0` into the losers bucket; they surface via
+    #     data_quality_flags['positions_missing_realized_pnl'] so the
+    #     dashboard can flag the data integrity hole
+    #
+    # ROI-based KPIs (avg_roi, best_trade_roi, worst_trade_roi,
+    # total_positions, open_positions, closed_positions, long_count,
+    # short_count) remain ROI-based by contract — only the dollar
+    # bucketing changes.
+    winners: list[dict] = []
+    losers: list[dict] = []
+    breakevens = 0
+    missing_pnl = 0
+    for p in closed:
+        pnl = p.get("realized_pnl")
+        if pnl is None:
+            missing_pnl += 1
+            continue
+        if pnl > 0:
+            winners.append(p)
+        elif pnl < 0:
+            losers.append(p)
+        else:
+            breakevens += 1
 
     total = len(all_positions)
     closed_count = len(closed)
     open_count = total - closed_count
 
-    win_rate = len(winners) / closed_count if closed_count > 0 else 0.0
+    # Win rate denominator: positions with a decided outcome (winner or
+    # loser). Breakevens and missing-PnL rows are excluded so they don't
+    # depress the rate. Pre-fix the denominator was `closed_count`, which
+    # let breakevens-as-losers depress the rate via the bucket leak.
+    decided = len(winners) + len(losers)
+    win_rate = len(winners) / decided if decided > 0 else 0.0
+
     rois = [p.get("roi", 0) or 0 for p in closed]
     avg_roi = sum(rois) / len(rois) if rois else 0.0
 
@@ -156,26 +192,44 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
     best_roi = max(rois) if rois else 0.0
     worst_roi = min(rois) if rois else 0.0
 
-    # Phase 12 Plan 05 / B-01 path (b) extension — these 5 keys feed
-    # `_compute_derived_trade_metrics` in `analytics_runner.py`. Strictly
-    # additive: every legacy key above is preserved unchanged.
+    # P1994 fix: sum realized_pnl DOLLARS, not ROI ratios. realized_pnl
+    # is guaranteed non-None within the winners/losers buckets by the
+    # loop above.
     avg_winning_trade = (
-        sum((p.get("roi") or 0) for p in winners) / len(winners)
+        sum(p["realized_pnl"] for p in winners) / len(winners)
         if winners
         else 0.0
     )
     avg_losing_trade = (
-        sum((p.get("roi") or 0) for p in losers) / len(losers)
+        sum(p["realized_pnl"] for p in losers) / len(losers)
         if losers
         else 0.0
     )
+    # P1994 fix: emit None (not phantom 0.0) for closed positions
+    # missing realized_pnl. Downstream consumers can now distinguish
+    # "this position broke even" from "we don't know what happened".
     realized_pnl_per_trade = [
         {
             "side": p.get("side"),
-            "realized_pnl": float(p.get("realized_pnl") or 0.0),
+            "realized_pnl": (
+                float(p["realized_pnl"]) if p.get("realized_pnl") is not None else None
+            ),
         }
         for p in closed
     ]
+
+    # P1994 fix: merge breakeven + missing-PnL counters into the
+    # aggregated quality flags so the analytics_runner can surface them
+    # alongside the existing G12.C.* flags.
+    if breakevens:
+        aggregated_data_quality_flags["breakeven_positions"] = (
+            aggregated_data_quality_flags.get("breakeven_positions", 0) + breakevens
+        )
+    if missing_pnl:
+        aggregated_data_quality_flags["positions_missing_realized_pnl"] = (
+            aggregated_data_quality_flags.get("positions_missing_realized_pnl", 0)
+            + missing_pnl
+        )
 
     out: dict[str, Any] = {
         "total_positions": total,
