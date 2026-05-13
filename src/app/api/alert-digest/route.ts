@@ -7,6 +7,22 @@ import { type AlertSeverity } from "@/lib/utils";
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
 
+/**
+ * P446 (audit-2026-05-07) — cap the unacked-alert fetch.
+ *
+ * Pre-fix this route did `SELECT ... FROM portfolio_alerts WHERE
+ * acknowledged_at IS NULL AND emailed_at IS NULL` with NO LIMIT. A
+ * backlog of 10K+ rows (a runaway alert engine, a backfill, a stuck
+ * cron) would OOM the Vercel function before the digest even shipped.
+ *
+ * 1000 sits well above the legitimate 1-hour-window cadence the cron
+ * runs at (a single user's portfolio realistically generates <50 alerts
+ * per cycle) and well below the lambda's memory headroom. When we hit
+ * the limit we log a warning so the operator notices the backlog —
+ * the remaining alerts will land on the next cron cycle.
+ */
+const ALERT_FETCH_LIMIT = 1000;
+
 interface PendingAlertRow {
   id: string;
   portfolio_id: string;
@@ -32,7 +48,9 @@ export async function POST(req: NextRequest) {
 
   const admin = createAdminClient();
 
-  // Fetch all unacked + un-emailed alerts, joined with their portfolio
+  // Fetch all unacked + un-emailed alerts, joined with their portfolio.
+  // P446 (audit-2026-05-07) — capped at ALERT_FETCH_LIMIT to bound
+  // lambda memory; see ALERT_FETCH_LIMIT comment.
   const { data: pending, error: fetchError } = await admin
     .from("portfolio_alerts")
     .select(
@@ -40,14 +58,41 @@ export async function POST(req: NextRequest) {
     )
     .is("acknowledged_at", null)
     .is("emailed_at", null)
-    .order("triggered_at", { ascending: true });
+    .order("triggered_at", { ascending: true })
+    .limit(ALERT_FETCH_LIMIT);
 
   if (fetchError) {
+    // P445 (audit-2026-05-07) — DO NOT leak `fetchError.message` to the
+    // client. Postgres error messages can reveal column names, table
+    // names, constraint detail, and join shapes useful to an attacker.
+    // The cron caller authenticates via CRON_SECRET so it only needs to
+    // know the request failed — Sentry / logs carry the diagnostic.
     console.error("[alert-digest] Fetch failed:", fetchError);
-    return NextResponse.json({ error: fetchError.message }, { status: 500 });
+    void import("@sentry/nextjs")
+      .then((Sentry) => {
+        Sentry.captureException(fetchError, {
+          tags: { route: "/api/alert-digest", phase: "fetch" },
+        });
+      })
+      .catch(() => {});
+    return NextResponse.json(
+      { error: "Failed to send alert digest" },
+      { status: 500 },
+    );
   }
 
   const rows = (pending ?? []) as unknown as PendingAlertRow[];
+
+  // P446 — log a warning at the limit boundary so the operator notices
+  // the backlog. The remaining unacked alerts will surface on the next
+  // cron tick; we don't paginate within a single invocation because the
+  // groups+sends cost grows with row count and the cron is idempotent.
+  if (rows.length === ALERT_FETCH_LIMIT) {
+    console.warn(
+      `[alert-digest] hit ALERT_FETCH_LIMIT (${ALERT_FETCH_LIMIT}). Backlog likely — remaining alerts deferred to next cron tick.`,
+    );
+  }
+
   if (rows.length === 0) {
     return NextResponse.json({ users_notified: 0, alerts_sent: 0 });
   }
@@ -153,9 +198,18 @@ export async function POST(req: NextRequest) {
       .in("id", sentAlertIds);
 
     if (updateError) {
+      // P445 — same rationale as the fetchError branch: don't leak
+      // Postgres error.message. Sentry carries the diagnostic.
       console.error("[alert-digest] Failed to mark emailed:", updateError);
+      void import("@sentry/nextjs")
+        .then((Sentry) => {
+          Sentry.captureException(updateError, {
+            tags: { route: "/api/alert-digest", phase: "mark-emailed" },
+          });
+        })
+        .catch(() => {});
       return NextResponse.json(
-        { error: updateError.message },
+        { error: "Failed to send alert digest" },
         { status: 500 },
       );
     }
