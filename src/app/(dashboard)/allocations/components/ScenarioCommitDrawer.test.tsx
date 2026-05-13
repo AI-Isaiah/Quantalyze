@@ -431,3 +431,182 @@ describe("T_D14 / T_D15 — close paths", () => {
     expect(onClose).toHaveBeenCalled();
   });
 });
+
+// ===========================================================================
+// P1934 — audit-2026-05-07 Block C / Task C.2
+//
+// AbortController on in-flight fetch + Esc-during-submit guard + strict
+// success gate (recorded must match diffs.length) + Idempotency-Key header.
+// ===========================================================================
+
+describe("P1934 — Esc during submit must NOT close the drawer", () => {
+  it("Esc keydown while state==='submitting' is ignored (onClose not called)", async () => {
+    vi.useRealTimers();
+    // Stall the fetch so the drawer sits in state==='submitting'.
+    const fetchSpy = vi.fn(
+      () =>
+        new Promise(() => {
+          /* never resolves — keep drawer in submitting state */
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onClose = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={onClose}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    // Click pre-flight Submit so state transitions to 'submitting' and
+    // the never-resolving fetch is in flight.
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    // Yield once so the click handler swaps state to 'submitting'.
+    await Promise.resolve();
+
+    // Esc must be a no-op while submitting (P1934).
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("P1934 — unmount during in-flight fetch aborts the request", () => {
+  it("unmounting the drawer mid-submit triggers AbortController.abort() on the in-flight fetch signal", async () => {
+    vi.useRealTimers();
+    let capturedSignal: AbortSignal | undefined;
+    const fetchSpy = vi.fn(
+      (_url: string, init: { signal?: AbortSignal }) => {
+        capturedSignal = init?.signal;
+        return new Promise(() => {
+          /* never resolves */
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { unmount } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await Promise.resolve();
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(false);
+
+    unmount();
+
+    // After unmount the cleanup effect should call abort() on the in-flight
+    // signal so React doesn't leak a setState after unmount.
+    expect(capturedSignal?.aborted).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("P1934 — strict success gate (recorded must equal diffs.length)", () => {
+  it("server returns recorded:1 for 3 diffs → drawer enters 'failure' AND onSubmitSuccess NOT called", async () => {
+    vi.useRealTimers();
+    // Server claims partial success — pre-fix the drawer accepted any
+    // `recorded > 0 && no errors` as full success; post-fix the gate
+    // requires recorded === diffs.length.
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ recorded: 1, results: [], errors: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF, VM_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF, VM_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    // Drawer must NOT collapse to the success card.
+    await waitFor(() => {
+      // The success card carries the "decisions recorded" copy; assert
+      // it is never shown because the gate is strict.
+      expect(screen.queryByText(/decisions recorded/i)).toBeNull();
+    });
+    // Wait a beat past any spurious timer to be sure onSubmitSuccess never
+    // fired (the success branch has a 1.5s auto-close + onSubmitSuccess
+    // call; failure has neither).
+    await new Promise((r) => setTimeout(r, 50));
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("P1934 — Idempotency-Key header on commit fetch", () => {
+  it("fetch is called with an Idempotency-Key header per submit (Block D contract)", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ recorded: 1, results: [], errors: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    // Headers may be a plain object or a Headers instance — accept both.
+    const init = fetchSpy.mock.calls[0][1] as {
+      headers: Record<string, string> | Headers;
+    };
+    const headers = init.headers;
+    const getHeader = (k: string) =>
+      headers instanceof Headers
+        ? headers.get(k)
+        : Object.entries(headers).find(
+            ([name]) => name.toLowerCase() === k.toLowerCase(),
+          )?.[1];
+    expect(getHeader("Idempotency-Key")).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+});
+

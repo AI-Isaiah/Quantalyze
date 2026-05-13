@@ -89,6 +89,10 @@ export function ScenarioCommitDrawer({
   // into the diffs at POST time so the wire shape matches the schema.
   const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
   const drawerRef = useRef<HTMLDivElement>(null);
+  // P1934 (audit-2026-05-07 Block C / C.2) — AbortController so an
+  // unmount or a repeat submit click cancels the in-flight POST and the
+  // post-fetch setState calls don't fire against an unmounted component.
+  const abortRef = useRef<AbortController | null>(null);
 
   // Reset transient state on close; install Esc handler when open.
   useEffect(() => {
@@ -101,11 +105,28 @@ export function ScenarioCommitDrawer({
       return;
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // P1934 — Esc must be a no-op while the batch is in-flight. The
+      // backend has a single-tx contract: silently closing the drawer
+      // mid-submit leaves the allocator wondering whether their commit
+      // landed. Force the user to wait for the terminal state (success
+      // collapses + auto-closes; failure leaves the drawer open with
+      // per-row errors so they can edit and retry).
+      if (state === "submitting") return;
+      onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, state]);
+
+  // P1934 — on unmount, abort any in-flight fetch so we don't leak a
+  // setState-after-unmount when the response comes back to a destroyed
+  // component. Empty deps so the cleanup fires exactly once on unmount.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // 1.5s success auto-close.
   useEffect(() => {
@@ -194,29 +215,55 @@ export function ScenarioCommitDrawer({
   }
 
   async function handleSubmit() {
+    // P1934 — supersede any prior in-flight request and arm a fresh
+    // AbortController so unmount / repeat-submit can cancel cleanly.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setState("submitting");
     try {
       const res = await fetch("/api/allocator/scenario/commit", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          // P1934 — Block D server honors Idempotency-Key for safe replay.
+          // If Block D hasn't shipped yet the header is silently ignored
+          // (no deserialization gate on the server side).
+          "Idempotency-Key":
+            typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        },
         body: JSON.stringify({ diffs: buildSubmitDiffs() }),
+        signal: controller.signal,
       });
       const json = (await res.json()) as SubmitResponse;
       setResponse(json);
-      // H4 — full-success vs full-failure ONLY (no partial state). The
-      // route's single-tx RPC returns ok=true with all rows recorded, OR
-      // ok=false with per-row errors and recorded=0 (the tx rolled back).
-      // The UI mirrors that contract here.
-      if (
+      // P1934 — strict success gate: the route's single-tx RPC commits the
+      // WHOLE batch or rolls back the WHOLE batch. `recorded === diffs.length`
+      // is the only signal that all rows landed. A `recorded:1` reply for
+      // a 3-row diff is a partial-state leak from the backend and must
+      // surface as failure on the client so onSubmitSuccess does NOT fire
+      // and the draft is NOT cleared.
+      const fullSuccess =
         res.ok &&
-        json.recorded > 0 &&
-        (!json.errors || json.errors.length === 0)
+        json.recorded === diffs.length &&
+        (!json.errors || json.errors.length === 0);
+      setState(fullSuccess ? "success" : "failure");
+    } catch (err) {
+      // AbortError on user-initiated cancel / unmount — swallow silently
+      // so the destroyed component does not setState. Any other error is
+      // a true network failure and surfaces as failure state.
+      if (
+        err instanceof DOMException &&
+        err.name === "AbortError"
       ) {
-        setState("success");
-      } else {
-        setState("failure");
+        return;
       }
-    } catch {
+      // Also catch the AbortController.abort() signal-thrown error in
+      // environments where it isn't a DOMException (some polyfills).
+      if (controller.signal.aborted) return;
       setState("failure");
       setResponse({
         recorded: 0,
