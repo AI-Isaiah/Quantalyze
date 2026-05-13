@@ -97,6 +97,16 @@ BEGIN
   ON CONFLICT (id) DO NOTHING;
 
   -- Switch to authenticated role (mimics the user's PostgREST session).
+  -- PR #150 follow-up: forge the request.jwt.claims sub so auth.uid()
+  -- resolves to test_uid. Without this the profiles RLS USING clause
+  -- (`id = auth.uid()`) evaluates to NULL for every row, the UPDATE
+  -- matches zero rows, the BEFORE UPDATE trigger never fires, and the
+  -- test reads as a false-positive "trigger missing".
+  PERFORM set_config(
+    'request.jwt.claims',
+    json_build_object('sub', test_uid::text, 'role', 'authenticated')::text,
+    true
+  );
   SET LOCAL ROLE authenticated;
 
   BEGIN
@@ -252,6 +262,13 @@ BEGIN
   VALUES (test_uid, 'finding3 name', 'test-finding3@quantalyze.test')
   ON CONFLICT (id) DO NOTHING;
 
+  -- Forge JWT sub so RLS admits the row to the authenticated role's view.
+  -- See Test 2 / PR #150 follow-up note for the full rationale.
+  PERFORM set_config(
+    'request.jwt.claims',
+    json_build_object('sub', test_uid::text, 'role', 'authenticated')::text,
+    true
+  );
   SET LOCAL ROLE authenticated;
   PERFORM set_config('quantalyze.sanitize_in_progress', 'on', true);
 
@@ -324,6 +341,15 @@ BEGIN
   INSERT INTO profiles (id, display_name, email)
   VALUES (test_uid, 'finding4 name', 'test-finding4@quantalyze.test')
   ON CONFLICT (id) DO NOTHING;
+
+  -- Forge JWT sub so RLS admits the seeded row to the authenticated
+  -- role's view. Set once at the top of the test; each loop iteration
+  -- only swaps ROLE.
+  PERFORM set_config(
+    'request.jwt.claims',
+    json_build_object('sub', test_uid::text, 'role', 'authenticated')::text,
+    true
+  );
 
   FOREACH v_variant IN ARRAY variants LOOP
     raised := FALSE;

@@ -150,6 +150,17 @@ $$;
 --
 -- Post-127, the trigger ignores the GUC entirely; the current_user
 -- check fires and raises ERRCODE 42501.
+--
+-- RLS scaffolding (PR #150 follow-up — first CI run of sql-tests):
+-- `SET LOCAL ROLE authenticated` alone leaves auth.uid() returning NULL,
+-- so the strategies RLS USING clause (`user_id = auth.uid()`) excludes
+-- every row from the role's visibility. The UPDATE then matches zero
+-- rows and the BEFORE UPDATE trigger never fires, producing a
+-- false-positive "bypass succeeded". The fix is to forge the
+-- `request.jwt.claims` GUC so auth.uid() returns the seeded user's id,
+-- giving the role legitimate UPDATE access — then the security boundary
+-- the test is actually trying to assert (the trigger's current_user gate)
+-- is the only thing standing between the role and the row.
 -- --------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -183,6 +194,16 @@ BEGIN
     '{}', '{}', '{}', ARRAY['binance']
   ) RETURNING id INTO test_sid;
 
+  -- Forge the JWT sub claim so auth.uid() resolves to test_uid for the
+  -- duration of this transaction. RLS on strategies then admits the row
+  -- to the authenticated role's view; the only thing that can still
+  -- reject the UPDATE is the guard trigger's current_user check (which
+  -- is exactly what this test is asserting).
+  PERFORM set_config(
+    'request.jwt.claims',
+    json_build_object('sub', test_uid::text, 'role', 'authenticated')::text,
+    true
+  );
   SET LOCAL ROLE authenticated;
 
   -- Attempt the bypass: smuggle the GUC then issue the promotion UPDATE.
