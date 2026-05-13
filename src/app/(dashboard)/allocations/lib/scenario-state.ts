@@ -366,15 +366,24 @@ export function setWeightOverride(
   scopeRef: string,
   newWeight: number,
 ): ScenarioDraft {
+  // P1936 (audit-2026-05-07 Block C / C.4) — refuse non-finite weights as a
+  // no-op so a coerced Number(input) of "NaN" / Infinity at the input edge
+  // can't blow up downstream renormalize math. Clamp finite values to
+  // [0, 1] — the wire schema rejects anything outside that range, and a
+  // negative or >1 weight produces nonsensical renormalize scaling
+  // (negative remainingMass / >1 scale factor).
+  if (!Number.isFinite(newWeight)) return draft;
+  const clamped = Math.min(1, Math.max(0, newWeight));
+
   const enabledIds = enabledIdsOf(draft);
   const otherIds = enabledIds.filter((id) => id !== scopeRef);
   const otherSum = otherIds.reduce(
     (s, id) => s + (draft.weightOverrides[id] ?? 0),
     0,
   );
-  const remainingMass = 1 - newWeight;
+  const remainingMass = 1 - clamped;
   const nextWeights: Record<string, number> = { ...draft.weightOverrides };
-  nextWeights[scopeRef] = newWeight;
+  nextWeights[scopeRef] = clamped;
 
   if (otherSum === 0) {
     // Fall back to equal distribution of the remaining mass.
