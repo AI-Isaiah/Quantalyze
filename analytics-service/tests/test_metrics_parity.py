@@ -36,6 +36,12 @@ from services.position_reconstruction import compute_turnover_series
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
+# audit-2026-05-07 G.2 / P2005: top-level keys in golden_252d_expected.json
+# that are fixture-metadata, not metrics output. The parity comparator MUST
+# allow these as legitimate "extra" top-level keys instead of failing the
+# extra-keys check.
+_FIXTURE_METADATA_KEYS = {"_fixture_has_maker_taker"}
+
 
 def _round_sig(x: float, sig: int = 12) -> float:
     """Round to N significant digits (D-11 scalar comparator)."""
@@ -175,6 +181,11 @@ def assertMetricParity(actual: dict, expected: dict, prefix: str = "") -> None:
     """
     actual_keys = set(actual.keys())
     expected_keys = set(expected.keys())
+    # audit-2026-05-07 G.2 / P2005: at the top level (prefix == ""), permit
+    # fixture-metadata keys (e.g. _fixture_has_maker_taker) that the regen
+    # script pins into the JSON for cross-process contract enforcement.
+    if prefix == "":
+        expected_keys -= _FIXTURE_METADATA_KEYS
     missing = expected_keys - actual_keys
     extra = actual_keys - expected_keys
     assert not missing, f"{prefix}: missing keys in actual: {sorted(missing)}"
@@ -244,7 +255,24 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     volume_metrics = _compute_volume_metrics(fills)
     volume_aggregator = _compute_volume_aggregator(fills)
     derived = _compute_derived_trade_metrics(volume_metrics, trade_metrics_from_positions)
-    has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER") == "true"
+    # audit-2026-05-07 G.2 / P2005: prefer the pinned fixture-mode over the
+    # env. If both are set they MUST agree, otherwise CI silently tests the
+    # wrong bucket shape — fail loud instead.
+    fixture_has_maker_taker = bool(
+        golden_252d_expected.get("_fixture_has_maker_taker", False)
+    )
+    env_has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER")
+    if env_has_maker_taker is not None:
+        expected_env = "true" if fixture_has_maker_taker else "false"
+        if env_has_maker_taker != expected_env:
+            raise AssertionError(
+                f"TRADE_MIX_HAS_MAKER_TAKER env ({env_has_maker_taker!r}) "
+                f"contradicts fixture pinned mode "
+                f"(_fixture_has_maker_taker={fixture_has_maker_taker}). "
+                "Regenerate the fixture with the env you want, or unset the "
+                "env. (audit-2026-05-07 P2005)"
+            )
+    has_maker_taker = fixture_has_maker_taker
     trade_mix = _compute_trade_mix(fills, has_maker_taker=has_maker_taker)
     # KPI-17 follow-up: position-side volume pcts. Fixture has no
     # positions list so the helper returns 0/0 — preserves the prior
@@ -264,25 +292,56 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     metrics_json["trade_metrics"] = merged_trade_metrics
     metrics_json["volume_metrics"] = volume_aggregator
 
-    # H-A1: compute exposure_series + turnover_series the same way as regen_golden.py
+    # audit-2026-05-07 G.1 / P2004: turnover_series is a runner-level
+    # sibling kind populated by analytics_runner via compute_turnover_series.
+    # Previously, this test contained an inline fallback that re-derived the
+    # whole series if compute_all_metrics().sibling_kinds was missing the key
+    # — that fallback duplicated production math, so a bug in
+    # compute_turnover_series could never fail the parity assertion. We now
+    # invoke the production helper directly. If a future refactor moves
+    # turnover_series into compute_all_metrics, fail loud so the engineer
+    # updates the harness instead of double-computing.
     sibling = dict(result.sibling_kinds)
-    if "exposure_series" not in sibling:
-        # Mirror fixture's exposure_series computation
-        symbols = list(next(iter(prices_by_date.values())).keys())
-        exposure_series: list[dict[str, Any]] = []
-        for d in sorted(positions_by_date.keys()):
-            day_p = positions_by_date[d]
-            day_pr = prices_by_date[d]
-            gross = sum(abs(day_p[s] * day_pr[s]) for s in symbols)
-            net = sum(day_p[s] * day_pr[s] for s in symbols)
-            exposure_series.append(
-                {"date": d, "gross": round(gross, 6), "net": round(net, 6)}
-            )
-        sibling["exposure_series"] = exposure_series
-    if "turnover_series" not in sibling:
-        sibling["turnover_series"] = compute_turnover_series(
-            positions_by_date, prices_by_date, nav_by_date
+    if "turnover_series" in sibling:
+        raise AssertionError(
+            "compute_all_metrics().sibling_kinds unexpectedly contains "
+            "'turnover_series' — this is a runner-level sibling kind. If "
+            "you intentionally moved it into compute_all_metrics, update "
+            "the parity test harness to stop computing it twice. "
+            "(audit-2026-05-07 P2004)"
         )
+    sibling["turnover_series"] = compute_turnover_series(
+        positions_by_date, prices_by_date, nav_by_date
+    )
+    # exposure_series: the production helper compute_exposure_metrics is
+    # async and reads position_snapshots from Supabase, so it cannot be
+    # invoked from this offline parity test. We project the same shape from
+    # the in-memory fixture (positions_by_date × prices_by_date), matching
+    # what the runner stores. This DOES re-implement the projection — a
+    # known irreducible limit of the offline test; the integration tests
+    # in test_equity_reconstruction_integration.py and the runner suite
+    # exercise the real DB-backed helper.
+    # P2004 mitigation: if compute_all_metrics ever starts emitting
+    # exposure_series, fail loud so the harness gets revisited.
+    if "exposure_series" in sibling:
+        raise AssertionError(
+            "compute_all_metrics().sibling_kinds unexpectedly contains "
+            "'exposure_series' — this is a runner-level sibling kind. If "
+            "you intentionally moved it into compute_all_metrics, update "
+            "the parity test harness to stop computing it twice. "
+            "(audit-2026-05-07 P2004)"
+        )
+    symbols = list(next(iter(prices_by_date.values())).keys())
+    exposure_series: list[dict[str, Any]] = []
+    for d in sorted(positions_by_date.keys()):
+        day_p = positions_by_date[d]
+        day_pr = prices_by_date[d]
+        gross = sum(abs(day_p[s] * day_pr[s]) for s in symbols)
+        net = sum(day_p[s] * day_pr[s] for s in symbols)
+        exposure_series.append(
+            {"date": d, "gross": round(gross, 6), "net": round(net, 6)}
+        )
+    sibling["exposure_series"] = exposure_series
 
     actual = {
         "metrics_json": metrics_json,
