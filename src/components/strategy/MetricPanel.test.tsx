@@ -135,8 +135,9 @@ describe("MetricPanel", () => {
     fireEvent.click(screen.getByText("Trade Metrics"));
 
     // Locate the chip body so we don't false-match rows in other groups.
+    // heading is the <button>; its parent is the chip wrapper <div class="border-b ...">.
     const heading = screen.getByText("Trade Metrics");
-    const chip = heading.parentElement?.parentElement;
+    const chip = heading.parentElement;
     expect(chip).toBeTruthy();
     const scoped = within(chip as HTMLElement);
 
@@ -186,7 +187,7 @@ describe("MetricPanel", () => {
     fireEvent.click(screen.getByText("Trade Metrics"));
 
     const heading = screen.getByText("Trade Metrics");
-    const chip = heading.parentElement?.parentElement;
+    const chip = heading.parentElement;
     const scoped = within(chip as HTMLElement);
 
     // Long Share still renders (computed from long_count / total_positions).
@@ -220,7 +221,7 @@ describe("MetricPanel", () => {
     fireEvent.click(screen.getByText("Trade Metrics"));
 
     const heading = screen.getByText("Trade Metrics");
-    const chip = heading.parentElement?.parentElement;
+    const chip = heading.parentElement;
     const scoped = within(chip as HTMLElement);
 
     expect(scoped.queryByText("Maker Share")).not.toBeInTheDocument();
