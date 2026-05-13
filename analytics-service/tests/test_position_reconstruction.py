@@ -1703,12 +1703,27 @@ class TestReconstructIdempotency:
         """Two concurrent reconstruct_positions(X) calls must serialize so
         the second one runs only AFTER the first releases the lock.
 
-        We assert serialization by tracking the order of atomic-rebuild RPC
-        invocations: under the lock, the RPC calls cannot interleave with
-        each other's surrounding work (no two callers can both be "between"
-        their fetch and their RPC at the same time). We use a sentinel
-        recorded inside the patched RPC to prove no parallel entry into the
-        critical section ever happens.
+        Implementation note (code-review fixup, audit-2026-05-07 round 2):
+        the original version of this test wrapped supabase.rpc with a
+        synchronous tracking function that had no `await` inside, so two
+        coroutines could not interleave inside the hook and max_in_flight
+        was structurally capped at 1 regardless of whether the lock was
+        present. That made the test pass even with `async with _lock_for(...)`
+        deleted — i.e. it was not load-bearing (CLAUDE.md Rule 9).
+
+        The fix mirrors `test_different_strategies_do_not_block_each_other`:
+        patch `db_execute` with an async hook that has a real yield point
+        (`await asyncio.sleep(...)`). Now the two coroutines can genuinely
+        interleave on the `await`, so:
+          - With the lock present, only one caller is ever inside
+            `_reconstruct_positions_inner` → max_in_flight == 1.
+          - Without the lock (sanity check — remove `async with _lock_for(...)`
+            and the assertion fails), both callers race through
+            `await db_execute(...)` simultaneously → max_in_flight == 2.
+
+        We also assert call ordering: the second caller's first db_execute
+        must happen AFTER the first caller's last db_execute (strict
+        non-interleaving — the gold standard for serialization).
         """
         # Reset the module-level lock dict so a previous test's strategy_id
         # entries do not leak in.
@@ -1731,26 +1746,43 @@ class TestReconstructIdempotency:
         ]
         mock_supabase = _make_mock_supabase(fills=fills)
 
-        # Track concurrency inside the critical section. We instrument
-        # the RPC so we can verify no two callers are inside the lock at
-        # once — i.e. when caller B enters the RPC, caller A has already
-        # released the lock.
+        # Slow async hook on db_execute — the await asyncio.sleep is the
+        # yield point that lets the event loop schedule the other gather()
+        # coroutine. WITHOUT the lock, both callers reach the sleep and
+        # in_flight peaks at 2. WITH the lock, only one caller is ever
+        # inside _reconstruct_positions_inner at a time and in_flight stays
+        # at 1.
         in_flight = 0
         max_in_flight = 0
-        original_rpc = mock_supabase.rpc
+        # Monotonically-increasing per-call sequence. We use this to
+        # establish the strict-ordering invariant: every db_execute call by
+        # the second-to-arrive caller must come AFTER every db_execute call
+        # by the first-to-arrive caller.
+        call_log: list[tuple[int, str]] = []  # (in_flight_at_entry, event)
+        call_counter = 0
 
-        def tracking_rpc(name, payload=None):
-            nonlocal in_flight, max_in_flight
+        async def slow_db_execute(fn):
+            nonlocal in_flight, max_in_flight, call_counter
+            call_counter += 1
+            my_seq = call_counter
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
+            call_log.append((my_seq, f"enter:{in_flight}"))
             try:
-                return original_rpc(name, payload)
+                # Yield to the event loop. Without the lock, this is where
+                # the second coroutine wakes up and ALSO enters this hook,
+                # driving in_flight to 2.
+                await asyncio.sleep(0.005)
+                result = await asyncio.to_thread(fn)
+                return result
             finally:
                 in_flight -= 1
+                call_log.append((my_seq, f"exit:{in_flight}"))
 
-        mock_supabase.rpc = tracking_rpc
-
-        with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=slow_db_execute,
+        ):
             r1, r2 = await asyncio.gather(
                 reconstruct_positions("strat-lock-1", mock_supabase),
                 reconstruct_positions("strat-lock-1", mock_supabase),
@@ -1771,14 +1803,41 @@ class TestReconstructIdempotency:
             f"Expected 2 sequential atomic-rebuild RPC calls (one per caller, "
             f"serialized under the lock), got {len(atomic_rpc_calls)}."
         )
-        # The critical-section invariant: never more than ONE caller in
-        # the RPC at any moment. Without the asyncio.Lock, asyncio.gather
-        # would race both callers into the RPC simultaneously (max_in_flight=2).
+
+        # The critical-section invariant — load-bearing assertion. Without
+        # the asyncio.Lock, asyncio.gather + the await asyncio.sleep yield
+        # point in slow_db_execute would race both callers into
+        # _reconstruct_positions_inner simultaneously → max_in_flight == 2.
+        # With the lock, the second caller waits at `async with
+        # _lock_for(strategy_id)` and never enters until the first releases.
         assert max_in_flight == 1, (
-            f"Expected at most 1 caller inside the atomic-rebuild RPC at a "
-            f"time (serialized via asyncio.Lock on strategy_id), saw "
+            f"Expected at most 1 caller inside _reconstruct_positions_inner "
+            f"at a time (serialized via asyncio.Lock on strategy_id), saw "
             f"max_in_flight={max_in_flight}. Caller-layer lock not serializing."
         )
+
+        # Strict-ordering invariant: ALL of caller A's db_execute events
+        # must complete before ANY of caller B's begin. We detect this by
+        # walking call_log and asserting in_flight never exceeded 1 and
+        # that the sequence shows two disjoint runs (enter→exit pairs do
+        # not interleave). The max_in_flight==1 check above already covers
+        # the no-overlap case, but this is the explicit "second caller
+        # runs strictly after first" form.
+        # Each db_execute call must enter and exit before the next enters.
+        prev_event = None
+        for seq, event in call_log:
+            kind = event.split(":")[0]
+            if prev_event is not None:
+                prev_kind = prev_event.split(":")[0]
+                # Allowed transitions under serialization: enter→exit,
+                # exit→enter. Forbidden: enter→enter (would mean two
+                # callers inside simultaneously).
+                assert not (prev_kind == "enter" and kind == "enter"), (
+                    f"Two consecutive 'enter' events in call_log "
+                    f"({prev_event} → {event}) — second db_execute started "
+                    f"before first finished, lock not serializing."
+                )
+            prev_event = event
 
     @pytest.mark.asyncio
     async def test_different_strategies_do_not_block_each_other(self) -> None:
