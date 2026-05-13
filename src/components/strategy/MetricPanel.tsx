@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
 import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
-import type { StrategyAnalytics } from "@/lib/types";
+import type { StrategyAnalytics, TradeMetrics } from "@/lib/types";
 
 interface MetricGroup {
   title: string;
@@ -16,7 +16,7 @@ export type Percentiles = Record<string, number> | null;
 
 function buildGroups(a: StrategyAnalytics): MetricGroup[] {
   const m = a.metrics_json as Record<string, number> | null;
-  const tm = a.trade_metrics as Record<string, number> | null;
+  const tm = a.trade_metrics as TradeMetrics | null;
 
   return [
     {
@@ -103,12 +103,41 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
       title: "Trade Metrics",
       defaultOpen: false,
       hide: tm == null,
-      metrics: [
-        { label: "Total Trades", value: tm?.total_trades != null ? Math.round(tm.total_trades).toLocaleString() : "—" },
-        { label: "Win Rate", value: formatPercent(tm?.win_rate) },
-        { label: "Maker %", value: formatPercent(tm?.maker_pct) },
-        { label: "Long %", value: formatPercent(tm?.long_pct) },
-      ],
+      // Trade Metrics rows are derived from the actual `TradeMetrics` fields
+      // (P2035 fix). Pre-fix this group read `total_trades`, `maker_pct`,
+      // `long_pct` — none of which exist on TradeMetrics — and rendered "—"
+      // for 3 of 4 rows on every strategy.
+      metrics: (() => {
+        if (tm == null) return [];
+        const total = tm.total_positions ?? 0;
+        const longShare = total > 0 ? tm.long_count / total : null;
+        // 4-bucket trade_mix carries maker/taker counts; 2-bucket does not.
+        const mix = tm.trade_mix;
+        const has4Bucket =
+          !!mix &&
+          (mix.long_maker !== undefined || mix.short_maker !== undefined);
+        let makerShare: number | null = null;
+        if (has4Bucket && mix) {
+          const lm = mix.long_maker?.count ?? 0;
+          const lt = mix.long_taker?.count ?? 0;
+          const sm = mix.short_maker?.count ?? 0;
+          const st = mix.short_taker?.count ?? 0;
+          const mixTotal = lm + lt + sm + st;
+          makerShare = mixTotal > 0 ? (lm + sm) / mixTotal : null;
+        }
+        const rows: MetricGroup["metrics"] = [
+          {
+            label: "Total Positions",
+            value: total > 0 ? total.toLocaleString() : "—",
+          },
+          { label: "Win Rate", value: formatPercent(tm.win_rate) },
+          { label: "Long Share", value: formatPercent(longShare) },
+        ];
+        if (makerShare !== null) {
+          rows.push({ label: "Maker Share", value: formatPercent(makerShare) });
+        }
+        return rows;
+      })(),
     },
   ];
 }
