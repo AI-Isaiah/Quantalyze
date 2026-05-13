@@ -4,15 +4,28 @@ import { Redis } from "@upstash/redis";
 /**
  * Upstash rate-limit helpers for sensitive routes.
  *
- * Graceful degradation: when UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
- * are missing (e.g., local dev without an Upstash account), checkLimit()
- * returns { success: true } and logs a single startup warning. This keeps
- * `npm run dev` working without requiring every developer to create an
- * Upstash database.
+ * Behavior matrix (P709, audit-2026-05-07):
  *
- * In production, the env vars are expected to be set in Vercel. If they go
- * missing in production, rate limiting silently allows everything — flagged
- * in the plan as a known prod-readiness gap that a canary job should detect.
+ *   Environment      | Upstash configured | Upstash throws | Result
+ *   -----------------+--------------------+----------------+--------------------
+ *   production       | yes                | no             | enforce limiter
+ *   production       | yes                | yes            | fail-CLOSED → 503
+ *   production       | no                 | n/a            | fail-CLOSED → 503
+ *   non-prod (dev,   | yes                | no             | enforce limiter
+ *   preview, test)   | yes                | yes            | fail-OPEN + warn
+ *                    | no                 | n/a            | fail-OPEN + warn
+ *
+ * Rationale: a misconfigured production deploy must NOT silently disable
+ * rate limiting on cost-sensitive endpoints (GDPR export 1/day, CSV
+ * validate, audit-log export). Pre-P709 behavior fell open on missing env
+ * vars, which effectively removed the regulatory cadence cap. Production
+ * now treats a missing limiter as a 503 Service Unavailable signal so the
+ * upstream lambda startup or canary catches the misconfig before any
+ * abuse window opens.
+ *
+ * Outside production we keep fail-OPEN so `npm run dev` works without an
+ * Upstash account, with a console.warn so devs notice during the first
+ * request rather than silently sailing through.
  *
  * Complementary to the in-memory `acquirePdfSlot` semaphore in
  * `src/lib/puppeteer.ts`. The semaphore caps per-lambda Chromium concurrency
@@ -20,16 +33,37 @@ import { Redis } from "@upstash/redis";
  * protection). Both layers should stay in place.
  */
 
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
 const redis =
   process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
     ? Redis.fromEnv()
     : null;
 
 if (!redis) {
-  // Log once at module load, not per request.
-  console.warn(
-    "[ratelimit] UPSTASH_REDIS_REST_URL not configured — rate limiting disabled (all requests allowed through).",
-  );
+  if (isProduction()) {
+    // Fail-CLOSED in production: surface loudly so the deploy is visibly
+    // misconfigured rather than silently uncapped. process.emitWarning
+    // appears in lambda startup logs alongside the boot trace.
+    console.error(
+      "[ratelimit] UPSTASH_REDIS_REST_URL not configured in production — rate limiting will fail-CLOSED (503).",
+    );
+    try {
+      process.emitWarning(
+        "Upstash rate-limit env vars missing in production; affected routes will respond 503.",
+        "QuantalyzeRateLimitMisconfig",
+      );
+    } catch {
+      // emitWarning is best-effort; do not crash the module load.
+    }
+  } else {
+    // Log once at module load, not per request.
+    console.warn(
+      "[ratelimit] UPSTASH_REDIS_REST_URL not configured — rate limiting disabled (all requests allowed through in dev/preview).",
+    );
+  }
 }
 
 function makeLimiter(
@@ -113,19 +147,67 @@ export const csvValidateLimiter = makeLimiter(20, "60 s");
 // from exportLimiter (1/day for the heavier full-account GDPR bundle).
 export const auditLogExportLimiter = makeLimiter(10, "3600 s");
 
+/**
+ * Discriminated result of `checkLimit`. The denial branch always
+ * carries `retryAfter` (so existing callers that read `rl.retryAfter`
+ * after `if (!rl.success)` keep working post-P709) and OPTIONALLY
+ * carries `reason: "ratelimit_misconfigured"` for the fail-CLOSED
+ * production-misconfig path. Callers that want to translate misconfig
+ * into a 503 should use `isRateLimitMisconfigured(rl)`; callers that
+ * only need to deny continue to surface a 429.
+ *
+ * The `retryAfter` on the misconfig path is a synthetic 60s placeholder
+ * — long enough that the canary alert can fire, short enough that
+ * legitimate traffic recovers automatically once env vars are restored.
+ */
 export type CheckLimitResult =
   | { success: true }
-  | { success: false; retryAfter: number };
+  | {
+      success: false;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    };
+
+/**
+ * Narrow a CheckLimitResult to the misconfigured-fail-closed variant.
+ * Routes use this to convert `{success:false, reason:'ratelimit_misconfigured'}`
+ * into a 503 Service Unavailable so canary/health checks see the
+ * configuration outage rather than a 429-shaped "user is being throttled"
+ * response.
+ */
+export function isRateLimitMisconfigured(
+  result: CheckLimitResult,
+): result is { success: false; retryAfter: number; reason: "ratelimit_misconfigured" } {
+  return (
+    result.success === false && result.reason === "ratelimit_misconfigured"
+  );
+}
+
+/** Synthetic Retry-After (seconds) for the misconfigured fail-CLOSED path. */
+const MISCONFIGURED_RETRY_AFTER_S = 60;
 
 /**
  * Consume one rate-limit token for the given identifier. Returns success
  * with retryAfter (seconds) when the limit is exceeded.
+ *
+ * Fail-CLOSED in production when the limiter is null (missing Upstash env)
+ * or the underlying limiter call throws — the `reason: "ratelimit_misconfigured"`
+ * variant signals route handlers to emit 503 Service Unavailable. Fail-OPEN
+ * outside production so local dev / preview deploys without Upstash keep
+ * working. See P709 + the module docstring for the full behavior matrix.
  */
 export async function checkLimit(
   limiter: Ratelimit | null,
   identifier: string,
 ): Promise<CheckLimitResult> {
   if (!limiter) {
+    if (isProduction()) {
+      return {
+        success: false,
+        retryAfter: MISCONFIGURED_RETRY_AFTER_S,
+        reason: "ratelimit_misconfigured",
+      };
+    }
     return { success: true };
   }
   try {
@@ -134,9 +216,18 @@ export async function checkLimit(
     const retryAfter = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
     return { success: false, retryAfter };
   } catch (err) {
-    // If Upstash itself errors (network, rate-limit-on-ratelimit), fail open
-    // rather than blocking a legitimate user.
-    console.error("[ratelimit] check failed, failing open:", err);
+    // Upstash itself errored (network, rate-limit-on-ratelimit). In
+    // production fail-CLOSED so a Redis outage doesn't silently unlock
+    // cost-sensitive endpoints; outside production fail-OPEN so a dev
+    // without Upstash can still iterate.
+    console.error("[ratelimit] check failed:", err);
+    if (isProduction()) {
+      return {
+        success: false,
+        retryAfter: MISCONFIGURED_RETRY_AFTER_S,
+        reason: "ratelimit_misconfigured",
+      };
+    }
     return { success: true };
   }
 }
