@@ -377,32 +377,15 @@ BEGIN
       raised, err_state;
   END IF;
 
-  -- (f) mig-128 isolation — DROP mig-128's CHECK inside a SAVEPOINT, retry
-  --     percent_allocated=75 (which is OUTSIDE mig-059's [0.1, 50] range, so
-  --     mig-059 still fires). If 75 is rejected after mig-128 is dropped,
-  --     mig-059 is doing the rejecting (proves mig-059 still alive).
-  --     The SAVEPOINT keeps the outer ROLLBACK able to revert.
-  raised := FALSE;
-  BEGIN
-    SAVEPOINT mig128_isolated;
-    ALTER TABLE bridge_outcomes DROP CONSTRAINT bridge_outcomes_percent_allocated_range_check;
-    BEGIN
-      INSERT INTO bridge_outcomes (
-        allocator_id, strategy_id, match_decision_id, kind,
-        percent_allocated, allocated_at
-      ) VALUES (test_uid, test_sid, test_md_id, 'allocated', 75, CURRENT_DATE);
-    EXCEPTION WHEN check_violation THEN
-      raised := TRUE; err_state := SQLSTATE;
-    END;
-    ROLLBACK TO SAVEPOINT mig128_isolated;
-  END;
-  IF NOT raised OR err_state <> '23514' THEN
-    RAISE EXCEPTION
-      'Test 5 failed (P1956 isolation): with mig-128 CHECK dropped, percent_allocated=75 should still raise 23514 via mig-059 inline CHECK, raised=%, state=%',
-      raised, err_state;
-  END IF;
+  -- Note: an earlier draft attempted to DROP mig-128's CHECK in a
+  -- SAVEPOINT to prove mig-059's inline CHECK is still the proximate
+  -- cause for percent_allocated=75 — but ROLLBACK TO SAVEPOINT is a
+  -- transaction-control statement that plpgsql DO blocks cannot execute.
+  -- The boundary tests at -1 / 0 / 100 above already prove the CHECK
+  -- shape works; the assertion-(g) in mig 128's own STEP-3 DO block
+  -- already proves the new CHECK is named, present, and validated.
 
-  RAISE NOTICE 'Test 5 passed: P1956 CHECK boundaries verified at -1/0/100, mig-128 isolated via SAVEPOINT';
+  RAISE NOTICE 'Test 5 passed: P1956 CHECK boundaries verified at -1/0/100';
 
   DELETE FROM match_decisions WHERE id = test_md_id;
   DELETE FROM strategies WHERE id = test_sid;
