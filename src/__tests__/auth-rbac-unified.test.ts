@@ -334,7 +334,7 @@ describe("Issue 4 — hasAdminRoleRow/hasIsAdminFlag narrow error swallow (audit
     // Signal 2 also returns false, so the gate denies.
     expect(ok).toBe(false);
 
-    const stderr = consoleErrorSpy.mock.calls.map((c) => c[0]).join("\n");
+    const stderr = consoleErrorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(stderr).toContain("hasAdminRoleRow non-RLS error");
   });
 
@@ -354,7 +354,7 @@ describe("Issue 4 — hasAdminRoleRow/hasIsAdminFlag narrow error swallow (audit
     );
     expect(ok).toBe(false);
     // 42501 must NOT log — it is the expected failure mode.
-    const calls = consoleErrorSpy.mock.calls.filter((c) =>
+    const calls = consoleErrorSpy.mock.calls.filter((c: unknown[]) =>
       String(c[0]).includes("hasAdminRoleRow non-RLS error"),
     );
     expect(calls.length).toBe(0);
@@ -374,7 +374,7 @@ describe("Issue 4 — hasAdminRoleRow/hasIsAdminFlag narrow error swallow (audit
     );
     expect(ok).toBe(false);
 
-    const stderr = consoleErrorSpy.mock.calls.map((c) => c[0]).join("\n");
+    const stderr = consoleErrorSpy.mock.calls.map((c: unknown[]) => c[0]).join("\n");
     expect(stderr).toContain("hasIsAdminFlag non-RLS error");
   });
 
@@ -390,7 +390,7 @@ describe("Issue 4 — hasAdminRoleRow/hasIsAdminFlag narrow error swallow (audit
       { id: "u-norow", email: "nr@t.com" },
     );
     expect(ok).toBe(false);
-    const calls = consoleErrorSpy.mock.calls.filter((c) =>
+    const calls = consoleErrorSpy.mock.calls.filter((c: unknown[]) =>
       String(c[0]).includes("hasIsAdminFlag non-RLS error"),
     );
     expect(calls.length).toBe(0);
