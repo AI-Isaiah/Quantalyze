@@ -234,10 +234,28 @@ jobs:
     # deletion FK action, the log_audit_event_service ceiling, or the
     # wizard draft guard with no test failure to catch it.
     #
-    # Security: this job only reads secrets via env: and runs psql with
-    # them as DSN values. No untrusted github.event.* input flows into
-    # any run: command — the test files themselves are static repo
-    # content, not user-supplied input.
+    # Security (audit-2026-05-07 red-team Finding 6): TWO defenses:
+    #
+    #   1. Fork-author gate. Forked-PR runs MUST NOT receive
+    #      TEST_SUPABASE_DB_URL — GitHub's default secret policy blocks
+    #      it for fork PRs, but we also explicitly check
+    #      github.event.pull_request.head.repo.full_name. Defense in
+    #      depth means an internal-branch PR with a typo'd vars setting
+    #      can't accidentally let a fork PR through.
+    #
+    #   2. Meta-command filter. Even with the gate, a malicious internal
+    #      PR could commit a test file containing psql meta-commands
+    #      (\!, \copy, \o, \COPY) that exfiltrate secrets from the
+    #      runner. We grep each test file before psql -f and bail with
+    #      an explicit error if any of those tokens appear. This is a
+    #      file-content check; the env: injection still keeps the secret
+    #      out of any run: shell-substitution surface.
+    #
+    # The if: gate composes both: fork PRs are blocked AND the
+    # E2E_TEST_DB_CONFIGURED variable must be set. No untrusted
+    # github.event.* content flows into any run: step — every reference
+    # to a github.event.* value sits in YAML expressions evaluated at
+    # workflow-parse time, never in shell substitution.
     #
     # Gating: same `vars.E2E_TEST_DB_CONFIGURED` pattern as the e2e job.
     # When the variable is unset (forks, repos without test-DB setup),
@@ -253,13 +271,63 @@ jobs:
     # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
     # fails the job.
     runs-on: ubuntu-latest
-    if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+    if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
     steps:
       - uses: actions/checkout@v4
       - name: Install psql client
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Preflight - reject psql meta-commands in test files (Finding 6)
+        # Reject any test file containing psql meta-commands that could
+        # exfiltrate secrets from the runner. Specifically:
+        #   \!       — shell escape (executes any shell command, can
+        #              read env vars / curl them out)
+        #   \copy    — client-side file IO (can read /etc/passwd,
+        #              the workflow's environment dumps, etc.)
+        #   \o ...   — redirect query output to a file (can persist
+        #              secrets into an artifact)
+        #   \COPY    — upper-case form of \copy
+        # All four are PSQL CLIENT-side; the server's check_function
+        # cannot help. We refuse them at the file level.
+        #
+        # We deliberately use plain grep (no -P) so the patterns are
+        # ERE-portable, and \\! requires single-quoting to keep the
+        # backslash literal through the shell.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(supabase/tests/test_*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No supabase/tests/test_*.sql files to scan."
+            exit 0
+          fi
+          bad=0
+          for f in "${files[@]}"; do
+            # Each pattern is its own grep so the error message can name
+            # the exact meta-command that triggered the reject.
+            if grep -nE '^\\\!|^\\!| \\\!| \\!' "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::contains '\\!' (shell escape) — refused by Finding 6 preflight"
+              bad=1
+            fi
+            if grep -nE '\\copy\b' "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::contains '\\copy' (client file IO) — refused by Finding 6 preflight"
+              bad=1
+            fi
+            if grep -nE '\\COPY\b' "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::contains '\\COPY' (client file IO) — refused by Finding 6 preflight"
+              bad=1
+            fi
+            if grep -nE '^\\o |^\\o$| \\o ' "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::contains '\\o' (output redirect) — refused by Finding 6 preflight"
+              bad=1
+            fi
+          done
+          if [ "$bad" = 1 ]; then
+            echo "::error::One or more SQL test files contain a refused psql meta-command."
+            exit 1
+          fi
+          echo "Preflight clean: ${#files[@]} test file(s) free of refused meta-commands."
       - name: Run SQL self-tests against test Supabase project
         env:
           # PG connection string for the test project (qmnijlgmdhviwzwfyzlc).
