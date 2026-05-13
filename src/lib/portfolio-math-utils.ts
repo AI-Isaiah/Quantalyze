@@ -32,25 +32,25 @@ export function normalizeDailyReturns(raw: unknown): DailyPoint[] {
           "date" in p &&
           "value" in p &&
           typeof (p as DailyPoint).date === "string" &&
-          typeof (p as DailyPoint).value === "number",
+          Number.isFinite((p as DailyPoint).value),
       )
       .sort((a, b) => a.date.localeCompare(b.date));
   }
   const out: DailyPoint[] = [];
   const obj = raw as Record<string, unknown>;
   for (const [k, v] of Object.entries(obj)) {
-    if (typeof v === "number") {
-      out.push({ date: k, value: v });
+    if (Number.isFinite(v)) {
+      out.push({ date: k, value: v as number });
     } else if (v && typeof v === "object") {
       for (const [kk, vv] of Object.entries(v as Record<string, unknown>)) {
-        if (typeof vv === "number") {
+        if (Number.isFinite(vv)) {
           if (kk.length === 10) {
-            out.push({ date: kk, value: vv });
+            out.push({ date: kk, value: vv as number });
           } else {
             const [mm = "", dd = ""] = kk.split("-");
             const paddedMm = mm.padStart(2, "0");
             const paddedDd = dd.padStart(2, "0");
-            out.push({ date: `${k}-${paddedMm}-${paddedDd}`, value: vv });
+            out.push({ date: `${k}-${paddedMm}-${paddedDd}`, value: vv as number });
           }
         }
       }

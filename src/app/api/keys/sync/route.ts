@@ -77,9 +77,15 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .single();
 
   if (!strategy) {
+    // P458 (audit-2026-05-07): uniform 404 for both "no such strategy" AND
+    // "exists but unowned". Pre-fix this returned 403 in both cases, which
+    // let an attacker probe strategy ID existence by distinguishing
+    // 403-unowned from 404-not-found. Now there is no asymmetry: an
+    // attacker probing a foreign strategy_id and an attacker probing a
+    // random uuid both see the same response shape.
     return NextResponse.json(
-      { error: "Strategy not found or not owned by you" },
-      { status: 403 },
+      { error: "Strategy not found" },
+      { status: 404 },
     );
   }
 

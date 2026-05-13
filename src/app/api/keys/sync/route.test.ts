@@ -204,18 +204,27 @@ describe("POST /api/keys/sync", () => {
     expect(mockRpc).not.toHaveBeenCalled();
   });
 
-  // ── 3. Ownership mismatch → 403 ────────────────────────────────
-  it("returns 403 when strategy is not owned by user", async () => {
+  // ── 3. Ownership mismatch / not-found → 404 (P458) ─────────────
+  // P458 (audit-2026-05-07): pre-fix this returned 403 for BOTH "no
+  // such strategy" AND "exists but unowned" — but with the same
+  // message — so an attacker could probe strategy_id existence via the
+  // status code's mere presence vs. a `404 Not Found` fall-through from
+  // a different route. The hardened contract is a uniform 404 with a
+  // non-discriminating message; the response shape must be identical
+  // in both branches so an attacker cannot infer existence.
+  it("P458 — returns 404 with uniform message when ownership check returns no row", async () => {
     ownershipResult.data = null;
 
     const { POST } = await import("./route");
     const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error).toContain("not owned");
+    expect(body.error).toBe("Strategy not found");
+    // The message must NOT leak the unowned-vs-not-found distinction.
+    expect(body.error).not.toMatch(/owned/i);
 
-    // Neither path should have been reached
+    // Neither path should have been reached.
     expect(mockRpc).not.toHaveBeenCalled();
     expect(mockAfter).not.toHaveBeenCalled();
   });

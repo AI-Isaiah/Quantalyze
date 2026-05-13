@@ -26,14 +26,25 @@ export default async function AdminUsersPage() {
 
   const admin = createAdminClient();
 
+  // P463 (audit-2026-05-07): cap user_app_roles read at 500 to match the
+  // profiles cap above. Pre-fix the join read was unbounded, which would
+  // OOM the admin page once the role table grows past a few thousand
+  // rows. 500 is large enough to cover the 500-profile slice plus
+  // multi-role users; if we ever need more, the right answer is
+  // pagination, not a larger limit.
+  const USER_APP_ROLES_LIMIT = 500;
   const [{ data: profiles }, { data: roleRows }] = await Promise.all([
     admin
       .from("profiles")
       .select("id, display_name, company, email, is_admin, role, created_at")
       .order("created_at", { ascending: false })
       .limit(500),
-    admin.from("user_app_roles").select("user_id, role"),
+    admin
+      .from("user_app_roles")
+      .select("user_id, role")
+      .limit(USER_APP_ROLES_LIMIT),
   ]);
+  const atRoleLimit = (roleRows?.length ?? 0) >= USER_APP_ROLES_LIMIT;
 
   // Build a lookup map so the template doesn't need a per-row DB trip.
   const rolesByUser = new Map<string, string[]>();
@@ -121,6 +132,14 @@ export default async function AdminUsersPage() {
               </tbody>
             </table>
           </div>
+        )}
+        {atRoleLimit && (
+          <p
+            className="px-4 py-3 text-text-muted text-[11px] italic"
+            data-testid="user-app-roles-limit-notice"
+          >
+            Showing 500 most recent role assignments — refine search to narrow.
+          </p>
         )}
       </Card>
     </>
