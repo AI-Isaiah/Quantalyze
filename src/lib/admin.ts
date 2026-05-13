@@ -89,6 +89,52 @@ export function isAdmin(email: string | null | undefined): boolean {
 }
 
 /**
+ * Lazy Sentry reporter used by the narrowed error paths in
+ * `hasAdminRoleRow` / `hasIsAdminFlag`. Mirrors the pattern in
+ * `src/lib/audit.ts` — the lazy import avoids pulling Sentry into
+ * middleware bundles that don't otherwise need it, and the inner
+ * try/catch prevents a Sentry-transport failure from masking the
+ * caller's signal.
+ */
+function reportNonRlsError(
+  err: unknown,
+  options: {
+    fn: "hasAdminRoleRow" | "hasIsAdminFlag";
+    userId: string;
+    code: string | null;
+    message: string;
+  },
+): void {
+  try {
+    void import("@sentry/nextjs")
+      .then((Sentry) => {
+        try {
+          Sentry.captureException(err, {
+            tags: {
+              admin_gate_non_rls_error: "true",
+              admin_gate_fn: options.fn,
+              admin_gate_code: options.code ?? "unknown",
+            },
+            extra: {
+              user_id: options.userId,
+              code: options.code,
+              message: options.message,
+            },
+            level: "error",
+          });
+        } catch {
+          // Swallow — caller already logged via console.error.
+        }
+      })
+      .catch(() => {
+        // Sentry import failed — swallow.
+      });
+  } catch {
+    // import() construction failed (extremely unlikely) — swallow.
+  }
+}
+
+/**
  * Internal: does `userId` have role='admin' in `user_app_roles`?
  *
  * Tolerates RLS rejections (returns false on error) — getUserRoles in
@@ -96,6 +142,15 @@ export function isAdmin(email: string | null | undefined): boolean {
  * but this module purposely does not import from `auth.ts` to keep the
  * call surface narrow (admin.ts is imported by middleware / pages that
  * shouldn't bundle the full RBAC surface).
+ *
+ * Issue 4 (audit-2026-05-07 follow-up): narrow the error catch. Pre-fix
+ * the unconditional `if (error) return false` masked schema drift,
+ * statement timeouts, and connection errors as "no admin row" — a real
+ * admin would silently get a 403 with no breadcrumb. We now ONLY swallow
+ * 42501 (RLS denial, the genuinely expected failure mode); every other
+ * error is logged + reported to Sentry while still returning false (the
+ * OR-union with profiles.is_admin / ADMIN_EMAIL is preserved so a single
+ * signal hiccup doesn't lock out admins).
  */
 async function hasAdminRoleRow(
   supabase: SupabaseClient,
@@ -109,9 +164,28 @@ async function hasAdminRoleRow(
     .limit(1);
 
   if (error) {
-    // RLS denial is the expected failure mode for a non-admin caller
-    // reading another user's roles. Treat as "no admin row" — the other
-    // signals (is_admin column, ADMIN_EMAIL fallback) still get a vote.
+    if (error.code === "42501") {
+      // RLS denial is the expected failure mode for a non-admin caller
+      // reading another user's roles. Treat as "no admin row" — the other
+      // signals (is_admin column, ADMIN_EMAIL fallback) still get a vote.
+      return false;
+    }
+    // Any other Postgres error: schema drift, statement timeout (57014),
+    // connection failure, etc. Don't silently mask — log + Sentry so the
+    // failure is visible. Still return false so the OR-union with the
+    // other signals continues to work; a real admin with profiles.is_admin
+    // = TRUE still passes the gate.
+    console.error("[admin] hasAdminRoleRow non-RLS error:", {
+      user_id: userId,
+      code: error.code,
+      message: error.message,
+    });
+    reportNonRlsError(error, {
+      fn: "hasAdminRoleRow",
+      userId,
+      code: error.code ?? null,
+      message: error.message,
+    });
     return false;
   }
   return Array.isArray(data) && data.length > 0;
@@ -124,6 +198,13 @@ async function hasAdminRoleRow(
  * every admin grant has been mirrored into user_app_roles. Per ADR-0005
  * we keep BOTH signals OR'd until the column is dropped so a partial
  * migration cannot silently revoke admin access.
+ *
+ * Issue 4 (audit-2026-05-07 follow-up): same narrowing as
+ * `hasAdminRoleRow`. Only swallow 42501 (RLS denial); everything else
+ * gets logged + Sentry-reported while still returning false so the
+ * OR-union retains its fault tolerance. PGRST116 ("no rows found" from
+ * .single()) is ALSO treated as a benign "no flag" — distinct from the
+ * RLS path but equally non-actionable.
  */
 async function hasIsAdminFlag(
   supabase: SupabaseClient,
@@ -135,7 +216,26 @@ async function hasIsAdminFlag(
     .eq("id", userId)
     .single();
 
-  if (error || !data) return false;
+  if (error) {
+    // PGRST116 = "Results contain 0 rows" (PostgREST's .single() shape).
+    // 42501 = RLS denial. Both are benign "no admin flag for this user".
+    if (error.code === "42501" || error.code === "PGRST116") {
+      return false;
+    }
+    console.error("[admin] hasIsAdminFlag non-RLS error:", {
+      user_id: userId,
+      code: error.code,
+      message: error.message,
+    });
+    reportNonRlsError(error, {
+      fn: "hasIsAdminFlag",
+      userId,
+      code: error.code ?? null,
+      message: error.message,
+    });
+    return false;
+  }
+  if (!data) return false;
   return data.is_admin === true;
 }
 

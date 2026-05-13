@@ -284,3 +284,115 @@ describe("audit-2026-05-07 P703 — withRole('admin') consults the same union as
     expect(handler).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * audit-2026-05-07 follow-up — Issue 4
+ *
+ * Pre-fix, `hasAdminRoleRow` and `hasIsAdminFlag` swallowed ALL Postgres
+ * errors unconditionally. A schema-drift error (42P01 "relation does not
+ * exist", 42703 "column does not exist") or a statement timeout (57014)
+ * silently failed Signal 1, the OR-union leaned on Signals 2/3, and a
+ * real admin could get a silent 403 with no breadcrumb.
+ *
+ * The fix narrows the swallow to ONLY error.code === "42501" (RLS denial,
+ * the genuinely expected failure mode) and PGRST116 for the .single()
+ * "0 rows" case on profiles. Anything else gets logged via console.error
+ * AND captured by Sentry while still returning false (the OR-union
+ * fault-tolerance is preserved — we don't escalate one signal hiccup
+ * into a full lockout).
+ *
+ * The test below pins the contract: a non-RLS Postgres error reaches
+ * console.error with a stable shape. We cannot easily assert on the
+ * Sentry call (lazy `import("@sentry/nextjs")`), but the console.error
+ * is the proof-of-life that the silent-swallow regression is closed.
+ */
+describe("Issue 4 — hasAdminRoleRow/hasIsAdminFlag narrow error swallow (audit-2026-05-07 follow-up)", () => {
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("hasAdminRoleRow surfaces a non-42501 PG error via console.error (no silent swallow)", async () => {
+    // 42P01 = "relation does not exist" — classic schema-drift signal.
+    userAppRolesQueryMock.mockResolvedValue({
+      data: null,
+      error: { code: "42P01", message: 'relation "user_app_roles" does not exist' },
+    });
+    // Defense in depth: make Signal 2 deny so the gate result is FALSE
+    // and we can prove Signal 1 logged.
+    profilesIsAdminMock.mockResolvedValue({
+      data: { is_admin: false },
+      error: null,
+    });
+
+    const ok = await isAdminUser(
+      makeSupabaseClient() as unknown as SupabaseClient,
+      { id: "u-drift", email: "drift@t.com" },
+    );
+    // OR-union still works — Signal 1 returns false (logged) and
+    // Signal 2 also returns false, so the gate denies.
+    expect(ok).toBe(false);
+
+    const stderr = consoleErrorSpy.mock.calls.map((c) => c[0]).join("\n");
+    expect(stderr).toContain("hasAdminRoleRow non-RLS error");
+  });
+
+  it("hasAdminRoleRow SILENTLY returns false on a 42501 RLS denial (expected path)", async () => {
+    userAppRolesQueryMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table user_app_roles" },
+    });
+    profilesIsAdminMock.mockResolvedValue({
+      data: { is_admin: false },
+      error: null,
+    });
+
+    const ok = await isAdminUser(
+      makeSupabaseClient() as unknown as SupabaseClient,
+      { id: "u-rls", email: "rls@t.com" },
+    );
+    expect(ok).toBe(false);
+    // 42501 must NOT log — it is the expected failure mode.
+    const calls = consoleErrorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("hasAdminRoleRow non-RLS error"),
+    );
+    expect(calls.length).toBe(0);
+  });
+
+  it("hasIsAdminFlag surfaces a non-42501/non-PGRST116 PG error via console.error", async () => {
+    userAppRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    // 57014 = statement_timeout. A real failure mode under load.
+    profilesIsAdminMock.mockResolvedValue({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+
+    const ok = await isAdminUser(
+      makeSupabaseClient() as unknown as SupabaseClient,
+      { id: "u-timeout", email: "t@t.com" },
+    );
+    expect(ok).toBe(false);
+
+    const stderr = consoleErrorSpy.mock.calls.map((c) => c[0]).join("\n");
+    expect(stderr).toContain("hasIsAdminFlag non-RLS error");
+  });
+
+  it("hasIsAdminFlag SILENTLY returns false on PGRST116 (.single() 0-rows)", async () => {
+    userAppRolesQueryMock.mockResolvedValue({ data: [], error: null });
+    profilesIsAdminMock.mockResolvedValue({
+      data: null,
+      error: { code: "PGRST116", message: "Results contain 0 rows" },
+    });
+
+    const ok = await isAdminUser(
+      makeSupabaseClient() as unknown as SupabaseClient,
+      { id: "u-norow", email: "nr@t.com" },
+    );
+    expect(ok).toBe(false);
+    const calls = consoleErrorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("hasIsAdminFlag non-RLS error"),
+    );
+    expect(calls.length).toBe(0);
+  });
+});
