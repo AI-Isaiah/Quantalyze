@@ -51,6 +51,86 @@ export { APP_ROLES, type AppRole };
  */
 
 /**
+ * Postgrest/Postgres error codes that getUserRoles treats as "expected"
+ * non-error states — both map to "the user has no roles visible from
+ * this caller":
+ *
+ *   - '42501' — Postgres `insufficient_privilege` (RLS denial). Caller
+ *     has no read access to the row(s); from the caller's perspective
+ *     the user has no visible roles.
+ *   - 'PGRST116' — PostgREST "no rows" sentinel. Empty result set
+ *     under maybeSingle()-style helpers; for our `.select` chain this
+ *     surfaces only on adjacent helpers but is kept here for parity.
+ *
+ * Any OTHER error (timeout, connection refused, malformed SQL,
+ * permission failures unrelated to RLS, schema drift, etc.) is a real
+ * fault. Pre-fix, getUserRoles caught EVERY error and returned `[]`,
+ * which `requireRole` then translated to a silent 403 for a legitimate
+ * admin — masking outages as authorization errors. Finding 5 narrows
+ * the swallow.
+ */
+const EXPECTED_NO_ROLES_CODES = new Set<string>(["42501", "PGRST116"]);
+
+/**
+ * Discriminated-union return shape for {@link getUserRolesResult} — the
+ * error-aware sibling of {@link getUserRoles}.
+ *
+ * The legacy `getUserRoles` callers want `AppRole[]` and treat every
+ * error as "no roles". The new shape lets callers (notably
+ * `requireRole`) distinguish "no roles" from "fetch faulted" so the
+ * latter surfaces as 500 instead of silently 403.
+ */
+export type GetUserRolesResult =
+  | { ok: true; roles: AppRole[] }
+  | { ok: false; error: { code: string | null; message: string } };
+
+/**
+ * Fetch the role set for a specific user, returning an explicit
+ * discriminated union. Returns `{ ok: true, roles: [] }` for the
+ * expected "no roles visible" path (RLS denial or empty result),
+ * and `{ ok: false, error }` for any unexpected fault.
+ *
+ * Use this when the caller needs to distinguish "no roles" from
+ * "fetch failed" — typically inside a guard that wants to return 500
+ * on real DB faults rather than 403.
+ */
+export async function getUserRolesResult(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<GetUserRolesResult> {
+  const { data, error } = await supabase
+    .from("user_app_roles")
+    .select("role")
+    .eq("user_id", userId);
+
+  if (error) {
+    const code = (error as { code?: string | null }).code ?? null;
+    if (code && EXPECTED_NO_ROLES_CODES.has(code)) {
+      // Expected non-error: RLS denial or no-rows. Caller-facing answer
+      // is "this user has no visible roles".
+      return { ok: true, roles: [] };
+    }
+    // Real fault — propagate so the caller can return 500 instead of
+    // mis-translating to 403.
+    console.error("[auth] getUserRolesResult faulted:", {
+      user_id: userId,
+      message: error.message,
+      code,
+    });
+    return { ok: false, error: { code, message: error.message } };
+  }
+
+  if (!data) return { ok: true, roles: [] };
+
+  const roles = data
+    .map((row) => row.role as string)
+    .filter((role): role is AppRole =>
+      (APP_ROLES as readonly string[]).includes(role),
+    );
+  return { ok: true, roles };
+}
+
+/**
  * Fetch the role set for a specific user. Returns an empty array if the
  * user has no roles (or doesn't exist — we don't distinguish those two
  * cases here, callers that need to shouldn't use this helper).
@@ -62,34 +142,26 @@ export { APP_ROLES, type AppRole };
  *
  * For admin-UI paths that need to read any user's roles, pass the admin
  * client from `createAdminClient()` — service_role bypasses RLS.
+ *
+ * Finding 5 (audit-2026-05-07 red-team): pre-fix this helper swallowed
+ * EVERY error and returned `[]`, which `requireRole` then translated to
+ * a silent 403 — masking real outages as "you're not authorized".
+ * Now: only the expected RLS-denial / no-rows codes are swallowed; any
+ * other error is logged AND the helper still returns `[]` for backward
+ * compatibility with the many legacy callers that ignore the
+ * discrimination. Callers that need to fail-loud on real faults should
+ * use {@link getUserRolesResult} instead — `requireRole` does.
  */
 export async function getUserRoles(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<AppRole[]> {
-  const { data, error } = await supabase
-    .from("user_app_roles")
-    .select("role")
-    .eq("user_id", userId);
-
-  if (error) {
-    console.error("[auth] getUserRoles failed:", {
-      user_id: userId,
-      message: error.message,
-      code: error.code,
-    });
+  const result = await getUserRolesResult(supabase, userId);
+  if (!result.ok) {
+    // Already logged in getUserRolesResult. Legacy contract: return [].
     return [];
   }
-
-  if (!data) return [];
-
-  // Filter to known AppRole values in case the DB constraint ever drifts
-  // (defensive; the CHECK constraint in migration 054 should prevent it).
-  return data
-    .map((row) => row.role as string)
-    .filter((role): role is AppRole =>
-      (APP_ROLES as readonly string[]).includes(role),
-    );
+  return result.roles;
 }
 
 /**
@@ -134,7 +206,22 @@ export async function requireRole(
     };
   }
 
-  const userRoles = await getUserRoles(supabase, user.id);
+  // Finding 5 (audit-2026-05-07 red-team): pre-fix, getUserRoles
+  // swallowed every error and returned []. A genuine fault (DB
+  // timeout, schema drift, etc.) then made `hasAny` evaluate to false
+  // and `requireRole` returned 403 — masking outages as authorization
+  // errors. Now we use the discriminated variant; non-42501/PGRST116
+  // errors propagate as a 500 so on-call sees the real signal.
+  const rolesResult = await getUserRolesResult(supabase, user.id);
+  if (!rolesResult.ok) {
+    return {
+      forbidden: NextResponse.json(
+        { error: "Internal Server Error" },
+        { status: 500 },
+      ),
+    };
+  }
+  const userRoles = rolesResult.roles;
 
   if (roles.length === 0) {
     // Caller passed no roles — treat as "must be authenticated but no

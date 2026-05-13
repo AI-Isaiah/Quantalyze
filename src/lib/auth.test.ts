@@ -173,19 +173,50 @@ describe("getUserRoles", () => {
     expect(roles).toEqual([]);
   });
 
-  it("returns an empty array on error and logs to stderr", async () => {
-    const spy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+  it("returns an empty array on RLS denial (42501) and does NOT log", async () => {
+    // Finding 5 (audit-2026-05-07 red-team): 42501 is the expected
+    // "no read access" code — it is NOT a fault and should not be
+    // logged as one. The previous behavior was to log every error
+    // including this one; that produced noise without signal.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     userRolesQueryMock.mockResolvedValueOnce({
       data: null,
       error: { code: "42501", message: "permission denied" },
     });
     const roles = await getUserRoles(makeFromOnly(), "u-3");
     expect(roles).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("returns an empty array on PostgREST no-rows (PGRST116) and does NOT log", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "PGRST116", message: "no rows" },
+    });
+    const roles = await getUserRoles(makeFromOnly(), "u-3b");
+    expect(roles).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("returns an empty array on unexpected error AND logs to stderr (legacy contract preserved)", async () => {
+    // Finding 5: a non-RLS, non-PGRST116 error is a real fault — we
+    // still return `[]` from the legacy `getUserRoles` helper for
+    // backward compatibility, but the discriminated `getUserRolesResult`
+    // (which `requireRole` now uses) returns ok:false so the route
+    // layer can surface 500 instead of 403. Logging happens here.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "statement timeout" },
+    });
+    const roles = await getUserRoles(makeFromOnly(), "u-3c");
+    expect(roles).toEqual([]);
     expect(spy).toHaveBeenCalledWith(
-      "[auth] getUserRoles failed:",
-      expect.objectContaining({ user_id: "u-3" }),
+      "[auth] getUserRolesResult faulted:",
+      expect.objectContaining({ user_id: "u-3c", code: "57014" }),
     );
     spy.mockRestore();
   });
@@ -262,6 +293,29 @@ describe("requireRole", () => {
     if ("roles" in result) {
       expect(result.roles).toEqual(["allocator"]);
     }
+  });
+
+  it("Finding 5: returns { forbidden: 500 } when the role fetch faults (NOT 403)", async () => {
+    // Pre-fix: a 57014 (statement timeout) would silently translate to
+    // a 403 because getUserRoles swallowed every error and returned [].
+    // Post-fix: requireRole uses the discriminated `getUserRolesResult`
+    // and surfaces a 500 so on-call sees the real signal.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "statement timeout" },
+    });
+    const result = await requireRole(
+      makeFromOnly(),
+      mockUser,
+      "admin",
+    );
+    expect("forbidden" in result).toBe(true);
+    if ("forbidden" in result) {
+      // 500, NOT 403 — a real fault is not an authorization failure.
+      expect(result.forbidden.status).toBe(500);
+    }
+    spy.mockRestore();
   });
 
   it("returns { roles } including the full resolved set (superset)", async () => {
