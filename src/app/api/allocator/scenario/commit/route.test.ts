@@ -37,21 +37,44 @@ vi.mock("@/lib/analytics/onboarding-funnel", () => ({
   stampOutcomeMarker: vi.fn(async () => undefined),
 }));
 
+// ---------------------------------------------------------------------------
+// Mock supabase admin client — used for the P1945 idempotency cache lookup
+// and post-success upsert.
+// ---------------------------------------------------------------------------
+
+const idemMaybeSingleMock = vi.fn();
+const idemUpsertMock = vi.fn(async () => ({ error: null }));
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     auth: { admin: { getUserById: vi.fn(), updateUserById: vi.fn() } },
+    // Chainable .from('scenario_commit_idempotency').select().eq().eq().maybeSingle()
+    // for the lookup; .from(...).upsert(...) for the post-success write.
+    from: (_table: string) => ({
+      select: () => ({
+        eq: () => ({
+          eq: () => ({
+            maybeSingle: idemMaybeSingleMock,
+          }),
+        }),
+      }),
+      upsert: idemUpsertMock,
+    }),
   }),
 }));
 
 // ---------------------------------------------------------------------------
-// Mock withAuth — toggleable so T_R1 can exercise the no-auth 401 path
+// Mock withAllocatorAuth — toggleable so we can exercise the no-auth 401 path
+// and the non-allocator 403 path independently.
 // ---------------------------------------------------------------------------
 
 const MOCK_USER = { id: "alloc-A" } as unknown as import("@supabase/supabase-js").User;
 
 let withAuthShouldFail = false;
-vi.mock("@/lib/api/withAuth", () => ({
-  withAuth:
+let allocatorGateShouldFail = false;
+
+vi.mock("@/lib/api/withAllocatorAuth", () => ({
+  withAllocatorAuth:
     (h: (req: NextRequest, user: typeof MOCK_USER) => unknown) =>
     (req: NextRequest) => {
       if (withAuthShouldFail) {
@@ -59,6 +82,18 @@ vi.mock("@/lib/api/withAuth", () => ({
           status: 401,
           headers: { "content-type": "application/json" },
         });
+      }
+      if (allocatorGateShouldFail) {
+        return new Response(
+          JSON.stringify({ error: "Forbidden — allocator role required" }),
+          {
+            status: 403,
+            headers: {
+              "content-type": "application/json",
+              "Cache-Control": "private, no-store",
+            },
+          },
+        );
       }
       return h(req, MOCK_USER);
     },
@@ -123,11 +158,33 @@ function mkReq(body: unknown) {
   );
 }
 
+// P1945 — a request bearing an Idempotency-Key header. The header value
+// length defaults to 24 (uuid-style without dashes), which sits inside the
+// 16..128 acceptance window defined in route.ts.
+function mkReqWithIdempotency(body: unknown, key: string) {
+  return new NextRequest(
+    new URL("http://localhost/api/allocator/scenario/commit"),
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": key,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   withAuthShouldFail = false;
+  allocatorGateShouldFail = false;
   rateLimitAllow = true;
   mockRpc.mockReset();
+  idemMaybeSingleMock.mockReset();
+  idemMaybeSingleMock.mockResolvedValue({ data: null, error: null });
+  idemUpsertMock.mockReset();
+  idemUpsertMock.mockResolvedValue({ error: null });
 });
 
 const VALID_VR = {
@@ -206,11 +263,13 @@ describe("zod validation", () => {
 // ===========================================================================
 
 describe("T_R4 — rate limit", () => {
-  it("returns 429 + Retry-After when rate limit exceeded", async () => {
+  it("returns 429 + Retry-After + Cache-Control when rate limit exceeded", async () => {
     rateLimitAllow = false;
     const res = await POST(mkReq({ diffs: [VALID_VR] }));
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("42");
+    // P1947 — every response carries no-store.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(checkLimit).toHaveBeenCalledWith(
       expect.anything(),
       "scenario_commit:alloc-A",
@@ -449,7 +508,11 @@ describe("T_R8 — M7 reuse-or-create (RPC level)", () => {
 // ===========================================================================
 
 describe("H4 single-tx full-failure paths", () => {
-  it("T_R9: voluntary_remove with un-owned holding_ref → ok=false (recorded:0), no audit", async () => {
+  // audit-2026-05-07 round-2 / P1945:
+  // Rolled-back batches now respond with HTTP 422 (Unprocessable Entity),
+  // not 200. The recorded:0 + errors[] payload shape is unchanged so the
+  // drawer UI continues to render per-row errors inline.
+  it("T_R9: voluntary_remove with un-owned holding_ref → 422 (recorded:0), no audit", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: false,
@@ -460,7 +523,8 @@ describe("H4 single-tx full-failure paths", () => {
     });
 
     const res = await POST(mkReq({ diffs: [VALID_VR] }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body.recorded).toBe(0);
     expect(body.errors).toEqual(
@@ -471,7 +535,7 @@ describe("H4 single-tx full-failure paths", () => {
     expect(logAuditEvent).not.toHaveBeenCalled();
   });
 
-  it("T_R10: voluntary_add with non-existent strategy_id → ok=false", async () => {
+  it("T_R10: voluntary_add with non-existent strategy_id → 422", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: false,
@@ -482,12 +546,12 @@ describe("H4 single-tx full-failure paths", () => {
     });
 
     const res = await POST(mkReq({ diffs: [VALID_VA] }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
     const body = await res.json();
     expect(body.recorded).toBe(0);
   });
 
-  it("T_R11: voluntary_add for strategy with status='draft' → ok=false", async () => {
+  it("T_R11: voluntary_add for strategy with status='draft' → 422", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: false,
@@ -498,12 +562,12 @@ describe("H4 single-tx full-failure paths", () => {
     });
 
     const res = await POST(mkReq({ diffs: [VALID_VA] }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
     const body = await res.json();
     expect(body.recorded).toBe(0);
   });
 
-  it("T_R12: H4 mixed batch — row-2 fails → recorded:0 (row-1 NOT persisted), no audit on partial", async () => {
+  it("T_R12: H4 mixed batch — row-2 fails → 422, recorded:0 (row-1 NOT persisted), no audit on partial", async () => {
     // Two-diff batch where row 1 fails; the RPC returns ok=false with recorded:0
     // (the entire tx rolled back — row 0 is NOT persisted).
     mockRpc.mockResolvedValueOnce({
@@ -523,7 +587,8 @@ describe("H4 single-tx full-failure paths", () => {
         ],
       }),
     );
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body.recorded).toBe(0);
     expect(body.errors[0].index).toBe(1);
@@ -674,5 +739,148 @@ describe("T_R16 / T_R17 — M6 rejection_reason enum", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+// T_R18 — audit-2026-05-07 round-2 / P1946 allocator gate
+// ===========================================================================
+//
+// The route is now wrapped in withAllocatorAuth, which returns 403 +
+// Cache-Control before the handler runs whenever the caller is authenticated
+// but not in profiles.role IN ('allocator','both'). We toggle the mock's
+// allocatorGateShouldFail flag to exercise that path without re-implementing
+// the profile lookup here (that's covered by withAllocatorAuth.test.ts).
+
+describe("T_R18 — allocator gate (P1946)", () => {
+  it("returns 403 + Cache-Control when the caller is not an allocator", async () => {
+    allocatorGateShouldFail = true;
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // RPC must not fire — the gate is upstream of the handler.
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// T_R19 — P1947: Cache-Control on the happy path
+// ===========================================================================
+
+describe("T_R19 — Cache-Control on happy-path 200", () => {
+  it("sets Cache-Control: private, no-store on successful 200 response", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("sets Cache-Control on validation 400 response", async () => {
+    const res = await POST(mkReq({ diffs: [] }));
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+});
+
+// ===========================================================================
+// T_R20 — P1945: Idempotency-Key dedup
+// ===========================================================================
+//
+// First request with a valid Idempotency-Key → RPC fires, success body is
+// cached via the admin client upsert. Second request with the SAME key →
+// the cached body is returned WITHOUT calling the RPC. We assert mockRpc
+// is invoked exactly once across both calls and the second response payload
+// equals the cached body.
+
+describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
+  const KEY = "a".repeat(24); // 24 chars — inside 16..128 window
+
+  it("first request runs the RPC and caches; duplicate request short-circuits to cache", async () => {
+    // First call: cache miss → RPC fires → success → cache upsert.
+    idemMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res1 = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res1.status).toBe(200);
+    const body1 = await res1.json();
+    expect(body1.recorded).toBe(1);
+
+    // The admin client should have been asked to upsert the response.
+    expect(idemUpsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allocator_id: "alloc-A",
+        idempotency_key: KEY,
+        response: expect.objectContaining({ recorded: 1 }),
+      }),
+      expect.anything(),
+    );
+
+    // Second call: cache HIT → RPC must NOT fire again.
+    idemMaybeSingleMock.mockResolvedValueOnce({
+      data: { response: body1 },
+      error: null,
+    });
+
+    const res2 = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res2.status).toBe(200);
+    expect(res2.headers.get("Cache-Control")).toBe("private, no-store");
+    const body2 = await res2.json();
+    expect(body2).toEqual(body1);
+
+    // Critical assertion: the RPC ran EXACTLY ONCE across both requests.
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("malformed Idempotency-Key (too short) is ignored — RPC runs as normal", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    // 8-char key is below the 16-char floor → treated as no-idempotency.
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, "shortkey"));
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    // The cache should NOT have been consulted for a malformed key.
+    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
+    expect(idemUpsertMock).not.toHaveBeenCalled();
+  });
+
+  it("request without Idempotency-Key header skips cache entirely", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(200);
+    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
+    expect(idemUpsertMock).not.toHaveBeenCalled();
   });
 });

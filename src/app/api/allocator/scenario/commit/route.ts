@@ -47,12 +47,28 @@ import { z } from "zod";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withAuth } from "@/lib/api/withAuth";
+import { withAllocatorAuth } from "@/lib/api/withAllocatorAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 
 export const runtime = "nodejs";
+
+// audit-2026-05-07 round-2 Block D / P1947 — every response from this route
+// carries `private, no-store`. The payload includes allocator-scoped match
+// decision IDs + per-row audit metadata; serving it from any shared cache
+// would leak across tenants.
+const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
+
+// audit-2026-05-07 round-2 Block D / P1945 — accepted Idempotency-Key length
+// range. Matches the CHECK on scenario_commit_idempotency.idempotency_key
+// (migration 130) so a request bearing a malformed key takes the
+// "no-idempotency" path rather than hitting a 23514 check_violation at INSERT
+// time. RFC draft-ietf-httpapi-idempotency-key recommends client-generated,
+// opaque, hard-to-guess values — 16 chars is the floor for collision safety.
+const IDEMPOTENCY_KEY_MIN = 16;
+const IDEMPOTENCY_KEY_MAX = 128;
+const IDEMPOTENCY_TABLE = "scenario_commit_idempotency";
 
 // ---------------------------------------------------------------------------
 // Discriminated union schema (M6 — rejection_reason enum)
@@ -153,12 +169,15 @@ interface RpcEnvelope {
 // POST handler
 // ---------------------------------------------------------------------------
 
-export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextResponse> => {
+export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Promise<NextResponse> => {
   const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
       { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+      {
+        status: 429,
+        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+      },
     );
   }
 
@@ -167,8 +186,60 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Invalid request body", issues: parsed.error.issues },
-      { status: 400 },
+      { status: 400, headers: NO_STORE_HEADERS },
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // P1945 — Idempotency-Key short-circuit.
+  //
+  // If the request bears a well-formed Idempotency-Key (length within the
+  // 16..128 CHECK on migration 130's scenario_commit_idempotency table), look
+  // up the cached response for (allocator_id, idempotency_key). On a hit we
+  // return the SAME response shape, status 200, and skip the RPC entirely —
+  // this is the only path that prevents replayed network/retry traffic from
+  // double-recording match_decisions + bridge_outcomes.
+  //
+  // The lookup uses the SERVICE-ROLE admin client on purpose: the dedup
+  // table's RLS policy admits SELECT only for `auth.uid() = allocator_id`,
+  // but the route already authenticated the caller through withAllocatorAuth.
+  // Routing the lookup through the user-scoped client would still work today,
+  // but the admin client is what later writes the cache row (post-success),
+  // so using the same client for both gives us a single place to reason
+  // about RLS bypass.
+  // ---------------------------------------------------------------------------
+  const idempotencyKey = req.headers.get("Idempotency-Key");
+  const idempotencyKeyValid =
+    !!idempotencyKey &&
+    idempotencyKey.length >= IDEMPOTENCY_KEY_MIN &&
+    idempotencyKey.length <= IDEMPOTENCY_KEY_MAX;
+
+  const admin = createAdminClient();
+
+  if (idempotencyKeyValid) {
+    const { data: cached, error: cacheErr } = await admin
+      .from(IDEMPOTENCY_TABLE)
+      .select("response")
+      .eq("allocator_id", user.id)
+      .eq("idempotency_key", idempotencyKey)
+      .maybeSingle();
+
+    if (cacheErr) {
+      // Cache lookup is a non-fatal path; log and fall through to the RPC.
+      // A persistent cache failure would manifest as duplicate writes on
+      // retries, but that's strictly better than failing closed for every
+      // commit.
+      console.warn("[scenario-commit] idempotency lookup failed:", {
+        user: user.id,
+        code: cacheErr.code,
+        message: cacheErr.message,
+      });
+    } else if (cached && cached.response) {
+      return NextResponse.json(cached.response, {
+        status: 200,
+        headers: NO_STORE_HEADERS,
+      });
+    }
   }
 
   // P1956 (audit-2026-05-07 round 2): single canonical percent encoding.
@@ -197,7 +268,7 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
               },
             ],
           },
-          { status: 400 },
+          { status: 400, headers: NO_STORE_HEADERS },
         );
       }
       // percent_allocated wins when both are present (legacy clients sending
@@ -232,7 +303,7 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     });
     return NextResponse.json(
       { error: "Commit failed", message: rpcErr.message },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -241,6 +312,15 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     // FULL FAILURE — single-tx rolled back. Return per-row errors so the
     // drawer can surface them inline. NO audit events emitted (the batch
     // was rolled back, so emitting audit would mis-represent on-disk state).
+    //
+    // audit-2026-05-07 round-2 Block D / P1945:
+    // Status is 422 (Unprocessable Entity), NOT 200. A 200 on a rolled-back
+    // batch was the pre-audit shape and made retry-loops indistinguishable
+    // from success at the HTTP layer — every legacy client that watched for
+    // 2xx-then-stop would silently swallow per-row errors. 422 surfaces the
+    // semantic distinction ("syntactically valid request, but the server
+    // refused to commit it") while keeping the recorded:0 + errors[] payload
+    // shape so the existing drawer UI can render inline failures unchanged.
     console.error("scenario_commit full failure", {
       user: user.id,
       diff_count: parsed.data.diffs.length,
@@ -253,7 +333,7 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
         errors:
           rpcResult?.errors ?? [{ index: -1, error: "Unknown commit failure" }],
       },
-      { status: 200 },
+      { status: 422, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -272,6 +352,39 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     });
   }
 
+  const successBody = {
+    recorded: recorded.length,
+    results: recorded,
+    errors: [] as Array<{ index: number; error: string }>,
+  };
+
+  // P1945 — persist the success envelope so a subsequent retry with the same
+  // Idempotency-Key short-circuits at the top of this handler. Upsert (not
+  // INSERT) so a concurrent retry that races us through the RPC doesn't trip
+  // the (allocator_id, idempotency_key) PK and leak a 500. The race window
+  // here is small but non-zero — duplicate RPC executions are still possible
+  // for genuinely concurrent retries; the cache is a best-effort dedup for
+  // the much more common "client retries N seconds later" path.
+  if (idempotencyKeyValid) {
+    const { error: cacheWriteErr } = await admin
+      .from(IDEMPOTENCY_TABLE)
+      .upsert(
+        {
+          allocator_id: user.id,
+          idempotency_key: idempotencyKey,
+          response: successBody,
+        },
+        { onConflict: "allocator_id,idempotency_key" },
+      );
+    if (cacheWriteErr) {
+      console.warn("[scenario-commit] idempotency cache write failed:", {
+        user: user.id,
+        code: cacheWriteErr.code,
+        message: cacheWriteErr.message,
+      });
+    }
+  }
+
   // Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_outcome_at marker.
   // The /allocations Server Component reader emits the PostHog
   // `first_outcome_recorded` event on the next dashboard request. Idempotent
@@ -279,7 +392,6 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
   // a stamp failure does NOT affect the route response or the committed
   // batch.
   try {
-    const admin = createAdminClient();
     await stampOutcomeMarker(admin, user.id);
   } catch (err) {
     // Phase 11 review fix IN-05: log err.stack ?? err.message so a
@@ -292,8 +404,8 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     );
   }
 
-  return NextResponse.json(
-    { recorded: recorded.length, results: recorded, errors: [] },
-    { status: 200 },
-  );
+  return NextResponse.json(successBody, {
+    status: 200,
+    headers: NO_STORE_HEADERS,
+  });
 });
