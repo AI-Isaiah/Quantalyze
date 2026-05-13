@@ -281,7 +281,25 @@ jobs:
       # local to the new package; the legacy untyped surface migrates
       # incrementally.
       - run: mypy --strict --follow-imports=silent services/ingestion/
+      # PR #149 v0.22.25.3 follow-up: wire the test Supabase project into
+      # the python job so the P97 fence regression tests in
+      # tests/test_compute_jobs_fencing.py execute against a real DB. The
+      # test project (`qmnijlgmdhviwzwfyzlc`) was caught up to main's
+      # migration head (109-119 applied 2026-05-12), so live-DB fixtures
+      # no longer hit pre-existing schema drift.
+      #
+      # Gated on the repository VARIABLE `E2E_TEST_DB_CONFIGURED` (NOT
+      # `secrets.X != ''`) — vars are introspectable in workflow logs so
+      # a missing/typo'd var fails loudly. When the var is unset (forks,
+      # repos without a configured test DB), the secrets fall back to
+      # empty strings AND `CI` is demoted to '' so `_need_supabase()` in
+      # `tests/test_compute_jobs_fencing.py` falls into the `pytest.skip`
+      # branch instead of the CI=true hard-fail branch.
       - run: pytest --cov=services --cov-report=term-missing --cov-fail-under=80
+        env:
+          SUPABASE_TEST_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || '' }}
+          SUPABASE_TEST_SERVICE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || '' }}
+          CI: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && 'true' || '' }}
 
   e2e:
     # Runs a small Playwright suite against a placeholder-env Next.js build.

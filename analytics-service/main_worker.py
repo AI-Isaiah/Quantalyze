@@ -88,7 +88,13 @@ SHUTDOWN = asyncio.Event()
 # iterates TIMEOUT_PER_KIND (the source of truth) — adding a new long
 # handler without an override fails CI.
 WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
-    "sync_trades": "20 minutes",       # handler timeout = 15 minutes
+    # audit-2026-05-07 P97 / G12.A.2 (mig 117): bumped sync_trades 20→30
+    # min so OKX backfills (legitimately 12+ min) don't routinely trip
+    # the watchdog and trigger the Race A 2-worker overlap that the
+    # claim-token fence detects but doesn't prevent. INVEST-P97
+    # §Recommendation pairs the fence with this override:
+    # `.planning/audit-2026-05-07/INVEST-P97.md`.
+    "sync_trades": "30 minutes",       # handler timeout = 15 minutes (mig 117)
     "compute_analytics": "20 minutes", # handler timeout = 15 minutes
     "poll_positions": "5 minutes",     # handler timeout = 3 minutes
     "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
@@ -106,6 +112,117 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # transitions through transition_strategy_verification.
     "process_key_long": "40 minutes",  # handler timeout = 30 minutes
 }
+
+
+# ---------------------------------------------------------------------------
+# Late-mark detection (audit-2026-05-07 P97 / G12.A.2 — claim-token fence)
+# ---------------------------------------------------------------------------
+# Migration 117 raises `serialization_failure` (PostgreSQL SQLSTATE 40001)
+# from mark_compute_job_done / mark_compute_job_failed when the caller's
+# p_claim_token doesn't match the row's current claim_token. This means
+# the watchdog reclaimed the row and a second worker has taken over —
+# the late mark is expected behavior, not a failure. Detect by:
+#   (a) sniffing the PostgREST APIError `.code` attribute for the
+#       SQLSTATE '40001', OR
+#   (b) for transports that don't surface .code cleanly, checking for our
+#       specific RAISE message literal 'preempted by watchdog reclaim'
+#       (set in migration 117 STEP 4 + STEP 5).
+#
+# PR #149 review I4 (maintainability conf 8 + security conf 6): the
+# previous version also matched the bare strings '40001' and
+# 'serialization_failure' anywhere in the message. That collides with
+# any OTHER source of a serialization conflict (manual SERIALIZABLE
+# isolation, advisory-lock contention surfacing as 40001, third-party
+# library messages embedding '40001' for unrelated reasons). Tighten to:
+# either .code == '40001' OR our specific message literal. This makes
+# the detection P97-specific and prevents silent swallowing of unrelated
+# 40001s.
+_PREEMPTED_MESSAGE_LITERAL = "preempted by watchdog reclaim"
+
+
+def _is_serialization_failure(exc: BaseException) -> bool:
+    code = getattr(exc, "code", None)
+    if code == "40001":
+        return True
+    msg = str(exc) if exc is not None else ""
+    return _PREEMPTED_MESSAGE_LITERAL in msg
+
+
+# ---------------------------------------------------------------------------
+# Safe mark wrapper (DRY for the 3 try/except blocks in dispatch_tick)
+# ---------------------------------------------------------------------------
+# PR #149 review I5 (maintainability conf 9) + I6 (red-team conf 8):
+# extract the "call mark RPC, swallow 40001, log LATE_MARK_IGNORED, re-
+# raise anything else" pattern that was repeated 3 times in dispatch_tick.
+# Single source of truth = single place to fix any future bug in the
+# late-mark detection / logging contract.
+#
+# `label` is the short tag that appears in the log line — typically the
+# RPC name ('mark_done' / 'mark_failed' / 'mark_failed (fallback)') so an
+# operator scanning logs can tell which code path fired the late-mark.
+#
+# `outer_exc` is set when called from the outer-catch fallback path
+# (I6): the original dispatch exception that triggered the
+# `_mark_failed_fallback`. If `_safe_mark` itself swallows a 40001 in
+# that path, the LATE_MARK_IGNORED log line carries
+# `event_type="preempted_after_dispatch_error"` and includes the outer
+# exception context — so the late-mark line subsumes the original
+# error log instead of triplicating it.
+#
+# Returns: True iff `_safe_mark` swallowed a 40001 (LATE_MARK_IGNORED
+# fired). False iff the mark succeeded normally. Re-raises any other
+# exception. PR #149 second-pass review fix #4 (HIGH conf 8): callers
+# in the outer-catch fallback path use the return value to decide
+# whether to log the original `dispatch_tick: unhandled error` line —
+# when LATE_MARK_IGNORED fired with `event_type="preempted_after_
+# dispatch_error"`, the late-mark line ALREADY carries the outer
+# context via the `extra` dict and the redundant error line would
+# triplicate the same conceptual event for Sentry's severity-based
+# alert pipeline.
+async def _safe_mark(
+    invoke_rpc,
+    *,
+    job_id: str,
+    claim_token: str | None,
+    worker_id: str,
+    label: str,
+    outer_exc: BaseException | None = None,
+) -> bool:
+    try:
+        await db_execute(invoke_rpc)
+        return False
+    except Exception as mark_exc:  # noqa: BLE001
+        if _is_serialization_failure(mark_exc):
+            # event_type lets Sentry/log routing distinguish a clean
+            # late-mark (worker preempted, nothing else wrong) from a
+            # late-mark-after-dispatch-error (worker preempted AND the
+            # original dispatch threw). The latter is structurally a
+            # single conceptual event — the dispatch error is
+            # explained by "another worker took over". Severity
+            # pipelines that key on the latest log line will see
+            # WARNING + the outer context together, not a stale
+            # ERROR line that's already been superseded.
+            event_type = (
+                "preempted_after_dispatch_error" if outer_exc is not None else "preempted"
+            )
+            logger.warning(
+                "LATE_MARK_IGNORED: job %s %s preempted by watchdog reclaim "
+                "(claim_token=%s, worker=%s) — another worker has taken over",
+                job_id, label, claim_token, worker_id,
+                extra={
+                    "event_type": event_type,
+                    "job_id": job_id,
+                    "label": label,
+                    "worker_id": worker_id,
+                    "claim_token": claim_token,
+                    # repr() so structured-logging exporters get a
+                    # stable string even when outer_exc carries
+                    # non-serializable attrs (PostgREST APIError etc.).
+                    "outer_exc": repr(outer_exc) if outer_exc is not None else None,
+                },
+            )
+            return True
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -171,16 +288,31 @@ async def dispatch_tick(worker_id: str) -> None:
     logger.info("Claimed %d jobs: %s", len(jobs), [j["id"] for j in jobs])
 
     for job in jobs:
+        # audit-2026-05-07 P97 / G12.A.2 (mig 117): claim-token fence.
+        # The claim RPC stamps a fresh UUID into compute_jobs.claim_token at
+        # claim time; we read it from the row here and pass it through to the
+        # mark RPCs. If the watchdog reclaims this row mid-handler and a
+        # second worker takes over, our late mark RPC raises
+        # serialization_failure — that's the expected late-mark-ignored path,
+        # not a failure. INVEST-P97 §Recommendation point 2.
+        claim_token = job.get("claim_token")
         try:
             result = await dispatch(job)
 
             if result.outcome == DispatchOutcome.DONE:
-                def _mark_done(jid=job["id"]):
+                def _mark_done(jid=job["id"], tok=claim_token):
                     supabase.rpc(
-                        "mark_compute_job_done", {"p_job_id": jid}
+                        "mark_compute_job_done",
+                        {"p_job_id": jid, "p_claim_token": tok},
                     ).execute()
 
-                await db_execute(_mark_done)
+                await _safe_mark(
+                    _mark_done,
+                    job_id=job["id"],
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    label="mark_done",
+                )
                 logger.info("Job %s done (trade_count=%s)", job["id"], result.trade_count)
 
             elif result.outcome == DispatchOutcome.FAILED:
@@ -188,6 +320,7 @@ async def dispatch_tick(worker_id: str) -> None:
                     jid=job["id"],
                     err=result.error_message,
                     kind=result.error_kind,
+                    tok=claim_token,
                 ):
                     supabase.rpc(
                         "mark_compute_job_failed",
@@ -195,10 +328,17 @@ async def dispatch_tick(worker_id: str) -> None:
                             "p_job_id": jid,
                             "p_error": err or "Unknown error",
                             "p_error_kind": kind or "unknown",
+                            "p_claim_token": tok,
                         },
                     ).execute()
 
-                await db_execute(_mark_failed)
+                await _safe_mark(
+                    _mark_failed,
+                    job_id=job["id"],
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    label="mark_failed",
+                )
                 logger.warning(
                     "Job %s failed (%s): %s",
                     job["id"],
@@ -212,15 +352,21 @@ async def dispatch_tick(worker_id: str) -> None:
         except Exception as exc:  # noqa: BLE001
             # dispatch() itself crashed — this should not normally happen
             # because dispatch has its own try-except. Defense in depth.
-            logger.error(
-                "dispatch_tick: unhandled error for job %s: %s",
-                job.get("id"),
-                exc,
-                exc_info=True,
-            )
+            #
+            # PR #149 second-pass review fix #4 (HIGH conf 8): defer the
+            # "dispatch_tick: unhandled error" log line until AFTER the
+            # fallback mark resolves. If the mark swallows a 40001
+            # (LATE_MARK_IGNORED with event_type="preempted_after_
+            # dispatch_error"), the late-mark line already carries the
+            # outer_exc context via its `extra` dict — logging the
+            # original error here would triplicate the same conceptual
+            # event for Sentry's severity-based alert pipelines (ERROR
+            # → WARNING cascade → WARNING) and the most-recent-severity
+            # router would mis-classify a benign preemption as a
+            # critical dispatch failure.
             try:
                 def _mark_failed_fallback(
-                    jid=job["id"], err=str(exc)[:500]
+                    jid=job["id"], err=str(exc)[:500], tok=claim_token,
                 ):
                     supabase.rpc(
                         "mark_compute_job_failed",
@@ -228,11 +374,46 @@ async def dispatch_tick(worker_id: str) -> None:
                             "p_job_id": jid,
                             "p_error": err,
                             "p_error_kind": "unknown",
+                            "p_claim_token": tok,
                         },
                     ).execute()
 
-                await db_execute(_mark_failed_fallback)
+                late_mark_swallowed = await _safe_mark(
+                    _mark_failed_fallback,
+                    job_id=job["id"],
+                    claim_token=claim_token,
+                    worker_id=worker_id,
+                    label="mark_failed (fallback)",
+                    outer_exc=exc,
+                )
+                if not late_mark_swallowed:
+                    # mark_failed succeeded normally — the outer dispatch
+                    # error is real and unattributed by any LATE_MARK_IGNORED
+                    # line. Log it now at ERROR with the full traceback.
+                    logger.error(
+                        "dispatch_tick: unhandled error for job %s "
+                        "(mark_failed succeeded): %s",
+                        job.get("id"),
+                        exc,
+                        exc_info=exc,
+                    )
+                # else: LATE_MARK_IGNORED fired with
+                # event_type="preempted_after_dispatch_error" and the
+                # outer exc context lives in that record's `extra`
+                # dict. Don't double-log.
             except Exception as mark_exc:  # noqa: BLE001
+                # `_safe_mark` only re-raises NON-40001 exceptions, so we
+                # reach this branch when the fallback mark itself failed
+                # for a reason unrelated to the P97 fence. The original
+                # dispatch error is also unattributed — log BOTH so the
+                # operator sees the full chain.
+                logger.error(
+                    "dispatch_tick: unhandled error for job %s "
+                    "(mark_failed also raised): %s",
+                    job.get("id"),
+                    exc,
+                    exc_info=exc,
+                )
                 logger.error(
                     "dispatch_tick: could not mark job %s failed: %s",
                     job.get("id"),

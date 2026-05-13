@@ -578,6 +578,7 @@ export type Database = {
           allocator_id: string | null
           api_key_id: string | null
           attempts: number
+          claim_token: string | null
           claimed_at: string | null
           claimed_by: string | null
           created_at: string
@@ -602,6 +603,7 @@ export type Database = {
           allocator_id?: string | null
           api_key_id?: string | null
           attempts?: number
+          claim_token?: string | null
           claimed_at?: string | null
           claimed_by?: string | null
           created_at?: string
@@ -626,6 +628,7 @@ export type Database = {
           allocator_id?: string | null
           api_key_id?: string | null
           attempts?: number
+          claim_token?: string | null
           claimed_at?: string | null
           claimed_by?: string | null
           created_at?: string
@@ -2866,6 +2869,7 @@ export type Database = {
           allocator_id: string | null
           api_key_id: string | null
           attempts: number
+          claim_token: string | null
           claimed_at: string | null
           claimed_by: string | null
           created_at: string
@@ -2908,6 +2912,7 @@ export type Database = {
           allocator_id: string | null
           api_key_id: string | null
           attempts: number
+          claim_token: string | null
           claimed_at: string | null
           claimed_by: string | null
           created_at: string
@@ -3190,9 +3195,36 @@ export type Database = {
         }
         Returns: string
       }
-      mark_compute_job_done: { Args: { p_job_id: string }; Returns: undefined }
+      // Migration 117 / P97 fence: the prior 1-arg / 3-arg overloads were
+      // dropped (DROP FUNCTION) so only the fenced signature exists. The
+      // p_claim_token parameter has DEFAULT NULL on the Postgres side, so
+      // it's optional from the TS surface — `null` means "skip fence"
+      // (back-compat for legacy callers like the admin runbook). Workers
+      // that go through the claim path MUST pass the row's claim_token.
+      //
+      // NOTE — these entries (and the `claim_token` additions to
+      // compute_jobs.{Row,Insert,Update} + claim_compute_jobs[_with_priority]
+      // Returns above) are MANUAL forward-edits ahead of the live remote
+      // schema. supabase_mcp.generate_typescript_types currently regenerates
+      // FROM the remote DB, where mig 117 hasn't been applied yet — running
+      // a fresh regen would REGRESS this PR by reverting to the un-fenced
+      // 1-arg / 3-arg signatures. After mig 117 deploys per
+      // docs/runbooks/deploy-mig-117-claim-token-fence.md, a follow-up
+      // regen will (a) reproduce these edits verbatim and (b) pick up
+      // whatever other drift has accumulated (e.g., `reclaim_count` was
+      // added to compute_jobs.Row by a separate unrelated migration that
+      // already shipped — keep that out of this PR).
+      mark_compute_job_done: {
+        Args: { p_job_id: string; p_claim_token?: string | null }
+        Returns: undefined
+      }
       mark_compute_job_failed: {
-        Args: { p_error: string; p_error_kind?: string; p_job_id: string }
+        Args: {
+          p_error: string
+          p_error_kind?: string
+          p_job_id: string
+          p_claim_token?: string | null
+        }
         Returns: string
       }
       parse_holding_ref: {

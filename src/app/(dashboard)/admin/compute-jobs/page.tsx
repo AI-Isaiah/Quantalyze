@@ -14,7 +14,17 @@ export default async function ComputeJobsPage() {
 
   // Parallel queries for fill health indicators
   const [jobsResult, fillHealthResult, dqfResult] = await Promise.all([
-    // Recent compute jobs
+    // Recent compute jobs.
+    //
+    // SECURITY (audit-2026-05-07 P97 / G12.A.2 — mig 117):
+    // DO NOT add `claim_token` to this select list. claim_token is a
+    // capability token used by the worker fence (mark_compute_job_done /
+    // mark_compute_job_failed verify it before flipping the row). Leaking
+    // it to the admin UI lets anyone who can see this page race the
+    // worker by calling the mark RPCs with the leaked token. The
+    // src/__tests__/compute-jobs-claim-token-not-leaked.test.ts grep
+    // gate enforces this — never `select("*")` against compute_jobs
+    // anywhere in src/.
     admin
       .from("compute_jobs")
       .select(

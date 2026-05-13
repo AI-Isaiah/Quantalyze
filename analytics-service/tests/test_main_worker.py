@@ -353,7 +353,10 @@ class TestWatchdogTick:
         # see TestWatchdogInvariant for the source-of-truth invariant. Bumped
         # sync_trades 10→20m and compute_portfolio 10→15m after a wizard hang
         # caused by sync_trades retrying past the watchdog instead of failing.
-        assert overrides["sync_trades"] == "20 minutes"
+        # audit-2026-05-07 P97 / G12.A.2 (mig 117): bumped sync_trades 20→30m
+        # so OKX backfills (legitimately 12+ min) don't routinely trip the
+        # watchdog and trigger Race A 2-worker overlap.
+        assert overrides["sync_trades"] == "30 minutes"
         assert overrides["compute_analytics"] == "20 minutes"
         assert overrides["poll_positions"] == "5 minutes"
         assert overrides["compute_portfolio"] == "15 minutes"

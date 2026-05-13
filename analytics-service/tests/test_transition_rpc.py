@@ -43,6 +43,15 @@ def admin():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _seed_user_id(admin) -> str:
+    """Return any existing profile id from the test DB to satisfy
+    strategies.user_id FK. See test_compute_jobs_fencing.py for rationale."""
+    res = admin.table("profiles").select("id").limit(1).execute()
+    if not res.data:
+        pytest.skip("test Supabase project has no seeded profiles")
+    return res.data[0]["id"]
+
+
 @pytest.fixture
 def strategy_id(admin):
     """Insert a synthetic strategy and yield its id; cleanup deletes the row.
@@ -50,7 +59,7 @@ def strategy_id(admin):
     The cascade FK on strategy_verifications.strategy_id removes any
     verification rows we created during the test.
     """
-    user_id = str(uuid.uuid4())
+    user_id = _seed_user_id(admin)
     res = admin.table("strategies").insert({
         "user_id": user_id,
         "name": f"test-transition-{uuid.uuid4().hex[:8]}",
