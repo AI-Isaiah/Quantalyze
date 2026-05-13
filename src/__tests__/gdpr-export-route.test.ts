@@ -98,6 +98,38 @@ async function loadRoute() {
   return await import("@/app/api/account/export/route");
 }
 
+/**
+ * P448 (audit 2026-05-12 Lane E) - peak memory invariant.
+ *
+ * The legacy upload path held `bundleJson` and `bundleBytes` in
+ * scope simultaneously, peaking memory at ~3x the payload size
+ * (object + JSON string + bytes). The fix drops the named
+ * intermediate so the JSON string is unreachable as soon as the
+ * encode call returns, letting GC reclaim it before the upload
+ * round-trip.
+ *
+ * Source-grep assertion: the variable name `bundleJson` must not
+ * appear in the route. A drift back to a separate `const
+ * bundleJson = ...` line would fail this test.
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+describe("POST /api/account/export - peak-memory invariant (P448)", () => {
+  it("does not retain a named bundleJson intermediate (fused stringify/encode)", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src", "app", "api", "account", "export", "route.ts"),
+      "utf8",
+    );
+    // Pattern: `const bundleJson` or `let bundleJson` at the top of a
+    // line. The fused expression `new TextEncoder().encode(JSON.stringify(bundle))`
+    // is the post-fix shape.
+    expect(src).not.toMatch(/\b(?:const|let|var)\s+bundleJson\b/);
+    // Sanity check: the fused expression IS present.
+    expect(src).toMatch(/TextEncoder\(\)\.encode\(\s*JSON\.stringify\(\s*bundle\s*\)\s*\)/);
+  });
+});
+
 describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () => {
   beforeEach(() => {
     vi.clearAllMocks();

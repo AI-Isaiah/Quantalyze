@@ -73,9 +73,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Upload to storage. Path: `{user_id}/{uuid}.json`. The owner-read
   // RLS policy in migration 055 gates by `storage.foldername(name)[1]`
   // so the user prefix MUST be the auth.uid() text.
+  //
+  // P448 (audit 2026-05-12 Lane E): pipe `JSON.stringify(bundle)`
+  // directly into `TextEncoder.encode` in a single expression — the
+  // intermediate string is still allocated by the JS engine, but its
+  // variable lifetime ends with the encode call, so the GC can
+  // reclaim it as soon as the Uint8Array is in hand. The legacy code
+  // held both `bundleJson` AND `bundleBytes` in scope until the
+  // upload returned, peaking at ~3× the payload size (object + JSON
+  // string + bytes). A future hardening pass could replace this with
+  // a true streaming serializer that writes chunks directly to a
+  // ReadableStream — tracked under audit P448 follow-up.
   const objectKey = `${user.id}/${crypto.randomUUID()}.json`;
-  const bundleJson = JSON.stringify(bundle);
-  const bundleBytes = new TextEncoder().encode(bundleJson);
+  const bundleBytes = new TextEncoder().encode(JSON.stringify(bundle));
 
   const { error: uploadErr } = await admin.storage
     .from(EXPORTS_BUCKET)
