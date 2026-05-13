@@ -482,9 +482,31 @@ def admin():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _seed_user_id(admin) -> str:
+    """Return any existing profile id from the test DB.
+
+    The strategies.user_id FK references profiles(id), which itself references
+    auth.users(id). Creating a fresh auth.users entry per test is expensive
+    and pollutes the test project. Reuse any seeded profile (per project
+    convention the test Supabase project has 3 fixed test users:
+    alloc/sm/admin@quantalyze.test). Strategies are still unique per test
+    because the new strategy_id is generated server-side; tests are isolated
+    by strategy_id, not user_id.
+    """
+    res = admin.table("profiles").select("id").limit(1).execute()
+    if not res.data:
+        pytest.fail(
+            "Test Supabase project has no seeded profiles — cannot satisfy "
+            "strategies.user_id FK. Seed at least one profile (linked to an "
+            "auth.users entry) in the test project before running this suite.",
+            pytrace=False,
+        )
+    return res.data[0]["id"]
+
+
 @pytest.fixture
 def strategy_id(admin):
-    user_id = str(uuid.uuid4())
+    user_id = _seed_user_id(admin)
     res = admin.table("strategies").insert({
         "user_id": user_id,
         "name": f"p97-fence-test-{uuid.uuid4().hex[:8]}",
