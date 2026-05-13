@@ -10,6 +10,7 @@ funding_fees rows in [opened_at, closed_at] window.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import statistics
 from collections import defaultdict
@@ -22,7 +23,41 @@ from services.db import db_execute
 logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 
 
+# Audit-2026-05-07 P1101 (caller follow-up): per-worker process in-memory
+# locks keyed on strategy_id. Defense-in-depth above the SQL-side
+# pg_advisory_xact_lock (migration 113) + migration 119's
+# (strategy_id, symbol, side, opened_at) UNIQUE constraint. Prevents the
+# same-worker race where two coroutines (e.g. watchdog reclaim + scheduled
+# tick) both fire reconstruct_positions for the same strategy_id
+# concurrently. The first holder runs the full body; the second waits, then
+# proceeds — but at that point the DB is consistent so the second pass is
+# harmless (and may incorporate any fills that arrived between the two
+# calls). We do NOT cache the result for the second caller — re-running
+# against the now-up-to-date DB is cheap and stays correct under further
+# fill arrivals.
+_RECONSTRUCT_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(strategy_id: str) -> asyncio.Lock:
+    lock = _RECONSTRUCT_LOCKS.get(strategy_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RECONSTRUCT_LOCKS[strategy_id] = lock
+    return lock
+
+
 async def reconstruct_positions(strategy_id: str, supabase) -> dict:
+    """Public entry point — serializes per-strategy via in-memory
+    asyncio.Lock so concurrent same-worker callers do not both fire the
+    atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
+    pg_advisory_xact_lock + migration 119 UNIQUE constraint's
+    responsibility. See `_RECONSTRUCT_LOCKS` docstring above for the full
+    rationale (audit-2026-05-07 P1101 caller follow-up)."""
+    async with _lock_for(strategy_id):
+        return await _reconstruct_positions_inner(strategy_id, supabase)
+
+
+async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     """Reconstruct position lifecycles from raw fills using FIFO matching.
 
     Returns trade_metrics dict for strategy_analytics JSONB. Each closed
