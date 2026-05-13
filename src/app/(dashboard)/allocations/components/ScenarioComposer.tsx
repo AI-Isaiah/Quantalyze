@@ -211,6 +211,16 @@ export function ScenarioComposer({
   // reinitialize from current live holdings.
   const [commitDrawerOpen, setCommitDrawerOpen] = useState(false);
   const [commitDiffs, setCommitDiffs] = useState<ScenarioCommitDiff[]>([]);
+  // P1933 (audit-2026-05-07 Block C / C.1) — inline error surfaced when
+  // handleCommit refuses to open the commit pipeline. Two refusal paths:
+  //   (a) at least one voluntary_add row is present AND scenarioAum is
+  //       non-positive / non-finite → every add row would commit with
+  //       size_at_decision_usd:0, division-by-zero downstream
+  //   (b) any computed size_at_decision_usd lands as non-finite or negative
+  //       (defense-in-depth covering P1942 / P1936 ripple — the per-row
+  //       weight is already clamped by setWeightOverride, but the
+  //       multiplication site here also guards against an unexpected NaN)
+  const [commitError, setCommitError] = useState<string | null>(null);
 
   // M3 — Empty state computed flag. The early-return moves to the END of
   // the hook list so React's hook ordering invariant is preserved across
@@ -474,12 +484,40 @@ export function ScenarioComposer({
         size_at_decision_usd: Number.isFinite(h.value_usd) ? h.value_usd : 0,
       });
     }
+
+    // P1933 (audit-2026-05-07 Block C / C.1) — when the allocator opens the
+    // composer with an empty portfolio (or every holding toggled off) and
+    // adds strategies from the empty-state Browse flow, `scenarioAum` is 0
+    // and every voluntary_add row below would land with
+    // size_at_decision_usd:0. Downstream the daily-delta cron divides
+    // realized PnL by size_at_decision_usd → division-by-zero. Refuse the
+    // commit gesture and surface an inline error before any state change.
+    const hasVoluntaryAdds = scenario.draft.addedStrategies.length > 0;
+    if (hasVoluntaryAdds && (!Number.isFinite(scenarioAum) || scenarioAum <= 0)) {
+      setCommitError(
+        "Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting.",
+      );
+      return;
+    }
+
     for (const a of scenario.draft.addedStrategies) {
+      const weight = scenario.draft.weightOverrides[a.id] ?? 0;
+      const sizeUsd = weight * scenarioAum;
+      // P1933 defense-in-depth — also guards P1942 / P1936 ripple. The
+      // setWeightOverride clamp already keeps weight in [0,1] and the
+      // scenarioAum gate above already rejects non-positive AUM, but a
+      // non-finite / negative product here means a state-machine bug
+      // earlier in the pipeline; refuse rather than commit garbage.
+      if (!Number.isFinite(sizeUsd) || sizeUsd < 0) {
+        setCommitError(
+          "Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting.",
+        );
+        return;
+      }
       diffs.push({
         kind: "voluntary_add",
         strategy_id: a.id,
-        size_at_decision_usd:
-          (scenario.draft.weightOverrides[a.id] ?? 0) * scenarioAum,
+        size_at_decision_usd: sizeUsd,
       });
     }
     // Review-pass P2 fix — single-source the commit-drawer surface. When
@@ -489,6 +527,7 @@ export function ScenarioComposer({
     // two confirmation surfaces on top of each other. When `false`, the
     // host is signalling "I own the commit UI" — fire onCommitRequested
     // and skip opening the internal drawer.
+    setCommitError(null);
     setCommitDiffs(diffs);
     if (useInternalCommitDrawer) {
       setCommitDrawerOpen(true);
@@ -725,6 +764,17 @@ export function ScenarioComposer({
           Browse strategies
         </button>
       </div>
+
+      {commitError && (
+        <div
+          role="alert"
+          aria-live="polite"
+          data-testid="scenario-commit-error"
+          className="mt-4 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative"
+        >
+          {commitError}
+        </div>
+      )}
 
       <ScenarioFooter
         diffCount={scenario.diffCount}

@@ -789,6 +789,67 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C_P1933 — P1933 CRITICAL: empty-state add flow + commit must refuse
+  //   when scenarioAum=0 (every voluntary_add row would land with
+  //   size_at_decision_usd:0 → division-by-zero downstream).
+  // -------------------------------------------------------------------------
+  it("T_C_P1933 (audit-2026-05-07/Block-C/C.1) — refuses commit + surfaces alert when scenarioAum=0 with voluntary_add", () => {
+    // Empty holdings + added-strategy via the empty-state Browse drawer
+    // transitions the composer out of the empty-state branch and into the
+    // main body with scenarioAum === 0 (no live holdings contribute).
+    const payload = makePayload({
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+    });
+    let capturedOnAdd: ((s: unknown) => void) | null = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onCommitRequested={onCommitRequested}
+        useInternalCommitDrawer={false}
+      />,
+    );
+    // Empty-state branch → click Browse → simulate Add. The browse drawer
+    // in the empty-state branch is rendered (and mocked) so onAdd is wired.
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Browse strategies$/i }),
+    );
+    act(() => {
+      capturedOnAdd!({
+        id: "strat-uuid-zero-aum",
+        name: "Zero AUM Strategy",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+    });
+
+    // Composer now in main-body render. Click Commit — the handler should
+    // refuse and surface an inline role="alert" referencing zero AUM.
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((a) => /portfolio AUM is zero/i.test(a.textContent ?? "")),
+    ).toBe(true);
+    // The drawer must NOT have opened (no internal drawer per the
+    // useInternalCommitDrawer={false} prop) and the legacy callback must
+    // NOT have fired either — the commit is refused outright.
+    expect(onCommitRequested).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C19 — Equity_curve +1 wealth conversion (Pitfall 1)
   // -------------------------------------------------------------------------
   it("T_C19 EquityChart scenarioSeries values are wealth-form (>=0.95 — i.e. +1 conversion applied)", () => {
