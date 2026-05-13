@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.26.1] - 2026-05-13
+
+### Fixed
+
+- **Ratelimit prod gate (PR #150 CI regression)** — `src/lib/ratelimit.ts` `isProduction()` now checks `VERCEL_ENV === 'production'` instead of `NODE_ENV === 'production'`. `next start` always sets `NODE_ENV=production` — including in the GitHub Actions e2e job where Upstash is intentionally unwired — so the previous gate flipped fail-CLOSED in CI and broke `onboarding-funnel.spec.ts`'s "Download CSV (last 90 days)" step (15s download-event timeout). `VERCEL_ENV` is Vercel's authoritative deploy-target marker: `production` only on real prod, `preview` on PR previews, unset in CI. Three new regression tests in `ratelimit.test.ts` lock the gate in. PR #150 round-1 critical-high sweep CI now passes.
+
 ## [0.22.26.0] - 2026-05-13
 
 ### Fixed — audit-2026-05-07 round-1 critical sweep (46 CRITICAL items closed)
