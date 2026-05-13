@@ -224,6 +224,78 @@ jobs:
           fi
           echo "All frontend-* jobs succeeded."
 
+  sql-tests:
+    # audit-2026-05-07 follow-up Issue 6 — wire the supabase/tests/test_*.sql
+    # files into CI. Pre-fix, the 5 plain PL/pgSQL test files were
+    # committed but never invoked by any workflow or `package.json`
+    # script — covering P911-P920, P917, P918, P919, P920, P455, P475
+    # with no CI signal. A future migration could silently break the
+    # sanitize_user sentinel trigger, the retention guard, the data
+    # deletion FK action, the log_audit_event_service ceiling, or the
+    # wizard draft guard with no test failure to catch it.
+    #
+    # Security: this job only reads secrets via env: and runs psql with
+    # them as DSN values. No untrusted github.event.* input flows into
+    # any run: command — the test files themselves are static repo
+    # content, not user-supplied input.
+    #
+    # Gating: same `vars.E2E_TEST_DB_CONFIGURED` pattern as the e2e job.
+    # When the variable is unset (forks, repos without test-DB setup),
+    # the job no-ops. Postgres connection string comes from
+    # `secrets.TEST_SUPABASE_DB_URL` — a separate secret from the
+    # PostgREST/HTTP-shaped TEST_SUPABASE_URL because psql speaks the
+    # raw Postgres wire protocol (port 5432/6543 via pooler) rather than
+    # the HTTPS REST API. If TEST_SUPABASE_DB_URL is not yet wired, the
+    # step fails explicitly so the gate flips from "silent" to "loud
+    # follow-up to provision the secret".
+    #
+    # The test files use plain `RAISE EXCEPTION` (no pgTAP) — under
+    # `psql -v ON_ERROR_STOP=1` a failed assertion exits non-zero and
+    # fails the job.
+    runs-on: ubuntu-latest
+    if: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Run SQL self-tests against test Supabase project
+        env:
+          # PG connection string for the test project (qmnijlgmdhviwzwfyzlc).
+          # Must be the raw Postgres DSN (postgresql://...), NOT the
+          # HTTPS REST URL (TEST_SUPABASE_URL). If the secret is not
+          # configured, the step exits with an explicit message rather
+          # than silently passing — Issue 6 is specifically about the
+          # silent-no-op surface.
+          TEST_SUPABASE_DB_URL: ${{ secrets.TEST_SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_SUPABASE_DB_URL}" ]; then
+            echo "::error::TEST_SUPABASE_DB_URL secret is required to run SQL self-tests."
+            echo "::error::Set this secret to the raw Postgres DSN for the test Supabase project."
+            echo "::error::Format: postgresql://postgres.<project-ref>:<password>@<pooler-host>:6543/postgres"
+            exit 1
+          fi
+          echo "Discovering supabase/tests/test_*.sql files..."
+          shopt -s nullglob
+          files=(supabase/tests/test_*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::No supabase/tests/test_*.sql files found — Issue 6 invariant drifted."
+            exit 0
+          fi
+          echo "Found ${#files[@]} test file(s):"
+          printf '  - %s\n' "${files[@]}"
+          # ON_ERROR_STOP=1 + the test files' RAISE EXCEPTION lines mean
+          # a failed assertion exits non-zero and fails this step.
+          for f in "${files[@]}"; do
+            echo ""
+            echo "=== Running: $f ==="
+            psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f "$f"
+          done
+          echo ""
+          echo "All ${#files[@]} SQL self-tests passed."
+
   secret-scan:
     # Task 7.6: gitleaks runs against the full commit history for PRs
     # (fetch-depth: 0) and against the pushed commits on main. Config
