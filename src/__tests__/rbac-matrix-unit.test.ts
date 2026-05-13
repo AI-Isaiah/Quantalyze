@@ -34,6 +34,7 @@ const {
   userRolesQueryMock,
   userAppRolesInsertMock,
   userAppRolesDeleteMock,
+  adminUserAppRolesSelectMock,
   afterSpy,
   logAuditRpcMock,
   createAdminClientMock,
@@ -43,6 +44,11 @@ const {
   userRolesQueryMock: vi.fn(),
   userAppRolesInsertMock: vi.fn(),
   userAppRolesDeleteMock: vi.fn(),
+  // P462 — the route now calls `fetchUserRoles(admin, targetUserId)` after
+  // every grant + revoke to build the unified `{ user_id, roles[] }`
+  // envelope. The admin client must therefore support
+  // `from("user_app_roles").select("role").eq("user_id", id)`.
+  adminUserAppRolesSelectMock: vi.fn(),
   afterSpy: vi.fn<(cb: () => void | Promise<void>) => void>((cb) => {
     queueMicrotask(() => {
       try {
@@ -117,6 +123,14 @@ function makeAdminClient() {
         throw new Error(`Unexpected table in admin client: ${table}`);
       }
       return {
+        // P462 — `fetchUserRoles` in the route reads the post-mutation
+        // role set via select("role").eq("user_id", id). Mirror that
+        // chain here so the audit-event assertion path doesn't blow up
+        // on an unmocked `.select`. The promise resolves to the canonical
+        // PostgREST shape `{ data, error }`.
+        select: (_cols: string) => ({
+          eq: (_col: string, userId: string) => adminUserAppRolesSelectMock(userId),
+        }),
         upsert: (row: unknown, opts: unknown) =>
           userAppRolesInsertMock(row, opts),
         delete: (opts?: unknown) => ({
@@ -276,6 +290,14 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
       error: null,
       count: 1,
     });
+    // P462 — fetchUserRoles default for the unified `{ user_id, roles[] }`
+    // envelope. Tests that care about a specific post-mutation role set
+    // (e.g. grant returns ["allocator"], revoke returns []) override this
+    // locally before invoking the route.
+    adminUserAppRolesSelectMock.mockResolvedValue({
+      data: [],
+      error: null,
+    });
     // Default: caller is admin.
     getUserMock.mockResolvedValue({
       data: { user: { id: "admin-user-id", email: "a@test.com" } },
@@ -296,14 +318,21 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
   }
 
   it("grants a role, calls upsert, emits an audit event", async () => {
+    // P462 — post-grant role set the route should echo back to the caller.
+    adminUserAppRolesSelectMock.mockResolvedValue({
+      data: [{ role: "allocator" }],
+      error: null,
+    });
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "grant", role: "allocator" });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
+    // P462 (audit-2026-05-07) — unified envelope across GET / grant / revoke:
+    // `{ user_id, roles: AppRole[] }`. The pre-P462 `{ success, action, role }`
+    // shape is gone — same single parser drives the UI now.
     expect(await res.json()).toEqual({
-      success: true,
-      action: "grant",
-      role: "allocator",
+      user_id: "target-user-id",
+      roles: ["allocator"],
     });
     expect(userAppRolesInsertMock).toHaveBeenCalledTimes(1);
     const [row, opts] = userAppRolesInsertMock.mock.calls[0];
@@ -335,15 +364,21 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
   });
 
   it("revokes a role, calls delete, emits an audit event", async () => {
+    // P462 — post-revoke role set is empty for this target.
+    adminUserAppRolesSelectMock.mockResolvedValue({
+      data: [],
+      error: null,
+    });
     const { POST } = await loadRoute();
     const req = makeRequest({ action: "revoke", role: "analyst" });
     const res = await POST(req, makeParamsCtx({ id: "target-user-id" }));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({
-      success: true,
-      action: "revoke",
-      role: "analyst",
+    // P462 — unified `{ user_id, roles[] }` envelope; pre-fix shape
+    // `{ success, action, role, removed_rows }` is gone.
+    expect(body).toEqual({
+      user_id: "target-user-id",
+      roles: [],
     });
     expect(userAppRolesDeleteMock).toHaveBeenCalledTimes(1);
     expect(userAppRolesDeleteMock.mock.calls[0][0]).toMatchObject({
