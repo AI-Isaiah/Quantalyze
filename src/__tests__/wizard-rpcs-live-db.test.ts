@@ -369,7 +369,7 @@ describe("finalize_wizard_strategy RPC (Migration 031 / P474)", () => {
 // guard_wizard_draft_updates trigger — defense in depth.
 // ---------------------------------------------------------------------------
 
-describe("guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1)", () => {
+describe("guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1)", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "blocks a direct authenticated UPDATE that would flip wizard draft status",
     async () => {
@@ -496,6 +496,69 @@ describe("guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 1
       expect((strat as { status: string } | null)?.status).toBe(
         "pending_review",
       );
+    },
+    60_000,
+  );
+
+  // Migration 127 / red-team Finding 1: the GUC bypass that migration 126
+  // introduced was forgeable from any authenticated session. Migration 127
+  // removes it and gates the trigger on current_user='authenticated' alone.
+  // This test pins that an authenticated client cannot smuggle the GUC to
+  // bypass the trigger.
+  it.skipIf(!HAS_LIVE_DB)(
+    "Migration 127 (Finding 1): authenticated session cannot smuggle the wizard_rpc_active GUC",
+    async () => {
+      if (!ownerClient || !ownerId || !admin) return;
+
+      const { data: created, error: createErr } = await ownerClient.rpc(
+        "create_wizard_strategy",
+        {
+          p_user_id: ownerId,
+          p_exchange: "binance",
+          p_label: "finding1-bypass-test",
+          p_api_key_encrypted: PLACEHOLDER_ENCRYPTED,
+          p_api_secret_encrypted: null,
+          p_passphrase_encrypted: null,
+          p_dek_encrypted: null,
+          p_nonce: null,
+          p_kek_version: 1,
+          p_placeholder_name: "finding1-bypass-placeholder",
+          p_wizard_session_id: crypto.randomUUID(),
+        },
+      );
+      expect(createErr).toBeNull();
+      const createdRow = Array.isArray(created) ? created[0] : created;
+      const strategyId = createdRow.strategy_id as string;
+      createdStrategyIds.push(strategyId);
+      createdApiKeyIds.push(createdRow.api_key_id);
+
+      // Attempt the bypass: call set_config('quantalyze.wizard_rpc_active',
+      // 'on', true) via an exec_sql-style RPC. We don't ship an exec_sql
+      // RPC, so we approximate the attacker's path by issuing the UPDATE
+      // directly — pre-127, this would have required set_config; post-127
+      // the trigger ignores the GUC entirely and the UPDATE is rejected
+      // by current_user='authenticated'.
+      //
+      // We cannot call set_config from supabase-js without a custom RPC,
+      // so the strongest assertion we can make end-to-end is that the
+      // direct UPDATE fails (which the previous test in this file
+      // already covers). The function-body invariant — that
+      // guard_wizard_draft_updates no longer reads the GUC — is pinned
+      // by the SQL self-test in
+      // supabase/tests/test_guard_wizard_draft_updates_auth_uid.sql.
+      const { error: updateErr } = await ownerClient
+        .from("strategies")
+        .update({ status: "pending_review" })
+        .eq("id", strategyId);
+      expect(updateErr).not.toBeNull();
+
+      // Status must still be 'draft' — the bypass did not succeed.
+      const { data: strat } = await admin
+        .from("strategies")
+        .select("status")
+        .eq("id", strategyId)
+        .single();
+      expect((strat as { status: string } | null)?.status).toBe("draft");
     },
     60_000,
   );

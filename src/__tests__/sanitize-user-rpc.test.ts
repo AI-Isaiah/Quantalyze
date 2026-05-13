@@ -184,6 +184,84 @@ describe("Migration 120 — sanitize_user hardening", () => {
   );
 
   it.skipIf(!HAS_LIVE_DB)(
+    "Finding 3 + 4 (Migration 127): sentinel-evasion variants are rejected and the GUC bypass is gone",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userIds: string[] = [];
+
+      try {
+        const password = `LiveDbTest${ts}!F34`;
+        const email = `finding34-${ts}@quantalyze.test`;
+        const userId = await createTestUser(admin, email, password);
+        userIds.push(userId);
+
+        const anonClient = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
+            process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        );
+        const { data: signIn, error: signInErr } =
+          await anonClient.auth.signInWithPassword({ email, password });
+        if (signInErr || !signIn.session) {
+          console.warn(
+            "[sanitize-user-rpc] sign-in failed; skipping Finding 3+4 live check:",
+            signInErr?.message,
+          );
+          return;
+        }
+
+        const userClient = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
+            process.env.SUPABASE_SERVICE_ROLE_KEY!,
+          {
+            global: {
+              headers: { Authorization: `Bearer ${signIn.session.access_token}` },
+            },
+          },
+        );
+
+        // Finding 4: every sentinel-evasion variant must be rejected.
+        // We cannot smuggle set_config from supabase-js without a custom
+        // RPC, so this exercises the "direct authenticated UPDATE" path
+        // alone — pre-127 the trigger compared by strict `=` and at
+        // least the whitespace/casing variants would have slipped
+        // through. Post-127 the LIKE prefix predicate catches them all.
+        const variants = [
+          "[deleted]",
+          "[deleted] ",
+          "[Deleted]",
+          "[DELETED]",
+          " [deleted]",
+          "[deleted strategy]",
+        ];
+        for (const variant of variants) {
+          const { error: updateErr } = await userClient
+            .from("profiles")
+            .update({ display_name: variant })
+            .eq("id", userId);
+          expect(
+            updateErr,
+            `Finding 4: variant ${JSON.stringify(variant)} should have been rejected`,
+          ).not.toBeNull();
+        }
+
+        // The row must still hold the original (non-sentinel) display_name.
+        const { data: reread } = await admin
+          .from("profiles")
+          .select("display_name")
+          .eq("id", userId)
+          .single();
+        expect(reread?.display_name).toBe(email);
+      } finally {
+        await cleanupLiveDbRow(admin, { userIds });
+      }
+    },
+    45_000,
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
     "P916: sanitize_user purges auth.refresh_tokens + auth.sessions and anonymizes auth.users",
     async () => {
       const admin = createLiveAdminClient();

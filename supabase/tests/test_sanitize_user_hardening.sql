@@ -169,12 +169,14 @@ BEGIN
     RAISE EXCEPTION 'Test 3 failed (P916): sanitize_user body does not set auth.users.banned_until';
   END IF;
 
-  -- P911: sentinel-allow session var
-  IF fn_body NOT LIKE '%quantalyze.sanitize_in_progress%' THEN
-    RAISE EXCEPTION 'Test 3 failed (P911): sanitize_user body does not set quantalyze.sanitize_in_progress';
+  -- Migration 127 (red-team Finding 3): the sanitize-in-progress GUC
+  -- bypass MUST be removed — it was forgeable from an authenticated
+  -- session via set_config(...).
+  IF fn_body LIKE '%quantalyze.sanitize_in_progress%' THEN
+    RAISE EXCEPTION 'Test 3 failed (Finding 3): sanitize_user still calls set_config on the bypass GUC — Migration 127 regressed';
   END IF;
 
-  RAISE NOTICE 'Test 3 passed: sanitize_user body contains P911/P913/P914/P916 fixes';
+  RAISE NOTICE 'Test 3 passed: sanitize_user body contains P913/P914/P916 fixes (Finding 3: GUC bypass removed)';
 END $$;
 
 -- --------------------------------------------------------------------------
@@ -217,6 +219,157 @@ BEGIN
   RAISE NOTICE 'Test 4 passed: sanitize_user mutations rolled back atomically on outer exception';
 
   -- Cleanup
+  DELETE FROM profiles WHERE id = test_uid;
+  DELETE FROM auth.users WHERE id = test_uid;
+END $$;
+
+-- --------------------------------------------------------------------------
+-- Test 5: Finding 3 (audit-2026-05-07 red-team) — GUC bypass attempt is
+-- blocked.
+--
+-- Pre-Migration-127, the following sequence succeeded and let an
+-- authenticated user poison the sentinel:
+--
+--   SET LOCAL ROLE authenticated;
+--   SELECT set_config('quantalyze.sanitize_in_progress', 'on', true);
+--   UPDATE profiles SET display_name='[deleted]' WHERE id=auth.uid();
+--
+-- Post-127, the trigger ignores the GUC; the current_user check fires
+-- and raises ERRCODE 22023.
+-- --------------------------------------------------------------------------
+DO $$
+DECLARE
+  test_uid    UUID := gen_random_uuid();
+  raised      BOOLEAN := FALSE;
+  err_state   TEXT;
+  cur_name    TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (test_uid, '00000000-0000-0000-0000-000000000000',
+          'test-finding3-' || test_uid::text || '@quantalyze.test',
+          now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (test_uid, 'finding3 name', 'test-finding3@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+
+  SET LOCAL ROLE authenticated;
+  PERFORM set_config('quantalyze.sanitize_in_progress', 'on', true);
+
+  BEGIN
+    UPDATE profiles SET display_name = '[deleted]' WHERE id = test_uid;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE;
+    err_state := SQLSTATE;
+  END;
+
+  RESET ROLE;
+
+  IF NOT raised THEN
+    RAISE EXCEPTION
+      'Test 5 failed (Finding 3): set_config + sentinel UPDATE bypass succeeded — Migration 127 regressed';
+  END IF;
+  IF err_state <> '22023' THEN
+    RAISE EXCEPTION
+      'Test 5 failed (Finding 3): expected ERRCODE 22023, got %', err_state;
+  END IF;
+  SELECT display_name INTO cur_name FROM profiles WHERE id = test_uid;
+  IF cur_name <> 'finding3 name' THEN
+    RAISE EXCEPTION
+      'Test 5 failed (Finding 3): profile was mutated despite bypass — display_name=%', cur_name;
+  END IF;
+
+  RAISE NOTICE 'Test 5 passed (Finding 3): GUC bypass blocked by current_user gate.';
+
+  DELETE FROM profiles WHERE id = test_uid;
+  DELETE FROM auth.users WHERE id = test_uid;
+END $$;
+
+-- --------------------------------------------------------------------------
+-- Test 6: Finding 4 (audit-2026-05-07 red-team) — sentinel comparison
+-- variants are all rejected.
+--
+-- Migration 127 replaces the strict `= '[deleted]'` predicate with
+-- `lower(trim(coalesce(NEW.<col>, ''))) LIKE '[deleted%'`. This must
+-- catch all the following evasion vectors:
+--
+--   - '[deleted]'           — exact baseline
+--   - '[deleted] '          — trailing whitespace
+--   - '[Deleted]'           — capital D
+--   - '[DELETED]'           — all-caps
+--   - ' [deleted]'          — leading whitespace
+--   - '[deleted strategy]'  — extended-suffix variant
+--
+-- NULL is allowed (it is not the sentinel; coalesce(NULL, '') = '' does
+-- not match '[deleted%').
+-- --------------------------------------------------------------------------
+DO $$
+DECLARE
+  test_uid    UUID := gen_random_uuid();
+  variants    TEXT[] := ARRAY[
+    '[deleted]',
+    '[deleted] ',
+    '[Deleted]',
+    '[DELETED]',
+    ' [deleted]',
+    '[deleted strategy]'
+  ];
+  v_variant   TEXT;
+  raised      BOOLEAN;
+  err_state   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (test_uid, '00000000-0000-0000-0000-000000000000',
+          'test-finding4-' || test_uid::text || '@quantalyze.test',
+          now(), now());
+  INSERT INTO profiles (id, display_name, email)
+  VALUES (test_uid, 'finding4 name', 'test-finding4@quantalyze.test')
+  ON CONFLICT (id) DO NOTHING;
+
+  FOREACH v_variant IN ARRAY variants LOOP
+    raised := FALSE;
+    err_state := NULL;
+    SET LOCAL ROLE authenticated;
+    BEGIN
+      UPDATE profiles SET display_name = v_variant WHERE id = test_uid;
+    EXCEPTION WHEN OTHERS THEN
+      raised := TRUE;
+      err_state := SQLSTATE;
+    END;
+    RESET ROLE;
+
+    IF NOT raised THEN
+      RAISE EXCEPTION
+        'Test 6 failed (Finding 4): evasion variant % was accepted by reject_sentinel_writes', v_variant;
+    END IF;
+    IF err_state <> '22023' THEN
+      RAISE EXCEPTION
+        'Test 6 failed (Finding 4): evasion variant % raised ERRCODE % (expected 22023)', v_variant, err_state;
+    END IF;
+  END LOOP;
+
+  RAISE NOTICE 'Test 6 passed (Finding 4): all sentinel-evasion variants rejected.';
+
+  -- Explicit-NULL case: NULL is not the sentinel; the trigger must allow
+  -- it (a profile may legitimately have a null display_name). Run under
+  -- the authenticated role so the trigger's gate is exercised.
+  SET LOCAL ROLE authenticated;
+  BEGIN
+    UPDATE profiles SET display_name = NULL WHERE id = test_uid;
+  EXCEPTION WHEN OTHERS THEN
+    RESET ROLE;
+    -- Some other CHECK / NOT NULL constraint on profiles.display_name
+    -- may reject the NULL; that's not the trigger's fault. We accept
+    -- either "succeeded" (the trigger let it through) or any non-22023
+    -- code (a separate constraint rejected it).
+    IF SQLSTATE = '22023' THEN
+      RAISE EXCEPTION
+        'Test 6 failed (Finding 4): NULL display_name was rejected by reject_sentinel_writes (should be allowed)';
+    END IF;
+  END;
+  RESET ROLE;
+
+  RAISE NOTICE 'Test 6 NULL case passed (Finding 4): NULL is not treated as the sentinel.';
+
   DELETE FROM profiles WHERE id = test_uid;
   DELETE FROM auth.users WHERE id = test_uid;
 END $$;
