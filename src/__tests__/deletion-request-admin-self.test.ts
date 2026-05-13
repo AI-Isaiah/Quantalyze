@@ -47,13 +47,46 @@ function makeUserClient() {
   return {
     auth: { getUser: getUserMock },
     // withRole queries user_app_roles internally to resolve the caller's
-    // role set. The deletion routes don't touch this client beyond that
-    // + the audit RPC.
+    // role set. The deletion routes also invoke `requireAdmin`
+    // immediately before sanitize_user (audit-2026-05-07 P705 TOCTOU
+    // close), which consults the unified isAdminUser union
+    // (user_app_roles + profiles.is_admin + ADMIN_EMAIL). Mock both
+    // query shapes here so the union check can fall through cleanly.
     from: (table: string) => {
       if (table === "user_app_roles") {
         return {
           select: () => ({
-            eq: (_col: string, userId: string) => userRolesQueryMock(userId),
+            eq: (col1: string, val1: string) => {
+              const bare = userRolesQueryMock(val1);
+              // Support the chained `.eq("user_id", id).eq("role",
+              // 'admin').limit(1)` shape used by hasAdminRoleRow.
+              return Object.assign(bare, {
+                eq: (_col2: string, val2: string) => ({
+                  limit: async (_n: number) => {
+                    const res = await userRolesQueryMock(val1);
+                    if (res.error) return res;
+                    const filtered = (res.data ?? []).filter(
+                      (r: { role: string }) => r.role === val2,
+                    );
+                    return { data: filtered, error: null };
+                  },
+                }),
+              });
+              void col1;
+            },
+          }),
+        };
+      }
+      if (table === "profiles") {
+        // `hasIsAdminFlag` falls through here on the union path.
+        return {
+          select: () => ({
+            eq: () => ({
+              single: async () => ({
+                data: { is_admin: false },
+                error: null,
+              }),
+            }),
           }),
         };
       }
