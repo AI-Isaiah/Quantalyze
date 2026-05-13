@@ -135,11 +135,15 @@ BEGIN
     '{}', '{}', '{}', ARRAY['binance']
   ) RETURNING id INTO test_sid;
 
-  -- Seed a match_decisions row so the FK chain is satisfied.
+  -- Seed a match_decisions row so the FK chain is satisfied. kind defaults
+  -- to 'bridge_recommended' which would require original_strategy_id OR
+  -- original_holding_ref NOT NULL per migration 080's per-kind CHECK; use
+  -- kind='voluntary_add' explicitly (strategy_id NOT NULL, originals NULL —
+  -- matches what we're inserting) so the seed passes that constraint.
   INSERT INTO match_decisions (
-    allocator_id, strategy_id, decision, decided_by
+    allocator_id, strategy_id, decision, decided_by, kind
   ) VALUES (
-    test_uid, test_sid, 'thumbs_up', test_uid
+    test_uid, test_sid, 'snoozed', test_uid, 'voluntary_add'
   ) RETURNING id INTO test_md_id;
 
   -- Attempt the out-of-range INSERT.
@@ -215,10 +219,12 @@ BEGIN
     '{}', '{}', '{}', ARRAY['binance']
   ) RETURNING id INTO test_sid;
 
+  -- Seed a match_decisions row so the FK chain is satisfied.
+  -- See voluntary_add note in Test 3 about the explicit kind.
   INSERT INTO match_decisions (
-    allocator_id, strategy_id, decision, decided_by
+    allocator_id, strategy_id, decision, decided_by, kind
   ) VALUES (
-    test_uid, test_sid, 'snoozed', test_uid
+    test_uid, test_sid, 'snoozed', test_uid, 'voluntary_add'
   ) RETURNING id INTO test_md_id;
 
   -- kind='rejected' rows carry NULL percent_allocated (mig 081).
@@ -312,8 +318,8 @@ BEGIN
     test_uid, test_kid, 'p1956-bdry strategy', 'published',
     '{}', '{}', '{}', ARRAY['binance']
   ) RETURNING id INTO test_sid;
-  INSERT INTO match_decisions (allocator_id, strategy_id, decision, decided_by)
-  VALUES (test_uid, test_sid, 'thumbs_up', test_uid)
+  INSERT INTO match_decisions (allocator_id, strategy_id, decision, decided_by, kind)
+  VALUES (test_uid, test_sid, 'snoozed', test_uid, 'voluntary_add')
   RETURNING id INTO test_md_id;
 
   -- (c) percent_allocated = -1 → MUST raise 23514 (both constraints reject).
