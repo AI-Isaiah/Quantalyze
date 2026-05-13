@@ -166,29 +166,39 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   // the LS payload (if any) and applies them via setState. `hydrated`
   // gates the wizard_start telemetry so the funnel id reflects the
   // resumed wizardSessionId, not the throwaway one from useState init.
+  //
+  // P473: loadWizardState is async (HMAC verify). Wrap in an inner async
+  // IIFE so the useEffect signature stays sync.
   useEffect(() => {
-    const loaded = loadWizardState();
-    const overrides = deriveWizardResumeOverrides(
-      loaded,
-      source,
-      initialDraft?.id ?? null,
-    );
-    if (overrides.wizardSessionId) {
-      setWizardSessionId(overrides.wizardSessionId);
-    }
-    if (overrides.step) {
-      setStep(overrides.step);
-    }
-    if (overrides.strategyName !== undefined) {
-      setStrategyName(overrides.strategyName);
-    }
-    if (overrides.showResumeBanner) {
-      setShowResumeBanner(true);
-    }
-    if (initialDraft) {
-      setSavedAt(Date.now());
-    }
-    setHydrated(true);
+    let cancelled = false;
+    (async () => {
+      const loaded = await loadWizardState();
+      if (cancelled) return;
+      const overrides = deriveWizardResumeOverrides(
+        loaded,
+        source,
+        initialDraft?.id ?? null,
+      );
+      if (overrides.wizardSessionId) {
+        setWizardSessionId(overrides.wizardSessionId);
+      }
+      if (overrides.step) {
+        setStep(overrides.step);
+      }
+      if (overrides.strategyName !== undefined) {
+        setStrategyName(overrides.strategyName);
+      }
+      if (overrides.showResumeBanner) {
+        setShowResumeBanner(true);
+      }
+      if (initialDraft) {
+        setSavedAt(Date.now());
+      }
+      setHydrated(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
     // Run once on mount. `source` and `initialDraft` come from props/URL
     // and are stable for the lifetime of this component instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -239,7 +249,10 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   const persistPointer = useCallback(
     (nextStep: WizardStepKey, id: string | null) => {
       if (!id) return;
-      saveWizardState({
+      // P473: saveWizardState is async (HMAC sign). Fire-and-forget —
+      // the optimistic setSavedAt below + the server-side draft as the
+      // source of truth mean we don't need to block on persistence.
+      void saveWizardState({
         strategyId: id,
         wizardSessionId,
         step: nextStep,
@@ -536,7 +549,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                   setCsvValidationPassed(payload.validationPassed);
                   setStrategyName(payload.strategyName);
                   setStep("csv_preview");
-                  saveWizardState({
+                  // P473: async HMAC envelope — fire-and-forget.
+                  void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
                     step: "csv_preview",
@@ -557,7 +571,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 validationPassed={csvValidationPassed}
                 onBack={() => {
                   setStep("csv_upload");
-                  saveWizardState({
+                  // P473: async HMAC envelope — fire-and-forget.
+                  void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
                     step: "csv_upload",
@@ -569,7 +584,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 }}
                 onContinue={() => {
                   setStep("csv_submit");
-                  saveWizardState({
+                  // P473: async HMAC envelope — fire-and-forget.
+                  void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
                     step: "csv_submit",
@@ -590,7 +606,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 preview={csvPreview}
                 onBack={() => {
                   setStep("csv_preview");
-                  saveWizardState({
+                  // P473: async HMAC envelope — fire-and-forget.
+                  void saveWizardState({
                     strategyId: "",
                     wizardSessionId,
                     step: "csv_preview",

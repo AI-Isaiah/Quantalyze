@@ -1,6 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
+  computeWizardHmac,
   deriveWizardResumeOverrides,
+  loadWizardState,
+  saveWizardState,
   type WizardLocalState,
 } from "./localStorage";
 
@@ -169,5 +172,205 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
     expect(
       deriveWizardResumeOverrides(loaded, "csv", null).wizardSessionId,
     ).toBe("ls-session-id");
+  });
+});
+
+/**
+ * P473 — localStorage tamper / replay defense.
+ *
+ * Before the fix the wizard wrote plain JSON to localStorage. An
+ * attacker (or a curious user via DevTools) could craft an entry
+ * pointing at any strategyId and the wizard would happily resume
+ * against it — replay + ID-swap surface.
+ *
+ * The fix is an HMAC-SHA256 envelope `{v, p, h}` where the HMAC key is
+ * a per-tab nonce stored in sessionStorage. Verify-on-read drops
+ * tampered or cross-tab entries as cold-start. These tests pin:
+ *
+ *   - Round-trip: save then load returns the same payload.
+ *   - Tamper detection: editing the payload after a save invalidates h.
+ *   - Cross-tab replay: clearing the sessionStorage nonce invalidates h.
+ *   - v1 (unsigned) legacy payloads are rejected as cold-start.
+ *   - Malformed envelope (missing fields) returns null.
+ */
+describe("P473 — HMAC envelope tamper / replay defense", () => {
+  // jsdom provides crypto.subtle, but we still wire a minimal
+  // localStorage/sessionStorage mock so each test starts clean and the
+  // STORAGE_KEY + NONCE_KEY constants don't leak across tests.
+  let localStore: Record<string, string>;
+  let sessionStore: Record<string, string>;
+
+  beforeEach(() => {
+    localStore = {};
+    sessionStore = {};
+    const localMock = {
+      getItem: (k: string) => (k in localStore ? localStore[k] : null),
+      setItem: (k: string, v: string) => {
+        localStore[k] = v;
+      },
+      removeItem: (k: string) => {
+        delete localStore[k];
+      },
+      clear: () => {
+        localStore = {};
+      },
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+    const sessionMock = {
+      getItem: (k: string) => (k in sessionStore ? sessionStore[k] : null),
+      setItem: (k: string, v: string) => {
+        sessionStore[k] = v;
+      },
+      removeItem: (k: string) => {
+        delete sessionStore[k];
+      },
+      clear: () => {
+        sessionStore = {};
+      },
+      key: () => null,
+      length: 0,
+    } as unknown as Storage;
+    Object.defineProperty(window, "localStorage", {
+      value: localMock,
+      configurable: true,
+    });
+    Object.defineProperty(window, "sessionStorage", {
+      value: sessionMock,
+      configurable: true,
+    });
+  });
+
+  it("saveWizardState then loadWizardState round-trips the payload (signed envelope)", async () => {
+    await saveWizardState({
+      strategyId: "00000000-0000-4000-8000-000000000001",
+      wizardSessionId: "session-1",
+      step: "sync_preview",
+    });
+
+    // Envelope-shape sanity: stored payload is an object with v/p/h.
+    const stored = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+    expect(stored.v).toBe(2);
+    expect(typeof stored.p).toBe("string");
+    expect(typeof stored.h).toBe("string");
+    expect(stored.h.length).toBe(16);
+
+    const loaded = await loadWizardState();
+    expect(loaded).not.toBeNull();
+    expect(loaded?.strategyId).toBe("00000000-0000-4000-8000-000000000001");
+    expect(loaded?.wizardSessionId).toBe("session-1");
+    expect(loaded?.step).toBe("sync_preview");
+    // savedAt was stamped by saveWizardState — should be present.
+    expect(typeof loaded?.savedAt).toBe("number");
+  });
+
+  it("returns null + warns when the payload is tampered after save (HMAC mismatch)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await saveWizardState({
+      strategyId: "00000000-0000-4000-8000-000000000aaa",
+      wizardSessionId: "session-aaa",
+      step: "sync_preview",
+    });
+
+    // Tamper: rewrite p to point at a different strategyId, keep h.
+    const envelope = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+    const tamperedPayload = JSON.stringify({
+      ...JSON.parse(envelope.p),
+      strategyId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    });
+    localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+      ...envelope,
+      p: tamperedPayload,
+    });
+
+    const loaded = await loadWizardState();
+    expect(loaded).toBeNull();
+    expect(
+      warn.mock.calls.some((args) =>
+        String(args[0]).includes("localStorage_signature_mismatch"),
+      ),
+    ).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("rejects a payload signed under a different tab nonce (cross-tab replay)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await saveWizardState({
+      strategyId: "00000000-0000-4000-8000-000000000bbb",
+      wizardSessionId: "session-bbb",
+      step: "metadata",
+    });
+
+    // Simulate a new tab: a fresh sessionStorage nonce.
+    sessionStore["quantalyze_wizard_signing_nonce_v1"] =
+      "f".repeat(64);
+
+    const loaded = await loadWizardState();
+    expect(loaded).toBeNull();
+    expect(
+      warn.mock.calls.some((args) =>
+        String(args[0]).includes("localStorage_signature_mismatch"),
+      ),
+    ).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("rejects pre-fix v1 (unsigned plain JSON) payloads as cold-start", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // The pre-fix shape: a plain WizardLocalState JSON object stored at
+    // STORAGE_KEY. A half-deployed environment must NOT pick this up.
+    localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+      strategyId: "00000000-0000-4000-8000-0000000000cc",
+      wizardSessionId: "legacy",
+      step: "sync_preview",
+      savedAt: 1_700_000_000_000,
+    });
+
+    const loaded = await loadWizardState();
+    expect(loaded).toBeNull();
+    expect(
+      warn.mock.calls.some((args) =>
+        String(args[0]).includes("localStorage_signature_mismatch"),
+      ),
+    ).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("rejects an envelope missing the hmac field as cold-start", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+      v: 2,
+      p: JSON.stringify({
+        strategyId: "00000000-0000-4000-8000-0000000000dd",
+        wizardSessionId: "no-hmac",
+        step: "sync_preview",
+        savedAt: 1_700_000_000_000,
+      }),
+      // h: intentionally missing
+    });
+
+    const loaded = await loadWizardState();
+    expect(loaded).toBeNull();
+    warn.mockRestore();
+  });
+
+  it("computeWizardHmac is deterministic for the same (payload, key) pair", async () => {
+    const a = await computeWizardHmac("the-payload", "the-key");
+    const b = await computeWizardHmac("the-payload", "the-key");
+    expect(a).toBe(b);
+    expect(a).not.toBeNull();
+    expect(a?.length).toBe(16);
+  });
+
+  it("computeWizardHmac differs when payload differs (basic tamper-detection invariant)", async () => {
+    const a = await computeWizardHmac("payload-A", "the-key");
+    const b = await computeWizardHmac("payload-B", "the-key");
+    expect(a).not.toBe(b);
+  });
+
+  it("computeWizardHmac differs when key differs (per-tab binding invariant)", async () => {
+    const a = await computeWizardHmac("the-payload", "key-1");
+    const b = await computeWizardHmac("the-payload", "key-2");
+    expect(a).not.toBe(b);
   });
 });

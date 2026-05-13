@@ -335,3 +335,151 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     ).toBeUndefined();
   });
 });
+
+/**
+ * P470 — RPC error-code → HTTP status mapping.
+ *
+ * route.ts:413-431 maps four Postgres SQLSTATE codes raised by
+ * `finalize_wizard_strategy` (migration 031) onto stable HTTP statuses +
+ * sanitized error bodies:
+ *
+ *   P0002 (no_data_found)          -> 404 "Draft not found"
+ *   02000 (no_data)                -> 404 "Draft not found"
+ *   42501 (insufficient_privilege) -> 403 "This draft cannot be finalized"
+ *   22023 (invalid_parameter_value)-> 403 "This draft cannot be finalized"
+ *   anything else                  -> 500 "Could not finalize wizard draft"
+ *
+ * Pre-fix this mapping table had ZERO test coverage. A regression that
+ * dropped one of the codes (e.g., removed the 42501 branch) would either
+ * leak the raw Postgres message to the client (P445-style PII leak) or
+ * return a misleading 500 on a legitimate "not your draft" attempt.
+ *
+ * Each test forces the scope-broadening probe to PASS (live perms stay
+ * read-only) so control reaches the RPC, then makes the RPC reject with
+ * the target code. We assert (i) the HTTP status, (ii) a stable error
+ * code/text, and (iii) that the raw Postgres message does NOT leak.
+ */
+describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping", () => {
+  function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }
+
+  it("maps P0002 (no_data_found) to 404 + sanitized 'Draft not found'", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.rpcResult = {
+      data: null,
+      // Raw Postgres-style message; must NOT leak to the client.
+      error: { code: "P0002", message: "finalize_wizard_strategy: strategy abc-uuid not found" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("Draft not found");
+    // The raw Postgres message must not leak (P445-style hardening).
+    expect(JSON.stringify(body)).not.toContain("strategy abc-uuid not found");
+
+    fetchSpy.mockRestore();
+    consoleErr.mockRestore();
+  });
+
+  it("maps 02000 (no_data) to 404 + sanitized 'Draft not found'", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "02000", message: "no data returned by the query" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("Draft not found");
+    expect(JSON.stringify(body)).not.toContain("no data returned");
+
+    fetchSpy.mockRestore();
+    consoleErr.mockRestore();
+  });
+
+  it("maps 42501 (insufficient_privilege) to 403 + sanitized 'This draft cannot be finalized'", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.rpcResult = {
+      data: null,
+      error: {
+        code: "42501",
+        message:
+          "finalize_wizard_strategy: strategy xyz-uuid is not owned by user uid-1234",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("This draft cannot be finalized");
+    // The raw owner/user UUIDs MUST NOT leak (P445-style hardening).
+    expect(JSON.stringify(body)).not.toContain("xyz-uuid");
+    expect(JSON.stringify(body)).not.toContain("uid-1234");
+
+    fetchSpy.mockRestore();
+    consoleErr.mockRestore();
+  });
+
+  it("maps 22023 (invalid_parameter_value) to 403 + sanitized 'This draft cannot be finalized'", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.rpcResult = {
+      data: null,
+      error: {
+        code: "22023",
+        message:
+          "finalize_wizard_strategy: strategy abc has source=legacy (expected wizard)",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("This draft cannot be finalized");
+    // The raw status/source details must not leak (P445-style hardening).
+    expect(JSON.stringify(body)).not.toContain("source=legacy");
+
+    fetchSpy.mockRestore();
+    consoleErr.mockRestore();
+  });
+
+  it("falls through to 500 + generic message for any other SQLSTATE", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A made-up unhandled code — must NOT silently 200, must NOT leak.
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "XX001", message: "internal_error: oops at line 42" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Could not finalize wizard draft");
+    expect(JSON.stringify(body)).not.toContain("oops at line 42");
+
+    fetchSpy.mockRestore();
+    consoleErr.mockRestore();
+  });
+});

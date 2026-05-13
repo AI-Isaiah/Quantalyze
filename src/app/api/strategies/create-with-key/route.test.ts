@@ -143,3 +143,144 @@ describe("POST /api/strategies/create-with-key — envelope-encryption shape", (
     );
   });
 });
+
+/**
+ * P467 — scope-rejection coverage. The route MUST reject any key whose
+ * scopes broaden beyond read-only. Pre-fix this code path had ZERO test
+ * coverage; a regression that silently widened the accepted scopes would
+ * promote a trading-capable key into a draft strategy without ever
+ * failing CI. These tests pin:
+ *
+ *   (a) trading=true alone           → 400 + KEY_HAS_TRADING_PERMS
+ *   (b) withdraw=true alone          → 400 + KEY_HAS_WITHDRAW_PERMS
+ *   (c) both trading + withdraw=true → 400, withdraw classification wins
+ *   (d) read_only=true (happy)       → 200 (envelope round-trip)
+ *   (e) validateKey throws (network) → 400 + KEY_NETWORK_TIMEOUT
+ *
+ * (e) reflects the route's actual error-classification block at lines
+ * 243-264: a thrown error is caught and bucketed into a wizardErrors
+ * code, returning 400 (not 502). The route never returns 502 for a
+ * caught validateKey failure — only for an "unexpected" encryption
+ * payload shape.
+ */
+describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+
+    // Encryption + RPC stay valid; only validateKey shape varies per test.
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  it("(a) rejects a key with trading scope (read_only=false, permissions=['read','trade'])", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: false,
+      permissions: ["read", "trade"],
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_HAS_TRADING_PERMS");
+    // Critical: the broadened key must NEVER reach the RPC.
+    expect(rpcMock).not.toHaveBeenCalled();
+    // Critical: the broadened key must NEVER be encrypted to disk.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("(b) rejects a key with withdraw scope (read_only=false, permissions=['read','withdraw'])", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: false,
+      permissions: ["read", "withdraw"],
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_HAS_WITHDRAW_PERMS");
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("(c) rejects a key with BOTH trading and withdraw scopes — withdraw classification wins", async () => {
+    // Route logic: includes("withdraw") is checked first; combined-scope
+    // keys must surface as KEY_HAS_WITHDRAW_PERMS so the wizard's re-key
+    // copy advertises the worst-case scope.
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: false,
+      permissions: ["read", "trade", "withdraw"],
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_HAS_WITHDRAW_PERMS");
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("(d) accepts a read-only key (read_only=true) and returns 200", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      strategy_id: STRATEGY_ID,
+      api_key_id: API_KEY_ID,
+    });
+    // Only AFTER read-only is confirmed do we encrypt + insert.
+    expect(encryptKeyMock).toHaveBeenCalledTimes(1);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("(e) classifies a network failure during validateKey as KEY_NETWORK_TIMEOUT (400)", async () => {
+    // The route catches anything thrown from validateKey and bucketizes
+    // it into a wizardErrors code. The classifier in route.ts:249-261
+    // routes "timeout" / "etimedout" strings to KEY_NETWORK_TIMEOUT.
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error("upstream ETIMEDOUT after 15000ms"),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_NETWORK_TIMEOUT");
+    // No encryption, no RPC — the validation step short-circuited.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+});
