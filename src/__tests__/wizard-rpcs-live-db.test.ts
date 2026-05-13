@@ -369,7 +369,7 @@ describe("finalize_wizard_strategy RPC (Migration 031 / P474)", () => {
 // guard_wizard_draft_updates trigger — defense in depth.
 // ---------------------------------------------------------------------------
 
-describe("guard_wizard_draft_updates trigger (Migration 031 / P474)", () => {
+describe("guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1)", () => {
   it.skipIf(!HAS_LIVE_DB)(
     "blocks a direct authenticated UPDATE that would flip wizard draft status",
     async () => {
@@ -422,6 +422,80 @@ describe("guard_wizard_draft_updates trigger (Migration 031 / P474)", () => {
         .eq("id", strategyId)
         .single();
       expect((strat as { status: string } | null)?.status).toBe("draft");
+    },
+    60_000,
+  );
+
+  // Issue 1 (audit-2026-05-07 follow-up): migration 125's auth.uid()
+  // clause incorrectly blocked finalize_wizard_strategy because the
+  // JWT-bound auth.uid() leaks into SECURITY DEFINER contexts. Migration
+  // 126 replaces the clause with a per-txn GUC bypass that
+  // finalize_wizard_strategy sets. This test pins the
+  // "SECURITY DEFINER RPC path passes the guard" invariant: a fresh
+  // wizard draft must successfully finalize end-to-end with the
+  // user-scoped client.
+  it.skipIf(!HAS_LIVE_DB)(
+    "Migration 126: SECURITY DEFINER finalize_wizard_strategy path passes the guard",
+    async () => {
+      if (!ownerClient || !ownerId || !admin) return;
+      const categoryId = await pickCategoryId();
+      if (!categoryId) return;
+
+      const { data: created, error: createErr } = await ownerClient.rpc(
+        "create_wizard_strategy",
+        {
+          p_user_id: ownerId,
+          p_exchange: "binance",
+          p_label: "guard-secdef-bypass-test",
+          p_api_key_encrypted: PLACEHOLDER_ENCRYPTED,
+          p_api_secret_encrypted: null,
+          p_passphrase_encrypted: null,
+          p_dek_encrypted: null,
+          p_nonce: null,
+          p_kek_version: 1,
+          p_placeholder_name: "guard-secdef-bypass-placeholder",
+          p_wizard_session_id: crypto.randomUUID(),
+        },
+      );
+      expect(createErr).toBeNull();
+      const createdRow = Array.isArray(created) ? created[0] : created;
+      const strategyId = createdRow.strategy_id as string;
+      createdStrategyIds.push(strategyId);
+      createdApiKeyIds.push(createdRow.api_key_id);
+
+      const { data: finalizedId, error: finalizeErr } = await ownerClient.rpc(
+        "finalize_wizard_strategy",
+        {
+          p_strategy_id: strategyId,
+          p_user_id: ownerId,
+          p_name: "secdef-bypass-name",
+          p_description:
+            "Description long enough to pass any length validation present.",
+          p_category_id: categoryId,
+          p_strategy_types: ["trend"],
+          p_subtypes: ["breakout"],
+          p_markets: ["BTC/USDT"],
+          p_supported_exchanges: ["binance"],
+          p_leverage_range: "1x-3x",
+          p_aum: 50_000,
+          p_max_capacity: 1_000_000,
+        },
+      );
+      // The whole point of Issue 1 / Migration 126: this RPC MUST succeed
+      // end-to-end. Pre-fix, migration 125's auth.uid() OR clause raised
+      // 'insufficient_privilege' inside the SECURITY DEFINER UPDATE and
+      // every wizard submit failed in production.
+      expect(finalizeErr).toBeNull();
+      expect(finalizedId).toBe(strategyId);
+
+      const { data: strat } = await admin
+        .from("strategies")
+        .select("status")
+        .eq("id", strategyId)
+        .single();
+      expect((strat as { status: string } | null)?.status).toBe(
+        "pending_review",
+      );
     },
     60_000,
   );
