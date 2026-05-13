@@ -275,8 +275,11 @@ export function ScenarioCommitDrawer({
   // M11 — drawer's role swaps to "region" while the pre-flight is open so
   // the DOM at preflight time contains exactly ONE role="dialog" + aria-modal=
   // "true" element (the pre-flight, rendered via portal below).
+  // P1935 (audit-2026-05-07 Block C / C.3) — keep the role-swap through
+  // the "submitting" transition too so the still-mounted pre-flight portal
+  // remains the single role="dialog".
   const drawerRoleProps =
-    state === "preflight"
+    state === "preflight" || state === "submitting"
       ? { role: "region" as const, "aria-label": "Commit scenario" }
       : {
           role: "dialog" as const,
@@ -607,8 +610,12 @@ export function ScenarioCommitDrawer({
       {/* M11 — pre-flight modal lives OUTSIDE the drawer's role="dialog" via
           createPortal to document.body. At preflight time the drawer's role
           is swapped to "region", so the DOM has exactly ONE element with
-          role="dialog" + aria-modal="true" (this portal). */}
-      {state === "preflight" &&
+          role="dialog" + aria-modal="true" (this portal).
+          P1935 (audit-2026-05-07 Block C / C.3) — keep the modal mounted
+          while `state === "submitting"` too so the Submit button stays in
+          DOM (disabled) and a rapid double-click can't bypass the gate by
+          firing the click handler twice before React commits the disable. */}
+      {(state === "preflight" || state === "submitting") &&
         typeof document !== "undefined" &&
         createPortal(
           <div
@@ -638,9 +645,15 @@ export function ScenarioCommitDrawer({
                 <button
                   type="button"
                   onClick={handleSubmit}
+                  // P1935 (audit-2026-05-07 Block C / C.3) — disable while
+                  // the POST is in flight so a synchronous double-click can't
+                  // bypass the AbortController + fire two commits. Also
+                  // disable after success (which auto-closes via the 1.5s
+                  // success-effect timer).
+                  disabled={state === "submitting" || state === "success"}
                   className="rounded-md bg-accent px-4 py-1.5 text-sm text-white hover:bg-accent/90 disabled:opacity-50"
                 >
-                  Submit
+                  {state === "submitting" ? "Submitting…" : "Submit"}
                 </button>
               </div>
             </div>

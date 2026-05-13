@@ -566,6 +566,63 @@ describe("P1934 — strict success gate (recorded must equal diffs.length)", () 
   });
 });
 
+// ===========================================================================
+// P1935 — audit-2026-05-07 Block C / Task C.3
+//
+// Pre-flight Submit must be disabled while a POST is in-flight so a rapid
+// double-click can't fire two commits. The button text flips to "Submitting…".
+// ===========================================================================
+
+describe("P1935 — pre-flight Submit disabled during in-flight submit", () => {
+  it("clicking pre-flight Submit twice synchronously only triggers ONE fetch (button must be disabled in DOM, not just unmounted)", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(
+      () =>
+        new Promise(() => {
+          /* never resolves — keep drawer in submitting state */
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    // Capture the pre-flight Submit by exact label "Submit" before the
+    // text flips to "Submitting…" mid-handler.
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    const preflight = preflightBtns[preflightBtns.length - 1] as HTMLButtonElement;
+
+    // Fire two clicks SYNCHRONOUSLY without yielding to React between
+    // them. The first click triggers handleSubmit (async) which calls
+    // setState('submitting') AND fetch(). Before React can commit the
+    // re-render, the second click also resolves and would call fetch
+    // again — unless the button is `disabled` in DOM (which short-circuits
+    // the click before React's synthetic event system reaches the handler).
+    fireEvent.click(preflight);
+    fireEvent.click(preflight);
+    fireEvent.click(preflight);
+
+    // Yield once so any pending microtasks resolve before the assertion.
+    await Promise.resolve();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // Button text should reflect the in-flight state per the C.3 contract.
+    // (The portal stays mounted during 'submitting' so the button is still
+    // queryable — assert that the captured node text flipped.)
+    expect(preflight.textContent).toMatch(/Submitting…/);
+    expect(preflight.disabled).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("P1934 — Idempotency-Key header on commit fetch", () => {
   it("fetch is called with an Idempotency-Key header per submit (Block D contract)", async () => {
     vi.useRealTimers();
