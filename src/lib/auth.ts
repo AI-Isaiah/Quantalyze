@@ -4,6 +4,7 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { APP_ROLES, type AppRole } from "@/lib/auth-types";
+import { isAdminUser } from "@/lib/admin";
 
 // Re-export so existing server-side callers (routes, tests) keep
 // resolving `import { AppRole, APP_ROLES } from "@/lib/auth"` without a
@@ -144,6 +145,32 @@ export async function requireRole(
 
   const hasAny = roles.some((r) => userRoles.includes(r));
   if (!hasAny) {
+    // audit-2026-05-07 P459 + P699 + P703: admin-gate consolidation.
+    //
+    // `withRole('admin')` and the legacy `isAdminUser` must agree on the
+    // SAME decision. If the caller is requesting the 'admin' role and
+    // user_app_roles does not return an admin row, fall back to the
+    // unified `isAdminUser` check (which OR's user_app_roles, the legacy
+    // `profiles.is_admin` column, and the audited ADMIN_EMAIL env
+    // fallback). A grant in any one of those three signals lights up
+    // BOTH the route wrapper and the legacy guard, closing the drift
+    // surface a parallel-RBAC reviewer flagged.
+    //
+    // Non-admin role requests skip this branch — there is no fallback
+    // signal for `allocator` / `quant_manager` / `analyst`, so the
+    // user_app_roles check is authoritative for those.
+    if (roles.includes("admin")) {
+      const adminUnion = await isAdminUser(supabase, user);
+      if (adminUnion) {
+        // Synthesize the admin role into the resolved set so handlers
+        // that read `roles` from the context see a consistent answer.
+        // Idempotent under repeated grants — Array.includes guards.
+        const resolved = userRoles.includes("admin")
+          ? userRoles
+          : [...userRoles, "admin" as AppRole];
+        return { roles: resolved };
+      }
+    }
     return {
       forbidden: NextResponse.json(
         { error: "Forbidden" },
@@ -153,6 +180,49 @@ export async function requireRole(
   }
 
   return { roles: userRoles };
+}
+
+/**
+ * Server-side admin guard — TOCTOU close for sanitize_user and other
+ * privileged RPCs (audit-2026-05-07 P705).
+ *
+ * Re-verifies the caller's admin status against the SAME unified union
+ * source (`isAdminUser` in `src/lib/admin.ts`) immediately before a
+ * privileged RPC call. Use this at the call site of `sanitize_user`,
+ * `log_audit_event_service`, or any other SECURITY DEFINER RPC where
+ * the gap between the route wrapper's auth check and the RPC execution
+ * is wide enough for a role-revoke to slip through.
+ *
+ * Returns:
+ *   - `null` — caller is still an admin; proceed with the RPC.
+ *   - a `NextResponse` — caller is no longer an admin (or never was);
+ *     return this response immediately. Caller MUST NOT continue.
+ *
+ * Typical use:
+ *
+ *   const guard = await requireAdmin(supabase, user);
+ *   if (guard) return guard;
+ *   const { data } = await admin.rpc('sanitize_user', { p_user_id });
+ *
+ * The function is intentionally re-entrant — calling it before EVERY
+ * privileged RPC is the recommended pattern (cheap: one DB round-trip
+ * on success, one extra one on the rare race). The accompanying
+ * DB-side sentinel trigger inside `sanitize_user` (migration 120) is
+ * the second half of the defense-in-depth: even if a race slips this
+ * TS check, the RPC refuses to fire without an admin context.
+ */
+export async function requireAdmin(
+  supabase: SupabaseClient,
+  user: User | null,
+): Promise<NextResponse | null> {
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const ok = await isAdminUser(supabase, user);
+  if (!ok) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  return null;
 }
 
 /**

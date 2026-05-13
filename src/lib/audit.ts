@@ -140,7 +140,9 @@ export type AuditAction =
   | "allocator.holdings.sync_completed"
   | "allocator.holdings.sync_failed"
   // --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ---
-  | "debug_key_flow.invoke";
+  | "debug_key_flow.invoke"
+  // --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ---
+  | "admin.access.via_env_email_fallback";
 
 /**
  * entity_type values are one per action. See ADR-0023 for the mapping.
