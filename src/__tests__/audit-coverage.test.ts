@@ -4,38 +4,44 @@ import * as path from "node:path";
 
 /**
  * Sprint 6 closeout Task 7.1b — parametrized audit-coverage grep test.
+ * P692/P694 extension (2026-05-13) — also catch known-mutating `.rpc()`
+ * calls and walk the audit window inside the enclosing function body
+ * rather than a flat 60-line lookahead.
  *
  * Scans every `src/app/api/** /route.ts` file and asserts that every
- * Supabase mutation (`.insert(`, `.update(`, `.delete(`, `.upsert(`)
- * is accompanied by ONE of:
- *   1. A `logAuditEvent(` or `logAuditEventAsUser(` call within a
- *      conservative window (default: 60 lines AFTER the mutation's
- *      first line). The window is large enough to accommodate the
- *      `if (error) { ... }` error-check block AND intervening
- *      non-blocking-emit statements (e.g., usage-funnel PostHog calls)
- *      that typically sit between a mutation and its audit emission in
- *      this codebase.
- *   2. An `@audit-skip:` pragma within 3 lines ABOVE the mutation.
+ * Supabase mutation is accompanied by ONE of:
+ *   1. A `logAuditEvent(` or `logAuditEventAsUser(` call within the
+ *      enclosing function body (walked forward using brace-balance,
+ *      bounded by AUDIT_WINDOW_MAX_LINES as a fail-safe).
+ *   2. An `@audit-skip:` pragma within 8 lines ABOVE the mutation's
+ *      chain-start line.
+ *
+ * Mutation classes detected:
+ *   a) Direct PostgREST chains: `.from(<table>).insert(...)` and
+ *      siblings `.update`, `.delete`, `.upsert` — original Task 7.1b
+ *      scan.
+ *   b) Known-mutating RPC calls: `.rpc("enqueue_compute_job", ...)`,
+ *      etc. Read-only RPCs (`get_*`, `fetch_*`,
+ *      `current_user_has_app_role`, `compute_bridge_outcome_deltas`)
+ *      are NOT in the allowlist — only RPCs that mutate state. The
+ *      explicit allowlist is the safer default than "every .rpc()
+ *      call" because most RPCs in this codebase are reads and would
+ *      trigger noisy false positives. P692/P694 extension.
+ *   c) Indirect mutations via helper modules listed in
+ *      HELPER_MUTATORS (Task 7.1b /review T4-C1).
+ *
+ * Window tightening (P694): the previous flat 60-line lookahead could
+ * incorrectly match a mutation in one function to an audit emit in the
+ * NEXT function of the same file (e.g., `POST` then `PATCH`). The new
+ * walker scans forward from the mutation site until brace-balance
+ * returns to (or below) the enclosing function's brace depth — i.e.,
+ * the audit emit MUST live inside the same function body. A hard
+ * fail-safe of AUDIT_WINDOW_MAX_LINES caps the walk so a 5000-line
+ * function (extremely unlikely; would already fail review) can't gum
+ * up the test runner.
  *
  * On failure the test prints the offending file + line + guidance
  * (add a logAuditEvent call or an @audit-skip pragma above the line).
- *
- * This test is the regression-pressure gate: a new mutation that ships
- * without instrumentation (e.g., a future webhook subscribe route)
- * fails the test and the author is forced to choose between "emit an
- * audit event" or "pragma-skip with a reason" — the third option
- * (silent drift) is what this test exists to block.
- *
- * Window choice (60 lines): empirical from the existing instrumented
- * sites. The intro.send pilot sits 48 lines after its insert (the gap
- * includes a null-id guard + a usage-event emit + a comment block).
- * The deletion.request.create pilot sits 30 lines after its insert
- * with a similar null-guard pattern. A 60-line window accommodates
- * both comfortably without allowing a "mutation at line 10, audit in
- * a completely different function at line 500" scenario. If a future
- * route grows past 60 lines of intervening logic, the author can
- * either restructure (extract the guards into a helper) or add an
- * `@audit-skip` pragma documenting why the audit lives elsewhere.
  *
  * The test does NOT cross file boundaries — a mutation with a
  * logAuditEvent that lives in a different file (e.g., a helper) will
@@ -141,6 +147,89 @@ function findMutations(file: string, src: string): Mutation[] {
 }
 
 /**
+ * Allowlist of RPCs that MUTATE state (write to audit_log-eligible
+ * tables, change row state, dispatch a worker job that mutates). A
+ * mutation site that calls one of these RPCs needs an audit emission
+ * or an `@audit-skip` pragma, same contract as a `.insert/.update/
+ * .delete/.upsert` chain. P692 extension.
+ *
+ * NOT every `.rpc()` call counts — most RPCs in this codebase are
+ * reads (`get_*`, `fetch_*`, `compute_bridge_outcome_deltas`,
+ * `current_user_has_app_role`) and would trigger noisy false
+ * positives. The allowlist is the safer default and forces the author
+ * of a new mutating RPC to add the name here as part of the audit
+ * checklist (the migration that creates the RPC + the route that
+ * calls it + this allowlist all change in the same PR).
+ *
+ * Notable exclusions:
+ *   - `log_audit_event` / `log_audit_event_service` — these ARE audit
+ *     emissions themselves, NOT actions that need auditing.
+ *   - `mark_compute_job_done` / `mark_compute_job_failed` /
+ *     `claim_compute_jobs` / `reclaim_stuck_compute_jobs` — worker-
+ *     internal compute-state RPCs; not called from src/app/api/. If
+ *     a route ever calls them, the @audit-skip pragma is the right
+ *     answer (internal state machine, not user-visible).
+ */
+const MUTATING_RPC_NAMES: readonly string[] = [
+  "enqueue_compute_job",
+  "sanitize_user",
+  "send_intro_with_decision",
+  "create_wizard_strategy",
+  "finalize_csv_strategy",
+  "commit_scenario_batch",
+  "update_allocator_mandates",
+  "delete_allocator_api_key",
+  "disconnect_allocator_api_key",
+  "stamp_first_bridge_surfaced",
+  "stamp_first_sync_success",
+  "sync_trades",
+];
+
+/**
+ * Build the regex matching any mutating-RPC call. We accept both single
+ * and double quotes. The leading boundary is `\.rpc\(\s*` so the match
+ * is anchored to a method call (not a substring of an identifier).
+ */
+const MUTATING_RPC_RE = new RegExp(
+  `\\.rpc\\(\\s*['"](?:${MUTATING_RPC_NAMES.join("|")})['"]`,
+);
+
+/**
+ * Find every mutating `.rpc(...)` call in a file's source. Returns a
+ * synthesized Mutation whose chainStart is the same as `line` — the
+ * `await admin.rpc("foo", ...)` statement is typically a single
+ * logical line + multi-line arg block, but the pragma anchor lives
+ * directly above the `await` expression, so chainStart == line is
+ * correct for the pragma-lookback semantics. P692 extension.
+ */
+function findRpcMutations(file: string, src: string): Mutation[] {
+  const lines = src.split("\n");
+  const out: Mutation[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = stripLineComment(lines[i]);
+    if (!MUTATING_RPC_RE.test(line)) continue;
+    // Walk backward to find the statement-start line (the line
+    // starting with `const`, `await`, `return`, etc. — not a
+    // continuation `.`).
+    let chainStart = i;
+    for (let j = i - 1; j >= 0; j--) {
+      const trimmed = lines[j].trim();
+      if (trimmed === "") continue;
+      if (trimmed.startsWith(".")) continue;
+      chainStart = j;
+      break;
+    }
+    out.push({
+      file,
+      line: i + 1,
+      chainStart: chainStart + 1,
+      snippet: line.trim(),
+    });
+  }
+  return out;
+}
+
+/**
  * Strip `//`-prefixed comment content so a comment mentioning
  * `logAuditEvent` (e.g., "// TODO: add logAuditEvent here") does not
  * falsely satisfy the coverage check. /review follow-up (T4-M2).
@@ -179,25 +268,52 @@ const HELPER_MUTATORS: Array<{ module: string; names: string[] }> = [
 ];
 
 /**
+ * Hard fail-safe cap on the forward audit-window walk. P694: the
+ * walker uses brace-balance to bound the window to the enclosing
+ * function body, but a pathological 5000-line function (would already
+ * fail review) shouldn't gum up the test runner. 200 lines is well
+ * past the longest function in this codebase (the largest route
+ * handler is ~150 lines including comments).
+ */
+const AUDIT_WINDOW_MAX_LINES = 200;
+
+/**
+ * Count net brace delta on a line, accounting for `//` line comments.
+ * Block comments (`/* … *\/`) are not stripped — they're rare in route
+ * files and the brace count of an internal block comment would be 0
+ * anyway. String contents containing `{` or `}` are a false-positive
+ * risk; we accept that and rely on the AUDIT_WINDOW_MAX_LINES fail-safe.
+ */
+function braceDelta(line: string): number {
+  const stripped = stripLineComment(line);
+  let delta = 0;
+  for (const ch of stripped) {
+    if (ch === "{") delta++;
+    else if (ch === "}") delta--;
+  }
+  return delta;
+}
+
+/**
  * Check whether a given mutation is "covered" — either an audit call
- * within a forward window, OR an `@audit-skip:` pragma within 8 lines
- * above the mutation chain's start line.
+ * within the enclosing function body, OR an `@audit-skip:` pragma
+ * within 8 lines above the mutation chain's start line.
  *
- * Window shape:
+ * Window shape (P694 tightening):
  *   - Pragma lookback: 8 lines ABOVE `chainStart` (accommodates a
  *     multi-line comment block explaining the skip reason).
- *   - Audit-call lookforward: 60 lines AFTER the mutation method line
- *     (`.insert(…)` / `.update(…)` / …) plus 3 lines above chainStart
- *     for the rare "audit-before-mutation" pattern.
+ *   - Audit-call lookforward: walk brace-balanced from the mutation
+ *     line until the enclosing function body ends (depth returns to
+ *     -1 relative to start), bounded by AUDIT_WINDOW_MAX_LINES.
+ *   - Also search 3 lines ABOVE chainStart for the rare
+ *     "audit-before-mutation" pattern.
  *
- * Empirical basis: the intro.send pilot sits 48 lines after its insert;
- * deletion.request.create pilot sits ~30 lines after. A 60-line window
- * covers both with margin, without allowing a mutation at line 10 to
- * be "covered" by an audit call in a different function at line 500.
- *
- * The window is asymmetric (mostly forward) because audit emissions
- * conventionally follow the mutation they audit (so caller-error
- * branches can return before the emission fires).
+ * Why brace-balance vs flat 60-line window: pre-P694, a mutation at
+ * line 10 in `POST()` could be "covered" by a `logAuditEvent` at
+ * line 55 inside `PATCH()` in the same file — the flat window crossed
+ * a function boundary silently. The brace walker terminates at the
+ * close-brace of the function containing the mutation, so the audit
+ * emit MUST live inside the same function body.
  *
  * /review follow-up (T4-M2): strips `//` comments before scanning so a
  * comment mentioning `logAuditEvent` doesn't falsely satisfy coverage.
@@ -222,17 +338,32 @@ function isCovered(
     }
   }
 
-  // Audit call check: logAuditEvent / logAuditEventAsUser within a
-  // 60-line forward window from the mutation method line. We also
-  // search 3 lines above the chain start for the rare
-  // "audit-before-mutation" pattern. Comment content is stripped so a
-  // `// TODO: logAuditEvent(…)` mention doesn't satisfy coverage.
-  const windowStart = Math.max(0, chainStartIdx - 3);
-  const windowEnd = Math.min(lines.length, lineIdx + 60);
-  for (let j = windowStart; j < windowEnd; j++) {
+  // Lookback window: 3 lines above chain start for "audit-before-
+  // mutation" pattern. (Rare; only a handful of sites use it.)
+  const lookbackStart = Math.max(0, chainStartIdx - 3);
+  for (let j = lookbackStart; j < chainStartIdx; j++) {
     if (/logAuditEvent(AsUser)?\s*\(/.test(stripLineComment(lines[j]))) {
+      return { covered: true, reason: "audit-call-above" };
+    }
+  }
+
+  // Lookforward window: walk brace-balanced. The mutation sits at some
+  // depth inside an enclosing function. We start at depth 0 (relative)
+  // and walk forward; when depth returns to -1 (the close-brace of
+  // the enclosing function), we stop. Audit emissions that live OUTSIDE
+  // the enclosing function body don't count. Bounded by
+  // AUDIT_WINDOW_MAX_LINES as a hard fail-safe.
+  let depth = 0;
+  const hardCap = Math.min(lines.length, lineIdx + AUDIT_WINDOW_MAX_LINES);
+  for (let j = lineIdx; j < hardCap; j++) {
+    const stripped = stripLineComment(lines[j]);
+    if (/logAuditEvent(AsUser)?\s*\(/.test(stripped)) {
       return { covered: true, reason: "audit-call" };
     }
+    depth += braceDelta(lines[j]);
+    // depth < 0 means we've exited the enclosing function body — the
+    // close-brace fired without us seeing a logAuditEvent. Stop.
+    if (depth < 0) break;
   }
 
   return { covered: false, reason: "uncovered" };
@@ -278,6 +409,109 @@ function findHelperMutations(file: string, src: string): Mutation[] {
   return out;
 }
 
+/**
+ * P692/P694 — synthetic regression cases. We test the helpers against
+ * in-memory source fixtures so the grep extensions can fail loudly
+ * even when the live src/app/api/ tree happens to be fully instrumented.
+ *
+ * Each fixture mimics a real route shape — `export async function POST`
+ * + brace-balanced body + a mutation call. The negative cases assert
+ * that the OLD regex (which only matched `.insert|.update|.delete|
+ * .upsert`) would have falsely passed, while the new regex correctly
+ * catches the gap.
+ */
+describe("audit-coverage helpers — P692/P694 regression fixtures", () => {
+  it("findRpcMutations catches admin.rpc('enqueue_compute_job', ...)", () => {
+    const src = [
+      "export async function POST() {",
+      "  const admin = createAdminClient();",
+      "  const { error } = await admin.rpc('enqueue_compute_job', {",
+      "    p_strategy_id: 'abc',",
+      "    p_kind: 'sync_trades',",
+      "  });",
+      "  return Response.json({ ok: true });",
+      "}",
+    ].join("\n");
+    const mutations = findRpcMutations("synthetic.ts", src);
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0].snippet).toContain("enqueue_compute_job");
+  });
+
+  it("findRpcMutations IGNORES read-only RPCs like get_admin_compute_jobs", () => {
+    const src = [
+      "export async function GET() {",
+      "  const { data } = await admin.rpc('get_admin_compute_jobs', { p_limit: 50 });",
+      "  return Response.json(data);",
+      "}",
+    ].join("\n");
+    expect(findRpcMutations("synthetic.ts", src)).toEqual([]);
+  });
+
+  it("isCovered (P694 brace-balance) does NOT match audit emit in a sibling function", () => {
+    const lines = [
+      "export async function POST() {",
+      "  const admin = createAdminClient();",
+      "  const { error } = await admin.rpc('enqueue_compute_job', { p_strategy_id: 'x' });",
+      "  if (error) return Response.json({ error: 'fail' }, { status: 500 });",
+      "  return Response.json({ ok: true });",
+      "}",
+      "",
+      "export async function PATCH() {",
+      "  // logAuditEvent in a DIFFERENT function — must NOT cover POST's RPC.",
+      "  logAuditEvent(supabase, { action: 'role.grant', entity_type: 'user_app_role', entity_id: 'x' });",
+      "  return Response.json({ ok: true });",
+      "}",
+    ];
+    const mutation: Mutation = {
+      file: "synthetic.ts",
+      line: 3,
+      chainStart: 3,
+      snippet: lines[2].trim(),
+    };
+    const check = isCovered(mutation, lines);
+    expect(check.covered).toBe(false);
+    expect(check.reason).toBe("uncovered");
+  });
+
+  it("isCovered MATCHES audit emit within the same function body", () => {
+    const lines = [
+      "export async function POST() {",
+      "  const admin = createAdminClient();",
+      "  const { error } = await admin.rpc('enqueue_compute_job', { p_strategy_id: 'x' });",
+      "  if (error) return Response.json({ error: 'fail' }, { status: 500 });",
+      "  logAuditEvent(supabase, { action: 'sync.start', entity_type: 'sync', entity_id: 'x' });",
+      "  return Response.json({ ok: true });",
+      "}",
+    ];
+    const mutation: Mutation = {
+      file: "synthetic.ts",
+      line: 3,
+      chainStart: 3,
+      snippet: lines[2].trim(),
+    };
+    expect(isCovered(mutation, lines).covered).toBe(true);
+  });
+
+  it("isCovered respects @audit-skip pragma above the mutation", () => {
+    const lines = [
+      "export async function POST() {",
+      "  // @audit-skip: scheduled cron tick.",
+      "  const { error } = await admin.rpc('enqueue_compute_job', { p_strategy_id: 'x' });",
+      "  return Response.json({ ok: true });",
+      "}",
+    ];
+    const mutation: Mutation = {
+      file: "synthetic.ts",
+      line: 3,
+      chainStart: 3,
+      snippet: lines[2].trim(),
+    };
+    const check = isCovered(mutation, lines);
+    expect(check.covered).toBe(true);
+    expect(check.reason).toBe("pragma");
+  });
+});
+
 describe("audit coverage: every mutation site in src/app/api must emit or skip", () => {
   it("every .insert/.update/.delete/.upsert has a logAuditEvent or @audit-skip", () => {
     const routeFiles = collectRouteFiles(API_DIR);
@@ -298,6 +532,10 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
         // Routes that delegate their mutation to a named helper export
         // must still emit an audit event in the route file.
         ...findHelperMutations(file, src),
+        // P692 extension: known-mutating .rpc() calls. The allowlist
+        // is in MUTATING_RPC_NAMES; route authors adding a new mutating
+        // RPC must add it there as part of the audit checklist.
+        ...findRpcMutations(file, src),
       ];
       for (const m of mutations) {
         const check = isCovered(m, lines);

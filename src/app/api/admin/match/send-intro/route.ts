@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
+import { logAuditEventAsUser } from "@/lib/audit";
 import {
   notifyAllocatorOfAdminIntro,
   notifyManagerOfAdminIntro,
@@ -83,6 +84,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // RPC returns a TABLE (row set); Supabase exposes it as an array.
   const row = Array.isArray(data) && data.length > 0 ? data[0] : data;
   const wasAlreadySent = row?.was_already_sent ?? false;
+
+  // P692 audit-coverage extension (2026-05-13): admin issuing an intro
+  // decision is a high-signal user-attributable action. Use
+  // logAuditEventAsUser because the route operates with the
+  // service-role admin client but has already validated the acting
+  // admin's JWT (isAdminUser check above). entity_id pins to the
+  // contact_request row created by the RPC.
+  if (row?.contact_request_id && user?.id) {
+    logAuditEventAsUser(admin, user.id, {
+      action: "intro.send",
+      entity_type: "contact_request",
+      entity_id: row.contact_request_id,
+      metadata: {
+        path: "admin",
+        allocator_id: body.allocator_id,
+        strategy_id: body.strategy_id,
+        original_strategy_id: body.original_strategy_id,
+        candidate_id: body.candidate_id ?? null,
+        was_already_sent: wasAlreadySent,
+        match_decision_id: row?.match_decision_id ?? null,
+      },
+    });
+  }
 
   // Dispatch emails only on first-time sends. Fire-and-forget: email failure
   // must never fail the API call since the intro is already persisted in the DB.

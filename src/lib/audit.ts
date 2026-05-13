@@ -3,6 +3,131 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { after } from "next/server";
 
 /**
+ * Audit-emission failure classification (P701 / P702).
+ *
+ * Lane C added the same typed dispatch to the Python `audit.py`. The TS
+ * side now mirrors that contract: rather than blanket-swallowing every
+ * emit failure, classify the error and choose `rethrow` vs `swallow`
+ * based on the failure mode.
+ *
+ *   - PERMISSION_DENIED (PostgREST code `42501`) — caller lost the right
+ *     to write to audit_log (auth regression, RPC EXECUTE grant drift,
+ *     RLS lockout). NEVER benign. Re-throw so the route flows into its
+ *     error handler instead of returning success on a silently dropped
+ *     audit gate. Sentry-tagged `audit_permission_denied=true`.
+ *   - TRANSIENT (fetch failure, AbortError, TypeError: fetch failed,
+ *     etc.) — infra blip on the supabase REST path. Bumping a module-
+ *     local counter (`auditEmitTransientFailures`) lets `/api/health`
+ *     surface a metric without exporting a global. Do NOT rethrow —
+ *     a network blip is the one case where breaking the parent compute
+ *     would be worse than the missed audit row. Sentry-tagged
+ *     `audit_emit_transient=true`.
+ *   - UNKNOWN — anything else (schema drift, RPC raising a runtime
+ *     error, etc.). Re-throw per project rule 12 (fail loud). Sentry-
+ *     tagged with the default tag set.
+ *
+ * Why this is critical: pre-fix, `emit()` caught every error and only
+ * `console.error`-logged it. A silent RPC permission_denied (e.g., the
+ * EXECUTE grant on `log_audit_event` getting dropped by a future
+ * migration) would have looked like every audit row writing successfully
+ * — the route returns 200 and Sentry sees nothing. P701/P702 close that
+ * gap.
+ */
+export type AuditEmitErrorKind =
+  | "permission_denied"
+  | "transient"
+  | "unknown";
+
+/**
+ * Module-local counter of transient audit emission failures. Reset only
+ * by process restart. Read by `/api/health` (or any in-process observer)
+ * via {@link getAuditEmitTransientFailures}; the test suite asserts the
+ * counter bumps after a synthesized fetch-failure.
+ */
+let auditEmitTransientFailures = 0;
+
+/**
+ * Read the module-local transient-failure counter. Exposed for tests
+ * and observability; production code should NOT branch on the value.
+ */
+export function getAuditEmitTransientFailures(): number {
+  return auditEmitTransientFailures;
+}
+
+/** Test-only reset hook. Not exported via barrel; tests import directly. */
+export function __resetAuditEmitTransientFailuresForTests(): void {
+  auditEmitTransientFailures = 0;
+}
+
+/**
+ * Heuristically classify an emit failure. Inputs:
+ *   - `err` — the thrown exception (TypeError, AbortError, custom Error,
+ *     unknown).
+ *   - `rpcError` — the PostgREST error object returned in `{ error }`
+ *     from `supabase.rpc(...)`. May be null when the failure is a
+ *     thrown exception path.
+ *
+ * Classification precedence:
+ *   1. `rpcError.code === "42501"` → permission_denied.
+ *   2. Thrown TypeError matching `fetch failed` → transient (Node's
+ *      undici fetch wraps EAI_AGAIN / ECONNRESET / network down as
+ *      `TypeError: fetch failed`). AbortError → transient (timeout).
+ *      DOMException with name `AbortError` → transient.
+ *   3. Anything else → unknown.
+ *
+ * The classifier is conservative: a PostgREST 500 (schema drift) lands
+ * in `unknown` and re-throws, surfacing in Sentry as a fail-loud event.
+ */
+export function classifyAuditEmitError(
+  err: unknown,
+  rpcError: { code?: string | null } | null,
+): AuditEmitErrorKind {
+  if (rpcError && rpcError.code === "42501") {
+    return "permission_denied";
+  }
+  if (err instanceof Error) {
+    if (err.name === "AbortError") return "transient";
+    if (err instanceof TypeError && /fetch failed/i.test(err.message)) {
+      return "transient";
+    }
+    // Some runtimes throw DOMException; the name check above covers it.
+  }
+  return "unknown";
+}
+
+/**
+ * Wrap a `Sentry.captureException` call so a Sentry transport failure
+ * (DSN misconfig, network down) never masks the original audit-emit
+ * exception. Mirrors the lazy-import pattern in
+ * `src/app/api/for-quants-lead/route.ts` and `src/app/error.tsx`.
+ */
+function reportToSentry(
+  err: unknown,
+  options: {
+    tags?: Record<string, string>;
+    extra?: Record<string, unknown>;
+    level?: "fatal" | "error" | "warning";
+  } = {},
+): void {
+  try {
+    void import("@sentry/nextjs")
+      .then((Sentry) => {
+        try {
+          Sentry.captureException(err, options);
+        } catch {
+          // Sentry SDK threw — swallow. The caller has already logged
+          // the original error to stderr via the stable `[audit]` prefix.
+        }
+      })
+      .catch(() => {
+        // Sentry import failed — swallow. Same reasoning.
+      });
+  } catch {
+    // import() construction failed (extremely unlikely) — swallow.
+  }
+}
+
+/**
  * Fire-and-forget audit event emitter.
  *
  * Sprint 6 closeout Task 7.1a (pilot: 3 events + `log_audit_event` RPC).
@@ -253,14 +378,17 @@ export function logAuditEventAsUser(
 }
 
 /**
- * Inner async emitter for the user-scoped path. Catches all failures;
- * never re-throws. Exported for direct testing of the failure-swallowing
- * contract — production callers should use `logAuditEvent`.
+ * Inner async emitter for the user-scoped path. P701/P702: typed
+ * dispatch — re-throws permission_denied and unknown failures, swallows
+ * transient infra blips. Sentry is notified on every failure path with
+ * appropriate tags. Exported for direct testing.
  */
 export async function emit(
   client: SupabaseClient,
   event: AuditEvent,
 ): Promise<void> {
+  let rpcError: { code?: string | null; message?: string } | null = null;
+  let thrown: unknown = null;
   try {
     const { error } = await client.rpc("log_audit_event", {
       p_action: event.action,
@@ -268,42 +396,96 @@ export async function emit(
       p_entity_id: event.entity_id,
       p_metadata: event.metadata ?? {},
     });
-
-    if (error) {
-      console.error(
-        "[audit] log_audit_event RPC returned error (dropping):",
-        {
-          action: event.action,
-          entity_type: event.entity_type,
-          entity_id: event.entity_id,
-          code: error.code,
-          message: error.message,
-        },
-      );
-    }
+    rpcError = error;
   } catch (err) {
+    thrown = err;
+  }
+
+  if (!rpcError && !thrown) return;
+
+  const errForDispatch =
+    thrown ??
+    (rpcError
+      ? Object.assign(
+          new Error(
+            `log_audit_event RPC error: ${rpcError.message ?? "(no message)"}`,
+          ),
+          { code: rpcError.code ?? undefined },
+        )
+      : new Error("log_audit_event unknown failure"));
+  const kind = classifyAuditEmitError(thrown ?? rpcError, rpcError);
+
+  const eventContext = {
+    action: event.action,
+    entity_type: event.entity_type,
+    entity_id: event.entity_id,
+  };
+
+  if (kind === "permission_denied") {
     console.error(
-      "[audit] log_audit_event call threw (dropping):",
+      "[audit] log_audit_event permission_denied (re-throwing):",
+      { ...eventContext, code: rpcError?.code, message: rpcError?.message },
+    );
+    reportToSentry(errForDispatch, {
+      tags: {
+        audit_permission_denied: "true",
+        audit_path: "log_audit_event",
+      },
+      extra: eventContext,
+      level: "fatal",
+    });
+    throw errForDispatch;
+  }
+
+  if (kind === "transient") {
+    auditEmitTransientFailures += 1;
+    console.error(
+      "[audit] log_audit_event transient failure (swallowing):",
       {
-        action: event.action,
-        entity_type: event.entity_type,
-        entity_id: event.entity_id,
-        message: err instanceof Error ? err.message : String(err),
+        ...eventContext,
+        message: thrown instanceof Error ? thrown.message : String(thrown),
+        transient_failure_count: auditEmitTransientFailures,
       },
     );
+    reportToSentry(errForDispatch, {
+      tags: { audit_emit_transient: "true", audit_path: "log_audit_event" },
+      extra: eventContext,
+      level: "error",
+    });
+    return; // Do NOT rethrow — transient infra blip.
   }
+
+  // kind === "unknown" — fail loud per project rule 12.
+  console.error(
+    "[audit] log_audit_event unknown failure (re-throwing):",
+    {
+      ...eventContext,
+      code: rpcError?.code,
+      message:
+        rpcError?.message ??
+        (thrown instanceof Error ? thrown.message : String(thrown)),
+    },
+  );
+  reportToSentry(errForDispatch, {
+    tags: { audit_path: "log_audit_event" },
+    extra: eventContext,
+    level: "error",
+  });
+  throw errForDispatch;
 }
 
 /**
- * Inner async emitter for the service-role path. Catches all failures;
- * never re-throws. Exported for direct testing of the failure-swallowing
- * contract — production callers should use `logAuditEventAsUser`.
+ * Inner async emitter for the service-role path. Same typed-dispatch
+ * contract as {@link emit} — re-throws permission_denied + unknown,
+ * swallows transient. Exported for direct testing.
  */
 export async function emitAsUser(
   adminClient: SupabaseClient,
   actingUserId: string,
   event: AuditEvent,
 ): Promise<void> {
+  let rpcError: { code?: string | null; message?: string } | null = null;
+  let thrown: unknown = null;
   try {
     const { error } = await adminClient.rpc("log_audit_event_service", {
       p_user_id: actingUserId,
@@ -312,30 +494,83 @@ export async function emitAsUser(
       p_entity_id: event.entity_id,
       p_metadata: event.metadata ?? {},
     });
-
-    if (error) {
-      console.error(
-        "[audit] log_audit_event_service RPC returned error (dropping):",
-        {
-          action: event.action,
-          entity_type: event.entity_type,
-          entity_id: event.entity_id,
-          user_id: actingUserId,
-          code: error.code,
-          message: error.message,
-        },
-      );
-    }
+    rpcError = error;
   } catch (err) {
+    thrown = err;
+  }
+
+  if (!rpcError && !thrown) return;
+
+  const errForDispatch =
+    thrown ??
+    (rpcError
+      ? Object.assign(
+          new Error(
+            `log_audit_event_service RPC error: ${rpcError.message ?? "(no message)"}`,
+          ),
+          { code: rpcError.code ?? undefined },
+        )
+      : new Error("log_audit_event_service unknown failure"));
+  const kind = classifyAuditEmitError(thrown ?? rpcError, rpcError);
+
+  const eventContext = {
+    action: event.action,
+    entity_type: event.entity_type,
+    entity_id: event.entity_id,
+    user_id: actingUserId,
+  };
+
+  if (kind === "permission_denied") {
     console.error(
-      "[audit] log_audit_event_service call threw (dropping):",
+      "[audit] log_audit_event_service permission_denied (re-throwing):",
+      { ...eventContext, code: rpcError?.code, message: rpcError?.message },
+    );
+    reportToSentry(errForDispatch, {
+      tags: {
+        audit_permission_denied: "true",
+        audit_path: "log_audit_event_service",
+      },
+      extra: eventContext,
+      level: "fatal",
+    });
+    throw errForDispatch;
+  }
+
+  if (kind === "transient") {
+    auditEmitTransientFailures += 1;
+    console.error(
+      "[audit] log_audit_event_service transient failure (swallowing):",
       {
-        action: event.action,
-        entity_type: event.entity_type,
-        entity_id: event.entity_id,
-        user_id: actingUserId,
-        message: err instanceof Error ? err.message : String(err),
+        ...eventContext,
+        message: thrown instanceof Error ? thrown.message : String(thrown),
+        transient_failure_count: auditEmitTransientFailures,
       },
     );
+    reportToSentry(errForDispatch, {
+      tags: {
+        audit_emit_transient: "true",
+        audit_path: "log_audit_event_service",
+      },
+      extra: eventContext,
+      level: "error",
+    });
+    return;
   }
+
+  console.error(
+    "[audit] log_audit_event_service unknown failure (re-throwing):",
+    {
+      ...eventContext,
+      code: rpcError?.code,
+      message:
+        rpcError?.message ??
+        (thrown instanceof Error ? thrown.message : String(thrown)),
+    },
+  );
+  reportToSentry(errForDispatch, {
+    tags: { audit_path: "log_audit_event_service" },
+    extra: eventContext,
+    level: "error",
+  });
+  throw errForDispatch;
 }
