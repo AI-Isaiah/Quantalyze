@@ -1148,3 +1148,90 @@ class TestAvgWinningLosingTradeDollars:
             f"missing-PnL position should emit None, not phantom 0.0; got "
             f"{rpt[1]['realized_pnl']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 round-2 / Block A — P1995
+# ---------------------------------------------------------------------------
+# compute_turnover_series sparse-day fix:
+#   1) First observed date must NOT emit a phantom turnover spike (pre-fix
+#      it treated the opening position as a same-day rotation against
+#      prev_positions={}).
+#   2) When sorted dates skip more than one day (sparse calendar), the
+#      post-gap row divides a multi-day position delta by a single-day NAV,
+#      inflating turnover. The new `_with_flags` helper surfaces those
+#      dates via `data_quality_flags['turnover_gap_dates']`.
+
+
+class TestComputeTurnoverSeries:
+    """P1995: first-day exclusion + sparse-gap flagging."""
+
+    def test_first_day_phantom_excluded_when_opening_position(self) -> None:
+        """Day 0 has a non-zero opening position; day 1 unchanged. Pre-fix
+        day 0 emitted turnover = (position * price) / nav (phantom spike,
+        because prev_positions={} treated the entire opening as a same-day
+        rotation). Post-fix: day 0 is either absent OR turnover=0.0."""
+        positions_by_date = {
+            "2025-01-01": {"BTC": 10.0},
+            "2025-01-02": {"BTC": 10.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 1000.0},
+            "2025-01-02": {"BTC": 1000.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+        }
+        series = compute_turnover_series(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # Spec: first observed date EITHER absent OR turnover==0.0.
+        first = days.get("2025-01-01")
+        assert first is None or abs(first - 0.0) < 1e-9, (
+            f"first-day phantom: expected absent or 0.0, got {first}. "
+            f"Pre-fix this was 1.0 (10*1000/10000) — the entire opening "
+            f"position treated as a same-day rotation against prev={{}}."
+        )
+        # Day 2 should still be 0 (no change between day 1 and day 2).
+        assert "2025-01-02" in days
+        assert abs(days["2025-01-02"] - 0.0) < 1e-9
+
+    def test_sparse_calendar_gap_dates_surfaced_in_flags(self) -> None:
+        """A 7-day skip from Mon 2025-01-06 to Mon 2025-01-13 with a
+        position change in between must surface the post-gap date in
+        `data_quality_flags['turnover_gap_dates']`. Pre-fix the 7-day
+        delta was divided by single-day NAV with no warning."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-06": {"BTC": 1.0},  # Monday
+            "2025-01-13": {"BTC": 2.0},  # following Monday — 7-day skip
+        }
+        prices_by_date = {
+            "2025-01-06": {"BTC": 100.0},
+            "2025-01-13": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-06": 10000.0,
+            "2025-01-13": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        # The 7-day skip post-gap date must surface in flags.
+        gap_dates = flags.get("turnover_gap_dates") or []
+        assert "2025-01-13" in gap_dates, (
+            f"expected 2025-01-13 (post-gap row) in turnover_gap_dates; "
+            f"got flags={flags}"
+        )
+        # And the plain helper still returns a bare list (no flags) so
+        # existing callers don't have to change.
+        plain_series = compute_turnover_series(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert isinstance(plain_series, list)
+        assert all(isinstance(p, dict) for p in plain_series)

@@ -879,17 +879,29 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     }
 
 
-def compute_turnover_series(
+def compute_turnover_series_with_flags(
     positions_by_date: dict[str, dict[str, float]],
     prices_by_date: dict[str, dict[str, float]],
     nav_by_date: dict[str, float],
-) -> list[dict[str, Any]]:
-    """Compute daily turnover series.
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """Compute daily turnover series + sparse-day quality flags.
 
     Pitfall #19 mitigation: contract is documented inline.
 
     Definition: daily_turnover = sum_over_symbols(abs(delta * price)) / nav
                 where delta = position_today - position_yesterday.
+
+    Audit-2026-05-07 round-2 / P1995 fixes:
+      1) First observed date emits turnover=0 (no phantom spike). The
+         pre-fix code computed delta = positions - prev_positions={}
+         on iteration 1, which treated the entire opening position as
+         a same-day rotation — inflating day-zero turnover to the full
+         position weight every time.
+      2) Sparse calendar gaps (any prev→current date delta > 1 day) are
+         surfaced via `flags['turnover_gap_dates']`. The math still runs
+         (delta / single-day NAV) so downstream consumers can decide
+         whether to drop, smooth, or normalize the row — but the flag
+         makes the data quality issue explicit instead of silent.
 
     Args:
         positions_by_date: { 'YYYY-MM-DD': { symbol: position_size }, ... }
@@ -897,25 +909,62 @@ def compute_turnover_series(
         nav_by_date:       { 'YYYY-MM-DD': nav_usd, ... }
 
     Returns:
-        [{date: 'YYYY-MM-DD', turnover: float}, ...] sorted by date asc.
-        Empty list when positions_by_date is empty.
+        Tuple of (series, flags) where:
+          - series: [{date: 'YYYY-MM-DD', turnover: float}, ...] sorted by date asc.
+                    Empty list when positions_by_date is empty.
+          - flags:  dict with optional 'turnover_gap_dates' key listing
+                    dates whose row spans more than one calendar day.
 
     Threat model T-12-04-02: nav <= 0 short-circuits to turnover=0.0
     rather than raising ZeroDivisionError on a stray zero/negative NAV row.
     """
+    flags: dict[str, list[str]] = {}
     if not positions_by_date:
-        return []
+        return [], flags
     dates = sorted(positions_by_date.keys())
     series: list[dict[str, Any]] = []
-    prev_positions: dict[str, float] = {}
+    prev_positions: dict[str, float] | None = None
+    prev_date: datetime | None = None
+    gap_dates: list[str] = []
     for date in dates:
         positions = positions_by_date.get(date, {})
         prices = prices_by_date.get(date, {})
         nav = nav_by_date.get(date, 0.0)
+
+        # P1995 fix #1: first observed date has no meaningful
+        # prev_positions snapshot — emit turnover=0 instead of
+        # treating the entire opening position as a same-day rotation.
+        if prev_positions is None:
+            series.append({"date": date, "turnover": 0.0})
+            prev_positions = positions
+            try:
+                prev_date = datetime.fromisoformat(date)
+            except (ValueError, TypeError):
+                prev_date = None
+            continue
+
+        # P1995 fix #2: flag sparse-day rows. Parse current date; if
+        # we can compute a calendar delta and it's > 1 day, record it.
+        # Parse failures are not flagged — defensive fallback for
+        # unconventional date keys (the math path still runs).
+        try:
+            current_date_parsed = datetime.fromisoformat(date)
+        except (ValueError, TypeError):
+            current_date_parsed = None
+        if (
+            current_date_parsed is not None
+            and prev_date is not None
+            and (current_date_parsed - prev_date).days > 1
+        ):
+            gap_dates.append(date)
+
         if nav <= 0:
             series.append({"date": date, "turnover": 0.0})
             prev_positions = positions
+            if current_date_parsed is not None:
+                prev_date = current_date_parsed
             continue
+
         total_change_usd = 0.0
         symbols = set(positions.keys()) | set(prev_positions.keys())
         for sym in symbols:
@@ -924,4 +973,27 @@ def compute_turnover_series(
             total_change_usd += abs(delta * price)
         series.append({"date": date, "turnover": round(total_change_usd / nav, 6)})
         prev_positions = positions
+        if current_date_parsed is not None:
+            prev_date = current_date_parsed
+
+    if gap_dates:
+        flags["turnover_gap_dates"] = gap_dates
+    return series, flags
+
+
+def compute_turnover_series(
+    positions_by_date: dict[str, dict[str, float]],
+    prices_by_date: dict[str, dict[str, float]],
+    nav_by_date: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Backwards-compatible wrapper around `compute_turnover_series_with_flags`.
+
+    Returns only the series and discards the data quality flags — preserves
+    the pre-existing call-site shape used by analytics_runner and
+    tests/fixtures/regen_golden.py. Callers that want the flags should
+    use `compute_turnover_series_with_flags` directly.
+    """
+    series, _flags = compute_turnover_series_with_flags(
+        positions_by_date, prices_by_date, nav_by_date
+    )
     return series
