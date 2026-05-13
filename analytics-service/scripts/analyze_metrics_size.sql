@@ -9,17 +9,31 @@
 -- the value Postgres actually has to lift off-disk. M-03 (12-REVIEWS.md) requires
 -- this single source of truth; phase12_kill_switch.py never re-measures via Python.
 --
--- Output columns (CSV-friendly, order is contract-stable):
---   p50_bytes, p95_bytes, p99_bytes, p999_bytes, max_bytes, strategy_count
+-- Output: rows of (k, v) where k is a string label and v is the numeric value as text.
+-- P2022 (audit-2026-05-07 round 2): the previous positional CSV layout meant a SQL
+-- re-order would silently shift the parsed p999 to a different percentile. Keyed
+-- output makes the parse contract column-order-independent and forces the caller
+-- to opt into specific keys.
+--
+-- Emitted keys (each appears exactly once):
+--   p50, p95, p99, p999, max, count
 --
 -- Usage:
---   psql "$DATABASE_URL" -tAF, -f analyze_metrics_size.sql
-SELECT
-    percentile_cont(0.50)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p50_bytes,
-    percentile_cont(0.95)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p95_bytes,
-    percentile_cont(0.99)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p99_bytes,
-    percentile_cont(0.999) WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p999_bytes,
-    max(pg_column_size(metrics_json)) AS max_bytes,
-    count(*) AS strategy_count
-FROM strategy_analytics
-WHERE metrics_json IS NOT NULL;
+--   psql --dbname "$DATABASE_URL" -tAF, -f analyze_metrics_size.sql
+WITH stats AS (
+    SELECT
+        percentile_cont(0.50)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p50,
+        percentile_cont(0.95)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p95,
+        percentile_cont(0.99)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p99,
+        percentile_cont(0.999) WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p999,
+        max(pg_column_size(metrics_json)) AS max_bytes,
+        count(*) AS strategy_count
+    FROM strategy_analytics
+    WHERE metrics_json IS NOT NULL
+)
+SELECT 'p50'   AS k, p50::text            AS v FROM stats
+UNION ALL SELECT 'p95',   p95::text            FROM stats
+UNION ALL SELECT 'p99',   p99::text            FROM stats
+UNION ALL SELECT 'p999',  p999::text           FROM stats
+UNION ALL SELECT 'max',   max_bytes::text      FROM stats
+UNION ALL SELECT 'count', strategy_count::text FROM stats;

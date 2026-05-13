@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import os
 import subprocess
 import sys
@@ -91,11 +92,46 @@ TODOS_PATH = (
 
 # --- Size measurement ------------------------------------------------------
 
+
+def _parse_probe_value(raw: str) -> float:
+    """Parse a single probe value (size in bytes) from psql output.
+
+    P2022 (audit-2026-05-07 round 2): reject NaN/inf/negative values rather
+    than letting them poison the kill-switch threshold compare. A missing
+    or empty value is also rejected — the caller should not paper over a
+    NULL row with `0.0` (that previously made an empty DB look like
+    "everything is fine" instead of "no data, abort").
+    """
+    if raw is None or raw == "":
+        raise ValueError("phase12_kill_switch: empty probe value")
+    val = float(raw)  # raises ValueError on garbage
+    if not math.isfinite(val):
+        raise ValueError(
+            f"phase12_kill_switch: non-finite probe value {raw!r} (NaN/inf rejected)"
+        )
+    if val < 0:
+        raise ValueError(
+            f"phase12_kill_switch: negative probe value {raw!r} (size cannot be < 0)"
+        )
+    return val
+
+
+def _nonneg_finite(raw: str) -> float:
+    """argparse `type=` validator. Same contract as _parse_probe_value but
+    accepts `argparse`'s string input shape. Used for --p999 and --count."""
+    return _parse_probe_value(raw)
+
+
 def measure_p999_via_sql() -> tuple[float, int]:
     """Run analyze_metrics_size.sql via psql; return (p999_bytes, strategy_count).
 
     Uses pg_column_size (post-TOAST-compression on-disk size). M-03: this is the
     only authoritative measurement — never approximate via Python json round-trip.
+
+    P2022: parses keyed output (k,v rows) rather than positional CSV columns —
+    a SQL re-order can no longer silently shift the parsed p999 to a different
+    percentile. Requires keys `p999` and `count` to be present; rejects NaN/
+    inf/negative values.
     """
     db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not db_url:
@@ -104,25 +140,40 @@ def measure_p999_via_sql() -> tuple[float, int]:
             "cannot run pg_column_size SQL probe (M-03)."
         )
     sql = SQL_PROBE_PATH.read_text()
+    # P2022: explicit --dbname flag (the previous positional dbname was easy to
+    # mis-read as a query when reviewing CI logs).
     result = subprocess.run(
-        ["psql", db_url, "-tAF,", "-c", sql],
+        ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
         capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
             f"phase12_kill_switch: SQL probe failed: {result.stderr.strip()}"
         )
-    # Output columns (per analyze_metrics_size.sql contract):
-    #   p50_bytes,p95_bytes,p99_bytes,p999_bytes,max_bytes,strategy_count
-    line = ""
-    if result.stdout.strip():
-        line = result.stdout.strip().splitlines()[-1]
-    parts = line.split(",")
-    if len(parts) < 6:
-        raise RuntimeError(f"phase12_kill_switch: unexpected SQL output: {line!r}")
-    p999 = float(parts[3]) if parts[3] else 0.0
-    n = int(parts[5]) if parts[5] else 0
-    return (p999, n)
+    parsed: dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split(",")
+        if len(parts) != 2:
+            raise RuntimeError(
+                f"phase12_kill_switch: unexpected SQL output line {line!r} "
+                f"(expected `key,value`)"
+            )
+        parsed[parts[0].strip()] = parts[1].strip()
+
+    if "p999" not in parsed:
+        raise RuntimeError(
+            f"phase12_kill_switch: SQL probe missing required key 'p999'; "
+            f"got keys {sorted(parsed.keys())!r}"
+        )
+    if "count" not in parsed:
+        raise RuntimeError(
+            f"phase12_kill_switch: SQL probe missing required key 'count'; "
+            f"got keys {sorted(parsed.keys())!r}"
+        )
+
+    p999 = _parse_probe_value(parsed["p999"])
+    count_val = _parse_probe_value(parsed["count"])
+    return (p999, int(count_val))
 
 
 async def measure_p999(
@@ -239,15 +290,17 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--p999",
-        type=float,
+        type=_nonneg_finite,  # P2022: reject NaN / inf / negative at parse time.
         default=None,
         help="pg_column_size p99.9 in bytes (from phase12_deploy.py SQL probe)",
     )
     parser.add_argument(
         "--count",
-        type=int,
+        type=_nonneg_finite,  # P2022: same — parsed as float, coerced to int below.
         default=None,
         help="strategy_count from SQL probe",
     )
     args = parser.parse_args()
-    sys.exit(asyncio.run(main(cli_p999=args.p999, cli_count=args.count)))
+    # _nonneg_finite returns float; coerce --count back to int for the strategy-count contract.
+    cli_count = int(args.count) if args.count is not None else None
+    sys.exit(asyncio.run(main(cli_p999=args.p999, cli_count=cli_count)))

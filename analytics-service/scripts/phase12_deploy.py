@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import subprocess
@@ -98,11 +99,31 @@ def _write_env_test(flag: str) -> None:
 
 # --- M-03: SQL probe -------------------------------------------------------
 
+def _parse_probe_value(raw: str) -> float:
+    """P2022: parse + validate a probe value. NaN/inf/negative all raise."""
+    if raw is None or raw == "":
+        raise ValueError("phase12_deploy: empty probe value")
+    val = float(raw)
+    if not math.isfinite(val):
+        raise ValueError(
+            f"phase12_deploy: non-finite probe value {raw!r} (NaN/inf rejected)"
+        )
+    if val < 0:
+        raise ValueError(
+            f"phase12_deploy: negative probe value {raw!r} (size cannot be < 0)"
+        )
+    return val
+
+
 def _run_sql_probe() -> tuple[float, int]:
     """M-03: run analyze_metrics_size.sql via psql; return (p999_bytes, strategy_count).
 
     Single source of truth for size measurement — pg_column_size is the only
     quantity that correlates with the 1MB JSONB decompression ceiling.
+
+    P2022: parses keyed (k,v) output rows; requires `p999` and `count` keys
+    to be present; rejects NaN/inf/negative numeric values; uses explicit
+    `--dbname` flag.
     """
     db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not db_url:
@@ -112,21 +133,35 @@ def _run_sql_probe() -> tuple[float, int]:
         )
     sql = SQL_PROBE_PATH.read_text()
     result = subprocess.run(
-        ["psql", db_url, "-tAF,", "-c", sql],
+        ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
         capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
             f"phase12_deploy: SQL probe failed: {result.stderr.strip()}"
         )
-    line = ""
-    if result.stdout.strip():
-        line = result.stdout.strip().splitlines()[-1]
-    parts = line.split(",")
-    if len(parts) < 6:
-        raise RuntimeError(f"phase12_deploy: unexpected SQL output: {line!r}")
-    p999 = float(parts[3]) if parts[3] else 0.0
-    n = int(parts[5]) if parts[5] else 0
+    parsed: dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split(",")
+        if len(parts) != 2:
+            raise RuntimeError(
+                f"phase12_deploy: unexpected SQL output line {line!r} "
+                f"(expected `key,value`)"
+            )
+        parsed[parts[0].strip()] = parts[1].strip()
+
+    if "p999" not in parsed:
+        raise RuntimeError(
+            f"phase12_deploy: SQL probe missing required key 'p999'; "
+            f"got keys {sorted(parsed.keys())!r}"
+        )
+    if "count" not in parsed:
+        raise RuntimeError(
+            f"phase12_deploy: SQL probe missing required key 'count'; "
+            f"got keys {sorted(parsed.keys())!r}"
+        )
+    p999 = _parse_probe_value(parsed["p999"])
+    n = int(_parse_probe_value(parsed["count"]))
     return (p999, n)
 
 
