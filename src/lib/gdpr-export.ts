@@ -158,11 +158,60 @@ const AUDIT_METADATA_REDACT_KEYS = new Set<string>([
 ]);
 
 /**
+ * Recursively redact `AUDIT_METADATA_REDACT_KEYS` inside a metadata
+ * value. Handles:
+ *   - plain objects: clones, redacts matching keys in-place
+ *   - arrays: recurses into each element (so array-of-objects metadata
+ *     is also scrubbed; non-object array elements pass through)
+ *   - primitives / null: passed through unchanged
+ *
+ * Internal helper — exported only via tests by way of
+ * `redactAuditLogForUser`. The recursion is bounded by the input
+ * depth; metadata is JSON sourced from `audit_log.metadata` JSONB so
+ * the structural depth is bounded by the producer.
+ */
+function redactMetadataValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((el) => redactMetadataValue(el));
+  }
+  if (value && typeof value === "object") {
+    const src = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(src)) {
+      if (AUDIT_METADATA_REDACT_KEYS.has(key)) {
+        out[key] = REDACTED_PLACEHOLDER;
+      } else {
+        out[key] = redactMetadataValue(src[key]);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
  * Projection helper — audit_log → audit_log_for_user.
  *
- * Keeps rows where the subject is the actor (user_id === subject).
- * Redacts metadata keys that identify OTHER users with
- * REDACTED_PLACEHOLDER.
+ * Finding 7 (audit-2026-05-07 red-team): pre-fix, the filter retained
+ * ONLY rows where the subject acted (row.user_id === userId). Rows where
+ * the subject was the TARGET (i.e. another user acted ON them) — role
+ * grants, admin-triggered deletions, account.export by an admin, etc. —
+ * were silently dropped from the export. GDPR Art. 15 entitles the
+ * subject to "data about them", not just "data they authored", so the
+ * target-row direction matters.
+ *
+ * Retains a row when ANY of these conditions hold:
+ *   - row.user_id === userId  (the subject acted)
+ *   - row.entity_id === userId AND row.entity_type === 'user'
+ *     (the subject is the entity an actor operated on)
+ *   - row.metadata is a plain object with a `target_user_id` that
+ *     matches userId (the subject is the target captured in metadata)
+ *
+ * Metadata redaction is recursive (Finding 7 part 2): arrays of nested
+ * objects (e.g., a bulk role-grant audit row whose metadata is an
+ * array of { user_id, role } pairs) now have their inner objects
+ * scrubbed too. Pre-fix the recursion only descended into the
+ * top-level object and stopped at the array boundary.
  *
  * Exported for unit-test pinning (`gdpr-export-redaction.test.ts`).
  */
@@ -174,18 +223,35 @@ export function redactAuditLogForUser(
   for (const r of rows) {
     if (!r || typeof r !== "object") continue;
     const row = r as Record<string, unknown>;
-    if (row.user_id !== userId) continue;
-    const clone: Record<string, unknown> = { ...row };
-    const meta = clone.metadata;
-    if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-      const redactedMeta: Record<string, unknown> = { ...(meta as Record<string, unknown>) };
-      for (const key of Object.keys(redactedMeta)) {
-        if (AUDIT_METADATA_REDACT_KEYS.has(key)) {
-          redactedMeta[key] = REDACTED_PLACEHOLDER;
-        }
-      }
-      clone.metadata = redactedMeta;
+
+    // Finding 7 part 1: subject can be actor, entity, OR metadata target.
+    const meta = row.metadata;
+    const metaIsObject =
+      meta !== null &&
+      meta !== undefined &&
+      typeof meta === "object" &&
+      !Array.isArray(meta);
+    const metaTargetMatch =
+      metaIsObject &&
+      (meta as Record<string, unknown>).target_user_id === userId;
+
+    const isActor = row.user_id === userId;
+    const isEntity =
+      row.entity_id === userId && row.entity_type === "user";
+    const isMetaTarget = metaTargetMatch;
+
+    if (!isActor && !isEntity && !isMetaTarget) {
+      continue;
     }
+
+    const clone: Record<string, unknown> = { ...row };
+
+    // Finding 7 part 2: recursive metadata redaction. Handles plain
+    // objects, arrays, and arrays of objects uniformly.
+    if (meta !== null && meta !== undefined) {
+      clone.metadata = redactMetadataValue(meta);
+    }
+
     out.push(clone);
   }
   return out;

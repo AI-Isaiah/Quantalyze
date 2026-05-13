@@ -113,6 +113,122 @@ describe("redactAuditLogForUser (P697/P707/P708)", () => {
     expect(redacted).toHaveLength(1);
     expect(redacted[0].metadata).toBeNull();
   });
+
+  // Finding 7 part 1 (audit-2026-05-07 red-team): the subject can be the
+  // TARGET of an audit row, not just the actor. Retaining only
+  // user_id===subject silently drops role grants, admin deletions, etc.
+  // GDPR Art. 15 entitles the subject to "data about them" — not just
+  // "data they authored".
+  it("Finding 7: retains a row where the subject is the entity (entity_id=userId, entity_type='user')", () => {
+    const rows = [
+      // Subject is the target of an admin's role-grant action.
+      {
+        id: "t1",
+        user_id: otherUserId, // actor is someone else
+        action: "role.grant",
+        entity_type: "user",
+        entity_id: userId,
+        metadata: { granted_role: "allocator" },
+      },
+      // Unrelated row — entity is a different user.
+      {
+        id: "t2",
+        user_id: otherUserId,
+        action: "role.grant",
+        entity_type: "user",
+        entity_id: "third-party",
+        metadata: {},
+      },
+    ];
+    const redacted = redactAuditLogForUser(rows, userId);
+    expect(redacted).toHaveLength(1);
+    expect(redacted[0].id).toBe("t1");
+  });
+
+  it("Finding 7: retains a row where metadata.target_user_id matches the subject", () => {
+    const rows = [
+      // Admin-issued sanitize: the actor is the admin, the metadata
+      // captures the subject as target_user_id.
+      {
+        id: "t3",
+        user_id: otherUserId,
+        action: "account.sanitize",
+        entity_type: "system",
+        entity_id: null,
+        metadata: { target_user_id: userId, reason: "user_request" },
+      },
+      // Mismatched target — must NOT be retained.
+      {
+        id: "t4",
+        user_id: otherUserId,
+        action: "account.sanitize",
+        metadata: { target_user_id: "third-party" },
+      },
+    ];
+    const redacted = redactAuditLogForUser(rows, userId);
+    expect(redacted.map((r) => r.id)).toEqual(["t3"]);
+    // target_user_id is itself in the redaction key set, so the value
+    // is replaced with the sentinel even on the retained row — the
+    // subject is entitled to know an action happened ABOUT them but
+    // not to re-fetch their own UUID from a redacted output.
+    const meta = redacted[0].metadata as Record<string, unknown>;
+    expect(meta.target_user_id).toBe(REDACTED_PLACEHOLDER);
+    expect(meta.reason).toBe("user_request");
+  });
+
+  // Finding 7 part 2: recursive metadata redaction. Pre-fix, array-
+  // shaped metadata (e.g., a bulk role-grant whose metadata is
+  // `[{user_id, role}, ...]`) was passed through untouched because
+  // the redactor only descended into a top-level plain object.
+  it("Finding 7: recursively redacts array-shaped metadata", () => {
+    const rows = [
+      {
+        id: "arr1",
+        user_id: userId,
+        action: "roles.bulk_grant",
+        metadata: [
+          {
+            grantee_id: otherUserId,
+            display_name: "Other A",
+            email: "a@example.com",
+            role: "allocator",
+          },
+          {
+            grantee_id: "third-party",
+            display_name: "Other B",
+            email: "b@example.com",
+            role: "analyst",
+          },
+        ],
+      },
+    ];
+    const redacted = redactAuditLogForUser(rows, userId);
+    expect(redacted).toHaveLength(1);
+    const meta = redacted[0].metadata as Array<Record<string, unknown>>;
+    expect(Array.isArray(meta)).toBe(true);
+    expect(meta).toHaveLength(2);
+    for (const entry of meta) {
+      // Cross-party PII inside each array element is scrubbed.
+      expect(entry.display_name).toBe(REDACTED_PLACEHOLDER);
+      expect(entry.email).toBe(REDACTED_PLACEHOLDER);
+      // Safe fields preserved.
+      expect(entry.role).toBeDefined();
+    }
+  });
+
+  it("Finding 7: passes non-object array elements through unchanged", () => {
+    const rows = [
+      {
+        id: "arr2",
+        user_id: userId,
+        action: "tags.assign",
+        metadata: ["tag-a", "tag-b", 42, null],
+      },
+    ];
+    const redacted = redactAuditLogForUser(rows, userId);
+    expect(redacted).toHaveLength(1);
+    expect(redacted[0].metadata).toEqual(["tag-a", "tag-b", 42, null]);
+  });
 });
 
 describe("redactContactRequestForUser (P708)", () => {
