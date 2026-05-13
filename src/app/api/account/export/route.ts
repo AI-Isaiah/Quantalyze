@@ -70,12 +70,59 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // (owner-only, cross-party, service-role-only).
   const bundle = await collectUserExportBundle(admin, user.id);
 
+  // Issue 5 (audit-2026-05-07 follow-up): GDPR Art. 15 requires a
+  // COMPLETE export. Pre-fix, a rejected fetch or PG error caused
+  // `collectUserExportBundle` to silently substitute `[]` for the
+  // failed table and mint a signed URL anyway — the user received a
+  // bundle that LOOKED complete but was missing half its tables. We
+  // chose policy (a) from the audit playbook: refuse to mint a signed
+  // URL on any fetch failure. The user can retry on the next rate-
+  // limit window (the limiter is sliding 24h, so a fresh export
+  // attempt the next day is possible). Policy (b) — deliver a partial
+  // bundle marked `partial: true` — was rejected because a regulator
+  // receiving a flagged-partial export would still see it as a data-
+  // protection deficiency; "complete or nothing" is the safer default.
+  //
+  // Finding 2 (audit-2026-05-07 red-team): the failed_tables list is
+  // schema reconnaissance — exposing which internal tables exist (and
+  // which currently error) gives an attacker the map they need to
+  // tune subsequent probes. Strip it from the client-facing body and
+  // log it server-side only, correlated by a request_id the user can
+  // quote to support so we can find the matching log line.
+  if (bundle.partial) {
+    const requestId = crypto.randomUUID();
+    console.error("[api/account/export] refusing to mint signed URL — partial bundle:", {
+      request_id: requestId,
+      user_id: user.id,
+      failed_tables: bundle.failed_tables,
+    });
+    return NextResponse.json(
+      {
+        error:
+          "Some tables failed to export. Please retry — GDPR Art. 15 requires a complete bundle.",
+        code: "export_partial",
+        request_id: requestId,
+      },
+      { status: 500 },
+    );
+  }
+
   // Upload to storage. Path: `{user_id}/{uuid}.json`. The owner-read
   // RLS policy in migration 055 gates by `storage.foldername(name)[1]`
   // so the user prefix MUST be the auth.uid() text.
+  //
+  // P448 (audit 2026-05-12 Lane E): pipe `JSON.stringify(bundle)`
+  // directly into `TextEncoder.encode` in a single expression — the
+  // intermediate string is still allocated by the JS engine, but its
+  // variable lifetime ends with the encode call, so the GC can
+  // reclaim it as soon as the Uint8Array is in hand. The legacy code
+  // held both `bundleJson` AND `bundleBytes` in scope until the
+  // upload returned, peaking at ~3× the payload size (object + JSON
+  // string + bytes). A future hardening pass could replace this with
+  // a true streaming serializer that writes chunks directly to a
+  // ReadableStream — tracked under audit P448 follow-up.
   const objectKey = `${user.id}/${crypto.randomUUID()}.json`;
-  const bundleJson = JSON.stringify(bundle);
-  const bundleBytes = new TextEncoder().encode(bundleJson);
+  const bundleBytes = new TextEncoder().encode(JSON.stringify(bundle));
 
   const { error: uploadErr } = await admin.storage
     .from(EXPORTS_BUCKET)

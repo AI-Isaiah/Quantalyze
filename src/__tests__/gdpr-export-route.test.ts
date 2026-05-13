@@ -98,6 +98,38 @@ async function loadRoute() {
   return await import("@/app/api/account/export/route");
 }
 
+/**
+ * P448 (audit 2026-05-12 Lane E) - peak memory invariant.
+ *
+ * The legacy upload path held `bundleJson` and `bundleBytes` in
+ * scope simultaneously, peaking memory at ~3x the payload size
+ * (object + JSON string + bytes). The fix drops the named
+ * intermediate so the JSON string is unreachable as soon as the
+ * encode call returns, letting GC reclaim it before the upload
+ * round-trip.
+ *
+ * Source-grep assertion: the variable name `bundleJson` must not
+ * appear in the route. A drift back to a separate `const
+ * bundleJson = ...` line would fail this test.
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+describe("POST /api/account/export - peak-memory invariant (P448)", () => {
+  it("does not retain a named bundleJson intermediate (fused stringify/encode)", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src", "app", "api", "account", "export", "route.ts"),
+      "utf8",
+    );
+    // Pattern: `const bundleJson` or `let bundleJson` at the top of a
+    // line. The fused expression `new TextEncoder().encode(JSON.stringify(bundle))`
+    // is the post-fix shape.
+    expect(src).not.toMatch(/\b(?:const|let|var)\s+bundleJson\b/);
+    // Sanity check: the fused expression IS present.
+    expect(src).toMatch(/TextEncoder\(\)\.encode\(\s*JSON\.stringify\(\s*bundle\s*\)\s*\)/);
+  });
+});
+
 describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -113,6 +145,8 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValue({ error: null });
     removeMock.mockResolvedValue({ error: null });
@@ -228,10 +262,12 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       generated_at: "2026-04-16T00:00:00Z",
       total_row_count: 3,
       tables: [
-        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false },
-        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false },
+        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false, fetch_error: null },
+        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, fetch_error: null },
       ],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValue({ error: null });
     createSignedUrlMock.mockResolvedValue({
@@ -334,6 +370,8 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValue({ error: null });
     createSignedUrlMock.mockResolvedValue({
@@ -382,6 +420,94 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     expect(createSignedUrlMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * audit-2026-05-07 follow-up — Issue 5
+   *
+   * GDPR Art. 15 requires a COMPLETE export. Pre-fix, a rejected fetch
+   * or PG error in collectUserExportBundle silently substituted `[]`
+   * for the failed table, and the route happily minted a signed URL
+   * over an incomplete bundle. Policy (a) from the audit playbook:
+   * refuse to mint the URL on any fetch failure; return 500 with a
+   * stable code so the user retries.
+   *
+   * The tests below pin:
+   *   - bundle.partial=true → 500 with code=export_partial and the
+   *     failed_tables array in the response body.
+   *   - The signed URL is NOT minted and the storage object is NOT
+   *     uploaded (the bundle assembly itself can be the slowest step
+   *     but the cheap upload is also skipped).
+   *   - The audit event is NOT emitted for a partial-export refusal.
+   */
+  it("Issue 5 + Finding 2: returns 500 with code=export_partial + request_id (NO failed_tables leak) when bundle.partial is true", async () => {
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-429",
+      generated_at: "2026-04-16T00:00:00Z",
+      total_row_count: 0,
+      tables: [
+        { table: "profiles", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: null },
+        { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: "direct select failed for api_keys: statement timeout" },
+      ],
+      truncated_at_size_cap: false,
+      partial: true,
+      failed_tables: ["api_keys"],
+    });
+
+    // Finding 2 (audit-2026-05-07 red-team): the failed_tables list is
+    // schema reconnaissance. The response MUST surface a stable code +
+    // a request_id (UUID) the user can quote, but MUST NOT carry the
+    // failed_tables array — that detail is server-log-only.
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(500);
+
+    const body = (await res.json()) as {
+      error?: string;
+      code?: string;
+      request_id?: string;
+      // Forbidden to leak.
+      failed_tables?: unknown;
+    };
+    expect(body.code).toBe("export_partial");
+    // Finding 2: failed_tables MUST NOT appear in the client body.
+    expect(body.failed_tables).toBeUndefined();
+    expect("failed_tables" in body).toBe(false);
+    // request_id is a UUID v4 (random) and carries the correlation key.
+    expect(typeof body.request_id).toBe("string");
+    expect(body.request_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+
+    // The storage round-trip must NOT have fired.
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(createSignedUrlMock).not.toHaveBeenCalled();
+
+    // No audit emission for the partial-refuse path.
+    await Promise.resolve();
+    await Promise.resolve();
+    const exportCall = logAuditRpcMock.mock.calls.find(
+      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "account.export",
+    );
+    expect(exportCall).toBeUndefined();
+
+    // Server-side log MUST carry the failed_tables (forensics) AND the
+    // request_id (correlation key the user quoted to support).
+    const logCall = consoleErrorSpy.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("[api/account/export]"),
+    );
+    expect(logCall).toBeDefined();
+    const ctx = logCall![1] as Record<string, unknown>;
+    expect(ctx.failed_tables).toEqual(["api_keys"]);
+    expect(ctx.user_id).toBe("user-429");
+    expect(typeof ctx.request_id).toBe("string");
+    // The request_id in the body matches the one in the log.
+    expect(ctx.request_id).toBe(body.request_id);
+
+    consoleErrorSpy.mockRestore();
+  });
+
   it("the limiter key buckets per user (not global) — different users each get 1/day", async () => {
     // First call for user-A: token available.
     getUserMock.mockResolvedValueOnce({
@@ -407,6 +533,8 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValueOnce({ error: null });
     createSignedUrlMock.mockResolvedValueOnce({

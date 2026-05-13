@@ -255,6 +255,212 @@ describe("collectUserExportBundle — mocked client", () => {
   });
 });
 
+describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
+  /**
+   * Pin the bounded-concurrency model. The legacy implementation
+   * iterated USER_EXPORT_TABLES with a sequential `await`, so 31
+   * fetches at ~100ms each cost ~3.1s of wall time. The new path
+   * runs them in batches of EXPORT_FETCH_CONCURRENCY=10 — so total
+   * wall time should be ~3 batches × per-batch latency ~= 300ms.
+   *
+   * Strategy: inject a 50ms artificial delay into every fetch. If
+   * the implementation is sequential, 28+ fetches × 50ms > 1400ms.
+   * If parallel (cap 10), 3 batches × 50ms ~= 150ms (allow generous
+   * scheduler slop; assert < 800ms).
+   */
+  it("collapses sequential fetches into bounded-concurrency batches", async () => {
+    const FETCH_LATENCY_MS = 50;
+    const mock = {
+      from: () => ({
+        select: (projection: string) => ({
+          eq: () => ({
+            limit: async () => {
+              await new Promise((r) => setTimeout(r, FETCH_LATENCY_MS));
+              if (projection === "id") return { data: [], error: null };
+              return { data: [], error: null };
+            },
+          }),
+          in: () => ({
+            limit: async () => {
+              await new Promise((r) => setTimeout(r, FETCH_LATENCY_MS));
+              return { data: [], error: null };
+            },
+          }),
+        }),
+      }),
+    };
+
+    const t0 = Date.now();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await collectUserExportBundle(mock as any, "u-parallel");
+    const elapsedMs = Date.now() - t0;
+
+    // Sequential floor: 28+ tables * 50ms = 1400+ ms.
+    // Parallel ceiling (concurrency=10, manifest ~28 entries):
+    //   ceil(28/10)=3 batches * 50ms = 150ms + JS overhead.
+    // Assert well under the sequential floor.
+    expect(elapsedMs).toBeLessThan(800);
+  });
+
+  it("uses Promise.allSettled — one rejected fetch does not abort the bundle", async () => {
+    // Make one specific table reject; everything else succeeds.
+    const mock = {
+      from: (table: string) => ({
+        select: (projection: string) => ({
+          eq: () => ({
+            limit: async () => {
+              if (table === "api_keys") {
+                throw new Error("simulated network failure for api_keys");
+              }
+              if (projection === "id") return { data: [], error: null };
+              return { data: [], error: null };
+            },
+          }),
+          in: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-resilient");
+
+    // Issue 5 (audit-2026-05-07 follow-up): the bundle survives, but the
+    // failed table is now MARKED with a fetch_error string and the
+    // bundle's `partial` flag is set — so the route can refuse to mint
+    // a signed URL instead of silently substituting `[]`.
+    const apiKeysEntry = bundle.tables.find((t) => t.table === "api_keys");
+    expect(apiKeysEntry).toBeDefined();
+    expect(apiKeysEntry!.row_count).toBe(0);
+    expect(apiKeysEntry!.fetch_error).toBeTruthy();
+    expect(apiKeysEntry!.fetch_error).toMatch(/api_keys/);
+    expect(bundle.partial).toBe(true);
+    expect(bundle.failed_tables).toContain("api_keys");
+    // Other tables should still be present in the bundle.
+    expect(bundle.tables.length).toBeGreaterThan(10);
+  });
+
+  it("Issue 5: a PG error (not a rejection) also sets fetch_error + partial", async () => {
+    // Simulate a per-table .from().select().eq().limit() returning an
+    // error: { code, message } instead of throwing. This is the path
+    // that pre-fix silently substituted [] inside fetchRowsForSpec.
+    const mock = {
+      from: (table: string) => ({
+        select: (_projection: string) => ({
+          eq: () => ({
+            limit: async () => {
+              if (table === "profiles") {
+                return {
+                  data: null,
+                  error: { code: "57014", message: "statement timeout" },
+                };
+              }
+              return { data: [], error: null };
+            },
+          }),
+          in: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-pg-err");
+
+    const profilesEntry = bundle.tables.find((t) => t.table === "profiles");
+    expect(profilesEntry).toBeDefined();
+    expect(profilesEntry!.fetch_error).toBeTruthy();
+    expect(profilesEntry!.fetch_error).toMatch(/statement timeout/);
+    expect(bundle.partial).toBe(true);
+    expect(bundle.failed_tables).toContain("profiles");
+  });
+
+  it("Issue 5: a fully successful bundle has partial=false and failed_tables=[]", async () => {
+    const mock = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+          in: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-clean");
+
+    expect(bundle.partial).toBe(false);
+    expect(bundle.failed_tables).toEqual([]);
+    for (const t of bundle.tables) {
+      expect(t.fetch_error).toBeNull();
+    }
+  });
+});
+
+describe("collectUserExportBundle — cumulative-size budget (P450 regression)", () => {
+  /**
+   * Pin the O(n) cumulative-byte-budget behavior. The legacy
+   * implementation re-serialized the full bundle inside a binary
+   * search at every truncation step — O(log n) full stringifications.
+   * The new path stringifies each row at most once.
+   *
+   * Strategy: instrument JSON.stringify. With ~10 large rows that
+   * trigger truncation, the legacy binary search re-serialized the
+   * whole bundle ~log2(10) ~= 4 times (each time over a 100MB
+   * payload). The new code calls JSON.stringify ONCE per row (10
+   * times) plus a small constant. Assert the call count stays under
+   * a tight ceiling.
+   */
+  it("does not re-serialize the full bundle on truncation (O(n) not O(log n))", async () => {
+    const ROW_SIZE = 12 * 1024 * 1024; // 12MB per row, 10 rows = 120MB > cap
+    const rows = Array.from({ length: 10 }, (_, i) => ({
+      id: `r${i}`,
+      blob: "x".repeat(ROW_SIZE),
+    }));
+    const mock = makeMockClient({ allocator_preferences: rows });
+
+    // Count JSON.stringify calls on objects "shaped like a full
+    // bundle" (i.e. having a `tables` array). The legacy code's
+    // binary-search re-serialized objects of this shape multiple
+    // times; the new code only stringifies leaf rows.
+    const originalStringify = JSON.stringify;
+    let bundleShapeStringifyCalls = 0;
+    const spied = (value: unknown, ...rest: Parameters<typeof JSON.stringify>) => {
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        "tables" in (value as Record<string, unknown>) &&
+        Array.isArray((value as { tables: unknown }).tables)
+      ) {
+        bundleShapeStringifyCalls += 1;
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return originalStringify(value as any, ...(rest as any));
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (JSON as any).stringify = spied;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bundle = await collectUserExportBundle(mock as any, "u-budget");
+      expect(bundle.truncated_at_size_cap).toBe(true);
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (JSON as any).stringify = originalStringify;
+    }
+
+    // The new path never stringifies a "bundle-shaped" object during
+    // collection. The legacy binary-search loop did this multiple
+    // times. Strict zero is acceptable; any drift to >0 indicates a
+    // regression into full-bundle re-serialization.
+    expect(bundleShapeStringifyCalls).toBe(0);
+  });
+});
+
 describe("USER_EXPORT_TABLES — shape type check (compile-time regression)", () => {
   it("accepts DirectUserTable and IndirectUserTable shapes", () => {
     const direct: UserExportTable = {

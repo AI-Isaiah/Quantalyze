@@ -348,6 +348,20 @@ async def _attribute_funding(
         pos["funding_pnl"] = float(round(total, 8))
 
 
+# Audit-2026-05-07 PATTERN-2 / P1100: net-qty snap-to-zero scale factor.
+# After every reducing fill in `_match_positions_fifo` we collapse any
+# `|net_qty|` below `max(total_entry_qty * FLIP_EPS_FACTOR, 1e-9)` to an
+# exact zero. 1e-9 = "one part per billion" of the original position
+# size; below this we treat the residue as IEEE-754 dust rather than a
+# real open exposure. Without the snap, sub-ULP residuals accumulated
+# across many micro-fills cause the close-and-flip branch to fire
+# spuriously, producing zero-duration phantom positions whose entry and
+# exit prices both equal a fill price (impossible under normal FIFO
+# semantics). Full root-cause analysis:
+# `.planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md`.
+FLIP_EPS_FACTOR = 1e-9
+
+
 # Phase 19 / MC-2 decision: leave private (underscore prefix preserved).
 # EquityCurveBuilder (services/equity_reconstruction.py) imports this
 # directly to avoid touching the DB-side tested primitive. Future API
@@ -451,6 +465,19 @@ def _match_positions_fifo(
                 # current long is min(qty, current net long size).
                 closing_qty = min(qty, net_qty) if net_qty > 0 else 0.0
                 net_qty -= qty
+                # Audit-2026-05-07 PATTERN-2 / P1100: snap sub-ULP residuals
+                # to zero. Without this, a residue of +/-1e-15..1e-9 in
+                # net_qty (from cumulative IEEE-754 error across many
+                # micro-fills) causes the close branch below to fire
+                # incorrectly — opening a phantom flip leg with size ~ ULP
+                # and entry_price drawn from the very fill that was
+                # supposed to close cleanly. The phantom then re-flips on
+                # the next fill, producing zero-duration positions whose
+                # opened_at == closed_at. See
+                # .planning/audit-2026-05-07/INVEST-PATTERN-2-POSITIONS.md.
+                flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, 1e-9)
+                if abs(net_qty) < flip_eps:
+                    net_qty = 0.0
         elif position_side == "short":
             if side == "sell":
                 # Adding to short
@@ -463,6 +490,12 @@ def _match_positions_fifo(
                 # Reducing/closing short
                 closing_qty = min(qty, -net_qty) if net_qty < 0 else 0.0
                 net_qty += qty
+                # Audit-2026-05-07 PATTERN-2 / P1100: see snap-to-zero note
+                # above (the long-reducing branch). Same rationale applied
+                # symmetrically when buys close a short.
+                flip_eps = max(total_entry_qty * FLIP_EPS_FACTOR, 1e-9)
+                if abs(net_qty) < flip_eps:
+                    net_qty = 0.0
 
         # Audit-2026-05-07 G12.C.5: accumulate VWAP exit across all
         # closing fills (partial reductions PLUS the final closing fill).

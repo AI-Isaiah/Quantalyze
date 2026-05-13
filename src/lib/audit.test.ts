@@ -29,8 +29,6 @@ vi.mock("next/server", () => ({
 import {
   logAuditEvent,
   logAuditEventAsUser,
-  emit,
-  emitAsUser,
   type AuditEvent,
 } from "./audit";
 
@@ -47,7 +45,24 @@ function event(overrides: Partial<AuditEvent> = {}): AuditEvent {
   };
 }
 
-describe("logAuditEvent — fire-and-forget contract", () => {
+/**
+ * audit-2026-05-07 P701 + P702 superseded the blanket swallow-all contract.
+ * The current contract is typed-exception dispatch:
+ *   - PostgREST code `42501` (permission_denied) → re-throw (hard error).
+ *   - Transient (TypeError: fetch failed, AbortError) → Sentry + log +
+ *     swallow.
+ *   - Anything else → Sentry + log + re-throw.
+ *
+ * The new contract is fully covered by
+ * `src/__tests__/audit-emit-typed-dispatch.test.ts`. This file keeps the
+ * orthogonal invariants that are independent of the throw/no-throw
+ * discriminant: happy-path RPC shape, `metadata` defaulting, void return,
+ * `after()` scheduling, and non-blocking sync semantics. The old
+ * `never-throws` tests (six of them) were removed when the contract
+ * changed — see analytics-service `test_audit.py` for the Python mirror
+ * of the same reconciliation (commit df3ac48).
+ */
+describe("logAuditEvent — fire-and-forget contract (orthogonal invariants)", () => {
   let consoleErrSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -112,73 +127,6 @@ describe("logAuditEvent — fire-and-forget contract", () => {
     expect(rpc.mock.calls[0][1].p_metadata).toEqual({});
   });
 
-  it("never throws to the caller when the RPC rejects (Supabase client error)", async () => {
-    const rpc = vi.fn().mockRejectedValue(new Error("network down"));
-    const client = { rpc };
-
-    // logAuditEvent must not throw synchronously.
-    expect(() =>
-      logAuditEvent(
-        client as unknown as Parameters<typeof logAuditEvent>[0],
-        event(),
-      ),
-    ).not.toThrow();
-
-    // And the dropped-error must NOT surface as an unhandled rejection.
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(consoleErrSpy).toHaveBeenCalledWith(
-      "[audit] log_audit_event call threw (dropping):",
-      expect.objectContaining({
-        action: "intro.send",
-        message: "network down",
-      }),
-    );
-  });
-
-  it("never throws to the caller when the RPC returns an error payload", async () => {
-    const rpc = vi.fn().mockResolvedValue({
-      data: null,
-      error: { code: "42501", message: "permission denied" },
-    });
-    const client = { rpc };
-
-    expect(() =>
-      logAuditEvent(
-        client as unknown as Parameters<typeof logAuditEvent>[0],
-        event(),
-      ),
-    ).not.toThrow();
-
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(consoleErrSpy).toHaveBeenCalledWith(
-      "[audit] log_audit_event RPC returned error (dropping):",
-      expect.objectContaining({
-        action: "intro.send",
-        entity_type: "contact_request",
-        entity_id: DUMMY_ENTITY,
-        code: "42501",
-        message: "permission denied",
-      }),
-    );
-  });
-
-  it("emit() also never throws when the RPC rejects (unit contract)", async () => {
-    const rpc = vi.fn().mockRejectedValue(new Error("boom"));
-    const client = { rpc };
-
-    await expect(
-      emit(
-        client as unknown as Parameters<typeof emit>[0],
-        event(),
-      ),
-    ).resolves.toBeUndefined();
-  });
-
   it("schedules the RPC via after() so it survives response flush on Vercel", () => {
     const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
     const client = { rpc };
@@ -219,12 +167,13 @@ describe("logAuditEvent — fire-and-forget contract", () => {
   });
 });
 
-describe("logAuditEventAsUser — service-role path with caller-supplied user_id", () => {
+describe("logAuditEventAsUser — service-role path with caller-supplied user_id (orthogonal invariants)", () => {
   // Task 7.1b — this variant calls `log_audit_event_service` (migration
   // 058) with an explicit user_id. EXECUTE on that RPC is locked to
   // service_role only, so the TS wrapper must pass through the admin
-  // client AND the user_id unchanged. Same fire-and-forget contract as
-  // `logAuditEvent`.
+  // client AND the user_id unchanged. The throw/no-throw contract under
+  // P701/P702 is exercised in `audit-emit-typed-dispatch.test.ts`; this
+  // file keeps only the happy-path wire-shape invariant.
   let consoleErrSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -262,71 +211,5 @@ describe("logAuditEventAsUser — service-role path with caller-supplied user_id
       p_entity_id: DUMMY_ENTITY,
       p_metadata: { source: "email" },
     });
-  });
-
-  it("never throws when the RPC rejects", async () => {
-    const rpc = vi.fn().mockRejectedValue(new Error("network down"));
-    const adminClient = { rpc };
-
-    expect(() =>
-      logAuditEventAsUser(
-        adminClient as unknown as Parameters<typeof logAuditEventAsUser>[0],
-        DUMMY_USER,
-        event(),
-      ),
-    ).not.toThrow();
-
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(consoleErrSpy).toHaveBeenCalledWith(
-      "[audit] log_audit_event_service call threw (dropping):",
-      expect.objectContaining({
-        action: "intro.send",
-        user_id: DUMMY_USER,
-        message: "network down",
-      }),
-    );
-  });
-
-  it("never throws when the RPC returns an error payload", async () => {
-    const rpc = vi.fn().mockResolvedValue({
-      data: null,
-      error: { code: "42501", message: "permission denied" },
-    });
-    const adminClient = { rpc };
-
-    expect(() =>
-      logAuditEventAsUser(
-        adminClient as unknown as Parameters<typeof logAuditEventAsUser>[0],
-        DUMMY_USER,
-        event(),
-      ),
-    ).not.toThrow();
-
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(consoleErrSpy).toHaveBeenCalledWith(
-      "[audit] log_audit_event_service RPC returned error (dropping):",
-      expect.objectContaining({
-        code: "42501",
-        user_id: DUMMY_USER,
-      }),
-    );
-  });
-
-  it("emitAsUser() also never throws when the RPC rejects (unit contract)", async () => {
-    const rpc = vi.fn().mockRejectedValue(new Error("boom"));
-    const adminClient = { rpc };
-
-    await expect(
-      emitAsUser(
-        adminClient as unknown as Parameters<typeof emitAsUser>[0],
-        DUMMY_USER,
-        event(),
-      ),
-    ).resolves.toBeUndefined();
   });
 });

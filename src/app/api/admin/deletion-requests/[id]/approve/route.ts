@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withRole } from "@/lib/auth";
+import { withRole, requireAdmin } from "@/lib/auth";
 import { logAuditEvent } from "@/lib/audit";
 import { loadDeletionRequestForAction } from "../_shared";
 
@@ -51,6 +51,20 @@ export const POST = withRole<{ id: string }>("admin")(
     );
     if (!loaded.ok) return loaded.res;
     const reqRow = loaded.row;
+
+    // audit-2026-05-07 P705: TOCTOU close. Re-verify admin status
+    // against the unified union source IMMEDIATELY before invoking
+    // sanitize_user — the gap between `withRole('admin')` at request
+    // entry and the RPC call is wide enough for a concurrent admin
+    // revoke to slip through. `requireAdmin` consults the same
+    // user_app_roles + profiles.is_admin + ADMIN_EMAIL union as the
+    // wrapper, so a revoke that landed during the loadDeletionRequest
+    // round-trip is reflected here. The DB-side sentinel trigger
+    // inside sanitize_user (migration 120) is the second half of the
+    // defense; this TS re-check returns a clean 403 before the RPC
+    // fires at all in the common case.
+    const adminGuard = await requireAdmin(supabase, user);
+    if (adminGuard) return adminGuard;
 
     // Fire the anonymize RPC. Returns BOOLEAN: TRUE on the first-run
     // anonymize, FALSE on idempotent re-run (already sanitized). Either

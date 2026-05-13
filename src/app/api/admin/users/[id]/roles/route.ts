@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withRole, APP_ROLES } from "@/lib/auth";
+import { withRole, APP_ROLES, type AppRole } from "@/lib/auth";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 
@@ -10,9 +10,15 @@ import { logAuditEvent } from "@/lib/audit";
  *
  * Sprint 6 closeout Task 7.2 — pilot route for `withRole("admin")`.
  *
+ * GET /api/admin/users/[id]/roles
+ *   200 on success → { user_id, roles: AppRole[] }
+ *   404 if the target user does not exist
+ *   401/403 if caller is unauthenticated / lacks admin role (via withRole)
+ *
  * POST /api/admin/users/[id]/roles
  *   Body: { action: "grant" | "revoke", role: AppRole }
- *   200 on success, 400 on invalid body, 403 if caller lacks admin role.
+ *   200 on success → { user_id, roles: AppRole[] } (post-mutation role set)
+ *   400 on invalid body, 403 if caller lacks admin role.
  *
  * Why this is the pilot for withRole
  * ----------------------------------
@@ -42,6 +48,127 @@ const BODY_SCHEMA = z.object({
   action: z.enum(["grant", "revoke"]),
   role: z.enum(APP_ROLES),
 });
+
+/**
+ * Read the current role set for a target user via the service-role client.
+ * Mirrors `getUserRoles` in `@/lib/auth` but bypasses RLS so an admin can
+ * inspect any user's roles. Filters to known AppRole values defensively.
+ *
+ * Issue 3 (audit-2026-05-07 follow-up): previously returned `[]` on PG
+ * error after a successful grant/revoke mutation. The UI then saw "user
+ * has zero roles" and an admin could re-grant — producing duplicate audit
+ * rows for what was actually one logical operation. The function now
+ * returns a discriminated result so callers can surface a 500 (mutation
+ * already committed; instructs the user to refresh, not retry) rather
+ * than silently masking the read failure.
+ */
+type FetchUserRolesResult =
+  | { roles: AppRole[] }
+  | {
+      error: {
+        code: string | null;
+        message: string;
+      };
+    };
+
+async function fetchUserRoles(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+): Promise<FetchUserRolesResult> {
+  const { data, error } = await admin
+    .from("user_app_roles")
+    .select("role")
+    .eq("user_id", userId);
+  if (error) {
+    return {
+      error: {
+        code: error.code ?? null,
+        message: error.message,
+      },
+    };
+  }
+  const rows = data ?? [];
+  const roles = rows
+    .map((row: { role: string }) => row.role)
+    .filter((role: string): role is AppRole =>
+      (APP_ROLES as readonly string[]).includes(role),
+    );
+  return { roles };
+}
+
+/**
+ * GET /api/admin/users/[id]/roles
+ *
+ * Returns the target user's current role set. The admin UI calls this to
+ * refresh the role panel after a grant/revoke without trusting the
+ * mutation response alone.
+ *
+ * 404 is emitted when the target user does not exist in `profiles`. We
+ * check profiles (not `auth.users`) because RLS-safe and because the
+ * grant/revoke endpoints already operate on the same `(user_id, role)`
+ * keyspace anchored to profile ids in practice. A 404 is preferable to
+ * silently returning `{ roles: [] }` for a typo'd id.
+ *
+ * P442 (audit-2026-05-07) — fills the missing-GET gap on the role panel.
+ * P462 — envelope matches POST: `{ user_id, roles: string[] }`.
+ */
+export const GET = withRole<{ id: string }>("admin")(
+  async (_req: NextRequest, { params }) => {
+    const targetUserId = params?.id;
+    if (!targetUserId) {
+      return NextResponse.json(
+        { error: "Missing target user id in path" },
+        { status: 400 },
+      );
+    }
+
+    const admin = createAdminClient();
+
+    // Existence check. profiles has a row-per-auth.user via trigger; an id
+    // not present here is a genuine 404 (not just "user has no roles").
+    const { data: profile, error: profileError } = await admin
+      .from("profiles")
+      .select("id")
+      .eq("id", targetUserId)
+      .maybeSingle();
+
+    if (profileError) {
+      console.error("[admin/users/roles] GET profile lookup failed:", {
+        target_user_id: targetUserId,
+        code: profileError.code,
+        message: profileError.message,
+      });
+      return NextResponse.json(
+        { error: "Failed to fetch user roles" },
+        { status: 500 },
+      );
+    }
+
+    if (!profile) {
+      return NextResponse.json(
+        { error: "User not found" },
+        { status: 404 },
+      );
+    }
+
+    // Issue 3: surface read errors instead of returning `{ roles: [] }`.
+    // For the GET path there's no prior mutation, so the right answer is
+    // "couldn't load roles — retry the request later" (stable 500).
+    const result = await fetchUserRoles(admin, targetUserId);
+    if ("error" in result) {
+      console.error("[admin/users/roles] GET fetchUserRoles failed:", {
+        target_user_id: targetUserId,
+        code: result.error.code,
+        message: result.error.message,
+      });
+      return NextResponse.json(
+        { error: "Failed to fetch user roles", code: "roles_read_failed" },
+        { status: 500 },
+      );
+    }
+    return NextResponse.json({ user_id: targetUserId, roles: result.roles });
+  },
+);
 
 export const POST = withRole<{ id: string }>("admin")(
   async (
@@ -149,7 +276,43 @@ export const POST = withRole<{ id: string }>("admin")(
         metadata: { role, granted_by: user.id },
       });
 
-      return NextResponse.json({ success: true, action, role });
+      // P462 (audit-2026-05-07) — unify the response envelope across GET,
+      // grant, and revoke. The UI's role panel uses the same parser for
+      // all three: { user_id, roles: string[] }. Pre-fix grant returned
+      // `{ role: ... }`, revoke returned `{ removed_rows: ... }` — the
+      // shape drift forced two separate UI parsers and made the GET added
+      // for P442 awkward to consume. Single shape, single parser.
+      //
+      // Issue 3 (audit-2026-05-07 follow-up): if the post-mutation read
+      // fails, the GRANT has already committed — returning `{ roles: [] }`
+      // would deceive the UI into thinking the user has no roles and
+      // tempt the admin to re-grant (producing a duplicate audit row for
+      // one logical operation). Surface a 500 with a stable code so the
+      // UI can prompt the admin to refresh instead of retrying.
+      const grantResult = await fetchUserRoles(admin, targetUserId);
+      if ("error" in grantResult) {
+        console.error(
+          "[admin/users/roles] grant succeeded but post-mutation read failed:",
+          {
+            target_user_id: targetUserId,
+            role,
+            code: grantResult.error.code,
+            message: grantResult.error.message,
+          },
+        );
+        return NextResponse.json(
+          {
+            error:
+              "Grant committed but the role set could not be re-read. Refresh to see the latest state.",
+            code: "mutation_succeeded_but_read_failed",
+          },
+          { status: 500 },
+        );
+      }
+      return NextResponse.json({
+        user_id: targetUserId,
+        roles: grantResult.roles,
+      });
     }
 
     // action === "revoke"
@@ -179,11 +342,38 @@ export const POST = withRole<{ id: string }>("admin")(
       metadata: { role, revoked_by: user.id, removed_rows: count ?? 0 },
     });
 
+    // P462 (audit-2026-05-07) — same envelope as grant + GET. The
+    // `removed_rows` count is dropped from the response body; it was a
+    // diagnostic-only field never read by any UI and the audit-event
+    // metadata above already retains it for the forensic trail.
+    //
+    // Issue 3 (audit-2026-05-07 follow-up): mirror the grant path — if
+    // the post-mutation read fails after a successful REVOKE, surface
+    // a 500 with the same stable code instead of returning `[]`. The
+    // mutation already committed; the admin should refresh, not retry.
+    const revokeResult = await fetchUserRoles(admin, targetUserId);
+    if ("error" in revokeResult) {
+      console.error(
+        "[admin/users/roles] revoke succeeded but post-mutation read failed:",
+        {
+          target_user_id: targetUserId,
+          role,
+          code: revokeResult.error.code,
+          message: revokeResult.error.message,
+        },
+      );
+      return NextResponse.json(
+        {
+          error:
+            "Revoke committed but the role set could not be re-read. Refresh to see the latest state.",
+          code: "mutation_succeeded_but_read_failed",
+        },
+        { status: 500 },
+      );
+    }
     return NextResponse.json({
-      success: true,
-      action,
-      role,
-      removed_rows: count ?? 0,
+      user_id: targetUserId,
+      roles: revokeResult.roles,
     });
   },
 );

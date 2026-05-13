@@ -5,15 +5,47 @@ import { assertPortfolioOwnership } from "@/lib/queries";
 import { logAuditEvent } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
+/**
+ * Pagination defaults — audit 2026-05-12 Lane E P464.
+ *
+ * The legacy GET returned EVERY unack'd alert for the user with no
+ * upper bound, which (a) is a wall-time DoS vector once a portfolio
+ * has thousands of alerts, and (b) lets a single response exceed the
+ * Vercel edge response-size budget. We adopt the same `limit`/`offset`
+ * idiom that `src/app/api/admin/compute-jobs/route.ts` already uses:
+ *   - default `limit = 50`
+ *   - hard ceiling `limit = 200` (clamped server-side)
+ *   - `offset >= 0`
+ *
+ * The response carries `{ alerts, page_size, offset, has_more }` so
+ * the client can drive a "load more" affordance without re-counting.
+ */
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 200;
+
 export const GET = withAuth(async (req: NextRequest, user: User) => {
-  const portfolioId = new URL(req.url).searchParams.get("portfolio_id");
+  const url = new URL(req.url);
+  const portfolioId = url.searchParams.get("portfolio_id");
+
+  // P464 — clamp limit/offset. `Math.min(... || DEFAULT, MAX)` mirrors
+  // the pattern in compute-jobs/route.ts; the explicit `Math.max(1,
+  // ...)` floor protects against `?limit=0` / negative-number trolling.
+  const limit = Math.max(
+    1,
+    Math.min(Number(url.searchParams.get("limit")) || DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE),
+  );
+  const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+
   const supabase = await createClient();
 
   let query = supabase
     .from("portfolio_alerts")
     .select("*")
     .is("acknowledged_at", null)
-    .order("triggered_at", { ascending: false });
+    .order("triggered_at", { ascending: false })
+    // Fetch one extra so we can return `has_more` without a COUNT(*)
+    // round-trip. Trim it back to `limit` before responding.
+    .range(offset, offset + limit);
 
   if (portfolioId) {
     if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
@@ -27,7 +59,12 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
       .eq("user_id", user.id);
     const portfolioIds = (portfolios ?? []).map((p) => p.id);
     if (portfolioIds.length === 0) {
-      return NextResponse.json({ alerts: [] });
+      return NextResponse.json({
+        alerts: [],
+        page_size: limit,
+        offset,
+        has_more: false,
+      });
     }
     query = query.in("portfolio_id", portfolioIds);
   }
@@ -36,7 +73,18 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  return NextResponse.json({ alerts: data ?? [] });
+  const rows = data ?? [];
+  // We asked for `limit + 1` rows via `.range(offset, offset + limit)`
+  // (inclusive). If we got more than `limit` back, there's another
+  // page — slice off the probe row and signal `has_more = true`.
+  const hasMore = rows.length > limit;
+  const alerts = hasMore ? rows.slice(0, limit) : rows;
+  return NextResponse.json({
+    alerts,
+    page_size: limit,
+    offset,
+    has_more: hasMore,
+  });
 });
 
 export const PATCH = withAuth(async (req: NextRequest, user: User) => {

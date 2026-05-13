@@ -214,6 +214,11 @@ export async function POST(req: NextRequest) {
       // keys/sync pattern so compute_jobs.metadata->>'correlation_id' is
       // queryable end-to-end for backfill snapshots too.
       const correlation_id = await getCorrelationId();
+      // @audit-skip: downstream snapshot-compute enqueue. The
+      // user-visible `intro.send` audit event was already emitted on
+      // the contact_requests insert above (line ~194). This RPC
+      // dispatches a backfill snapshot worker; it is internal pipeline
+      // wiring, not a separate user-attributable action.
       const { error: enqueueError } = await admin.rpc("enqueue_compute_job", {
         p_strategy_id: strategy_id,
         p_kind: "compute_intro_snapshot",

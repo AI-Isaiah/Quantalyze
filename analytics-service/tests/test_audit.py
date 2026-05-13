@@ -3,17 +3,20 @@
 Sprint 6 closeout Task 7.1b — the fire-and-forget contract for the
 Python cross-service audit emitter.
 
-Asserted invariants:
-  1. Happy path calls `log_audit_event_service` with the expected shape.
-  2. RPC raising an exception does NOT propagate to the caller
-     (fire-and-forget, swallow-all).
-  3. NULL / empty user_id is caught at the Python layer (before the
-     RPC) and logged with the stable `[audit]` stderr prefix; nothing
-     hits the wire.
-  4. `metadata=None` default is normalized to `{}` on the RPC call.
+audit-2026-05-07 P907 + P908 superseded the blanket swallow-all contract.
+The current contract is typed-exception dispatch:
+  - permission_denied (SQLSTATE 42501) → re-raise (hard error).
+  - httpx transient (Timeout / NetworkError / RemoteProtocolError) →
+    Sentry + log + swallow.
+  - anything else → Sentry + log + re-raise.
 
-These tests mirror the `src/lib/audit.test.ts` fire-and-forget contract
-so the TS and Python sides stay behaviorally aligned.
+The new contract is fully covered by `test_audit_emit.py`. This file
+keeps the orthogonal invariants:
+  1. Happy path calls `log_audit_event_service` with the expected shape.
+  2. NULL / empty user_id is caught at the Python layer (before the
+     RPC) — nothing hits the wire and the log message is scrubbed.
+  3. `metadata=None` default is normalized to `{}` on the RPC call.
+  4. Payload scrubbing — `p_metadata` is redacted before the wire.
 """
 
 from __future__ import annotations
@@ -118,75 +121,13 @@ class TestLogAuditEventHappyPath:
         assert result is None
 
 
-class TestLogAuditEventSwallowsErrors:
-    """The wrapper must NEVER propagate errors to callers. An audit drop
-    is logged and silently moves on — the compute path keeps running."""
-
-    def test_rpc_raises_does_not_propagate(self, monkeypatch, caplog):
-        # RPC method itself raises (e.g., network error before execute()).
-        rpc_method = MagicMock(side_effect=RuntimeError("network down"))
-        supabase = MagicMock(rpc=rpc_method)
-        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
-
-        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
-            # Assert no exception escapes.
-            log_audit_event(
-                user_id=DUMMY_USER,
-                action="bridge.score_candidates",
-                entity_type="bridge_run",
-                entity_id=DUMMY_ENTITY,
-            )
-
-        assert any(
-            "log_audit_event_service call threw" in rec.getMessage()
-            for rec in caplog.records
-        )
-
-    def test_execute_raises_does_not_propagate(self, monkeypatch, caplog):
-        execute_mock = MagicMock(side_effect=RuntimeError("db disconnect"))
-        rpc_result = MagicMock(execute=execute_mock)
-        rpc_method = MagicMock(return_value=rpc_result)
-        supabase = MagicMock(rpc=rpc_method)
-        monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
-
-        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
-            log_audit_event(
-                user_id=DUMMY_USER,
-                action="bridge.score_candidates",
-                entity_type="bridge_run",
-                entity_id=DUMMY_ENTITY,
-            )
-
-        assert any(
-            "log_audit_event_service call threw" in rec.getMessage()
-            for rec in caplog.records
-        )
-
-    def test_get_supabase_missing_env_does_not_propagate(
-        self, monkeypatch, caplog
-    ):
-        """If SUPABASE_URL / SERVICE_KEY are unset, get_supabase() raises.
-        The wrapper must catch this too — audit emission must not DOA
-        the whole worker when env vars are misconfigured in a preview
-        deploy."""
-
-        def _broken_get_supabase():
-            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY required")
-
-        monkeypatch.setattr(audit_module, "get_supabase", _broken_get_supabase)
-
-        with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
-            log_audit_event(
-                user_id=DUMMY_USER,
-                action="bridge.score_candidates",
-                entity_type="bridge_run",
-                entity_id=DUMMY_ENTITY,
-            )
-
-        assert any(
-            "log_audit_event_service call threw" in rec.getMessage()
-            for rec in caplog.records
-        )
+# NOTE — `TestLogAuditEventSwallowsErrors` was removed as part of the
+# audit-2026-05-07 P907 + P908 fix. The blanket swallow-all contract
+# the class encoded is no longer correct; only httpx-transient errors
+# are swallowed, and the typed-dispatch path is covered exhaustively in
+# `test_audit_emit.py` (TestPermissionDeniedReRaises,
+# TestTransientNetworkErrorsAreCapturedAndCounted,
+# TestUnexpectedExceptionReRaises).
 
 
 class TestLogAuditEventNullGuards:
@@ -330,20 +271,23 @@ class TestLoggerErrorScrubsPiiMetadata:
         assert "[REDACTED_JWT]" in msg or "[REDACTED]" in msg
 
     def test_rpc_throw_branch_scrubs_args(self, monkeypatch, caplog):
-        # When the RPC call throws, the except branch logs action/entity_type/
-        # entity_id/user_id/exc — every one must run through the redactor.
+        # When the RPC call throws an UNEXPECTED exception, the wrapper now
+        # logs + Sentry-captures + re-raises (audit-2026-05-07 P907 + P908).
+        # The log line emitted before the re-raise must still scrub PII in
+        # every formatter arg (action/entity_type/entity_id/user_id/exc).
         jwt_action = "1234567890.0987654321.abcdefghij"
         rpc_method = MagicMock(side_effect=RuntimeError("network down"))
         supabase = MagicMock(rpc=rpc_method)
         monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
 
         with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
-            log_audit_event(
-                user_id=DUMMY_USER,
-                action=jwt_action,
-                entity_type="bridge_run",
-                entity_id=DUMMY_ENTITY,
-            )
+            with pytest.raises(RuntimeError):
+                log_audit_event(
+                    user_id=DUMMY_USER,
+                    action=jwt_action,
+                    entity_type="bridge_run",
+                    entity_id=DUMMY_ENTITY,
+                )
 
         msg = caplog.records[-1].getMessage()
         assert jwt_action not in msg, f"raw JWT leaked: {msg!r}"
@@ -359,19 +303,22 @@ class TestLoggerErrorScrubsPiiMetadata:
     def test_rpc_throw_substring_leak_redacted(self, monkeypatch, caplog):
         """Supabase RPC error that echoes a `key=value` substring (NOT a JWT
         shape) must be redacted. This was leaking under the old `scrub_pii`
-        wrapper that only matched whole-anchored JWTs."""
+        wrapper that only matched whole-anchored JWTs. Under
+        audit-2026-05-07 P907 + P908, an unexpected RuntimeError now
+        re-raises after logging — the scrub of the log line still applies."""
         leaky_msg = "request body: {'metadata': 'api_key=PROD_LEAK_VALUE_42 ok'}"
         rpc_method = MagicMock(side_effect=RuntimeError(leaky_msg))
         supabase = MagicMock(rpc=rpc_method)
         monkeypatch.setattr(audit_module, "get_supabase", lambda: supabase)
 
         with caplog.at_level(logging.ERROR, logger="quantalyze.audit"):
-            log_audit_event(
-                user_id=DUMMY_USER,
-                action="bridge.run",
-                entity_type="bridge_run",
-                entity_id=DUMMY_ENTITY,
-            )
+            with pytest.raises(RuntimeError):
+                log_audit_event(
+                    user_id=DUMMY_USER,
+                    action="bridge.run",
+                    entity_type="bridge_run",
+                    entity_id=DUMMY_ENTITY,
+                )
 
         msg = caplog.records[-1].getMessage()
         assert "PROD_LEAK_VALUE_42" not in msg, (

@@ -186,8 +186,12 @@ const EXCLUDED_TABLES: Record<string, { reason: string; addedIn: string }> = {
 
 /**
  * Read the manifest file as text, then extract the list of `table: "..."`
- * literals from the `USER_EXPORT_TABLES` array. A regex is sufficient
- * because we control the file's shape — see gdpr-export.ts.
+ * AND `source_table: "..."` literals from the `USER_EXPORT_TABLES`
+ * array. `source_table` is the underlying table for the `projected`
+ * entries (e.g. audit_log -> audit_log_for_user); from the migration
+ * coverage perspective the raw source is what's covered.
+ * A regex is sufficient because we control the file's shape - see
+ * gdpr-export.ts.
  */
 function readManifestTables(): Set<string> {
   const src = readFileSync(MANIFEST_FILE, "utf8");
@@ -203,12 +207,59 @@ function readManifestTables(): Set<string> {
   }
   const body = arrMatch[1];
   const names = new Set<string>();
-  const tableLiteralRe = /\btable:\s*"([a-z0-9_]+)"/g;
+  const tableLiteralRe = /\b(?:table|source_table):\s*"([a-z0-9_]+)"/g;
   let m: RegExpExecArray | null;
   while ((m = tableLiteralRe.exec(body)) !== null) {
     names.add(m[1]);
   }
   return names;
+}
+
+/**
+ * P698 - per-table user-id filter audit.
+ *
+ * Walk every entry in USER_EXPORT_TABLES and assert each has an
+ * explicit user-scoping column declared:
+ *   - direct: user_column set
+ *   - projected: user_column set (post-fetch redaction is enforced
+ *     separately by the unit tests in gdpr-export-redaction.test.ts)
+ *   - indirect: parent_user_column set
+ *
+ * Service-role bypasses RLS, so this filter is the only contractual
+ * guarantee that a manifest entry cannot leak cross-tenant rows. A
+ * future refactor that omits the filter on a new entry would silently
+ * widen the export beyond the data subject.
+ */
+function readManifestEntries(): Array<{
+  table: string;
+  kind: string;
+  hasUserFilter: boolean;
+}> {
+  const src = readFileSync(MANIFEST_FILE, "utf8");
+  const arrMatch = src.match(
+    /USER_EXPORT_TABLES:\s*readonly\s+UserExportTable\[\]\s*=\s*\[([\s\S]*?)\]\s*as\s*const\s*;/,
+  );
+  if (!arrMatch) return [];
+  const body = arrMatch[1];
+
+  const entries: Array<{ table: string; kind: string; hasUserFilter: boolean }> = [];
+  const entryRe = /\{\s*kind:\s*"(direct|indirect|projected)"\s*,([\s\S]*?)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = entryRe.exec(body)) !== null) {
+    const kind = m[1];
+    const entryBody = m[2];
+    const tableMatch = entryBody.match(/\btable:\s*"([a-z0-9_]+)"/);
+    if (!tableMatch) continue;
+    const table = tableMatch[1];
+    let hasUserFilter = false;
+    if (kind === "direct" || kind === "projected") {
+      hasUserFilter = /\buser_column:\s*"[a-z0-9_]+"/.test(entryBody);
+    } else if (kind === "indirect") {
+      hasUserFilter = /\bparent_user_column:\s*"[a-z0-9_]+"/.test(entryBody);
+    }
+    entries.push({ table, kind, hasUserFilter });
+  }
+  return entries;
 }
 
 /**
@@ -277,6 +328,31 @@ function main(): void {
       err instanceof Error ? err.message : err,
     );
     process.exit(2);
+  }
+
+  // P698 - per-table user-id filter audit. Run BEFORE the coverage
+  // diff so a filter-less entry surfaces even if the manifest otherwise
+  // matches the migrations.
+  const entries = readManifestEntries();
+  const filterless = entries.filter((e) => !e.hasUserFilter);
+  if (filterless.length > 0) {
+    console.error(
+      "[check-gdpr-export-coverage] FAIL (P698) - " +
+        filterless.length +
+        " USER_EXPORT_TABLES entry/entries lack an explicit user-id filter:",
+    );
+    for (const e of filterless) {
+      console.error(
+        `  - ${e.table} (kind="${e.kind}") -> add ` +
+          (e.kind === "indirect" ? "parent_user_column" : "user_column"),
+      );
+    }
+    console.error(
+      "\nService-role bypasses RLS; the user-id filter is the only contractual " +
+        "guarantee that the export cannot leak cross-tenant rows. See P698 in " +
+        "the 2026-05-07 audit.",
+    );
+    process.exit(1);
   }
 
   const missing: Array<{ table: string; migration: string }> = [];

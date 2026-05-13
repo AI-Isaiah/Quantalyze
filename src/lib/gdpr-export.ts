@@ -10,6 +10,33 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * `scripts/check-gdpr-export-coverage.ts` (which greps migrations for
  * user-owned tables and fails if `USER_EXPORT_TABLES` lacks coverage).
  *
+ * Audit 2026-05-12 (Lane E) hardening
+ * -----------------------------------
+ * - P449: 31 sequential SELECTs collapsed into a bounded-concurrency
+ *   `Promise.all` pool (cap 10) to avoid Supabase connection-pool
+ *   exhaustion while removing the ~3s serial-latency tax.
+ * - P450: O(log n) binary-search re-serialization replaced with an
+ *   O(n) cumulative-size budget — each row is stringified once and
+ *   its UTF-8 byte length accumulated. Once the budget is exceeded
+ *   the remaining rows in that table (and all subsequent tables) are
+ *   dropped from the tail (FIFO — preserves the oldest rows the user
+ *   has accumulated; documented decision).
+ * - P460/P697/P707/P708: `audit_log` removed from the raw export
+ *   manifest. Replaced with the synthetic `audit_log_for_user`
+ *   projection that (a) keeps ONLY rows where the subject acted
+ *   (user_id = subject) and (b) redacts metadata fields that
+ *   identify OTHER users (display_name, email, partner_tag,
+ *   manager_id, allocator_email).
+ *   `contact_requests` rows are likewise redacted: the user's own
+ *   row state is preserved but the cross-party `strategy_id` is
+ *   blanked (pointing at it would identify the other user's
+ *   strategy).
+ * - P698: every entry in USER_EXPORT_TABLES has an explicit filter
+ *   column (direct: `user_column`; indirect: `parent_user_column`)
+ *   so the projection is symmetric with the table's RLS policy. The
+ *   build-time grep in `scripts/check-gdpr-export-coverage.ts`
+ *   verifies that no entry exports without a filter.
+ *
  * Design constraints
  * ------------------
  * 1. Enumerate EVERY table that references a specific user. The list below
@@ -68,7 +95,196 @@ export interface IndirectUserTable {
   parent_user_column: string;
 }
 
-export type UserExportTable = DirectUserTable | IndirectUserTable;
+/**
+ * Projection: the table source is queried RAW from a different table
+ * name and post-processed through a projection function before
+ * landing in the bundle. Used for audit_log → audit_log_for_user
+ * (filter rows where subject acted + redact other-user PII in
+ * metadata).
+ *
+ * Why a separate kind? Because the bundle's `table` name MUST differ
+ * from the raw `source_table` (the bundle exposes a synthetic
+ * projection, not the raw rows). The CI coverage hook
+ * (`scripts/check-gdpr-export-coverage.ts`) understands this kind so
+ * the raw source table is considered covered.
+ */
+export interface ProjectedUserTable {
+  kind: "projected";
+  /** Bundle-facing name (e.g. "audit_log_for_user"). */
+  table: string;
+  /** Underlying table name the SELECT hits. */
+  source_table: string;
+  /** Column on source_table holding the subject's user id. */
+  user_column: string;
+  /** Post-fetch redaction function. */
+  project: (rows: unknown[], userId: string) => unknown[];
+}
+
+export type UserExportTable =
+  | DirectUserTable
+  | IndirectUserTable
+  | ProjectedUserTable;
+
+/**
+ * Sentinel used when redacting fields that identify OTHER users in
+ * cross-party rows that the subject is still entitled to see.
+ * Stable string so a downstream JSON consumer can grep for occurrences.
+ */
+export const REDACTED_PLACEHOLDER = "[REDACTED — other user]";
+
+/**
+ * Metadata keys on `audit_log.metadata` that we know can reference
+ * OTHER users (manager identity, allocator identity, partner handles).
+ * Kept narrow so we don't blank legitimate own-state metadata
+ * (strategy_id, source, etc).
+ *
+ * Convention: if an audit producer adds a NEW metadata field that
+ * references another user, append the key here. The unit test
+ * `gdpr-export-redaction.test.ts` pins the redaction shape.
+ */
+const AUDIT_METADATA_REDACT_KEYS = new Set<string>([
+  "display_name",
+  "email",
+  "partner_tag",
+  "manager_id",
+  "manager_email",
+  "manager_display_name",
+  "allocator_email",
+  "allocator_display_name",
+  "other_user_id",
+  "target_user_id",
+  "actor_email",
+  "actor_display_name",
+]);
+
+/**
+ * Recursively redact `AUDIT_METADATA_REDACT_KEYS` inside a metadata
+ * value. Handles:
+ *   - plain objects: clones, redacts matching keys in-place
+ *   - arrays: recurses into each element (so array-of-objects metadata
+ *     is also scrubbed; non-object array elements pass through)
+ *   - primitives / null: passed through unchanged
+ *
+ * Internal helper — exported only via tests by way of
+ * `redactAuditLogForUser`. The recursion is bounded by the input
+ * depth; metadata is JSON sourced from `audit_log.metadata` JSONB so
+ * the structural depth is bounded by the producer.
+ */
+function redactMetadataValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((el) => redactMetadataValue(el));
+  }
+  if (value && typeof value === "object") {
+    const src = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(src)) {
+      if (AUDIT_METADATA_REDACT_KEYS.has(key)) {
+        out[key] = REDACTED_PLACEHOLDER;
+      } else {
+        out[key] = redactMetadataValue(src[key]);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Projection helper — audit_log → audit_log_for_user.
+ *
+ * Finding 7 (audit-2026-05-07 red-team): pre-fix, the filter retained
+ * ONLY rows where the subject acted (row.user_id === userId). Rows where
+ * the subject was the TARGET (i.e. another user acted ON them) — role
+ * grants, admin-triggered deletions, account.export by an admin, etc. —
+ * were silently dropped from the export. GDPR Art. 15 entitles the
+ * subject to "data about them", not just "data they authored", so the
+ * target-row direction matters.
+ *
+ * Retains a row when ANY of these conditions hold:
+ *   - row.user_id === userId  (the subject acted)
+ *   - row.entity_id === userId AND row.entity_type === 'user'
+ *     (the subject is the entity an actor operated on)
+ *   - row.metadata is a plain object with a `target_user_id` that
+ *     matches userId (the subject is the target captured in metadata)
+ *
+ * Metadata redaction is recursive (Finding 7 part 2): arrays of nested
+ * objects (e.g., a bulk role-grant audit row whose metadata is an
+ * array of { user_id, role } pairs) now have their inner objects
+ * scrubbed too. Pre-fix the recursion only descended into the
+ * top-level object and stopped at the array boundary.
+ *
+ * Exported for unit-test pinning (`gdpr-export-redaction.test.ts`).
+ */
+export function redactAuditLogForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+
+    // Finding 7 part 1: subject can be actor, entity, OR metadata target.
+    const meta = row.metadata;
+    const metaIsObject =
+      meta !== null &&
+      meta !== undefined &&
+      typeof meta === "object" &&
+      !Array.isArray(meta);
+    const metaTargetMatch =
+      metaIsObject &&
+      (meta as Record<string, unknown>).target_user_id === userId;
+
+    const isActor = row.user_id === userId;
+    const isEntity =
+      row.entity_id === userId && row.entity_type === "user";
+    const isMetaTarget = metaTargetMatch;
+
+    if (!isActor && !isEntity && !isMetaTarget) {
+      continue;
+    }
+
+    const clone: Record<string, unknown> = { ...row };
+
+    // Finding 7 part 2: recursive metadata redaction. Handles plain
+    // objects, arrays, and arrays of objects uniformly.
+    if (meta !== null && meta !== undefined) {
+      clone.metadata = redactMetadataValue(meta);
+    }
+
+    out.push(clone);
+  }
+  return out;
+}
+
+/**
+ * Projection helper — contact_requests projected for the subject.
+ *
+ * Keeps only rows where `allocator_id === subject` (the user as the
+ * allocator who sent the contact request). Blanks `strategy_id`
+ * because the strategy belongs to a DIFFERENT user (the manager), so
+ * disclosing it would let the subject derive the manager's strategy
+ * inventory.
+ *
+ * Exported for unit-test pinning.
+ */
+export function redactContactRequestForUser(
+  rows: unknown[],
+  userId: string,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    const row = r as Record<string, unknown>;
+    if (row.allocator_id !== userId) continue;
+    const clone: Record<string, unknown> = { ...row };
+    if ("strategy_id" in clone && clone.strategy_id !== null) {
+      clone.strategy_id = REDACTED_PLACEHOLDER;
+    }
+    out.push(clone);
+  }
+  return out;
+}
 
 /**
  * Canonical list of every table that holds user-owned data.
@@ -95,10 +311,19 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "allocator_holdings", user_column: "allocator_id" },
   { kind: "direct", table: "allocator_preferences", user_column: "user_id" },
   { kind: "direct", table: "api_keys", user_column: "user_id" },
-  { kind: "direct", table: "audit_log", user_column: "user_id" },
+  // contact_requests carries a cross-party `strategy_id` referring to
+  // another user's strategy. The projected version retains the
+  // subject's own row state and blanks the cross-party link.
+  // See `redactContactRequestForUser` and Lane E audit P708.
+  {
+    kind: "projected",
+    table: "contact_requests",
+    source_table: "contact_requests",
+    user_column: "allocator_id",
+    project: redactContactRequestForUser,
+  },
   { kind: "direct", table: "bridge_outcome_dismissals", user_column: "allocator_id" },
   { kind: "direct", table: "bridge_outcomes", user_column: "allocator_id" },
-  { kind: "direct", table: "contact_requests", user_column: "allocator_id" },
   { kind: "direct", table: "data_deletion_requests", user_column: "user_id" },
   { kind: "direct", table: "investor_attestations", user_column: "user_id" },
   { kind: "direct", table: "match_batches", user_column: "allocator_id" },
@@ -111,6 +336,21 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   { kind: "direct", table: "user_app_roles", user_column: "user_id" },
   { kind: "direct", table: "user_favorites", user_column: "user_id" },
   { kind: "direct", table: "user_notes", user_column: "user_id" },
+  // ------------------------------------------------------------------
+  // Projected (raw source table excluded; bundle exposes a redacted
+  // projection — see kind:"projected" docstring)
+  // ------------------------------------------------------------------
+  // audit_log entries can reference OTHER users in `metadata` (manager
+  // display_name, partner_tag of the counter-party allocator, etc.).
+  // The subject is entitled to the entries THEY authored, with
+  // cross-party identifiers blanked. See Lane E audit P460/P697/P707.
+  {
+    kind: "projected",
+    table: "audit_log_for_user",
+    source_table: "audit_log",
+    user_column: "user_id",
+    project: redactAuditLogForUser,
+  },
   // ------------------------------------------------------------------
   // Indirectly owned (reachable via a parent table)
   // ------------------------------------------------------------------
@@ -195,17 +435,42 @@ export const EXPORT_SIZE_CAP_BYTES = 100 * 1024 * 1024;
 export const EXPORT_PER_TABLE_ROW_CAP = 50_000;
 
 /**
+ * Max concurrent table fetches against Supabase. Cap chosen to balance
+ * latency (31 sequential ~= 3s of round-trip; 10-parallel ~= 300ms) and
+ * connection-pool pressure (Supabase pooler defaults to ~15 PgBouncer
+ * connections per role; 10 leaves headroom for the rest of the request
+ * lifecycle). See Lane E audit P449.
+ */
+export const EXPORT_FETCH_CONCURRENCY = 10;
+
+/**
  * Shape of one `tables[*]` entry in the export bundle.
+ *
+ * Issue 5 (audit-2026-05-07 follow-up): `fetch_error` carries the failure
+ * mode when a table's fetch errored or its Promise rejected. The route
+ * inspects this — if any table has a non-null `fetch_error` the route
+ * refuses to mint a signed URL (option (a) below), surfacing a 500 with
+ * a stable code instead of silently substituting `[]`. GDPR Art. 15
+ * requires a COMPLETE export; a partial bundle marked as such would
+ * still be a violation, so the chosen policy is "fail loud, ask the
+ * user to retry".
  */
 export interface ExportTablePayload {
   table: string;
   rows: unknown[];
   row_count: number;
   truncated_at_cap: boolean;
+  fetch_error: string | null;
 }
 
 /**
  * Shape of the full export bundle that lands in Supabase Storage.
+ *
+ * Issue 5: `partial` + `failed_tables` make any read failure observable
+ * to bundle consumers. In the chosen policy (option (a)) the route never
+ * actually persists a bundle with partial=true, but the helper still
+ * exposes the fields so the route's gate has a single object to inspect
+ * and tests can pin the exact shape.
  */
 export interface ExportBundle {
   schema_version: 1;
@@ -214,6 +479,8 @@ export interface ExportBundle {
   total_row_count: number;
   tables: ExportTablePayload[];
   truncated_at_size_cap: boolean;
+  partial: boolean;
+  failed_tables: string[];
 }
 
 /**
@@ -224,6 +491,29 @@ export interface ExportBundle {
  * (b) the caller has already been authenticated + authorized in the
  * route wrapper.
  *
+ * Concurrency model
+ * -----------------
+ * Tables are fetched in bounded-concurrency batches of
+ * `EXPORT_FETCH_CONCURRENCY` (10). Within a batch, all fetches run in
+ * parallel via `Promise.allSettled` — a single failed fetch logs and
+ * yields an empty `rows[]` for that table without aborting the rest
+ * of the bundle. Manifest order is preserved in the output bundle so
+ * downstream consumers can rely on stable indexing.
+ *
+ * Size-cap model (P450)
+ * ---------------------
+ * The legacy implementation re-serialized the entire bundle inside a
+ * binary-search loop (O(log n) full re-stringifications, each ~100MB).
+ * The new path is O(n):
+ *   - For each row in each table, JSON.stringify just THAT row and
+ *     accumulate its UTF-8 byte length into `bytesUsed`.
+ *   - Stop including rows once `bytesUsed + nextRowBytes >
+ *     EXPORT_SIZE_CAP_BYTES`.
+ *   - Drop policy: FIFO from the tail (preserves the OLDEST rows the
+ *     user has accumulated — matches user-intuition that "old history"
+ *     is more durably valuable than the freshest tail). Documented
+ *     decision; reversible by sorting the rows array.
+ *
  * Returns an ExportBundle. The caller writes it to storage and
  * returns a signed URL.
  */
@@ -231,84 +521,109 @@ export async function collectUserExportBundle(
   admin: SupabaseClient,
   userId: string,
 ): Promise<ExportBundle> {
-  const tables: ExportTablePayload[] = [];
-  let totalRowCount = 0;
-  let totalBytes = 0;
-  let truncatedAtSizeCap = false;
+  // Phase 1: parallel fetch across all 31 tables (bounded concurrency).
+  // Manifest order is preserved by storing into a positional array.
+  //
+  // Issue 5 (audit-2026-05-07 follow-up): pre-fix, both the
+  // Promise.allSettled rejection branch AND `fetchRowsForSpec`'s
+  // per-error returns silently substituted `[]` — the bundle reported
+  // "row_count: 0" for failed tables indistinguishably from genuinely
+  // empty tables, violating the "complete export" requirement of GDPR
+  // Art. 15. We now record an explicit `fetch_error` per table and
+  // surface `partial: true` + `failed_tables` at the bundle level so
+  // the route can refuse to deliver an incomplete bundle.
+  interface FetchedEntry {
+    spec: UserExportTable;
+    rows: unknown[];
+    error: string | null;
+  }
+  const fetched: Array<FetchedEntry | null> = new Array(
+    USER_EXPORT_TABLES.length,
+  ).fill(null);
 
-  for (const spec of USER_EXPORT_TABLES) {
+  for (let start = 0; start < USER_EXPORT_TABLES.length; start += EXPORT_FETCH_CONCURRENCY) {
+    const batch = USER_EXPORT_TABLES.slice(start, start + EXPORT_FETCH_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map((spec) => fetchRowsForSpec(admin, spec, userId)),
+    );
+    for (let i = 0; i < batch.length; i += 1) {
+      const r = results[i];
+      const spec = batch[i];
+      if (r.status === "fulfilled") {
+        const result = r.value;
+        if (result.error) {
+          console.error(
+            `[gdpr-export] fetch failed for ${spec.table}: ${result.error}`,
+          );
+          fetched[start + i] = { spec, rows: [], error: result.error };
+        } else {
+          fetched[start + i] = { spec, rows: result.rows, error: null };
+        }
+      } else {
+        const reason =
+          r.reason instanceof Error
+            ? r.reason.message
+            : String(r.reason ?? "unknown rejection");
+        console.error(
+          `[gdpr-export] batch fetch rejected for ${spec.table}: ${reason}`,
+        );
+        fetched[start + i] = { spec, rows: [], error: reason };
+      }
+    }
+  }
+
+  // Phase 2: cumulative-size budget. O(n) over the rows, NOT
+  // O(log n) over the full bundle.
+  const tables: ExportTablePayload[] = [];
+  const failedTables: string[] = [];
+  let totalRowCount = 0;
+  let bytesUsed = 0;
+  let truncatedAtSizeCap = false;
+  const encoder = new TextEncoder();
+
+  for (const entry of fetched) {
+    if (!entry) continue;
+    const { spec, rows, error: fetchError } = entry;
+
+    if (fetchError) {
+      failedTables.push(spec.table);
+    }
+
     if (truncatedAtSizeCap) {
-      // Once the cap is hit, emit empty shells for the remaining tables
-      // so the caller sees which tables were skipped.
       tables.push({
         table: spec.table,
         rows: [],
         row_count: 0,
         truncated_at_cap: true,
+        fetch_error: fetchError,
       });
       continue;
     }
 
-    const rows = await fetchRowsForSpec(admin, spec, userId);
-    const payload: ExportTablePayload = {
-      table: spec.table,
-      rows,
-      row_count: rows.length,
-      truncated_at_cap: rows.length >= EXPORT_PER_TABLE_ROW_CAP,
-    };
+    const includedRows: unknown[] = [];
+    let tableTruncated = rows.length >= EXPORT_PER_TABLE_ROW_CAP;
 
-    // Approximate the serialized UTF-8 byte size so we can enforce the
-    // 100MB cap without double-encoding. JSON.stringify(x).length counts
-    // UTF-16 code units, which undercounts non-ASCII bytes (e.g. accented
-    // display_name or emoji in bio) and would let the cap be exceeded.
-    // TextEncoder.encode(...).byteLength returns true UTF-8 byte size.
-    const approxBytes = new TextEncoder().encode(JSON.stringify(payload))
-      .byteLength;
-    if (totalBytes + approxBytes > EXPORT_SIZE_CAP_BYTES) {
-      truncatedAtSizeCap = true;
-      // Binary-search for the largest row-count whose serialized size
-      // keeps totalBytes under the cap. The prior halving loop
-      // under-packed: after the first pivot that fit, it stopped
-      // searching, so the bundle lost rows between (fitting_pivot,
-      // last_failed_pivot]. Proper binary search converges on the exact
-      // boundary.
-      let low = 0;
-      let high = payload.rows.length;
-      let bestRows = 0;
-      let bestBytes = 0;
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        const candidate = {
-          ...payload,
-          rows: payload.rows.slice(0, mid),
-          row_count: mid,
-          truncated_at_cap: true,
-        };
-        const candidateBytes = new TextEncoder().encode(
-          JSON.stringify(candidate),
-        ).byteLength;
-        if (totalBytes + candidateBytes <= EXPORT_SIZE_CAP_BYTES) {
-          bestRows = mid;
-          bestBytes = candidateBytes;
-          low = mid + 1;
-        } else {
-          high = mid - 1;
-        }
+    for (const row of rows) {
+      // Stringify once. Per-row size includes the trailing comma the
+      // outer JSON.stringify would insert; small constant overhead.
+      const rowBytes = encoder.encode(JSON.stringify(row) + ",").byteLength;
+      if (bytesUsed + rowBytes > EXPORT_SIZE_CAP_BYTES) {
+        truncatedAtSizeCap = true;
+        tableTruncated = true;
+        break;
       }
-      const trimmed: ExportTablePayload = {
-        ...payload,
-        rows: payload.rows.slice(0, bestRows),
-        row_count: bestRows,
-        truncated_at_cap: true,
-      };
-      totalBytes += bestBytes;
-      totalRowCount += trimmed.row_count;
-      tables.push(trimmed);
-    } else {
-      totalBytes += approxBytes;
-      totalRowCount += payload.row_count;
-      tables.push(payload);
+      includedRows.push(row);
+      bytesUsed += rowBytes;
     }
+
+    tables.push({
+      table: spec.table,
+      rows: includedRows,
+      row_count: includedRows.length,
+      truncated_at_cap: tableTruncated,
+      fetch_error: fetchError,
+    });
+    totalRowCount += includedRows.length;
   }
 
   return {
@@ -318,6 +633,8 @@ export async function collectUserExportBundle(
     total_row_count: totalRowCount,
     tables,
     truncated_at_size_cap: truncatedAtSizeCap,
+    partial: failedTables.length > 0,
+    failed_tables: failedTables,
   };
 }
 
@@ -328,12 +645,28 @@ export async function collectUserExportBundle(
  * those ids. A `.in()` filter with 50k elements is pathological — we
  * cap the parent-id batch at 2k, which handles any realistic user and
  * simply drops the tail in the extreme case (marked truncated).
+ *
+ * P698 — per-table user-id filter audit
+ * -------------------------------------
+ * Every branch below MUST apply a filter that scopes rows to the user.
+ * direct  → `.eq(spec.user_column, userId)`
+ * projected → `.eq(spec.user_column, userId)` (plus post-fetch redaction)
+ * indirect → two-hop `.eq(parent_user_column, userId)` then `.in(via_column, parentIds)`
+ *
+ * Service-role bypasses RLS, so this filter is the ONLY guarantee that
+ * the export contains the subject's own data. A future refactor that
+ * drops a filter would silently leak cross-tenant rows.
  */
+interface FetchRowsResult {
+  rows: unknown[];
+  error: string | null;
+}
+
 async function fetchRowsForSpec(
   admin: SupabaseClient,
   spec: UserExportTable,
   userId: string,
-): Promise<unknown[]> {
+): Promise<FetchRowsResult> {
   if (spec.kind === "direct") {
     const { data, error } = await admin
       .from(spec.table)
@@ -341,13 +674,31 @@ async function fetchRowsForSpec(
       .eq(spec.user_column, userId)
       .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (error) {
-      console.error(
-        `[gdpr-export] direct select failed for ${spec.table}:`,
-        error.message,
-      );
-      return [];
+      // Issue 5 fix: surface the error to the bundle instead of silently
+      // substituting `[]`. The route's gate refuses to mint a signed URL
+      // when ANY table reports a fetch_error.
+      const msg = `direct select failed for ${spec.table}: ${error.message}`;
+      console.error(`[gdpr-export] ${msg}`);
+      return { rows: [], error: msg };
     }
-    return data ?? [];
+    return { rows: data ?? [], error: null };
+  }
+
+  if (spec.kind === "projected") {
+    // Fetch raw rows from the source table, filtered to the subject.
+    const { data, error } = await admin
+      .from(spec.source_table)
+      .select("*")
+      .eq(spec.user_column, userId)
+      .limit(EXPORT_PER_TABLE_ROW_CAP);
+    if (error) {
+      const msg = `projected select failed for ${spec.source_table} (->${spec.table}): ${error.message}`;
+      console.error(`[gdpr-export] ${msg}`);
+      return { rows: [], error: msg };
+    }
+    // Run the redaction projection. This is where cross-party PII in
+    // metadata gets blanked.
+    return { rows: spec.project(data ?? [], userId), error: null };
   }
 
   // Indirect: two-hop.
@@ -357,15 +708,13 @@ async function fetchRowsForSpec(
     .eq(spec.parent_user_column, userId)
     .limit(2000);
   if (parentErr) {
-    console.error(
-      `[gdpr-export] parent select failed for ${spec.parent_table} (via ${spec.table}):`,
-      parentErr.message,
-    );
-    return [];
+    const msg = `parent select failed for ${spec.parent_table} (via ${spec.table}): ${parentErr.message}`;
+    console.error(`[gdpr-export] ${msg}`);
+    return { rows: [], error: msg };
   }
   const parentIds = (parentRows ?? []).map((r: { id: string }) => r.id);
   if (parentIds.length === 0) {
-    return [];
+    return { rows: [], error: null };
   }
 
   const { data, error } = await admin
@@ -374,11 +723,9 @@ async function fetchRowsForSpec(
     .in(spec.via_column, parentIds)
     .limit(EXPORT_PER_TABLE_ROW_CAP);
   if (error) {
-    console.error(
-      `[gdpr-export] indirect select failed for ${spec.table}:`,
-      error.message,
-    );
-    return [];
+    const msg = `indirect select failed for ${spec.table}: ${error.message}`;
+    console.error(`[gdpr-export] ${msg}`);
+    return { rows: [], error: msg };
   }
-  return data ?? [];
+  return { rows: data ?? [], error: null };
 }

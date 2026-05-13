@@ -19,6 +19,7 @@ const {
   getUserMock,
   assertSameOriginMock,
   userRolesQueryMock,
+  profilesIsAdminQueryMock,
 } = vi.hoisted(() => ({
   getUserMock: vi.fn<
     () => Promise<{ data: { user: unknown } }>
@@ -28,22 +29,71 @@ const {
   userRolesQueryMock: vi.fn<
     (userId: string) => Promise<{ data: { role: string }[] | null; error: unknown }>
   >(),
+  // Used for the unified `isAdminUser` fallback path (audit-2026-05-07 P459/P700)
+  // — queries `profiles.is_admin` when the user_app_roles 'admin' check
+  // misses. Defaults to "not an admin" so the existing tests that expect
+  // 403 on a non-admin role set keep passing.
+  profilesIsAdminQueryMock: vi.fn<
+    (userId: string) => Promise<{ data: { is_admin: boolean } | null; error: unknown }>
+  >(() => Promise.resolve({ data: { is_admin: false }, error: null })),
 }));
+
+// Helper: build a `.from(table)` factory that handles BOTH the
+// user_app_roles query chains (the bare role-fetch AND the admin-role
+// re-check used by `hasAdminRoleRow` in `src/lib/admin.ts`) AND the
+// profiles.is_admin query used by `hasIsAdminFlag`.
+function buildFromMock() {
+  return (table: string) => {
+    if (table === "user_app_roles") {
+      return {
+        select: () => ({
+          eq: (col1: string, val1: string) => {
+            // Chained .eq().eq().limit() — the hasAdminRoleRow shape.
+            // We delegate to userRolesQueryMock with the userId; the
+            // role filter is applied client-side in the test by
+            // filtering the returned data set.
+            const chained = {
+              eq: (_col2: string, val2: string) => ({
+                limit: async (_n: number) => {
+                  const res = await userRolesQueryMock(val1);
+                  if (res.error) return res;
+                  const filtered = (res.data ?? []).filter(
+                    (r) => r.role === val2,
+                  );
+                  return { data: filtered, error: null };
+                },
+              }),
+              // Fallback for the bare `.eq("user_id", id)` shape used
+              // by getUserRoles — supports `await` directly.
+              then: (
+                resolve: (
+                  v: { data: { role: string }[] | null; error: unknown },
+                ) => unknown,
+              ) => userRolesQueryMock(col1 === "user_id" ? val1 : val1).then(resolve),
+            };
+            return chained;
+          },
+        }),
+      };
+    }
+    if (table === "profiles") {
+      return {
+        select: () => ({
+          eq: (_col: string, userId: string) => ({
+            single: () => profilesIsAdminQueryMock(userId),
+          }),
+        }),
+      };
+    }
+    throw new Error(`Unexpected table in test: ${table}`);
+  };
+}
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: vi.fn(async () => ({
     auth: { getUser: getUserMock },
-    from: (table: string) => {
-      if (table !== "user_app_roles") {
-        throw new Error(`Unexpected table in test: ${table}`);
-      }
-      return {
-        select: () => ({
-          eq: (_col: string, userId: string) =>
-            userRolesQueryMock(userId),
-        }),
-      };
-    },
+    from: buildFromMock(),
+    rpc: vi.fn().mockResolvedValue({ data: null, error: null }),
   })),
 }));
 
@@ -55,18 +105,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getUserRoles, requireRole, withRole, APP_ROLES } from "./auth";
 
 function makeFromOnly(): SupabaseClient {
-  // Minimal mock that satisfies getUserRoles (only calls .from().select().eq()).
+  // Mock that satisfies getUserRoles AND the unified admin-fallback
+  // path inside `isAdminUser` (audit-2026-05-07 P459) — both
+  // user_app_roles (single + chained eq) and profiles queries.
   const client = {
-    from: (table: string) => {
-      if (table !== "user_app_roles") {
-        throw new Error(`Unexpected table: ${table}`);
-      }
-      return {
-        select: () => ({
-          eq: (_col: string, userId: string) => userRolesQueryMock(userId),
-        }),
-      };
-    },
+    from: buildFromMock(),
+    rpc: vi.fn().mockResolvedValue({ data: null, error: null }),
   };
   return client as unknown as SupabaseClient;
 }
@@ -88,6 +132,16 @@ function makeRequest({
 beforeEach(() => {
   vi.clearAllMocks();
   assertSameOriginMock.mockReturnValue(null);
+  // Default: profiles.is_admin = false. Individual tests that need the
+  // unified admin-union to flip TRUE override this with mockResolvedValueOnce.
+  profilesIsAdminQueryMock.mockImplementation(() =>
+    Promise.resolve({ data: { is_admin: false }, error: null }),
+  );
+  // Default: any extra user_app_roles read returns an empty set so the
+  // hasAdminRoleRow re-check inside isAdminUser does not blow up tests
+  // that only registered ONE mockResolvedValueOnce for the primary
+  // getUserRoles call.
+  userRolesQueryMock.mockResolvedValue({ data: [], error: null });
 });
 
 describe("APP_ROLES runtime list", () => {
@@ -119,19 +173,50 @@ describe("getUserRoles", () => {
     expect(roles).toEqual([]);
   });
 
-  it("returns an empty array on error and logs to stderr", async () => {
-    const spy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+  it("returns an empty array on RLS denial (42501) and does NOT log", async () => {
+    // Finding 5 (audit-2026-05-07 red-team): 42501 is the expected
+    // "no read access" code — it is NOT a fault and should not be
+    // logged as one. The previous behavior was to log every error
+    // including this one; that produced noise without signal.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     userRolesQueryMock.mockResolvedValueOnce({
       data: null,
       error: { code: "42501", message: "permission denied" },
     });
     const roles = await getUserRoles(makeFromOnly(), "u-3");
     expect(roles).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("returns an empty array on PostgREST no-rows (PGRST116) and does NOT log", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "PGRST116", message: "no rows" },
+    });
+    const roles = await getUserRoles(makeFromOnly(), "u-3b");
+    expect(roles).toEqual([]);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("returns an empty array on unexpected error AND logs to stderr (legacy contract preserved)", async () => {
+    // Finding 5: a non-RLS, non-PGRST116 error is a real fault — we
+    // still return `[]` from the legacy `getUserRoles` helper for
+    // backward compatibility, but the discriminated `getUserRolesResult`
+    // (which `requireRole` now uses) returns ok:false so the route
+    // layer can surface 500 instead of 403. Logging happens here.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "statement timeout" },
+    });
+    const roles = await getUserRoles(makeFromOnly(), "u-3c");
+    expect(roles).toEqual([]);
     expect(spy).toHaveBeenCalledWith(
-      "[auth] getUserRoles failed:",
-      expect.objectContaining({ user_id: "u-3" }),
+      "[auth] getUserRolesResult faulted:",
+      expect.objectContaining({ user_id: "u-3c", code: "57014" }),
     );
     spy.mockRestore();
   });
@@ -208,6 +293,29 @@ describe("requireRole", () => {
     if ("roles" in result) {
       expect(result.roles).toEqual(["allocator"]);
     }
+  });
+
+  it("Finding 5: returns { forbidden: 500 } when the role fetch faults (NOT 403)", async () => {
+    // Pre-fix: a 57014 (statement timeout) would silently translate to
+    // a 403 because getUserRoles swallowed every error and returned [].
+    // Post-fix: requireRole uses the discriminated `getUserRolesResult`
+    // and surfaces a 500 so on-call sees the real signal.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    userRolesQueryMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "statement timeout" },
+    });
+    const result = await requireRole(
+      makeFromOnly(),
+      mockUser,
+      "admin",
+    );
+    expect("forbidden" in result).toBe(true);
+    if ("forbidden" in result) {
+      // 500, NOT 403 — a real fault is not an authorization failure.
+      expect(result.forbidden.status).toBe(500);
+    }
+    spy.mockRestore();
   });
 
   it("returns { roles } including the full resolved set (superset)", async () => {

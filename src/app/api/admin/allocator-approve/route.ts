@@ -22,8 +22,9 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // P444 (audit-2026-05-07) — 403 body says "Forbidden", not "Unauthorized".
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const rl = await checkLimit(
