@@ -24,8 +24,26 @@
 --     and audit emission (Test 5 catches by string-grep).
 --
 -- Run order: AFTER migrations 120-123 have been applied.
+--
+-- JWT-claims scaffolding (PR #150 follow-up — first CI run of sql-tests):
+-- Tests 3, 4, and 6 call log_audit_event_service which gates on
+-- `auth.role() IN ('authenticated','service_role')` (migration 123 / P919).
+-- Connecting via the Supabase pooler as the `postgres` role does NOT
+-- carry a JWT, so without an explicit forge auth.role() returns NULL
+-- and the gate raises ERRCODE 42501 — masking the size-ceiling check
+-- that Test 3 is actually trying to assert. Setting
+-- request.jwt.claims.role='service_role' as the first statement inside
+-- the outer transaction makes auth.role() resolve to 'service_role' for
+-- every DO block below (transaction-local config persists across
+-- statements in the same transaction).
 
 BEGIN;
+
+SELECT set_config(
+  'request.jwt.claims',
+  '{"role":"service_role"}',
+  true
+);
 
 -- --------------------------------------------------------------------------
 -- Test 1: audit_log.user_id FK shape (P919)
