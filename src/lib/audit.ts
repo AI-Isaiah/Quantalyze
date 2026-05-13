@@ -12,9 +12,10 @@ import { after } from "next/server";
  *
  *   - PERMISSION_DENIED (PostgREST code `42501`) — caller lost the right
  *     to write to audit_log (auth regression, RPC EXECUTE grant drift,
- *     RLS lockout). NEVER benign. Re-throw so the route flows into its
- *     error handler instead of returning success on a silently dropped
- *     audit gate. Sentry-tagged `audit_permission_denied=true`.
+ *     RLS lockout). NEVER benign. Re-throw — surfaces as an unhandled
+ *     rejection captured by Sentry and visible in Vercel function logs.
+ *     Sentry-tagged `audit_permission_denied=true`. See "What rethrow
+ *     does NOT do" below.
  *   - TRANSIENT (fetch failure, AbortError, TypeError: fetch failed,
  *     etc.) — infra blip on the supabase REST path. Bumping a module-
  *     local counter (`auditEmitTransientFailures`) lets `/api/health`
@@ -32,6 +33,34 @@ import { after } from "next/server";
  * migration) would have looked like every audit row writing successfully
  * — the route returns 200 and Sentry sees nothing. P701/P702 close that
  * gap.
+ *
+ * What rethrow does NOT do (Issue 2 — audit-2026-05-07 follow-up)
+ * ---------------------------------------------------------------
+ * The fire-and-forget wrappers (`logAuditEvent`, `logAuditEventAsUser`)
+ * schedule the emit via `after(() => emit(...))`. On Vercel, `after()`
+ * runs the callback AFTER the HTTP response has flushed. As a result,
+ * a thrown `permission_denied` or `unknown` error from `emit()`:
+ *
+ *   - is CAUGHT by the runtime as an unhandled promise rejection,
+ *   - is REPORTED to Sentry (via the in-emit reportToSentry call AND the
+ *     runtime's default unhandled-rejection hook),
+ *   - is VISIBLE in Vercel function logs with the stable `[audit]` prefix,
+ *   - but does NOT change the user-facing HTTP response (the response was
+ *     already flushed). The route handler never observes the throw.
+ *
+ * In other words: "re-throw" is a diagnostic signal, not a control-flow
+ * mechanism. The route returns the same status code it would have returned
+ * with no audit-emit failure. To get a 500 on audit failures, callers must
+ * invoke `emit()` (or `emitAsUser()`) synchronously and `await` it BEFORE
+ * building the response — which is intentionally not the default path
+ * because it would gate user-facing latency on the audit round-trip.
+ *
+ * The classification logic is still valuable even under `after()`: Sentry
+ * captures every failure with the right level + tags, the transient
+ * counter still increments for `/api/health`, and log aggregation can
+ * still grep `[audit]` for forensic review. The contract above is about
+ * what rethrow means in the fire-and-forget call path — NOT how to
+ * propagate audit failures to the HTTP boundary.
  */
 export type AuditEmitErrorKind =
   | "permission_denied"
@@ -330,6 +359,12 @@ export interface AuditEvent {
  * RPC derives user_id from `auth.uid()` internally, so passing an admin
  * (service-role) client here would result in a NULL auth.uid() and the
  * RPC would raise — use `logAuditEventAsUser` for admin paths instead.
+ *
+ * Failure visibility (Issue 2): emit() runs inside `after()`, which on
+ * Vercel executes AFTER the response flushes. A thrown failure surfaces
+ * as a Sentry capture + `[audit]`-prefixed log entry — it does NOT change
+ * the route response. Callers that need audit failure to gate the HTTP
+ * status must call `emit()` (or `emitAsUser()`) directly with `await`.
  */
 export function logAuditEvent(
   client: SupabaseClient,
@@ -361,7 +396,9 @@ export function logAuditEvent(
  * granted to service_role only — a user JWT that somehow reached this
  * code path cannot actually write to audit_log through this RPC.
  *
- * Returns void — fire-and-forget, same semantics as `logAuditEvent`.
+ * Returns void — fire-and-forget, same semantics as `logAuditEvent`. See
+ * the Issue 2 note on that function: any rethrown failure is only visible
+ * via Sentry + Vercel logs and does NOT change the route response.
  */
 export function logAuditEventAsUser(
   adminClient: SupabaseClient,
