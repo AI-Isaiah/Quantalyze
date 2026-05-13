@@ -2,8 +2,14 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { withAuth } from "@/lib/api/withAuth";
+import { withAllocatorAuth } from "@/lib/api/withAllocatorAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+
+// audit-2026-05-07 round-2 Block D / P1947 — the catalog this route returns
+// is allocator-scoped (it is fetched by allocators only and consumed by the
+// per-allocator drawer). `private, no-store` keeps a stale or cross-tenant
+// view from being served by any intermediary cache.
+const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
 /**
  * Phase 10 / Plan 10-03 — GET /api/strategies/browse
@@ -46,7 +52,7 @@ export interface BrowseStrategyRow {
 // in v0.15. Documented cap; raise (and add pagination) when v0.16 lands.
 const STRATEGY_BROWSE_LIMIT = 200;
 
-export const GET = withAuth(
+export const GET = withAllocatorAuth(
   async (req: NextRequest, user: User): Promise<NextResponse> => {
     void req;
     const rl = await checkLimit(
@@ -56,7 +62,10 @@ export const GET = withAuth(
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many requests" },
-        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+        {
+          status: 429,
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+        },
       );
     }
 
@@ -75,7 +84,10 @@ export const GET = withAuth(
 
     if (error) {
       console.error("[api/strategies/browse] select error:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json(
+        { error: error.message },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
     }
 
     // W2 — defensive null mapping. PostgreSQL text[] columns can be NULL
@@ -101,6 +113,9 @@ export const GET = withAuth(
       };
     });
 
-    return NextResponse.json({ strategies }, { status: 200 });
+    return NextResponse.json(
+      { strategies },
+      { status: 200, headers: NO_STORE_HEADERS },
+    );
   },
 );
