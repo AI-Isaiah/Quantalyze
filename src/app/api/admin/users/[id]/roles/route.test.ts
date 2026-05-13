@@ -50,11 +50,18 @@ vi.mock("@/lib/supabase/server", () => ({
 // returns a row (user exists) or null (404 path for GET). The user_app_roles
 // rows the mock returns from `.select(...).eq(...)` are the post-mutation
 // (or pre-existing) role set used by the unified envelope.
+//
+// Issue 3 (audit-2026-05-07 follow-up): `rolesReadError` lets a test
+// inject a Postgres-style error into the post-mutation re-read so we can
+// pin the "mutation succeeded but read failed → 500" contract.
 const adminMockState = vi.hoisted(() => ({
   profileExists: true as boolean,
   rolesRows: [
     { role: "analyst" },
   ] as Array<{ role: string }>,
+  rolesReadError: null as
+    | null
+    | { code: string | null; message: string },
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -73,8 +80,10 @@ vi.mock("@/lib/supabase/admin", () => ({
           }),
           select: (_cols: string) => ({
             eq: async () => ({
-              data: adminMockState.rolesRows,
-              error: null,
+              data: adminMockState.rolesReadError
+                ? null
+                : adminMockState.rolesRows,
+              error: adminMockState.rolesReadError,
             }),
           }),
         };
@@ -122,6 +131,7 @@ describe("POST /api/admin/users/[id]/roles — rate limit (I4)", () => {
     upsertSpy.mockClear();
     adminMockState.profileExists = true;
     adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.resetModules();
@@ -199,6 +209,7 @@ describe("GET /api/admin/users/[id]/roles (P442)", () => {
     upsertSpy.mockClear();
     adminMockState.profileExists = true;
     adminMockState.rolesRows = [{ role: "analyst" }, { role: "admin" }];
+    adminMockState.rolesReadError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     // Wipe any vi.doMock("@/lib/ratelimit") left over from the rate-limit
@@ -239,6 +250,7 @@ describe("response envelope consistency (P462)", () => {
     upsertSpy.mockClear();
     adminMockState.profileExists = true;
     adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -301,5 +313,87 @@ describe("response envelope consistency (P462)", () => {
     expect(Object.keys(grantBody).sort()).toEqual(
       Object.keys(revokeBody).sort(),
     );
+  });
+});
+
+/**
+ * audit-2026-05-07 follow-up — Issue 3
+ *
+ * Pre-fix, `fetchUserRoles` swallowed every PG error and returned `[]`.
+ * After a successful grant/revoke, a transient PG error on the
+ * post-mutation re-read therefore made the response look like
+ * "user has zero roles" — tempting the admin to re-grant and producing
+ * a duplicate audit row for one logical operation. The fix returns 500
+ * with a stable code so the UI can prompt a refresh rather than retry.
+ *
+ * The tests below pin:
+ *   - GET surfaces 500 with code=roles_read_failed on read error.
+ *   - POST grant surfaces 500 with code=mutation_succeeded_but_read_failed
+ *     when the post-mutation re-read fails (mutation already committed).
+ *   - POST revoke surfaces the same 500.
+ *   - The pre-fix `{ user_id, roles: [] }` body is NOT returned on a read
+ *     failure path — proving the silent-zero-roles regression is closed.
+ */
+describe("Issue 3 — fetchUserRoles error propagation (audit-2026-05-07 follow-up)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("GET returns 500 with code=roles_read_failed when fetchUserRoles errors", async () => {
+    adminMockState.rolesReadError = {
+      code: "57014",
+      message: "statement timeout",
+    };
+    const mod = await import("./route");
+    const res = await mod.GET!(makeGetReq(), makeCtx());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("roles_read_failed");
+    // Crucial: must NOT silently produce a `{ roles: [] }` body — that
+    // is exactly the regression Issue 3 closes.
+    expect(body).not.toHaveProperty("roles");
+  });
+
+  it("POST grant returns 500 with code=mutation_succeeded_but_read_failed when re-read fails", async () => {
+    adminMockState.rolesReadError = {
+      code: "57014",
+      message: "statement timeout",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    // The upsert ITSELF succeeded (its mock returns `{ error: null }`),
+    // so the mutation has committed. The 500 is a hint to refresh, not
+    // a signal to retry the grant.
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("mutation_succeeded_but_read_failed");
+    expect(body).not.toHaveProperty("roles");
+  });
+
+  it("POST revoke returns 500 with code=mutation_succeeded_but_read_failed when re-read fails", async () => {
+    adminMockState.rolesReadError = {
+      code: "57014",
+      message: "statement timeout",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("mutation_succeeded_but_read_failed");
+    expect(body).not.toHaveProperty("roles");
   });
 });
