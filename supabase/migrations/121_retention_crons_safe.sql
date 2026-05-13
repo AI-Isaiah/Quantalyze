@@ -23,11 +23,15 @@
 --    that future copies/edits of this migration could DROP the WHERE
 --    clause and produce an unbounded DELETE. Defense-in-depth: install
 --    a row-trigger that REJECTS any DELETE on audit_log / audit_log_cold
---    whose row count exceeds a sanity threshold (10,000 rows per call).
+--    whose row count exceeds a sanity threshold (100,000 rows per call).
 --    Trigger fires per-statement, captures TG_OP rows-affected, and
 --    raises if the threshold is crossed — a future bug that issues
 --    `DELETE FROM audit_log` with no WHERE would fail loudly on the
---    first 10k rows rather than silently wipe the table.
+--    first 100k rows rather than silently wipe the table.
+--    (Docstring previously cited 10,000; the actual implementation constant
+--    has always been 100,000 — corrected for accuracy in red-team WARN 9.
+--    100k is the right ceiling: retention runs can legitimately delete
+--    30k+ rows per batch, and 10k would false-positive in production.)
 --
 -- What this migration ships
 -- -------------------------
