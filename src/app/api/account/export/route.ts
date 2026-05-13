@@ -70,6 +70,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // (owner-only, cross-party, service-role-only).
   const bundle = await collectUserExportBundle(admin, user.id);
 
+  // Issue 5 (audit-2026-05-07 follow-up): GDPR Art. 15 requires a
+  // COMPLETE export. Pre-fix, a rejected fetch or PG error caused
+  // `collectUserExportBundle` to silently substitute `[]` for the
+  // failed table and mint a signed URL anyway — the user received a
+  // bundle that LOOKED complete but was missing half its tables. We
+  // chose policy (a) from the audit playbook: refuse to mint a signed
+  // URL on any fetch failure. The user can retry on the next rate-
+  // limit window (the limiter is sliding 24h, so a fresh export
+  // attempt the next day is possible). Policy (b) — deliver a partial
+  // bundle marked `partial: true` — was rejected because a regulator
+  // receiving a flagged-partial export would still see it as a data-
+  // protection deficiency; "complete or nothing" is the safer default.
+  if (bundle.partial) {
+    console.error("[api/account/export] refusing to mint signed URL — partial bundle:", {
+      user_id: user.id,
+      failed_tables: bundle.failed_tables,
+    });
+    return NextResponse.json(
+      {
+        error:
+          "Some tables failed to export. Please retry — GDPR Art. 15 requires a complete bundle.",
+        code: "export_partial",
+        failed_tables: bundle.failed_tables,
+      },
+      { status: 500 },
+    );
+  }
+
   // Upload to storage. Path: `{user_id}/{uuid}.json`. The owner-read
   // RLS policy in migration 055 gates by `storage.foldername(name)[1]`
   // so the user prefix MUST be the auth.uid() text.

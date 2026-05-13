@@ -326,12 +326,79 @@ describe("collectUserExportBundle — parallel fetch (P449 regression)", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const bundle = await collectUserExportBundle(mock as any, "u-resilient");
 
-    // The failed table appears with rows=[] (best-effort), bundle survives.
+    // Issue 5 (audit-2026-05-07 follow-up): the bundle survives, but the
+    // failed table is now MARKED with a fetch_error string and the
+    // bundle's `partial` flag is set — so the route can refuse to mint
+    // a signed URL instead of silently substituting `[]`.
     const apiKeysEntry = bundle.tables.find((t) => t.table === "api_keys");
     expect(apiKeysEntry).toBeDefined();
     expect(apiKeysEntry!.row_count).toBe(0);
+    expect(apiKeysEntry!.fetch_error).toBeTruthy();
+    expect(apiKeysEntry!.fetch_error).toMatch(/api_keys/);
+    expect(bundle.partial).toBe(true);
+    expect(bundle.failed_tables).toContain("api_keys");
     // Other tables should still be present in the bundle.
     expect(bundle.tables.length).toBeGreaterThan(10);
+  });
+
+  it("Issue 5: a PG error (not a rejection) also sets fetch_error + partial", async () => {
+    // Simulate a per-table .from().select().eq().limit() returning an
+    // error: { code, message } instead of throwing. This is the path
+    // that pre-fix silently substituted [] inside fetchRowsForSpec.
+    const mock = {
+      from: (table: string) => ({
+        select: (_projection: string) => ({
+          eq: () => ({
+            limit: async () => {
+              if (table === "profiles") {
+                return {
+                  data: null,
+                  error: { code: "57014", message: "statement timeout" },
+                };
+              }
+              return { data: [], error: null };
+            },
+          }),
+          in: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-pg-err");
+
+    const profilesEntry = bundle.tables.find((t) => t.table === "profiles");
+    expect(profilesEntry).toBeDefined();
+    expect(profilesEntry!.fetch_error).toBeTruthy();
+    expect(profilesEntry!.fetch_error).toMatch(/statement timeout/);
+    expect(bundle.partial).toBe(true);
+    expect(bundle.failed_tables).toContain("profiles");
+  });
+
+  it("Issue 5: a fully successful bundle has partial=false and failed_tables=[]", async () => {
+    const mock = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+          in: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
+        }),
+      }),
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bundle = await collectUserExportBundle(mock as any, "u-clean");
+
+    expect(bundle.partial).toBe(false);
+    expect(bundle.failed_tables).toEqual([]);
+    for (const t of bundle.tables) {
+      expect(t.fetch_error).toBeNull();
+    }
   });
 });
 

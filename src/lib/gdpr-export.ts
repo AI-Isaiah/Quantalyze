@@ -379,16 +379,32 @@ export const EXPORT_FETCH_CONCURRENCY = 10;
 
 /**
  * Shape of one `tables[*]` entry in the export bundle.
+ *
+ * Issue 5 (audit-2026-05-07 follow-up): `fetch_error` carries the failure
+ * mode when a table's fetch errored or its Promise rejected. The route
+ * inspects this — if any table has a non-null `fetch_error` the route
+ * refuses to mint a signed URL (option (a) below), surfacing a 500 with
+ * a stable code instead of silently substituting `[]`. GDPR Art. 15
+ * requires a COMPLETE export; a partial bundle marked as such would
+ * still be a violation, so the chosen policy is "fail loud, ask the
+ * user to retry".
  */
 export interface ExportTablePayload {
   table: string;
   rows: unknown[];
   row_count: number;
   truncated_at_cap: boolean;
+  fetch_error: string | null;
 }
 
 /**
  * Shape of the full export bundle that lands in Supabase Storage.
+ *
+ * Issue 5: `partial` + `failed_tables` make any read failure observable
+ * to bundle consumers. In the chosen policy (option (a)) the route never
+ * actually persists a bundle with partial=true, but the helper still
+ * exposes the fields so the route's gate has a single object to inspect
+ * and tests can pin the exact shape.
  */
 export interface ExportBundle {
   schema_version: 1;
@@ -397,6 +413,8 @@ export interface ExportBundle {
   total_row_count: number;
   tables: ExportTablePayload[];
   truncated_at_size_cap: boolean;
+  partial: boolean;
+  failed_tables: string[];
 }
 
 /**
@@ -439,8 +457,23 @@ export async function collectUserExportBundle(
 ): Promise<ExportBundle> {
   // Phase 1: parallel fetch across all 31 tables (bounded concurrency).
   // Manifest order is preserved by storing into a positional array.
-  const fetched: Array<{ spec: UserExportTable; rows: unknown[] } | null> =
-    new Array(USER_EXPORT_TABLES.length).fill(null);
+  //
+  // Issue 5 (audit-2026-05-07 follow-up): pre-fix, both the
+  // Promise.allSettled rejection branch AND `fetchRowsForSpec`'s
+  // per-error returns silently substituted `[]` — the bundle reported
+  // "row_count: 0" for failed tables indistinguishably from genuinely
+  // empty tables, violating the "complete export" requirement of GDPR
+  // Art. 15. We now record an explicit `fetch_error` per table and
+  // surface `partial: true` + `failed_tables` at the bundle level so
+  // the route can refuse to deliver an incomplete bundle.
+  interface FetchedEntry {
+    spec: UserExportTable;
+    rows: unknown[];
+    error: string | null;
+  }
+  const fetched: Array<FetchedEntry | null> = new Array(
+    USER_EXPORT_TABLES.length,
+  ).fill(null);
 
   for (let start = 0; start < USER_EXPORT_TABLES.length; start += EXPORT_FETCH_CONCURRENCY) {
     const batch = USER_EXPORT_TABLES.slice(start, start + EXPORT_FETCH_CONCURRENCY);
@@ -449,14 +482,26 @@ export async function collectUserExportBundle(
     );
     for (let i = 0; i < batch.length; i += 1) {
       const r = results[i];
+      const spec = batch[i];
       if (r.status === "fulfilled") {
-        fetched[start + i] = { spec: batch[i], rows: r.value };
+        const result = r.value;
+        if (result.error) {
+          console.error(
+            `[gdpr-export] fetch failed for ${spec.table}: ${result.error}`,
+          );
+          fetched[start + i] = { spec, rows: [], error: result.error };
+        } else {
+          fetched[start + i] = { spec, rows: result.rows, error: null };
+        }
       } else {
+        const reason =
+          r.reason instanceof Error
+            ? r.reason.message
+            : String(r.reason ?? "unknown rejection");
         console.error(
-          `[gdpr-export] batch fetch rejected for ${batch[i].table}:`,
-          r.reason instanceof Error ? r.reason.message : r.reason,
+          `[gdpr-export] batch fetch rejected for ${spec.table}: ${reason}`,
         );
-        fetched[start + i] = { spec: batch[i], rows: [] };
+        fetched[start + i] = { spec, rows: [], error: reason };
       }
     }
   }
@@ -464,6 +509,7 @@ export async function collectUserExportBundle(
   // Phase 2: cumulative-size budget. O(n) over the rows, NOT
   // O(log n) over the full bundle.
   const tables: ExportTablePayload[] = [];
+  const failedTables: string[] = [];
   let totalRowCount = 0;
   let bytesUsed = 0;
   let truncatedAtSizeCap = false;
@@ -471,7 +517,11 @@ export async function collectUserExportBundle(
 
   for (const entry of fetched) {
     if (!entry) continue;
-    const { spec, rows } = entry;
+    const { spec, rows, error: fetchError } = entry;
+
+    if (fetchError) {
+      failedTables.push(spec.table);
+    }
 
     if (truncatedAtSizeCap) {
       tables.push({
@@ -479,6 +529,7 @@ export async function collectUserExportBundle(
         rows: [],
         row_count: 0,
         truncated_at_cap: true,
+        fetch_error: fetchError,
       });
       continue;
     }
@@ -504,6 +555,7 @@ export async function collectUserExportBundle(
       rows: includedRows,
       row_count: includedRows.length,
       truncated_at_cap: tableTruncated,
+      fetch_error: fetchError,
     });
     totalRowCount += includedRows.length;
   }
@@ -515,6 +567,8 @@ export async function collectUserExportBundle(
     total_row_count: totalRowCount,
     tables,
     truncated_at_size_cap: truncatedAtSizeCap,
+    partial: failedTables.length > 0,
+    failed_tables: failedTables,
   };
 }
 
@@ -537,11 +591,16 @@ export async function collectUserExportBundle(
  * the export contains the subject's own data. A future refactor that
  * drops a filter would silently leak cross-tenant rows.
  */
+interface FetchRowsResult {
+  rows: unknown[];
+  error: string | null;
+}
+
 async function fetchRowsForSpec(
   admin: SupabaseClient,
   spec: UserExportTable,
   userId: string,
-): Promise<unknown[]> {
+): Promise<FetchRowsResult> {
   if (spec.kind === "direct") {
     const { data, error } = await admin
       .from(spec.table)
@@ -549,13 +608,14 @@ async function fetchRowsForSpec(
       .eq(spec.user_column, userId)
       .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (error) {
-      console.error(
-        `[gdpr-export] direct select failed for ${spec.table}:`,
-        error.message,
-      );
-      return [];
+      // Issue 5 fix: surface the error to the bundle instead of silently
+      // substituting `[]`. The route's gate refuses to mint a signed URL
+      // when ANY table reports a fetch_error.
+      const msg = `direct select failed for ${spec.table}: ${error.message}`;
+      console.error(`[gdpr-export] ${msg}`);
+      return { rows: [], error: msg };
     }
-    return data ?? [];
+    return { rows: data ?? [], error: null };
   }
 
   if (spec.kind === "projected") {
@@ -566,15 +626,13 @@ async function fetchRowsForSpec(
       .eq(spec.user_column, userId)
       .limit(EXPORT_PER_TABLE_ROW_CAP);
     if (error) {
-      console.error(
-        `[gdpr-export] projected select failed for ${spec.source_table} (->${spec.table}):`,
-        error.message,
-      );
-      return [];
+      const msg = `projected select failed for ${spec.source_table} (->${spec.table}): ${error.message}`;
+      console.error(`[gdpr-export] ${msg}`);
+      return { rows: [], error: msg };
     }
     // Run the redaction projection. This is where cross-party PII in
     // metadata gets blanked.
-    return spec.project(data ?? [], userId);
+    return { rows: spec.project(data ?? [], userId), error: null };
   }
 
   // Indirect: two-hop.
@@ -584,15 +642,13 @@ async function fetchRowsForSpec(
     .eq(spec.parent_user_column, userId)
     .limit(2000);
   if (parentErr) {
-    console.error(
-      `[gdpr-export] parent select failed for ${spec.parent_table} (via ${spec.table}):`,
-      parentErr.message,
-    );
-    return [];
+    const msg = `parent select failed for ${spec.parent_table} (via ${spec.table}): ${parentErr.message}`;
+    console.error(`[gdpr-export] ${msg}`);
+    return { rows: [], error: msg };
   }
   const parentIds = (parentRows ?? []).map((r: { id: string }) => r.id);
   if (parentIds.length === 0) {
-    return [];
+    return { rows: [], error: null };
   }
 
   const { data, error } = await admin
@@ -601,11 +657,9 @@ async function fetchRowsForSpec(
     .in(spec.via_column, parentIds)
     .limit(EXPORT_PER_TABLE_ROW_CAP);
   if (error) {
-    console.error(
-      `[gdpr-export] indirect select failed for ${spec.table}:`,
-      error.message,
-    );
-    return [];
+    const msg = `indirect select failed for ${spec.table}: ${error.message}`;
+    console.error(`[gdpr-export] ${msg}`);
+    return { rows: [], error: msg };
   }
-  return data ?? [];
+  return { rows: data ?? [], error: null };
 }

@@ -145,6 +145,8 @@ describe("POST /api/account/export — orphan cleanup on sign failure (I2)", () 
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValue({ error: null });
     removeMock.mockResolvedValue({ error: null });
@@ -260,10 +262,12 @@ describe("POST /api/account/export — signed URL TTL + envelope (spec invariant
       generated_at: "2026-04-16T00:00:00Z",
       total_row_count: 3,
       tables: [
-        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false },
-        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false },
+        { table: "profiles", rows: [{ id: "user-ttl" }], row_count: 1, truncated_at_cap: false, fetch_error: null },
+        { table: "api_keys", rows: [{ id: "k1" }, { id: "k2" }], row_count: 2, truncated_at_cap: false, fetch_error: null },
       ],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValue({ error: null });
     createSignedUrlMock.mockResolvedValue({
@@ -366,6 +370,8 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValue({ error: null });
     createSignedUrlMock.mockResolvedValue({
@@ -414,6 +420,67 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
     expect(createSignedUrlMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * audit-2026-05-07 follow-up — Issue 5
+   *
+   * GDPR Art. 15 requires a COMPLETE export. Pre-fix, a rejected fetch
+   * or PG error in collectUserExportBundle silently substituted `[]`
+   * for the failed table, and the route happily minted a signed URL
+   * over an incomplete bundle. Policy (a) from the audit playbook:
+   * refuse to mint the URL on any fetch failure; return 500 with a
+   * stable code so the user retries.
+   *
+   * The tests below pin:
+   *   - bundle.partial=true → 500 with code=export_partial and the
+   *     failed_tables array in the response body.
+   *   - The signed URL is NOT minted and the storage object is NOT
+   *     uploaded (the bundle assembly itself can be the slowest step
+   *     but the cheap upload is also skipped).
+   *   - The audit event is NOT emitted for a partial-export refusal.
+   */
+  it("Issue 5: returns 500 with code=export_partial when bundle.partial is true (does NOT mint signed URL)", async () => {
+    collectBundleMock.mockResolvedValueOnce({
+      schema_version: 1,
+      user_id: "user-429",
+      generated_at: "2026-04-16T00:00:00Z",
+      total_row_count: 0,
+      tables: [
+        { table: "profiles", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: null },
+        { table: "api_keys", rows: [], row_count: 0, truncated_at_cap: false, fetch_error: "direct select failed for api_keys: statement timeout" },
+      ],
+      truncated_at_size_cap: false,
+      partial: true,
+      failed_tables: ["api_keys"],
+    });
+
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest());
+    expect(res.status).toBe(500);
+
+    const body = (await res.json()) as {
+      error?: string;
+      code?: string;
+      failed_tables?: string[];
+    };
+    expect(body.code).toBe("export_partial");
+    expect(body.failed_tables).toEqual(["api_keys"]);
+
+    // The storage round-trip must NOT have fired. A signed URL over a
+    // partial bundle is exactly the regression Issue 5 closes.
+    expect(uploadMock).not.toHaveBeenCalled();
+    expect(createSignedUrlMock).not.toHaveBeenCalled();
+
+    // No audit emission either — emitting `account.export` here would
+    // create a misleading forensic record of an export that did NOT
+    // happen.
+    await Promise.resolve();
+    await Promise.resolve();
+    const exportCall = logAuditRpcMock.mock.calls.find(
+      (c) => c[0] === "log_audit_event" && c[1]?.p_action === "account.export",
+    );
+    expect(exportCall).toBeUndefined();
+  });
+
   it("the limiter key buckets per user (not global) — different users each get 1/day", async () => {
     // First call for user-A: token available.
     getUserMock.mockResolvedValueOnce({
@@ -439,6 +506,8 @@ describe("POST /api/account/export — 1/day rate limit (429 path)", () => {
       total_row_count: 0,
       tables: [],
       truncated_at_size_cap: false,
+      partial: false,
+      failed_tables: [],
     });
     uploadMock.mockResolvedValueOnce({ error: null });
     createSignedUrlMock.mockResolvedValueOnce({
