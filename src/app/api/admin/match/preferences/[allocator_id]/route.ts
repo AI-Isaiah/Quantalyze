@@ -19,8 +19,12 @@ export async function PUT(
 
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
+  // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   let body: Record<string, unknown>;
