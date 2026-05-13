@@ -42,6 +42,13 @@ const state = vi.hoisted(() => ({
   auditLog: vi.fn(),
 }));
 
+/**
+ * audit-2026-05-07 P459 + P699 + P703: `requireRole("admin")` falls back to
+ * `isAdminUser` (the unified union) when user_app_roles misses, which chains
+ * `.eq("user_id", id).eq("role", "admin").limit(1)` AND reads
+ * `profiles.is_admin`. Mock both shapes so the negative path (non-admin
+ * caller) returns cleanly instead of throwing on an unmocked chain.
+ */
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -52,11 +59,36 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     from: (table: string) => {
       if (table === "user_app_roles") {
+        const allRoles = () => ({
+          data: state.userRoles.map((r) => ({ role: r })),
+          error: null,
+        });
         return {
           select: () => ({
-            eq: async () => ({
-              data: state.userRoles.map((r) => ({ role: r })),
-              error: null,
+            eq: (_col1: string, _val1: string) => {
+              const rolesPromise = Promise.resolve(allRoles());
+              return Object.assign(rolesPromise, {
+                eq: (_col2: string, val2: string) => ({
+                  limit: async (_n: number) => {
+                    const filtered = state.userRoles
+                      .filter((r) => r === val2)
+                      .map((r) => ({ role: r }));
+                    return { data: filtered, error: null };
+                  },
+                }),
+              });
+            },
+          }),
+        };
+      }
+      if (table === "profiles") {
+        return {
+          select: () => ({
+            eq: () => ({
+              single: async () => ({
+                data: { is_admin: false },
+                error: null,
+              }),
             }),
           }),
         };

@@ -49,6 +49,22 @@ const state = vi.hoisted(() => ({
 // + role-gate) runs BEFORE sanitize_user.
 const callOrder: string[] = [];
 
+/**
+ * Lane F (audit-2026-05-07 P705) wired `requireAdmin(supabase, user)` into
+ * the approve route immediately before the sanitize_user RPC. `requireAdmin`
+ * calls `isAdminUser` which OR's THREE signals:
+ *   1. `user_app_roles.select("role").eq("user_id", id).eq("role","admin").limit(1)`
+ *   2. `profiles.select("is_admin").eq("id", id).single()`
+ *   3. ADMIN_EMAIL env-fallback (not exercised here)
+ *
+ * `withRole("admin")` also calls `requireRole` which does the user_app_roles
+ * SELECT-by-user_id (no `.eq("role")` chain) and only falls into the
+ * isAdminUser union when the user_app_roles read misses. We support BOTH
+ * shapes — single-eq for `requireRole`, double-eq + limit for
+ * `hasAdminRoleRow` — and we also handle the `profiles` table fallback so
+ * the negative path returns cleanly instead of throwing on an unmocked
+ * chain.
+ */
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
@@ -59,15 +75,47 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     from: (table: string) => {
       if (table === "user_app_roles") {
+        const allRoles = () => ({
+          data: state.userRoles.map((r) => ({ role: r })),
+          error: null,
+        });
         return {
           select: () => ({
-            eq: async () => {
+            eq: (_col1: string, _val1: string) => {
               callOrder.push("getUserRoles");
-              return {
-                data: state.userRoles.map((r) => ({ role: r })),
-                error: null,
-              };
+              const rolesPromise = Promise.resolve(allRoles());
+              // Attach the chained `.eq().limit()` shape used by
+              // `hasAdminRoleRow` so an `await` on the bare `.eq()` resolves
+              // to the full role set (requireRole / getUserRoles path),
+              // while the chained `.eq(...).limit(1)` resolves to a filtered
+              // single-role match (isAdminUser fallback path).
+              return Object.assign(rolesPromise, {
+                eq: (_col2: string, val2: string) => ({
+                  limit: async (_n: number) => {
+                    callOrder.push("hasAdminRoleRow");
+                    const filtered = state.userRoles
+                      .filter((r) => r === val2)
+                      .map((r) => ({ role: r }));
+                    return { data: filtered, error: null };
+                  },
+                }),
+              });
             },
+          }),
+        };
+      }
+      if (table === "profiles") {
+        // Lane F: `hasIsAdminFlag` reads profiles.is_admin under the
+        // isAdminUser union. Return `false` so non-admin callers stay
+        // forbidden; admin callers already pass via user_app_roles.
+        return {
+          select: () => ({
+            eq: () => ({
+              single: async () => ({
+                data: { is_admin: false },
+                error: null,
+              }),
+            }),
           }),
         };
       }
