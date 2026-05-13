@@ -92,9 +92,18 @@ BEGIN
           'test-p911-' || test_uid::text || '@quantalyze.test',
           now(), now());
 
+  -- PR #150 follow-up: Supabase projects typically install an
+  -- on_auth_user_created trigger on auth.users that auto-inserts a
+  -- profile row with display_name=NULL (or email). ON CONFLICT DO NOTHING
+  -- would then leave the row at the auto-inserted value, and the post-
+  -- rollback display_name='normal name' assertion below would fail
+  -- even when the savepoint correctly reverted the UPDATE. Use DO
+  -- UPDATE to force the seed value the test was authored to assume.
   INSERT INTO profiles (id, display_name, email)
   VALUES (test_uid, 'normal name', 'test-p911@quantalyze.test')
-  ON CONFLICT (id) DO NOTHING;
+  ON CONFLICT (id) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    email        = EXCLUDED.email;
 
   -- Switch to authenticated role (mimics the user's PostgREST session).
   -- PR #150 follow-up: forge the request.jwt.claims sub so auth.uid()
@@ -206,7 +215,9 @@ BEGIN
           now(), now());
   INSERT INTO profiles (id, display_name, email)
   VALUES (test_uid, 'atomicity test', 'test-p915@quantalyze.test')
-  ON CONFLICT (id) DO NOTHING;
+  ON CONFLICT (id) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    email        = EXCLUDED.email;
 
   -- Open a SAVEPOINT, call sanitize_user, then force a rollback.
   BEGIN
@@ -260,7 +271,9 @@ BEGIN
           now(), now());
   INSERT INTO profiles (id, display_name, email)
   VALUES (test_uid, 'finding3 name', 'test-finding3@quantalyze.test')
-  ON CONFLICT (id) DO NOTHING;
+  ON CONFLICT (id) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    email        = EXCLUDED.email;
 
   -- Forge JWT sub so RLS admits the row to the authenticated role's view.
   -- See Test 2 / PR #150 follow-up note for the full rationale.
@@ -340,7 +353,9 @@ BEGIN
           now(), now());
   INSERT INTO profiles (id, display_name, email)
   VALUES (test_uid, 'finding4 name', 'test-finding4@quantalyze.test')
-  ON CONFLICT (id) DO NOTHING;
+  ON CONFLICT (id) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    email        = EXCLUDED.email;
 
   -- Forge JWT sub so RLS admits the seeded row to the authenticated
   -- role's view. Set once at the top of the test; each loop iteration
