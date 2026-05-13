@@ -19,8 +19,8 @@ starve sync_trades — the migration 086 RPC's ORDER BY + low-skip guard pace it
 
 Usage:
     cd analytics-service
-    python -m scripts.phase12_deploy
-    SKIP_KILL_SWITCH=1 python -m scripts.phase12_deploy   # bypass kill-switch
+    python -m scripts.phase12_deploy                          # kill-switch OFF by default (P2021)
+    RUN_KILL_SWITCH=true python -m scripts.phase12_deploy     # enable kill-switch
 """
 from __future__ import annotations
 

@@ -2,9 +2,16 @@
 when p99.9 (post-TOAST-compression on-disk size) >= 800kB.
 
 Usage:
-    python -m scripts.phase12_kill_switch                 # auto-runs SQL probe
-    python -m scripts.phase12_kill_switch --p999 820000 --count 15
-    SKIP_KILL_SWITCH=1 python -m scripts.phase12_kill_switch  # honors override
+    # Opt-IN: kill-switch is OFF by default; set RUN_KILL_SWITCH to enable.
+    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch              # auto-runs SQL probe
+    RUN_KILL_SWITCH=true python -m scripts.phase12_kill_switch --p999 820000 --count 15
+    python -m scripts.phase12_kill_switch                                   # bypass (default)
+
+P2021 (audit-2026-05-07 round 2):
+    Inverted from the prior opt-OUT `SKIP_KILL_SWITCH=1` polarity — that fired the
+    kill-switch by default on partial deploys. RUN_KILL_SWITCH is now an opt-IN
+    truthy parse (true|yes|1|on / false|no|0|off|""); unknown values raise SystemExit
+    rather than silently defaulting (CLAUDE.md Rule 12: fail loud).
 
 Idempotent: re-running after a successful cutover is a no-op (heavy keys already missing
 from metrics_json; the batch upsert into strategy_analytics_series is itself an upsert).
@@ -37,12 +44,38 @@ from services.db import db_execute, get_supabase
 
 THRESHOLD_BYTES = 800_000  # 800kB — Phase 12 SC#3a kill-switch trigger.
 
-# P2024 (audit-2026-05-07 round 2): the heavy-kind allowlist is no longer
-# encoded in Python. Migration 129's `cutover_strategy_metrics_keys_atomic`
-# RPC defines `v_allowlist` server-side and reads metrics_json under
-# SELECT ... FOR UPDATE — the Python caller never touches the snapshot.
-# Keeping a duplicate list here invites drift; the single source of truth
-# lives in supabase/migrations/129_*.sql.
+# P2021: opt-IN env var (replaces prior opt-OUT SKIP_KILL_SWITCH=1). Unknown
+# values fall through to _parse_run_flag's SystemExit (CLAUDE.md Rule 12).
+_TRUTHY = frozenset({"true", "yes", "1", "on"})
+_FALSY = frozenset({"false", "no", "0", "off", ""})
+
+
+def _parse_run_flag(value: str) -> bool:
+    """Parse a RUN_KILL_SWITCH-shaped env value with case folding.
+
+    Truthy: true / yes / 1 / on
+    Falsy:  false / no / 0 / off / "" (unset is handled by the caller)
+
+    Unknown values raise SystemExit (Rule 12: fail loud — a typo like
+    `RUN_KILL_SWITCH=ture` must not silently default to either polarity).
+    """
+    norm = (value or "").strip().lower()
+    if norm in _TRUTHY:
+        return True
+    if norm in _FALSY:
+        return False
+    raise SystemExit(
+        f"phase12_kill_switch: RUN_KILL_SWITCH={value!r} is not a recognized "
+        f"boolean (expected one of: true/yes/1/on or false/no/0/off). "
+        f"Aborting to avoid an ambiguous kill-switch decision."
+    )
+
+
+# P2024: the heavy-kind allowlist is no longer encoded in Python. Migration
+# 129's `cutover_strategy_metrics_keys_atomic` RPC defines `v_allowlist`
+# server-side and reads metrics_json under SELECT ... FOR UPDATE — the
+# Python caller never touches the snapshot. Single source of truth lives
+# in supabase/migrations/129_*.sql.
 
 SQL_PROBE_PATH = Path(__file__).parent / "analyze_metrics_size.sql"
 
@@ -145,8 +178,13 @@ async def main(
     cli_p999: float | None = None,
     cli_count: int | None = None,
 ) -> int:
-    if os.getenv("SKIP_KILL_SWITCH") == "1":
-        print("phase12_kill_switch: SKIP_KILL_SWITCH=1 — bypassing.")
+    # P2021: opt-IN. Default (unset) → bypass. Truthy → run. Garbage → SystemExit.
+    raw = os.getenv("RUN_KILL_SWITCH")
+    if raw is None or not _parse_run_flag(raw):
+        print(
+            "phase12_kill_switch: RUN_KILL_SWITCH not set (or falsy) — bypassing. "
+            "Set RUN_KILL_SWITCH=true to enable."
+        )
         return 0
 
     p999, n = await measure_p999(cli_p999=cli_p999, cli_count=cli_count)
@@ -196,7 +234,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
             "Phase 12 kill-switch — DB-side pg_column_size measurement only (M-03). "
-            "Honors SKIP_KILL_SWITCH=1."
+            "Opt-IN: set RUN_KILL_SWITCH=true to enable; default is bypass (P2021)."
         )
     )
     parser.add_argument(
