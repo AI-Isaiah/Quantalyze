@@ -23,16 +23,25 @@
 --   COALESCE((v_diff->>'percent_allocated')::numeric,
 --            (v_diff->>'new_weight')::numeric * 100)
 --
--- The dual encoding let a client pass `new_weight: 50` (intended as
--- "50 percent") AND have it silently multiplied by 100 → 5000. Round-2
--- audit S14c.RT.2 observed three production diffs landing at
--- percent_allocated = 4750..5000, far outside the 0..100 valid range.
+-- The dual encoding made the canonical write site ambiguous: a client could
+-- send `new_weight: 0.5` OR `percent_allocated: 50` and the function would
+-- accept either, then the rest of the system had to guess which encoding
+-- to expect on read. This is the bug class — silent acceptance of two
+-- shapes — not a specific numeric overflow scenario; the existing
+-- column-level CHECK `percent_allocated NUMERIC(5,2) CHECK (NULL OR
+-- (0.1..50))` from migration 059 makes any out-of-range value impossible
+-- to PERSIST (NUMERIC(5,2) caps at 999.99, the inline CHECK caps at 50).
 -- The fix collapses to the single canonical encoding
--- `(v_diff->>'percent_allocated')::numeric` and adds a NOT VALID-then-
--- VALIDATE CHECK constraint on bridge_outcomes.percent_allocated as a
--- defense-in-depth backstop. Block D drops the `new_weight` field from
--- the zod schema in commit/route.ts so the request side stops accepting
--- it; this migration enforces the SQL side independently.
+-- `(v_diff->>'percent_allocated')::numeric` so the function's contract
+-- with callers is unambiguous. STEP 1 adds a NOT VALID-then-VALIDATE
+-- range CHECK on bridge_outcomes.percent_allocated bounded [0, 100]; this
+-- is WIDER than mig 059's inline [0.1, 50] check on purpose — it survives
+-- a future migration that drops the mig 059 inline check, providing
+-- defense-in-depth against schema drift, not against currently-persistable
+-- values. The transition path: route.ts at src/app/api/allocator/scenario/commit/
+-- normalises `new_weight: 0.08` into `percent_allocated: 8` BEFORE
+-- forwarding to this RPC. Block C/D will drop new_weight from the zod
+-- schema and drawer once the wire shape has fully migrated.
 --
 -- Change 2 — P1957 (CRITICAL): asof + value_usd-filtered ownership probe.
 -- -----------------------------------------------------------------------
@@ -70,12 +79,22 @@ SET lock_timeout = '3s';
 --         scan under SHARE UPDATE EXCLUSIVE which permits concurrent
 --         reads. Both run in this BEGIN/COMMIT so the migration is
 --         atomic. Existing rows are scanned, but readers are not blocked
---         during the scan window. If VALIDATE fails (a stale dual-encoded
---         row sneaked through before this migration applied), the
---         wrapping transaction rolls back so the DO block at STEP 3 never
---         runs. Both ALTERs are wrapped in pg_constraint guards so a
---         re-apply (DR recovery, manual replay) no-ops instead of
---         42710-aborting before the function-replacement work runs.
+--         during the scan window. VALIDATE is expected to PASS — every
+--         persisted bridge_outcomes.percent_allocated row already
+--         satisfies mig 059's inline CHECK (0.1..50), which is strictly
+--         inside our new [0..100] range. The wrapping transaction rolls
+--         back on any failure regardless, so DR safety is preserved if a
+--         future tampering somehow introduces an out-of-range row before
+--         this migration applies. Both ALTERs are wrapped in
+--         pg_constraint guards so a re-apply (DR recovery, manual replay)
+--         no-ops instead of 42710-aborting before the function-replacement
+--         work runs. NB: lock_timeout=3s applies to lock ACQUISITION only;
+--         the VALIDATE scan itself is bounded by table size — for the
+--         bridge_outcomes row count expected in production (Phase 12
+--         compute-job-driven, low thousands), the scan completes in
+--         <100ms. If future growth pushes this beyond 3s of lock-wait
+--         time under contention, split the VALIDATE into its own
+--         migration with a higher lock_timeout.
 -- --------------------------------------------------------------------------
 DO $$
 BEGIN
@@ -433,13 +452,22 @@ BEGIN
     RAISE EXCEPTION 'Migration 128 assertion (a) failed: commit_scenario_batch is not SECURITY DEFINER';
   END IF;
 
-  -- (b) search_path still set; auth.uid() guard still present in source;
-  --     race-safe ON CONFLICT path lands in the new body.
-  SELECT array_to_string(proconfig, ',') INTO v_search_path
-    FROM pg_proc
-   WHERE oid = 'public.commit_scenario_batch(uuid,jsonb)'::regprocedure;
-  IF v_search_path IS NULL OR v_search_path NOT LIKE '%search_path=public%' THEN
-    RAISE EXCEPTION 'Migration 128 assertion (b) failed: search_path not set on commit_scenario_batch (got %)', v_search_path;
+  -- (b) search_path still set to the exact H-B hardening value, not a weaker
+  --     prefix match; auth.uid() guard still present in source; race-safe
+  --     ON CONFLICT path lands in the new body. The old `LIKE '%search_path=public%'`
+  --     would have passed for `public, pg_catalog` (no pg_temp) — tightened
+  --     to the same exact-string check mig 129's assertion (e) uses, so a
+  --     future CREATE OR REPLACE that accidentally weakens search_path
+  --     fails the self-verification.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_proc p
+     WHERE p.oid = 'public.commit_scenario_batch(uuid,jsonb)'::regprocedure
+       AND 'search_path=public, pg_temp' = ANY(p.proconfig)
+  ) THEN
+    SELECT array_to_string(proconfig, ',') INTO v_search_path
+      FROM pg_proc
+     WHERE oid = 'public.commit_scenario_batch(uuid,jsonb)'::regprocedure;
+    RAISE EXCEPTION 'Migration 128 assertion (b) failed: search_path not exactly ''public, pg_temp'' on commit_scenario_batch (got %)', v_search_path;
   END IF;
 
   SELECT prosrc INTO v_prosrc
