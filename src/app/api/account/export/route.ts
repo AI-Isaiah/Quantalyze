@@ -82,8 +82,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // bundle marked `partial: true` — was rejected because a regulator
   // receiving a flagged-partial export would still see it as a data-
   // protection deficiency; "complete or nothing" is the safer default.
+  //
+  // Finding 2 (audit-2026-05-07 red-team): the failed_tables list is
+  // schema reconnaissance — exposing which internal tables exist (and
+  // which currently error) gives an attacker the map they need to
+  // tune subsequent probes. Strip it from the client-facing body and
+  // log it server-side only, correlated by a request_id the user can
+  // quote to support so we can find the matching log line.
   if (bundle.partial) {
+    const requestId = crypto.randomUUID();
     console.error("[api/account/export] refusing to mint signed URL — partial bundle:", {
+      request_id: requestId,
       user_id: user.id,
       failed_tables: bundle.failed_tables,
     });
@@ -92,7 +101,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         error:
           "Some tables failed to export. Please retry — GDPR Art. 15 requires a complete bundle.",
         code: "export_partial",
-        failed_tables: bundle.failed_tables,
+        request_id: requestId,
       },
       { status: 500 },
     );
