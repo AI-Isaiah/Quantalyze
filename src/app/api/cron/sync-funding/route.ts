@@ -61,6 +61,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // same batch in compute_jobs.metadata->>'correlation_id'.
   const correlation_id = await getCorrelationId();
 
+  // @audit-skip: scheduled cron tick with no acting user. Enqueuing
+  // sync_funding compute jobs is platform-internal maintenance, not a
+  // user-attributable action. Vercel Cron requests don't carry a JWT
+  // and an audit row with NULL acting_user would be meaningless. The
+  // downstream worker emits per-strategy events with platform
+  // service-role attribution.
   const results = await Promise.allSettled(
     rows.map((row) =>
       admin.rpc("enqueue_compute_job", {
