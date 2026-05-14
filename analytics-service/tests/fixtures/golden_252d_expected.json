@@ -5566,14 +5566,14 @@
     ],
     "trade_metrics": {
       "avg_duration_days": 4.94,
-      "avg_losing_trade": -0.035821,
+      "avg_losing_trade": -35.820881,
       "avg_roi": 0.021091,
-      "avg_winning_trade": 0.047873,
+      "avg_winning_trade": 47.873066,
       "best_trade_roi": 0.15293388741715502,
       "buy_volume_pct": 0.0,
       "closed_positions": 50,
       "daily_turnover_usd": 1450.0,
-      "expectancy": 0.021090920000000006,
+      "expectancy": 21.091002960000008,
       "gross_volume_usd": 362500.0,
       "long_count": 25,
       "long_volume_pct": 0.0,
@@ -5785,7 +5785,7 @@
           "side": "short"
         }
       ],
-      "risk_reward_ratio": 1.3364506853521678,
+      "risk_reward_ratio": 1.3364569676552625,
       "sell_volume_pct": 0.0,
       "short_count": 25,
       "short_volume_pct": 0.0,
@@ -5803,7 +5803,7 @@
           "total_notional": 187500.0
         }
       },
-      "weighted_risk_reward_ratio": 2.8399577063733568,
+      "weighted_risk_reward_ratio": 2.8399710562674323,
       "win_rate": 0.68,
       "winners_count": 34,
       "worst_trade_roi": -0.08465765601095945
