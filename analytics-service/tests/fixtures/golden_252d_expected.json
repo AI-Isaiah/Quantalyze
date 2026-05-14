@@ -1,4 +1,5 @@
 {
+  "_fixture_has_maker_taker": true,
   "metrics_json": {
     "cagr": 0.021583583443333776,
     "calmar": 0.08902841319791246,
@@ -5794,13 +5795,21 @@
       "total_positions": 50,
       "total_volume_usd": 0.0,
       "trade_mix": {
-        "long": {
-          "count": 125,
-          "total_notional": 175000.0
+        "long_maker": {
+          "count": 42,
+          "total_notional": 58600.0
         },
-        "short": {
-          "count": 125,
-          "total_notional": 187500.0
+        "long_taker": {
+          "count": 83,
+          "total_notional": 116400.0
+        },
+        "short_maker": {
+          "count": 42,
+          "total_notional": 63200.0
+        },
+        "short_taker": {
+          "count": 83,
+          "total_notional": 124300.0
         }
       },
       "weighted_risk_reward_ratio": 2.8399710562674323,

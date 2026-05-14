@@ -24,6 +24,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from services.analytics_runner import (
     _compute_derived_trade_metrics,  # B-01 — extracted in Plan 12-05
     _compute_position_side_volume_pcts,
@@ -35,6 +37,58 @@ from services.metrics import compute_all_metrics
 from services.position_reconstruction import compute_turnover_series
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# audit-2026-05-07 G.2 / P2005: top-level keys in golden_252d_expected.json
+# that are fixture-metadata, not metrics output. The parity comparator MUST
+# allow these as legitimate "extra" top-level keys instead of failing the
+# extra-keys check.
+_FIXTURE_METADATA_KEYS = {"_fixture_has_maker_taker"}
+
+
+def _resolve_has_maker_taker(
+    fixture_expected: dict[str, Any], env_value: str | None
+) -> bool:
+    """audit-2026-05-07 P2005: reconcile fixture-pinned mode against env.
+
+    The fixture's ``_fixture_has_maker_taker`` is the source of truth.
+    ``TRADE_MIX_HAS_MAKER_TAKER`` env is optional — if set, it MUST agree
+    with the fixture, otherwise CI silently tests the wrong bucket shape.
+
+    Raises:
+        AssertionError if the fixture is missing the key, the key has the
+            wrong type, or the env contradicts the fixture.
+    """
+    if "_fixture_has_maker_taker" not in fixture_expected:
+        raise AssertionError(
+            "golden_252d_expected.json is missing top-level "
+            "'_fixture_has_maker_taker' — fixture predates P2005. "
+            "Regenerate via regen_golden.py so the bucket-shape mode is "
+            "pinned in. (audit-2026-05-07 P2005)"
+        )
+    raw_fixture_mode = fixture_expected["_fixture_has_maker_taker"]
+    if not isinstance(raw_fixture_mode, bool):
+        raise AssertionError(
+            f"_fixture_has_maker_taker must be a JSON bool, got "
+            f"{type(raw_fixture_mode).__name__}={raw_fixture_mode!r}. "
+            "Regenerate the fixture. (audit-2026-05-07 P2005)"
+        )
+    if env_value is not None:
+        # Match production parsing at services/analytics_runner.py: case-
+        # insensitive comparison against "true"/"false". Strict equality
+        # used to reject "True"/"TRUE" as contradictions, but production
+        # parses those as truthy, so the parity test would CI-fail on the
+        # exact same env that production accepts.
+        env_normalized = env_value.lower()
+        expected_env = "true" if raw_fixture_mode else "false"
+        if env_normalized != expected_env:
+            raise AssertionError(
+                f"TRADE_MIX_HAS_MAKER_TAKER env ({env_value!r}) "
+                f"contradicts fixture pinned mode "
+                f"(_fixture_has_maker_taker={raw_fixture_mode}). "
+                "Regenerate the fixture with the env you want, or unset "
+                "the env. (audit-2026-05-07 P2005)"
+            )
+    return raw_fixture_mode
 
 
 def _round_sig(x: float, sig: int = 12) -> float:
@@ -175,6 +229,11 @@ def assertMetricParity(actual: dict, expected: dict, prefix: str = "") -> None:
     """
     actual_keys = set(actual.keys())
     expected_keys = set(expected.keys())
+    # audit-2026-05-07 G.2 / P2005: at the top level (prefix == ""), permit
+    # fixture-metadata keys (e.g. _fixture_has_maker_taker) that the regen
+    # script pins into the JSON for cross-process contract enforcement.
+    if prefix == "":
+        expected_keys -= _FIXTURE_METADATA_KEYS
     missing = expected_keys - actual_keys
     extra = actual_keys - expected_keys
     assert not missing, f"{prefix}: missing keys in actual: {sorted(missing)}"
@@ -225,6 +284,83 @@ def test_scalar_close_two_tier_fallback():
     assert _scalar_close(a, b) is False
 
 
+# audit-2026-05-07 P2005: _resolve_has_maker_taker contract pins
+def test_resolve_has_maker_taker_fixture_only_true():
+    """No env set — fixture pin is the source of truth (True case)."""
+    assert _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, None) is True
+
+
+def test_resolve_has_maker_taker_fixture_only_false():
+    """No env set — fixture pin is the source of truth (False case)."""
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, None) is False
+    )
+
+
+def test_resolve_has_maker_taker_env_agrees():
+    """Env matches fixture — agreement returns fixture mode."""
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "true") is True
+    )
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "false")
+        is False
+    )
+
+
+def test_resolve_has_maker_taker_env_contradicts_raises():
+    """Env contradicts fixture pin — must fail loud (P2005 core defense)."""
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "false")
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "true")
+
+
+def test_resolve_has_maker_taker_missing_key_raises():
+    """Pre-P2005 fixture (key absent) — must refuse instead of defaulting False."""
+    with pytest.raises(AssertionError, match="missing top-level"):
+        _resolve_has_maker_taker({}, None)
+    with pytest.raises(AssertionError, match="missing top-level"):
+        _resolve_has_maker_taker({"other_key": 1}, "true")
+
+
+def test_resolve_has_maker_taker_wrong_type_raises():
+    """Truthy non-bool (e.g. string 'true') must NOT silently pass as True."""
+    with pytest.raises(AssertionError, match="must be a JSON bool"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": "true"}, None)
+    with pytest.raises(AssertionError, match="must be a JSON bool"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": 1}, None)
+
+
+def test_resolve_has_maker_taker_env_case_insensitive_match():
+    """Mixed-case env matches production parsing — must NOT contradict.
+
+    Production at services/analytics_runner.py uses ``.lower() == "true"``
+    so "True"/"TRUE" are truthy. The parity reconciliation must agree
+    or CI will reject env values that production accepts.
+    """
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "True") is True
+    )
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "TRUE") is True
+    )
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "False")
+        is False
+    )
+
+
+def test_resolve_has_maker_taker_env_garbage_still_rejected():
+    """Env set to a non-truthy/non-falsy value contradicts both modes."""
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "1")
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "")
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "yes")
+
+
 def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     """METRICS-13: full parity assertion against committed fixture (B-01 + H-A1 wiring)."""
     # Run the actual metrics path
@@ -244,7 +380,12 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     volume_metrics = _compute_volume_metrics(fills)
     volume_aggregator = _compute_volume_aggregator(fills)
     derived = _compute_derived_trade_metrics(volume_metrics, trade_metrics_from_positions)
-    has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER") == "true"
+    # audit-2026-05-07 G.2 / P2005: prefer the pinned fixture-mode over the
+    # env. The reconciliation is extracted so it can be unit-tested
+    # independently of the full parity pipeline.
+    has_maker_taker = _resolve_has_maker_taker(
+        golden_252d_expected, os.getenv("TRADE_MIX_HAS_MAKER_TAKER")
+    )
     trade_mix = _compute_trade_mix(fills, has_maker_taker=has_maker_taker)
     # KPI-17 follow-up: position-side volume pcts. Fixture has no
     # positions list so the helper returns 0/0 — preserves the prior
@@ -264,25 +405,56 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     metrics_json["trade_metrics"] = merged_trade_metrics
     metrics_json["volume_metrics"] = volume_aggregator
 
-    # H-A1: compute exposure_series + turnover_series the same way as regen_golden.py
+    # audit-2026-05-07 G.1 / P2004: turnover_series is a runner-level
+    # sibling kind populated by analytics_runner via compute_turnover_series.
+    # Previously, this test contained an inline fallback that re-derived the
+    # whole series if compute_all_metrics().sibling_kinds was missing the key
+    # — that fallback duplicated production math, so a bug in
+    # compute_turnover_series could never fail the parity assertion. We now
+    # invoke the production helper directly. If a future refactor moves
+    # turnover_series into compute_all_metrics, fail loud so the engineer
+    # updates the harness instead of double-computing.
     sibling = dict(result.sibling_kinds)
-    if "exposure_series" not in sibling:
-        # Mirror fixture's exposure_series computation
-        symbols = list(next(iter(prices_by_date.values())).keys())
-        exposure_series: list[dict[str, Any]] = []
-        for d in sorted(positions_by_date.keys()):
-            day_p = positions_by_date[d]
-            day_pr = prices_by_date[d]
-            gross = sum(abs(day_p[s] * day_pr[s]) for s in symbols)
-            net = sum(day_p[s] * day_pr[s] for s in symbols)
-            exposure_series.append(
-                {"date": d, "gross": round(gross, 6), "net": round(net, 6)}
-            )
-        sibling["exposure_series"] = exposure_series
-    if "turnover_series" not in sibling:
-        sibling["turnover_series"] = compute_turnover_series(
-            positions_by_date, prices_by_date, nav_by_date
+    if "turnover_series" in sibling:
+        raise AssertionError(
+            "compute_all_metrics().sibling_kinds unexpectedly contains "
+            "'turnover_series' — this is a runner-level sibling kind. If "
+            "you intentionally moved it into compute_all_metrics, update "
+            "the parity test harness to stop computing it twice. "
+            "(audit-2026-05-07 P2004)"
         )
+    sibling["turnover_series"] = compute_turnover_series(
+        positions_by_date, prices_by_date, nav_by_date
+    )
+    # exposure_series: the production helper compute_exposure_metrics is
+    # async and reads position_snapshots from Supabase, so it cannot be
+    # invoked from this offline parity test. We project the same shape from
+    # the in-memory fixture (positions_by_date × prices_by_date), matching
+    # what the runner stores. This DOES re-implement the projection — a
+    # known irreducible limit of the offline test; the integration tests
+    # in test_equity_reconstruction_integration.py and the runner suite
+    # exercise the real DB-backed helper.
+    # P2004 mitigation: if compute_all_metrics ever starts emitting
+    # exposure_series, fail loud so the harness gets revisited.
+    if "exposure_series" in sibling:
+        raise AssertionError(
+            "compute_all_metrics().sibling_kinds unexpectedly contains "
+            "'exposure_series' — this is a runner-level sibling kind. If "
+            "you intentionally moved it into compute_all_metrics, update "
+            "the parity test harness to stop computing it twice. "
+            "(audit-2026-05-07 P2004)"
+        )
+    symbols = list(next(iter(prices_by_date.values())).keys())
+    exposure_series: list[dict[str, Any]] = []
+    for d in sorted(positions_by_date.keys()):
+        day_p = positions_by_date[d]
+        day_pr = prices_by_date[d]
+        gross = sum(abs(day_p[s] * day_pr[s]) for s in symbols)
+        net = sum(day_p[s] * day_pr[s] for s in symbols)
+        exposure_series.append(
+            {"date": d, "gross": round(gross, 6), "net": round(net, 6)}
+        )
+    sibling["exposure_series"] = exposure_series
 
     actual = {
         "metrics_json": metrics_json,
