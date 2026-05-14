@@ -3,6 +3,8 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { withAuth } from "./withAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -47,7 +49,7 @@ import { createClient } from "@/lib/supabase/server";
  * Branded user type signalling the allocator-role gate has run. Routes
  * accepting `AllocatorUser` (rather than the bare `User`) cannot be
  * downgraded back to `withAuth` by accident — TypeScript will reject the
- * type narrowing. Round-2-D type-design (conf 8).
+ * type narrowing.
  */
 export type AllocatorUser = User & { readonly __allocatorRoleVerified: true };
 
@@ -55,51 +57,6 @@ export type AllocatorHandler = (
   req: NextRequest,
   user: AllocatorUser,
 ) => Promise<NextResponse>;
-
-const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
-
-/**
- * Lazy-import Sentry to capture profile-lookup failures and missing-profile
- * states without pulling Sentry into routes that don't otherwise need it.
- * Mirrors the pattern in `src/lib/admin.ts` / `src/lib/audit.ts`.
- */
-function reportProfileGateError(
-  err: unknown,
-  options: {
-    kind: "lookup_error" | "missing_profile";
-    userId: string;
-    code: string | null;
-    message: string;
-  },
-): void {
-  try {
-    void import("@sentry/nextjs")
-      .then((Sentry) => {
-        try {
-          Sentry.captureException(err, {
-            tags: {
-              allocator_gate_failure: "true",
-              allocator_gate_kind: options.kind,
-              allocator_gate_code: options.code ?? "unknown",
-            },
-            extra: {
-              user_id: options.userId,
-              code: options.code,
-              message: options.message,
-            },
-            level: options.kind === "lookup_error" ? "error" : "warning",
-          });
-        } catch {
-          // Swallow — caller already logged via console.error.
-        }
-      })
-      .catch(() => {
-        // Sentry import failed — swallow.
-      });
-  } catch {
-    // import() construction failed (extremely unlikely) — swallow.
-  }
-}
 
 export function withAllocatorAuth(handler: AllocatorHandler) {
   return withAuth(async (req, user) => {
@@ -119,11 +76,14 @@ export function withAllocatorAuth(handler: AllocatorHandler) {
         code: error.code,
         message: error.message,
       });
-      reportProfileGateError(error, {
-        kind: "lookup_error",
-        userId: user.id,
-        code: error.code ?? null,
-        message: error.message ?? "",
+      captureToSentry(error, {
+        tags: {
+          allocator_gate_failure: "true",
+          allocator_gate_kind: "lookup_error",
+          allocator_gate_code: error.code ?? "unknown",
+        },
+        extra: { user_id: user.id, message: error.message ?? "" },
+        level: "error",
       });
       return NextResponse.json(
         { error: "Profile lookup failed" },
@@ -135,14 +95,17 @@ export function withAllocatorAuth(handler: AllocatorHandler) {
       // Missing profile for an authenticated user — should be impossible
       // under normal provisioning, but if it happens the message must be
       // specific so triage doesn't waste time on the role-assignment runbook.
+      const missingErr = new Error("Profile row missing for auth user");
       console.error("[withAllocatorAuth] profile row missing for auth user:", {
         user_id: user.id,
       });
-      reportProfileGateError(new Error("Profile row missing for auth user"), {
-        kind: "missing_profile",
-        userId: user.id,
-        code: null,
-        message: "Profile row missing for auth user",
+      captureToSentry(missingErr, {
+        tags: {
+          allocator_gate_failure: "true",
+          allocator_gate_kind: "missing_profile",
+        },
+        extra: { user_id: user.id },
+        level: "warning",
       });
       return NextResponse.json(
         { error: "Profile not provisioned" },

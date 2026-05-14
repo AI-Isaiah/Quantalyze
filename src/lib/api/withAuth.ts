@@ -1,22 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import type { User } from "@supabase/supabase-js";
 
 type AuthenticatedHandler = (req: NextRequest, user: User) => Promise<NextResponse>;
-
-// audit-2026-05-07 round-2 Block D / P1947 — the 401 path returns
-// authenticated-route metadata (the existence of the route, the error message)
-// and any intermediary cache MUST NOT serve it cross-tenant.
-const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
 export function withAuth(handler: AuthenticatedHandler) {
   return async (req: NextRequest) => {
     // CSRF defense-in-depth on mutating requests (POST/PUT/PATCH/DELETE).
     // GET/HEAD/OPTIONS are safe methods and don't need origin checks.
     //
-    // Round-2-D red-team F.6: GET routes returning authenticated data
-    // (e.g., /api/allocator/* catalogs) rely on:
+    // GET routes returning authenticated data (e.g., /api/allocator/*
+    // catalogs) rely on:
     //   1. Same-Origin Policy in browsers — a cross-origin <script> or
     //      `fetch()` from evil.com receives the response opaque under
     //      CORS, so the response body is unreadable. The victim's cookies

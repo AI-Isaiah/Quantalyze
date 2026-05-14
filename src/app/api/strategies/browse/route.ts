@@ -2,13 +2,8 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
-
-// audit-2026-05-07 round-2 Block D / P1947 — the catalog this route returns
-// is allocator-scoped (it is fetched by allocators only and consumed by the
-// per-allocator drawer). `private, no-store` keeps a stale or cross-tenant
-// view from being served by any intermediary cache.
-const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
 /**
  * Phase 10 / Plan 10-03 — GET /api/strategies/browse

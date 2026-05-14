@@ -38,28 +38,25 @@ vi.mock("@/lib/analytics/onboarding-funnel", () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Mock supabase admin client — used for the P1945 idempotency cache lookup
-// and post-success upsert.
+// Mock supabase admin client.
+//
+// Pre-migration-131 the route lookup-and-upserted on `scenario_commit_idempotency`
+// directly. That logic now lives inside commit_scenario_batch (the SQL function);
+// the route only touches the admin client lazily inside `after()` for
+// `stampOutcomeMarker`, which is itself mocked above. So the route should
+// NEVER reach `admin.from(...)` in tests — fail loudly if it does, so a
+// future regression that re-introduces route-layer cache plumbing fails
+// the suite instead of silently passing on a permissive mock.
 // ---------------------------------------------------------------------------
-
-const idemMaybeSingleMock = vi.fn();
-const idemUpsertMock = vi.fn(async () => ({ error: null }));
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     auth: { admin: { getUserById: vi.fn(), updateUserById: vi.fn() } },
-    // Chainable .from('scenario_commit_idempotency').select().eq().eq().maybeSingle()
-    // for the lookup; .from(...).upsert(...) for the post-success write.
-    from: (_table: string) => ({
-      select: () => ({
-        eq: () => ({
-          eq: () => ({
-            maybeSingle: idemMaybeSingleMock,
-          }),
-        }),
-      }),
-      upsert: idemUpsertMock,
-    }),
+    from: () => {
+      throw new Error(
+        "[test] route should not touch admin.from() — idempotency lives in commit_scenario_batch since migration 131",
+      );
+    },
   }),
 }));
 
@@ -181,10 +178,6 @@ beforeEach(() => {
   allocatorGateShouldFail = false;
   rateLimitAllow = true;
   mockRpc.mockReset();
-  idemMaybeSingleMock.mockReset();
-  idemMaybeSingleMock.mockResolvedValue({ data: null, error: null });
-  idemUpsertMock.mockReset();
-  idemUpsertMock.mockResolvedValue({ error: null });
 });
 
 const VALID_VR = {
@@ -809,9 +802,9 @@ describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () =
   //   - WHAT THE ROUTE PASSES to the RPC (p_idempotency_key, p_request_hash)
   //   - HOW THE ROUTE MAPS the RPC's envelope shape to HTTP status
   //
-  // The idemMaybeSingleMock / idemUpsertMock fixtures from the admin client
-  // are still in scope (stampOutcomeMarker uses admin), but the cache
-  // lookup mocks are NEVER hit by the route for idempotency anymore.
+  // The admin-client mock throws on `.from(...)` (see top-of-file mock) so
+  // any regression that re-introduces route-layer cache plumbing fails the
+  // suite immediately. stampOutcomeMarker is mocked separately above.
   const KEY = "a".repeat(24);
 
   it("valid Idempotency-Key is passed to the RPC as p_idempotency_key + p_request_hash", async () => {
@@ -836,9 +829,8 @@ describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () =
         p_request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     );
-    // Route does NOT do any cache work directly — the RPC handles it.
-    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
-    expect(idemUpsertMock).not.toHaveBeenCalled();
+    // Route does not touch admin.from() directly — the SQL function
+    // handles caching. The admin-mock would throw if the route did.
   });
 
   it("RPC ok:true + cached:true returns 200 WITHOUT re-emitting audit events", async () => {

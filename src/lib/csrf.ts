@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * CSRF defense via Origin/Referer header validation.
@@ -41,12 +42,6 @@ function buildAllowedHosts(): Set<string> {
 
 // Cache the allowed hosts at module load. Changes to env vars require a redeploy.
 const ALLOWED_HOSTS = buildAllowedHosts();
-
-// audit-2026-05-07 round-2 Block D / P1947 — the 403 rejection paths returned
-// from authenticated mutating routes must not be cached cross-tenant. The
-// header is cheap defense-in-depth even though 403s are already rarely
-// cached.
-const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
 export function assertSameOrigin(req: NextRequest): NextResponse | null {
   const origin = req.headers.get("origin");

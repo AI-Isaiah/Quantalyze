@@ -42,23 +42,19 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 
 export const runtime = "nodejs";
-
-// audit-2026-05-07 round-2 Block D / P1947 — every response from this route
-// carries `private, no-store`. The payload includes allocator-scoped match
-// decision IDs + per-row audit metadata; serving it from any shared cache
-// would leak across tenants.
-const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
 // audit-2026-05-07 round-2 Block D / P1945 — accepted Idempotency-Key shape.
 // The charset is restricted to ASCII alphanumerics + URL-safe punctuation
@@ -154,14 +150,13 @@ export const CommitBodySchema = z.object({
   diffs: z.array(CommitDiffSchema).min(1).max(50),
 });
 
-// Post-normalisation shape of a voluntary_modify diff (round-2-D
-// type-design + red-team F.7, conf 8). After the imperative
-// at-least-one-percent-encoding check runs and the diff is rewritten
-// with `percent_allocated` set and `new_weight` removed, this is the
-// shape the RPC actually receives. Typing the normalisedDiffs array
-// against this — rather than `typeof parsed.data.diffs` — documents
-// the invariant + lets the type system flag a future regression that
-// re-introduces `new_weight` into the RPC payload.
+// Post-normalisation shape of a voluntary_modify diff. After the
+// imperative at-least-one-percent-encoding check runs and the diff is
+// rewritten with `percent_allocated` set and `new_weight` removed, this
+// is the shape the RPC actually receives. Typing the normalisedDiffs
+// array against this — rather than `typeof parsed.data.diffs` —
+// documents the invariant + lets the type system flag a future
+// regression that re-introduces `new_weight` into the RPC payload.
 type NormalisedVoluntaryModifyDiff = Omit<
   z.infer<typeof VoluntaryModifyDiff>,
   "new_weight" | "percent_allocated"
@@ -178,13 +173,12 @@ type NormalisedCommitDiff =
 // ---------------------------------------------------------------------------
 // Recorded-row envelope returned by the RPC
 //
-// Round-2-D type-design review (conf 9): the previous flat shape
-// `{ ok: boolean; recorded?; errors? }` admitted four states for two valid
-// ones (`{ok:true,errors:[...]}` and `{ok:false,recorded:[...]}` are
-// nonsense given the single-tx contract). The route then needed defensive
-// `?? []` / `recorded ?? []` fallbacks throughout. A discriminated union on
-// `ok` removes those fallbacks AND surfaces a real mismatch loudly via the
-// runtime-validation parse below.
+// The envelope is a discriminated union on `ok` rather than the flat
+// `{ ok: boolean; recorded?; errors? }` shape — the flat shape admitted
+// four states for two valid ones (`{ok:true,errors:[...]}` and
+// `{ok:false,recorded:[...]}` are nonsense given the single-tx contract)
+// and forced defensive `?? []` fallbacks throughout. The runtime-validation
+// parse below makes a malformed envelope fail loud.
 // ---------------------------------------------------------------------------
 
 const CommitKindSchema = z.enum([
@@ -203,13 +197,21 @@ const RpcRecordedRowSchema = z.object({
 
 type RpcRecordedRow = z.infer<typeof RpcRecordedRowSchema>;
 
-// Migration 131 idempotency error codes. When ok:false carries one of
-// these codes the route maps to a specific HTTP status (not the default
-// 422 for per-row commit failure).
+// Migration 131 idempotency error codes. The SQL function in 131
+// returns ok:false envelopes carrying one of these `code` values; the
+// route maps each to a specific HTTP status (not the default 422 for
+// per-row commit failure). Centralised here so SQL/TS comparisons don't
+// drift on a typo — keep the SQL function (migration 131) in sync.
+export const IDEM_CODES = {
+  BODY_MISMATCH: "idempotency_body_mismatch",
+  IN_FLIGHT: "idempotency_in_flight",
+  SCHEMA_DRIFT: "idempotency_schema_drift",
+} as const;
+
 const IdempotencyErrorCode = z.enum([
-  "idempotency_body_mismatch",
-  "idempotency_in_flight",
-  "idempotency_schema_drift",
+  IDEM_CODES.BODY_MISMATCH,
+  IDEM_CODES.IN_FLIGHT,
+  IDEM_CODES.SCHEMA_DRIFT,
 ]);
 
 const RpcEnvelopeSchema = z.discriminatedUnion("ok", [
@@ -248,48 +250,6 @@ interface SuccessBody {
 // POST handler
 // ---------------------------------------------------------------------------
 
-/**
- * Lazy-import Sentry to capture idempotency-cache failures without pulling
- * Sentry into routes that don't need it. Mirrors the pattern in
- * `src/lib/admin.ts` / `src/lib/audit.ts`. The kind tag lets SRE filter
- * lookup-vs-write failures separately.
- */
-function reportEnvelopeError(
-  err: unknown,
-  options: {
-    userId: string;
-    code: string | null;
-    message: string;
-  },
-): void {
-  try {
-    void import("@sentry/nextjs")
-      .then((Sentry) => {
-        try {
-          Sentry.captureException(err, {
-            tags: {
-              scenario_commit_envelope_invalid: "true",
-              scenario_commit_code: options.code ?? "unknown",
-            },
-            extra: {
-              user_id: options.userId,
-              code: options.code,
-              message: options.message,
-            },
-            level: "error",
-          });
-        } catch {
-          // Swallow — caller already logged via console.error.
-        }
-      })
-      .catch(() => {
-        // Sentry import failed — swallow.
-      });
-  } catch {
-    // import() construction failed — swallow.
-  }
-}
-
 export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
   const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
   if (!rl.success) {
@@ -304,11 +264,11 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
 
   // Read the raw body bytes once. The bytes drive (a) JSON parse + zod
   // validation and (b) the SHA-256 request_hash used to bind Idempotency-Key
-  // cache rows to the exact body. Round-2-D code-reviewer (conf 8): the prior
-  // implementation only matched on (allocator_id, idempotency_key) — a client
-  // re-using the same key with a different body got the FIRST body's cached
-  // response, masking the bug silently. RFC draft-ietf-httpapi-idempotency-key
-  // §2.5 requires us to detect this and 422.
+  // cache rows to the exact body. Earlier implementations only matched on
+  // (allocator_id, idempotency_key) — a client re-using the same key with
+  // a different body got the FIRST body's cached response, masking the
+  // bug silently. RFC draft-ietf-httpapi-idempotency-key §2.5 requires
+  // the server to detect this case and respond 422.
   let rawBody: string;
   try {
     rawBody = await req.text();
@@ -354,7 +314,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // fails immediately below and we return 400 before the hash is used.
   // We chose this over `req.arrayBuffer()` + raw-byte hashing because
   // the route also needs the parsed JSON, so a single text() + parse
-  // pass is simpler than two stream reads. (Round-2-D red-team F.5.)
+  // pass is simpler than two stream reads.
   const requestHash = createHash("sha256").update(rawBody).digest("hex");
 
   // ---------------------------------------------------------------------------
@@ -368,8 +328,8 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   //   - send a different body under the same key             → 422
   //   - succeed                                              → 200 fresh
   //
-  // Round-2-D red-team F.2 (conf 9): the previous route-layer
-  // SELECT-then-RPC-then-UPSERT had a race window where two clients could
+  // The previous route-layer SELECT-then-RPC-then-UPSERT had a race
+  // window where two clients could
   // both pass the SELECT before either UPSERT — both then invoked the RPC,
   // double-recording match_decisions/bridge_outcomes. Server-side dedup
   // eliminates that window entirely.
@@ -377,7 +337,6 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   const idempotencyKey = req.headers.get("Idempotency-Key");
   const idempotencyKeyValid =
     !!idempotencyKey && IDEMPOTENCY_KEY_RE.test(idempotencyKey);
-  const admin = createAdminClient();
 
   // P1956 (audit-2026-05-07 round 2): single canonical percent encoding.
   // Migration 128 dropped the SQL-side `new_weight * 100` fallback — the RPC
@@ -455,10 +414,10 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
     );
   }
 
-  // Round-2-D type-design review (conf 9): runtime-validate the RPC envelope
-  // instead of `as RpcEnvelope | null`. A malformed envelope (RPC schema drift,
-  // body NULL, partial JSONB) hits a loud failure here rather than producing
-  // a confusing 200 with empty arrays.
+  // Runtime-validate the RPC envelope instead of `as RpcEnvelope | null`.
+  // A malformed envelope (RPC schema drift, body NULL, partial JSONB)
+  // hits a loud failure here rather than producing a confusing 200 with
+  // empty arrays.
   const envelopeParsed = RpcEnvelopeSchema.safeParse(rpcData);
   if (!envelopeParsed.success) {
     console.error("[scenario-commit] RPC envelope failed validation:", {
@@ -466,10 +425,12 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       issues: envelopeParsed.error.issues,
       raw: rpcData,
     });
-    reportEnvelopeError(envelopeParsed.error, {
-      userId: user.id,
-      code: null,
-      message: "commit_scenario_batch returned a malformed envelope",
+    captureToSentry(envelopeParsed.error, {
+      tags: { scenario_commit_envelope_invalid: "true" },
+      extra: {
+        user_id: user.id,
+        message: "commit_scenario_batch returned a malformed envelope",
+      },
     });
     return NextResponse.json(
       { error: "Commit failed", message: "Malformed RPC envelope" },
@@ -486,7 +447,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
     // not need to change.
     const firstCode = rpcResult.errors[0]?.code;
 
-    if (firstCode === "idempotency_body_mismatch") {
+    if (firstCode === IDEM_CODES.BODY_MISMATCH) {
       // RFC §2.5 — same Idempotency-Key, different body is a client bug.
       return NextResponse.json(
         {
@@ -498,7 +459,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       );
     }
 
-    if (firstCode === "idempotency_in_flight") {
+    if (firstCode === IDEM_CODES.IN_FLIGHT) {
       // A concurrent retry holds the placeholder row. The client can
       // re-poll once the winner completes (typically <1s — the RPC body
       // is fast).
@@ -513,7 +474,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       );
     }
 
-    if (firstCode === "idempotency_schema_drift") {
+    if (firstCode === IDEM_CODES.SCHEMA_DRIFT) {
       // Cached row written by an older route revision. Treat as server-
       // side data state requiring SRE follow-up; client retry with a
       // fresh key.
@@ -544,7 +505,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
     // shape so the existing drawer UI can render inline failures unchanged.
     console.error("scenario_commit full failure", {
       user: user.id,
-      diff_count: parsed.data.diffs.length,
+      diff_count: normalisedDiffs.length,
       errors: rpcResult.errors,
     });
     return NextResponse.json(
@@ -592,42 +553,41 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
 
   // Stamp first_outcome_at marker — PostHog `first_outcome_recorded` fires
   // on the next /allocations dashboard render. Idempotent (helper reads
-  // metadata first, no-ops once stamp is set). Non-blocking: a stamp
-  // failure does NOT affect the route response or the committed batch.
+  // metadata first, no-ops once stamp is set). Two Auth Admin REST calls
+  // (getUserById + updateUserById on first commit) ran SYNCHRONOUSLY pre-
+  // simplify, extending p95 commit latency by ~50–200 ms. Moved into
+  // `after()` so the response returns immediately; Vercel keeps the
+  // function alive until the callback resolves. The broad catch routes
+  // to Sentry so a regression inside stampOutcomeMarker (TypeError /
+  // ReferenceError) doesn't silently break the onboarding funnel.
   //
-  // Round-2-D silent-failure-hunter follow-up: the broad catch must
-  // surface to Sentry so a TypeError / ReferenceError regression inside
-  // stampOutcomeMarker doesn't silently break the onboarding funnel for
-  // an extended period. The console.warn keeps the immediate Vercel-log
-  // signal; the lazy Sentry capture lights up the SRE breadcrumb.
-  try {
-    await stampOutcomeMarker(admin, user.id);
-  } catch (err) {
-    console.warn(
-      "[scenario-commit] first_outcome_at stamp failed:",
-      err instanceof Error ? (err.stack ?? err.message) : err,
-    );
+  // The try/queueMicrotask fallback mirrors src/lib/audit.ts:374 — outside
+  // a request scope (vitest, cron, prerender) `after()` throws, so we
+  // fall back to a microtask scheduler best-effort. The admin client is
+  // created lazily inside the callback so non-success paths don't pay
+  // the construction cost.
+  const stampMarker = async () => {
+    const admin = createAdminClient();
     try {
-      void import("@sentry/nextjs")
-        .then((Sentry) => {
-          try {
-            Sentry.captureException(err, {
-              tags: {
-                scenario_commit_stamp_failure: "true",
-              },
-              extra: { user_id: user.id },
-              level: "warning",
-            });
-          } catch {
-            // Swallow — caller already logged via console.warn.
-          }
-        })
-        .catch(() => {
-          // Sentry import failed — swallow.
-        });
-    } catch {
-      // import() construction failed — swallow.
+      await stampOutcomeMarker(admin, user.id);
+    } catch (err) {
+      console.warn(
+        "[scenario-commit] first_outcome_at stamp failed:",
+        err instanceof Error ? (err.stack ?? err.message) : err,
+      );
+      captureToSentry(err, {
+        tags: { scenario_commit_stamp_failure: "true" },
+        extra: { user_id: user.id },
+        level: "warning",
+      });
     }
+  };
+  try {
+    after(stampMarker);
+  } catch {
+    queueMicrotask(() => {
+      void stampMarker();
+    });
   }
 
   return NextResponse.json(successBody, {
