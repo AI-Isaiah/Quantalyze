@@ -99,11 +99,6 @@ describe("MetricPanel", () => {
     expect(screen.queryByText("Trade Metrics")).toBeNull();
   });
 
-  // ---- Block F / P2035: Trade Metrics chip aligns with actual TradeMetrics shape ----
-  // Pre-fix the chip read `total_trades`, `maker_pct`, `long_pct` — none of which exist
-  // on TradeMetrics — so 3 of 4 rows always rendered "—". Tests below pin the chip to
-  // the real type contract (total_positions, win_rate, long_count/total, trade_mix).
-
   it("Trade Metrics chip renders actual values from TradeMetrics (4-bucket trade_mix)", () => {
     const tm: TradeMetrics = {
       total_positions: 100,
@@ -130,31 +125,20 @@ describe("MetricPanel", () => {
       },
     };
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
-
-    // Trade Metrics chip is collapsed by default — expand it first.
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    // Locate the chip body so we don't false-match rows in other groups.
-    // heading is the <button>; its parent is the chip wrapper <div class="border-b ...">.
-    const heading = screen.getByText("Trade Metrics");
-    const chip = heading.parentElement;
-    expect(chip).toBeTruthy();
-    const scoped = within(chip as HTMLElement);
+    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
 
-    // Row labels exist.
     expect(scoped.getByText("Total Positions")).toBeInTheDocument();
     expect(scoped.getByText("Win Rate")).toBeInTheDocument();
     expect(scoped.getByText("Long Share")).toBeInTheDocument();
     expect(scoped.getByText("Maker Share")).toBeInTheDocument();
 
-    // Row values — match what formatPercent / toLocaleString actually produce.
-    // formatPercent is signed-by-default with 2 decimals.
-    expect(scoped.getByText("100")).toBeInTheDocument();          // total_positions
-    expect(scoped.getByText("+62.00%")).toBeInTheDocument();      // win_rate
-    expect(scoped.getByText("+60.00%")).toBeInTheDocument();      // long_share = 60/100
-    expect(scoped.getByText("+50.00%")).toBeInTheDocument();      // maker_share = (30+20)/100
+    expect(scoped.getByText("100")).toBeInTheDocument();
+    expect(scoped.getByText("+62.00%")).toBeInTheDocument();
+    expect(scoped.getByText("+60.00%")).toBeInTheDocument();
+    expect(scoped.getByText("+50.00%")).toBeInTheDocument();
 
-    // Regression guard: legacy labels that read non-existent fields must be gone.
     expect(scoped.queryByText("Total Trades")).not.toBeInTheDocument();
     expect(scoped.queryByText("Maker %")).not.toBeInTheDocument();
     expect(scoped.queryByText("Long %")).not.toBeInTheDocument();
@@ -186,15 +170,10 @@ describe("MetricPanel", () => {
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const heading = screen.getByText("Trade Metrics");
-    const chip = heading.parentElement;
-    const scoped = within(chip as HTMLElement);
+    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
 
-    // Long Share still renders (computed from long_count / total_positions).
     expect(scoped.getByText("Long Share")).toBeInTheDocument();
-    expect(scoped.getByText("+60.00%")).toBeInTheDocument();      // 30/50
-
-    // Maker Share is hidden because the 2-bucket variant has no maker/taker split.
+    expect(scoped.getByText("+60.00%")).toBeInTheDocument();
     expect(scoped.queryByText("Maker Share")).not.toBeInTheDocument();
   });
 
@@ -220,11 +199,73 @@ describe("MetricPanel", () => {
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const heading = screen.getByText("Trade Metrics");
-    const chip = heading.parentElement;
-    const scoped = within(chip as HTMLElement);
+    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
 
     expect(scoped.queryByText("Maker Share")).not.toBeInTheDocument();
+  });
+
+  it("Trade Metrics chip omits Maker Share when trade_mix is partial 4-bucket", () => {
+    // Producer drift: only long_maker emitted, other 3 buckets missing.
+    // Pre-fix this fabricated a confident "+100.00% Maker Share" from
+    // incomplete data; chip must now suppress the row entirely.
+    const tm: TradeMetrics = {
+      total_positions: 30,
+      closed_positions: 30,
+      open_positions: 0,
+      win_rate: 0.5,
+      avg_roi: 0,
+      avg_duration_days: 1,
+      long_count: 15,
+      short_count: 15,
+      best_trade_roi: 0.05,
+      worst_trade_roi: -0.05,
+      expectancy: null,
+      risk_reward_ratio: null,
+      weighted_risk_reward_ratio: null,
+      sqn: null,
+      profit_factor_long: null,
+      profit_factor_short: null,
+      trade_mix: {
+        long_maker: { count: 30, total_notional: 30_000 },
+      },
+    };
+    render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
+    fireEvent.click(screen.getByText("Trade Metrics"));
+
+    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+
+    expect(scoped.queryByText("Maker Share")).not.toBeInTheDocument();
+    expect(scoped.queryByText("+100.00%")).not.toBeInTheDocument();
+  });
+
+  it("Trade Metrics chip renders 0 literally for total_positions = 0", () => {
+    const tm: TradeMetrics = {
+      total_positions: 0,
+      closed_positions: 0,
+      open_positions: 0,
+      win_rate: 0,
+      avg_roi: 0,
+      avg_duration_days: 0,
+      long_count: 0,
+      short_count: 0,
+      best_trade_roi: 0,
+      worst_trade_roi: 0,
+      expectancy: null,
+      risk_reward_ratio: null,
+      weighted_risk_reward_ratio: null,
+      sqn: null,
+      profit_factor_long: null,
+      profit_factor_short: null,
+    };
+    render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
+    fireEvent.click(screen.getByText("Trade Metrics"));
+
+    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+
+    // "0" must distinguish "no positions yet" from "no data" ("—").
+    expect(scoped.getByText("0")).toBeInTheDocument();
+    // Long Share has no defined value at total=0 — must be "—", not "+NaN%".
+    expect(scoped.queryByText(/NaN/)).not.toBeInTheDocument();
   });
 
   it("renders all visible groups without crashing", () => {
@@ -263,8 +304,17 @@ describe("MetricPanel", () => {
         trade_mix: undefined,
       },
     });
-    const { container } = render(<MetricPanel analytics={fullAnalytics} />);
-    // Should render without throwing
-    expect(container.querySelector("div")).toBeDefined();
+    render(<MetricPanel analytics={fullAnalytics} />);
+    fireEvent.click(screen.getByText("Trade Metrics"));
+
+    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+
+    // Pin the chip actually rendered (a regression that nulled the group out
+    // would have passed the old `querySelector("div")` assertion).
+    expect(scoped.getByText("Total Positions")).toBeInTheDocument();
+    expect(scoped.getByText("150")).toBeInTheDocument();
+    // long_count=0 / total>0 must render "+0.00%", not "+NaN%".
+    expect(scoped.getByText("Long Share")).toBeInTheDocument();
+    expect(scoped.getByText("+0.00%")).toBeInTheDocument();
   });
 });

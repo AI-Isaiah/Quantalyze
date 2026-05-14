@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { formatPercent, formatNumber, metricColor, cn } from "@/lib/utils";
 import { getMetricLabel, LABEL_COLORS } from "@/lib/metric-labels";
-import type { StrategyAnalytics, TradeMetrics } from "@/lib/types";
+import type { StrategyAnalytics } from "@/lib/types";
 
 interface MetricGroup {
   title: string;
@@ -16,7 +16,7 @@ export type Percentiles = Record<string, number> | null;
 
 function buildGroups(a: StrategyAnalytics): MetricGroup[] {
   const m = a.metrics_json as Record<string, number> | null;
-  const tm = a.trade_metrics as TradeMetrics | null;
+  const tm = a.trade_metrics;
 
   return [
     {
@@ -103,33 +103,31 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
       title: "Trade Metrics",
       defaultOpen: false,
       hide: tm == null,
-      // Trade Metrics rows are derived from the actual `TradeMetrics` fields
-      // (P2035 fix). Pre-fix this group read `total_trades`, `maker_pct`,
-      // `long_pct` — none of which exist on TradeMetrics — and rendered "—"
-      // for 3 of 4 rows on every strategy.
       metrics: (() => {
         if (tm == null) return [];
-        const total = tm.total_positions ?? 0;
+        const total = tm.total_positions;
         const longShare = total > 0 ? tm.long_count / total : null;
-        // 4-bucket trade_mix carries maker/taker counts; 2-bucket does not.
         const mix = tm.trade_mix;
+        // Maker Share is only computable when the producer emits the full
+        // 4-bucket trade_mix (OKX maker/taker reliable). A partial payload
+        // would silently fabricate a confident percentage from incomplete data.
         const has4Bucket =
           !!mix &&
-          (mix.long_maker !== undefined || mix.short_maker !== undefined);
+          mix.long_maker !== undefined &&
+          mix.long_taker !== undefined &&
+          mix.short_maker !== undefined &&
+          mix.short_taker !== undefined;
         let makerShare: number | null = null;
         if (has4Bucket && mix) {
-          const lm = mix.long_maker?.count ?? 0;
-          const lt = mix.long_taker?.count ?? 0;
-          const sm = mix.short_maker?.count ?? 0;
-          const st = mix.short_taker?.count ?? 0;
+          const lm = mix.long_maker!.count;
+          const lt = mix.long_taker!.count;
+          const sm = mix.short_maker!.count;
+          const st = mix.short_taker!.count;
           const mixTotal = lm + lt + sm + st;
           makerShare = mixTotal > 0 ? (lm + sm) / mixTotal : null;
         }
         const rows: MetricGroup["metrics"] = [
-          {
-            label: "Total Positions",
-            value: total > 0 ? total.toLocaleString() : "—",
-          },
+          { label: "Total Positions", value: total.toLocaleString() },
           { label: "Win Rate", value: formatPercent(tm.win_rate) },
           { label: "Long Share", value: formatPercent(longShare) },
         ];
@@ -165,7 +163,7 @@ function MetricAccordion({ group, percentiles }: { group: MetricGroup; percentil
   const [open, setOpen] = useState(group.defaultOpen);
 
   return (
-    <div className="border-b border-border last:border-0">
+    <div className="border-b border-border last:border-0" data-testid={`metric-group-${group.title}`}>
       <button
         onClick={() => setOpen(!open)}
         className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-text-primary hover:bg-page/50 transition-colors"
