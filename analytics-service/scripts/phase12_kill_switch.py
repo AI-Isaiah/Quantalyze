@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import math
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -44,6 +45,10 @@ from services.db import db_execute, get_supabase
 # --- Constants -------------------------------------------------------------
 
 THRESHOLD_BYTES = 800_000  # 800kB — Phase 12 SC#3a kill-switch trigger.
+# Bounded timeout on the psql subprocess so a hung pgbouncer / network
+# partition / held FOR UPDATE can't park the deploy indefinitely. Override
+# via PHASE12_PROBE_TIMEOUT_S for unusually large strategy_analytics tables.
+SQL_PROBE_TIMEOUT_S = int(os.getenv("PHASE12_PROBE_TIMEOUT_S", "60"))
 
 # P2021: opt-IN env var (replaces prior opt-OUT SKIP_KILL_SWITCH=1). Unknown
 # values fall through to _parse_run_flag's SystemExit (CLAUDE.md Rule 12).
@@ -126,14 +131,27 @@ def _nonneg_finite(raw: str) -> float:
 
 
 def _nonneg_finite_int(raw: str) -> int:
-    """argparse `type=` validator for integer-valued counts. Same nonneg+
-    finite contract as _parse_probe_value, but rejects non-integer floats
-    (e.g. `--count 3.7`) rather than silently truncating to 3."""
-    val = _parse_probe_value(raw)
-    if val != int(val):
+    """argparse `type=` validator for integer-valued counts.
+
+    Rejects:
+      * Negative / NaN / inf (via _parse_probe_value first)
+      * Non-integer floats (e.g. `--count 3.7`)
+      * Scientific notation (`--count 1e2`) — operator mental model says
+        --count takes a plain integer; exponential forms are almost always
+        a typo or accidental shell expansion. Refuse the ambiguity per
+        CLAUDE.md Rule 12.
+    """
+    # Plain-integer regex check first. This rejects "1e2", "1.0", "+1",
+    # "0x10", and any whitespace before downstream parsing has a chance
+    # to silently coerce them. `\d+` is unsigned because _parse_probe_value
+    # also rejects negatives — keeping the two layers' contracts aligned.
+    if not isinstance(raw, str) or not re.fullmatch(r"\d+", raw):
         raise ValueError(
-            f"phase12_kill_switch: --count must be integer-valued, got {raw!r}"
+            f"phase12_kill_switch: --count must be a plain non-negative "
+            f"integer (digits only, no sign, no decimal, no exponent); "
+            f"got {raw!r}"
         )
+    val = _parse_probe_value(raw)
     return int(val)
 
 
@@ -155,12 +173,22 @@ def measure_p999_via_sql() -> tuple[float, int]:
             "cannot run pg_column_size SQL probe (M-03)."
         )
     sql = SQL_PROBE_PATH.read_text()
-    # P2022: explicit --dbname flag (the previous positional dbname was easy to
-    # mis-read as a query when reviewing CI logs).
-    result = subprocess.run(
-        ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
-        capture_output=True, text=True, check=False,
-    )
+    # Explicit --dbname flag (the previous positional dbname was easy to
+    # mis-read as a query when reviewing CI logs). A bounded timeout
+    # prevents a hung pgbouncer / network partition / held FOR UPDATE
+    # from parking the deploy indefinitely with no diagnostic.
+    try:
+        result = subprocess.run(
+            ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
+            capture_output=True, text=True, check=False,
+            timeout=SQL_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"phase12_kill_switch: SQL probe timed out after "
+            f"{SQL_PROBE_TIMEOUT_S}s (DATABASE_URL host unreachable, "
+            f"pgbouncer hung, or strategy_analytics held under FOR UPDATE)"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"phase12_kill_switch: SQL probe failed: {result.stderr.strip()}"
@@ -175,29 +203,34 @@ def measure_p999_via_sql() -> tuple[float, int]:
             )
         parsed[parts[0].strip()] = parts[1].strip()
 
-    if "p999" not in parsed:
-        raise RuntimeError(
-            f"phase12_kill_switch: SQL probe missing required key 'p999'; "
-            f"got keys {sorted(parsed.keys())!r}"
-        )
-    if "count" not in parsed:
-        raise RuntimeError(
-            f"phase12_kill_switch: SQL probe missing required key 'count'; "
-            f"got keys {sorted(parsed.keys())!r}"
-        )
+    for required in ("p999", "count", "total_rows"):
+        if required not in parsed:
+            raise RuntimeError(
+                f"phase12_kill_switch: SQL probe missing required key "
+                f"{required!r}; got keys {sorted(parsed.keys())!r}"
+            )
 
     # Validate count first: an empty strategy_analytics table produces
     # count=0 and NULL→empty-string percentiles. Without this guard, the
-    # p999 parse below would raise a generic "empty probe value" error and
-    # the operator would mistake "you ran this against the wrong DB" for
-    # "the kill-switch is broken". Fail loud with an explicit diagnostic.
+    # p999 parse below would raise a generic "empty probe value" error
+    # and the operator can't tell "wrong DB" from "kill-switch broken".
+    # Distinguish (H4) "table truly empty / wrong DB" from "table
+    # populated but no metrics yet" using the new total_rows key.
     count = int(_parse_probe_value(parsed["count"]))
+    total_rows = int(_parse_probe_value(parsed["total_rows"]))
     if count == 0:
+        if total_rows > 0:
+            raise RuntimeError(
+                f"phase12_kill_switch: strategy_analytics has {total_rows} "
+                f"rows but all metrics_json values are NULL — analytics_runner "
+                f"has not produced any output yet. Re-run after the runner "
+                f"catches up; refusing to make a kill-switch decision "
+                f"against a pre-populated table."
+            )
         raise RuntimeError(
-            "phase12_kill_switch: SQL probe returned strategy_count=0 — "
-            "refusing to make a kill-switch decision against an empty "
-            "strategy_analytics table. Check that DATABASE_URL points to "
-            "the correct DB."
+            "phase12_kill_switch: strategy_analytics is empty (0 rows) — "
+            "refusing to make a kill-switch decision. Check DATABASE_URL "
+            "points to the correct DB."
         )
 
     p999 = _parse_probe_value(parsed["p999"])
@@ -252,17 +285,29 @@ async def cutover_strategy(strategy_id: str) -> int:
     )
     payload = result.data
     # Migration 129 returns jsonb_build_object('moved', N) — a scalar JSONB
-    # dict. Anything else (None, list, dict-without-'moved') indicates the
-    # migration was rolled back or the wire format changed. Fail loud
-    # rather than silently returning 0 and reporting "moved 0 keys" as if
-    # everything succeeded (Rule 12).
+    # dict whose 'moved' value is an int. Anything else (None, list, dict
+    # without 'moved', dict with non-int 'moved', dict with bool 'moved')
+    # indicates the migration was rolled back or the wire format changed.
+    # Fail loud rather than silently returning 0 and reporting "moved 0
+    # keys" as if everything succeeded (Rule 12).
+    #
+    # bool is excluded explicitly because isinstance(True, int) is True in
+    # Python — a buggy RPC returning {"moved": true} would otherwise be
+    # int-coerced to 1 with no warning.
     if not isinstance(payload, dict) or "moved" not in payload:
         raise RuntimeError(
             f"cutover_strategy_metrics_keys_atomic({strategy_id}) returned "
             f"unexpected shape {payload!r}; expected {{'moved': <int>}}. "
             f"Aborting cutover to avoid silent under-count."
         )
-    return int(payload["moved"])
+    moved = payload["moved"]
+    if isinstance(moved, bool) or not isinstance(moved, int):
+        raise RuntimeError(
+            f"cutover_strategy_metrics_keys_atomic({strategy_id}) returned "
+            f"'moved'={moved!r} of type {type(moved).__name__}; "
+            f"expected int. Aborting cutover to avoid silent under-count."
+        )
+    return moved
 
 
 # --- Main ------------------------------------------------------------------
@@ -331,9 +376,16 @@ async def main(
         + (f" ({len(failures)} failed)" if failures else "")
     )
 
-    # Always append the audit-log entry — even on partial completion the
-    # mutations that DID land must be recoverable from in-tree history.
-    if TODOS_PATH.exists():
+    # Audit-log policy:
+    #   * Skip the append on a true no-op re-run (total_moved == 0 AND no
+    #     failures) — otherwise an operator re-running to confirm
+    #     "did it work?" appends a second indistinguishable entry and
+    #     post-incident the in-tree audit trail can't tell trigger from
+    #     re-run.
+    #   * Always append on partial completion — the mutations that DID
+    #     land must be recoverable from in-tree history.
+    is_noop_rerun = total_moved == 0 and not failures
+    if TODOS_PATH.exists() and not is_noop_rerun:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         TODOS_PATH.write_text(
             TODOS_PATH.read_text()
@@ -344,6 +396,11 @@ async def main(
                 f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} "
                 f"strategies ({len(failures)} failed).\n"
             )
+        )
+    elif is_noop_rerun:
+        print(
+            "phase12_kill_switch: re-run is a no-op (moved=0, failures=0) "
+            "— skipping audit-log append to keep TODOS.md trigger record clean."
         )
 
     return 1 if failures else 0

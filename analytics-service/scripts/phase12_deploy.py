@@ -137,10 +137,21 @@ def _run_sql_probe() -> tuple[float, int]:
             "cannot run pg_column_size SQL probe (M-03)."
         )
     sql = SQL_PROBE_PATH.read_text()
-    result = subprocess.run(
-        ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
-        capture_output=True, text=True, check=False,
-    )
+    # Bounded timeout (see phase12_kill_switch.SQL_PROBE_TIMEOUT_S) so a
+    # hung connection cannot park the deploy with no diagnostic.
+    try:
+        result = subprocess.run(
+            ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
+            capture_output=True, text=True, check=False,
+            timeout=phase12_kill_switch.SQL_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"phase12_deploy: SQL probe timed out after "
+            f"{phase12_kill_switch.SQL_PROBE_TIMEOUT_S}s (DATABASE_URL host "
+            f"unreachable, pgbouncer hung, or strategy_analytics held under "
+            f"FOR UPDATE)"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"phase12_deploy: SQL probe failed: {result.stderr.strip()}"
@@ -155,27 +166,28 @@ def _run_sql_probe() -> tuple[float, int]:
             )
         parsed[parts[0].strip()] = parts[1].strip()
 
-    if "p999" not in parsed:
-        raise RuntimeError(
-            f"phase12_deploy: SQL probe missing required key 'p999'; "
-            f"got keys {sorted(parsed.keys())!r}"
-        )
-    if "count" not in parsed:
-        raise RuntimeError(
-            f"phase12_deploy: SQL probe missing required key 'count'; "
-            f"got keys {sorted(parsed.keys())!r}"
-        )
-    # Validate count first — empty strategy_analytics yields count=0 and
-    # NULL→empty-string percentiles. Without this, p999 parse below raises
-    # "empty probe value" and the operator can't tell "wrong DB" apart
-    # from "kill-switch broken". Fail loud with an explicit diagnostic.
+    for required in ("p999", "count", "total_rows"):
+        if required not in parsed:
+            raise RuntimeError(
+                f"phase12_deploy: SQL probe missing required key "
+                f"{required!r}; got keys {sorted(parsed.keys())!r}"
+            )
+    # H4: distinguish "table populated but no metrics yet" from "empty
+    # table / wrong DB" using the unfiltered total_rows key.
     n = int(_parse_probe_value(parsed["count"]))
+    total_rows = int(_parse_probe_value(parsed["total_rows"]))
     if n == 0:
+        if total_rows > 0:
+            raise RuntimeError(
+                f"phase12_deploy: strategy_analytics has {total_rows} rows "
+                f"but all metrics_json values are NULL — analytics_runner "
+                f"has not produced output yet. Re-run after the runner "
+                f"catches up."
+            )
         raise RuntimeError(
-            "phase12_deploy: SQL probe returned strategy_count=0 — refusing "
-            "to make a kill-switch decision against an empty "
-            "strategy_analytics table. Check DATABASE_URL points to the "
-            "correct DB."
+            "phase12_deploy: strategy_analytics is empty (0 rows) — "
+            "refusing to make a kill-switch decision. Check DATABASE_URL "
+            "points to the correct DB."
         )
     p999 = _parse_probe_value(parsed["p999"])
     return (p999, n)

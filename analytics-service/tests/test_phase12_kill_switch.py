@@ -147,20 +147,30 @@ class TestParseProbeValue:
 
 
 class TestNonnegFiniteInt:
-    """argparse `--count` validator: integer-valued or reject (no silent
-    truncation of `3.7` → `3`)."""
+    """argparse `--count` validator: plain non-negative integer or reject.
+    No silent truncation, no scientific notation, no decimal forms."""
 
-    @pytest.mark.parametrize("good,expected", [("0", 0), ("1", 1), ("42", 42), ("100.0", 100)])
-    def test_integer_valued_accepted(self, good: str, expected: int) -> None:
+    @pytest.mark.parametrize("good,expected", [("0", 0), ("1", 1), ("42", 42), ("100", 100)])
+    def test_plain_integer_accepted(self, good: str, expected: int) -> None:
         assert ks._nonneg_finite_int(good) == expected
 
-    @pytest.mark.parametrize("bad", ["3.7", "0.5", "1.0001", "99.9"])
-    def test_non_integer_rejected(self, bad: str) -> None:
-        with pytest.raises(ValueError, match="integer-valued"):
+    @pytest.mark.parametrize("bad", ["3.7", "0.5", "1.0001", "99.9", "100.0", "1.0"])
+    def test_decimal_form_rejected(self, bad: str) -> None:
+        """Even integer-valued decimals (`100.0`) are rejected — --count
+        takes a plain integer; if the operator's mental model says "1.0"
+        that's almost certainly a typo or shell-expansion artifact."""
+        with pytest.raises(ValueError, match="plain non-negative integer"):
             ks._nonneg_finite_int(bad)
 
-    @pytest.mark.parametrize("bad", ["-1", "nan", "inf"])
-    def test_nonneg_finite_invariants_preserved(self, bad: str) -> None:
+    @pytest.mark.parametrize("bad", ["1e2", "1E2", "1.5e1", "1e-3", "1e+2"])
+    def test_scientific_notation_rejected(self, bad: str) -> None:
+        """H2: --count 1e2 silently being 100 is the worst kind of trap —
+        looks deliberate, almost certainly a typo. Refuse the ambiguity."""
+        with pytest.raises(ValueError, match="plain non-negative integer"):
+            ks._nonneg_finite_int(bad)
+
+    @pytest.mark.parametrize("bad", ["-1", "nan", "inf", "+1", "0x10", " 1", "1 "])
+    def test_other_forms_rejected(self, bad: str) -> None:
         with pytest.raises(ValueError):
             ks._nonneg_finite_int(bad)
 
@@ -174,47 +184,85 @@ class TestSqlProbeParsing:
         result = MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
         monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", lambda *a, **kw: result)
 
+    def test_psql_timeout_raises_loud_diagnostic(self, monkeypatch) -> None:
+        """H1: a hung pgbouncer / network partition / held FOR UPDATE must
+        time out with a loud diagnostic instead of parking the deploy
+        forever with no signal."""
+        import subprocess as sp
+        monkeypatch.setenv("DATABASE_URL", "postgresql://stub/x")
+
+        def raises_timeout(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise sp.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 60))
+
+        monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", raises_timeout)
+        with pytest.raises(RuntimeError, match="timed out"):
+            ks.measure_p999_via_sql()
+
+    def test_psql_timeout_passed_to_subprocess(self, monkeypatch) -> None:
+        """The timeout kwarg must actually be forwarded to subprocess.run
+        (otherwise nothing prevents the hang)."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://stub/x")
+        captured: dict[str, object] = {}
+
+        def capture(*args, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return MagicMock(returncode=0, stdout="p999,1\ncount,1\ntotal_rows,1\n", stderr="")
+
+        monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", capture)
+        ks.measure_p999_via_sql()
+        assert isinstance(captured.get("timeout"), int) and captured["timeout"] > 0
+
     def test_keyed_parse_happy_path(self, monkeypatch) -> None:
         self._stub_psql(
             monkeypatch,
-            "p50,12345\np95,234567\np99,345678\np999,456789\nmax,567890\ncount,42\n",
+            "p50,12345\np95,234567\np99,345678\np999,456789\nmax,567890\ncount,42\ntotal_rows,42\n",
         )
         p999, n = ks.measure_p999_via_sql()
         assert p999 == 456789.0
         assert n == 42
 
     def test_missing_p999_key_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p50,12345\ncount,42\n")
+        self._stub_psql(monkeypatch, "p50,12345\ncount,42\ntotal_rows,42\n")
         with pytest.raises(RuntimeError, match="p999"):
             ks.measure_p999_via_sql()
 
     def test_missing_count_key_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,456789\n")
+        self._stub_psql(monkeypatch, "p999,456789\ntotal_rows,42\n")
         with pytest.raises(RuntimeError, match="count"):
             ks.measure_p999_via_sql()
 
+    def test_missing_total_rows_key_raises(self, monkeypatch) -> None:
+        """total_rows is required for the H4 NULL-metrics-only diagnostic."""
+        self._stub_psql(monkeypatch, "p999,456789\ncount,42\n")
+        with pytest.raises(RuntimeError, match="total_rows"):
+            ks.measure_p999_via_sql()
+
     def test_nan_p999_in_probe_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,nan\ncount,42\n")
+        self._stub_psql(monkeypatch, "p999,nan\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_inf_p999_in_probe_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,inf\ncount,42\n")
+        self._stub_psql(monkeypatch, "p999,inf\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_negative_count_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,500\ncount,-3\n")
+        self._stub_psql(monkeypatch, "p999,500\ncount,-3\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
-    def test_zero_count_raises_empty_table_diagnostic(self, monkeypatch) -> None:
-        """An empty strategy_analytics table yields count=0 and NULL→empty-
-        string percentiles. Without the explicit count==0 guard, the p999
-        parse below would raise a generic 'empty probe value' error and the
-        operator could not tell 'wrong DB' apart from 'kill-switch broken'."""
-        self._stub_psql(monkeypatch, "p999,\ncount,0\n")
-        with pytest.raises(RuntimeError, match="strategy_count=0"):
+    def test_empty_table_raises_with_explicit_diagnostic(self, monkeypatch) -> None:
+        """count=0 AND total_rows=0 → wrong-DB diagnostic."""
+        self._stub_psql(monkeypatch, "p999,\ncount,0\ntotal_rows,0\n")
+        with pytest.raises(RuntimeError, match="empty.*0 rows"):
+            ks.measure_p999_via_sql()
+
+    def test_null_metrics_only_raises_distinct_diagnostic(self, monkeypatch) -> None:
+        """H4: total_rows>0 AND count=0 → table populated but no metrics
+        yet. Must NOT misdiagnose as "wrong DB"."""
+        self._stub_psql(monkeypatch, "p999,\ncount,0\ntotal_rows,17\n")
+        with pytest.raises(RuntimeError, match="17 rows.*all metrics_json values are NULL"):
             ks.measure_p999_via_sql()
 
     def test_unknown_stdout_shape_raises(self, monkeypatch) -> None:
@@ -282,7 +330,7 @@ class TestCutoverDelegatesToAtomicRpc:
         [None, [], [{"moved": 7}], {}, {"other": 1}, "moved"],
         ids=["none", "empty_list", "wrapped_list", "empty_dict", "wrong_key", "string"],
     )
-    async def test_cutover_fails_loud_on_unexpected_rpc_shape(self, bad_payload) -> None:
+    async def test_cutover_fails_loud_on_unexpected_shape(self, bad_payload) -> None:
         """Migration 129 returns jsonb_build_object('moved', N) — a scalar
         JSONB dict. Anything else (None, list, dict-without-'moved', etc.)
         indicates the migration was rolled back or the wire shape changed.
@@ -295,6 +343,31 @@ class TestCutoverDelegatesToAtomicRpc:
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
             with pytest.raises(RuntimeError, match="unexpected shape"):
+                await ks.cutover_strategy("strat-abc")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_moved,desc",
+        [
+            (None, "moved=None"),
+            (True, "moved=True (bool)"),
+            (False, "moved=False (bool)"),
+            ("3", "moved=str"),
+            (3.0, "moved=float"),
+        ],
+    )
+    async def test_cutover_fails_loud_on_non_int_moved(self, bad_moved, desc) -> None:
+        """C1: shape check alone isn't enough — {'moved': None} would crash
+        on int(None) with a confusing TypeError, and {'moved': True} would
+        coerce to 1 silently (bool is a subclass of int in Python). The
+        guard must reject both."""
+        mock_supabase = MagicMock()
+        mock_rpc_chain = MagicMock()
+        mock_supabase.rpc.return_value = mock_rpc_chain
+        mock_rpc_chain.execute.return_value = MagicMock(data={"moved": bad_moved})
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            with pytest.raises(RuntimeError, match="expected int"):
                 await ks.cutover_strategy("strat-abc")
 
     @pytest.mark.asyncio
@@ -423,6 +496,40 @@ class TestCutoverLoopPartialFailure:
         assert rc == 1
 
     @pytest.mark.asyncio
+    async def test_noop_rerun_skips_audit_log_append(
+        self, monkeypatch, capsys, tmp_path
+    ) -> None:
+        """H3: re-running the kill-switch after a successful cutover is a
+        no-op (RPC returns moved=0 for already-stripped rows). The audit
+        log must NOT get a duplicate "Kill-switch triggered" entry — the
+        operator can't tell trigger from re-run later otherwise."""
+        todos_path = tmp_path / "TODOS.md"
+        todos_path.write_text("# pristine\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        async def fake_cutover(sid: str) -> int:
+            return 0  # already-stripped — RPC says nothing to move
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(
+            data=[{"strategy_id": f"strat-{i}"} for i in range(3)],
+        )
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            rc = await ks.main(cli_p999=900_000.0, cli_count=3)
+
+        assert rc == 0
+        assert todos_path.read_text() == "# pristine\n", (
+            "no-op re-run must not append to TODOS.md"
+        )
+        captured = capsys.readouterr()
+        assert "no-op" in captured.out.lower()
+
+    @pytest.mark.asyncio
     async def test_strategy_select_none_data_raises(self, monkeypatch) -> None:
         """If the strategy_analytics select returns rows.data=None, the
         loop must NOT silently iterate over [] and log "moved 0 keys
@@ -449,17 +556,18 @@ class TestMeasureP999OffloadsSubprocess:
 
     @pytest.mark.asyncio
     async def test_subprocess_runs_in_thread_executor(self, monkeypatch) -> None:
+        import threading
         captured: dict[str, object] = {}
 
         def fake_via_sql() -> tuple[float, int]:
-            import threading
-            captured["thread_name"] = threading.current_thread().name
+            captured["thread"] = threading.current_thread()
             return (123.0, 4)
 
         monkeypatch.setattr(ks, "measure_p999_via_sql", fake_via_sql)
         p999, n = await ks.measure_p999(cli_p999=None, cli_count=None)
         assert (p999, n) == (123.0, 4)
-        # Anything other than the MainThread proves to_thread offloaded it.
-        assert captured["thread_name"] != "MainThread", (
-            "measure_p999_via_sql must run on a worker thread, not the event-loop thread"
+        # Identity check, not name comparison — name is brittle across
+        # Python versions and pytest-asyncio loop configurations.
+        assert captured["thread"] is not threading.main_thread(), (
+            "measure_p999_via_sql must run on a worker thread, not the main thread"
         )

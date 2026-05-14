@@ -16,7 +16,13 @@
 -- to opt into specific keys.
 --
 -- Emitted keys (each appears exactly once):
---   p50, p95, p99, p999, max, count
+--   p50, p95, p99, p999, max, count, total_rows
+--
+-- `count` is the number of rows with non-NULL metrics_json (the rows the
+-- percentile is computed over). `total_rows` is the unfiltered row count;
+-- the Python parser uses (total_rows > 0 AND count == 0) to emit a
+-- "table populated but no metrics yet" diagnostic distinct from "table
+-- empty / wrong DB" (H4).
 --
 -- Usage:
 --   psql --dbname "$DATABASE_URL" -tAF, -f analyze_metrics_size.sql
@@ -30,10 +36,14 @@ WITH stats AS (
         count(*) AS strategy_count
     FROM strategy_analytics
     WHERE metrics_json IS NOT NULL
+),
+unfiltered AS (
+    SELECT count(*) AS total_rows FROM strategy_analytics
 )
-SELECT 'p50'   AS k, p50::text            AS v FROM stats
-UNION ALL SELECT 'p95',   p95::text            FROM stats
-UNION ALL SELECT 'p99',   p99::text            FROM stats
-UNION ALL SELECT 'p999',  p999::text           FROM stats
-UNION ALL SELECT 'max',   max_bytes::text      FROM stats
-UNION ALL SELECT 'count', strategy_count::text FROM stats;
+SELECT 'p50'   AS k, p50::text                AS v FROM stats
+UNION ALL SELECT 'p95',        p95::text          FROM stats
+UNION ALL SELECT 'p99',        p99::text          FROM stats
+UNION ALL SELECT 'p999',       p999::text         FROM stats
+UNION ALL SELECT 'max',        max_bytes::text    FROM stats
+UNION ALL SELECT 'count',      strategy_count::text FROM stats
+UNION ALL SELECT 'total_rows', total_rows::text   FROM unfiltered;

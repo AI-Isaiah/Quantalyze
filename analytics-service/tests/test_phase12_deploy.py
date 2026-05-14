@@ -93,60 +93,90 @@ class TestRunSqlProbe:
     def test_keyed_parse_happy_path(self, monkeypatch) -> None:
         self._stub_psql(
             monkeypatch,
-            "p50,1\np95,2\np99,3\np999,456789\nmax,5\ncount,42\n",
+            "p50,1\np95,2\np99,3\np999,456789\nmax,5\ncount,42\ntotal_rows,42\n",
         )
         p999, n = dep._run_sql_probe()
         assert p999 == 456789.0
         assert n == 42
 
     def test_missing_p999_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p50,1\ncount,1\n")
+        self._stub_psql(monkeypatch, "p50,1\ncount,1\ntotal_rows,1\n")
         with pytest.raises(RuntimeError, match="p999"):
             dep._run_sql_probe()
 
     def test_missing_count_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,1\n")
+        self._stub_psql(monkeypatch, "p999,1\ntotal_rows,1\n")
         with pytest.raises(RuntimeError, match="count"):
             dep._run_sql_probe()
 
+    def test_missing_total_rows_raises(self, monkeypatch) -> None:
+        """total_rows is required for the H4 NULL-metrics-only diagnostic."""
+        self._stub_psql(monkeypatch, "p999,1\ncount,1\n")
+        with pytest.raises(RuntimeError, match="total_rows"):
+            dep._run_sql_probe()
+
     def test_nan_rejected(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,nan\ncount,42\n")
+        self._stub_psql(monkeypatch, "p999,nan\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
     def test_inf_rejected(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,inf\ncount,42\n")
+        self._stub_psql(monkeypatch, "p999,inf\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
     def test_negative_rejected(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,-1\ncount,42\n")
+        self._stub_psql(monkeypatch, "p999,-1\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
-    def test_zero_count_raises_empty_table_diagnostic(self, monkeypatch) -> None:
-        """count=0 yields NULL percentiles (empty-string in psql -tA). The
-        probe must fail loud with an explicit "empty table" message so the
-        operator can distinguish "wrong DB" from "kill-switch broken"."""
-        self._stub_psql(monkeypatch, "p999,\ncount,0\n")
-        with pytest.raises(RuntimeError, match="strategy_count=0"):
+    def test_empty_table_raises_wrong_db_diagnostic(self, monkeypatch) -> None:
+        """count=0 AND total_rows=0 → wrong-DB diagnostic."""
+        self._stub_psql(monkeypatch, "p999,\ncount,0\ntotal_rows,0\n")
+        with pytest.raises(RuntimeError, match="empty.*0 rows"):
+            dep._run_sql_probe()
+
+    def test_null_metrics_only_raises_distinct_diagnostic(self, monkeypatch) -> None:
+        """H4: total_rows>0 AND count=0 → table populated but no metrics
+        yet. Must NOT misdiagnose as "wrong DB"."""
+        self._stub_psql(monkeypatch, "p999,\ncount,0\ntotal_rows,17\n")
+        with pytest.raises(RuntimeError, match="17 rows.*all metrics_json values are NULL"):
+            dep._run_sql_probe()
+
+    def test_psql_timeout_raises_loud_diagnostic(self, monkeypatch) -> None:
+        """H1: hung psql must fail loud, not park the deploy indefinitely."""
+        import subprocess as sp
+        monkeypatch.setenv("DATABASE_URL", "postgresql://stub/x")
+
+        def raises_timeout(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise sp.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 60))
+
+        monkeypatch.setattr("scripts.phase12_deploy.subprocess.run", raises_timeout)
+        with pytest.raises(RuntimeError, match="timed out"):
             dep._run_sql_probe()
 
     def test_psql_uses_dbname_flag(self, monkeypatch) -> None:
-        """P2022: explicit --dbname is used rather than positional dbname."""
+        """Explicit --dbname is used rather than positional dbname."""
         monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
         captured: dict[str, list[str]] = {}
 
         def fake_run(args, **kw):  # type: ignore[no-untyped-def]
             captured["args"] = args
-            return MagicMock(returncode=0, stdout="p999,1\ncount,1\n", stderr="")
+            captured["kwargs"] = kw
+            return MagicMock(
+                returncode=0,
+                stdout="p999,1\ncount,1\ntotal_rows,1\n",
+                stderr="",
+            )
 
         monkeypatch.setattr("scripts.phase12_deploy.subprocess.run", fake_run)
         dep._run_sql_probe()
         assert "--dbname" in captured["args"]
-        # --dbname comes immediately before the URL value.
         idx = captured["args"].index("--dbname")
         assert captured["args"][idx + 1] == "postgresql://x/y"
+        # H1: timeout kwarg must be forwarded to subprocess.run.
+        assert isinstance(captured["kwargs"].get("timeout"), int)
+        assert captured["kwargs"]["timeout"] > 0
 
 
 # --- P2025: backfill failure → INCOMPLETE deploy --------------------------
