@@ -16,7 +16,7 @@ export type Percentiles = Record<string, number> | null;
 
 function buildGroups(a: StrategyAnalytics): MetricGroup[] {
   const m = a.metrics_json as Record<string, number> | null;
-  const tm = a.trade_metrics as Record<string, number> | null;
+  const tm = a.trade_metrics;
 
   return [
     {
@@ -103,12 +103,29 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
       title: "Trade Metrics",
       defaultOpen: false,
       hide: tm == null,
-      metrics: [
-        { label: "Total Trades", value: tm?.total_trades != null ? Math.round(tm.total_trades).toLocaleString() : "—" },
-        { label: "Win Rate", value: formatPercent(tm?.win_rate) },
-        { label: "Maker %", value: formatPercent(tm?.maker_pct) },
-        { label: "Long %", value: formatPercent(tm?.long_pct) },
-      ],
+      metrics: (() => {
+        if (tm == null) return [];
+        const total = tm.total_positions;
+        const longShare = total > 0 ? tm.long_count / total : null;
+        // Maker Share is only computable when the producer emits the full
+        // 4-bucket trade_mix (OKX maker/taker reliable). A partial payload
+        // would silently fabricate a confident percentage from incomplete data.
+        const { long_maker, long_taker, short_maker, short_taker } = tm.trade_mix ?? {};
+        let makerShare: number | null = null;
+        if (long_maker && long_taker && short_maker && short_taker) {
+          const mixTotal = long_maker.count + long_taker.count + short_maker.count + short_taker.count;
+          makerShare = mixTotal > 0 ? (long_maker.count + short_maker.count) / mixTotal : null;
+        }
+        const rows: MetricGroup["metrics"] = [
+          { label: "Total Positions", value: total.toLocaleString() },
+          { label: "Win Rate", value: formatPercent(tm.win_rate) },
+          { label: "Long Share", value: formatPercent(longShare) },
+        ];
+        if (makerShare !== null) {
+          rows.push({ label: "Maker Share", value: formatPercent(makerShare) });
+        }
+        return rows;
+      })(),
     },
   ];
 }
@@ -135,14 +152,20 @@ function formatPercentileBadge(percentile: number): { text: string; isTop25: boo
 function MetricAccordion({ group, percentiles }: { group: MetricGroup; percentiles?: Percentiles }) {
   const [open, setOpen] = useState(group.defaultOpen);
 
+  const bodyId = `metric-group-${group.title}-body`;
+
   return (
-    <div className="border-b border-border last:border-0">
+    <div className="border-b border-border last:border-0" data-testid={`metric-group-${group.title}`}>
       <button
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls={bodyId}
         className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-text-primary hover:bg-page/50 transition-colors"
       >
         {group.title}
         <svg
+          aria-hidden="true"
+          focusable="false"
           className={cn("h-4 w-4 text-text-muted transition-transform", open && "rotate-180")}
           viewBox="0 0 16 16"
           fill="none"
@@ -154,7 +177,7 @@ function MetricAccordion({ group, percentiles }: { group: MetricGroup; percentil
         </svg>
       </button>
       {open && (
-        <div className="px-4 pb-3 space-y-2">
+        <div id={bodyId} role="region" aria-label={group.title} className="px-4 pb-3 space-y-2">
           {group.metrics.map((m) => {
             const qual = m.qualKey ? getMetricLabel(m.qualKey, m.qualValue) : null;
             const pctile = m.percentileKey && percentiles ? percentiles[m.percentileKey] : undefined;
