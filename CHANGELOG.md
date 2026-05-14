@@ -27,7 +27,7 @@ can bump without ambiguity.
 
 - **Migration 130 is now idempotent** — earlier revisions of the same file would have left environments stuck on a stale schema if they had applied an older version. `CREATE TABLE IF NOT EXISTS` plus `ALTER TABLE ADD COLUMN IF NOT EXISTS` (with backfill + `SET NOT NULL` + named CHECK constraint) makes re-application safe across all prior states.
 
-
+## [0.22.32.0] - 2026-05-14
 
 ### Fixed
 
