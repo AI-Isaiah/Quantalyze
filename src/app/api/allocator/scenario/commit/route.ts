@@ -76,13 +76,6 @@ const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 // before the key starts to look like an attempt to stash payload in a
 // header.
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._~-]{16,128}$/;
-const IDEMPOTENCY_TABLE = "scenario_commit_idempotency";
-
-// Round-2-D type-design review (conf 9): bump this when the success-body
-// shape changes. Cached rows with a different schema_version are treated
-// as a miss so an older route revision's payload is never served by a
-// newer route. Stored on every cache row by migration 130.
-const RESPONSE_SCHEMA_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // Discriminated union schema (M6 — rejection_reason enum)
@@ -190,32 +183,46 @@ const RpcRecordedRowSchema = z.object({
 
 type RpcRecordedRow = z.infer<typeof RpcRecordedRowSchema>;
 
+// Migration 131 idempotency error codes. When ok:false carries one of
+// these codes the route maps to a specific HTTP status (not the default
+// 422 for per-row commit failure).
+const IdempotencyErrorCode = z.enum([
+  "idempotency_body_mismatch",
+  "idempotency_in_flight",
+  "idempotency_schema_drift",
+]);
+
 const RpcEnvelopeSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
     recorded: z.array(RpcRecordedRowSchema),
+    // Set when the response was served from the dedup cache (migration 131).
+    // The body shape is otherwise identical to a fresh commit.
+    cached: z.boolean().optional(),
   }),
   z.object({
     ok: z.literal(false),
     errors: z.array(
-      z.object({ index: z.number().int(), error: z.string() }),
+      z.object({
+        index: z.number().int(),
+        error: z.string(),
+        code: IdempotencyErrorCode.optional(),
+      }),
     ),
   }),
 ]);
 
 type RpcEnvelope = z.infer<typeof RpcEnvelopeSchema>;
 
-// Success body that gets cached in scenario_commit_idempotency.response.
-// Used to validate cached rows BEFORE returning them to a retry — a row
-// written by an older route revision with a different shape is treated
-// as a cache miss rather than served verbatim to the client.
-const SuccessBodySchema = z.object({
-  recorded: z.number().int().nonnegative(),
-  results: z.array(RpcRecordedRowSchema),
-  errors: z.array(z.never()).max(0),
-});
-
-type SuccessBody = z.infer<typeof SuccessBodySchema>;
+// Final response body returned to the client (200 path). The migration
+// 131 SQL function persists the same shape inside scenario_commit_idempotency
+// for cached replays. Type-only — the function-side validation lives in
+// the RpcEnvelopeSchema parse above.
+interface SuccessBody {
+  recorded: number;
+  results: RpcRecordedRow[];
+  errors: [];
+}
 
 // ---------------------------------------------------------------------------
 // POST handler
@@ -227,10 +234,9 @@ type SuccessBody = z.infer<typeof SuccessBodySchema>;
  * `src/lib/admin.ts` / `src/lib/audit.ts`. The kind tag lets SRE filter
  * lookup-vs-write failures separately.
  */
-function reportIdempotencyError(
+function reportEnvelopeError(
   err: unknown,
   options: {
-    kind: "lookup_error" | "write_error" | "envelope_invalid";
     userId: string;
     code: string | null;
     message: string;
@@ -242,9 +248,8 @@ function reportIdempotencyError(
         try {
           Sentry.captureException(err, {
             tags: {
-              scenario_commit_idem: "true",
-              scenario_commit_idem_kind: options.kind,
-              scenario_commit_idem_code: options.code ?? "unknown",
+              scenario_commit_envelope_invalid: "true",
+              scenario_commit_code: options.code ?? "unknown",
             },
             extra: {
               user_id: options.userId,
@@ -326,109 +331,26 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
   const requestHash = createHash("sha256").update(rawBody).digest("hex");
 
   // ---------------------------------------------------------------------------
-  // P1945 — Idempotency-Key short-circuit.
+  // P1945 — Idempotency-Key contract is now enforced INSIDE the RPC
+  // (migration 131). The route extracts + validates the key and hash, then
+  // passes both to commit_scenario_batch which atomically reserves
+  // (allocator_id, idempotency_key) via INSERT ... ON CONFLICT DO NOTHING
+  // in the SAME transaction as the data inserts. Concurrent retries either:
+  //   - lose the race and see the in-flight placeholder      → 409 Retry-After
+  //   - lose the race and see the completed cache row        → 200 cached
+  //   - send a different body under the same key             → 422
+  //   - succeed                                              → 200 fresh
   //
-  // If the request bears a well-formed Idempotency-Key (length within the
-  // 16..128 CHECK on migration 130's scenario_commit_idempotency table), look
-  // up the cached response for (allocator_id, idempotency_key). On a hit we
-  // compare the stored request_hash against this request's hash:
-  //   - hash matches + schema_version matches + response validates → return
-  //     the cached 200 (RPC is skipped entirely)
-  //   - hash mismatches                                            → 422
-  //     (RFC §2.5 — same key, different body is a client bug)
-  //   - schema_version mismatches OR response fails validation     → treat
-  //     as cache miss; re-run the RPC and overwrite the row
-  //
-  // Round-2-D silent-failure-hunter (conf 8): on cache lookup ERROR (Postgres
-  // outage, RLS misconfig, etc.) the route FAIL-CLOSES with 503. The prior
-  // implementation logged and fell through to the RPC, which negated the
-  // whole P1945 contract: a flaky downstream is exactly when retries fire,
-  // and falling through doubles writes precisely when the user needs dedup.
-  //
-  // The lookup uses the SERVICE-ROLE admin client because the dedup table's
-  // RLS policy admits SELECT only for `auth.uid() = allocator_id`, and the
-  // post-success upsert is also via the admin client — using the same client
-  // for both keeps a single place to reason about RLS bypass.
+  // Round-2-D red-team F.2 (conf 9): the previous route-layer
+  // SELECT-then-RPC-then-UPSERT had a race window where two clients could
+  // both pass the SELECT before either UPSERT — both then invoked the RPC,
+  // double-recording match_decisions/bridge_outcomes. Server-side dedup
+  // eliminates that window entirely.
   // ---------------------------------------------------------------------------
   const idempotencyKey = req.headers.get("Idempotency-Key");
   const idempotencyKeyValid =
     !!idempotencyKey && IDEMPOTENCY_KEY_RE.test(idempotencyKey);
-
   const admin = createAdminClient();
-
-  if (idempotencyKeyValid) {
-    const { data: cached, error: cacheErr } = await admin
-      .from(IDEMPOTENCY_TABLE)
-      .select("request_hash, response, schema_version")
-      .eq("allocator_id", user.id)
-      .eq("idempotency_key", idempotencyKey)
-      .maybeSingle();
-
-    if (cacheErr) {
-      // Fail-closed. The client retries, the underlying cache outage gets
-      // a Sentry breadcrumb, and we never silently double-commit.
-      console.error("[scenario-commit] idempotency lookup failed:", {
-        user_id: user.id,
-        code: cacheErr.code,
-        message: cacheErr.message,
-      });
-      reportIdempotencyError(cacheErr, {
-        kind: "lookup_error",
-        userId: user.id,
-        code: cacheErr.code ?? null,
-        message: cacheErr.message ?? "",
-      });
-      return NextResponse.json(
-        { error: "Idempotency cache unavailable; please retry" },
-        { status: 503, headers: NO_STORE_HEADERS },
-      );
-    }
-
-    if (cached) {
-      const row = cached as {
-        request_hash: string;
-        response: unknown;
-        schema_version: number;
-      };
-
-      if (row.request_hash !== requestHash) {
-        return NextResponse.json(
-          {
-            error: "Idempotency-Key reuse with different body",
-            detail:
-              "An earlier request used this Idempotency-Key with a different payload. Generate a new key for this request.",
-          },
-          { status: 422, headers: NO_STORE_HEADERS },
-        );
-      }
-
-      if (row.schema_version === RESPONSE_SCHEMA_VERSION) {
-        const validated = SuccessBodySchema.safeParse(row.response);
-        if (validated.success) {
-          return NextResponse.json(validated.data, {
-            status: 200,
-            headers: NO_STORE_HEADERS,
-          });
-        }
-        // Schema version is current but body fails validation — treat as
-        // miss and overwrite. Log loudly because this means a corrupt or
-        // hand-mutated row exists in the cache.
-        console.error(
-          "[scenario-commit] cached response failed schema validation",
-          { user_id: user.id, issues: validated.error.issues },
-        );
-        reportIdempotencyError(validated.error, {
-          kind: "envelope_invalid",
-          userId: user.id,
-          code: null,
-          message: "Cached response failed SuccessBodySchema parse",
-        });
-      }
-      // Schema version mismatch (older row, route revision changed shape)
-      // OR validation failed above — both paths fall through to a fresh
-      // RPC run and overwrite the row.
-    }
-  }
 
   // P1956 (audit-2026-05-07 round 2): single canonical percent encoding.
   // Migration 128 dropped the SQL-side `new_weight * 100` fallback — the RPC
@@ -478,9 +400,20 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
   // BEGIN..COMMIT scope, performs M7 reuse-or-create for bridge_recommended,
   // and RAISE EXCEPTIONs on any failure (rolling back the entire batch). NO
   // partial state — full-success or full-failure.
+  //
+  // Migration 131 added p_idempotency_key / p_request_hash params. When the
+  // caller supplies these, the RPC's first step is an atomic
+  // INSERT ... ON CONFLICT DO NOTHING on scenario_commit_idempotency, in
+  // the SAME transaction as the match_decisions inserts. This is the only
+  // place a concurrent retry can be deterministically deduped.
   const { data: rpcData, error: rpcErr } = await supabase.rpc(
     "commit_scenario_batch",
-    { p_allocator_id: user.id, p_diffs: normalisedDiffs },
+    {
+      p_allocator_id: user.id,
+      p_diffs: normalisedDiffs,
+      p_idempotency_key: idempotencyKeyValid ? idempotencyKey : null,
+      p_request_hash: idempotencyKeyValid ? requestHash : null,
+    },
   );
 
   if (rpcErr) {
@@ -506,8 +439,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
       issues: envelopeParsed.error.issues,
       raw: rpcData,
     });
-    reportIdempotencyError(envelopeParsed.error, {
-      kind: "envelope_invalid",
+    reportEnvelopeError(envelopeParsed.error, {
       userId: user.id,
       code: null,
       message: "commit_scenario_batch returned a malformed envelope",
@@ -520,9 +452,60 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
   const rpcResult: RpcEnvelope = envelopeParsed.data;
 
   if (rpcResult.ok === false) {
-    // FULL FAILURE — single-tx rolled back. Return per-row errors so the
-    // drawer can surface them inline. NO audit events emitted (the batch
-    // was rolled back, so emitting audit would mis-represent on-disk state).
+    // Map migration 131's idempotency error codes to specific HTTP statuses.
+    // Anything else (per-row commit failure envelopes from older code paths
+    // or hand-tested fixtures) keeps the existing 422 semantics — the
+    // recorded:0 + errors[] body shape is preserved so the drawer UI does
+    // not need to change.
+    const firstCode = rpcResult.errors[0]?.code;
+
+    if (firstCode === "idempotency_body_mismatch") {
+      // RFC §2.5 — same Idempotency-Key, different body is a client bug.
+      return NextResponse.json(
+        {
+          error: "Idempotency-Key reuse with different body",
+          detail:
+            "An earlier request used this Idempotency-Key with a different payload. Generate a new key for this request.",
+        },
+        { status: 422, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (firstCode === "idempotency_in_flight") {
+      // A concurrent retry holds the placeholder row. The client can
+      // re-poll once the winner completes (typically <1s — the RPC body
+      // is fast).
+      return NextResponse.json(
+        {
+          error: "Idempotent commit is already in flight; please retry",
+        },
+        {
+          status: 409,
+          headers: { ...NO_STORE_HEADERS, "Retry-After": "1" },
+        },
+      );
+    }
+
+    if (firstCode === "idempotency_schema_drift") {
+      // Cached row written by an older route revision. Treat as server-
+      // side data state requiring SRE follow-up; client retry with a
+      // fresh key.
+      console.error("[scenario-commit] idempotency schema drift:", {
+        user_id: user.id,
+        errors: rpcResult.errors,
+      });
+      return NextResponse.json(
+        {
+          error: "Idempotency cache has a stale entry; please retry with a fresh key",
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // FULL FAILURE (non-idempotency) — single-tx rolled back. Return
+    // per-row errors so the drawer can surface them inline. NO audit
+    // events emitted (the batch was rolled back, so emitting audit would
+    // mis-represent on-disk state).
     //
     // audit-2026-05-07 round-2 Block D / P1945:
     // Status is 422 (Unprocessable Entity), NOT 200. A 200 on a rolled-back
@@ -547,28 +530,31 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
     );
   }
 
-  // FULL SUCCESS — emit one audit event per inserted match_decision.
-  //
-  // Round-2-D code-reviewer (conf 8): include a per-request commit_batch_id
-  // in audit metadata AND in the cached response. If the cache upsert fails
-  // and a subsequent retry re-runs the RPC, the duplicate audit rows will
-  // share the same commit_batch_id, giving the audit operator a deterministic
-  // dedup key. This converts a silent audit-duplication leak into something
-  // a SQL `SELECT ... GROUP BY commit_batch_id HAVING COUNT(*) > 1` can spot.
+  // FULL SUCCESS. Emit one audit event per inserted match_decision UNLESS
+  // this was a cached replay (rpcResult.cached === true) — the original
+  // commit already emitted audit events when the cache row was first
+  // written; re-emitting them on every retry would duplicate the audit
+  // trail. The commit_batch_id below is included so a forensic SQL `GROUP
+  // BY commit_batch_id` can still cluster the per-row events for one
+  // logical commit if needed.
   const recorded = rpcResult.recorded;
   const commitBatchId = randomUUID();
-  for (const row of recorded) {
-    logAuditEvent(supabase, {
-      action: "match.decision_record",
-      entity_type: "match_decision",
-      entity_id: row.match_decision_id,
-      metadata: {
-        kind: row.kind,
-        source: "scenario_commit",
-        bridge_outcome_id: row.bridge_outcome_id,
-        commit_batch_id: commitBatchId,
-      },
-    });
+  const isCachedReplay = rpcResult.cached === true;
+
+  if (!isCachedReplay) {
+    for (const row of recorded) {
+      logAuditEvent(supabase, {
+        action: "match.decision_record",
+        entity_type: "match_decision",
+        entity_id: row.match_decision_id,
+        metadata: {
+          kind: row.kind,
+          source: "scenario_commit",
+          bridge_outcome_id: row.bridge_outcome_id,
+          commit_batch_id: commitBatchId,
+        },
+      });
+    }
   }
 
   const successBody: SuccessBody = {
@@ -576,53 +562,6 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
     results: recorded,
     errors: [],
   };
-
-  // P1945 — persist the success envelope so a subsequent retry with the same
-  // Idempotency-Key short-circuits at the top of this handler. The cache row
-  // carries request_hash (RFC §2.5 body-binding) and schema_version (so a
-  // future shape change invalidates stale rows deterministically). Upsert
-  // (not INSERT) so a concurrent retry through the RPC doesn't trip the
-  // (allocator_id, idempotency_key) PK.
-  //
-  // Round-2-D silent-failure-hunter (conf 9): on upsert failure, log at
-  // error level + Sentry breadcrumb. A swallowed failure here means the NEXT
-  // retry will re-run the RPC, double-recording match_decisions; the only
-  // signal in that case is the commit_batch_id on the duplicate audit rows.
-  //
-  // @audit-skip: scenario_commit_idempotency is a denormalization cache for
-  // the Idempotency-Key contract. Writes are server-side dedup state, NOT
-  // a user-visible mutation, and the per-row match_decisions / bridge_outcomes
-  // emitted above (line 549) ARE the audit-event source of truth. Auditing
-  // the cache write would double-count every commit + emit a "commit" event
-  // for retry-deduped requests that never recorded a decision.
-  if (idempotencyKeyValid) {
-    const { error: cacheWriteErr } = await admin
-      .from(IDEMPOTENCY_TABLE)
-      .upsert(
-        {
-          allocator_id: user.id,
-          idempotency_key: idempotencyKey,
-          request_hash: requestHash,
-          response: successBody,
-          schema_version: RESPONSE_SCHEMA_VERSION,
-        },
-        { onConflict: "allocator_id,idempotency_key" },
-      );
-    if (cacheWriteErr) {
-      console.error("[scenario-commit] idempotency cache write failed:", {
-        user_id: user.id,
-        code: cacheWriteErr.code,
-        message: cacheWriteErr.message,
-        commit_batch_id: commitBatchId,
-      });
-      reportIdempotencyError(cacheWriteErr, {
-        kind: "write_error",
-        userId: user.id,
-        code: cacheWriteErr.code ?? null,
-        message: cacheWriteErr.message ?? "",
-      });
-    }
-  }
 
   // Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_outcome_at marker.
   // The /allocations Server Component reader emits the PostHog

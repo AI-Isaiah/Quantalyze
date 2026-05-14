@@ -25,7 +25,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
 
 // `import "server-only"` (transitive via @/lib/analytics/onboarding-funnel)
@@ -801,128 +800,21 @@ describe("T_R19 — Cache-Control on happy-path 200", () => {
 // is invoked exactly once across both calls and the second response payload
 // equals the cached body.
 
-describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
-  const KEY = "a".repeat(24); // 24 chars — inside 16..128 window
+describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () => {
+  // Migration 131 moved the cache lookup + reservation + write INTO the
+  // commit_scenario_batch RPC. The route now just passes the key + hash to
+  // the RPC and inspects the envelope. These tests therefore mock mockRpc
+  // (the only Postgres surface the route touches for idempotency) and
+  // assert on:
+  //   - WHAT THE ROUTE PASSES to the RPC (p_idempotency_key, p_request_hash)
+  //   - HOW THE ROUTE MAPS the RPC's envelope shape to HTTP status
+  //
+  // The idemMaybeSingleMock / idemUpsertMock fixtures from the admin client
+  // are still in scope (stampOutcomeMarker uses admin), but the cache
+  // lookup mocks are NEVER hit by the route for idempotency anymore.
+  const KEY = "a".repeat(24);
 
-  it("first request runs the RPC and caches; duplicate request short-circuits to cache", async () => {
-    // First call: cache miss → RPC fires → success → cache upsert.
-    idemMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
-    mockRpc.mockResolvedValueOnce({
-      data: {
-        ok: true,
-        recorded: [
-          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
-        ],
-      },
-      error: null,
-    });
-
-    const res1 = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
-    expect(res1.status).toBe(200);
-    const body1 = await res1.json();
-    expect(body1.recorded).toBe(1);
-
-    // The admin client should have been asked to upsert the response.
-    // Round-2-D review: upsert now also carries the body-binding
-    // request_hash + schema_version (migration 130 columns).
-    expect(idemUpsertMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        allocator_id: "alloc-A",
-        idempotency_key: KEY,
-        response: expect.objectContaining({ recorded: 1 }),
-        request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
-        schema_version: 1,
-      }),
-      expect.anything(),
-    );
-
-    // Capture the request_hash that the route stamped on the upsert. The
-    // second request constructs the same body bytes, so the route will
-    // compute the same hash; we mirror it back via the cache mock so the
-    // body-binding check (request_hash mismatch → 422) doesn't fire.
-    const firstUpsertCall = (idemUpsertMock.mock.calls as unknown[][])[0][0] as {
-      request_hash: string;
-    };
-
-    // Second call: cache HIT → RPC must NOT fire again.
-    idemMaybeSingleMock.mockResolvedValueOnce({
-      data: {
-        response: body1,
-        request_hash: firstUpsertCall.request_hash,
-        schema_version: 1,
-      },
-      error: null,
-    });
-
-    const res2 = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
-    expect(res2.status).toBe(200);
-    expect(res2.headers.get("Cache-Control")).toBe("private, no-store");
-    const body2 = await res2.json();
-    expect(body2).toEqual(body1);
-
-    // Critical assertion: the RPC ran EXACTLY ONCE across both requests.
-    expect(mockRpc).toHaveBeenCalledTimes(1);
-  });
-
-  it("Idempotency-Key reuse with DIFFERENT body returns 422 (RFC §2.5 body-binding)", async () => {
-    // Pre-populate the cache as if a previous commit with this key+different
-    // body landed. The stored request_hash is for the "original" body; the
-    // current request hashes to a different value → 422.
-    idemMaybeSingleMock.mockResolvedValueOnce({
-      data: {
-        response: { recorded: 1, results: [], errors: [] },
-        request_hash: "0".repeat(64),
-        schema_version: 1,
-      },
-      error: null,
-    });
-
-    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
-    expect(res.status).toBe(422);
-    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    const body = await res.json();
-    expect(body.error).toMatch(/Idempotency-Key reuse/i);
-    // RPC must NOT have been invoked — the gate is upstream of the RPC.
-    expect(mockRpc).not.toHaveBeenCalled();
-  });
-
-  it("cache lookup error WITH valid Idempotency-Key fails closed with 503", async () => {
-    // Round-2-D silent-failure-hunter (conf 8): the prior implementation
-    // logged-and-fell-through. A flaky lookup is exactly when retries fire,
-    // so falling through doubles writes precisely when the user needs dedup.
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    idemMaybeSingleMock.mockResolvedValueOnce({
-      data: null,
-      error: { code: "PGRST000", message: "DB timeout" },
-    });
-
-    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
-    expect(res.status).toBe(503);
-    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(mockRpc).not.toHaveBeenCalled();
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "[scenario-commit] idempotency lookup failed:",
-      expect.objectContaining({ user_id: "alloc-A", code: "PGRST000" }),
-    );
-    consoleSpy.mockRestore();
-  });
-
-  it("cached row with mismatched schema_version is treated as a miss + overwritten", async () => {
-    // A row written by an older route revision (schema_version=0) must not
-    // be served verbatim. The route falls through to a fresh RPC and the
-    // upsert replaces the stale row. Hash MATCHES (same body bytes), so the
-    // request_hash check passes and we exercise the schema_version branch.
-    const bodyHash = createHash("sha256")
-      .update(JSON.stringify({ diffs: [VALID_VR] }))
-      .digest("hex");
-    idemMaybeSingleMock.mockResolvedValueOnce({
-      data: {
-        response: { recorded: 99, legacy_field: "drift" },
-        request_hash: bodyHash,
-        schema_version: 0,
-      },
-      error: null,
-    });
+  it("valid Idempotency-Key is passed to the RPC as p_idempotency_key + p_request_hash", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -935,20 +827,119 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
 
     const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
     expect(res.status).toBe(200);
-    expect(mockRpc).toHaveBeenCalledTimes(1);
-    expect(idemUpsertMock).toHaveBeenCalledWith(
-      expect.objectContaining({ schema_version: 1 }),
-      expect.anything(),
+
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_allocator_id: "alloc-A",
+        p_idempotency_key: KEY,
+        p_request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
     );
-    // Crucially, NOT the stale shape from the old row.
-    const body = await res.json();
-    expect(body.legacy_field).toBeUndefined();
-    expect(body.recorded).toBe(1);
+    // Route does NOT do any cache work directly — the RPC handles it.
+    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
+    expect(idemUpsertMock).not.toHaveBeenCalled();
   });
 
-  it("key boundary: 16 chars (min) → cache is consulted", async () => {
+  it("RPC ok:true + cached:true returns 200 WITHOUT re-emitting audit events", async () => {
+    // The original commit (whoever wrote the cache row) already emitted
+    // audit events. A cached replay must NOT duplicate them.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        cached: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    const body = await res.json();
+    expect(body.recorded).toBe(1);
+    // Critical: NO audit emission on cached replay.
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("RPC ok:false + code=idempotency_body_mismatch → 422 (RFC §2.5)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Idempotency-Key reuse with different body",
+            code: "idempotency_body_mismatch",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(422);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toMatch(/Idempotency-Key reuse/i);
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("RPC ok:false + code=idempotency_in_flight → 409 with Retry-After", async () => {
+    // A concurrent retry holds the placeholder row inside the SQL function.
+    // The route maps this to 409 so the client can re-poll.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Idempotent commit is already in flight",
+            code: "idempotency_in_flight",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("1");
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("RPC ok:false + code=idempotency_schema_drift → 503", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Cached response has an unknown schema_version",
+            code: "idempotency_schema_drift",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[scenario-commit] idempotency schema drift:",
+      expect.objectContaining({ user_id: "alloc-A" }),
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("key boundary: 16 chars (min) → RPC receives p_idempotency_key", async () => {
     const minKey = "k".repeat(16);
-    idemMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -959,13 +950,14 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
       error: null,
     });
     await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, minKey));
-    expect(idemMaybeSingleMock).toHaveBeenCalledTimes(1);
-    expect(idemUpsertMock).toHaveBeenCalledTimes(1);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: minKey }),
+    );
   });
 
-  it("key boundary: 128 chars (max) → cache is consulted", async () => {
+  it("key boundary: 128 chars (max) → RPC receives p_idempotency_key", async () => {
     const maxKey = "k".repeat(128);
-    idemMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -976,11 +968,13 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
       error: null,
     });
     await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, maxKey));
-    expect(idemMaybeSingleMock).toHaveBeenCalledTimes(1);
-    expect(idemUpsertMock).toHaveBeenCalledTimes(1);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: maxKey }),
+    );
   });
 
-  it("key boundary: 129 chars → treated as no-idempotency (cache skipped)", async () => {
+  it("key boundary: 129 chars → RPC called with p_idempotency_key=null", async () => {
     const overKey = "k".repeat(129);
     mockRpc.mockResolvedValueOnce({
       data: {
@@ -992,21 +986,17 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
       error: null,
     });
     await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, overKey));
-    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
-    expect(idemUpsertMock).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_idempotency_key: null,
+        p_request_hash: null,
+      }),
+    );
   });
 
-  it("Idempotency-Key with non-allowed chars is treated as no-idempotency (round-2-D red-team F.4)", async () => {
-    // The HTTP Headers Web API itself blocks chars >0xFF (so emoji can't
-    // even reach the route via a normal client). The remaining concern is
-    // Latin-1 chars (0x80–0xFF) which CAN be sent in headers and which the
-    // RFC-recommended charset (uuid-style hex / base64url) does not include.
-    // The regex `/^[A-Za-z0-9._~-]{16,128}$/` matches the RFC's "opaque token"
-    // shape; any key with punctuation outside the allowed set (here: a
-    // space, which IS valid in HTTP-header byte strings but is not an
-    // RFC-conformant key char) gets the no-idempotency path with no cache
-    // consultation or write.
-    const spacedKey = "abcdefghijklmnop qrstuvwx"; // 25 chars including a space
+  it("Idempotency-Key with non-RFC-charset (space) → RPC called with p_idempotency_key=null", async () => {
+    const spacedKey = "abcdefghijklmnop qrstuvwx";
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -1017,46 +1007,14 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
       error: null,
     });
     const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, spacedKey));
-    // Request still succeeds (no-idempotency-key path), but cache is NEVER
-    // consulted or written — so a subsequent retry of this exact request
-    // would re-run the RPC. This is the correct trade-off: a non-conformant
-    // key gets dropped at the route layer (cache not touched), preventing
-    // a downstream Postgres CHECK violation on the upsert.
     expect(res.status).toBe(200);
-    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
-    expect(idemUpsertMock).not.toHaveBeenCalled();
-  });
-
-  it("cache write failure does NOT block the 200 success response", async () => {
-    // Best-effort dedup contract: the RPC has already committed. We MUST
-    // still return 200 with the success body to the client; the failed
-    // cache write is logged at error level for SRE follow-up.
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    idemMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
-    idemUpsertMock.mockResolvedValueOnce({
-      error: { code: "23505", message: "concurrent retry race" },
-    } as unknown as { error: null });
-    mockRpc.mockResolvedValueOnce({
-      data: {
-        ok: true,
-        recorded: [
-          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
-        ],
-      },
-      error: null,
-    });
-
-    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "[scenario-commit] idempotency cache write failed:",
-      expect.objectContaining({ user_id: "alloc-A", code: "23505" }),
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: null }),
     );
-    consoleSpy.mockRestore();
   });
 
-  it("malformed Idempotency-Key (too short) is ignored — RPC runs as normal", async () => {
+  it("Idempotency-Key too short (8 chars) → RPC called with p_idempotency_key=null", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -1066,17 +1024,15 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
       },
       error: null,
     });
-
-    // 8-char key is below the 16-char floor → treated as no-idempotency.
     const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, "shortkey"));
     expect(res.status).toBe(200);
-    expect(mockRpc).toHaveBeenCalledTimes(1);
-    // The cache should NOT have been consulted for a malformed key.
-    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
-    expect(idemUpsertMock).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: null }),
+    );
   });
 
-  it("request without Idempotency-Key header skips cache entirely", async () => {
+  it("request without Idempotency-Key header → RPC called with p_idempotency_key=null", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -1089,8 +1045,13 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
 
     const res = await POST(mkReq({ diffs: [VALID_VR] }));
     expect(res.status).toBe(200);
-    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
-    expect(idemUpsertMock).not.toHaveBeenCalled();
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_idempotency_key: null,
+        p_request_hash: null,
+      }),
+    );
   });
 });
 
@@ -1099,7 +1060,7 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
 // ===========================================================================
 
 describe("T_R21 — RPC error 500 path", () => {
-  it("RPC error returns 500 with Cache-Control + no audit + no cache write", async () => {
+  it("RPC error returns 500 with Cache-Control + no audit", async () => {
     mockRpc.mockResolvedValueOnce({
       data: null,
       error: { code: "P0001", message: "RPC blew up" },
@@ -1111,9 +1072,10 @@ describe("T_R21 — RPC error 500 path", () => {
     expect(res.status).toBe(500);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(logAuditEvent).not.toHaveBeenCalled();
-    // 500 means the RPC was attempted but failed; cache MUST NOT capture
-    // a failure response (a retry should be able to succeed).
-    expect(idemUpsertMock).not.toHaveBeenCalled();
+    // Migration 131: when the RPC raises EXCEPTION the function's
+    // transaction (including the idempotency placeholder reservation) rolls
+    // back. The route does not need to do anything else — the cache stays
+    // clean.
   });
 });
 
@@ -1123,11 +1085,7 @@ describe("T_R21 — RPC error 500 path", () => {
 // ===========================================================================
 
 describe("T_R22 — Idempotency + voluntary_modify percent normalisation", () => {
-  it("cached success body for a new_weight modify request carries percent_allocated", async () => {
-    // First call: voluntary_modify with new_weight; route normalises to
-    // percent_allocated before calling the RPC. The cached response should
-    // reflect what was actually committed.
-    idemMaybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
+  it("modify with new_weight + Idempotency-Key passes normalised percent + hash to the RPC", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -1144,8 +1102,8 @@ describe("T_R22 — Idempotency + voluntary_modify percent normalisation", () =>
     );
     expect(res.status).toBe(200);
 
-    // RPC should have been called with normalised percent_allocated (8) — NOT
-    // new_weight (0.08).
+    // RPC receives the normalised percent_allocated (8 = 0.08 * 100) AND
+    // the new idempotency params. Migration 131 SQL handles the cache row.
     expect(mockRpc).toHaveBeenCalledWith(
       "commit_scenario_batch",
       expect.objectContaining({
@@ -1155,18 +1113,9 @@ describe("T_R22 — Idempotency + voluntary_modify percent normalisation", () =>
             percent_allocated: 8,
           }),
         ]),
+        p_idempotency_key: key,
+        p_request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
-    );
-
-    // The cache row stamped on upsert carries the canonical successBody (no
-    // new_weight leak), the request_hash, and the schema_version.
-    expect(idemUpsertMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        response: expect.objectContaining({ recorded: 1 }),
-        request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
-        schema_version: 1,
-      }),
-      expect.anything(),
     );
   });
 
