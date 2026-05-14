@@ -61,14 +61,21 @@ export const runtime = "nodejs";
 // would leak across tenants.
 const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
 
-// audit-2026-05-07 round-2 Block D / P1945 — accepted Idempotency-Key length
-// range. Matches the CHECK on scenario_commit_idempotency.idempotency_key
-// (migration 130) so a request bearing a malformed key takes the
-// "no-idempotency" path rather than hitting a 23514 check_violation at INSERT
-// time. RFC draft-ietf-httpapi-idempotency-key recommends client-generated,
-// opaque, hard-to-guess values — 16 chars is the floor for collision safety.
-const IDEMPOTENCY_KEY_MIN = 16;
-const IDEMPOTENCY_KEY_MAX = 128;
+// audit-2026-05-07 round-2 Block D / P1945 — accepted Idempotency-Key shape.
+// The charset is restricted to ASCII alphanumerics + URL-safe punctuation
+// (RFC 8941 token-ish) for two reasons:
+//   1. JS `.length` counts UTF-16 code units; Postgres `length(text)` counts
+//      characters. A 16-code-unit emoji key (which JS admits) is 8 chars in
+//      Postgres → fails the migration 130 CHECK at upsert time → cache row
+//      never written → next retry duplicates the RPC. The ASCII regex
+//      eliminates the JS/Postgres counting mismatch by construction.
+//   2. The RFC's "opaque, hard-to-guess, client-generated" guidance maps
+//      naturally to uuid-style hex / base64url charsets; restricting here
+//      also prevents homoglyph confusion in logs.
+// 16 chars is the collision-safety floor; 128 the practical upper bound
+// before the key starts to look like an attempt to stash payload in a
+// header.
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._~-]{16,128}$/;
 const IDEMPOTENCY_TABLE = "scenario_commit_idempotency";
 
 // Round-2-D type-design review (conf 9): bump this when the success-body
@@ -345,9 +352,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
   // ---------------------------------------------------------------------------
   const idempotencyKey = req.headers.get("Idempotency-Key");
   const idempotencyKeyValid =
-    !!idempotencyKey &&
-    idempotencyKey.length >= IDEMPOTENCY_KEY_MIN &&
-    idempotencyKey.length <= IDEMPOTENCY_KEY_MAX;
+    !!idempotencyKey && IDEMPOTENCY_KEY_RE.test(idempotencyKey);
 
   const admin = createAdminClient();
 

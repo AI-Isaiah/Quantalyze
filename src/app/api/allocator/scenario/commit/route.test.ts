@@ -996,6 +996,37 @@ describe("T_R20 — Idempotency-Key dedup (P1945)", () => {
     expect(idemUpsertMock).not.toHaveBeenCalled();
   });
 
+  it("Idempotency-Key with non-allowed chars is treated as no-idempotency (round-2-D red-team F.4)", async () => {
+    // The HTTP Headers Web API itself blocks chars >0xFF (so emoji can't
+    // even reach the route via a normal client). The remaining concern is
+    // Latin-1 chars (0x80–0xFF) which CAN be sent in headers and which the
+    // RFC-recommended charset (uuid-style hex / base64url) does not include.
+    // The regex `/^[A-Za-z0-9._~-]{16,128}$/` matches the RFC's "opaque token"
+    // shape; any key with punctuation outside the allowed set (here: a
+    // space, which IS valid in HTTP-header byte strings but is not an
+    // RFC-conformant key char) gets the no-idempotency path with no cache
+    // consultation or write.
+    const spacedKey = "abcdefghijklmnop qrstuvwx"; // 25 chars including a space
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, spacedKey));
+    // Request still succeeds (no-idempotency-key path), but cache is NEVER
+    // consulted or written — so a subsequent retry of this exact request
+    // would re-run the RPC. This is the correct trade-off: a non-conformant
+    // key gets dropped at the route layer (cache not touched), preventing
+    // a downstream Postgres CHECK violation on the upsert.
+    expect(res.status).toBe(200);
+    expect(idemMaybeSingleMock).not.toHaveBeenCalled();
+    expect(idemUpsertMock).not.toHaveBeenCalled();
+  });
+
   it("cache write failure does NOT block the 200 success response", async () => {
     // Best-effort dedup contract: the RPC has already committed. We MUST
     // still return 200 with the success body to the client; the failed

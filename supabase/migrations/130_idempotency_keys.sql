@@ -56,6 +56,14 @@
 --
 -- Self-verifying DO block at the bottom — fails the migration loudly if
 -- the table or RLS policy is missing after CREATE TABLE / CREATE POLICY.
+--
+-- Idempotency note (round-2-D red-team CRITICAL):
+--   The CREATE TABLE + ADD COLUMN IF NOT EXISTS structure below is
+--   defensively idempotent. Any environment that applied an earlier
+--   revision of this same file (one without `request_hash` /
+--   `schema_version`) will get the missing columns added by the ALTER
+--   TABLE statements below — `CREATE TABLE IF NOT EXISTS` alone would
+--   skip the new columns when the table already exists.
 
 BEGIN;
 SET lock_timeout = '3s';
@@ -69,6 +77,47 @@ CREATE TABLE IF NOT EXISTS scenario_commit_idempotency (
   created_at      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (allocator_id, idempotency_key)
 );
+
+-- Defensive idempotent backfill for environments that applied a prior
+-- revision of this migration without these columns. `ADD COLUMN IF NOT
+-- EXISTS` is a no-op on a fresh CREATE; on an existing table it adds the
+-- column. The NOT NULL is enforced after backfill (sentinel-zero hash +
+-- schema_version=0 sentinel) so the constraint isn't violated on existing
+-- rows. Round-2-D red-team CRITICAL.
+ALTER TABLE scenario_commit_idempotency
+  ADD COLUMN IF NOT EXISTS request_hash text;
+ALTER TABLE scenario_commit_idempotency
+  ADD COLUMN IF NOT EXISTS schema_version smallint;
+
+UPDATE scenario_commit_idempotency
+  SET request_hash = repeat('0', 64)
+  WHERE request_hash IS NULL;
+UPDATE scenario_commit_idempotency
+  SET schema_version = 0
+  WHERE schema_version IS NULL;
+
+ALTER TABLE scenario_commit_idempotency
+  ALTER COLUMN request_hash SET NOT NULL;
+ALTER TABLE scenario_commit_idempotency
+  ALTER COLUMN schema_version SET NOT NULL;
+ALTER TABLE scenario_commit_idempotency
+  ALTER COLUMN schema_version SET DEFAULT 1;
+
+-- request_hash length CHECK as an ADD CONSTRAINT IF NOT EXISTS-equivalent.
+-- Postgres lacks `ADD CONSTRAINT IF NOT EXISTS`; we drop-then-add inside a
+-- DO block guarded by pg_constraint introspection so re-running this
+-- migration on a previously-applied state is a no-op.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'scenario_commit_idem_request_hash_len_chk'
+  ) THEN
+    ALTER TABLE scenario_commit_idempotency
+      ADD CONSTRAINT scenario_commit_idem_request_hash_len_chk
+      CHECK (length(request_hash) = 64);
+  END IF;
+END $$;
 
 COMMENT ON TABLE scenario_commit_idempotency IS
   'Per-allocator Idempotency-Key dedup cache for POST /api/allocator/scenario/commit. Row inserted after a successful commit; lookups short-circuit retries with the cached response. See migration 130 + audit-2026-05-07 round-2 Block D.';
