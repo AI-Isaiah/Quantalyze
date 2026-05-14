@@ -93,53 +93,53 @@ class TestRunSqlProbe:
     def test_keyed_parse_happy_path(self, monkeypatch) -> None:
         self._stub_psql(
             monkeypatch,
-            "relation_visible,t\np50,1\np95,2\np99,3\np999,456789\nmax,5\ncount,42\ntotal_rows,42\n",
+            "relation_visible,t\nrow_security_active,f\np50,1\np95,2\np99,3\np999,456789\nmax,5\ncount,42\ntotal_rows,42\n",
         )
         p999, n = dep._run_sql_probe()
         assert p999 == 456789.0
         assert n == 42
 
     def test_missing_p999_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np50,1\ncount,1\ntotal_rows,1\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np50,1\ncount,1\ntotal_rows,1\n")
         with pytest.raises(RuntimeError, match="p999"):
             dep._run_sql_probe()
 
     def test_missing_count_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,1\ntotal_rows,1\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,1\ntotal_rows,1\n")
         with pytest.raises(RuntimeError, match="count"):
             dep._run_sql_probe()
 
     def test_missing_total_rows_raises(self, monkeypatch) -> None:
         """total_rows is required for the H4 NULL-metrics-only diagnostic."""
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,1\ncount,1\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,1\ncount,1\n")
         with pytest.raises(RuntimeError, match="total_rows"):
             dep._run_sql_probe()
 
     def test_nan_rejected(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,nan\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,nan\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
     def test_inf_rejected(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,inf\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,inf\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
     def test_negative_rejected(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,-1\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,-1\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
     def test_empty_table_raises_wrong_db_diagnostic(self, monkeypatch) -> None:
         """count=0 AND total_rows=0 → wrong-DB diagnostic."""
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,\ncount,0\ntotal_rows,0\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,\ncount,0\ntotal_rows,0\n")
         with pytest.raises(RuntimeError, match="empty.*0 rows"):
             dep._run_sql_probe()
 
     def test_null_metrics_only_raises_distinct_diagnostic(self, monkeypatch) -> None:
         """H4: total_rows>0 AND count=0 → table populated but no metrics
         yet. Must NOT misdiagnose as "wrong DB"."""
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,\ncount,0\ntotal_rows,17\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,\ncount,0\ntotal_rows,17\n")
         with pytest.raises(RuntimeError, match="17 rows.*all metrics_json values are NULL"):
             dep._run_sql_probe()
 
@@ -152,7 +152,7 @@ class TestRunSqlProbe:
         operator chases GRANTs / role config, not DATABASE_URL."""
         self._stub_psql(
             monkeypatch,
-            f"relation_visible,{visible_val}\np999,\ncount,0\ntotal_rows,0\n",
+            f"relation_visible,{visible_val}\nrow_security_active,f\np999,\ncount,0\ntotal_rows,0\n",
         )
         with pytest.raises(RuntimeError, match="not visible to the connecting role"):
             dep._run_sql_probe()
@@ -179,7 +179,7 @@ class TestRunSqlProbe:
             captured["kwargs"] = kw
             return MagicMock(
                 returncode=0,
-                stdout="relation_visible,t\np999,1\ncount,1\ntotal_rows,1\n",
+                stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n",
                 stderr="",
             )
 

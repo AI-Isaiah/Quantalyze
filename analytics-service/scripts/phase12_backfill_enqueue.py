@@ -73,11 +73,22 @@ async def main() -> int:
     # P2025: track per-row outcomes. The old loop had no try/except — a partial-
     # unique-index violation on row K would raise and leave the caller thinking
     # K-1 rows were enqueued, while the final message lied about `total`.
+    #
+    # Defensive id extraction: a row missing 'id' (schema rename, RLS-
+    # projection change, malformed response) must NOT raise KeyError
+    # mid-loop and skip the final summary. Match the kill_switch pattern.
     now_iso = datetime.now(timezone.utc).isoformat()
     inserted = 0
     failures: list[tuple[str, str]] = []
-    for r in strategies:
-        sid = r["id"]
+    for idx, r in enumerate(strategies):
+        sid = r.get("id") if isinstance(r, dict) else None
+        if not isinstance(sid, str) or not sid:
+            failures.append((f"<row-{idx}>", f"missing/invalid 'id' in {r!r}"))
+            print(
+                f"phase12_backfill_enqueue: WARNING — strategy row {idx} "
+                f"missing/invalid 'id' field: {r!r} (continuing)"
+            )
+            continue
         try:
             await db_execute(
                 lambda strategy_id=sid: supabase.table("compute_jobs").insert(

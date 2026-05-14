@@ -168,25 +168,34 @@ def _run_sql_probe() -> tuple[float, int]:
             )
         parsed[parts[0].strip()] = parts[1].strip()
 
-    for required in ("relation_visible", "p999", "count", "total_rows"):
+    for required in ("relation_visible", "row_security_active", "p999", "count", "total_rows"):
         if required not in parsed:
             raise RuntimeError(
                 f"phase12_deploy: SQL probe missing required key "
                 f"{required!r}; got keys {sorted(parsed.keys())!r}"
             )
-    # Relation visibility comes first — distinguishes RLS/GRANT failure
-    # (identical-looking count=0 / total_rows=0 to "empty table") from
-    # actual emptiness.
-    if parsed["relation_visible"].strip().lower() not in ("t", "true"):
+
+    relation_visible = parsed["relation_visible"].strip().lower() in ("t", "true")
+    row_security_active = parsed["row_security_active"].strip().lower() in ("t", "true")
+    n = int(_parse_probe_value(parsed["count"]))
+    total_rows = int(_parse_probe_value(parsed["total_rows"]))
+
+    if not relation_visible:
         raise RuntimeError(
             "phase12_deploy: strategy_analytics is not visible to the "
             "connecting role (table missing or SELECT denied). Check the "
             "DATABASE_URL role/GRANTs before re-running."
         )
+    if n == 0 and total_rows == 0 and row_security_active:
+        raise RuntimeError(
+            "phase12_deploy: strategy_analytics has RLS enabled AND the "
+            "connecting role lacks BYPASSRLS — every row appears filtered. "
+            "Re-run via service_role or grant BYPASSRLS before triggering "
+            "the kill-switch."
+        )
+
     # Distinguish "table populated but no metrics yet" from "empty
     # table / wrong DB" using the unfiltered total_rows key.
-    n = int(_parse_probe_value(parsed["count"]))
-    total_rows = int(_parse_probe_value(parsed["total_rows"]))
     if n == 0:
         if total_rows > 0:
             raise RuntimeError(

@@ -57,21 +57,26 @@ _DEFAULT_PROBE_TIMEOUT_S = 60
 def _resolve_probe_timeout_s() -> int:
     """Resolve PHASE12_PROBE_TIMEOUT_S → positive int.
 
-    Rejects non-integer values (so `PHASE12_PROBE_TIMEOUT_S=foo` fails
-    loud at probe time, not at module import) and rejects non-positive
-    values (so `PHASE12_PROBE_TIMEOUT_S=0` doesn't silently turn every
-    probe into an instant "hung connection" diagnostic).
+    Uses the same digits-only regex as `_nonneg_finite_int` so the two
+    env-var validators have consistent semantics: no leading sign, no
+    decimal point, no thousands separators (`60_000`), no scientific
+    notation. The strict pattern avoids quietly mis-interpreting a typo
+    or shell-expansion artifact as a deliberate value.
     """
     raw = os.getenv("PHASE12_PROBE_TIMEOUT_S")
     if raw is None or raw == "":
         return _DEFAULT_PROBE_TIMEOUT_S
-    try:
-        val = int(raw)
-    except ValueError as exc:
+    # Allow an optional leading minus so the non-positive branch below can
+    # emit the more-helpful "must be positive" message for `-1` / `-60`.
+    # The regex still rejects decimals, underscores, scientific notation,
+    # `+`, and whitespace — anything ambiguous.
+    if not re.fullmatch(r"-?\d+", raw):
         raise RuntimeError(
             f"phase12_kill_switch: PHASE12_PROBE_TIMEOUT_S={raw!r} is not "
-            f"an integer; expected positive seconds (e.g. '120')."
-        ) from exc
+            f"an integer (digits only, no separators, no exponent); "
+            f"expected positive seconds (e.g. '120')."
+        )
+    val = int(raw)
     if val <= 0:
         raise RuntimeError(
             f"phase12_kill_switch: PHASE12_PROBE_TIMEOUT_S={raw!r} must be "
@@ -235,22 +240,35 @@ def measure_p999_via_sql() -> tuple[float, int]:
             )
         parsed[parts[0].strip()] = parts[1].strip()
 
-    for required in ("relation_visible", "p999", "count", "total_rows"):
+    for required in ("relation_visible", "row_security_active", "p999", "count", "total_rows"):
         if required not in parsed:
             raise RuntimeError(
                 f"phase12_kill_switch: SQL probe missing required key "
                 f"{required!r}; got keys {sorted(parsed.keys())!r}"
             )
 
-    # Check relation visibility first: if `to_regclass` returned NULL or
-    # the role lacks SELECT, an RLS-hidden or missing table looks
-    # identical to "empty table" from the count alone. The visibility
-    # key disambiguates so the operator gets the right root-cause hint.
-    if parsed["relation_visible"].strip().lower() not in ("t", "true"):
+    relation_visible = parsed["relation_visible"].strip().lower() in ("t", "true")
+    row_security_active = parsed["row_security_active"].strip().lower() in ("t", "true")
+    count = int(_parse_probe_value(parsed["count"]))
+    total_rows = int(_parse_probe_value(parsed["total_rows"]))
+
+    # Three distinct empty-looking states with three distinct root causes.
+    # Order matters: check visibility first, then RLS, then true emptiness.
+    if not relation_visible:
         raise RuntimeError(
             "phase12_kill_switch: strategy_analytics is not visible to the "
             "connecting role (table missing or SELECT denied). Check the "
             "DATABASE_URL role/GRANTs before re-running."
+        )
+    if count == 0 and total_rows == 0 and row_security_active:
+        # has_table_privilege passed but RLS filters every row — operator
+        # connected with the right role but lacks BYPASSRLS / a matching
+        # policy. Different fix from "wrong DB".
+        raise RuntimeError(
+            "phase12_kill_switch: strategy_analytics has RLS enabled AND "
+            "the connecting role lacks BYPASSRLS — every row appears "
+            "filtered. Re-run via service_role or grant BYPASSRLS to the "
+            "deploy role before triggering the kill-switch."
         )
 
     # Validate count: an empty strategy_analytics table produces count=0
@@ -259,8 +277,6 @@ def measure_p999_via_sql() -> tuple[float, int]:
     # the operator can't tell "wrong DB" from "kill-switch broken".
     # Distinguish "table truly empty" from "table populated but no
     # metrics yet" using the total_rows key.
-    count = int(_parse_probe_value(parsed["count"]))
-    total_rows = int(_parse_probe_value(parsed["total_rows"]))
     if count == 0:
         if total_rows > 0:
             raise RuntimeError(
@@ -402,6 +418,13 @@ async def main(
     # RLS-projection change, malformed response) must NOT raise KeyError
     # mid-loop and skip the post-loop audit-log write. Capture the
     # malformed row as a failure so the trigger is still recorded.
+    #
+    # `input_total` is the row count BEFORE filtering — it is the
+    # denominator the audit log reports. `strategy_ids` is the valid
+    # subset the per-strategy loop iterates over. Without splitting these
+    # two, `len(strategy_ids) - len(failures)` produces a negative
+    # success count when malformed_rows > valid rows.
+    input_total = len(rows.data)
     strategy_ids: list[str] = []
     malformed_rows: list[tuple[str, str]] = []
     for idx, row in enumerate(rows.data):
@@ -430,10 +453,11 @@ async def main(
                 f"  strategy {sid}: WARNING — cutover failed: {exc!r} (continuing)"
             )
 
+    succeeded = input_total - len(failures)
     status = "COMPLETE" if not failures else "PARTIAL"
     print(
         f"phase12_kill_switch: {status} — {total_moved} keys moved across "
-        f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} strategies"
+        f"{succeeded}/{input_total} strategies"
         + (f" ({len(failures)} failed)" if failures else "")
     )
 
@@ -471,8 +495,8 @@ async def main(
             f"\n## Kill-switch triggered (D-07) — {ts}{noop_marker}\n"
             f"- p99.9 = {p999:.0f} bytes (threshold {THRESHOLD_BYTES}); "
             f"moved {total_moved} keys across "
-            f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} "
-            f"strategies ({len(failures)} failed).\n"
+            f"{succeeded}/{input_total} strategies "
+            f"({len(failures)} failed).\n"
         )
     )
 

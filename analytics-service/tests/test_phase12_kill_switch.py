@@ -206,7 +206,7 @@ class TestSqlProbeParsing:
 
         def capture(*args, **kwargs):  # type: ignore[no-untyped-def]
             captured.update(kwargs)
-            return MagicMock(returncode=0, stdout="relation_visible,t\np999,1\ncount,1\ntotal_rows,1\n", stderr="")
+            return MagicMock(returncode=0, stdout="relation_visible,t\nrow_security_active,f\np999,1\ncount,1\ntotal_rows,1\n", stderr="")
 
         monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", capture)
         ks.measure_p999_via_sql()
@@ -215,53 +215,53 @@ class TestSqlProbeParsing:
     def test_keyed_parse_happy_path(self, monkeypatch) -> None:
         self._stub_psql(
             monkeypatch,
-            "relation_visible,t\np50,12345\np95,234567\np99,345678\np999,456789\nmax,567890\ncount,42\ntotal_rows,42\n",
+            "relation_visible,t\nrow_security_active,f\np50,12345\np95,234567\np99,345678\np999,456789\nmax,567890\ncount,42\ntotal_rows,42\n",
         )
         p999, n = ks.measure_p999_via_sql()
         assert p999 == 456789.0
         assert n == 42
 
     def test_missing_p999_key_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np50,12345\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np50,12345\ncount,42\ntotal_rows,42\n")
         with pytest.raises(RuntimeError, match="p999"):
             ks.measure_p999_via_sql()
 
     def test_missing_count_key_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,456789\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,456789\ntotal_rows,42\n")
         with pytest.raises(RuntimeError, match="count"):
             ks.measure_p999_via_sql()
 
     def test_missing_total_rows_key_raises(self, monkeypatch) -> None:
         """total_rows is required for the H4 NULL-metrics-only diagnostic."""
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,456789\ncount,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,456789\ncount,42\n")
         with pytest.raises(RuntimeError, match="total_rows"):
             ks.measure_p999_via_sql()
 
     def test_nan_p999_in_probe_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,nan\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,nan\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_inf_p999_in_probe_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,inf\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,inf\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_negative_count_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,500\ncount,-3\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,500\ncount,-3\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_empty_table_raises_with_explicit_diagnostic(self, monkeypatch) -> None:
         """count=0 AND total_rows=0 → wrong-DB diagnostic."""
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,\ncount,0\ntotal_rows,0\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,\ncount,0\ntotal_rows,0\n")
         with pytest.raises(RuntimeError, match="empty.*0 rows"):
             ks.measure_p999_via_sql()
 
     def test_null_metrics_only_raises_distinct_diagnostic(self, monkeypatch) -> None:
         """H4: total_rows>0 AND count=0 → table populated but no metrics
         yet. Must NOT misdiagnose as "wrong DB"."""
-        self._stub_psql(monkeypatch, "relation_visible,t\np999,\ncount,0\ntotal_rows,17\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\nrow_security_active,f\np999,\ncount,0\ntotal_rows,17\n")
         with pytest.raises(RuntimeError, match="17 rows.*all metrics_json values are NULL"):
             ks.measure_p999_via_sql()
 
@@ -274,9 +274,33 @@ class TestSqlProbeParsing:
         so operator chases the right root cause."""
         self._stub_psql(
             monkeypatch,
-            f"relation_visible,{visible_val}\np999,\ncount,0\ntotal_rows,0\n",
+            f"relation_visible,{visible_val}\nrow_security_active,f\np999,\ncount,0\ntotal_rows,0\n",
         )
         with pytest.raises(RuntimeError, match="not visible to the connecting role"):
+            ks.measure_p999_via_sql()
+
+    @pytest.mark.parametrize("rls_val", ["t", "true", "TRUE"])
+    def test_rls_active_with_zero_rows_emits_distinct_diagnostic(
+        self, monkeypatch, rls_val: str
+    ) -> None:
+        """Round-3 #2: has_table_privilege returns true regardless of RLS,
+        so an RLS-filtered role looks identical to "empty table". The new
+        row_security_active key must surface a different diagnostic so the
+        operator chases GRANTs/BYPASSRLS, not DATABASE_URL."""
+        self._stub_psql(
+            monkeypatch,
+            f"relation_visible,t\nrow_security_active,{rls_val}\np999,\ncount,0\ntotal_rows,0\n",
+        )
+        with pytest.raises(RuntimeError, match="RLS enabled.*BYPASSRLS"):
+            ks.measure_p999_via_sql()
+
+    def test_missing_row_security_active_key_raises(self, monkeypatch) -> None:
+        """Drift guard: row_security_active is required."""
+        self._stub_psql(
+            monkeypatch,
+            "relation_visible,t\np999,1\ncount,1\ntotal_rows,1\n",
+        )
+        with pytest.raises(RuntimeError, match="row_security_active"):
             ks.measure_p999_via_sql()
 
     def test_missing_relation_visible_key_raises(self, monkeypatch) -> None:
@@ -622,10 +646,16 @@ class TestCutoverLoopPartialFailure:
 
     @pytest.mark.asyncio
     async def test_malformed_rows_recorded_as_failures(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, capsys
     ) -> None:
         """#4: a row missing 'strategy_id' must not raise KeyError mid-loop
-        and skip the audit log. Capture as a failure; continue."""
+        and skip the audit log. Capture as a failure; continue.
+
+        Round-3 #1: the success-count math must use input_total (the
+        denominator the operator reads) not len(strategy_ids). With 1
+        valid + 2 malformed inputs, the prior code emitted "-1/1" (a
+        negative success count). The audit log must show "1/3".
+        """
         todos_path = tmp_path / "TODOS.md"
         todos_path.write_text("# existing\n")
         monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
@@ -655,6 +685,16 @@ class TestCutoverLoopPartialFailure:
         log = todos_path.read_text()
         assert "Kill-switch triggered" in log
         assert "2 failed" in log
+        # Audit-log math must not go negative when malformed > valid.
+        assert "1/3" in log, f"expected '1/3' in audit log, got: {log!r}"
+        # The success fraction itself must not be negative — guard against
+        # the specific "moved K keys across -N/M" regression.
+        assert "across -" not in log, (
+            f"audit-log success fraction must not be negative: {log!r}"
+        )
+        captured = capsys.readouterr()
+        assert "1/3" in captured.out
+        assert "across -" not in captured.out
 
     @pytest.mark.asyncio
     async def test_strategy_select_none_data_raises(self, monkeypatch) -> None:
