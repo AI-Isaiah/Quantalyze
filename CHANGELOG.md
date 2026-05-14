@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.33.0] - 2026-05-14
+
+### Added
+
+- **Allocator role gate (`withAllocatorAuth`)** — new shared route helper enforces `profiles.role IN ('allocator','both')` on top of `withAuth`. Three failure modes are distinct (instead of one lying 403): DB lookup error → 503 + Sentry breadcrumb, missing profile row → 403 "Profile not provisioned", role mismatch → 403 "allocator role required". Wired into `/api/allocator/scenario/commit` and `/api/strategies/browse`. A branded `AllocatorUser` type prevents accidental downgrade to `withAuth` via the compiler (P1946).
+- **Idempotency-Key support on `POST /api/allocator/scenario/commit`** — RFC draft-ietf-httpapi-idempotency-key. Retried requests with the same key return the cached commit envelope without re-recording match decisions. Reservation happens inside the SQL function (migration 131) in the same transaction as the data inserts, so concurrent retries serialize via `INSERT ... ON CONFLICT DO NOTHING` row-lock — no double-commit under any race. New error codes returned by the function map to HTTP statuses: `idempotency_body_mismatch` → 422 (key reused with different body, per RFC §2.5), `idempotency_in_flight` → 409 + `Retry-After: 1`, `idempotency_schema_drift` → 503. Key validation restricted to ASCII alphanumerics + URL-safe punctuation (16-128 chars) so JS `.length` and Postgres `length(text)` agree by construction (P1945).
+- **Body-hash binding on cached idempotency rows** — SHA-256 of the raw request body is stored alongside each cached response. Retries with the same key but a different body return 422 instead of silently serving the original body. Cached rows also carry a `schema_version` so a future shape change automatically invalidates stale entries.
+- **`Cache-Control: private, no-store` on every authenticated response path** — including the 401 from `withAuth`, the three 403 paths in `assertSameOrigin` (CSRF), and every status code from both routes (200/400/422/429/500/503). Prevents intermediary caches from serving authenticated payloads cross-tenant (P1947).
+- **Shared helpers extracted** — `src/lib/api/headers.ts` (single source of truth for `NO_STORE_HEADERS`) and `src/lib/sentry-capture.ts` (lazy-import Sentry helper, previously duplicated across `admin.ts`, `audit.ts`, `withAllocatorAuth.ts`, and `commit/route.ts`). Future audits adding `Vary` or `Pragma` headers land in one file.
+
+### Changed
+
+- **`/api/allocator/scenario/commit` returns HTTP 422 on full rollback** — was 200 with `recorded: 0`. Legacy clients that watched only the status code couldn't distinguish a rolled-back batch from a successful one; the body shape (`recorded: 0, results: [], errors: [...]`) is unchanged so the drawer UI still renders inline failures.
+- **`commit_scenario_batch` RPC signature** — added `p_idempotency_key text` and `p_request_hash text` parameters (both default NULL, callers without idempotency unchanged). Reservation + per-row inserts + final cache-write all run in one Postgres transaction; rollback rolls back the reservation, so retries proceed fresh.
+- **`stampOutcomeMarker` runs in `after()`** — first-outcome stamp now executes post-response via Next.js `after()`, dropping two Auth Admin REST round-trips off p95 commit latency. A try/`queueMicrotask` fallback mirrors `src/lib/audit.ts` so non-request scopes (vitest, cron) still work.
+- **Audit metadata carries `commit_batch_id`** — each batch generates a v4 UUID emitted on every `match.decision_record` audit row. Forensic SQL `GROUP BY commit_batch_id` clusters per-row events for one logical commit; if the cache write ever fails and a retry duplicates writes, the duplicates share an id.
+
+### Fixed
+
+- **Migration 130 is now idempotent** — earlier revisions of the same file would have left environments stuck on a stale schema if they had applied an older version. `CREATE TABLE IF NOT EXISTS` plus `ALTER TABLE ADD COLUMN IF NOT EXISTS` (with backfill + `SET NOT NULL` + named CHECK constraint) makes re-application safe across all prior states.
+
 ## [0.22.32.0] - 2026-05-14
 
 ### Fixed

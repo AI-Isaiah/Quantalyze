@@ -2941,7 +2941,12 @@ export type Database = {
         }
       }
       commit_scenario_batch: {
-        Args: { p_allocator_id: string; p_diffs: Json }
+        Args: {
+          p_allocator_id: string
+          p_diffs: Json
+          p_idempotency_key?: string | null
+          p_request_hash?: string | null
+        }
         Returns: Json
       }
       compute_bridge_outcome_deltas: {

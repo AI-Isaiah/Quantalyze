@@ -37,21 +37,41 @@ vi.mock("@/lib/analytics/onboarding-funnel", () => ({
   stampOutcomeMarker: vi.fn(async () => undefined),
 }));
 
+// ---------------------------------------------------------------------------
+// Mock supabase admin client.
+//
+// Pre-migration-131 the route lookup-and-upserted on `scenario_commit_idempotency`
+// directly. That logic now lives inside commit_scenario_batch (the SQL function);
+// the route only touches the admin client lazily inside `after()` for
+// `stampOutcomeMarker`, which is itself mocked above. So the route should
+// NEVER reach `admin.from(...)` in tests — fail loudly if it does, so a
+// future regression that re-introduces route-layer cache plumbing fails
+// the suite instead of silently passing on a permissive mock.
+// ---------------------------------------------------------------------------
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     auth: { admin: { getUserById: vi.fn(), updateUserById: vi.fn() } },
+    from: () => {
+      throw new Error(
+        "[test] route should not touch admin.from() — idempotency lives in commit_scenario_batch since migration 131",
+      );
+    },
   }),
 }));
 
 // ---------------------------------------------------------------------------
-// Mock withAuth — toggleable so T_R1 can exercise the no-auth 401 path
+// Mock withAllocatorAuth — toggleable so we can exercise the no-auth 401 path
+// and the non-allocator 403 path independently.
 // ---------------------------------------------------------------------------
 
 const MOCK_USER = { id: "alloc-A" } as unknown as import("@supabase/supabase-js").User;
 
 let withAuthShouldFail = false;
-vi.mock("@/lib/api/withAuth", () => ({
-  withAuth:
+let allocatorGateShouldFail = false;
+
+vi.mock("@/lib/api/withAllocatorAuth", () => ({
+  withAllocatorAuth:
     (h: (req: NextRequest, user: typeof MOCK_USER) => unknown) =>
     (req: NextRequest) => {
       if (withAuthShouldFail) {
@@ -59,6 +79,18 @@ vi.mock("@/lib/api/withAuth", () => ({
           status: 401,
           headers: { "content-type": "application/json" },
         });
+      }
+      if (allocatorGateShouldFail) {
+        return new Response(
+          JSON.stringify({ error: "Forbidden — allocator role required" }),
+          {
+            status: 403,
+            headers: {
+              "content-type": "application/json",
+              "Cache-Control": "private, no-store",
+            },
+          },
+        );
       }
       return h(req, MOCK_USER);
     },
@@ -123,9 +155,27 @@ function mkReq(body: unknown) {
   );
 }
 
+// P1945 — a request bearing an Idempotency-Key header. The header value
+// length defaults to 24 (uuid-style without dashes), which sits inside the
+// 16..128 acceptance window defined in route.ts.
+function mkReqWithIdempotency(body: unknown, key: string) {
+  return new NextRequest(
+    new URL("http://localhost/api/allocator/scenario/commit"),
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": key,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   withAuthShouldFail = false;
+  allocatorGateShouldFail = false;
   rateLimitAllow = true;
   mockRpc.mockReset();
 });
@@ -206,11 +256,13 @@ describe("zod validation", () => {
 // ===========================================================================
 
 describe("T_R4 — rate limit", () => {
-  it("returns 429 + Retry-After when rate limit exceeded", async () => {
+  it("returns 429 + Retry-After + Cache-Control when rate limit exceeded", async () => {
     rateLimitAllow = false;
     const res = await POST(mkReq({ diffs: [VALID_VR] }));
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("42");
+    // P1947 — every response carries no-store.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(checkLimit).toHaveBeenCalledWith(
       expect.anything(),
       "scenario_commit:alloc-A",
@@ -449,7 +501,11 @@ describe("T_R8 — M7 reuse-or-create (RPC level)", () => {
 // ===========================================================================
 
 describe("H4 single-tx full-failure paths", () => {
-  it("T_R9: voluntary_remove with un-owned holding_ref → ok=false (recorded:0), no audit", async () => {
+  // audit-2026-05-07 round-2 / P1945:
+  // Rolled-back batches now respond with HTTP 422 (Unprocessable Entity),
+  // not 200. The recorded:0 + errors[] payload shape is unchanged so the
+  // drawer UI continues to render per-row errors inline.
+  it("T_R9: voluntary_remove with un-owned holding_ref → 422 (recorded:0), no audit", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: false,
@@ -460,7 +516,8 @@ describe("H4 single-tx full-failure paths", () => {
     });
 
     const res = await POST(mkReq({ diffs: [VALID_VR] }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body.recorded).toBe(0);
     expect(body.errors).toEqual(
@@ -471,7 +528,7 @@ describe("H4 single-tx full-failure paths", () => {
     expect(logAuditEvent).not.toHaveBeenCalled();
   });
 
-  it("T_R10: voluntary_add with non-existent strategy_id → ok=false", async () => {
+  it("T_R10: voluntary_add with non-existent strategy_id → 422", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: false,
@@ -482,12 +539,12 @@ describe("H4 single-tx full-failure paths", () => {
     });
 
     const res = await POST(mkReq({ diffs: [VALID_VA] }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
     const body = await res.json();
     expect(body.recorded).toBe(0);
   });
 
-  it("T_R11: voluntary_add for strategy with status='draft' → ok=false", async () => {
+  it("T_R11: voluntary_add for strategy with status='draft' → 422", async () => {
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: false,
@@ -498,12 +555,12 @@ describe("H4 single-tx full-failure paths", () => {
     });
 
     const res = await POST(mkReq({ diffs: [VALID_VA] }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
     const body = await res.json();
     expect(body.recorded).toBe(0);
   });
 
-  it("T_R12: H4 mixed batch — row-2 fails → recorded:0 (row-1 NOT persisted), no audit on partial", async () => {
+  it("T_R12: H4 mixed batch — row-2 fails → 422, recorded:0 (row-1 NOT persisted), no audit on partial", async () => {
     // Two-diff batch where row 1 fails; the RPC returns ok=false with recorded:0
     // (the entire tx rolled back — row 0 is NOT persisted).
     mockRpc.mockResolvedValueOnce({
@@ -523,7 +580,8 @@ describe("H4 single-tx full-failure paths", () => {
         ],
       }),
     );
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(422);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(body.recorded).toBe(0);
     expect(body.errors[0].index).toBe(1);
@@ -674,5 +732,436 @@ describe("T_R16 / T_R17 — M6 rejection_reason enum", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+// ===========================================================================
+// T_R18 — audit-2026-05-07 round-2 / P1946 allocator gate
+// ===========================================================================
+//
+// The route is now wrapped in withAllocatorAuth, which returns 403 +
+// Cache-Control before the handler runs whenever the caller is authenticated
+// but not in profiles.role IN ('allocator','both'). We toggle the mock's
+// allocatorGateShouldFail flag to exercise that path without re-implementing
+// the profile lookup here (that's covered by withAllocatorAuth.test.ts).
+
+describe("T_R18 — allocator gate (P1946)", () => {
+  it("returns 403 + Cache-Control when the caller is not an allocator", async () => {
+    allocatorGateShouldFail = true;
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // RPC must not fire — the gate is upstream of the handler.
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// T_R19 — P1947: Cache-Control on the happy path
+// ===========================================================================
+
+describe("T_R19 — Cache-Control on happy-path 200", () => {
+  it("sets Cache-Control: private, no-store on successful 200 response", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("sets Cache-Control on validation 400 response", async () => {
+    const res = await POST(mkReq({ diffs: [] }));
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+});
+
+// ===========================================================================
+// T_R20 — P1945: Idempotency-Key dedup
+// ===========================================================================
+//
+// First request with a valid Idempotency-Key → RPC fires, success body is
+// cached via the admin client upsert. Second request with the SAME key →
+// the cached body is returned WITHOUT calling the RPC. We assert mockRpc
+// is invoked exactly once across both calls and the second response payload
+// equals the cached body.
+
+describe("T_R20 — Idempotency-Key dedup (P1945, migration 131 SQL-side)", () => {
+  // Migration 131 moved the cache lookup + reservation + write INTO the
+  // commit_scenario_batch RPC. The route now just passes the key + hash to
+  // the RPC and inspects the envelope. These tests therefore mock mockRpc
+  // (the only Postgres surface the route touches for idempotency) and
+  // assert on:
+  //   - WHAT THE ROUTE PASSES to the RPC (p_idempotency_key, p_request_hash)
+  //   - HOW THE ROUTE MAPS the RPC's envelope shape to HTTP status
+  //
+  // The admin-client mock throws on `.from(...)` (see top-of-file mock) so
+  // any regression that re-introduces route-layer cache plumbing fails the
+  // suite immediately. stampOutcomeMarker is mocked separately above.
+  const KEY = "a".repeat(24);
+
+  it("valid Idempotency-Key is passed to the RPC as p_idempotency_key + p_request_hash", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(200);
+
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_allocator_id: "alloc-A",
+        p_idempotency_key: KEY,
+        p_request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    );
+    // Route does not touch admin.from() directly — the SQL function
+    // handles caching. The admin-mock would throw if the route did.
+  });
+
+  it("RPC ok:true + cached:true returns 200 WITHOUT re-emitting audit events", async () => {
+    // The original commit (whoever wrote the cache row) already emitted
+    // audit events. A cached replay must NOT duplicate them.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        cached: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+
+    const body = await res.json();
+    expect(body.recorded).toBe(1);
+    // Critical: NO audit emission on cached replay.
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("RPC ok:false + code=idempotency_body_mismatch → 422 (RFC §2.5)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Idempotency-Key reuse with different body",
+            code: "idempotency_body_mismatch",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(422);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toMatch(/Idempotency-Key reuse/i);
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("RPC ok:false + code=idempotency_in_flight → 409 with Retry-After", async () => {
+    // A concurrent retry holds the placeholder row inside the SQL function.
+    // The route maps this to 409 so the client can re-poll.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Idempotent commit is already in flight",
+            code: "idempotency_in_flight",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("1");
+    expect(logAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it("RPC ok:false + code=idempotency_schema_drift → 503", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: false,
+        errors: [
+          {
+            index: -1,
+            error: "Cached response has an unknown schema_version",
+            code: "idempotency_schema_drift",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, KEY));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[scenario-commit] idempotency schema drift:",
+      expect.objectContaining({ user_id: "alloc-A" }),
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it("key boundary: 16 chars (min) → RPC receives p_idempotency_key", async () => {
+    const minKey = "k".repeat(16);
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, minKey));
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: minKey }),
+    );
+  });
+
+  it("key boundary: 128 chars (max) → RPC receives p_idempotency_key", async () => {
+    const maxKey = "k".repeat(128);
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, maxKey));
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: maxKey }),
+    );
+  });
+
+  it("key boundary: 129 chars → RPC called with p_idempotency_key=null", async () => {
+    const overKey = "k".repeat(129);
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, overKey));
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_idempotency_key: null,
+        p_request_hash: null,
+      }),
+    );
+  });
+
+  it("Idempotency-Key with non-RFC-charset (space) → RPC called with p_idempotency_key=null", async () => {
+    const spacedKey = "abcdefghijklmnop qrstuvwx";
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, spacedKey));
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: null }),
+    );
+  });
+
+  it("Idempotency-Key too short (8 chars) → RPC called with p_idempotency_key=null", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+    const res = await POST(mkReqWithIdempotency({ diffs: [VALID_VR] }, "shortkey"));
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_idempotency_key: null }),
+    );
+  });
+
+  it("request without Idempotency-Key header → RPC called with p_idempotency_key=null", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR] }));
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_idempotency_key: null,
+        p_request_hash: null,
+      }),
+    );
+  });
+});
+
+// ===========================================================================
+// T_R21 — RPC error → 500 + Cache-Control (round-2-D test-analyzer M2)
+// ===========================================================================
+
+describe("T_R21 — RPC error 500 path", () => {
+  it("RPC error returns 500 with Cache-Control + no audit", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "P0001", message: "RPC blew up" },
+    });
+
+    const res = await POST(
+      mkReqWithIdempotency({ diffs: [VALID_VR] }, "k".repeat(24)),
+    );
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(logAuditEvent).not.toHaveBeenCalled();
+    // Migration 131: when the RPC raises EXCEPTION the function's
+    // transaction (including the idempotency placeholder reservation) rolls
+    // back. The route does not need to do anything else — the cache stays
+    // clean.
+  });
+});
+
+// ===========================================================================
+// T_R22 — Idempotency + voluntary_modify post-normalisation
+// (round-2-D test-analyzer M1)
+// ===========================================================================
+
+describe("T_R22 — Idempotency + voluntary_modify percent normalisation", () => {
+  it("modify with new_weight + Idempotency-Key passes normalised percent + hash to the RPC", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_modify" },
+        ],
+      },
+      error: null,
+    });
+
+    const key = "m".repeat(32);
+    const res = await POST(
+      mkReqWithIdempotency({ diffs: [VALID_VM] }, key),
+    );
+    expect(res.status).toBe(200);
+
+    // RPC receives the normalised percent_allocated (8 = 0.08 * 100) AND
+    // the new idempotency params. Migration 131 SQL handles the cache row.
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_diffs: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "voluntary_modify",
+            percent_allocated: 8,
+          }),
+        ]),
+        p_idempotency_key: key,
+        p_request_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    );
+  });
+
+  it("voluntary_modify with neither new_weight nor percent_allocated returns 400 + Cache-Control", async () => {
+    // Pre-normalisation imperative check (the schema admits both-undefined
+    // because Zod's discriminatedUnion requires ZodObject members).
+    const res = await POST(
+      mkReq({
+        diffs: [
+          {
+            kind: "voluntary_modify",
+            holding_ref: "holding:binance:ETH:spot",
+            size_at_decision_usd: 8000,
+            // new_weight + percent_allocated both omitted
+          },
+        ],
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.issues[0].message).toMatch(/either new_weight or percent_allocated/);
+  });
+});
+
+// ===========================================================================
+// T_R23 — audit emission carries commit_batch_id (round-2-D code-review #4)
+// ===========================================================================
+
+describe("T_R23 — audit metadata.commit_batch_id", () => {
+  it("each per-row audit event in one batch shares the same commit_batch_id", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-1", bridge_outcome_id: "bo-1", kind: "voluntary_remove" },
+          { index: 1, match_decision_id: "md-2", bridge_outcome_id: "bo-2", kind: "voluntary_add" },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(mkReq({ diffs: [VALID_VR, VALID_VA] }));
+    expect(res.status).toBe(200);
+    expect(logAuditEvent).toHaveBeenCalledTimes(2);
+
+    const calls = (logAuditEvent as unknown as { mock: { calls: unknown[][] } })
+      .mock.calls as Array<
+      [unknown, { metadata: { commit_batch_id: string } }]
+    >;
+    const batchId1 = calls[0][1].metadata.commit_batch_id;
+    const batchId2 = calls[1][1].metadata.commit_batch_id;
+
+    expect(batchId1).toMatch(/^[0-9a-f-]{36}$/);
+    expect(batchId2).toBe(batchId1);
   });
 });

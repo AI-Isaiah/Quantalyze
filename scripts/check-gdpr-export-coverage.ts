@@ -123,6 +123,11 @@ const EXCLUDED_TABLES: Record<string, { reason: string; addedIn: string }> = {
       "Outbound email ledger with recipient_email PII, but it's a system-authored audit trail — not user-owned. Retention policy (ADR-0024) purges at 180d.",
     addedIn: "migration 020",
   },
+  scenario_commit_idempotency: {
+    reason:
+      "Short-lived server-side dedup cache for the Idempotency-Key contract on POST /api/allocator/scenario/commit. Rows carry a body-hash + cached response payload pointing to match_decisions / bridge_outcomes that ARE exported via those tables. ON DELETE CASCADE to profiles(id) handles right-to-erasure; the cache itself is server state, not user-owned content. Equivalent treatment to notification_dispatches.",
+    addedIn: "migration 130",
+  },
   compute_jobs: {
     reason: "System job queue. No user-owned row-level data.",
     addedIn: "migration 032",

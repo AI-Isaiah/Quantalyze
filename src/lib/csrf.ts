@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
  * CSRF defense via Origin/Referer header validation.
@@ -50,7 +51,7 @@ export function assertSameOrigin(req: NextRequest): NextResponse | null {
   if (!source) {
     return NextResponse.json(
       { error: "Missing Origin or Referer header" },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -60,14 +61,14 @@ export function assertSameOrigin(req: NextRequest): NextResponse | null {
   } catch {
     return NextResponse.json(
       { error: "Invalid Origin header" },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!ALLOWED_HOSTS.has(host)) {
     return NextResponse.json(
       { error: "Origin not allowed" },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 

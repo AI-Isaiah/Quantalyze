@@ -22,16 +22,18 @@ describe("assertSameOrigin", () => {
     expect(assertSameOrigin(req)).toBeNull();
   });
 
-  it("returns 403 when Origin header is missing", async () => {
+  it("returns 403 + Cache-Control when Origin header is missing", async () => {
     const req = makeRequest({});
     const result = assertSameOrigin(req);
     expect(result?.status).toBe(403);
+    expect(result?.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  it("returns 403 when Origin host is not in allowlist", async () => {
+  it("returns 403 + Cache-Control when Origin host is not in allowlist", async () => {
     const req = makeRequest({ origin: "https://evil.example.com" });
     const result = assertSameOrigin(req);
     expect(result?.status).toBe(403);
+    expect(result?.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("accepts Referer as fallback when Origin is missing", async () => {
@@ -39,9 +41,10 @@ describe("assertSameOrigin", () => {
     expect(assertSameOrigin(req)).toBeNull();
   });
 
-  it("returns 403 when Origin is an invalid URL", async () => {
+  it("returns 403 + Cache-Control when Origin is an invalid URL", async () => {
     const req = makeRequest({ origin: "not-a-url" });
     const result = assertSameOrigin(req);
     expect(result?.status).toBe(403);
+    expect(result?.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });

@@ -1,8 +1,8 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { withAuth } from "@/lib/api/withAuth";
+import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 /**
@@ -46,8 +46,8 @@ export interface BrowseStrategyRow {
 // in v0.15. Documented cap; raise (and add pagination) when v0.16 lands.
 const STRATEGY_BROWSE_LIMIT = 200;
 
-export const GET = withAuth(
-  async (req: NextRequest, user: User): Promise<NextResponse> => {
+export const GET = withAllocatorAuth(
+  async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
     void req;
     const rl = await checkLimit(
       userActionLimiter,
@@ -56,7 +56,10 @@ export const GET = withAuth(
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many requests" },
-        { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+        {
+          status: 429,
+          headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+        },
       );
     }
 
@@ -75,7 +78,10 @@ export const GET = withAuth(
 
     if (error) {
       console.error("[api/strategies/browse] select error:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json(
+        { error: error.message },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
     }
 
     // W2 — defensive null mapping. PostgreSQL text[] columns can be NULL
@@ -101,6 +107,9 @@ export const GET = withAuth(
       };
     });
 
-    return NextResponse.json({ strategies }, { status: 200 });
+    return NextResponse.json(
+      { strategies },
+      { status: 200, headers: NO_STORE_HEADERS },
+    );
   },
 );
