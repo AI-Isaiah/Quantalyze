@@ -250,6 +250,17 @@ describe("setWeightOverride", () => {
     expect(out.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
   });
 
+  it("P1936 clamping BTC=1.5 → 1 also drives ETH renormalize to 0 (remainingMass = 0)", () => {
+    // Without the renormalize step the clamp alone would leave ETH at 0.4
+    // and the enabled sum would land at 1.4, breaking the wire schema. The
+    // clamp + renormalize together must produce a valid sum-to-1 draft.
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const out = setWeightOverride(initial, "holding:binance:BTC:spot", 1.5);
+    expect(out.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+    expect(out.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(0, 9);
+    expect(sumEnabled(out)).toBeCloseTo(1.0, 9);
+  });
+
   it("P1936 clamps newWeight < 0 to 0", () => {
     const initial = defaultDraftFromHoldings(HOLDINGS_2);
     const out = setWeightOverride(initial, "holding:binance:BTC:spot", -0.2);

@@ -1215,6 +1215,49 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Weight input fail-loud — typing Infinity in the weight input must surface
+  // a visible inline error instead of silently dropping the change (the
+  // controlled input would otherwise display a value that doesn't match
+  // underlying state).
+  // -------------------------------------------------------------------------
+  it("non-finite weight input surfaces an inline role='alert' (fail-loud, no silent drop)", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    // Force a non-finite synthetic event through React's controlled-input
+    // bridge. We can't just write `target: { value: "Infinity" }` because
+    // jsdom's `<input type="number">` sanitizes the value to "" before
+    // React reads it — Number("") is 0, which would take the happy path.
+    // Patching the input's `valueAsNumber` getter to return NaN delivers a
+    // non-finite Number(e.target.value) to the composer's wrapper without
+    // depending on string-parsing semantics.
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    Object.defineProperty(btcInput, "value", {
+      configurable: true,
+      get: () => "Infinity",
+    });
+    fireEvent.change(btcInput);
+    const errEl = screen.getByTestId("scenario-commit-error");
+    expect(errEl.textContent).toMatch(/Invalid weight/i);
+
+    // Restore so the next assertion exercises the cleared-error path.
+    if (originalDescriptor) {
+      Object.defineProperty(btcInput, "value", originalDescriptor);
+    }
+    fireEvent.change(btcInput, { target: { value: "0.5" } });
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C21 — Plan 07 wire-in: Click Commit footer button → ScenarioCommitDrawer
   //         opens with the diffs prop.
   // -------------------------------------------------------------------------

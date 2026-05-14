@@ -91,6 +91,30 @@ function holdingRefOf(h: HoldingForFingerprint): string {
 }
 
 /**
+ * Clamp a single weight value to [0, 1]. Non-finite inputs (NaN, Infinity)
+ * collapse to 0 — the wire schema rejects anything outside [0, 1] and
+ * negative or >1 weights produce nonsensical renormalize scaling. The
+ * public mutators (toggleHolding / addStrategy* / setWeightOverride) wrap
+ * their final weightOverrides map with `clampAllWeights` as a defense-in-
+ * depth exit gate; setWeightOverride additionally rejects non-finite
+ * inputs at the entry point to keep the no-op semantics it documents.
+ */
+function clampWeight(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+function clampAllWeights(
+  weights: Record<string, number>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of Object.keys(weights)) {
+    out[k] = clampWeight(weights[k]);
+  }
+  return out;
+}
+
+/**
  * Deterministic, order-invariant fingerprint of a holdings set. Sort by
  * "{symbol}:{venue}:{holding_type}" then join with "|". Collision resistance
  * is NOT required — the fingerprint exists to detect when live holdings
@@ -153,7 +177,7 @@ export function defaultDraftFromHoldings(
     init_holdings_fingerprint: fingerprint ?? computeHoldingsFingerprint(holdings),
     toggleByScopeRef,
     addedStrategies: [],
-    weightOverrides,
+    weightOverrides: clampAllWeights(weightOverrides),
     lastEditedAt: new Date().toISOString(),
   };
 }
@@ -241,7 +265,7 @@ export function toggleHolding(
   return {
     ...draft,
     toggleByScopeRef: nextToggle,
-    weightOverrides: nextWeights,
+    weightOverrides: clampAllWeights(nextWeights),
     lastEditedAt: new Date().toISOString(),
   };
 }
@@ -284,7 +308,7 @@ export function addStrategyBrowse(
     ...draft,
     addedStrategies: [...draft.addedStrategies, strategy],
     toggleByScopeRef: { ...draft.toggleByScopeRef, [strategy.id]: true },
-    weightOverrides: nextWeights,
+    weightOverrides: clampAllWeights(nextWeights),
     lastEditedAt: new Date().toISOString(),
   };
 }
@@ -320,7 +344,7 @@ export function addStrategyBridge(
     ...draft,
     addedStrategies: [...draft.addedStrategies, strategy],
     toggleByScopeRef: nextToggle,
-    weightOverrides: nextWeights,
+    weightOverrides: clampAllWeights(nextWeights),
     lastEditedAt: new Date().toISOString(),
   };
 }
@@ -351,7 +375,7 @@ export function removeAddedStrategy(
     ...draft,
     addedStrategies: nextAdded,
     toggleByScopeRef: nextToggle,
-    weightOverrides: nextWeights,
+    weightOverrides: clampAllWeights(nextWeights),
     lastEditedAt: new Date().toISOString(),
   };
 }
@@ -360,20 +384,19 @@ export function removeAddedStrategy(
  * Set a manual weight override for one ref. Other enabled refs are scaled
  * proportionally so the total sum === 1.0. Used by D-17 voluntary_modify
  * weight inputs.
+ *
+ * Non-finite inputs (NaN, Infinity from a bad paste) are refused as a no-op
+ * so a coerced Number(input) at the input edge can't blow up downstream
+ * renormalize math. The composer wraps this call to surface a visible error
+ * for the same case so the rejection isn't silent at the UI layer.
  */
 export function setWeightOverride(
   draft: ScenarioDraft,
   scopeRef: string,
   newWeight: number,
 ): ScenarioDraft {
-  // P1936 (audit-2026-05-07 Block C / C.4) — refuse non-finite weights as a
-  // no-op so a coerced Number(input) of "NaN" / Infinity at the input edge
-  // can't blow up downstream renormalize math. Clamp finite values to
-  // [0, 1] — the wire schema rejects anything outside that range, and a
-  // negative or >1 weight produces nonsensical renormalize scaling
-  // (negative remainingMass / >1 scale factor).
   if (!Number.isFinite(newWeight)) return draft;
-  const clamped = Math.min(1, Math.max(0, newWeight));
+  const clamped = clampWeight(newWeight);
 
   const enabledIds = enabledIdsOf(draft);
   const otherIds = enabledIds.filter((id) => id !== scopeRef);
@@ -398,7 +421,7 @@ export function setWeightOverride(
 
   return {
     ...draft,
-    weightOverrides: nextWeights,
+    weightOverrides: clampAllWeights(nextWeights),
     lastEditedAt: new Date().toISOString(),
   };
 }

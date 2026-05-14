@@ -381,7 +381,7 @@ describe("T_D12 / T_D13 — H4 full failure (no partial state)", () => {
     });
 
     // Drawer body stays open (the success card is NOT shown)
-    expect(screen.queryByText(/decisions recorded/i)).toBeNull();
+    expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
     // Inline error visible
     const alerts = screen.getAllByRole("alert");
     expect(alerts.length).toBeGreaterThan(0);
@@ -550,11 +550,11 @@ describe("P1934 — strict success gate (recorded must equal diffs.length)", () 
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
-    // Drawer must NOT collapse to the success card.
+    // Drawer must NOT collapse to the success card. Use the testid (not a
+    // text matcher) because the new partial-commit error message also
+    // contains the substring "decisions recorded".
     await waitFor(() => {
-      // The success card carries the "decisions recorded" copy; assert
-      // it is never shown because the gate is strict.
-      expect(screen.queryByText(/decisions recorded/i)).toBeNull();
+      expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
     });
     // Wait a beat past any spurious timer to be sure onSubmitSuccess never
     // fired (the success branch has a 1.5s auto-close + onSubmitSuccess
@@ -651,9 +651,9 @@ describe("P1934 — Idempotency-Key header on commit fetch", () => {
       expect(fetchSpy).toHaveBeenCalled();
     });
     // Headers may be a plain object or a Headers instance — accept both.
-    const init = fetchSpy.mock.calls[0][1] as {
-      headers: Record<string, string> | Headers;
-    };
+    const init = (fetchSpy.mock.calls as unknown as Array<
+      [string, { headers: Record<string, string> | Headers }]
+    >)[0][1];
     const headers = init.headers;
     const getHeader = (k: string) =>
       headers instanceof Headers
@@ -662,6 +662,399 @@ describe("P1934 — Idempotency-Key header on commit fetch", () => {
             ([name]) => name.toLowerCase() === k.toLowerCase(),
           )?.[1];
     expect(getHeader("Idempotency-Key")).toBeTruthy();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// ===========================================================================
+// Idempotency-Key reuse across user-initiated retries
+//
+// The header exists to let the server dedupe — a fresh key on every retry
+// of the same batch defeats it. Stable across the lifetime of one open
+// batch; reset on close.
+// ===========================================================================
+
+function getIdempotencyHeader(call: unknown): string | null {
+  const init = (call as [string, { headers: Record<string, string> | Headers }])[1];
+  const headers = init.headers;
+  if (headers instanceof Headers) return headers.get("Idempotency-Key");
+  const entry = Object.entries(headers).find(
+    ([name]) => name.toLowerCase() === "idempotency-key",
+  );
+  return entry ? entry[1] : null;
+}
+
+describe("Idempotency-Key reuse on retry within one batch", () => {
+  it("two submits of the same batch send the SAME Idempotency-Key (server-side dedup contract)", async () => {
+    vi.useRealTimers();
+    let callCount = 0;
+    const fetchSpy = vi.fn(async () => {
+      callCount += 1;
+      // First call fails (network), second call succeeds.
+      if (callCount === 1) {
+        return new Response("", { status: 502 });
+      }
+      return new Response(
+        JSON.stringify({ recorded: 1, results: [], errors: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    let preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Retry from the still-open pre-flight (state flipped to failure but
+    // the portal stays mounted for "submitting"). The drawer's pre-flight
+    // disappears on failure; re-open by clicking Submit-all then Submit
+    // again.
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    const k1 = getIdempotencyHeader(fetchSpy.mock.calls[0]);
+    const k2 = getIdempotencyHeader(fetchSpy.mock.calls[1]);
+    expect(k1).toBeTruthy();
+    expect(k2).toBeTruthy();
+    expect(k1).toBe(k2);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("crypto.randomUUID fallback path: when randomUUID is absent the header is still set", async () => {
+    vi.useRealTimers();
+    const originalCrypto = globalThis.crypto;
+    // Force the fallback branch.
+    Object.defineProperty(globalThis, "crypto", {
+      value: { ...originalCrypto, randomUUID: undefined },
+      configurable: true,
+    });
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ recorded: 1, results: [], errors: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const k = getIdempotencyHeader(fetchSpy.mock.calls[0]);
+    expect(k).toBeTruthy();
+    expect(k!.length).toBeGreaterThan(0);
+
+    Object.defineProperty(globalThis, "crypto", {
+      value: originalCrypto,
+      configurable: true,
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+// ===========================================================================
+// Backdrop + X close during submit must be no-ops (same invariant as Esc).
+// ===========================================================================
+
+describe("close paths during submit", () => {
+  it("backdrop click while state==='submitting' is ignored (onClose not called)", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(
+      () =>
+        new Promise(() => {
+          /* never resolves */
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onClose = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={onClose}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await Promise.resolve();
+
+    fireEvent.click(screen.getByTestId("commit-drawer-backdrop"));
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("X close button is disabled while state==='submitting'", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(
+      () =>
+        new Promise(() => {
+          /* never resolves */
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onClose = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={onClose}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await Promise.resolve();
+
+    const closeBtn = screen.getByRole("button", { name: /Close drawer/i }) as HTMLButtonElement;
+    expect(closeBtn.disabled).toBe(true);
+    fireEvent.click(closeBtn);
+    expect(onClose).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// ===========================================================================
+// Strict success gate — additional cases:
+//   - res.ok=false but recorded===diffs.length must still fail (T2)
+//   - empty 200 body (server returned blank → JSON.parse throws) (T1a)
+//   - HTML 502 body (non-JSON error page → JSON.parse throws)   (T1b)
+// ===========================================================================
+
+describe("strict success gate — non-2xx with matching recorded count", () => {
+  it("res.ok=false with recorded===diffs.length still surfaces as failure (T2)", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ recorded: 1, results: [], errors: [] }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("response body is not valid JSON", () => {
+  it("empty body 200 → drawer surfaces failure (no JSON parse, no onSubmitSuccess) (T1a)", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () => new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("commit-drawer-success")).toBeNull();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("HTML 502 body → drawer surfaces failure, not silent network swallow (T1b)", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response("<html>502 Bad Gateway</html>", {
+        status: 502,
+        headers: { "content-type": "text/html" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    // Error copy must reflect server-status (5xx), not network-failed.
+    const err = screen.getByTestId("commit-drawer-error");
+    expect(err.textContent).toMatch(/502|invalid response/i);
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// ===========================================================================
+// Partial-commit surfacing: recorded < diffs.length on a 2xx with no error
+// list is a single-tx contract violation. Surface explicit "do NOT retry"
+// copy so the user doesn't double-commit the rows that landed.
+// ===========================================================================
+
+describe("partial-commit detection (server returned ok with recorded < diffs.length)", () => {
+  it("surfaces an explicit do-NOT-retry message and tags the error region with data-failure-reason='partial'", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF, VA_DIFF, VM_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF, VA_DIFF, VM_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    expect(err.getAttribute("data-failure-reason")).toBe("partial");
+    expect(err.textContent).toMatch(/do NOT retry/i);
+    expect(err.textContent).toMatch(/1 of 3/i);
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+// ===========================================================================
+// AbortError mid-fetch (without unmount). The catch branch swallows
+// AbortError so the destroyed component doesn't setState — but with the
+// drawer still mounted, the swallow must not leave the UI in a stale
+// "submitting" state forever. Verifies the swallow keeps the drawer alive.
+// ===========================================================================
+
+describe("AbortError swallow leaves the drawer alive (does not transition to failure)", () => {
+  it("fetch rejecting with AbortError does not flip state to failure", async () => {
+    vi.useRealTimers();
+    // Reject directly with an AbortError so the catch branch's
+    // `err instanceof DOMException && err.name === "AbortError"` swallow
+    // fires without needing to plumb dispatchEvent through jsdom's
+    // AbortSignal implementation.
+    const fetchSpy = vi.fn(
+      async (_url: string, init: { signal?: AbortSignal }) => {
+        // Mirror native fetch: when the signal is already aborted OR an
+        // abort is triggered, throw an AbortError. Throw immediately here.
+        const _ = init?.signal;
+        throw new DOMException("aborted", "AbortError");
+      },
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    // Allow the rejected fetch + catch branch to run.
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(screen.queryByTestId("commit-drawer-error")).toBeNull();
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
   });
