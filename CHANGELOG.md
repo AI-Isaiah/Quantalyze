@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.1] - 2026-05-14
+
+**phase-19 pre-PR-D prep (PR-X3 of 3).** Fixes a P0 bug in the unified-backbone teaser handler discovered during the abortive 2026-05-14T19:00 kill-switch flip. The TS `unifiedVerifyStrategyHandler` at `src/app/api/verify-strategy/route.ts` forwarded the request body verbatim as `context` without setting `step='validate'`. The `/process-key` validator at `analytics-service/routers/process_key.py:568` rejects every teaser submission with `MISSING_STRATEGY_ID` (422) because the teaser flow has no caller-owned `strategy_id` (the user is testing keys against the universe of strategies — no strategy exists yet). When the kill-switch was flipped ON, the landing-page submit was broken for 3m43s before the bug was caught and the flag was rolled back. PR-X3 ships the 1-line `context: { ...body, step: "validate" }` fix and an integration regression test that asserts `body.context.step === 'validate'` for the teaser flow.
+
+### Fixed
+
+- **`unifiedVerifyStrategyHandler` forwards `context.step='validate'`** (`src/app/api/verify-strategy/route.ts`). Mirrors the contract that `strategies/csv-validate` and `keys/validate-and-encrypt` already satisfy. The fix only changes the unified path — the legacy `legacyVerifyStrategyHandler` is unchanged.
+
+### Added
+
+- **PR-X3 regression test** (`tests/integration/process-key-thin-adapters.test.ts`). Asserts `body.context.step === 'validate'` and `body.context.{api_key,api_secret,exchange}` still pass through. Verified meaningful by stripping the fix and confirming the assertion fails (`expected undefined to be 'validate'`); re-applying the fix returns the test to green.
+
 ## [0.22.34.0] - 2026-05-14
 
 ### Fixed
