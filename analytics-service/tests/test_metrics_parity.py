@@ -24,6 +24,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from services.analytics_runner import (
     _compute_derived_trade_metrics,  # B-01 — extracted in Plan 12-05
     _compute_position_side_volume_pcts,
@@ -41,6 +43,52 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # allow these as legitimate "extra" top-level keys instead of failing the
 # extra-keys check.
 _FIXTURE_METADATA_KEYS = {"_fixture_has_maker_taker"}
+
+
+def _resolve_has_maker_taker(
+    fixture_expected: dict[str, Any], env_value: str | None
+) -> bool:
+    """audit-2026-05-07 P2005: reconcile fixture-pinned mode against env.
+
+    The fixture's ``_fixture_has_maker_taker`` is the source of truth.
+    ``TRADE_MIX_HAS_MAKER_TAKER`` env is optional — if set, it MUST agree
+    with the fixture, otherwise CI silently tests the wrong bucket shape.
+
+    Raises:
+        AssertionError if the fixture is missing the key, the key has the
+            wrong type, or the env contradicts the fixture.
+    """
+    if "_fixture_has_maker_taker" not in fixture_expected:
+        raise AssertionError(
+            "golden_252d_expected.json is missing top-level "
+            "'_fixture_has_maker_taker' — fixture predates P2005. "
+            "Regenerate via regen_golden.py so the bucket-shape mode is "
+            "pinned in. (audit-2026-05-07 P2005)"
+        )
+    raw_fixture_mode = fixture_expected["_fixture_has_maker_taker"]
+    if not isinstance(raw_fixture_mode, bool):
+        raise AssertionError(
+            f"_fixture_has_maker_taker must be a JSON bool, got "
+            f"{type(raw_fixture_mode).__name__}={raw_fixture_mode!r}. "
+            "Regenerate the fixture. (audit-2026-05-07 P2005)"
+        )
+    if env_value is not None:
+        # Match production parsing at services/analytics_runner.py: case-
+        # insensitive comparison against "true"/"false". Strict equality
+        # used to reject "True"/"TRUE" as contradictions, but production
+        # parses those as truthy, so the parity test would CI-fail on the
+        # exact same env that production accepts.
+        env_normalized = env_value.lower()
+        expected_env = "true" if raw_fixture_mode else "false"
+        if env_normalized != expected_env:
+            raise AssertionError(
+                f"TRADE_MIX_HAS_MAKER_TAKER env ({env_value!r}) "
+                f"contradicts fixture pinned mode "
+                f"(_fixture_has_maker_taker={raw_fixture_mode}). "
+                "Regenerate the fixture with the env you want, or unset "
+                "the env. (audit-2026-05-07 P2005)"
+            )
+    return raw_fixture_mode
 
 
 def _round_sig(x: float, sig: int = 12) -> float:
@@ -236,6 +284,83 @@ def test_scalar_close_two_tier_fallback():
     assert _scalar_close(a, b) is False
 
 
+# audit-2026-05-07 P2005: _resolve_has_maker_taker contract pins
+def test_resolve_has_maker_taker_fixture_only_true():
+    """No env set — fixture pin is the source of truth (True case)."""
+    assert _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, None) is True
+
+
+def test_resolve_has_maker_taker_fixture_only_false():
+    """No env set — fixture pin is the source of truth (False case)."""
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, None) is False
+    )
+
+
+def test_resolve_has_maker_taker_env_agrees():
+    """Env matches fixture — agreement returns fixture mode."""
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "true") is True
+    )
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "false")
+        is False
+    )
+
+
+def test_resolve_has_maker_taker_env_contradicts_raises():
+    """Env contradicts fixture pin — must fail loud (P2005 core defense)."""
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "false")
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "true")
+
+
+def test_resolve_has_maker_taker_missing_key_raises():
+    """Pre-P2005 fixture (key absent) — must refuse instead of defaulting False."""
+    with pytest.raises(AssertionError, match="missing top-level"):
+        _resolve_has_maker_taker({}, None)
+    with pytest.raises(AssertionError, match="missing top-level"):
+        _resolve_has_maker_taker({"other_key": 1}, "true")
+
+
+def test_resolve_has_maker_taker_wrong_type_raises():
+    """Truthy non-bool (e.g. string 'true') must NOT silently pass as True."""
+    with pytest.raises(AssertionError, match="must be a JSON bool"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": "true"}, None)
+    with pytest.raises(AssertionError, match="must be a JSON bool"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": 1}, None)
+
+
+def test_resolve_has_maker_taker_env_case_insensitive_match():
+    """Mixed-case env matches production parsing — must NOT contradict.
+
+    Production at services/analytics_runner.py uses ``.lower() == "true"``
+    so "True"/"TRUE" are truthy. The parity reconciliation must agree
+    or CI will reject env values that production accepts.
+    """
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "True") is True
+    )
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "TRUE") is True
+    )
+    assert (
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "False")
+        is False
+    )
+
+
+def test_resolve_has_maker_taker_env_garbage_still_rejected():
+    """Env set to a non-truthy/non-falsy value contradicts both modes."""
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": False}, "1")
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "")
+    with pytest.raises(AssertionError, match="contradicts fixture pinned mode"):
+        _resolve_has_maker_taker({"_fixture_has_maker_taker": True}, "yes")
+
+
 def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     """METRICS-13: full parity assertion against committed fixture (B-01 + H-A1 wiring)."""
     # Run the actual metrics path
@@ -256,23 +381,11 @@ def test_metrics_parity_full(golden_252d_input, golden_252d_expected):
     volume_aggregator = _compute_volume_aggregator(fills)
     derived = _compute_derived_trade_metrics(volume_metrics, trade_metrics_from_positions)
     # audit-2026-05-07 G.2 / P2005: prefer the pinned fixture-mode over the
-    # env. If both are set they MUST agree, otherwise CI silently tests the
-    # wrong bucket shape — fail loud instead.
-    fixture_has_maker_taker = bool(
-        golden_252d_expected.get("_fixture_has_maker_taker", False)
+    # env. The reconciliation is extracted so it can be unit-tested
+    # independently of the full parity pipeline.
+    has_maker_taker = _resolve_has_maker_taker(
+        golden_252d_expected, os.getenv("TRADE_MIX_HAS_MAKER_TAKER")
     )
-    env_has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER")
-    if env_has_maker_taker is not None:
-        expected_env = "true" if fixture_has_maker_taker else "false"
-        if env_has_maker_taker != expected_env:
-            raise AssertionError(
-                f"TRADE_MIX_HAS_MAKER_TAKER env ({env_has_maker_taker!r}) "
-                f"contradicts fixture pinned mode "
-                f"(_fixture_has_maker_taker={fixture_has_maker_taker}). "
-                "Regenerate the fixture with the env you want, or unset the "
-                "env. (audit-2026-05-07 P2005)"
-            )
-    has_maker_taker = fixture_has_maker_taker
     trade_mix = _compute_trade_mix(fills, has_maker_taker=has_maker_taker)
     # KPI-17 follow-up: position-side volume pcts. Fixture has no
     # positions list so the helper returns 0/0 — preserves the prior

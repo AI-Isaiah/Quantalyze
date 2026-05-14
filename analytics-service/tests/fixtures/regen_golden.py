@@ -276,13 +276,17 @@ def _scalar_drift_summary(
 
     Returns:
         Dict of {scalar_key_path: |relative_delta|} for every key present
-        in BOTH where ``old`` is a non-zero numeric. Keys missing on either
-        side are surfaced as ``float('inf')`` so the caller refuses to
-        accept silent contract drift.
+        in BOTH where ``old`` is a non-zero numeric. The following silent
+        contract drifts are surfaced as ``float('inf')`` so the caller
+        refuses to accept them: keys missing on either side, dict↔scalar
+        shape flips, exotic numerics that fail isinstance(int|float) but
+        slip the bool guard. Matched zeros (0→0) are not recorded — there
+        is no drift signal to emit.
     """
     drifts: dict[str, float] = {}
 
     def _walk(o: Any, n: Any, prefix: str) -> None:
+        # dict↔dict: recurse + record missing-on-either-side as inf
         if isinstance(o, dict) and isinstance(n, dict):
             old_keys = set(o.keys())
             new_keys = set(n.keys())
@@ -293,6 +297,11 @@ def _scalar_drift_summary(
             for k in (old_keys & new_keys):
                 _walk(o[k], n[k], f"{prefix}.{k}" if prefix else k)
             return
+        # dict↔non-dict (or vice versa): a shape flip is a contract drift,
+        # surface as inf. Pre-fix this branch fell through silently.
+        if isinstance(o, dict) != isinstance(n, dict):
+            drifts[prefix] = float("inf")
+            return
         # Skip lists (series) — scalar-drift signal only.
         if isinstance(o, list) or isinstance(n, list):
             return
@@ -302,16 +311,26 @@ def _scalar_drift_summary(
         if not isinstance(n, (int, float)) or isinstance(n, bool):
             return
         if o == 0:
-            # Avoid div-by-zero; treat 0→non-zero as inf drift.
-            drifts[prefix] = 0.0 if n == 0 else float("inf")
+            # Avoid div-by-zero; treat 0→non-zero as inf drift. (0,0)
+            # matches and is not recorded — no drift signal to emit.
+            if n != 0:
+                drifts[prefix] = float("inf")
             return
         try:
             drifts[prefix] = abs(float(n) - float(o)) / abs(float(o))
         except (TypeError, ValueError):
-            return
+            # Both isinstance checks above already passed (int/float, not
+            # bool) — only exotic numerics (numpy NaN/Inf or a subclass)
+            # can land here. Surface as inf so the drift gate sees it.
+            drifts[prefix] = float("inf")
 
     _walk(old, new, "")
     return drifts
+
+
+_DRIFT_HEAVY_THRESHOLD = 0.01  # > 1% relative drift counts as "heavy"
+_DRIFT_HEAVY_KEY_COUNT = 3  # > N heavy keys trips the gate
+_DRIFT_MAGNITUDE_THRESHOLD = 0.05  # any single drift > 5% trips the gate
 
 
 def _check_drift_or_die(
@@ -321,26 +340,64 @@ def _check_drift_or_die(
 ) -> None:
     """audit-2026-05-07 P2006: refuse silent fixture overwrite on heavy drift.
 
-    Raises SystemExit(3) if > 3 scalar keys have |drift| > 1% AND
-    ``--accept-numpy-drift`` was not provided. The threshold is intentionally
-    coarse: ULP-scale drift on hundreds of keys should be 0; >1% on 4+ keys
-    is the signature of a real formula change masquerading as a regen.
+    Two-arm trip:
+      - Population: > 3 scalar keys with |drift| > 1%  (broad math shift)
+      - Magnitude: any single key with |drift| > 5%    (catastrophic
+        scalar regression that the population test misses)
+    Either arm requires the ``--accept-numpy-drift`` escape hatch.
+
+    If the prior fixture is unreadable or has invalid JSON, raises
+    SystemExit(4) — silent skipping of the gate is exactly the contract
+    drift this guard exists to prevent. A truly fresh-from-empty regen
+    hits the ``not fixture_path.exists()`` early-return instead.
     """
     if not fixture_path.exists():
         return
     try:
         old = json.loads(fixture_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
+    except OSError as exc:
+        print(
+            f"REFUSING TO REGENERATE: prior fixture at {fixture_path} is "
+            f"unreadable ({exc}). Resolve before regen so the drift gate "
+            "can run. (audit-2026-05-07 P2006)",
+            file=sys.stderr,
+        )
+        raise SystemExit(4) from exc
+    except json.JSONDecodeError as exc:
+        print(
+            f"REFUSING TO REGENERATE: prior fixture at {fixture_path} is "
+            f"not valid JSON ({exc}). Resolve before regen so the drift "
+            "gate can run. (audit-2026-05-07 P2006)",
+            file=sys.stderr,
+        )
+        raise SystemExit(4) from exc
     old_metrics = old.get("metrics_json", {})
     new_metrics = new_expected.get("metrics_json", {})
     drifts = _scalar_drift_summary(old_metrics, new_metrics)
-    heavy = {k: v for k, v in drifts.items() if v > 0.01}
-    if len(heavy) > 3 and not accept_drift:
+    heavy = {k: v for k, v in drifts.items() if v > _DRIFT_HEAVY_THRESHOLD}
+    catastrophic = {
+        k: v for k, v in drifts.items() if v > _DRIFT_MAGNITUDE_THRESHOLD
+    }
+    population_trip = len(heavy) > _DRIFT_HEAVY_KEY_COUNT
+    magnitude_trip = bool(catastrophic)
+    if (population_trip or magnitude_trip) and not accept_drift:
         keys_preview = sorted(heavy.items(), key=lambda kv: -kv[1])[:10]
+        reasons: list[str] = []
+        if population_trip:
+            reasons.append(
+                f"{len(heavy)} keys with |drift| > "
+                f"{_DRIFT_HEAVY_THRESHOLD:.0%}"
+            )
+        if magnitude_trip:
+            top = max(catastrophic.values())
+            reasons.append(
+                f"max |drift| {top:.2%} exceeds "
+                f"{_DRIFT_MAGNITUDE_THRESHOLD:.0%} magnitude cap"
+            )
         print(
-            "REFUSING TO REGENERATE: scalar drift > 1% on "
-            f"{len(heavy)} keys (audit-2026-05-07 P2006).",
+            "REFUSING TO REGENERATE: "
+            + " AND ".join(reasons)
+            + " (audit-2026-05-07 P2006).",
             file=sys.stderr,
         )
         print("Top offenders (key, |drift|):", file=sys.stderr)
@@ -435,8 +492,13 @@ def main(argv: list[str] | None = None) -> None:
         volume_metrics, inp["trade_metrics_from_positions"]
     )
 
-    # TRADE_MIX_HAS_MAKER_TAKER drives 4-bucket vs 2-bucket Trade Mix per D-15
-    has_maker_taker = os.getenv("TRADE_MIX_HAS_MAKER_TAKER") == "true"
+    # TRADE_MIX_HAS_MAKER_TAKER drives 4-bucket vs 2-bucket Trade Mix per D-15.
+    # Match production's parsing at services/analytics_runner.py (case-insensitive
+    # "true") so a developer running regen with TRADE_MIX_HAS_MAKER_TAKER=True
+    # doesn't silently pin the fixture to the opposite mode.
+    has_maker_taker = (
+        os.getenv("TRADE_MIX_HAS_MAKER_TAKER", "false").lower() == "true"
+    )
     trade_mix = _compute_trade_mix(inp["fills"], has_maker_taker=has_maker_taker)
 
     # KPI-17 follow-up: position-side volume attribution. The fixture has

@@ -5,12 +5,13 @@ same helpers that the test asserts against. A math bug in those helpers
 bakes silently into the fixture during regen and parity passes anyway. The
 defenses against that are layered:
 
-- G.3: `regen_golden` requires explicit acknowledgement flags + scalar-drift
-  guard (catches large unintentional moves).
-- **G.4 (this file)**: a 5-trade scenario with hand-computed expected values
-  that exercises the production trade-metrics computation directly. Because
-  the expectations are derived from first principles (paper, not Python),
-  no shared helper between the test and the SUT can mask a regression here.
+- G.3: ``regen_golden`` requires explicit acknowledgement flags +
+  scalar-drift guard (catches large unintentional moves).
+- **G.4 (this file)**: a 5-trade scenario with hand-computed expected
+  values that exercises the production trade-metrics computation
+  directly. Because the expectations are derived from first principles
+  (paper, not Python), no shared helper between the test and the SUT can
+  mask a regression here.
 
 Scenario:
     W1: long  realized_pnl=+500, roi=+0.5  (entry 100 x10, exit 150 x10, no fees)
@@ -19,19 +20,22 @@ Scenario:
     L2: short realized_pnl=-50,  roi=-0.05 (entry 100 x10, exit 105 x10)
     BE: long  realized_pnl=0,    roi=0    (entry 100 x10, exit 100 x10)
 
-Hand-computed expected values (dollars-based, the Block A target):
+Hand-computed expected values (dollars, the Block A contract):
     avg_winning_trade = (500 + 200) / 2 = **350.0** (NOT 0.45 ratio)
     avg_losing_trade  = (-100 + -50) / 2 = **-75.0** (NOT -0.075 ratio)
     winners_count = 2
     losers_count  = 2
-    win_rate = 2/4 = 0.5  (breakeven excluded from BOTH winners and losers)
-    expectancy = 0.5 * 350 + 0.5 * -75 = **137.5** dollars
+    win_rate = 2 / (2 + 2) = 0.5  (breakeven excluded from numerator
+                                   AND denominator)
+    expectancy = win_rate * avg_win - (1 - win_rate) * abs(avg_loss)
+               = 0.5 * 350 - 0.5 * 75
+               = **137.5** dollars
 
-CRITICAL: these tests will **FAIL** on `main` because production currently
-emits the ROI-ratio averages (P1994). The failure IS the test of the test
-— this file is the independent oracle for Block A's fix. Once Block A
-flips `position_reconstruction.py:162-171` to use ``realized_pnl`` instead
-of ``roi``, these tests will pass.
+Block A (P1994) — winner/loser bucketing on ``realized_pnl`` sign, breakeven
+exclusion, and ``data_quality_flags['breakeven_positions']`` — landed in
+v0.22.28.0. This file pins the post-fix semantics so any regression to
+ROI-ratio averages, breakeven-in-losers, or a missing breakeven flag fails
+loudly here, even if ``regen_golden.py`` quietly re-bakes a bad fixture.
 
 Run: ``cd analytics-service && pytest tests/test_metrics_minigolden.py``
 """
@@ -114,8 +118,14 @@ def _make_mock_supabase(fills: list[dict]) -> MagicMock:
             return mock_trades
         if name == "funding_fees":
             return mock_funding
-        # positions / others — return a permissive mock that no-ops.
-        return MagicMock()
+        # Anything else means the production code grew a new table
+        # dependency the oracle scenario doesn't model — fail loud rather
+        # than auto-vivify a permissive MagicMock that returns wrong shapes.
+        raise AssertionError(
+            f"minigolden mock supabase received unexpected table: {name!r}. "
+            "Update _make_mock_supabase to model the new table or extend "
+            "the scenario."
+        )
 
     mock.table = _table
 
@@ -178,86 +188,96 @@ def minigolden_metrics() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Sanity checks (these MUST pass even on `main`)
+# Structural sanity (independent of Block A)
 # ---------------------------------------------------------------------------
 
 def test_minigolden_position_count_sanity(minigolden_metrics):
-    """5 fills × 2 = 10 fills → 5 closed positions (one per symbol)."""
+    """5 symbols × (1 open + 1 close) = 10 fills → 5 closed positions."""
     assert minigolden_metrics["closed_positions"] == 5
     assert minigolden_metrics["total_positions"] == 5
     assert minigolden_metrics["open_positions"] == 0
 
 
+# ---------------------------------------------------------------------------
+# Block A (P1994) regression pins — pre-fix semantics fail these loudly
+# ---------------------------------------------------------------------------
+
 def test_minigolden_winners_losers_partition(minigolden_metrics):
-    """Breakeven MUST be excluded from BOTH winners and losers.
+    """Breakeven MUST be excluded from both winners and losers.
 
-    The production code at position_reconstruction.py:130/136 partitions:
-        winners = roi > 0    (strict)
-        losers  = roi <= 0   (THIS INCLUDES BE)
+    Hand-counted from the scenario: winners=2 (W1,W2), losers=2 (L1,L2),
+    breakeven=1 (BE) — excluded.
 
-    Audit finding (Block A / P1994): the `<=` swallows breakeven into the
-    loser bucket, which is wrong — a flat trade is neither a win nor a
-    loss. This test asserts the corrected semantics.
-
-    This test is expected to FAIL on `main` (where losers_count == 3, not 2)
-    until Block A flips the partition to `roi < 0` for losers and excludes
-    BE from both buckets.
+    Pre-Block-A bucketing on ``roi <= 0`` lumped BE into losers
+    (losers_count==3). A regression to that behaviour fails here.
     """
     assert minigolden_metrics["winners_count"] == 2
     assert minigolden_metrics["losers_count"] == 2
 
 
-# ---------------------------------------------------------------------------
-# P1994 / Block A oracle — DOLLARS, not ratios
-# ---------------------------------------------------------------------------
-
 def test_minigolden_avg_winning_trade_is_dollars(minigolden_metrics):
-    """avg_winning_trade MUST be the dollar mean, NOT the ROI ratio.
+    """avg_winning_trade is the realized_pnl dollar mean, not an ROI ratio.
 
     Hand-computed: (500 + 200) / 2 = 350.0 dollars.
-
-    Production today (P1994) returns (0.5 + 0.4) / 2 = 0.45 (ratio) — this
-    test fails until Block A switches the formula to use realized_pnl.
+    Pre-Block-A regression: (0.5 + 0.4) / 2 = 0.45 (ratio).
     """
-    assert minigolden_metrics["avg_winning_trade"] == pytest.approx(350.0, abs=1e-6)
+    assert minigolden_metrics["avg_winning_trade"] == 350.0
 
 
 def test_minigolden_avg_losing_trade_is_dollars(minigolden_metrics):
-    """avg_losing_trade MUST be the dollar mean, NOT the ROI ratio.
+    """avg_losing_trade is the realized_pnl dollar mean, not an ROI ratio.
 
     Hand-computed: (-100 + -50) / 2 = -75.0 dollars.
-
-    Production today (P1994) returns (-0.1 + -0.05) / 2 = -0.075 (ratio).
-    Block A fixes.
+    Pre-Block-A regression: (-0.1 + -0.05) / 2 = -0.075 (ratio).
     """
-    assert minigolden_metrics["avg_losing_trade"] == pytest.approx(-75.0, abs=1e-6)
+    assert minigolden_metrics["avg_losing_trade"] == -75.0
 
 
 def test_minigolden_win_rate_excludes_breakeven(minigolden_metrics):
-    """Win rate must be winners / (winners + losers), with BE excluded.
+    """win_rate = winners / (winners + losers), breakeven excluded.
 
-    Hand-computed: 2 / (2 + 2) = 0.5. NOT 2/5 = 0.4 (which would result
-    from including BE in the denominator).
-
-    This is currently broken on `main` because the closed-position count
-    (5) is the denominator, giving 2/5 = 0.4 instead of 2/4 = 0.5. Block A
-    fixes by partitioning closed → winners / losers / breakeven.
+    Hand-computed: 2 / (2 + 2) = 0.5.
+    Pre-Block-A regression (denominator = closed_count): 2/5 = 0.4.
     """
-    assert minigolden_metrics["win_rate"] == pytest.approx(0.5, abs=1e-6)
+    assert minigolden_metrics["win_rate"] == 0.5
 
 
 def test_minigolden_data_quality_flags_records_breakeven(minigolden_metrics):
-    """Breakeven trades must surface as a data_quality_flag count of 1.
+    """``data_quality_flags['breakeven_positions']`` counts BE trades.
 
-    The reconstructed positions output should include a flag like
-    ``data_quality_flags.breakeven_positions == 1`` so allocators can see
-    that one of the closed trades was flat.
-
-    Block A is expected to add this flag. On `main` the key is absent and
-    this test fails with KeyError.
+    Hand-counted: exactly 1 (the BE scenario). The flag must be present —
+    a missing key indicates a regression to pre-Block-A behaviour where
+    breakeven trades were silently lumped into losers.
     """
-    flags = minigolden_metrics.get("data_quality_flags") or {}
-    assert flags.get("breakeven_positions") == 1
+    assert "data_quality_flags" in minigolden_metrics, (
+        "data_quality_flags key is missing — Block A regression"
+    )
+    flags = minigolden_metrics["data_quality_flags"]
+    assert flags["breakeven_positions"] == 1
+
+
+def test_minigolden_realized_pnl_per_trade_preserves_breakeven_zero(
+    minigolden_metrics,
+):
+    """realized_pnl_per_trade must distinguish 0.0 (breakeven) from None.
+
+    Block A (P1994) added the None-vs-0.0 contract: closed positions with
+    a numeric ``realized_pnl`` (including 0.0 for breakeven) round-trip as
+    that number, while closed positions with no ``realized_pnl`` surface
+    as ``None`` and are counted in
+    ``data_quality_flags['positions_missing_realized_pnl']``.
+
+    The minigolden BE trade has realized_pnl==0.0 (numeric, not None). A
+    regression coercing 0.0 → None (or vice versa) fails here.
+    """
+    per_trade = minigolden_metrics["realized_pnl_per_trade"]
+    assert len(per_trade) == 5
+    pnls = sorted(p["realized_pnl"] for p in per_trade)
+    assert pnls == [-100.0, -50.0, 0.0, 200.0, 500.0]
+    # And the breakeven entry is the literal float 0.0, not None.
+    assert any(p["realized_pnl"] == 0.0 for p in per_trade)
+    # Block A invariant: no closed-position oracle entry is None here.
+    assert all(p["realized_pnl"] is not None for p in per_trade)
 
 
 def test_minigolden_expectancy_is_dollars():
@@ -289,10 +309,10 @@ def test_minigolden_expectancy_is_dollars():
         ],
     }
     derived = _compute_derived_trade_metrics({}, trade_metrics_post_block_a)
-    assert derived["expectancy"] == pytest.approx(137.5, abs=1e-6)
-    # Risk:Reward (dollar ratio) = avg_win / |avg_loss| = 350 / 75 = 4.666...
-    assert derived["risk_reward_ratio"] == pytest.approx(350.0 / 75.0, abs=1e-9)
-    # Weighted R:R = (350 * 2) / (75 * 2) = 350/75 (same in this symmetric case).
-    assert derived["weighted_risk_reward_ratio"] == pytest.approx(
-        350.0 / 75.0, abs=1e-9
-    )
+    # Expectancy: 0.5*350 - 0.5*75 = 137.5 (exact for these inputs).
+    assert derived["expectancy"] == 137.5
+    # Risk:Reward (dollar ratio) = avg_win / |avg_loss| = 350/75.
+    # IEEE-754 ULP slack via approx (rel default 1e-6).
+    assert derived["risk_reward_ratio"] == pytest.approx(350.0 / 75.0)
+    # Weighted R:R = (350*2) / (75*2) — symmetric case collapses to same.
+    assert derived["weighted_risk_reward_ratio"] == pytest.approx(350.0 / 75.0)
