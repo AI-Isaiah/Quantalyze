@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import statistics
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -21,6 +22,13 @@ from typing import Any
 from services.db import db_execute
 
 logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
+
+# A single contended reconstruct that genuinely needs operator attention
+# typically blocks for seconds (DB roundtrip + atomic-rebuild RPC). A
+# 1-second hold threshold filters out routine sub-RTT contention noise
+# while still surfacing the 30s stalls the lock was added to make
+# debuggable. See `reconstruct_positions` log site below.
+_LOCK_HOLD_LOG_THRESHOLD_S = 1.0
 
 
 # Audit-2026-05-07 P1101 (caller follow-up): per-worker process in-memory
@@ -56,24 +64,33 @@ def _lock_for(strategy_id: str) -> asyncio.Lock:
     return _RECONSTRUCT_LOCKS.setdefault(strategy_id, asyncio.Lock())
 
 
-async def reconstruct_positions(strategy_id: str, supabase) -> dict:
+async def reconstruct_positions(strategy_id, supabase) -> dict:
     """Public entry point — serializes per-strategy via in-memory
     asyncio.Lock so concurrent same-worker callers do not both fire the
     atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
     pg_advisory_xact_lock + migration 119 UNIQUE constraint's
     responsibility. See the module-level comment on `_RECONSTRUCT_LOCKS`
     for the full rationale (audit-2026-05-07 P1101 caller follow-up)."""
+    # Normalize to a canonical string key so a UUID, str, or whitespace
+    # variant of the same strategy can never end up in two different lock
+    # buckets. The SQL-side advisory lock hashes the text representation,
+    # so we mirror that here.
+    strategy_id = str(strategy_id).strip()
     lock = _lock_for(strategy_id)
-    if lock.locked():
-        # Contention is informational — the second caller will get a
-        # consistent re-run after the first releases. Surfacing it
-        # makes 30s reconstruct latency in production debuggable
-        # instead of mysterious.
-        logger.info(
-            "reconstruct_positions: waiting on per-strategy lock",
-            extra={"strategy_id": strategy_id},
-        )
+    # Log AFTER acquire, gated on actual wait time. A pre-acquire log
+    # would be racy (the holder may release between `locked()` and
+    # `acquire`) and would spam INFO for trivial sub-RTT contention.
+    # Logging only the slow path matches the "30s stalls debuggable"
+    # operational goal without flooding log shipping under bursts.
+    t0 = time.monotonic()
     async with lock:
+        wait_s = time.monotonic() - t0
+        if wait_s > _LOCK_HOLD_LOG_THRESHOLD_S:
+            logger.warning(
+                "reconstruct_positions: blocked on per-strategy lock for %.2fs",
+                wait_s,
+                extra={"strategy_id": strategy_id, "wait_seconds": wait_s},
+            )
         return await _reconstruct_positions_inner(strategy_id, supabase)
 
 

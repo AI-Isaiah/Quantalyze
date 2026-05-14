@@ -19,6 +19,25 @@ from services.position_reconstruction import (
 
 
 # ---------------------------------------------------------------------------
+# Autouse: clear the per-worker lock registry between tests
+# ---------------------------------------------------------------------------
+# pytest-asyncio (auto mode, function-scope loop) gives each test a fresh
+# event loop. `_RECONSTRUCT_LOCKS` is module-level state, so a Lock built
+# under loop A would survive into loop B's tests. The new idempotency
+# regressions clear the dict themselves, but every PRE-EXISTING test that
+# reuses the canonical "strat-1" / "strategy-xyz" ids does not. Clearing
+# here keeps tests isolated and prevents future parked waiters from
+# leaking across tests (audit-2026-05-07 P1101 red-team F1).
+
+@pytest.fixture(autouse=True)
+def _reset_reconstruct_locks():
+    import services.position_reconstruction as pr_mod
+    pr_mod._RECONSTRUCT_LOCKS.clear()
+    yield
+    pr_mod._RECONSTRUCT_LOCKS.clear()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -1709,11 +1728,6 @@ class TestReconstructIdempotency:
         check: delete `async with _lock_for(...)` in production code and this
         assertion must flip to `max_in_flight == 2`.
         """
-        # Reset the module-level lock dict so a previous test's strategy_id
-        # entries do not leak in.
-        import services.position_reconstruction as pr_mod
-        pr_mod._RECONSTRUCT_LOCKS.clear()
-
         fills = [
             {
                 "symbol": "BTCUSDT", "side": "buy",
@@ -1837,7 +1851,6 @@ class TestReconstructIdempotency:
         peak stays at 1 — the assertion flips.
         """
         import services.position_reconstruction as pr_mod
-        pr_mod._RECONSTRUCT_LOCKS.clear()
 
         mock_a = _make_mock_supabase(fills=[])
         mock_b = _make_mock_supabase(fills=[])
@@ -1895,7 +1908,6 @@ class TestReconstructIdempotency:
         same strategy would hang forever.
         """
         import services.position_reconstruction as pr_mod
-        pr_mod._RECONSTRUCT_LOCKS.clear()
 
         mock = _make_mock_supabase(fills=[])
         boom = RuntimeError("inner exploded")
@@ -1935,7 +1947,6 @@ class TestReconstructIdempotency:
         strategy is permanently stuck.
         """
         import services.position_reconstruction as pr_mod
-        pr_mod._RECONSTRUCT_LOCKS.clear()
 
         mock = _make_mock_supabase(fills=[])
 
