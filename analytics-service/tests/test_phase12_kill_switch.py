@@ -206,7 +206,7 @@ class TestSqlProbeParsing:
 
         def capture(*args, **kwargs):  # type: ignore[no-untyped-def]
             captured.update(kwargs)
-            return MagicMock(returncode=0, stdout="p999,1\ncount,1\ntotal_rows,1\n", stderr="")
+            return MagicMock(returncode=0, stdout="relation_visible,t\np999,1\ncount,1\ntotal_rows,1\n", stderr="")
 
         monkeypatch.setattr("scripts.phase12_kill_switch.subprocess.run", capture)
         ks.measure_p999_via_sql()
@@ -215,54 +215,75 @@ class TestSqlProbeParsing:
     def test_keyed_parse_happy_path(self, monkeypatch) -> None:
         self._stub_psql(
             monkeypatch,
-            "p50,12345\np95,234567\np99,345678\np999,456789\nmax,567890\ncount,42\ntotal_rows,42\n",
+            "relation_visible,t\np50,12345\np95,234567\np99,345678\np999,456789\nmax,567890\ncount,42\ntotal_rows,42\n",
         )
         p999, n = ks.measure_p999_via_sql()
         assert p999 == 456789.0
         assert n == 42
 
     def test_missing_p999_key_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p50,12345\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np50,12345\ncount,42\ntotal_rows,42\n")
         with pytest.raises(RuntimeError, match="p999"):
             ks.measure_p999_via_sql()
 
     def test_missing_count_key_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,456789\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,456789\ntotal_rows,42\n")
         with pytest.raises(RuntimeError, match="count"):
             ks.measure_p999_via_sql()
 
     def test_missing_total_rows_key_raises(self, monkeypatch) -> None:
         """total_rows is required for the H4 NULL-metrics-only diagnostic."""
-        self._stub_psql(monkeypatch, "p999,456789\ncount,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,456789\ncount,42\n")
         with pytest.raises(RuntimeError, match="total_rows"):
             ks.measure_p999_via_sql()
 
     def test_nan_p999_in_probe_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,nan\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,nan\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_inf_p999_in_probe_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,inf\ncount,42\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,inf\ncount,42\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_negative_count_raises(self, monkeypatch) -> None:
-        self._stub_psql(monkeypatch, "p999,500\ncount,-3\ntotal_rows,42\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,500\ncount,-3\ntotal_rows,42\n")
         with pytest.raises(ValueError):
             ks.measure_p999_via_sql()
 
     def test_empty_table_raises_with_explicit_diagnostic(self, monkeypatch) -> None:
         """count=0 AND total_rows=0 → wrong-DB diagnostic."""
-        self._stub_psql(monkeypatch, "p999,\ncount,0\ntotal_rows,0\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,\ncount,0\ntotal_rows,0\n")
         with pytest.raises(RuntimeError, match="empty.*0 rows"):
             ks.measure_p999_via_sql()
 
     def test_null_metrics_only_raises_distinct_diagnostic(self, monkeypatch) -> None:
         """H4: total_rows>0 AND count=0 → table populated but no metrics
         yet. Must NOT misdiagnose as "wrong DB"."""
-        self._stub_psql(monkeypatch, "p999,\ncount,0\ntotal_rows,17\n")
+        self._stub_psql(monkeypatch, "relation_visible,t\np999,\ncount,0\ntotal_rows,17\n")
         with pytest.raises(RuntimeError, match="17 rows.*all metrics_json values are NULL"):
+            ks.measure_p999_via_sql()
+
+    @pytest.mark.parametrize("visible_val", ["f", "false", "FALSE", "F"])
+    def test_relation_not_visible_raises_rls_grant_diagnostic(
+        self, monkeypatch, visible_val: str
+    ) -> None:
+        """#5: if to_regclass returns NULL or SELECT is denied, count and
+        total_rows both look like 0 — must distinguish from "empty table"
+        so operator chases the right root cause."""
+        self._stub_psql(
+            monkeypatch,
+            f"relation_visible,{visible_val}\np999,\ncount,0\ntotal_rows,0\n",
+        )
+        with pytest.raises(RuntimeError, match="not visible to the connecting role"):
+            ks.measure_p999_via_sql()
+
+    def test_missing_relation_visible_key_raises(self, monkeypatch) -> None:
+        """The visibility key is required — drift in the SQL must surface
+        as a parse failure, not a silent fallthrough."""
+        self._stub_psql(monkeypatch, "p999,1\ncount,1\ntotal_rows,1\n")
+        with pytest.raises(RuntimeError, match="relation_visible"):
             ks.measure_p999_via_sql()
 
     def test_unknown_stdout_shape_raises(self, monkeypatch) -> None:
@@ -280,6 +301,44 @@ class TestSqlProbeParsing:
         monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
         with pytest.raises(RuntimeError, match="DATABASE_URL"):
             ks.measure_p999_via_sql()
+
+
+# --- Lazy timeout resolution (round-2 red-team #1) --------------------------
+
+
+class TestResolveProbeTimeout:
+    """Timeout resolution must be lazy and validate the env var. A malformed
+    PHASE12_PROBE_TIMEOUT_S must NOT crash at module import (the prior
+    `int(os.getenv(...))` ran at import and broke unrelated callers); a
+    value of 0 must NOT silently turn every probe into an instant
+    TimeoutExpired."""
+
+    def test_default_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("PHASE12_PROBE_TIMEOUT_S", raising=False)
+        assert ks._resolve_probe_timeout_s() == ks._DEFAULT_PROBE_TIMEOUT_S
+
+    def test_empty_string_uses_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("PHASE12_PROBE_TIMEOUT_S", "")
+        assert ks._resolve_probe_timeout_s() == ks._DEFAULT_PROBE_TIMEOUT_S
+
+    def test_valid_positive_int(self, monkeypatch) -> None:
+        monkeypatch.setenv("PHASE12_PROBE_TIMEOUT_S", "120")
+        assert ks._resolve_probe_timeout_s() == 120
+
+    @pytest.mark.parametrize("bad", ["foo", "1.5", "60s", "abc"])
+    def test_non_integer_raises_loud(self, monkeypatch, bad: str) -> None:
+        monkeypatch.setenv("PHASE12_PROBE_TIMEOUT_S", bad)
+        with pytest.raises(RuntimeError, match="not an integer"):
+            ks._resolve_probe_timeout_s()
+
+    @pytest.mark.parametrize("bad", ["0", "-1", "-60"])
+    def test_non_positive_raises_loud(self, monkeypatch, bad: str) -> None:
+        """PHASE12_PROBE_TIMEOUT_S=0 would turn every probe into an instant
+        TimeoutExpired and the operator would chase a phantom hung
+        connection. Refuse non-positive values."""
+        monkeypatch.setenv("PHASE12_PROBE_TIMEOUT_S", bad)
+        with pytest.raises(RuntimeError, match="positive integer"):
+            ks._resolve_probe_timeout_s()
 
 
 # --- P2024: atomic cutover via RPC ------------------------------------------
@@ -350,8 +409,8 @@ class TestCutoverDelegatesToAtomicRpc:
         "bad_moved,desc",
         [
             (None, "moved=None"),
-            (True, "moved=True (bool)"),
-            (False, "moved=False (bool)"),
+            (True, "moved=True (bool — int subclass that must be rejected)"),
+            (False, "moved=False (bool — int subclass that must be rejected)"),
             ("3", "moved=str"),
             (3.0, "moved=float"),
         ],
@@ -496,15 +555,18 @@ class TestCutoverLoopPartialFailure:
         assert rc == 1
 
     @pytest.mark.asyncio
-    async def test_noop_rerun_skips_audit_log_append(
+    async def test_noop_run_appends_marked_audit_entry(
         self, monkeypatch, capsys, tmp_path
     ) -> None:
-        """H3: re-running the kill-switch after a successful cutover is a
-        no-op (RPC returns moved=0 for already-stripped rows). The audit
-        log must NOT get a duplicate "Kill-switch triggered" entry — the
-        operator can't tell trigger from re-run later otherwise."""
+        """Reverses an earlier H3 fix that silently swallowed legit
+        triggers. Now: ALWAYS append an audit-log entry on a triggered
+        run; mark no-op cases with "(no-op ...)" so duplicates are
+        distinguishable. Three real cases hit this path:
+          * operator forces --p999 above threshold but keys already stripped
+          * v_allowlist regressed to empty (operator MUST see)
+          * zero published strategies (still record the trigger fired)"""
         todos_path = tmp_path / "TODOS.md"
-        todos_path.write_text("# pristine\n")
+        todos_path.write_text("# existing\n")
         monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
         monkeypatch.setenv("RUN_KILL_SWITCH", "true")
 
@@ -523,11 +585,76 @@ class TestCutoverLoopPartialFailure:
             rc = await ks.main(cli_p999=900_000.0, cli_count=3)
 
         assert rc == 0
-        assert todos_path.read_text() == "# pristine\n", (
-            "no-op re-run must not append to TODOS.md"
+        log = todos_path.read_text()
+        assert "Kill-switch triggered" in log, (
+            "triggered run MUST always leave an audit-log entry, even when no-op"
         )
-        captured = capsys.readouterr()
-        assert "no-op" in captured.out.lower()
+        assert "(no-op" in log, (
+            "no-op runs must be marked so post-incident the audit trail "
+            "distinguishes them from real triggers"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_todos_path_raises_when_triggered(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """#3: if TODOS_PATH does not exist, the kill-switch trigger has
+        nowhere to record itself. Fail loud rather than completing
+        silently with the audit log lost."""
+        missing_path = tmp_path / "does-not-exist.md"
+        monkeypatch.setattr(ks, "TODOS_PATH", missing_path)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        async def fake_cutover(sid: str) -> int:
+            return 1
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(
+            data=[{"strategy_id": "s1"}],
+        )
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            with pytest.raises(RuntimeError, match="audit destination .* not found"):
+                await ks.main(cli_p999=900_000.0, cli_count=1)
+
+    @pytest.mark.asyncio
+    async def test_malformed_rows_recorded_as_failures(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """#4: a row missing 'strategy_id' must not raise KeyError mid-loop
+        and skip the audit log. Capture as a failure; continue."""
+        todos_path = tmp_path / "TODOS.md"
+        todos_path.write_text("# existing\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        async def fake_cutover(sid: str) -> int:
+            return 2
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        # Mixed rows: one valid, one missing strategy_id, one with empty string.
+        select_chain.execute.return_value = MagicMock(
+            data=[
+                {"strategy_id": "valid-1"},
+                {"other_field": "no strategy_id key"},
+                {"strategy_id": ""},
+            ],
+        )
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            rc = await ks.main(cli_p999=900_000.0, cli_count=3)
+
+        # 1 valid succeeded; 2 malformed counted as failures → partial.
+        assert rc == 1
+        log = todos_path.read_text()
+        assert "Kill-switch triggered" in log
+        assert "2 failed" in log
 
     @pytest.mark.asyncio
     async def test_strategy_select_none_data_raises(self, monkeypatch) -> None:

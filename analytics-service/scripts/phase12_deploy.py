@@ -137,20 +137,22 @@ def _run_sql_probe() -> tuple[float, int]:
             "cannot run pg_column_size SQL probe (M-03)."
         )
     sql = SQL_PROBE_PATH.read_text()
-    # Bounded timeout (see phase12_kill_switch.SQL_PROBE_TIMEOUT_S) so a
-    # hung connection cannot park the deploy with no diagnostic.
+    # Bounded timeout (see phase12_kill_switch._resolve_probe_timeout_s)
+    # so a hung connection cannot park the deploy with no diagnostic.
+    # Lazy resolution at probe time, so a malformed env var raises here
+    # rather than at module import.
+    timeout_s = phase12_kill_switch._resolve_probe_timeout_s()
     try:
         result = subprocess.run(
             ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
             capture_output=True, text=True, check=False,
-            timeout=phase12_kill_switch.SQL_PROBE_TIMEOUT_S,
+            timeout=timeout_s,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"phase12_deploy: SQL probe timed out after "
-            f"{phase12_kill_switch.SQL_PROBE_TIMEOUT_S}s (DATABASE_URL host "
-            f"unreachable, pgbouncer hung, or strategy_analytics held under "
-            f"FOR UPDATE)"
+            f"phase12_deploy: SQL probe timed out after {timeout_s}s "
+            f"(DATABASE_URL host unreachable, pgbouncer hung, or "
+            f"strategy_analytics held under FOR UPDATE)"
         ) from exc
     if result.returncode != 0:
         raise RuntimeError(
@@ -166,13 +168,22 @@ def _run_sql_probe() -> tuple[float, int]:
             )
         parsed[parts[0].strip()] = parts[1].strip()
 
-    for required in ("p999", "count", "total_rows"):
+    for required in ("relation_visible", "p999", "count", "total_rows"):
         if required not in parsed:
             raise RuntimeError(
                 f"phase12_deploy: SQL probe missing required key "
                 f"{required!r}; got keys {sorted(parsed.keys())!r}"
             )
-    # H4: distinguish "table populated but no metrics yet" from "empty
+    # Relation visibility comes first — distinguishes RLS/GRANT failure
+    # (identical-looking count=0 / total_rows=0 to "empty table") from
+    # actual emptiness.
+    if parsed["relation_visible"].strip().lower() not in ("t", "true"):
+        raise RuntimeError(
+            "phase12_deploy: strategy_analytics is not visible to the "
+            "connecting role (table missing or SELECT denied). Check the "
+            "DATABASE_URL role/GRANTs before re-running."
+        )
+    # Distinguish "table populated but no metrics yet" from "empty
     # table / wrong DB" using the unfiltered total_rows key.
     n = int(_parse_probe_value(parsed["count"]))
     total_rows = int(_parse_probe_value(parsed["total_rows"]))

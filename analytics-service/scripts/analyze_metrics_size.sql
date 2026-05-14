@@ -16,17 +16,30 @@
 -- to opt into specific keys.
 --
 -- Emitted keys (each appears exactly once):
---   p50, p95, p99, p999, max, count, total_rows
+--   relation_visible, p50, p95, p99, p999, max, count, total_rows
+--
+-- `relation_visible` is `t` when `to_regclass('public.strategy_analytics')`
+-- resolves AND the current role has SELECT privilege (regardless of RLS
+-- row filtering). It distinguishes (RLS hides every row → count=0,
+-- total_rows=0, relation_visible=t) from (table missing / role lacks
+-- SELECT → count=0, total_rows=0, relation_visible=f). Without it, the
+-- Python parser would mis-diagnose a permissions failure as "wrong DB".
 --
 -- `count` is the number of rows with non-NULL metrics_json (the rows the
 -- percentile is computed over). `total_rows` is the unfiltered row count;
 -- the Python parser uses (total_rows > 0 AND count == 0) to emit a
 -- "table populated but no metrics yet" diagnostic distinct from "table
--- empty / wrong DB" (H4).
+-- empty / wrong DB".
 --
 -- Usage:
 --   psql --dbname "$DATABASE_URL" -tAF, -f analyze_metrics_size.sql
-WITH stats AS (
+WITH visibility AS (
+    SELECT
+        to_regclass('public.strategy_analytics') IS NOT NULL
+        AND has_table_privilege('public.strategy_analytics', 'SELECT')
+        AS relation_visible
+),
+stats AS (
     SELECT
         percentile_cont(0.50)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p50,
         percentile_cont(0.95)  WITHIN GROUP (ORDER BY pg_column_size(metrics_json)) AS p95,
@@ -40,10 +53,11 @@ WITH stats AS (
 unfiltered AS (
     SELECT count(*) AS total_rows FROM strategy_analytics
 )
-SELECT 'p50'   AS k, p50::text                AS v FROM stats
-UNION ALL SELECT 'p95',        p95::text          FROM stats
-UNION ALL SELECT 'p99',        p99::text          FROM stats
-UNION ALL SELECT 'p999',       p999::text         FROM stats
-UNION ALL SELECT 'max',        max_bytes::text    FROM stats
-UNION ALL SELECT 'count',      strategy_count::text FROM stats
-UNION ALL SELECT 'total_rows', total_rows::text   FROM unfiltered;
+SELECT 'relation_visible' AS k, relation_visible::text AS v FROM visibility
+UNION ALL SELECT 'p50',        p50::text                FROM stats
+UNION ALL SELECT 'p95',        p95::text                FROM stats
+UNION ALL SELECT 'p99',        p99::text                FROM stats
+UNION ALL SELECT 'p999',       p999::text               FROM stats
+UNION ALL SELECT 'max',        max_bytes::text          FROM stats
+UNION ALL SELECT 'count',      strategy_count::text     FROM stats
+UNION ALL SELECT 'total_rows', total_rows::text         FROM unfiltered;

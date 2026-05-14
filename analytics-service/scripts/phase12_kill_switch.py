@@ -45,10 +45,41 @@ from services.db import db_execute, get_supabase
 # --- Constants -------------------------------------------------------------
 
 THRESHOLD_BYTES = 800_000  # 800kB — Phase 12 SC#3a kill-switch trigger.
-# Bounded timeout on the psql subprocess so a hung pgbouncer / network
-# partition / held FOR UPDATE can't park the deploy indefinitely. Override
-# via PHASE12_PROBE_TIMEOUT_S for unusually large strategy_analytics tables.
-SQL_PROBE_TIMEOUT_S = int(os.getenv("PHASE12_PROBE_TIMEOUT_S", "60"))
+# Default timeout on the psql subprocess so a hung pgbouncer / network
+# partition / held FOR UPDATE can't park the deploy indefinitely. Resolved
+# lazily inside `_resolve_probe_timeout_s` so a malformed env var raises a
+# loud diagnostic at probe time rather than crashing at module import (an
+# import-time crash points at the wrong file in tracebacks and breaks
+# `from scripts import phase12_kill_switch` for any caller).
+_DEFAULT_PROBE_TIMEOUT_S = 60
+
+
+def _resolve_probe_timeout_s() -> int:
+    """Resolve PHASE12_PROBE_TIMEOUT_S → positive int.
+
+    Rejects non-integer values (so `PHASE12_PROBE_TIMEOUT_S=foo` fails
+    loud at probe time, not at module import) and rejects non-positive
+    values (so `PHASE12_PROBE_TIMEOUT_S=0` doesn't silently turn every
+    probe into an instant "hung connection" diagnostic).
+    """
+    raw = os.getenv("PHASE12_PROBE_TIMEOUT_S")
+    if raw is None or raw == "":
+        return _DEFAULT_PROBE_TIMEOUT_S
+    try:
+        val = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"phase12_kill_switch: PHASE12_PROBE_TIMEOUT_S={raw!r} is not "
+            f"an integer; expected positive seconds (e.g. '120')."
+        ) from exc
+    if val <= 0:
+        raise RuntimeError(
+            f"phase12_kill_switch: PHASE12_PROBE_TIMEOUT_S={raw!r} must be "
+            f"a positive integer; received {val}. A non-positive timeout "
+            f"would turn every probe into an instant 'hung connection' "
+            f"diagnostic."
+        )
+    return val
 
 # P2021: opt-IN env var (replaces prior opt-OUT SKIP_KILL_SWITCH=1). Unknown
 # values fall through to _parse_run_flag's SystemExit (CLAUDE.md Rule 12).
@@ -173,20 +204,21 @@ def measure_p999_via_sql() -> tuple[float, int]:
             "cannot run pg_column_size SQL probe (M-03)."
         )
     sql = SQL_PROBE_PATH.read_text()
+    timeout_s = _resolve_probe_timeout_s()
     # Explicit --dbname flag (the previous positional dbname was easy to
-    # mis-read as a query when reviewing CI logs). A bounded timeout
+    # mis-read as a query when reviewing CI logs). The bounded timeout
     # prevents a hung pgbouncer / network partition / held FOR UPDATE
     # from parking the deploy indefinitely with no diagnostic.
     try:
         result = subprocess.run(
             ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
             capture_output=True, text=True, check=False,
-            timeout=SQL_PROBE_TIMEOUT_S,
+            timeout=timeout_s,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
             f"phase12_kill_switch: SQL probe timed out after "
-            f"{SQL_PROBE_TIMEOUT_S}s (DATABASE_URL host unreachable, "
+            f"{timeout_s}s (DATABASE_URL host unreachable, "
             f"pgbouncer hung, or strategy_analytics held under FOR UPDATE)"
         ) from exc
     if result.returncode != 0:
@@ -203,19 +235,30 @@ def measure_p999_via_sql() -> tuple[float, int]:
             )
         parsed[parts[0].strip()] = parts[1].strip()
 
-    for required in ("p999", "count", "total_rows"):
+    for required in ("relation_visible", "p999", "count", "total_rows"):
         if required not in parsed:
             raise RuntimeError(
                 f"phase12_kill_switch: SQL probe missing required key "
                 f"{required!r}; got keys {sorted(parsed.keys())!r}"
             )
 
-    # Validate count first: an empty strategy_analytics table produces
-    # count=0 and NULL→empty-string percentiles. Without this guard, the
-    # p999 parse below would raise a generic "empty probe value" error
-    # and the operator can't tell "wrong DB" from "kill-switch broken".
-    # Distinguish (H4) "table truly empty / wrong DB" from "table
-    # populated but no metrics yet" using the new total_rows key.
+    # Check relation visibility first: if `to_regclass` returned NULL or
+    # the role lacks SELECT, an RLS-hidden or missing table looks
+    # identical to "empty table" from the count alone. The visibility
+    # key disambiguates so the operator gets the right root-cause hint.
+    if parsed["relation_visible"].strip().lower() not in ("t", "true"):
+        raise RuntimeError(
+            "phase12_kill_switch: strategy_analytics is not visible to the "
+            "connecting role (table missing or SELECT denied). Check the "
+            "DATABASE_URL role/GRANTs before re-running."
+        )
+
+    # Validate count: an empty strategy_analytics table produces count=0
+    # and NULL→empty-string percentiles. Without this guard, the p999
+    # parse below would raise a generic "empty probe value" error and
+    # the operator can't tell "wrong DB" from "kill-switch broken".
+    # Distinguish "table truly empty" from "table populated but no
+    # metrics yet" using the total_rows key.
     count = int(_parse_probe_value(parsed["count"]))
     total_rows = int(_parse_probe_value(parsed["total_rows"]))
     if count == 0:
@@ -301,7 +344,12 @@ async def cutover_strategy(strategy_id: str) -> int:
             f"Aborting cutover to avoid silent under-count."
         )
     moved = payload["moved"]
-    if isinstance(moved, bool) or not isinstance(moved, int):
+    # `type(x) is int` rejects bool implicitly (type(True) is bool, not
+    # int), making the type-guard ordering-independent — a future refactor
+    # that drops one of the prior `isinstance` checks would not regress
+    # silently. Subclasses-of-int (numpy.int64, etc.) are not expected
+    # over the PostgREST wire so the strict check is appropriate here.
+    if type(moved) is not int:
         raise RuntimeError(
             f"cutover_strategy_metrics_keys_atomic({strategy_id}) returned "
             f"'moved'={moved!r} of type {type(moved).__name__}; "
@@ -350,14 +398,27 @@ async def main(
             "(PostgREST query failure); refusing to log a kill-switch "
             "no-op against an unverified row set."
         )
-    strategy_ids = [r["strategy_id"] for r in rows.data]
+    # Defensive iteration: a row missing 'strategy_id' (schema rename,
+    # RLS-projection change, malformed response) must NOT raise KeyError
+    # mid-loop and skip the post-loop audit-log write. Capture the
+    # malformed row as a failure so the trigger is still recorded.
+    strategy_ids: list[str] = []
+    malformed_rows: list[tuple[str, str]] = []
+    for idx, row in enumerate(rows.data):
+        sid = row.get("strategy_id") if isinstance(row, dict) else None
+        if not isinstance(sid, str) or not sid:
+            malformed_rows.append((f"<row-{idx}>", f"missing/invalid strategy_id in {row!r}"))
+            continue
+        strategy_ids.append(sid)
 
     # Per-strategy try/except so a mid-loop RPC failure cannot skip the
     # post-loop audit-log write. Mirror P2025: collect (sid, exc) failures,
     # always write the TODOS.md entry with moved/failed counts, return
-    # non-zero when any strategy failed.
+    # non-zero when any strategy failed. Malformed-row failures (rows
+    # missing strategy_id) are seeded into `failures` before the loop so
+    # they roll up into the same audit record.
     total_moved = 0
-    failures: list[tuple[str, str]] = []
+    failures: list[tuple[str, str]] = list(malformed_rows)
     for sid in strategy_ids:
         try:
             moved = await cutover_strategy(sid)
@@ -376,32 +437,44 @@ async def main(
         + (f" ({len(failures)} failed)" if failures else "")
     )
 
-    # Audit-log policy:
-    #   * Skip the append on a true no-op re-run (total_moved == 0 AND no
-    #     failures) — otherwise an operator re-running to confirm
-    #     "did it work?" appends a second indistinguishable entry and
-    #     post-incident the in-tree audit trail can't tell trigger from
-    #     re-run.
-    #   * Always append on partial completion — the mutations that DID
-    #     land must be recoverable from in-tree history.
-    is_noop_rerun = total_moved == 0 and not failures
-    if TODOS_PATH.exists() and not is_noop_rerun:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        TODOS_PATH.write_text(
-            TODOS_PATH.read_text()
-            + (
-                f"\n## Kill-switch triggered (D-07) — {ts}\n"
-                f"- p99.9 = {p999:.0f} bytes (threshold {THRESHOLD_BYTES}); "
-                f"moved {total_moved} keys across "
-                f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} "
-                f"strategies ({len(failures)} failed).\n"
-            )
+    # Audit-log policy: ALWAYS append on a triggered run. The "skip on
+    # no-op re-run" optimization (prior round) silently swallowed three
+    # legitimate-trigger cases — (a) operator forces --p999 above
+    # threshold but all keys already stripped server-side, (b) migration
+    # 129's v_allowlist regressed to empty so RPC returns moved=0 for
+    # every strategy, (c) zero published strategies. In each, the
+    # operator must SEE the trigger fired. Mark the no-op cases with a
+    # "(no-op)" suffix so duplicates are still distinguishable post-
+    # incident without losing the record.
+    #
+    # Refuse to run when TODOS_PATH is missing (env-specific failure
+    # mode: archived phase dirs, wrong working directory). The audit
+    # destination is part of the operational contract.
+    if not TODOS_PATH.exists():
+        raise RuntimeError(
+            f"phase12_kill_switch: audit destination {TODOS_PATH} not "
+            f"found. The kill-switch triggered (p99.9={p999:.0f} >= "
+            f"{THRESHOLD_BYTES}) but cannot record the event. Restore the "
+            f"phase 12 TODOS.md or rerun from the correct working "
+            f"directory before proceeding."
         )
-    elif is_noop_rerun:
-        print(
-            "phase12_kill_switch: re-run is a no-op (moved=0, failures=0) "
-            "— skipping audit-log append to keep TODOS.md trigger record clean."
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    noop_marker = (
+        " (no-op — moved=0, failures=0; either keys already stripped, "
+        "v_allowlist empty, or zero published strategies)"
+        if total_moved == 0 and not failures
+        else ""
+    )
+    TODOS_PATH.write_text(
+        TODOS_PATH.read_text()
+        + (
+            f"\n## Kill-switch triggered (D-07) — {ts}{noop_marker}\n"
+            f"- p99.9 = {p999:.0f} bytes (threshold {THRESHOLD_BYTES}); "
+            f"moved {total_moved} keys across "
+            f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} "
+            f"strategies ({len(failures)} failed).\n"
         )
+    )
 
     return 1 if failures else 0
 
