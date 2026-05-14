@@ -29,21 +29,31 @@ logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 # (strategy_id, symbol, side, opened_at) UNIQUE constraint. Prevents the
 # same-worker race where two coroutines (e.g. watchdog reclaim + scheduled
 # tick) both fire reconstruct_positions for the same strategy_id
-# concurrently. The first holder runs the full body; the second waits, then
-# proceeds — but at that point the DB is consistent so the second pass is
-# harmless (and may incorporate any fills that arrived between the two
-# calls). We do NOT cache the result for the second caller — re-running
-# against the now-up-to-date DB is cheap and stays correct under further
-# fill arrivals.
+# concurrently. The first holder runs the full body; the second waits and
+# then re-runs against the now-up-to-date DB (cheap, no result-caching).
+#
+# Lock ordering: the outer asyncio.Lock is always acquired BEFORE any DB
+# call. Inner code paths (atomic-rebuild RPC) then take the SQL-side
+# pg_advisory_xact_lock. Ordering is monotonic outer→inner across every
+# path in this module, so no deadlock surface exists between the two
+# layers.
+#
+# Lifetime: the registry is intentionally bounded by strategy-ID
+# cardinality (one entry per strategy ever reconstructed in this worker
+# process), not by request volume. At ~56 bytes per asyncio.Lock plus
+# dict overhead and a realistic O(10²–10³) strategy cardinality this is a
+# <1 MB resident-set cost. No eviction is necessary or desired — evicting
+# a Lock that has waiters would silently break serialization.
 _RECONSTRUCT_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def _lock_for(strategy_id: str) -> asyncio.Lock:
-    lock = _RECONSTRUCT_LOCKS.get(strategy_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _RECONSTRUCT_LOCKS[strategy_id] = lock
-    return lock
+    # setdefault is atomic across coroutine resumption — there is no
+    # await between the lookup and the insert, so within one event loop
+    # two simultaneous first-callers cannot end up with two different
+    # Lock objects for the same strategy_id. This is single-event-loop
+    # safe; cross-thread invocation is not supported.
+    return _RECONSTRUCT_LOCKS.setdefault(strategy_id, asyncio.Lock())
 
 
 async def reconstruct_positions(strategy_id: str, supabase) -> dict:
@@ -51,9 +61,19 @@ async def reconstruct_positions(strategy_id: str, supabase) -> dict:
     asyncio.Lock so concurrent same-worker callers do not both fire the
     atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
     pg_advisory_xact_lock + migration 119 UNIQUE constraint's
-    responsibility. See `_RECONSTRUCT_LOCKS` docstring above for the full
-    rationale (audit-2026-05-07 P1101 caller follow-up)."""
-    async with _lock_for(strategy_id):
+    responsibility. See the module-level comment on `_RECONSTRUCT_LOCKS`
+    for the full rationale (audit-2026-05-07 P1101 caller follow-up)."""
+    lock = _lock_for(strategy_id)
+    if lock.locked():
+        # Contention is informational — the second caller will get a
+        # consistent re-run after the first releases. Surfacing it
+        # makes 30s reconstruct latency in production debuggable
+        # instead of mysterious.
+        logger.info(
+            "reconstruct_positions: waiting on per-strategy lock",
+            extra={"strategy_id": strategy_id},
+        )
+    async with lock:
         return await _reconstruct_positions_inner(strategy_id, supabase)
 
 
