@@ -152,14 +152,20 @@ function formatPercentileBadge(percentile: number): { text: string; isTop25: boo
 function MetricAccordion({ group, percentiles }: { group: MetricGroup; percentiles?: Percentiles }) {
   const [open, setOpen] = useState(group.defaultOpen);
 
+  const bodyId = `metric-group-${group.title}-body`;
+
   return (
     <div className="border-b border-border last:border-0" data-testid={`metric-group-${group.title}`}>
       <button
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls={bodyId}
         className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-text-primary hover:bg-page/50 transition-colors"
       >
         {group.title}
         <svg
+          aria-hidden="true"
+          focusable="false"
           className={cn("h-4 w-4 text-text-muted transition-transform", open && "rotate-180")}
           viewBox="0 0 16 16"
           fill="none"
@@ -171,7 +177,7 @@ function MetricAccordion({ group, percentiles }: { group: MetricGroup; percentil
         </svg>
       </button>
       {open && (
-        <div className="px-4 pb-3 space-y-2">
+        <div id={bodyId} role="region" aria-label={group.title} className="px-4 pb-3 space-y-2">
           {group.metrics.map((m) => {
             const qual = m.qualKey ? getMetricLabel(m.qualKey, m.qualValue) : null;
             const pctile = m.percentileKey && percentiles ? percentiles[m.percentileKey] : undefined;
