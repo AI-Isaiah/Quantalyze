@@ -14,8 +14,26 @@
 -- request bearing the same Idempotency-Key. Schema:
 --
 --   (allocator_id, idempotency_key) PRIMARY KEY
---   response   jsonb       -- the cached success response payload
---   created_at timestamptz -- audit + TTL anchor (future cron)
+--   request_hash  text        -- SHA-256 of the canonicalised request body
+--   response      jsonb       -- the cached success response payload
+--   schema_version smallint   -- response shape version, bumped on shape change
+--   created_at    timestamptz -- audit + TTL anchor (future cron)
+--
+-- request_hash binding (round-2-D code-review):
+--   RFC draft-ietf-httpapi-idempotency-key §2.5 requires the server to
+--   reject reuse of the same key with a different body (422). Without the
+--   hash column the cache returns the FIRST body for any subsequent body
+--   under the same key, silently masking a client bug. The route computes
+--   SHA-256 over the canonical-JSON of the parsed (and post-normalised)
+--   diffs and stores it here; lookups compare hashes and 422 on mismatch.
+--
+-- schema_version (round-2-D type-design review):
+--   A cached jsonb row written by an older route revision must not be
+--   returned by a newer route that has changed the response shape. The
+--   route validates `response` against a zod schema before returning it,
+--   AND treats a schema_version other than the current constant as a
+--   cache miss (fresh RPC + overwrite). Default 1 = the current shape
+--   { recorded:number; results:RpcRecordedRow[]; errors:[] }.
 --
 -- RLS model:
 --   - SELECT policy `scenario_commit_idem_self` lets an allocator read
@@ -45,7 +63,9 @@ SET lock_timeout = '3s';
 CREATE TABLE IF NOT EXISTS scenario_commit_idempotency (
   allocator_id    uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
   idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 16 AND 128),
+  request_hash    text NOT NULL CHECK (length(request_hash) = 64),
   response        jsonb NOT NULL,
+  schema_version  smallint NOT NULL DEFAULT 1,
   created_at      timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (allocator_id, idempotency_key)
 );
@@ -74,6 +94,24 @@ BEGIN
     WHERE table_schema = 'public' AND table_name = 'scenario_commit_idempotency'
   ) THEN
     RAISE EXCEPTION 'Migration 130: scenario_commit_idempotency table missing';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'scenario_commit_idempotency'
+      AND column_name = 'request_hash'
+  ) THEN
+    RAISE EXCEPTION 'Migration 130: scenario_commit_idempotency.request_hash column missing (RFC 7234-style body-binding for Idempotency-Key)';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'scenario_commit_idempotency'
+      AND column_name = 'schema_version'
+  ) THEN
+    RAISE EXCEPTION 'Migration 130: scenario_commit_idempotency.schema_version column missing';
   END IF;
 
   IF NOT EXISTS (
