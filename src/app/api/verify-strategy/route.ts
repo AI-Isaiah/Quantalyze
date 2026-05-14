@@ -98,7 +98,16 @@ async function unifiedVerifyStrategyHandler(
   const result = await postProcessKey({
     flow_type: "teaser",
     source: exchange,
-    context: body,
+    // PR-X3 (post 2026-05-14 abortive flag flip) — the teaser flow has no
+    // caller-owned `strategy_id` (the user is testing keys against the
+    // universe of strategies; no strategy exists yet). The `/process-key`
+    // validator at analytics-service/routers/process_key.py:568 raises
+    // MISSING_STRATEGY_ID (422) unless either `context.strategy_id` OR
+    // `context.step='validate'` is set. Without this marker, the kill-switch
+    // gate-on state breaks every landing-page teaser submission. Mirrors
+    // the same pattern used by strategies/csv-validate's unified handler
+    // (route.ts:189) and keys/validate-and-encrypt.
+    context: { ...body, step: "validate" },
     routeTag: "verify-strategy",
     // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
     // so the upstream rate limiter buckets all anonymous landing-page

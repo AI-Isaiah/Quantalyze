@@ -228,6 +228,48 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("okx");
   });
 
+  /**
+   * PR-X3 regression — the teaser flow MUST forward
+   * `context.step='validate'` to `/process-key`. The upstream validator at
+   * analytics-service/routers/process_key.py:568 raises
+   * MISSING_STRATEGY_ID (422) unless either `context.strategy_id` OR
+   * `context.step='validate'` is set. The teaser flow has no caller-owned
+   * strategy_id (the user is testing keys against the universe of
+   * strategies — no strategy exists yet), so without `step='validate'`
+   * every landing-page submission breaks the moment the kill-switch flag
+   * is flipped ON.
+   *
+   * Captured during the abortive 2026-05-14T19:00 flag flip — gate was on
+   * for 3m43s before the bug was caught and the kill-switch flipped back
+   * to off. This test ensures the regression cannot ship again silently.
+   */
+  it("verify-strategy: teaser context forwards step='validate' (PR-X3)", async () => {
+    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    await POST(
+      jsonReq("/api/verify-strategy", {
+        email: "step-validate-pr-x3@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    const call = findProcessKeyCall();
+    expect(call).toBeDefined();
+    const body = parseFetchBody(call);
+    expect(body!.flow_type).toBe("teaser");
+    const context = body!.context as Record<string, unknown>;
+    expect(context).toBeDefined();
+    expect(context.step).toBe("validate");
+    // Sanity: the original payload fields still pass through so the Python
+    // validate_key_permissions step has the API key + secret it needs.
+    expect(context.api_key).toBe("k");
+    expect(context.api_secret).toBe("s");
+    expect(context.exchange).toBe("okx");
+  });
+
   // CT-4 (army2) — every thin adapter must forward X-User-Id on the
   // upstream POST to /process-key. The Python rate limiter keys on
   // (token_hash, X-User-Id) for cross-tenant isolation. Pre-fix the
