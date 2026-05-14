@@ -54,6 +54,10 @@ const STATE = vi.hoisted(() => ({
     retryAfter: number;
   },
   rateLimitKey: null as string | null,
+  // Round-2-D pr-test-analyzer M6: when set, the strategies query
+  // resolves with this error so the route's 500 branch + Cache-Control
+  // header can be pinned.
+  strategyQueryError: null as { code: string; message: string } | null,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -108,6 +112,12 @@ vi.mock("@/lib/supabase/server", () => ({
         },
         limit: (n: number) => {
           STATE.observedFilters.limit = n;
+          if (STATE.strategyQueryError) {
+            return Promise.resolve({
+              data: null,
+              error: STATE.strategyQueryError,
+            });
+          }
           return Promise.resolve({
             data: STATE.strategyRows.slice(0, n),
             error: null,
@@ -157,6 +167,7 @@ beforeEach(() => {
   STATE.strategiesQueried = false;
   STATE.checkLimitResult = { success: true, retryAfter: 0 };
   STATE.rateLimitKey = null;
+  STATE.strategyQueryError = null;
 });
 
 afterEach(() => {
@@ -382,5 +393,15 @@ describe("GET /api/strategies/browse", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("9");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("T11c — 500 supabase-error response carries Cache-Control (round-2-D pr-test-analyzer M6)", async () => {
+    STATE.strategyQueryError = { code: "PGRST500", message: "boom" };
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    consoleSpy.mockRestore();
   });
 });

@@ -1,8 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
-import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
-import { withAllocatorAuth } from "@/lib/api/withAllocatorAuth";
+import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 
 // audit-2026-05-07 round-2 Block D / P1947 — the catalog this route returns
@@ -53,7 +52,7 @@ export interface BrowseStrategyRow {
 const STRATEGY_BROWSE_LIMIT = 200;
 
 export const GET = withAllocatorAuth(
-  async (req: NextRequest, user: User): Promise<NextResponse> => {
+  async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
     void req;
     const rl = await checkLimit(
       userActionLimiter,

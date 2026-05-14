@@ -43,9 +43,17 @@ import { createClient } from "@/lib/supabase/server";
  *   designed to retire.
  */
 
+/**
+ * Branded user type signalling the allocator-role gate has run. Routes
+ * accepting `AllocatorUser` (rather than the bare `User`) cannot be
+ * downgraded back to `withAuth` by accident — TypeScript will reject the
+ * type narrowing. Round-2-D type-design (conf 8).
+ */
+export type AllocatorUser = User & { readonly __allocatorRoleVerified: true };
+
 export type AllocatorHandler = (
   req: NextRequest,
-  user: User,
+  user: AllocatorUser,
 ) => Promise<NextResponse>;
 
 const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
@@ -149,6 +157,9 @@ export function withAllocatorAuth(handler: AllocatorHandler) {
       );
     }
 
-    return handler(req, user);
+    // The brand is a phantom property — no runtime effect, but the
+    // handler signature `(req, user: AllocatorUser)` now statically
+    // requires the gate to have run.
+    return handler(req, user as AllocatorUser);
   });
 }

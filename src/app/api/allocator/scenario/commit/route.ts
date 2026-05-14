@@ -45,10 +45,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withAllocatorAuth } from "@/lib/api/withAllocatorAuth";
+import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
@@ -154,6 +153,27 @@ export const CommitDiffSchema = z.discriminatedUnion("kind", [
 export const CommitBodySchema = z.object({
   diffs: z.array(CommitDiffSchema).min(1).max(50),
 });
+
+// Post-normalisation shape of a voluntary_modify diff (round-2-D
+// type-design + red-team F.7, conf 8). After the imperative
+// at-least-one-percent-encoding check runs and the diff is rewritten
+// with `percent_allocated` set and `new_weight` removed, this is the
+// shape the RPC actually receives. Typing the normalisedDiffs array
+// against this — rather than `typeof parsed.data.diffs` — documents
+// the invariant + lets the type system flag a future regression that
+// re-introduces `new_weight` into the RPC payload.
+type NormalisedVoluntaryModifyDiff = Omit<
+  z.infer<typeof VoluntaryModifyDiff>,
+  "new_weight" | "percent_allocated"
+> & {
+  percent_allocated: number;
+};
+
+type NormalisedCommitDiff =
+  | z.infer<typeof VoluntaryRemoveDiff>
+  | z.infer<typeof VoluntaryAddDiff>
+  | NormalisedVoluntaryModifyDiff
+  | z.infer<typeof BridgeRecommendedDiff>;
 
 // ---------------------------------------------------------------------------
 // Recorded-row envelope returned by the RPC
@@ -270,7 +290,7 @@ function reportEnvelopeError(
   }
 }
 
-export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Promise<NextResponse> => {
+export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUser): Promise<NextResponse> => {
   const rl = await checkLimit(userActionLimiter, `scenario_commit:${user.id}`);
   if (!rl.success) {
     return NextResponse.json(
@@ -324,10 +344,17 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
     );
   }
 
-  // Bind cache rows to the body bytes. The hash is over the RAW request text
-  // (what the client sent), not over a re-serialised parsed view — this
-  // matches the RFC intent (clients control retry payloads) and avoids
-  // canonical-JSON-ordering bugs.
+  // Bind cache rows to the body. The hash is over the UTF-8-decoded
+  // request text (the JS string returned by `req.text()`), re-encoded
+  // as UTF-8 by `createHash().update()`. For VALID-UTF-8 input this is
+  // byte-identical to the on-wire bytes — which is the only payload
+  // shape `req.json()` would have accepted downstream anyway. For
+  // malformed UTF-8 input the decoder substitutes U+FFFD, so the hash
+  // diverges from the on-wire bytes — but in that case `JSON.parse`
+  // fails immediately below and we return 400 before the hash is used.
+  // We chose this over `req.arrayBuffer()` + raw-byte hashing because
+  // the route also needs the parsed JSON, so a single text() + parse
+  // pass is simpler than two stream reads. (Round-2-D red-team F.5.)
   const requestHash = createHash("sha256").update(rawBody).digest("hex");
 
   // ---------------------------------------------------------------------------
@@ -359,7 +386,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
   // if a voluntary_modify diff has neither (the schema allows this state so
   // we have to enforce at-least-one imperatively — discriminated unions
   // require each member to be a ZodObject, no `.refine()`).
-  const normalisedDiffs: typeof parsed.data.diffs = [];
+  const normalisedDiffs: NormalisedCommitDiff[] = [];
   for (let i = 0; i < parsed.data.diffs.length; i++) {
     const d = parsed.data.diffs[i];
     if (d.kind === "voluntary_modify") {
@@ -563,23 +590,44 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: User): Prom
     errors: [],
   };
 
-  // Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_outcome_at marker.
-  // The /allocations Server Component reader emits the PostHog
-  // `first_outcome_recorded` event on the next dashboard request. Idempotent
-  // (helper reads metadata first, no-ops once stamp is set). Non-blocking:
-  // a stamp failure does NOT affect the route response or the committed
-  // batch.
+  // Stamp first_outcome_at marker — PostHog `first_outcome_recorded` fires
+  // on the next /allocations dashboard render. Idempotent (helper reads
+  // metadata first, no-ops once stamp is set). Non-blocking: a stamp
+  // failure does NOT affect the route response or the committed batch.
+  //
+  // Round-2-D silent-failure-hunter follow-up: the broad catch must
+  // surface to Sentry so a TypeError / ReferenceError regression inside
+  // stampOutcomeMarker doesn't silently break the onboarding funnel for
+  // an extended period. The console.warn keeps the immediate Vercel-log
+  // signal; the lazy Sentry capture lights up the SRE breadcrumb.
   try {
     await stampOutcomeMarker(admin, user.id);
   } catch (err) {
-    // Phase 11 review fix IN-05: log err.stack ?? err.message so a
-    // future ts/lint regression (e.g. an undefined.method typo inside
-    // stampOutcomeMarker) surfaces in the warn output rather than
-    // being swallowed by the broad catch + message-only render.
     console.warn(
       "[scenario-commit] first_outcome_at stamp failed:",
       err instanceof Error ? (err.stack ?? err.message) : err,
     );
+    try {
+      void import("@sentry/nextjs")
+        .then((Sentry) => {
+          try {
+            Sentry.captureException(err, {
+              tags: {
+                scenario_commit_stamp_failure: "true",
+              },
+              extra: { user_id: user.id },
+              level: "warning",
+            });
+          } catch {
+            // Swallow — caller already logged via console.warn.
+          }
+        })
+        .catch(() => {
+          // Sentry import failed — swallow.
+        });
+    } catch {
+      // import() construction failed — swallow.
+    }
   }
 
   return NextResponse.json(successBody, {
