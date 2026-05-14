@@ -8863,9 +8863,9 @@
   "seed": 42,
   "trade_metrics_from_positions": {
     "avg_duration_days": 4.94,
-    "avg_losing_trade": -0.035821,
+    "avg_losing_trade": -35.820881,
     "avg_roi": 0.021091,
-    "avg_winning_trade": 0.047873,
+    "avg_winning_trade": 47.873066,
     "best_trade_roi": 0.15293388741715502,
     "closed_positions": 50,
     "long_count": 25,
