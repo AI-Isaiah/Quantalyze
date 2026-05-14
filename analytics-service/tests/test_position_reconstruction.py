@@ -1235,3 +1235,449 @@ class TestComputeTurnoverSeries:
         )
         assert isinstance(plain_series, list)
         assert all(isinstance(p, dict) for p in plain_series)
+
+
+# ---------------------------------------------------------------------------
+# Specialist review follow-ups (testing-specialist findings, round-2 / Block A)
+# ---------------------------------------------------------------------------
+# Pins the contracts the specialist flagged as inadequately covered:
+#   - win_rate when decided == 0 (all breakevens, or all missing-PnL)
+#   - avg_losing_trade dollar-vs-ratio at orders-of-magnitude divergence
+#   - data_quality_flags key ABSENCE when counts are zero
+#   - realized_pnl_per_trade `side` field preserved for missing-PnL rows
+#   - turnover gap-detection boundary: consecutive vs exactly-2-day delta
+#   - turnover single-day input: no spurious flags
+#   - turnover unparseable date keys: math survives, no false-positive gap
+#   - compute_turnover_series wrapper === compute_turnover_series_with_flags[0]
+
+
+class TestDecidedDenominatorEdgeCases:
+    """Pin the `decided = winners + losers; win_rate = ... if decided > 0 else 0.0`
+    guard against ZeroDivisionError when ALL closed positions fall outside the
+    winner/loser buckets (all breakevens, or all missing realized_pnl)."""
+
+    @pytest.mark.asyncio
+    async def test_all_breakevens_win_rate_zero_no_divzero(self) -> None:
+        """All closed positions are breakevens (realized_pnl=0.0). winners and
+        losers are both empty → decided=0 → win_rate must be 0.0 and the
+        breakeven counter must reflect every closed position."""
+        crafted_positions = [
+            {
+                "strategy_id": "strat-1", "symbol": "BTCUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 100.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": 0.0, "fee_total": 0.0, "roi": 0.0,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+            {
+                "strategy_id": "strat-1", "symbol": "ETHUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 100.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": 0.0, "fee_total": 0.0, "roi": 0.0,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+        ]
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ), patch(
+            "services.position_reconstruction._match_positions_fifo",
+            return_value=crafted_positions,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        assert result["winners_count"] == 0
+        assert result["losers_count"] == 0
+        # If the `else 0.0` guard regresses, this becomes ZeroDivisionError.
+        assert result["win_rate"] == 0.0
+        assert result["avg_winning_trade"] == 0.0
+        assert result["avg_losing_trade"] == 0.0
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("breakeven_positions") == 2
+
+    @pytest.mark.asyncio
+    async def test_all_missing_pnl_win_rate_zero_no_divzero(self) -> None:
+        """All closed positions have realized_pnl=None (data-integrity hole).
+        winners and losers both empty → decided=0 → win_rate must be 0.0;
+        positions_missing_realized_pnl must reflect every closed row."""
+        crafted_positions = [
+            {
+                "strategy_id": "strat-1", "symbol": "BTCUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": None,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": None, "fee_total": 0.0, "roi": None,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+            {
+                "strategy_id": "strat-1", "symbol": "ETHUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": None,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": None, "fee_total": 0.0, "roi": None,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+        ]
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ), patch(
+            "services.position_reconstruction._match_positions_fifo",
+            return_value=crafted_positions,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        assert result["winners_count"] == 0
+        assert result["losers_count"] == 0
+        assert result["win_rate"] == 0.0
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("positions_missing_realized_pnl") == 2
+        # Breakeven key must be absent (zero breakevens this run).
+        assert "breakeven_positions" not in flags
+
+
+class TestAvgLosingTradeDollarSum:
+    """Specialist gap: existing avg_losing_trade test uses a single loser
+    where dollar-mean and ROI-mean coincidentally have the same sign/order.
+    Two losers with divergent magnitudes pin the dollar-bucket contract."""
+
+    @pytest.mark.asyncio
+    async def test_avg_losing_trade_is_dollar_sum_not_roi_ratio(self) -> None:
+        """Two losers: realized_pnl=-500 (roi=-0.5) and -200 (roi=-0.2).
+        Dollar mean = -350.0; ROI mean = -0.35. Orders of magnitude apart —
+        the assertion catches a regression that re-introduces ROI averaging."""
+        # First trade: buy 1@1000, sell 1@500 → realized_pnl=-500, roi=-0.5
+        # Second trade: buy 1@1000, sell 1@800 → realized_pnl=-200, roi=-0.2
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 1000.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 500.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 1000.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-03T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 800.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-04T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        assert result["winners_count"] == 0
+        assert result["losers_count"] == 2
+        # Dollar mean: (-500 + -200) / 2 = -350.0. NOT a ratio mean (-0.35).
+        assert abs(result["avg_losing_trade"] - (-350.0)) < 1e-4, (
+            f"expected dollar mean -350.0, got {result['avg_losing_trade']} "
+            f"(if ~-0.35, you're still averaging ROI ratios)"
+        )
+
+
+class TestDataQualityFlagKeyAbsence:
+    """Specialist gap: assert flag keys are ABSENT (not present-with-zero)
+    when their counters are zero. Downstream consumers branch on
+    `'breakeven_positions' in flags` — a regression that drops the `if breakevens:`
+    guard would silently change consumer behavior."""
+
+    @pytest.mark.asyncio
+    async def test_no_breakevens_no_missing_keys_absent(self) -> None:
+        """A clean run (two winners, zero breakevens, zero missing) must
+        NOT emit `breakeven_positions` or `positions_missing_realized_pnl`."""
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 600.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-03T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 300.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-04T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        flags = result.get("data_quality_flags") or {}
+        assert "breakeven_positions" not in flags, (
+            f"breakeven_positions key must be absent when count is zero; got {flags}"
+        )
+        assert "positions_missing_realized_pnl" not in flags, (
+            f"positions_missing_realized_pnl key must be absent when count is "
+            f"zero; got {flags}"
+        )
+
+
+class TestRealizedPnlPerTradeSidePreserved:
+    """Specialist gap: realized_pnl_per_trade rows are `{side, realized_pnl}`.
+    The missing-PnL test asserts realized_pnl is None but does not assert
+    `side` is preserved — a regression dropping `side` from the comprehension
+    would silently break downstream consumers that key off long/short."""
+
+    @pytest.mark.asyncio
+    async def test_per_trade_row_preserves_side_for_missing_pnl(self) -> None:
+        """Two closed positions: one long (winner), one short (missing PnL).
+        Both rows must carry their original `side` regardless of realized_pnl."""
+        crafted_positions = [
+            {
+                "strategy_id": "strat-1", "symbol": "BTCUSDT",
+                "side": "long", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": 110.0,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": 10.0, "fee_total": 0.0, "roi": 0.1,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+            {
+                "strategy_id": "strat-1", "symbol": "ETHUSDT",
+                "side": "short", "status": "closed",
+                "entry_price_avg": 100.0, "exit_price_avg": None,
+                "size_base": 1.0, "size_peak": 1.0,
+                "realized_pnl": None, "fee_total": 0.0, "roi": None,
+                "duration_days": 1.0, "duration_seconds": 86400,
+                "opened_at": "2024-01-01T00:00:00+00:00",
+                "closed_at": "2024-01-02T00:00:00+00:00",
+                "fill_count": 2, "funding_pnl": 0,
+            },
+        ]
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ), patch(
+            "services.position_reconstruction._match_positions_fifo",
+            return_value=crafted_positions,
+        ):
+            result = await reconstruct_positions("strat-1", mock_supabase)
+
+        rpt = result["realized_pnl_per_trade"]
+        assert len(rpt) == 2
+        # Side must be preserved on every row regardless of realized_pnl value.
+        sides = {row["side"] for row in rpt}
+        assert sides == {"long", "short"}, (
+            f"per-trade rows must preserve side for every closed position; got {rpt}"
+        )
+        # And the dict shape must be exactly {side, realized_pnl} — no extras.
+        for row in rpt:
+            assert set(row.keys()) == {"side", "realized_pnl"}, (
+                f"per-trade row shape drifted: {set(row.keys())}"
+            )
+
+
+class TestTurnoverGapDetectionBoundary:
+    """Specialist gap: the gap-detection check is `(current - prev).days > 1`.
+    The existing 7-day skip test only exercises the >1 branch. Pin the
+    boundary with (a) consecutive days (must NOT flag) and (b) exactly-2-day
+    delta (smallest possible gap — MUST flag). Catches regressions that flip
+    `> 1` to `>= 1` (false positives) or `> 2` (misses smallest gap)."""
+
+    def test_consecutive_days_no_gap_flag(self) -> None:
+        """2025-01-06 → 2025-01-07. Adjacent days — delta is exactly 1 day,
+        not a gap. flags['turnover_gap_dates'] must be absent."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-06": {"BTC": 1.0},
+            "2025-01-07": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-06": {"BTC": 100.0},
+            "2025-01-07": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-06": 10000.0,
+            "2025-01-07": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(series) == 2
+        assert "turnover_gap_dates" not in flags, (
+            f"consecutive days must NOT trigger gap flag; got {flags}"
+        )
+
+    def test_two_day_gap_flagged(self) -> None:
+        """2025-01-06 → 2025-01-08. Smallest possible gap (skip exactly one
+        day). The post-gap date must surface in flags['turnover_gap_dates']."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-06": {"BTC": 1.0},
+            "2025-01-08": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-06": {"BTC": 100.0},
+            "2025-01-08": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-06": 10000.0,
+            "2025-01-08": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert "2025-01-08" in (flags.get("turnover_gap_dates") or []), (
+            f"smallest 2-day gap must flag the post-gap date; got {flags}"
+        )
+
+
+class TestTurnoverEdgeCasesWithFlags:
+    """Specialist gaps: single-day input (no second iteration), unparseable
+    date keys (defensive fallback), and the backwards-compat wrapper
+    contract (must return == first element of _with_flags)."""
+
+    def test_single_day_input_returns_zero_turnover_and_empty_flags(self) -> None:
+        """One-date input: only the first-iteration branch runs (emits
+        turnover=0). flags must be an empty dict — no spurious keys."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {"2025-01-01": {"BTC": 1.0}}
+        prices_by_date = {"2025-01-01": {"BTC": 100.0}}
+        nav_by_date = {"2025-01-01": 10000.0}
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert series == [{"date": "2025-01-01", "turnover": 0.0}]
+        assert flags == {}, f"single-day input must emit empty flags; got {flags}"
+
+    def test_unparseable_date_keys_no_gap_flag_no_crash(self) -> None:
+        """Non-ISO date strings hit the `except (ValueError, TypeError)`
+        fallback. Math path still runs (no crash), gap detection is
+        suppressed (no false-positive flag for unparseable keys)."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "not-a-date-a": {"BTC": 1.0},
+            "not-a-date-b": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "not-a-date-a": {"BTC": 100.0},
+            "not-a-date-b": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "not-a-date-a": 10000.0,
+            "not-a-date-b": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        # Math survived — two rows, second has nonzero turnover.
+        assert len(series) == 2
+        assert "turnover_gap_dates" not in flags, (
+            f"unparseable dates must not produce false gap flags; got {flags}"
+        )
+
+    def test_wrapper_equals_first_element_of_with_flags(self) -> None:
+        """The backwards-compat wrapper must return exactly the series
+        portion of the _with_flags tuple — no transformation, no flags leak."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-06": {"BTC": 1.0},
+            "2025-01-13": {"BTC": 2.0},  # 7-day gap so flags would be populated
+        }
+        prices_by_date = {
+            "2025-01-06": {"BTC": 100.0},
+            "2025-01-13": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-06": 10000.0,
+            "2025-01-13": 10000.0,
+        }
+        series_full, _flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        series_wrapper = compute_turnover_series(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert series_wrapper == series_full, (
+            "compute_turnover_series wrapper must return exactly the series "
+            "portion of the _with_flags tuple"
+        )
