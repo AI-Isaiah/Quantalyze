@@ -31,6 +31,8 @@ describe("METRICS-13 cross-runtime parity (TS schema gate)", () => {
   const expected = JSON.parse(readFileSync(FIXTURE_PATH, "utf-8")) as {
     metrics_json: Record<string, unknown>;
     sibling: Record<string, unknown>;
+    // audit-2026-05-07 P2005: pinned bucket-shape mode (cross-process contract).
+    _fixture_has_maker_taker?: boolean;
   };
 
   it("expected JSON has metrics_json and sibling top-level keys", () => {

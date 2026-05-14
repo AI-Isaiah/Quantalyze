@@ -128,10 +128,17 @@ export function assertMetricParity(expected: {
 
 /**
  * Asserts the trade_mix bucket count matches the D-15 audit outcome.
- * Reads TRADE_MIX_HAS_MAKER_TAKER from process.env (test runner sets this).
+ *
+ * audit-2026-05-07 P2005: the source of truth is the fixture's pinned
+ * ``_fixture_has_maker_taker`` field (cross-process contract), not the
+ * ``TRADE_MIX_HAS_MAKER_TAKER`` env (cross-process convention). Mirrors the
+ * Python-side ``_resolve_has_maker_taker`` helper in
+ * analytics-service/tests/test_metrics_parity.py — both sides MUST agree on
+ * how to reconcile fixture pin vs env or the contract drifts silently.
  */
 export function assertTradeMixBucketCount(expected: {
   metrics_json: Record<string, unknown>;
+  _fixture_has_maker_taker?: unknown;
 }): void {
   const tradeMix = (
     expected.metrics_json["trade_metrics"] as Record<string, unknown> | undefined
@@ -140,14 +147,52 @@ export function assertTradeMixBucketCount(expected: {
     return; // No trade_mix at all; let upstream test cover this case
   }
   const keys = Object.keys(tradeMix as Record<string, unknown>);
-  const hasMakerTaker = process.env.TRADE_MIX_HAS_MAKER_TAKER === "true";
+
+  // P2005: prefer the fixture pin over the env. A pre-P2005 fixture is
+  // missing the key entirely — refuse to silently default to env-only.
+  if (!("_fixture_has_maker_taker" in expected)) {
+    throw new Error(
+      "golden_252d_expected.json is missing top-level " +
+        "'_fixture_has_maker_taker' — fixture predates P2005. Regenerate " +
+        "via analytics-service/tests/fixtures/regen_golden.py so the " +
+        "bucket-shape mode is pinned in. (audit-2026-05-07 P2005)",
+    );
+  }
+  const rawFixtureMode = expected._fixture_has_maker_taker;
+  if (typeof rawFixtureMode !== "boolean") {
+    throw new Error(
+      `_fixture_has_maker_taker must be a JSON bool, got ` +
+        `${typeof rawFixtureMode}=${JSON.stringify(rawFixtureMode)}. ` +
+        "Regenerate the fixture. (audit-2026-05-07 P2005)",
+    );
+  }
+
+  // Env is optional — if present, MUST agree with the fixture pin.
+  // Case-insensitive comparison matches services/analytics_runner.py
+  // production parsing AND the Python _resolve_has_maker_taker helper.
+  const envValue = process.env.TRADE_MIX_HAS_MAKER_TAKER;
+  if (envValue !== undefined) {
+    const envNormalized = envValue.toLowerCase();
+    const expectedEnv = rawFixtureMode ? "true" : "false";
+    if (envNormalized !== expectedEnv) {
+      throw new Error(
+        `TRADE_MIX_HAS_MAKER_TAKER env (${JSON.stringify(envValue)}) ` +
+          `contradicts fixture pinned mode ` +
+          `(_fixture_has_maker_taker=${rawFixtureMode}). Regenerate the ` +
+          "fixture with the env you want, or unset the env. " +
+          "(audit-2026-05-07 P2005)",
+      );
+    }
+  }
+
+  const hasMakerTaker = rawFixtureMode;
   if (hasMakerTaker) {
     const expected4 = ["long_maker", "long_taker", "short_maker", "short_taker"];
     for (const k of expected4) {
       if (!keys.includes(k)) {
         throw new Error(
           `4-bucket Trade Mix missing key: ${k}. Got ${keys.join(", ")}. ` +
-            "Audit reported is_maker available; expected 4 buckets.",
+            "Fixture pin reports is_maker available; expected 4 buckets.",
         );
       }
     }
@@ -157,7 +202,7 @@ export function assertTradeMixBucketCount(expected: {
       if (!keys.includes(k)) {
         throw new Error(
           `2-bucket fallback missing key: ${k}. Got ${keys.join(", ")}. ` +
-            "Audit reported is_maker unavailable; expected 2 buckets.",
+            "Fixture pin reports is_maker unavailable; expected 2 buckets.",
         );
       }
     }
