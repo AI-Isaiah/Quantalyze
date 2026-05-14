@@ -96,11 +96,14 @@ TODOS_PATH = (
 def _parse_probe_value(raw: str) -> float:
     """Parse a single probe value (size in bytes) from psql output.
 
-    P2022 (audit-2026-05-07 round 2): reject NaN/inf/negative values rather
-    than letting them poison the kill-switch threshold compare. A missing
-    or empty value is also rejected — the caller should not paper over a
-    NULL row with `0.0` (that previously made an empty DB look like
-    "everything is fine" instead of "no data, abort").
+    Rejects NaN/inf/negative values rather than letting them poison the
+    kill-switch threshold compare. Empty/missing is also rejected — the
+    caller must not paper over a NULL row with `0.0` (that would make an
+    empty DB look like "everything is fine" instead of "no data, abort").
+
+    Normalizes float("-0") (which Python produces from "-0", "-0.0") to a
+    positive 0.0 — the value is zero, and the sign would otherwise leak
+    through to downstream comparisons in subtle ways.
     """
     if raw is None or raw == "":
         raise ValueError("phase12_kill_switch: empty probe value")
@@ -113,13 +116,25 @@ def _parse_probe_value(raw: str) -> float:
         raise ValueError(
             f"phase12_kill_switch: negative probe value {raw!r} (size cannot be < 0)"
         )
-    return val
+    return 0.0 if val == 0 else val
 
 
 def _nonneg_finite(raw: str) -> float:
     """argparse `type=` validator. Same contract as _parse_probe_value but
-    accepts `argparse`'s string input shape. Used for --p999 and --count."""
+    accepts `argparse`'s string input shape. Used for --p999."""
     return _parse_probe_value(raw)
+
+
+def _nonneg_finite_int(raw: str) -> int:
+    """argparse `type=` validator for integer-valued counts. Same nonneg+
+    finite contract as _parse_probe_value, but rejects non-integer floats
+    (e.g. `--count 3.7`) rather than silently truncating to 3."""
+    val = _parse_probe_value(raw)
+    if val != int(val):
+        raise ValueError(
+            f"phase12_kill_switch: --count must be integer-valued, got {raw!r}"
+        )
+    return int(val)
 
 
 def measure_p999_via_sql() -> tuple[float, int]:
@@ -171,9 +186,22 @@ def measure_p999_via_sql() -> tuple[float, int]:
             f"got keys {sorted(parsed.keys())!r}"
         )
 
+    # Validate count first: an empty strategy_analytics table produces
+    # count=0 and NULL→empty-string percentiles. Without this guard, the
+    # p999 parse below would raise a generic "empty probe value" error and
+    # the operator would mistake "you ran this against the wrong DB" for
+    # "the kill-switch is broken". Fail loud with an explicit diagnostic.
+    count = int(_parse_probe_value(parsed["count"]))
+    if count == 0:
+        raise RuntimeError(
+            "phase12_kill_switch: SQL probe returned strategy_count=0 — "
+            "refusing to make a kill-switch decision against an empty "
+            "strategy_analytics table. Check that DATABASE_URL points to "
+            "the correct DB."
+        )
+
     p999 = _parse_probe_value(parsed["p999"])
-    count_val = _parse_probe_value(parsed["count"])
-    return (p999, int(count_val))
+    return (p999, count)
 
 
 async def measure_p999(
@@ -187,9 +215,11 @@ async def measure_p999(
     """
     if cli_p999 is not None and cli_count is not None:
         return (cli_p999, cli_count)
-    # Run synchronously via subprocess; psql is fast enough that wrapping in
-    # asyncio.to_thread is overkill for a one-shot deploy invocation.
-    return measure_p999_via_sql()
+    # Offload blocking psql subprocess to a worker thread so the event loop
+    # is not parked for the probe duration. The fallback path is rare (the
+    # deploy orchestrator normally passes --p999/--count), but if a future
+    # caller composes this with asyncio.gather, the loop must stay live.
+    return await asyncio.to_thread(measure_p999_via_sql)
 
 
 # --- Cutover logic ---------------------------------------------------------
@@ -220,7 +250,19 @@ async def cutover_strategy(strategy_id: str) -> int:
             {"p_strategy_id": strategy_id},
         ).execute()
     )
-    return int((result.data or {}).get("moved", 0))
+    payload = result.data
+    # Migration 129 returns jsonb_build_object('moved', N) — a scalar JSONB
+    # dict. Anything else (None, list, dict-without-'moved') indicates the
+    # migration was rolled back or the wire format changed. Fail loud
+    # rather than silently returning 0 and reporting "moved 0 keys" as if
+    # everything succeeded (Rule 12).
+    if not isinstance(payload, dict) or "moved" not in payload:
+        raise RuntimeError(
+            f"cutover_strategy_metrics_keys_atomic({strategy_id}) returned "
+            f"unexpected shape {payload!r}; expected {{'moved': <int>}}. "
+            f"Aborting cutover to avoid silent under-count."
+        )
+    return int(payload["moved"])
 
 
 # --- Main ------------------------------------------------------------------
@@ -254,19 +296,43 @@ async def main(
     rows = await db_execute(
         lambda: supabase.table("strategy_analytics").select("strategy_id").execute()
     )
-    total_moved = 0
-    strategy_ids = [r["strategy_id"] for r in (rows.data or [])]
-    for sid in strategy_ids:
-        moved = await cutover_strategy(sid)
-        total_moved += moved
-        print(f"  strategy {sid}: moved {moved} keys")
+    # rows.data is None on PostgREST query failure — None must NOT silently
+    # coerce to [] and let the loop emit "moved 0 keys across 0 strategies"
+    # as if the trigger was a no-op (Rule 12).
+    if rows.data is None:
+        raise RuntimeError(
+            "phase12_kill_switch: strategy_analytics select returned None "
+            "(PostgREST query failure); refusing to log a kill-switch "
+            "no-op against an unverified row set."
+        )
+    strategy_ids = [r["strategy_id"] for r in rows.data]
 
+    # Per-strategy try/except so a mid-loop RPC failure cannot skip the
+    # post-loop audit-log write. Mirror P2025: collect (sid, exc) failures,
+    # always write the TODOS.md entry with moved/failed counts, return
+    # non-zero when any strategy failed.
+    total_moved = 0
+    failures: list[tuple[str, str]] = []
+    for sid in strategy_ids:
+        try:
+            moved = await cutover_strategy(sid)
+            total_moved += moved
+            print(f"  strategy {sid}: moved {moved} keys")
+        except Exception as exc:
+            failures.append((sid, repr(exc)))
+            print(
+                f"  strategy {sid}: WARNING — cutover failed: {exc!r} (continuing)"
+            )
+
+    status = "COMPLETE" if not failures else "PARTIAL"
     print(
-        f"phase12_kill_switch: COMPLETE — {total_moved} keys moved across "
-        f"{len(strategy_ids)} strategies"
+        f"phase12_kill_switch: {status} — {total_moved} keys moved across "
+        f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} strategies"
+        + (f" ({len(failures)} failed)" if failures else "")
     )
 
-    # Append a log entry to TODOS.md so the trigger is auditable in-tree.
+    # Always append the audit-log entry — even on partial completion the
+    # mutations that DID land must be recoverable from in-tree history.
     if TODOS_PATH.exists():
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         TODOS_PATH.write_text(
@@ -274,11 +340,13 @@ async def main(
             + (
                 f"\n## Kill-switch triggered (D-07) — {ts}\n"
                 f"- p99.9 = {p999:.0f} bytes (threshold {THRESHOLD_BYTES}); "
-                f"moved {total_moved} keys across {len(strategy_ids)} strategies.\n"
+                f"moved {total_moved} keys across "
+                f"{len(strategy_ids) - len(failures)}/{len(strategy_ids)} "
+                f"strategies ({len(failures)} failed).\n"
             )
         )
 
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
@@ -296,11 +364,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--count",
-        type=_nonneg_finite,  # P2022: same — parsed as float, coerced to int below.
+        type=_nonneg_finite_int,
         default=None,
-        help="strategy_count from SQL probe",
+        help="strategy_count from SQL probe (integer)",
     )
     args = parser.parse_args()
-    # _nonneg_finite returns float; coerce --count back to int for the strategy-count contract.
-    cli_count = int(args.count) if args.count is not None else None
-    sys.exit(asyncio.run(main(cli_p999=args.p999, cli_count=cli_count)))
+    sys.exit(asyncio.run(main(cli_p999=args.p999, cli_count=args.count)))

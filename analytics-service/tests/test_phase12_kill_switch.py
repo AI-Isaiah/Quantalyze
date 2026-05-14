@@ -24,7 +24,7 @@ P2024 (atomic cutover via migration 129 RPC):
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -53,6 +53,20 @@ class TestParseRunFlag:
         not silently fall through to "do nothing" or "run anyway"."""
         with pytest.raises(SystemExit):
             ks._parse_run_flag(value)
+
+    @pytest.mark.parametrize("value", ["  true  ", "\ttrue\n", " yes", "false ", "\t0\t"])
+    def test_whitespace_around_value_is_stripped(self, value: str) -> None:
+        """Env files / heredocs commonly inject trailing whitespace. The
+        parser strips outer whitespace before case-folding — pin this so a
+        future refactor that drops .strip() turns CI into a SystemExit."""
+        # Whether each value is truthy/falsy is set by the inner token; this
+        # asserts only that no SystemExit is raised (i.e. the strip is wired).
+        ks._parse_run_flag(value)
+
+    @pytest.mark.parametrize("value", ["   ", "\t\t", ""])
+    def test_whitespace_only_is_falsy(self, value: str) -> None:
+        """Whitespace-only normalizes to "" which is in _FALSY — parse to False."""
+        assert ks._parse_run_flag(value) is False
 
 
 class TestMainRunFlagGate:
@@ -120,6 +134,36 @@ class TestParseProbeValue:
     def test_valid_nonneg_finite_accepted(self, good: str, expected: float) -> None:
         assert ks._parse_probe_value(good) == expected
 
+    @pytest.mark.parametrize("neg_zero", ["-0", "-0.0", "-0.000"])
+    def test_negative_zero_normalized_to_positive_zero(self, neg_zero: str) -> None:
+        """Python's float("-0") returns -0.0, which compares equal to 0 but
+        leaks a sign bit through to downstream math. Normalize to +0.0 so
+        the "negative rejected" guarantee holds strictly."""
+        val = ks._parse_probe_value(neg_zero)
+        assert val == 0.0
+        # math.copysign distinguishes +0.0 from -0.0 where == does not.
+        import math
+        assert math.copysign(1.0, val) > 0, f"expected +0.0, got -0.0 for {neg_zero!r}"
+
+
+class TestNonnegFiniteInt:
+    """argparse `--count` validator: integer-valued or reject (no silent
+    truncation of `3.7` → `3`)."""
+
+    @pytest.mark.parametrize("good,expected", [("0", 0), ("1", 1), ("42", 42), ("100.0", 100)])
+    def test_integer_valued_accepted(self, good: str, expected: int) -> None:
+        assert ks._nonneg_finite_int(good) == expected
+
+    @pytest.mark.parametrize("bad", ["3.7", "0.5", "1.0001", "99.9"])
+    def test_non_integer_rejected(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="integer-valued"):
+            ks._nonneg_finite_int(bad)
+
+    @pytest.mark.parametrize("bad", ["-1", "nan", "inf"])
+    def test_nonneg_finite_invariants_preserved(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            ks._nonneg_finite_int(bad)
+
 
 class TestSqlProbeParsing:
     """measure_p999_via_sql now parses key,value rows. Missing keys, bad
@@ -162,6 +206,15 @@ class TestSqlProbeParsing:
     def test_negative_count_raises(self, monkeypatch) -> None:
         self._stub_psql(monkeypatch, "p999,500\ncount,-3\n")
         with pytest.raises(ValueError):
+            ks.measure_p999_via_sql()
+
+    def test_zero_count_raises_empty_table_diagnostic(self, monkeypatch) -> None:
+        """An empty strategy_analytics table yields count=0 and NULL→empty-
+        string percentiles. Without the explicit count==0 guard, the p999
+        parse below would raise a generic 'empty probe value' error and the
+        operator could not tell 'wrong DB' apart from 'kill-switch broken'."""
+        self._stub_psql(monkeypatch, "p999,\ncount,0\n")
+        with pytest.raises(RuntimeError, match="strategy_count=0"):
             ks.measure_p999_via_sql()
 
     def test_unknown_stdout_shape_raises(self, monkeypatch) -> None:
@@ -224,16 +277,25 @@ class TestCutoverDelegatesToAtomicRpc:
         mock_supabase.table.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_cutover_missing_data_returns_zero(self) -> None:
-        """If the RPC returns NULL/empty (no row), moved must be 0, not crash."""
+    @pytest.mark.parametrize(
+        "bad_payload",
+        [None, [], [{"moved": 7}], {}, {"other": 1}, "moved"],
+        ids=["none", "empty_list", "wrapped_list", "empty_dict", "wrong_key", "string"],
+    )
+    async def test_cutover_fails_loud_on_unexpected_rpc_shape(self, bad_payload) -> None:
+        """Migration 129 returns jsonb_build_object('moved', N) — a scalar
+        JSONB dict. Anything else (None, list, dict-without-'moved', etc.)
+        indicates the migration was rolled back or the wire shape changed.
+        The helper must raise, NOT silently return 0 (which would log
+        "moved 0 keys" as if the cutover succeeded)."""
         mock_supabase = MagicMock()
         mock_rpc_chain = MagicMock()
         mock_supabase.rpc.return_value = mock_rpc_chain
-        mock_rpc_chain.execute.return_value = MagicMock(data=None)
+        mock_rpc_chain.execute.return_value = MagicMock(data=bad_payload)
 
         with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
-            moved = await ks.cutover_strategy("strat-abc")
-        assert moved == 0
+            with pytest.raises(RuntimeError, match="unexpected shape"):
+                await ks.cutover_strategy("strat-abc")
 
     @pytest.mark.asyncio
     async def test_cutover_does_not_drop_runner_writes(self) -> None:
@@ -308,3 +370,96 @@ def test_no_python_heavy_kinds_constant() -> None:
         "P2024: HEAVY_KINDS must NOT be defined in Python — single "
         "source of truth lives in supabase/migrations/129_*.sql v_allowlist."
     )
+
+
+# --- Cutover loop per-strategy try/except + audit log -----------------------
+
+
+class TestCutoverLoopPartialFailure:
+    """If one strategy's RPC raises mid-loop, the surviving rows must still
+    enqueue, the audit log must still be written (the mutations that DID
+    land must be recoverable), and main() must return non-zero."""
+
+    @pytest.mark.asyncio
+    async def test_per_strategy_failure_continues_logs_returns_nonzero(
+        self, monkeypatch, capsys, tmp_path
+    ) -> None:
+        # Redirect the TODOS audit log to a temp file so we can assert on it.
+        todos_path = tmp_path / "TODOS.md"
+        todos_path.write_text("# existing content\n")
+        monkeypatch.setattr(ks, "TODOS_PATH", todos_path)
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        # Cutover succeeds for sids 0 and 2, fails for sid 1.
+        async def fake_cutover(sid: str) -> int:
+            if sid == "strat-1":
+                raise RuntimeError("simulated mid-loop RPC failure")
+            return 5
+        monkeypatch.setattr(ks, "cutover_strategy", fake_cutover)
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(
+            data=[{"strategy_id": f"strat-{i}"} for i in range(3)],
+        )
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            rc = await ks.main(cli_p999=900_000.0, cli_count=3)
+
+        captured = capsys.readouterr()
+        # Mid-loop failure is surfaced.
+        assert "simulated mid-loop RPC failure" in captured.out
+        # Loop did NOT abort — strat-2 still processed AFTER strat-1's failure.
+        assert "strat-2: moved 5 keys" in captured.out
+        # Status reflects partial completion.
+        assert "PARTIAL" in captured.out
+        assert "2/3" in captured.out  # 2 succeeded out of 3
+        # Audit log was written even though the loop had a failure.
+        log = todos_path.read_text()
+        assert "Kill-switch triggered" in log
+        assert "1 failed" in log
+        # Non-zero exit code when any strategy fails.
+        assert rc == 1
+
+    @pytest.mark.asyncio
+    async def test_strategy_select_none_data_raises(self, monkeypatch) -> None:
+        """If the strategy_analytics select returns rows.data=None, the
+        loop must NOT silently iterate over [] and log "moved 0 keys
+        across 0 strategies" (Rule 12 — fail loud)."""
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+
+        mock_supabase = MagicMock()
+        select_chain = MagicMock()
+        select_chain.execute.return_value = MagicMock(data=None)
+        mock_supabase.table.return_value.select.return_value = select_chain
+
+        with patch("scripts.phase12_kill_switch.get_supabase", return_value=mock_supabase):
+            with pytest.raises(RuntimeError, match="strategy_analytics select returned None"):
+                await ks.main(cli_p999=900_000.0, cli_count=3)
+
+
+# --- asyncio.to_thread wrapping of blocking subprocess ---------------------
+
+
+class TestMeasureP999OffloadsSubprocess:
+    """measure_p999() is async; the fallback path must offload the blocking
+    psql subprocess to a worker thread so the event loop stays live for
+    any concurrently-awaiting coroutine."""
+
+    @pytest.mark.asyncio
+    async def test_subprocess_runs_in_thread_executor(self, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_via_sql() -> tuple[float, int]:
+            import threading
+            captured["thread_name"] = threading.current_thread().name
+            return (123.0, 4)
+
+        monkeypatch.setattr(ks, "measure_p999_via_sql", fake_via_sql)
+        p999, n = await ks.measure_p999(cli_p999=None, cli_count=None)
+        assert (p999, n) == (123.0, 4)
+        # Anything other than the MainThread proves to_thread offloaded it.
+        assert captured["thread_name"] != "MainThread", (
+            "measure_p999_via_sql must run on a worker thread, not the event-loop thread"
+        )

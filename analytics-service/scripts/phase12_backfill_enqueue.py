@@ -54,7 +54,16 @@ async def main() -> int:
         .eq("status", "published")
         .execute()
     )
-    strategies = rows.data or []
+    # rows.data is None on PostgREST query failure; coercing to [] would
+    # silently print "enqueueing 0 published strategies" and exit 0 on a
+    # broken query (Rule 12 — fail loud).
+    if rows.data is None:
+        raise RuntimeError(
+            "phase12_backfill_enqueue: strategies select returned None "
+            "(PostgREST query failure); refusing to claim a zero-strategy "
+            "no-op against an unverified row set."
+        )
+    strategies = rows.data
     total = len(strategies)
     print(
         f"phase12_backfill_enqueue: enqueueing {total} published strategies as "
@@ -83,7 +92,7 @@ async def main() -> int:
                 ).execute()
             )
             inserted += 1
-        except Exception as exc:  # pragma: no cover — exercised by tests
+        except Exception as exc:
             failures.append((sid, repr(exc)))
             print(
                 f"phase12_backfill_enqueue: WARNING — insert failed for strategy "

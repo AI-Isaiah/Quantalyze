@@ -41,6 +41,45 @@ class TestParseProbeValue:
     def test_valid_accepted(self) -> None:
         assert dep._parse_probe_value("123.4") == 123.4
 
+    @pytest.mark.parametrize("neg_zero", ["-0", "-0.0"])
+    def test_negative_zero_normalized(self, neg_zero: str) -> None:
+        """float("-0") returns -0.0; normalize to +0.0 so the
+        negative-rejected guarantee holds strictly (no sign-bit leak)."""
+        import math
+        val = dep._parse_probe_value(neg_zero)
+        assert val == 0.0
+        assert math.copysign(1.0, val) > 0
+
+
+# --- M-01: TRADE_MIX_HAS_MAKER_TAKER must be explicit ----------------------
+
+
+class TestTradeMixFlagFailsLoud:
+    """The TRADE_MIX_HAS_MAKER_TAKER audit decision governs which Trade Mix
+    bucketing path CI exercises. A silent "false" default would let a
+    misconfigured deploy run parity tests against the 2-bucket path even
+    when the strategy has maker/taker data — operator must supply the
+    decision explicitly (Rule 12)."""
+
+    def test_missing_todos_file_raises(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr(dep, "TODOS_PATH", tmp_path / "nonexistent.md")
+        with pytest.raises(SystemExit, match="TODOS.md not found"):
+            dep._read_trade_mix_flag_from_todos()
+
+    def test_missing_flag_line_raises(self, monkeypatch, tmp_path) -> None:
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("# unrelated content\n")
+        monkeypatch.setattr(dep, "TODOS_PATH", todos)
+        with pytest.raises(SystemExit, match="TRADE_MIX_HAS_MAKER_TAKER line missing"):
+            dep._read_trade_mix_flag_from_todos()
+
+    @pytest.mark.parametrize("value", ["true", "false"])
+    def test_present_flag_returned_verbatim(self, monkeypatch, tmp_path, value: str) -> None:
+        todos = tmp_path / "TODOS.md"
+        todos.write_text(f"TRADE_MIX_HAS_MAKER_TAKER = {value}\n")
+        monkeypatch.setattr(dep, "TODOS_PATH", todos)
+        assert dep._read_trade_mix_flag_from_todos() == value
+
 
 # --- P2022: _run_sql_probe parse safety ------------------------------------
 
@@ -85,6 +124,14 @@ class TestRunSqlProbe:
         with pytest.raises(ValueError):
             dep._run_sql_probe()
 
+    def test_zero_count_raises_empty_table_diagnostic(self, monkeypatch) -> None:
+        """count=0 yields NULL percentiles (empty-string in psql -tA). The
+        probe must fail loud with an explicit "empty table" message so the
+        operator can distinguish "wrong DB" from "kill-switch broken"."""
+        self._stub_psql(monkeypatch, "p999,\ncount,0\n")
+        with pytest.raises(RuntimeError, match="strategy_count=0"):
+            dep._run_sql_probe()
+
     def test_psql_uses_dbname_flag(self, monkeypatch) -> None:
         """P2022: explicit --dbname is used rather than positional dbname."""
         monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
@@ -114,7 +161,7 @@ class TestDeployIncompleteOnBackfillFail:
         # Stub the M-01 file plumbing so the test focuses on flow control.
         monkeypatch.setattr(dep, "_read_trade_mix_flag_from_todos", lambda: "false")
         monkeypatch.setattr(dep, "_write_env_test", lambda flag: None)
-        monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 0))
+        monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 1))
         # Kill-switch path is OK (returns 0).
         with patch(
             "scripts.phase12_deploy.phase12_kill_switch.main",
@@ -136,7 +183,7 @@ class TestDeployIncompleteOnBackfillFail:
     async def test_backfill_success_prints_complete(self, monkeypatch, capsys) -> None:
         monkeypatch.setattr(dep, "_read_trade_mix_flag_from_todos", lambda: "false")
         monkeypatch.setattr(dep, "_write_env_test", lambda flag: None)
-        monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 0))
+        monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 1))
         with patch(
             "scripts.phase12_deploy.phase12_kill_switch.main",
             new=AsyncMock(return_value=0),

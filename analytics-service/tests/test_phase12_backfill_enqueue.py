@@ -133,3 +133,39 @@ async def test_all_failures_returns_nonzero(capsys) -> None:
     captured = capsys.readouterr()
     assert rc != 0
     assert "0/5" in captured.out
+
+
+# --- Strategies-select returning None must NOT silently coerce to [] ------
+
+
+@pytest.mark.asyncio
+async def test_published_strategies_none_data_raises() -> None:
+    """rows.data is None when the supabase client failed the query. If we
+    coerced to [] (the prior behavior), the script would print
+    "enqueueing 0 strategies" and exit 0 — a green log on a broken query.
+    Must raise RuntimeError instead (Rule 12)."""
+    supabase = MagicMock()
+
+    # Pending-check select: count=0 (lets us past the early-exit gate).
+    select_chain = MagicMock()
+    select_chain.eq.return_value = select_chain
+    select_chain.execute.return_value = MagicMock(count=0, data=[])
+
+    # Published-strategies select: data=None — simulating a query failure
+    # where the client returned an envelope without rows.
+    published_chain = MagicMock()
+    published_chain.eq.return_value = published_chain
+    published_chain.execute.return_value = MagicMock(data=None)
+
+    def table(name: str) -> MagicMock:  # type: ignore[no-untyped-def]
+        chain = MagicMock()
+        chain.select = lambda *a, **kw: (
+            select_chain if name == "compute_jobs" else published_chain
+        )
+        return chain
+
+    supabase.table = table
+
+    with patch("scripts.phase12_backfill_enqueue.get_supabase", return_value=supabase):
+        with pytest.raises(RuntimeError, match="strategies select returned None"):
+            await bf.main()

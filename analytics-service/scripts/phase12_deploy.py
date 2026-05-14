@@ -55,24 +55,26 @@ def _read_trade_mix_flag_from_todos() -> str:
     based on the is_maker coverage audit. We read it back here verbatim and
     propagate to .env.test for CI consumption.
 
-    Default 'false' on absent file or unmatched line — CI defaults to the safer
-    2-bucket Trade Mix path rather than booting the 4-bucket reader against
-    incomplete fixture data.
+    Fails loud (SystemExit) when TODOS.md is absent or the line is missing.
+    The audit decision must be explicit — a silent "false" default would
+    let a misconfigured deploy environment run parity tests against the
+    2-bucket path even when the strategy has maker/taker data.
     """
     if not TODOS_PATH.exists():
-        print(
-            f"phase12_deploy: WARNING — TODOS.md not found at {TODOS_PATH}; "
-            f"defaulting TRADE_MIX_HAS_MAKER_TAKER=false"
+        raise SystemExit(
+            f"phase12_deploy: TODOS.md not found at {TODOS_PATH}. "
+            f"The TRADE_MIX_HAS_MAKER_TAKER audit decision is required; "
+            f"either provide TODOS.md or pass the flag via env "
+            f"(TRADE_MIX_HAS_MAKER_TAKER=true|false)."
         )
-        return "false"
     text = TODOS_PATH.read_text()
     m = re.search(r"TRADE_MIX_HAS_MAKER_TAKER\s*=\s*(true|false)", text)
     if not m:
-        print(
-            "phase12_deploy: WARNING — TRADE_MIX_HAS_MAKER_TAKER not found in "
-            "TODOS.md; defaulting to false"
+        raise SystemExit(
+            f"phase12_deploy: TRADE_MIX_HAS_MAKER_TAKER line missing from "
+            f"{TODOS_PATH}. The audit decision must be explicit — refusing "
+            f"to default a flag that governs Trade Mix bucketing in CI."
         )
-        return "false"
     return m.group(1)
 
 
@@ -100,7 +102,10 @@ def _write_env_test(flag: str) -> None:
 # --- M-03: SQL probe -------------------------------------------------------
 
 def _parse_probe_value(raw: str) -> float:
-    """P2022: parse + validate a probe value. NaN/inf/negative all raise."""
+    """Reject NaN/inf/negative probe values — they would poison the
+    threshold compare. Empty/missing is rejected too (NULL row must not
+    silently become 0.0). Normalizes float("-0") → 0.0.
+    """
     if raw is None or raw == "":
         raise ValueError("phase12_deploy: empty probe value")
     val = float(raw)
@@ -112,7 +117,7 @@ def _parse_probe_value(raw: str) -> float:
         raise ValueError(
             f"phase12_deploy: negative probe value {raw!r} (size cannot be < 0)"
         )
-    return val
+    return 0.0 if val == 0 else val
 
 
 def _run_sql_probe() -> tuple[float, int]:
@@ -160,8 +165,19 @@ def _run_sql_probe() -> tuple[float, int]:
             f"phase12_deploy: SQL probe missing required key 'count'; "
             f"got keys {sorted(parsed.keys())!r}"
         )
-    p999 = _parse_probe_value(parsed["p999"])
+    # Validate count first — empty strategy_analytics yields count=0 and
+    # NULL→empty-string percentiles. Without this, p999 parse below raises
+    # "empty probe value" and the operator can't tell "wrong DB" apart
+    # from "kill-switch broken". Fail loud with an explicit diagnostic.
     n = int(_parse_probe_value(parsed["count"]))
+    if n == 0:
+        raise RuntimeError(
+            "phase12_deploy: SQL probe returned strategy_count=0 — refusing "
+            "to make a kill-switch decision against an empty "
+            "strategy_analytics table. Check DATABASE_URL points to the "
+            "correct DB."
+        )
+    p999 = _parse_probe_value(parsed["p999"])
     return (p999, n)
 
 
