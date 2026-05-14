@@ -95,12 +95,18 @@ export function ScenarioCommitDrawer({
   const [state, setState] = useState<SubmitState>({ kind: "idle" });
   const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
   const drawerRef = useRef<HTMLDivElement>(null);
+  const errorBannerRef = useRef<HTMLDivElement>(null);
+  const preflightModalRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Stable across retries of the same logical batch. Minted on the first
-  // submit attempt; reused if the user retries after a network failure so
-  // the server's dedup picks the second attempt as the SAME request as the
-  // first. Reset on close / on successful commit so a brand-new batch
-  // (different diffs) gets a fresh key.
+  // Stable across retries WITHIN a single drawer-open lifetime. Minted on
+  // the first submit attempt; reused on retries from the failure state so
+  // the server's dedup treats them as the SAME logical request. Reset on
+  // close (a brand-new batch gets a fresh key) and on full success. Caveat:
+  // if the parent unmounts mid-submit (route change), the abort effect
+  // cancels the in-flight fetch but can't tell whether the server already
+  // committed; a subsequent re-open with the same draft content would get
+  // a fresh key, so the server's own dedup window is the only safety net
+  // for that narrow edge case.
   const idempotencyKeyRef = useRef<string | null>(null);
 
   // Reset transient state on close; install Esc handler when open.
@@ -144,6 +150,49 @@ export function ScenarioCommitDrawer({
     return () => clearTimeout(t);
   }, [state.kind, onSubmitSuccess, onClose]);
 
+  // Focus trap inside the pre-flight portal. The portal is mounted for
+  // `preflight` and `submitting` states. While mounted, Tab must cycle
+  // within the modal — otherwise keyboard users escape to the drawer
+  // beneath the backdrop. Initial focus lands on the first focusable.
+  useEffect(() => {
+    if (state.kind !== "preflight" && state.kind !== "submitting") return;
+    const container = preflightModalRef.current;
+    if (!container) return;
+    const focusableSelector =
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const firstFocusable = container.querySelector<HTMLElement>(focusableSelector);
+    if (firstFocusable && state.kind === "preflight") {
+      firstFocusable.focus();
+    }
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const fs = container.querySelectorAll<HTMLElement>(focusableSelector);
+      if (fs.length === 0) return;
+      const first = fs[0];
+      const last = fs[fs.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onTab);
+    return () => document.removeEventListener("keydown", onTab);
+  }, [state.kind]);
+
+  // Focus restoration on failure. When the pre-flight portal unmounts on
+  // a submitting → failure transition, the previously focused Submit
+  // button disappears and focus falls to <body>. Move focus to the new
+  // error banner so keyboard / screen-reader users have an anchor.
+  useEffect(() => {
+    if (state.kind === "failure" && errorBannerRef.current) {
+      errorBannerRef.current.focus();
+    }
+  }, [state.kind]);
+
   if (!isOpen) return null;
 
   const removed = diffs.filter((d) => d.kind === "voluntary_remove");
@@ -175,11 +224,20 @@ export function ScenarioCommitDrawer({
     if (state.kind !== "failure") return null;
     if (state.failureReason === "partial") {
       const recorded = state.response?.recorded ?? 0;
-      const direction = recorded > diffs.length ? "over-recorded" : "partial";
+      const overRecorded = recorded > diffs.length;
+      const direction = overRecorded ? "over-recorded" : "partial";
+      // Under-recorded: some rows landed; remediation is to review the
+      // Outcomes timeline and record what's missing.
+      // Over-recorded: server claims to have committed MORE rows than were
+      // submitted (off-by-one / double-count bug); there is nothing
+      // "missing" to record, so the user needs support to investigate.
+      const remediation = overRecorded
+        ? "Contact support — the server reported committing more decisions than were submitted, which needs investigation."
+        : "Review the Outcomes timeline and record any missing decisions there, or contact support.";
       return (
         `Server reported ${recorded} of ${diffs.length} recorded (${direction} — single-transaction contract violated). ` +
         "Do NOT retry from this drawer — retrying would compound the discrepancy. " +
-        "Review the Outcomes timeline and record any missing decisions there, or contact support."
+        remediation
       );
     }
     if (orphanErrorMessages.length > 0) return orphanErrorMessages.join(" ");
@@ -431,13 +489,14 @@ export function ScenarioCommitDrawer({
           <>
             {topLevelError && (
               <div
+                ref={errorBannerRef}
                 role="alert"
-                aria-live="polite"
+                tabIndex={-1}
                 data-testid="commit-drawer-error"
                 data-failure-reason={
                   state.kind === "failure" ? state.failureReason : undefined
                 }
-                className="mt-6 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative"
+                className="mt-6 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative focus:outline-none focus:ring-2 focus:ring-negative/50"
               >
                 {topLevelError}
               </div>
@@ -696,6 +755,7 @@ export function ScenarioCommitDrawer({
         typeof document !== "undefined" &&
         createPortal(
           <div
+            ref={preflightModalRef}
             role="dialog"
             aria-modal="true"
             aria-label="Confirm commit"

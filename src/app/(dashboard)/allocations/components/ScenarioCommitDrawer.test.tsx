@@ -974,6 +974,111 @@ describe("response body is not valid JSON", () => {
 // copy so the user doesn't double-commit the rows that landed.
 // ===========================================================================
 
+describe("focus management — pre-flight portal + failure transition", () => {
+  it("pre-flight portal traps Tab inside the modal (no escape to drawer beneath)", () => {
+    vi.useRealTimers();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+
+    // The pre-flight portal mounts with Cancel and Submit. Find them in
+    // order — `getAllByRole` returns drawer Submit first, portal buttons
+    // last because the portal is appended to document.body.
+    const cancelBtn = screen.getByRole("button", { name: /^Cancel$/i });
+    const submitBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    const submitBtn = submitBtns[submitBtns.length - 1];
+
+    // Initial focus lands on the first focusable inside the portal (Cancel).
+    expect(document.activeElement).toBe(cancelBtn);
+
+    // Tab from Cancel → Submit
+    submitBtn.focus();
+    expect(document.activeElement).toBe(submitBtn);
+
+    // Tab from Submit (the last focusable) wraps to Cancel.
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(cancelBtn);
+
+    // Shift+Tab from Cancel (the first focusable) wraps to Submit.
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(submitBtn);
+  });
+
+  it("submitting → failure transition moves focus to the error banner", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 0,
+          results: [],
+          errors: [{ index: 0, error: "x" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    // After failure, focus must move to the error banner. Per-row errors
+    // (index 0 → matches diff) don't trigger a top-level banner, so seed
+    // an orphan error to force one. Re-run with that shape:
+    vi.unstubAllGlobals();
+    cleanup();
+    const fetchSpy2 = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          recorded: 0,
+          results: [],
+          errors: [{ index: -1, error: "Network error" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy2);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns2 = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns2[preflightBtns2.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    expect(document.activeElement).toBe(
+      screen.getByTestId("commit-drawer-error"),
+    );
+
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("partial-commit detection — over-recorded direction (server bug)", () => {
   it("recorded > diffs.length on a 2xx with no errors → flagged as contract violation with do-NOT-retry copy", async () => {
     vi.useRealTimers();
@@ -1161,6 +1266,15 @@ describe("AbortError swallow leaves the drawer alive (does not transition to fai
 
     expect(screen.queryByTestId("commit-drawer-error")).toBeNull();
     expect(onSubmitSuccess).not.toHaveBeenCalled();
+    // Pin the documented invariant: with no successor submit, the swallow
+    // path leaves the drawer in `submitting` state. The pre-flight portal
+    // stays mounted with the "Submitting…" button label. A future caller
+    // that aborts via any path OTHER than a new submit / unmount would
+    // strand the drawer, so this test guards that contract — if it ever
+    // changes, the documented abort callers must change too.
+    const submittingBtn = screen.queryByRole("button", { name: /Submitting…/i });
+    expect(submittingBtn).not.toBeNull();
+    expect((submittingBtn as HTMLButtonElement).disabled).toBe(true);
 
     vi.unstubAllGlobals();
   });
