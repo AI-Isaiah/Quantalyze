@@ -211,6 +211,26 @@ export function ScenarioComposer({
   // reinitialize from current live holdings.
   const [commitDrawerOpen, setCommitDrawerOpen] = useState(false);
   const [commitDiffs, setCommitDiffs] = useState<ScenarioCommitDiff[]>([]);
+  // Inline error surfaced for two distinct rejection paths:
+  //   (a) the commit pipeline refuses to open — either scenarioAum<=0 with
+  //       voluntary_adds present (division-by-zero downstream in the daily
+  //       delta cron), or any computed size_at_decision_usd lands non-finite
+  //   (b) the weight input received a non-finite value (Infinity, NaN from
+  //       a paste). Controlled inputs don't auto-snap-back when the change
+  //       handler short-circuits, so a silent drop leaves the user with a
+  //       displayed value that doesn't match underlying state.
+  const [commitError, setCommitError] = useState<string | null>(null);
+
+  function handleWeightChange(scopeRef: string, weight: number) {
+    if (!Number.isFinite(weight)) {
+      setCommitError(
+        "Invalid weight — enter a value between 0 and 1. The previous value was kept.",
+      );
+      return;
+    }
+    if (commitError) setCommitError(null);
+    scenario.setWeightOverride(scopeRef, weight);
+  }
 
   // M3 — Empty state computed flag. The early-return moves to the END of
   // the hook list so React's hook ordering invariant is preserved across
@@ -474,12 +494,26 @@ export function ScenarioComposer({
         size_at_decision_usd: Number.isFinite(h.value_usd) ? h.value_usd : 0,
       });
     }
+
+    // Refuse the commit when scenarioAum<=0 with voluntary_adds present:
+    // every add row would land with size_at_decision_usd:0 and the
+    // downstream daily-delta cron divides realized PnL by that size →
+    // division-by-zero. The setWeightOverride clamp + this gate together
+    // guarantee a finite, non-negative product below.
+    const hasVoluntaryAdds = scenario.draft.addedStrategies.length > 0;
+    if (hasVoluntaryAdds && (!Number.isFinite(scenarioAum) || scenarioAum <= 0)) {
+      setCommitError(
+        "Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting.",
+      );
+      return;
+    }
+
     for (const a of scenario.draft.addedStrategies) {
+      const weight = scenario.draft.weightOverrides[a.id] ?? 0;
       diffs.push({
         kind: "voluntary_add",
         strategy_id: a.id,
-        size_at_decision_usd:
-          (scenario.draft.weightOverrides[a.id] ?? 0) * scenarioAum,
+        size_at_decision_usd: weight * scenarioAum,
       });
     }
     // Review-pass P2 fix — single-source the commit-drawer surface. When
@@ -489,6 +523,7 @@ export function ScenarioComposer({
     // two confirmation surfaces on top of each other. When `false`, the
     // host is signalling "I own the commit UI" — fire onCommitRequested
     // and skip opening the internal drawer.
+    setCommitError(null);
     setCommitDiffs(diffs);
     if (useInternalCommitDrawer) {
       setCommitDrawerOpen(true);
@@ -700,7 +735,7 @@ export function ScenarioComposer({
         flaggedHoldings={flaggedHoldings}
         sharedSymbols={sharedSymbols}
         onToggle={scenario.toggleHolding}
-        onSetWeight={scenario.setWeightOverride}
+        onSetWeight={handleWeightChange}
         onRemoveAdded={scenario.removeAddedStrategy}
         onCompare={(scopeRef, candidateId) =>
           router.push(
@@ -725,6 +760,17 @@ export function ScenarioComposer({
           Browse strategies
         </button>
       </div>
+
+      {commitError && (
+        <div
+          role="alert"
+          aria-live="polite"
+          data-testid="scenario-commit-error"
+          className="mt-4 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative"
+        >
+          {commitError}
+        </div>
+      )}
 
       <ScenarioFooter
         diffCount={scenario.diffCount}
@@ -895,10 +941,7 @@ function CompositionList({
                   max="1"
                   value={weight.toFixed(3)}
                   disabled={!enabled}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    if (Number.isFinite(next)) onSetWeight(ref, next);
-                  }}
+                  onChange={(e) => onSetWeight(ref, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
                 {flagged && flagged.top_candidate_strategy_id && (
@@ -964,10 +1007,7 @@ function CompositionList({
                   max="1"
                   value={weight.toFixed(3)}
                   disabled={!enabled}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    if (Number.isFinite(next)) onSetWeight(a.id, next);
-                  }}
+                  onChange={(e) => onSetWeight(a.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
                 <button

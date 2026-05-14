@@ -1,37 +1,26 @@
 "use client";
 
 /**
- * Phase 10 / Plan 07 / SCENARIO-07. ScenarioCommitDrawer.
+ * ScenarioCommitDrawer — 720px right slide-over with grouped diff sections
+ * (Holdings removed / Strategies added / Weight changes), per-row inline
+ * RejectedForm / AllocatedForm, Submit-all gesture with portal'd pre-flight
+ * modal, and full-success / full-failure terminal states.
  *
- * 720px right slide-over with grouped diff sections (Holdings removed /
- * Strategies added / Weight changes), per-row inline RejectedForm /
- * AllocatedForm, Submit-all gesture with portal'd pre-flight modal, and
- * H4 full-success / full-failure terminal states.
+ * Single-tx semantics. The route's RPC either commits the WHOLE batch
+ * (success: drawer collapses to green confirmation card, onSubmitSuccess
+ * fires after a 1.5s timer, drawer auto-closes) OR rolls back the WHOLE
+ * batch (failure: drawer stays open, per-row errors render inline beneath
+ * each diff row, onSubmitSuccess does NOT fire). Partial-commit responses
+ * (recorded < diffs.length) violate that contract and surface to the user
+ * with explicit "do NOT retry" copy — retrying would double-commit the rows
+ * the server already accepted.
  *
- * H4 — single-tx semantics. The route's RPC either commits the WHOLE batch
- * (success: state=success, drawer collapses to green confirmation card,
- * onSubmitSuccess fires after a 1.5s timer, drawer auto-closes) OR rolls
- * back the WHOLE batch (failure: state=failure, drawer stays open, per-row
- * errors render inline beneath each diff row, onSubmitSuccess does NOT
- * fire — the user can edit and re-submit). NO partial state — the prior
- * "row 0 succeeded, row 1 failed" intermediate is REMOVED.
- *
- * M11 — pre-flight modal a11y. The pre-flight confirmation is rendered via
- * React `createPortal` to `document.body` so the DOM at submit-time has
- * exactly ONE element with role="dialog" + aria-modal="true" (the pre-flight
- * itself). The drawer's `role` is swapped to `region` while the pre-flight
- * is open so screen-reader semantics see ONE modal. Focus trap behaves
- * correctly across the swap.
- *
- * BridgeDrawer is the layout analog (same backdrop + panel + Esc handler
- * + keyframe animations); width here is 720 (vs Bridge's 620) to fit the
- * inline RejectedForm + AllocatedForm rows comfortably.
- *
- * The form-prop construction (RejectedForm + AllocatedForm props per row)
- * uses Plan 01's synthetic match_decision helpers (toVoluntaryRemoveDecision,
- * toVoluntaryAddDecision) plus the existing strategy-shaped form-prop
- * adapter contracts. The adapter call is local — the diff list is already
- * shaped by the composer, and per-row form props are derived inline.
+ * Pre-flight modal a11y: the confirmation is rendered via React `createPortal`
+ * to `document.body` so the DOM at submit-time has exactly ONE element with
+ * role="dialog" + aria-modal="true" (the pre-flight). The drawer's `role`
+ * is swapped to `region` while the pre-flight is open. The portal stays
+ * mounted through the `submitting` transition so the disabled Submit button
+ * remains in the DOM (the disable gate, not unmount, blocks double-clicks).
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -56,11 +45,6 @@ export interface ScenarioCommitDrawerProps {
   onSubmitSuccess: () => void;
 }
 
-// H4 — drawer state machine. "partial" is intentionally absent — the route's
-// single-tx RPC either commits the whole batch (success) or rolls back the
-// whole batch (failure). There is no per-row partial intermediate.
-type SubmitState = "idle" | "preflight" | "submitting" | "success" | "failure";
-
 interface SubmitResponse {
   recorded: number;
   results?: Array<{
@@ -70,6 +54,36 @@ interface SubmitResponse {
     kind: string;
   }>;
   errors?: Array<{ index: number; error: string }>;
+  error?: string;
+}
+
+/**
+ * Drawer state machine. Discriminated union so the success / failure variants
+ * carry the response payload — `kind === "success"` narrows `state.response`
+ * to non-null at compile time and forbids the "success without payload" pair
+ * that two independent useState cells used to allow.
+ *
+ * `failureReason` distinguishes user-visible error copy: "partial" means the
+ * server returned ok with a partial-recorded count (do NOT retry — some rows
+ * landed); "generic" is everything else (network error, top-level error,
+ * per-row error list — retry is safe).
+ */
+type SubmitState =
+  | { kind: "idle" }
+  | { kind: "preflight" }
+  | { kind: "submitting" }
+  | { kind: "success"; response: SubmitResponse }
+  | {
+      kind: "failure";
+      response: SubmitResponse | null;
+      failureReason: "partial" | "generic";
+    };
+
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function ScenarioCommitDrawer({
@@ -78,44 +92,106 @@ export function ScenarioCommitDrawer({
   diffs,
   onSubmitSuccess,
 }: ScenarioCommitDrawerProps) {
-  const [state, setState] = useState<SubmitState>("idle");
-  const [response, setResponse] = useState<SubmitResponse | null>(null);
-  // Per-row form state: index → { rejection_reason, percent_allocated, note }.
-  // The composer's diff shape carries the kind + ref + size, but the route
-  // schema also requires user-collected fields per kind:
-  //   - voluntary_remove → rejection_reason (enum) + optional note
-  //   - voluntary_add / bridge_recommended → percent_allocated + optional note
-  // Drawer holds these as a controlled-input map; Submit-all merges them
-  // into the diffs at POST time so the wire shape matches the schema.
+  const [state, setState] = useState<SubmitState>({ kind: "idle" });
   const [perRow, setPerRow] = useState<Record<number, PerRowState>>({});
   const drawerRef = useRef<HTMLDivElement>(null);
+  const errorBannerRef = useRef<HTMLDivElement>(null);
+  const preflightModalRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // Stable across retries WITHIN a single drawer-open lifetime. Minted on
+  // the first submit attempt; reused on retries from the failure state so
+  // the server's dedup treats them as the SAME logical request. Reset on
+  // close (a brand-new batch gets a fresh key) and on full success. Caveat:
+  // if the parent unmounts mid-submit (route change), the abort effect
+  // cancels the in-flight fetch but can't tell whether the server already
+  // committed; a subsequent re-open with the same draft content would get
+  // a fresh key, so the server's own dedup window is the only safety net
+  // for that narrow edge case.
+  const idempotencyKeyRef = useRef<string | null>(null);
 
   // Reset transient state on close; install Esc handler when open.
   useEffect(() => {
     if (!isOpen) {
       /* eslint-disable react-hooks/set-state-in-effect */
-      setState("idle");
-      setResponse(null);
+      setState({ kind: "idle" });
       setPerRow({});
       /* eslint-enable react-hooks/set-state-in-effect */
+      idempotencyKeyRef.current = null;
       return;
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // Esc must be a no-op while the batch is in-flight. The backend has a
+      // single-tx contract: silently closing the drawer mid-submit leaves
+      // the allocator wondering whether their commit landed. Force the user
+      // to wait for the terminal state.
+      if (state.kind === "submitting") return;
+      onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, state.kind]);
+
+  // Abort any in-flight fetch on unmount so the response handler does not
+  // setState on a destroyed component.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // 1.5s success auto-close.
   useEffect(() => {
-    if (state !== "success") return;
+    if (state.kind !== "success") return;
     const t = setTimeout(() => {
       onSubmitSuccess();
       onClose();
     }, 1500);
     return () => clearTimeout(t);
-  }, [state, onSubmitSuccess, onClose]);
+  }, [state.kind, onSubmitSuccess, onClose]);
+
+  // Focus trap inside the pre-flight portal. The portal is mounted for
+  // `preflight` and `submitting` states. While mounted, Tab must cycle
+  // within the modal — otherwise keyboard users escape to the drawer
+  // beneath the backdrop. Initial focus lands on the first focusable.
+  useEffect(() => {
+    if (state.kind !== "preflight" && state.kind !== "submitting") return;
+    const container = preflightModalRef.current;
+    if (!container) return;
+    const focusableSelector =
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const firstFocusable = container.querySelector<HTMLElement>(focusableSelector);
+    if (firstFocusable && state.kind === "preflight") {
+      firstFocusable.focus();
+    }
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const fs = container.querySelectorAll<HTMLElement>(focusableSelector);
+      if (fs.length === 0) return;
+      const first = fs[0];
+      const last = fs[fs.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onTab);
+    return () => document.removeEventListener("keydown", onTab);
+  }, [state.kind]);
+
+  // Focus restoration on failure. When the pre-flight portal unmounts on
+  // a submitting → failure transition, the previously focused Submit
+  // button disappears and focus falls to <body>. Move focus to the new
+  // error banner so keyboard / screen-reader users have an anchor.
+  useEffect(() => {
+    if (state.kind === "failure" && errorBannerRef.current) {
+      errorBannerRef.current.focus();
+    }
+  }, [state.kind]);
 
   if (!isOpen) return null;
 
@@ -124,24 +200,57 @@ export function ScenarioCommitDrawer({
     (d) => d.kind === "voluntary_add" || d.kind === "bridge_recommended",
   );
   const modified = diffs.filter((d) => d.kind === "voluntary_modify");
-  const errorByIndex = new Map(
-    (response?.errors ?? []).map((e) => [e.index, e.error] as const),
+  const response = state.kind === "success" || state.kind === "failure" ? state.response : null;
+  // Errors whose `index` doesn't match a real diff row (e.g. index === -1
+  // for network/parse failures) would otherwise be invisible — the per-row
+  // sections only render entries for valid 0..diffs.length-1 indices. Lift
+  // those to the top-level banner.
+  const orphanErrorMessages = (response?.errors ?? [])
+    .filter((e) => e.index < 0 || e.index >= diffs.length)
+    .map((e) => e.error);
+  const rowMatchedErrors = new Map(
+    (response?.errors ?? [])
+      .filter((e) => e.index >= 0 && e.index < diffs.length)
+      .map((e) => [e.index, e.error] as const),
   );
 
-  // Top-level (non-per-row) failure message. The route returns Zod-shape
-  // errors as `{ error, issues }` with no per-row index, so errorByIndex
-  // is empty. Without this surface, a 400 leaves the drawer silent.
-  const topLevelError =
-    state === "failure" && errorByIndex.size === 0
-      ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ((response as any)?.error as string | undefined) ??
-        "Couldn't record decisions. Check the inputs above and try again."
-      : null;
+  // Single source of truth for the user-visible error banner.
+  //   - partial: server returned ok with a recorded count != diffs.length
+  //     (single-tx contract violation, both under- and over-counts).
+  //   - orphan errors: network / parse failures keyed at index -1.
+  //   - generic top-level error string (Zod 400 etc) with no errors list.
+  //   - row-only failures: rowMatchedErrors carry per-row copy; no banner.
+  const topLevelError = (() => {
+    if (state.kind !== "failure") return null;
+    if (state.failureReason === "partial") {
+      const recorded = state.response?.recorded ?? 0;
+      const overRecorded = recorded > diffs.length;
+      const direction = overRecorded ? "over-recorded" : "partial";
+      // Under-recorded: some rows landed; remediation is to review the
+      // Outcomes timeline and record what's missing.
+      // Over-recorded: server claims to have committed MORE rows than were
+      // submitted (off-by-one / double-count bug); there is nothing
+      // "missing" to record, so the user needs support to investigate.
+      const remediation = overRecorded
+        ? "Contact support — the server reported committing more decisions than were submitted, which needs investigation."
+        : "Review the Outcomes timeline and record any missing decisions there, or contact support.";
+      return (
+        `Server reported ${recorded} of ${diffs.length} recorded (${direction} — single-transaction contract violated). ` +
+        "Do NOT retry from this drawer — retrying would compound the discrepancy. " +
+        remediation
+      );
+    }
+    if (orphanErrorMessages.length > 0) return orphanErrorMessages.join(" ");
+    if (rowMatchedErrors.size > 0) return null;
+    return (
+      state.response?.error ??
+      "Couldn't record decisions. Check the inputs above and try again."
+    );
+  })();
 
-  // Validation: Submit-all is enabled only when every diff has the
-  // user-input fields the route schema requires. Inline (not useMemo) so it
-  // sits below the `if (!isOpen) return null` early return without breaking
-  // hooks order; the computation is O(diffs.length) and runs once per render.
+  // Submit-all is enabled only when every diff has the user-input fields the
+  // route schema requires. Inline (not useMemo) so it sits below the
+  // `if (!isOpen) return null` early return without breaking hooks order.
   const allFilled = (() => {
     for (let i = 0; i < diffs.length; i++) {
       const d = diffs[i];
@@ -164,7 +273,6 @@ export function ScenarioCommitDrawer({
         )
           return false;
       }
-      // voluntary_modify needs no extra user input — new_weight is on the diff.
     }
     return true;
   })();
@@ -173,8 +281,6 @@ export function ScenarioCommitDrawer({
     setPerRow((prev) => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
   }
 
-  // Merge the user-collected per-row state into the diffs at submit time so
-  // the wire shape matches the route's discriminated zod union.
   function buildSubmitDiffs(): ScenarioCommitDiff[] {
     return diffs.map((d, i) => {
       const r = perRow[i] ?? {};
@@ -193,43 +299,121 @@ export function ScenarioCommitDrawer({
     });
   }
 
-  async function handleSubmit() {
-    setState("submitting");
-    try {
-      const res = await fetch("/api/allocator/scenario/commit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ diffs: buildSubmitDiffs() }),
-      });
-      const json = (await res.json()) as SubmitResponse;
-      setResponse(json);
-      // H4 — full-success vs full-failure ONLY (no partial state). The
-      // route's single-tx RPC returns ok=true with all rows recorded, OR
-      // ok=false with per-row errors and recorded=0 (the tx rolled back).
-      // The UI mirrors that contract here.
-      if (
-        res.ok &&
-        json.recorded > 0 &&
-        (!json.errors || json.errors.length === 0)
-      ) {
-        setState("success");
-      } else {
-        setState("failure");
-      }
-    } catch {
-      setState("failure");
-      setResponse({
-        recorded: 0,
-        errors: [{ index: -1, error: "Network error — no decisions were recorded." }],
-      });
-    }
+  // Gate all three close paths (Esc, backdrop, X). The Esc handler also
+  // checks this internally, but routing every close gesture through one
+  // helper makes the invariant impossible to forget on a new close path.
+  function safeClose() {
+    if (state.kind === "submitting") return;
+    onClose();
   }
 
-  // M11 — drawer's role swaps to "region" while the pre-flight is open so
-  // the DOM at preflight time contains exactly ONE role="dialog" + aria-modal=
-  // "true" element (the pre-flight, rendered via portal below).
+  async function handleSubmit() {
+    // Supersede any prior in-flight request. The Submit button is disabled
+    // while submitting (so this is defense-in-depth), but unmount during an
+    // in-flight retry could otherwise leak a setState-after-unmount.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // Mint once per batch, reuse on user-initiated retry. The server
+    // dedups on this header so two retries of the same batch are seen as
+    // ONE logical request.
+    if (idempotencyKeyRef.current === null) {
+      idempotencyKeyRef.current = generateIdempotencyKey();
+    }
+    const idempotencyKey = idempotencyKeyRef.current;
+
+    setState({ kind: "submitting" });
+    let res: Response;
+    try {
+      res = await fetch("/api/allocator/scenario/commit", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify({ diffs: buildSubmitDiffs() }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (
+        (err instanceof DOMException && err.name === "AbortError") ||
+        controller.signal.aborted
+      ) {
+        return;
+      }
+      setState({
+        kind: "failure",
+        failureReason: "generic",
+        response: {
+          recorded: 0,
+          errors: [{ index: -1, error: "Network error — no decisions were recorded." }],
+        },
+      });
+      return;
+    }
+
+    // Parse the response body separately so that a 5xx returning HTML, an
+    // edge-cached empty 200, or any other non-JSON payload surfaces as a
+    // proper failure rather than as the catch branch's "network error"
+    // (which would be wrong — the request did reach the server).
+    let json: SubmitResponse;
+    try {
+      json = (await res.json()) as SubmitResponse;
+    } catch {
+      if (controller.signal.aborted) return;
+      setState({
+        kind: "failure",
+        failureReason: "generic",
+        response: {
+          recorded: 0,
+          errors: [
+            {
+              index: -1,
+              error: res.ok
+                ? "Server returned an empty response — no decisions were recorded."
+                : `Server returned an invalid response (status ${res.status}) — no decisions were recorded.`,
+            },
+          ],
+        },
+      });
+      return;
+    }
+
+    // Strict success gate: the route's single-tx RPC commits the WHOLE batch
+    // or rolls back the WHOLE batch. `recorded === diffs.length` is the only
+    // signal that all rows landed.
+    const noErrors = !json.errors || json.errors.length === 0;
+    const fullSuccess =
+      res.ok && json.recorded === diffs.length && noErrors;
+
+    if (fullSuccess) {
+      idempotencyKeyRef.current = null;
+      setState({ kind: "success", response: json });
+      return;
+    }
+
+    // Single-tx contract violation: server returned 2xx with a recorded
+    // count that does not equal diffs.length. Both directions are dangerous:
+    //   - recorded < length: some rows landed; retrying double-commits them.
+    //   - recorded > length: server over-reported (off-by-one / double-count
+    //     bug); retrying compounds the over-recording.
+    // Either way the user MUST NOT retry from this drawer.
+    const isContractViolation =
+      res.ok && json.recorded !== diffs.length && noErrors;
+    setState({
+      kind: "failure",
+      failureReason: isContractViolation ? "partial" : "generic",
+      response: json,
+    });
+  }
+
+  // The drawer's role swaps to "region" while the pre-flight is open so the
+  // DOM at preflight time contains exactly ONE role="dialog" + aria-modal=
+  // "true" element (the pre-flight). Kept through `submitting` too so the
+  // still-mounted pre-flight portal remains the single role="dialog".
   const drawerRoleProps =
-    state === "preflight"
+    state.kind === "preflight" || state.kind === "submitting"
       ? { role: "region" as const, "aria-label": "Commit scenario" }
       : {
           role: "dialog" as const,
@@ -239,9 +423,8 @@ export function ScenarioCommitDrawer({
 
   return (
     <>
-      {/* Backdrop — click dismisses */}
       <div
-        onClick={onClose}
+        onClick={safeClose}
         aria-hidden="true"
         data-testid="commit-drawer-backdrop"
         style={{
@@ -252,7 +435,6 @@ export function ScenarioCommitDrawer({
           animation: "bd-fade 160ms ease",
         }}
       />
-      {/* Drawer panel — width 720. */}
       <div
         ref={drawerRef}
         {...drawerRoleProps}
@@ -283,33 +465,38 @@ export function ScenarioCommitDrawer({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={safeClose}
             aria-label="Close drawer"
-            className="text-text-muted hover:text-text-primary"
+            disabled={state.kind === "submitting"}
+            className="text-text-muted hover:text-text-primary disabled:opacity-50"
           >
             ×
           </button>
         </div>
 
-        {state === "success" && response && (
+        {state.kind === "success" && (
           <div
             role="status"
             className="mt-6 rounded-lg border border-positive bg-[rgba(21,128,61,0.08)] p-4 text-sm text-text-primary"
             data-testid="commit-drawer-success"
           >
-            <strong>{response.recorded} decisions recorded.</strong> Scenario
-            draft reset to new live state.
+            <strong>{state.response.recorded} decisions recorded.</strong>{" "}
+            Scenario draft reset to new live state.
           </div>
         )}
 
-        {state !== "success" && (
+        {state.kind !== "success" && (
           <>
             {topLevelError && (
               <div
+                ref={errorBannerRef}
                 role="alert"
-                aria-live="polite"
+                tabIndex={-1}
                 data-testid="commit-drawer-error"
-                className="mt-6 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative"
+                data-failure-reason={
+                  state.kind === "failure" ? state.failureReason : undefined
+                }
+                className="mt-6 rounded-md border border-negative bg-[rgba(220,38,38,0.05)] p-3 text-sm text-negative focus:outline-none focus:ring-2 focus:ring-negative/50"
               >
                 {topLevelError}
               </div>
@@ -328,7 +515,7 @@ export function ScenarioCommitDrawer({
                 <ul className="mt-3 grid gap-3">
                   {removed.map((d) => {
                     const idx = diffs.indexOf(d);
-                    const err = errorByIndex.get(idx);
+                    const err = rowMatchedErrors.get(idx);
                     const row = perRow[idx] ?? {};
                     return (
                       <li
@@ -410,7 +597,7 @@ export function ScenarioCommitDrawer({
                 <ul className="mt-3 grid gap-3">
                   {added.map((d) => {
                     const idx = diffs.indexOf(d);
-                    const err = errorByIndex.get(idx);
+                    const err = rowMatchedErrors.get(idx);
                     const row = perRow[idx] ?? {};
                     return (
                       <li
@@ -488,7 +675,7 @@ export function ScenarioCommitDrawer({
                 <ul className="mt-3 grid gap-3">
                   {modified.map((d) => {
                     const idx = diffs.indexOf(d);
-                    const err = errorByIndex.get(idx);
+                    const err = rowMatchedErrors.get(idx);
                     const row = perRow[idx] ?? {};
                     return (
                       <li
@@ -540,11 +727,11 @@ export function ScenarioCommitDrawer({
               )}
               <button
                 type="button"
-                onClick={() => setState("preflight")}
+                onClick={() => setState({ kind: "preflight" })}
                 disabled={
                   diffs.length === 0 ||
-                  state === "submitting" ||
-                  state === "preflight" ||
+                  state.kind === "submitting" ||
+                  state.kind === "preflight" ||
                   !allFilled
                 }
                 className="w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50"
@@ -557,14 +744,18 @@ export function ScenarioCommitDrawer({
         )}
       </div>
 
-      {/* M11 — pre-flight modal lives OUTSIDE the drawer's role="dialog" via
+      {/* Pre-flight modal lives OUTSIDE the drawer's role="dialog" via
           createPortal to document.body. At preflight time the drawer's role
           is swapped to "region", so the DOM has exactly ONE element with
-          role="dialog" + aria-modal="true" (this portal). */}
-      {state === "preflight" &&
+          role="dialog" + aria-modal="true" (this portal). Stays mounted
+          through `submitting` so the disabled Submit button remains in DOM
+          and a rapid double-click can't bypass the gate by firing the click
+          handler twice before React commits the disable. */}
+      {(state.kind === "preflight" || state.kind === "submitting") &&
         typeof document !== "undefined" &&
         createPortal(
           <div
+            ref={preflightModalRef}
             role="dialog"
             aria-modal="true"
             aria-label="Confirm commit"
@@ -583,17 +774,19 @@ export function ScenarioCommitDrawer({
               <div className="mt-4 flex justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setState("idle")}
-                  className="rounded-md border border-border px-3 py-1.5 text-xs"
+                  onClick={() => setState({ kind: "idle" })}
+                  disabled={state.kind === "submitting"}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   onClick={handleSubmit}
+                  disabled={state.kind === "submitting"}
                   className="rounded-md bg-accent px-4 py-1.5 text-sm text-white hover:bg-accent/90 disabled:opacity-50"
                 >
-                  Submit
+                  {state.kind === "submitting" ? "Submitting…" : "Submit"}
                 </button>
               </div>
             </div>

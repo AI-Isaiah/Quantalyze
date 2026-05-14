@@ -789,6 +789,67 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C_P1933 — P1933 CRITICAL: empty-state add flow + commit must refuse
+  //   when scenarioAum=0 (every voluntary_add row would land with
+  //   size_at_decision_usd:0 → division-by-zero downstream).
+  // -------------------------------------------------------------------------
+  it("T_C_P1933 (audit-2026-05-07/Block-C/C.1) — refuses commit + surfaces alert when scenarioAum=0 with voluntary_add", () => {
+    // Empty holdings + added-strategy via the empty-state Browse drawer
+    // transitions the composer out of the empty-state branch and into the
+    // main body with scenarioAum === 0 (no live holdings contribute).
+    const payload = makePayload({
+      holdingsSummary: [],
+      holdingReturnsByScopeRef: {},
+    });
+    let capturedOnAdd: ((s: unknown) => void) | null = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      capturedOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onCommitRequested={onCommitRequested}
+        useInternalCommitDrawer={false}
+      />,
+    );
+    // Empty-state branch → click Browse → simulate Add. The browse drawer
+    // in the empty-state branch is rendered (and mocked) so onAdd is wired.
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Browse strategies$/i }),
+    );
+    act(() => {
+      capturedOnAdd!({
+        id: "strat-uuid-zero-aum",
+        name: "Zero AUM Strategy",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+    });
+
+    // Composer now in main-body render. Click Commit — the handler should
+    // refuse and surface an inline role="alert" referencing zero AUM.
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const alerts = screen.getAllByRole("alert");
+    expect(
+      alerts.some((a) => /portfolio AUM is zero/i.test(a.textContent ?? "")),
+    ).toBe(true);
+    // The drawer must NOT have opened (no internal drawer per the
+    // useInternalCommitDrawer={false} prop) and the legacy callback must
+    // NOT have fired either — the commit is refused outright.
+    expect(onCommitRequested).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C19 — Equity_curve +1 wealth conversion (Pitfall 1)
   // -------------------------------------------------------------------------
   it("T_C19 EquityChart scenarioSeries values are wealth-form (>=0.95 — i.e. +1 conversion applied)", () => {
@@ -1151,6 +1212,49 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(metadataLookup[ADDED_ID].disclosure_tier).toBe("institutional");
     expect(metadataLookup[ADDED_ID].cagr).toBe(0.22);
     expect(metadataLookup[ADDED_ID].sharpe).toBe(1.55);
+  });
+
+  // -------------------------------------------------------------------------
+  // Weight input fail-loud — typing Infinity in the weight input must surface
+  // a visible inline error instead of silently dropping the change (the
+  // controlled input would otherwise display a value that doesn't match
+  // underlying state).
+  // -------------------------------------------------------------------------
+  it("non-finite weight input surfaces an inline role='alert' (fail-loud, no silent drop)", () => {
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    const btcInput = screen.getByLabelText(/BTC weight/i) as HTMLInputElement;
+    // Force a non-finite synthetic event through React's controlled-input
+    // bridge. We can't just write `target: { value: "Infinity" }` because
+    // jsdom's `<input type="number">` sanitizes the value to "" before
+    // React reads it — Number("") is 0, which would take the happy path.
+    // Patching the input's `valueAsNumber` getter to return NaN delivers a
+    // non-finite Number(e.target.value) to the composer's wrapper without
+    // depending on string-parsing semantics.
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    Object.defineProperty(btcInput, "value", {
+      configurable: true,
+      get: () => "Infinity",
+    });
+    fireEvent.change(btcInput);
+    const errEl = screen.getByTestId("scenario-commit-error");
+    expect(errEl.textContent).toMatch(/Invalid weight/i);
+
+    // Restore so the next assertion exercises the cleared-error path.
+    if (originalDescriptor) {
+      Object.defineProperty(btcInput, "value", originalDescriptor);
+    }
+    fireEvent.change(btcInput, { target: { value: "0.5" } });
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
   });
 
   // -------------------------------------------------------------------------

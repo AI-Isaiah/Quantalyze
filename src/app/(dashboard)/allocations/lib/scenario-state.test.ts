@@ -238,6 +238,50 @@ describe("setWeightOverride", () => {
     expect(next.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(0.2, 9);
     expect(sumEnabled(next)).toBeCloseTo(1.0, 9);
   });
+
+  // P1936 HIGH — audit-2026-05-07 Block C / Task C.4. The wire schema only
+  // accepts weights in [0,1]; an unclamped value flows straight into
+  // weightOverrides + downstream computeScenario, producing NaN/negative
+  // metrics or 100%+ allocations. NaN/Infinity inputs must be a no-op so
+  // an out-of-range numeric coercion can't blow up the running draft.
+  it("P1936 clamps newWeight > 1 to 1", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const out = setWeightOverride(initial, "holding:binance:BTC:spot", 1.5);
+    expect(out.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+  });
+
+  it("P1936 clamping BTC=1.5 → 1 also drives ETH renormalize to 0 (remainingMass = 0)", () => {
+    // Without the renormalize step the clamp alone would leave ETH at 0.4
+    // and the enabled sum would land at 1.4, breaking the wire schema. The
+    // clamp + renormalize together must produce a valid sum-to-1 draft.
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const out = setWeightOverride(initial, "holding:binance:BTC:spot", 1.5);
+    expect(out.weightOverrides["holding:binance:BTC:spot"]).toBe(1);
+    expect(out.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(0, 9);
+    expect(sumEnabled(out)).toBeCloseTo(1.0, 9);
+  });
+
+  it("P1936 clamps newWeight < 0 to 0", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const out = setWeightOverride(initial, "holding:binance:BTC:spot", -0.2);
+    expect(out.weightOverrides["holding:binance:BTC:spot"]).toBe(0);
+  });
+
+  it("P1936 rejects NaN as a no-op (returns the input draft by reference)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const out = setWeightOverride(initial, "holding:binance:BTC:spot", Number.NaN);
+    expect(out).toBe(initial);
+  });
+
+  it("P1936 rejects Infinity as a no-op (returns the input draft by reference)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const out = setWeightOverride(
+      initial,
+      "holding:binance:BTC:spot",
+      Number.POSITIVE_INFINITY,
+    );
+    expect(out).toBe(initial);
+  });
 });
 
 describe("renormalizeWeights", () => {
