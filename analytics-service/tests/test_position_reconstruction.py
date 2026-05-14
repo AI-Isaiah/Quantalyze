@@ -18,6 +18,18 @@ from services.position_reconstruction import (
 )
 
 
+# `_RECONSTRUCT_LOCKS` is module-level state; pytest-asyncio gives each
+# test a fresh event loop, so a parked waiter under loop A would leak
+# into loop B (audit-2026-05-07 P1101 red-team F1).
+
+@pytest.fixture(autouse=True)
+def _reset_reconstruct_locks():
+    import services.position_reconstruction as pr_mod
+    pr_mod._RECONSTRUCT_LOCKS.clear()
+    yield
+    pr_mod._RECONSTRUCT_LOCKS.clear()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1680,4 +1692,227 @@ class TestTurnoverEdgeCasesWithFlags:
         assert series_wrapper == series_full, (
             "compute_turnover_series wrapper must return exactly the series "
             "portion of the _with_flags tuple"
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 P1101 caller follow-up: per-worker asyncio.Lock keyed on
+# strategy_id. Cluster-wide serialization is still the SQL-side
+# pg_advisory_xact_lock + migration 119 UNIQUE constraint's responsibility;
+# this lock prevents the same-worker race where two coroutines (e.g.
+# watchdog reclaim + scheduled tick) both fire reconstruct_positions_atomic
+# for the same strategy_id concurrently.
+# ---------------------------------------------------------------------------
+
+class TestReconstructIdempotency:
+    """Caller-layer in-memory serialization via asyncio.Lock keyed on
+    strategy_id. Two concurrent coroutines in the same worker process must
+    NOT both fire reconstruct_positions_atomic for the same strategy."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_callers_serialize_via_asyncio_lock(self) -> None:
+        """Two concurrent reconstruct_positions(X) calls must serialize so
+        the second one runs only AFTER the first releases the lock.
+
+        Load-bearing assertion: `max_in_flight == 1`. The `await asyncio.sleep`
+        inside `slow_db_execute` is the yield point that would otherwise let
+        both coroutines race through `_reconstruct_positions_inner`. Sanity
+        check: delete `async with _lock_for(...)` in production code and this
+        assertion must flip to `max_in_flight == 2`.
+        """
+        fills = [
+            {
+                "symbol": "BTCUSDT", "side": "buy",
+                "price": 100.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-01T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+            {
+                "symbol": "BTCUSDT", "side": "sell",
+                "price": 110.0, "quantity": 1.0, "fee": 0.0,
+                "timestamp": "2024-01-02T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            },
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+
+        # The `await asyncio.sleep` is the yield point that lets the
+        # second gather() coroutine race in. Without the production
+        # lock, both callers reach the sleep and `in_flight` peaks at 2.
+        in_flight = 0
+        max_in_flight = 0
+
+        async def slow_db_execute(fn):
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0.005)
+                return await asyncio.to_thread(fn)
+            finally:
+                in_flight -= 1
+
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=slow_db_execute,
+        ):
+            r1, r2 = await asyncio.gather(
+                reconstruct_positions("strat-lock-1", mock_supabase),
+                reconstruct_positions("strat-lock-1", mock_supabase),
+            )
+
+        assert r1 == r2
+
+        atomic_rpc_calls = [
+            c for c in mock_supabase.rpc_calls
+            if c[0] == "reconstruct_positions_atomic"
+        ]
+        assert len(atomic_rpc_calls) == 2, (
+            f"Expected 2 sequential atomic-rebuild RPC calls (one per caller, "
+            f"serialized under the lock), got {len(atomic_rpc_calls)}."
+        )
+
+        # Load-bearing assertion: with the lock, the second caller waits
+        # at `async with _lock_for(strategy_id)` and never enters until
+        # the first releases. Without the lock, both race through the
+        # `await asyncio.sleep` and max_in_flight reaches 2.
+        assert max_in_flight == 1, (
+            f"Expected at most 1 caller inside _reconstruct_positions_inner "
+            f"at a time (serialized via asyncio.Lock on strategy_id), saw "
+            f"max_in_flight={max_in_flight}. Caller-layer lock not serializing."
+        )
+
+    @pytest.mark.asyncio
+    async def test_different_strategies_do_not_block_each_other(self) -> None:
+        """The lock is keyed on strategy_id — different strategies must run
+        concurrently. Load-bearing assertion: `max_in_inner == 2`.
+
+        We patch `_reconstruct_positions_inner` with a tracking coroutine
+        that yields via `await asyncio.sleep` while a counter records peak
+        concurrent entries. Under per-strategy keying both callers reach
+        the inner body at the same time → peak == 2. Under a single global
+        lock (regression: replace `_lock_for(strategy_id)` with one
+        module-level Lock) the second caller blocks at `async with` and
+        peak stays at 1 — the assertion flips.
+        """
+        import services.position_reconstruction as pr_mod
+
+        mock_a = _make_mock_supabase(fills=[])
+        mock_b = _make_mock_supabase(fills=[])
+
+        in_inner = 0
+        max_in_inner = 0
+
+        async def tracking_inner(strategy_id, supabase):
+            nonlocal in_inner, max_in_inner
+            in_inner += 1
+            max_in_inner = max(max_in_inner, in_inner)
+            try:
+                # Yield long enough for the second gather() coroutine to
+                # acquire ITS per-strategy lock and enter this hook. If
+                # the production lock were global, the second caller
+                # would still be parked at `async with _lock_for(...)`
+                # and max_in_inner would stay at 1.
+                await asyncio.sleep(0.02)
+                return {"strategy_id": strategy_id}
+            finally:
+                in_inner -= 1
+
+        with patch.object(pr_mod, "_reconstruct_positions_inner", tracking_inner):
+            r_a, r_b = await asyncio.gather(
+                reconstruct_positions("strat-A", mock_a),
+                reconstruct_positions("strat-B", mock_b),
+            )
+
+        # Per-strategy parallelism invariant — the load-bearing assertion.
+        assert max_in_inner == 2, (
+            f"Expected both strategies inside the inner critical section "
+            f"concurrently (per-strategy lock keying), saw max_in_inner="
+            f"{max_in_inner}. The lock is serializing across strategies — "
+            f"likely a regression where `_lock_for` returns a shared object."
+        )
+        # Both keys present and distinct in the registry — corroborates
+        # the keying claim above.
+        assert "strat-A" in pr_mod._RECONSTRUCT_LOCKS
+        assert "strat-B" in pr_mod._RECONSTRUCT_LOCKS
+        assert (
+            pr_mod._RECONSTRUCT_LOCKS["strat-A"]
+            is not pr_mod._RECONSTRUCT_LOCKS["strat-B"]
+        )
+        # Both calls returned their own payload (sanity — patch wired up).
+        assert r_a == {"strategy_id": "strat-A"}
+        assert r_b == {"strategy_id": "strat-B"}
+
+    @pytest.mark.asyncio
+    async def test_lock_releases_when_inner_raises(self) -> None:
+        """`async with _lock_for(...)` must release the lock on exception so
+        a subsequent caller for the same strategy_id is NOT permanently
+        deadlocked. Regression for a future refactor that swaps to manual
+        `acquire()`/`release()` without try/finally — that change would
+        silently leak the lock and every following reconstruct for the
+        same strategy would hang forever.
+        """
+        import services.position_reconstruction as pr_mod
+
+        mock = _make_mock_supabase(fills=[])
+        boom = RuntimeError("inner exploded")
+
+        async def raising_inner(strategy_id, supabase):
+            raise boom
+
+        with patch.object(pr_mod, "_reconstruct_positions_inner", raising_inner):
+            with pytest.raises(RuntimeError, match="inner exploded"):
+                await reconstruct_positions("strat-boom", mock)
+
+        # The lock must be released — if it leaked, a follow-up call
+        # would hang at `async with`. We bound the second attempt with
+        # asyncio.wait_for so a lock leak surfaces as a TimeoutError
+        # rather than hanging the test runner.
+        lock = pr_mod._RECONSTRUCT_LOCKS["strat-boom"]
+        assert not lock.locked(), (
+            "Lock not released after exception — future reconstructs for "
+            "this strategy_id will deadlock."
+        )
+
+        # Second caller must acquire and proceed (it will also raise — we
+        # only care that it gets PAST `async with`).
+        with patch.object(pr_mod, "_reconstruct_positions_inner", raising_inner):
+            with pytest.raises(RuntimeError, match="inner exploded"):
+                await asyncio.wait_for(
+                    reconstruct_positions("strat-boom", mock),
+                    timeout=1.0,
+                )
+
+    @pytest.mark.asyncio
+    async def test_lock_releases_on_cancel(self) -> None:
+        """`async with _lock_for(...)` must release on `CancelledError`. If a
+        caller is cancelled while inside the critical section (e.g. the
+        watchdog task is cancelled mid-reconstruct), the next caller must
+        be able to acquire — otherwise every reconstruct for that
+        strategy is permanently stuck.
+        """
+        import services.position_reconstruction as pr_mod
+
+        mock = _make_mock_supabase(fills=[])
+
+        async def hanging_inner(strategy_id, supabase):
+            await asyncio.sleep(10)  # never returns on its own
+            return {}
+
+        with patch.object(pr_mod, "_reconstruct_positions_inner", hanging_inner):
+            task = asyncio.create_task(
+                reconstruct_positions("strat-cancel", mock)
+            )
+            # Let the task acquire the lock and enter the inner sleep.
+            await asyncio.sleep(0.01)
+            assert pr_mod._RECONSTRUCT_LOCKS["strat-cancel"].locked()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # Post-cancellation: lock must be released.
+        assert not pr_mod._RECONSTRUCT_LOCKS["strat-cancel"].locked(), (
+            "Lock not released after CancelledError — future reconstructs "
+            "for this strategy_id will deadlock."
         )

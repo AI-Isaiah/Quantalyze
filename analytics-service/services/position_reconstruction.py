@@ -10,19 +10,81 @@ funding_fees rows in [opened_at, closed_at] window.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import statistics
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from services.db import db_execute
 
 logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 
+# A single contended reconstruct that genuinely needs operator attention
+# typically blocks for seconds (DB roundtrip + atomic-rebuild RPC). A
+# 1-second hold threshold filters out routine sub-RTT contention noise
+# while still surfacing the 30s stalls the lock was added to make
+# debuggable. See `reconstruct_positions` log site below.
+_LOCK_HOLD_LOG_THRESHOLD_S = 1.0
 
-async def reconstruct_positions(strategy_id: str, supabase) -> dict:
+
+# Audit-2026-05-07 P1101 (caller follow-up): per-worker per-strategy
+# asyncio.Lock registry — defense-in-depth above the SQL-side
+# pg_advisory_xact_lock (migration 113) + (strategy_id, symbol, side,
+# opened_at) UNIQUE constraint (migration 119).
+#
+# Lock ordering invariant: the outer asyncio.Lock is always acquired
+# BEFORE the SQL advisory lock. Monotonic outer→inner across every path
+# in this module — no deadlock surface between the two layers.
+#
+# The dict grows unboundedly by design: evicting a Lock with waiters
+# parked on it would silently break serialization, and strategy_id
+# cardinality is bounded by the strategies table (O(10²–10³)).
+_RECONSTRUCT_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(strategy_id: str) -> asyncio.Lock:
+    # setdefault is atomic across coroutine resumption — there is no
+    # await between the lookup and the insert, so within one event loop
+    # two simultaneous first-callers cannot end up with two different
+    # Lock objects for the same strategy_id. This is single-event-loop
+    # safe; cross-thread invocation is not supported.
+    return _RECONSTRUCT_LOCKS.setdefault(strategy_id, asyncio.Lock())
+
+
+async def reconstruct_positions(strategy_id: str | UUID, supabase) -> dict:
+    """Public entry point — serializes per-strategy via in-memory
+    asyncio.Lock so concurrent same-worker callers do not both fire the
+    atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
+    pg_advisory_xact_lock + migration 119 UNIQUE constraint's
+    responsibility (audit-2026-05-07 P1101 caller follow-up)."""
+    # Canonicalize so UUID / str / padded-str representations of the
+    # same strategy all hash to the same in-memory Lock bucket. (This
+    # only needs to be internally consistent across Python callers; the
+    # SQL advisory lock is an independent cross-process defense layer
+    # and does not need to share a key derivation with this lock.)
+    strategy_id = str(strategy_id).strip()
+    lock = _lock_for(strategy_id)
+    # Log on the slow path only — pre-acquire `locked()` checks are racy
+    # (the holder may release between check and acquire), and INFO-level
+    # contention logging at burst rates would flood log shipping.
+    t0 = time.monotonic()
+    async with lock:
+        wait_s = time.monotonic() - t0
+        if wait_s > _LOCK_HOLD_LOG_THRESHOLD_S:
+            logger.warning(
+                "reconstruct_positions: blocked on per-strategy lock for %.2fs",
+                wait_s,
+                extra={"strategy_id": strategy_id, "wait_seconds": wait_s},
+            )
+        return await _reconstruct_positions_inner(strategy_id, supabase)
+
+
+async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     """Reconstruct position lifecycles from raw fills using FIFO matching.
 
     Returns trade_metrics dict for strategy_analytics JSONB. Each closed
