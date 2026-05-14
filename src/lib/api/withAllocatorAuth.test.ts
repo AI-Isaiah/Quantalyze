@@ -5,12 +5,14 @@
  *   - withAuth admitted the request (auth session present), AND
  *   - profiles.role for that user is in ('allocator', 'both').
  *
- * Every other path returns 403 with Cache-Control: private, no-store, and the
- * inner handler is never invoked.
+ * The three failure paths each carry Cache-Control: private, no-store and
+ * each returns a distinct status + message so triage doesn't conflate them:
+ *   - profile lookup error → 503 ("Profile lookup failed")
+ *   - profile row missing  → 403 ("Profile not provisioned")
+ *   - role not allocator   → 403 ("Forbidden — allocator role required")
  *
- * The plan-text spec covers three cases (profile missing, non-allocator role,
- * allocator passes). We add `role='both'` and `role='manager'` to exercise
- * the boundary the role-IN check creates.
+ * We also exercise `role='both'` and `role='manager'` to pin the boundary
+ * the role-IN check creates.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -59,8 +61,26 @@ beforeEach(() => {
 });
 
 describe("withAllocatorAuth", () => {
-  it("returns 403 + Cache-Control when the profile row is missing", async () => {
+  it("returns 403 'Profile not provisioned' + Cache-Control when the profile row is missing", async () => {
     maybeSingleMock.mockResolvedValueOnce({ data: null, error: null });
+
+    const handler = vi.fn();
+    const wrapped = withAllocatorAuth(handler as never);
+    const res = await wrapped(mkReq());
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await res.json()).toEqual({
+      error: "Profile not provisioned",
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 'allocator role required' when the profile row exists but role='manager'", async () => {
+    maybeSingleMock.mockResolvedValueOnce({
+      data: { role: "manager" },
+      error: null,
+    });
 
     const handler = vi.fn();
     const wrapped = withAllocatorAuth(handler as never);
@@ -74,34 +94,33 @@ describe("withAllocatorAuth", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("returns 403 when the profile row exists but role='manager'", async () => {
-    maybeSingleMock.mockResolvedValueOnce({
-      data: { role: "manager" },
-      error: null,
-    });
-
-    const handler = vi.fn();
-    const wrapped = withAllocatorAuth(handler as never);
-    const res = await wrapped(mkReq());
-
-    expect(res.status).toBe(403);
-    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(handler).not.toHaveBeenCalled();
-  });
-
-  it("returns 403 when the profile lookup errors out", async () => {
+  it("returns 503 + Cache-Control when the profile lookup errors out (not 403)", async () => {
+    // Silent-failure round-1 fix: a DB blip must NOT surface as 403 with a
+    // "you lost your allocator role" message. Caller sees 503 (retry) and
+    // SRE sees a Sentry breadcrumb.
     maybeSingleMock.mockResolvedValueOnce({
       data: null,
       error: { message: "boom", code: "PGRST000" },
     });
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const handler = vi.fn();
     const wrapped = withAllocatorAuth(handler as never);
     const res = await wrapped(mkReq());
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(503);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await res.json()).toEqual({ error: "Profile lookup failed" });
     expect(handler).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[withAllocatorAuth] profile lookup failed:",
+      expect.objectContaining({
+        user_id: "user-A",
+        code: "PGRST000",
+        message: "boom",
+      }),
+    );
+    consoleSpy.mockRestore();
   });
 
   it("invokes the inner handler with (req, user) when role='allocator'", async () => {
