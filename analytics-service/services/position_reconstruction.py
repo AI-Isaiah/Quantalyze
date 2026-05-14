@@ -62,8 +62,11 @@ async def reconstruct_positions(strategy_id: str | UUID, supabase) -> dict:
     atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
     pg_advisory_xact_lock + migration 119 UNIQUE constraint's
     responsibility (audit-2026-05-07 P1101 caller follow-up)."""
-    # Mirror the SQL advisory lock's text hashing so UUID / str / padded
-    # variants of the same strategy share one lock bucket.
+    # Canonicalize so UUID / str / padded-str representations of the
+    # same strategy all hash to the same in-memory Lock bucket. (This
+    # only needs to be internally consistent across Python callers; the
+    # SQL advisory lock is an independent cross-process defense layer
+    # and does not need to share a key derivation with this lock.)
     strategy_id = str(strategy_id).strip()
     lock = _lock_for(strategy_id)
     # Log on the slow path only — pre-acquire `locked()` checks are racy

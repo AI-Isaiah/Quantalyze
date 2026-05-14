@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.0] - 2026-05-14
+
+### Fixed
+
+- **Reconstruct lock — same-worker serialization for `reconstruct_positions`** (audit-2026-05-07 P1101 caller follow-up). The analytics worker now serializes concurrent same-worker calls to `reconstruct_positions(strategy_id, supabase)` via a per-strategy `asyncio.Lock` registry, closing the watchdog-reclaim-vs-scheduled-tick race where two coroutines could fire the atomic-rebuild RPC for the same strategy concurrently. Cross-process serialization remains the SQL-side `pg_advisory_xact_lock` (migration 113) + `(strategy_id, symbol, side, opened_at)` UNIQUE constraint (migration 119) — the new in-memory lock is defense-in-depth above the SQL boundary, not a replacement.
+- **Lock lifecycle hardening** — `_lock_for` uses `setdefault` to eliminate any TOCTOU window on lazy registry init; `strategy_id` is normalized via `str().strip()` so UUID, str, and padded-str representations of the same strategy share one lock bucket; contention logging is gated on actual wait time (>1s threshold via `time.monotonic`) and emitted as `logger.warning` post-acquire, so routine sub-RTT contention doesn't flood log shipping and the recorded wait time is the real one.
+
+### Added
+
+- **Four load-bearing regression tests** in `TestReconstructIdempotency` (analytics-service/tests/test_position_reconstruction.py): same-strategy serialization (max-in-flight == 1), per-strategy concurrency (max-in-inner == 2 — proves keying), lock release on exception, lock release on `CancelledError`. Each empirically verified to fail under a targeted production regression (remove `async with`, share a global lock, replace `async with` with bare `acquire()`).
+- **Autouse `_reset_reconstruct_locks` fixture** so module-level `_RECONSTRUCT_LOCKS` state cannot leak across tests under pytest-asyncio's function-scope event loop.
+
 ## [0.22.33.0] - 2026-05-14
 
 ### Added
