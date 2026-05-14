@@ -37,16 +37,12 @@ from services.db import db_execute, get_supabase
 
 THRESHOLD_BYTES = 800_000  # 800kB — Phase 12 SC#3a kill-switch trigger.
 
-# The 12 D-01 sibling kinds. equity_series_1y is intentionally NOT here — it stays
-# in metrics_json above-the-fold per H-D (12-REVIEWS.md). Same set as the runner's
-# MetricsResult.sibling_kinds emits in analytics_runner.run_strategy_analytics.
-HEAVY_KINDS: list[str] = [
-    "daily_returns_grid",
-    "rolling_sortino_3m", "rolling_sortino_6m", "rolling_sortino_12m",
-    "rolling_volatility_3m", "rolling_volatility_6m", "rolling_volatility_12m",
-    "rolling_alpha", "rolling_beta",
-    "exposure_series", "turnover_series", "log_returns_series",
-]
+# P2024 (audit-2026-05-07 round 2): the heavy-kind allowlist is no longer
+# encoded in Python. Migration 129's `cutover_strategy_metrics_keys_atomic`
+# RPC defines `v_allowlist` server-side and reads metrics_json under
+# SELECT ... FOR UPDATE — the Python caller never touches the snapshot.
+# Keeping a duplicate list here invites drift; the single source of truth
+# lives in supabase/migrations/129_*.sql.
 
 SQL_PROBE_PATH = Path(__file__).parent / "analyze_metrics_size.sql"
 
@@ -115,61 +111,32 @@ async def measure_p999(
 # --- Cutover logic ---------------------------------------------------------
 
 async def cutover_strategy(strategy_id: str) -> int:
-    """Move heavy keys from metrics_json to the sibling table for one strategy.
+    """Atomic cutover via migration 129's `cutover_strategy_metrics_keys_atomic`.
 
-    Atomic dual-write via the migration 088 RPC `cutover_strategy_metrics_keys`:
-    inserts heavy kinds into `strategy_analytics_series` AND strips them from
-    `strategy_analytics.metrics_json` inside one Postgres function body
-    (single implicit transaction). Partial failure is impossible at the DB
-    level — either both writes commit or both roll back.
+    P2024 (audit-2026-05-07 round 2):
+        The previous flow SELECTed metrics_json over PostgREST, projected a
+        sibling payload in Python, then called the migration 088 RPC with
+        that client-side snapshot. Between the SELECT and the RPC call,
+        analytics_runner could write a NEW metrics_json the cutover wouldn't
+        observe — a race window that could partially drop runner writes.
 
-    T-12-10-01 mitigation: failure of one strategy's cutover does not affect
-    subsequent strategies (each call is independent). Re-running this function
-    is a no-op for strategies that already had their heavy keys moved (the
-    sibling upsert ON CONFLICT DOes UPDATE, the metrics_json strip is a no-op
-    when the keys are already absent).
+        Migration 129's RPC reads metrics_json INSIDE the Postgres function
+        body under SELECT ... FOR UPDATE, copies the v_allowlist heavy keys
+        into strategy_analytics_series, strips them from metrics_json, and
+        returns `jsonb_build_object('moved', <int>)`. The entire read+strip
+        runs under a row lock — no race window vs concurrent writers.
 
-    WR-04 long-term fix: migration 088's `cutover_strategy_metrics_keys` RPC
-    replaces the prior non-atomic two-call pattern (sibling upsert + metrics_json
-    update + Python rollback guard). The atomic RPC eliminates the failure
-    window entirely.
+    Idempotent (per migration 129's contract): a re-run for a strategy whose
+    heavy keys are already in the sibling table is a no-op.
     """
     supabase = get_supabase()
-
     result = await db_execute(
-        lambda: supabase.table("strategy_analytics")
-        .select("metrics_json")
-        .eq("strategy_id", strategy_id)
-        .single()
-        .execute()
-    )
-    if not result.data or not result.data.get("metrics_json"):
-        return 0
-    m = result.data["metrics_json"]
-
-    # Collect heavy-key payloads that are still present in metrics_json.
-    sibling_payload: dict[str, object] = {}
-    for kind in HEAVY_KINDS:
-        if kind in m:
-            sibling_payload[kind] = m[kind]
-
-    if not sibling_payload:
-        return 0
-
-    # Atomic dual-write via migration 088 RPC. The function body's implicit
-    # transaction commits both writes together (sibling INSERT … ON CONFLICT
-    # DO UPDATE + metrics_json - text[]) or rolls both back. No partial state.
-    await db_execute(
         lambda: supabase.rpc(
-            "cutover_strategy_metrics_keys",
-            {
-                "p_strategy_id": strategy_id,
-                "p_kinds": sibling_payload,
-            },
+            "cutover_strategy_metrics_keys_atomic",
+            {"p_strategy_id": strategy_id},
         ).execute()
     )
-
-    return len(sibling_payload)
+    return int((result.data or {}).get("moved", 0))
 
 
 # --- Main ------------------------------------------------------------------
