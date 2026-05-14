@@ -2031,3 +2031,211 @@ async def test_run_strategy_analytics_pins_fills_select_column_list() -> None:
     assert "created_at" not in columns, (
         f"trades schema has no created_at column on fills. Found: {columns!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 round-2 / red-team CRIT-1 + CRIT-2 follow-up:
+# inner `data_quality_flags` from reconstruct_positions and the new
+# turnover-series flags MUST be lifted to the top-level
+# `strategy_analytics.data_quality_flags` column the dashboard reads.
+# Pre-fix, the inner dict was buried inside `trade_metrics.data_quality_flags`
+# (nested JSONB) and the turnover wrapper discarded its flags entirely.
+# ---------------------------------------------------------------------------
+
+
+class TestPositionFlagsPropagateToTopLevel:
+    """Pin the round-trip: position-reconstruction inner flags + turnover
+    flags reach `strategy_analytics.data_quality_flags` in the upsert."""
+
+    @pytest.mark.asyncio
+    async def test_inner_breakeven_and_missing_pnl_flags_reach_top_level(
+        self,
+    ) -> None:
+        """reconstruct_positions returns inner flags
+        `{breakeven_positions: 2, positions_missing_realized_pnl: 1}`. The
+        runner must merge them into the top-level data_quality_flags
+        column (not just leave them nested inside trade_metrics)."""
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        mock_supabase = _build_balance_flag_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(),
+            sa_upsert_calls=sa_upsert_calls,
+            strategy_api_key_id="key-1",
+        )
+
+        # Craft a reconstruct_positions return value containing inner flags.
+        position_flags = {
+            "breakeven_positions": 2,
+            "positions_missing_realized_pnl": 1,
+        }
+        crafted_trade_metrics = {
+            "total_positions": 3,
+            "open_positions": 0,
+            "closed_positions": 3,
+            "win_rate": 0.0,
+            "avg_roi": 0.0,
+            "winners_count": 0,
+            "losers_count": 0,
+            "avg_winning_trade": 0.0,
+            "avg_losing_trade": 0.0,
+            "realized_pnl_per_trade": [],
+            "data_quality_flags": position_flags,
+        }
+
+        async def _mock_reconstruct(*_args, **_kwargs):
+            return crafted_trade_metrics
+
+        async def _mock_exposure(*_args, **_kwargs):
+            return {}
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        with patch(
+            "services.analytics_runner.get_supabase", return_value=mock_supabase
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ), patch(
+            "services.analytics_runner.trades_to_daily_returns_with_status",
+            return_value=(mock_returns, _DEFAULT_RETURNS_META),
+        ), patch(
+            "services.analytics_runner.compute_all_metrics",
+            return_value=mock_metrics,
+        ), patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ), patch(
+            "services.position_reconstruction.reconstruct_positions",
+            side_effect=_mock_reconstruct,
+        ), patch(
+            "services.position_reconstruction.compute_exposure_metrics",
+            side_effect=_mock_exposure,
+        ):
+            result = await run_strategy_analytics("strat-test")
+
+        assert result["status"] == "complete"
+
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        assert successes, f"no success upsert; saw {sa_upsert_calls!r}"
+        top_flags = successes[-1].get("data_quality_flags") or {}
+
+        assert top_flags.get("breakeven_positions") == 2, (
+            f"breakeven_positions must reach top-level data_quality_flags; "
+            f"got top={top_flags}, trade_metrics inner="
+            f"{(successes[-1].get('trade_metrics') or {}).get('data_quality_flags')}"
+        )
+        assert top_flags.get("positions_missing_realized_pnl") == 1, (
+            f"positions_missing_realized_pnl must reach top-level; got {top_flags}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_turnover_gap_dates_flag_reaches_top_level(self) -> None:
+        """The turnover series helper returns `flags['turnover_gap_dates']`.
+        The runner must merge that into the top-level data_quality_flags
+        column. Pre-fix the wrapper `compute_turnover_series` discarded
+        the flags dict entirely."""
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        mock_supabase = _build_balance_flag_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(),
+            sa_upsert_calls=sa_upsert_calls,
+            strategy_api_key_id="key-1",
+        )
+
+        async def _mock_reconstruct(*_args, **_kwargs):
+            return {}
+
+        async def _mock_exposure(*_args, **_kwargs):
+            return {}
+
+        def _mock_turnover_with_flags(*_args, **_kwargs):
+            # Return a tuple matching the new _with_flags contract: the
+            # second element is a flags dict that includes a 2-day-gap
+            # entry. If the runner reverts to calling the bare wrapper
+            # the patched flags are discarded and the assertion below fails.
+            return (
+                [{"date": "2025-01-01", "turnover": 0.0}],
+                {"turnover_gap_dates": ["2025-01-15"]},
+            )
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        with patch(
+            "services.analytics_runner.get_supabase", return_value=mock_supabase
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ), patch(
+            "services.analytics_runner.trades_to_daily_returns_with_status",
+            return_value=(mock_returns, _DEFAULT_RETURNS_META),
+        ), patch(
+            "services.analytics_runner.compute_all_metrics",
+            return_value=mock_metrics,
+        ), patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ), patch(
+            "services.position_reconstruction.reconstruct_positions",
+            side_effect=_mock_reconstruct,
+        ), patch(
+            "services.position_reconstruction.compute_exposure_metrics",
+            side_effect=_mock_exposure,
+        ), patch(
+            "services.position_reconstruction.compute_turnover_series_with_flags",
+            side_effect=_mock_turnover_with_flags,
+        ):
+            result = await run_strategy_analytics("strat-test")
+
+        assert result["status"] == "complete"
+
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        assert successes, f"no success upsert; saw {sa_upsert_calls!r}"
+        top_flags = successes[-1].get("data_quality_flags") or {}
+
+        assert top_flags.get("turnover_gap_dates") == ["2025-01-15"], (
+            f"turnover_gap_dates must reach top-level data_quality_flags. "
+            f"If absent or empty, the runner is still calling the bare wrapper "
+            f"that discards flags. Got: {top_flags}"
+        )

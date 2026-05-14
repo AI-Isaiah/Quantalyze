@@ -50,6 +50,46 @@ from services.transforms import trades_to_daily_returns_with_status
 logger = logging.getLogger("quantalyze.analytics.runner")
 
 
+def _merge_into_top_level_flags(
+    target: dict | None,
+    source: dict | None,
+) -> dict | None:
+    """Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
+    `data_quality_flags` keys (from `reconstruct_positions` and the
+    turnover series) into the top-level `strategy_analytics.data_quality_flags`
+    column the dashboard reads.
+
+    Pre-fix, `reconstruct_positions` returned its aggregated flags inside
+    `trade_metrics.data_quality_flags` (nested JSONB), and the wrapper
+    `compute_turnover_series` discarded its flags entirely. Allocators
+    never saw `breakeven_positions`, `positions_missing_realized_pnl`, or
+    `turnover_gap_dates`. This helper performs the propagation.
+
+    Merge rules (mirror `aggregated_data_quality_flags` in
+    `position_reconstruction.py`):
+      - booleans: OR-merge (any True wins)
+      - ints / floats: sum (counters accumulate)
+      - everything else (e.g. lists, strings): replace (last write wins)
+
+    Returns the (possibly None) target dict. None is preserved when both
+    sides are empty so the upsert payload can keep emitting `null` rather
+    than `{}` for strategies with zero flags.
+    """
+    if not source:
+        return target
+    merged = target if target is not None else {}
+    for k, v in source.items():
+        existing = merged.get(k)
+        if isinstance(v, bool):
+            merged[k] = bool(existing) or v
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            base = existing if isinstance(existing, (int, float)) and not isinstance(existing, bool) else 0
+            merged[k] = base + v
+        else:
+            merged[k] = v
+    return merged
+
+
 async def _load_position_time_series(
     strategy_id: str,
     supabase,
@@ -64,10 +104,10 @@ async def _load_position_time_series(
     has NO `historical_prices` table (verified pre-execution per H-A1 — the
     phantom table from REVIEWS does not exist).
 
-    Outputs feed `compute_turnover_series(positions_by_date, prices_by_date,
-    nav_by_date)` (Plan 12-04) — empty inputs return [] gracefully so a
-    snapshot-less strategy degrades to an empty turnover series rather than
-    a runtime error.
+    Outputs feed `compute_turnover_series_with_flags(positions_by_date,
+    prices_by_date, nav_by_date)` (Plan 12-04, audit-2026-05-07 round-2 /
+    P1995) — empty inputs return ([], {}) gracefully so a snapshot-less
+    strategy degrades to an empty turnover series rather than a runtime error.
 
     Args:
         strategy_id: UUID string of the strategy.
@@ -713,7 +753,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         from services.position_reconstruction import (
             reconstruct_positions,
             compute_exposure_metrics,
-            compute_turnover_series,
+            compute_turnover_series_with_flags,
         )
 
         trade_metrics_from_positions: dict = {}
@@ -883,7 +923,12 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         }
 
         # H-A1: turnover_series from position_snapshots-derived grids.
-        turnover_series = compute_turnover_series(
+        # Audit-2026-05-07 round-2 / P1995 follow-up: use the _with_flags
+        # variant so `turnover_gap_dates` (sparse-calendar flag) reaches
+        # the top-level data_quality_flags below — the wrapper discards
+        # the flags dict and was the silent source of the dashboard not
+        # surfacing the gap signal.
+        turnover_series, turnover_flags = compute_turnover_series_with_flags(
             positions_by_date, prices_by_date, nav_by_date
         )
 
@@ -995,6 +1040,33 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         if returns_meta["balance_error"]:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["balance_error"] = True
+
+        # Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
+        # `data_quality_flags` from reconstruct_positions (breakeven_positions,
+        # positions_missing_realized_pnl, plus pre-existing fills_dropped_no_symbol
+        # and posSide_side_mismatch) AND from the turnover series
+        # (turnover_gap_dates) into the top-level column the dashboard reads.
+        # Pre-fix these were buried inside `trade_metrics.data_quality_flags`
+        # (nested JSONB) or discarded entirely by the wrapper — allocators
+        # never saw the new observability signals the audit fix added.
+        #
+        # The merge does NOT promote `computation_status` to
+        # `complete_with_warnings`: that promotion is gated below on
+        # `used_heuristic_capital` / `balance_error` only (see the long
+        # comment block on the consumer_specific_flags check).
+        inner_position_flags = (
+            (trade_metrics_from_positions or {}).get("data_quality_flags")
+            if isinstance(trade_metrics_from_positions, dict)
+            else None
+        )
+        if inner_position_flags:
+            data_quality_flags = _merge_into_top_level_flags(
+                data_quality_flags, inner_position_flags
+            )
+        if turnover_flags:
+            data_quality_flags = _merge_into_top_level_flags(
+                data_quality_flags, turnover_flags
+            )
 
         # Upgrade computation_status to 'complete_with_warnings' ONLY when
         # one of the consumer-specific flags above fires

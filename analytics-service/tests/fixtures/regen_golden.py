@@ -96,12 +96,39 @@ def _build_input() -> dict:
             "duration_days": 2.0 + (i % 7),
         }
         positions.append(pos)
-        (winners if roi > 0 else losers).append(pos)
+        # Audit-2026-05-07 round-2 / P1994: bucket by sign of
+        # `realized_pnl` (dollars), matching production code at
+        # services/position_reconstruction.py. Pre-fix this script
+        # bucketed by `roi` sign and summed ROI ratios — producing
+        # a golden fixture that documented the broken contract.
+        if realized_pnl > 0:
+            winners.append(pos)
+        elif realized_pnl < 0:
+            losers.append(pos)
+        # realized_pnl == 0 cases skip both buckets (breakeven). The
+        # synthetic data above uses np.random.normal so exact zeros
+        # are vanishingly unlikely, but the bucketing rule still
+        # mirrors production.
         realized_per_trade.append({"side": side, "realized_pnl": realized_pnl})
 
-    win_rate = len(winners) / max(len(positions), 1)
-    avg_win = sum(p["roi"] for p in winners) / max(len(winners), 1) if winners else 0.0
-    avg_loss = sum(p["roi"] for p in losers) / max(len(losers), 1) if losers else 0.0
+    # win_rate denominator: positions with a decided outcome (winner or
+    # loser). Synthetic data here produces no breakevens, so this matches
+    # `len(positions)` — but the formula tracks the production rule for
+    # parity if synthetic data later includes breakevens.
+    decided = len(winners) + len(losers)
+    win_rate = len(winners) / decided if decided > 0 else 0.0
+    # P1994 fix: sum realized_pnl DOLLARS, not ROI ratios. Matches
+    # production at position_reconstruction.py:206-217.
+    avg_win = (
+        sum(p["realized_pnl"] for p in winners) / len(winners)
+        if winners
+        else 0.0
+    )
+    avg_loss = (
+        sum(p["realized_pnl"] for p in losers) / len(losers)
+        if losers
+        else 0.0
+    )
 
     trade_metrics_from_positions = {
         "total_positions": len(positions),

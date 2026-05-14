@@ -180,6 +180,29 @@ export interface AnalyticsDataQualityFlags {
    *  Emitted by analytics_runner.py:980 when the sibling-table batch
    *  upsert RPC fails. Surfaced on the admin compute-jobs page. */
   sibling_kinds_error?: string;
+  /** Audit-2026-05-07 round-2 / P1994: count of closed positions with
+   *  `realized_pnl == 0.0` (exit price equals entry, no fees). Pre-fix
+   *  the runner's `roi <= 0` bucketing lumped these into the losers
+   *  bucket, depressing avg_losing_trade. Emitted by
+   *  position_reconstruction.py and lifted to the top-level column by
+   *  analytics_runner.py so allocators can distinguish "won/lost" from
+   *  "neither". Absent when zero. */
+  breakeven_positions?: number;
+  /** Audit-2026-05-07 round-2 / P1994: count of closed positions whose
+   *  `realized_pnl` is null in the source data — a data-integrity hole
+   *  worth surfacing rather than silently coercing to zero. Pre-fix
+   *  these were silently bucketed as losers via `(roi or 0) <= 0`.
+   *  Absent when zero. */
+  positions_missing_realized_pnl?: number;
+  /** Audit-2026-05-07 round-2 / P1995: list of dates whose row in the
+   *  turnover series spans more than one calendar day (sparse-day
+   *  artifact — multi-day position delta divided by single-day NAV).
+   *  Downstream consumers can decide whether to drop, smooth, or
+   *  normalize the affected rows. Emitted by
+   *  compute_turnover_series_with_flags via analytics_runner.py.
+   *  Note: Quantalyze is crypto-first (24/7 markets, no weekends), so
+   *  any gap > 1 day is a real data hole. Absent when no gaps. */
+  turnover_gap_dates?: string[];
 }
 
 export interface VolumeMetrics {
