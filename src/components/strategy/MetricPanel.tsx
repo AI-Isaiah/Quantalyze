@@ -107,24 +107,14 @@ function buildGroups(a: StrategyAnalytics): MetricGroup[] {
         if (tm == null) return [];
         const total = tm.total_positions;
         const longShare = total > 0 ? tm.long_count / total : null;
-        const mix = tm.trade_mix;
         // Maker Share is only computable when the producer emits the full
         // 4-bucket trade_mix (OKX maker/taker reliable). A partial payload
         // would silently fabricate a confident percentage from incomplete data.
-        const has4Bucket =
-          !!mix &&
-          mix.long_maker !== undefined &&
-          mix.long_taker !== undefined &&
-          mix.short_maker !== undefined &&
-          mix.short_taker !== undefined;
+        const { long_maker, long_taker, short_maker, short_taker } = tm.trade_mix ?? {};
         let makerShare: number | null = null;
-        if (has4Bucket && mix) {
-          const lm = mix.long_maker!.count;
-          const lt = mix.long_taker!.count;
-          const sm = mix.short_maker!.count;
-          const st = mix.short_taker!.count;
-          const mixTotal = lm + lt + sm + st;
-          makerShare = mixTotal > 0 ? (lm + sm) / mixTotal : null;
+        if (long_maker && long_taker && short_maker && short_taker) {
+          const mixTotal = long_maker.count + long_taker.count + short_maker.count + short_taker.count;
+          makerShare = mixTotal > 0 ? (long_maker.count + short_maker.count) / mixTotal : null;
         }
         const rows: MetricGroup["metrics"] = [
           { label: "Total Positions", value: total.toLocaleString() },

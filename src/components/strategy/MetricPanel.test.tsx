@@ -46,6 +46,28 @@ const makeAnalytics = (overrides?: Partial<StrategyAnalytics>): StrategyAnalytic
   ...overrides,
 });
 
+const makeTradeMetrics = (overrides?: Partial<TradeMetrics>): TradeMetrics => ({
+  total_positions: 0,
+  closed_positions: 0,
+  open_positions: 0,
+  win_rate: 0,
+  avg_roi: 0,
+  avg_duration_days: 0,
+  long_count: 0,
+  short_count: 0,
+  best_trade_roi: 0,
+  worst_trade_roi: 0,
+  expectancy: null,
+  risk_reward_ratio: null,
+  weighted_risk_reward_ratio: null,
+  sqn: null,
+  profit_factor_long: null,
+  profit_factor_short: null,
+  ...overrides,
+});
+
+const tradeMetricsChip = () => within(screen.getByTestId("metric-group-Trade Metrics"));
+
 describe("MetricPanel", () => {
   it("renders main metrics group", () => {
     render(<MetricPanel analytics={makeAnalytics()} />);
@@ -100,10 +122,9 @@ describe("MetricPanel", () => {
   });
 
   it("Trade Metrics chip renders actual values from TradeMetrics (4-bucket trade_mix)", () => {
-    const tm: TradeMetrics = {
+    const tm = makeTradeMetrics({
       total_positions: 100,
       closed_positions: 100,
-      open_positions: 0,
       win_rate: 0.62,
       avg_roi: 0.03,
       avg_duration_days: 4.2,
@@ -123,11 +144,11 @@ describe("MetricPanel", () => {
         short_maker: { count: 20, total_notional: 20_000 },
         short_taker: { count: 20, total_notional: 20_000 },
       },
-    };
+    });
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+    const scoped = tradeMetricsChip();
 
     expect(scoped.getByText("Total Positions")).toBeInTheDocument();
     expect(scoped.getByText("Win Rate")).toBeInTheDocument();
@@ -145,32 +166,21 @@ describe("MetricPanel", () => {
   });
 
   it("Trade Metrics chip omits Maker Share when trade_mix is 2-bucket", () => {
-    const tm: TradeMetrics = {
+    const tm = makeTradeMetrics({
       total_positions: 50,
       closed_positions: 50,
-      open_positions: 0,
       win_rate: 0.5,
-      avg_roi: 0,
-      avg_duration_days: 2,
       long_count: 30,
       short_count: 20,
-      best_trade_roi: 0.1,
-      worst_trade_roi: -0.1,
-      expectancy: null,
-      risk_reward_ratio: null,
-      weighted_risk_reward_ratio: null,
-      sqn: null,
-      profit_factor_long: null,
-      profit_factor_short: null,
       trade_mix: {
         long: { count: 30, total_notional: 30_000 },
         short: { count: 20, total_notional: 20_000 },
       },
-    };
+    });
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+    const scoped = tradeMetricsChip();
 
     expect(scoped.getByText("Long Share")).toBeInTheDocument();
     expect(scoped.getByText("+60.00%")).toBeInTheDocument();
@@ -178,89 +188,47 @@ describe("MetricPanel", () => {
   });
 
   it("Trade Metrics chip omits Maker Share when trade_mix is absent", () => {
-    const tm: TradeMetrics = {
+    const tm = makeTradeMetrics({
       total_positions: 10,
       closed_positions: 10,
-      open_positions: 0,
       win_rate: 0.4,
-      avg_roi: 0,
-      avg_duration_days: 1,
       long_count: 4,
       short_count: 6,
-      best_trade_roi: 0.05,
-      worst_trade_roi: -0.05,
-      expectancy: null,
-      risk_reward_ratio: null,
-      weighted_risk_reward_ratio: null,
-      sqn: null,
-      profit_factor_long: null,
-      profit_factor_short: null,
-    };
+    });
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
-
-    expect(scoped.queryByText("Maker Share")).not.toBeInTheDocument();
+    expect(tradeMetricsChip().queryByText("Maker Share")).not.toBeInTheDocument();
   });
 
   it("Trade Metrics chip omits Maker Share when trade_mix is partial 4-bucket", () => {
     // Producer drift: only long_maker emitted, other 3 buckets missing.
     // Without the all-4-buckets gate, this would fabricate a confident
     // "+100.00% Maker Share" from incomplete data; chip must suppress the row.
-    const tm: TradeMetrics = {
+    const tm = makeTradeMetrics({
       total_positions: 30,
       closed_positions: 30,
-      open_positions: 0,
       win_rate: 0.5,
-      avg_roi: 0,
-      avg_duration_days: 1,
       long_count: 15,
       short_count: 15,
-      best_trade_roi: 0.05,
-      worst_trade_roi: -0.05,
-      expectancy: null,
-      risk_reward_ratio: null,
-      weighted_risk_reward_ratio: null,
-      sqn: null,
-      profit_factor_long: null,
-      profit_factor_short: null,
       trade_mix: {
         long_maker: { count: 30, total_notional: 30_000 },
       },
-    };
+    });
     render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+    const scoped = tradeMetricsChip();
 
     expect(scoped.queryByText("Maker Share")).not.toBeInTheDocument();
     expect(scoped.queryByText("+100.00%")).not.toBeInTheDocument();
   });
 
   it("Trade Metrics chip renders 0 literally for total_positions = 0", () => {
-    const tm: TradeMetrics = {
-      total_positions: 0,
-      closed_positions: 0,
-      open_positions: 0,
-      win_rate: 0,
-      avg_roi: 0,
-      avg_duration_days: 0,
-      long_count: 0,
-      short_count: 0,
-      best_trade_roi: 0,
-      worst_trade_roi: 0,
-      expectancy: null,
-      risk_reward_ratio: null,
-      weighted_risk_reward_ratio: null,
-      sqn: null,
-      profit_factor_long: null,
-      profit_factor_short: null,
-    };
-    render(<MetricPanel analytics={makeAnalytics({ trade_metrics: tm })} />);
+    render(<MetricPanel analytics={makeAnalytics({ trade_metrics: makeTradeMetrics() })} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+    const scoped = tradeMetricsChip();
 
     // "0" must distinguish "no positions yet" from "no data" ("—").
     expect(scoped.getByText("0")).toBeInTheDocument();
@@ -284,30 +252,16 @@ describe("MetricPanel", () => {
         alpha: 0.05,
         beta: 0.8,
       },
-      trade_metrics: {
+      trade_metrics: makeTradeMetrics({
         total_positions: 150,
-        open_positions: 0,
         closed_positions: 150,
         win_rate: 0.55,
-        avg_roi: 0.0,
-        avg_duration_days: 0,
-        long_count: 0,
-        short_count: 0,
-        best_trade_roi: 0.0,
-        worst_trade_roi: 0.0,
-        expectancy: null,
-        risk_reward_ratio: null,
-        weighted_risk_reward_ratio: null,
-        sqn: null,
-        profit_factor_long: null,
-        profit_factor_short: null,
-        trade_mix: undefined,
-      },
+      }),
     });
     render(<MetricPanel analytics={fullAnalytics} />);
     fireEvent.click(screen.getByText("Trade Metrics"));
 
-    const scoped = within(screen.getByTestId("metric-group-Trade Metrics"));
+    const scoped = tradeMetricsChip();
 
     // Pin the chip actually rendered (a regression that nulled the group out
     // would have passed the old `querySelector("div")` assertion).

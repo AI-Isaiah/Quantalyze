@@ -16,26 +16,17 @@ type _MetricPanelTradeMixFields =
   | NonNullable<TradeMixBuckets["short_maker"]>["count"]
   | NonNullable<TradeMixBuckets["short_taker"]>["count"];
 
-// Width pins: fail if a field is widened (e.g. number → number | null), which
-// would let MetricPanel silently absorb the drift instead of failing tsc.
 type _TotalPositionsIsNumber = TradeMetrics["total_positions"] extends number ? true : false;
 type _LongCountIsNumber = TradeMetrics["long_count"] extends number ? true : false;
 type _WinRateIsNumber = TradeMetrics["win_rate"] extends number ? true : false;
 type _BucketCountIsNumber = TradeMixBucket["count"] extends number ? true : false;
-const _totalPositionsIsNumber: _TotalPositionsIsNumber = true;
-const _longCountIsNumber: _LongCountIsNumber = true;
-const _winRateIsNumber: _WinRateIsNumber = true;
-const _bucketCountIsNumber: _BucketCountIsNumber = true;
+const _widthPins: _TotalPositionsIsNumber & _LongCountIsNumber & _WinRateIsNumber & _BucketCountIsNumber = true;
 
-// Exported references so the unused-type checker doesn't elide the guard.
-export type _MetricPanelContract =
-  | _MetricPanelTradeFields
-  | _MetricPanelTradeMixFields;
+// Exported so the unused-type checker doesn't elide the guard.
+export type _MetricPanelContract = _MetricPanelTradeFields | _MetricPanelTradeMixFields;
 
 describe("MetricPanel TradeMetrics contract", () => {
-  // No-op at runtime — exists so vitest picks up the file and the type-level
-  // guards above are compiled.
   it("compiles against the live TradeMetrics shape", () => {
-    expect(_totalPositionsIsNumber && _longCountIsNumber && _winRateIsNumber && _bucketCountIsNumber).toBe(true);
+    expect(_widthPins).toBe(true);
   });
 });
