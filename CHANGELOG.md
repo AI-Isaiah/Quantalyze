@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.32.0] - 2026-05-14
+
+### Fixed
+
+- **MetricPanel Trade Metrics chip — round-2-F audit hardening (P2035)** — The Trade Metrics chip on the strategy detail page now reads real fields off `TradeMetrics` and renders honestly when the data is incomplete. Six issues addressed in one round:
+  - **Partial 4-bucket payloads no longer fabricate a confident Maker Share** — the gate previously accepted any payload with `long_maker` OR `short_maker` defined, so a producer drift emitting only `long_maker` would render "+100.00% Maker Share" from incomplete data. Now requires all four buckets (`long_maker`, `long_taker`, `short_maker`, `short_taker`) before computing — partial mixes hide the row.
+  - **Total Positions = 0 renders `0` literally** — pre-fix the chip rendered "—" for both "no positions yet" and "missing data", merging two operationally distinct states into one indistinguishable glyph. New strategies with zero closed positions now show "0"; "—" is reserved for genuinely-nullish values.
+  - **Dropped the silent `as TradeMetrics | null` cast** on `a.trade_metrics` — the source field is already typed; the cast was papering over any future widening (the same class of bug that produced P2035 originally).
+  - **Type-guard now pins `trade_mix` key + field widths** — `MetricPanel.types.test.ts` previously only pinned field names. A widening of `total_positions`/`long_count`/`win_rate` from `number` to `number | null` would have slipped past. New width pins (`extends number ? true : false`) fail `tsc --noEmit` on any drift.
+  - **Stable `data-testid` on accordion wrapper** — replaces brittle `heading.parentElement` test scoping. Survives DOM-structure refactors.
+  - **Accordion accessibility** — added `aria-expanded` / `aria-controls` to the toggle button, `role="region"` + `aria-label` to the body, and `aria-hidden="true"` to the chevron. Pre-existing gap surfaced by the design specialist; fixed while touching the wrapper.
+
+### Changed
+
+- **MetricPanel test fixtures consolidated** — five inline 17-field `TradeMetrics` literals replaced with a shared `makeTradeMetrics(overrides?)` helper mirroring the existing `makeAnalytics` pattern. Test bodies dropped from ~80 lines of filler to 2–4 fields each. Future `TradeMetrics` schema changes need updating in one place, not five.
+
 ## [0.22.31.0] - 2026-05-14
 
 ### Fixed
