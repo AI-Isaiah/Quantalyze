@@ -23,7 +23,7 @@
  * remains in the DOM (the disable gate, not unmount, blocks double-clicks).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   REJECTION_REASONS,
@@ -144,15 +144,6 @@ export function ScenarioCommitDrawer({
     return () => clearTimeout(t);
   }, [state.kind, onSubmitSuccess, onClose]);
 
-  // Reset the Idempotency-Key whenever the diffs identity changes (i.e. a
-  // genuinely new batch) so retries within the same batch share a key but
-  // a new batch gets a fresh one. `diffs` is constructed fresh by the
-  // composer each commit gesture, so reference identity is a stable proxy
-  // for "new batch."
-  useEffect(() => {
-    idempotencyKeyRef.current = null;
-  }, [diffs]);
-
   if (!isOpen) return null;
 
   const removed = diffs.filter((d) => d.kind === "voluntary_remove");
@@ -175,8 +166,8 @@ export function ScenarioCommitDrawer({
   );
 
   // Single source of truth for the user-visible error banner.
-  //   - partial-commit: server returned ok with recorded < diffs.length;
-  //     surface explicit "do NOT retry" copy with the recorded count.
+  //   - partial: server returned ok with a recorded count != diffs.length
+  //     (single-tx contract violation, both under- and over-counts).
   //   - orphan errors: network / parse failures keyed at index -1.
   //   - generic top-level error string (Zod 400 etc) with no errors list.
   //   - row-only failures: rowMatchedErrors carry per-row copy; no banner.
@@ -184,10 +175,11 @@ export function ScenarioCommitDrawer({
     if (state.kind !== "failure") return null;
     if (state.failureReason === "partial") {
       const recorded = state.response?.recorded ?? 0;
+      const direction = recorded > diffs.length ? "over-recorded" : "partial";
       return (
-        `Partial commit detected — ${recorded} of ${diffs.length} decisions recorded. ` +
-        "Do NOT retry from this drawer — the recorded rows would be double-committed. " +
-        "Review the Outcomes timeline and record any missing decisions there."
+        `Server reported ${recorded} of ${diffs.length} recorded (${direction} — single-transaction contract violated). ` +
+        "Do NOT retry from this drawer — retrying would compound the discrepancy. " +
+        "Review the Outcomes timeline and record any missing decisions there, or contact support."
       );
     }
     if (orphanErrorMessages.length > 0) return orphanErrorMessages.join(" ");
@@ -199,8 +191,9 @@ export function ScenarioCommitDrawer({
   })();
 
   // Submit-all is enabled only when every diff has the user-input fields the
-  // route schema requires.
-  const allFilled = useMemo(() => {
+  // route schema requires. Inline (not useMemo) so it sits below the
+  // `if (!isOpen) return null` early return without breaking hooks order.
+  const allFilled = (() => {
     for (let i = 0; i < diffs.length; i++) {
       const d = diffs[i];
       const r = perRow[i];
@@ -224,7 +217,7 @@ export function ScenarioCommitDrawer({
       }
     }
     return true;
-  }, [diffs, perRow]);
+  })();
 
   function setRow(idx: number, patch: PerRowState) {
     setPerRow((prev) => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
@@ -342,16 +335,17 @@ export function ScenarioCommitDrawer({
       return;
     }
 
-    // Partial commit (server returned 2xx with recorded < diffs.length, no
-    // per-row error list). Violates the single-tx contract and is the one
-    // case where the user MUST NOT retry: the recorded rows are already in
-    // the DB and a second submit would double-commit them. Surface with
-    // explicit non-retry copy.
-    const isPartial =
-      res.ok && json.recorded < diffs.length && noErrors;
+    // Single-tx contract violation: server returned 2xx with a recorded
+    // count that does not equal diffs.length. Both directions are dangerous:
+    //   - recorded < length: some rows landed; retrying double-commits them.
+    //   - recorded > length: server over-reported (off-by-one / double-count
+    //     bug); retrying compounds the over-recording.
+    // Either way the user MUST NOT retry from this drawer.
+    const isContractViolation =
+      res.ok && json.recorded !== diffs.length && noErrors;
     setState({
       kind: "failure",
-      failureReason: isPartial ? "partial" : "generic",
+      failureReason: isContractViolation ? "partial" : "generic",
       response: json,
     });
   }

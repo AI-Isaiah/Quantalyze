@@ -974,6 +974,112 @@ describe("response body is not valid JSON", () => {
 // copy so the user doesn't double-commit the rows that landed.
 // ===========================================================================
 
+describe("partial-commit detection — over-recorded direction (server bug)", () => {
+  it("recorded > diffs.length on a 2xx with no errors → flagged as contract violation with do-NOT-retry copy", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        // 1 diff submitted, 5 reported recorded — server bug (double-count).
+        JSON.stringify({ recorded: 5, results: [], errors: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const onSubmitSuccess = vi.fn();
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={onSubmitSuccess}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("commit-drawer-error")).toBeInTheDocument();
+    });
+    const err = screen.getByTestId("commit-drawer-error");
+    expect(err.getAttribute("data-failure-reason")).toBe("partial");
+    expect(err.textContent).toMatch(/do NOT retry/i);
+    expect(err.textContent).toMatch(/over-recorded/i);
+    expect(err.textContent).toMatch(/5 of 1/i);
+    expect(onSubmitSuccess).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("Idempotency-Key reset on close → reopen (new batch gets a fresh key)", () => {
+  it("closing the drawer and reopening with the same diffs content mints a NEW key", async () => {
+    vi.useRealTimers();
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ recorded: 0, results: [], errors: [{ index: 0, error: "x" }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { rerender } = render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    let preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Close, then reopen — same diffs reference, but isOpen flips, which
+    // is the "new batch starts" signal.
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen={false}
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+    rerender(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+      />,
+    );
+
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    const k1 = getIdempotencyHeader(fetchSpy.mock.calls[0]);
+    const k2 = getIdempotencyHeader(fetchSpy.mock.calls[1]);
+    expect(k1).toBeTruthy();
+    expect(k2).toBeTruthy();
+    expect(k1).not.toBe(k2);
+
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("partial-commit detection (server returned ok with recorded < diffs.length)", () => {
   it("surfaces an explicit do-NOT-retry message and tags the error region with data-failure-reason='partial'", async () => {
     vi.useRealTimers();
