@@ -206,8 +206,8 @@ describe("MetricPanel", () => {
 
   it("Trade Metrics chip omits Maker Share when trade_mix is partial 4-bucket", () => {
     // Producer drift: only long_maker emitted, other 3 buckets missing.
-    // Pre-fix this fabricated a confident "+100.00% Maker Share" from
-    // incomplete data; chip must now suppress the row entirely.
+    // Without the all-4-buckets gate, this would fabricate a confident
+    // "+100.00% Maker Share" from incomplete data; chip must suppress the row.
     const tm: TradeMetrics = {
       total_positions: 30,
       closed_positions: 30,
