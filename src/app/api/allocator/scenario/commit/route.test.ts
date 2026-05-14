@@ -288,7 +288,11 @@ describe("happy paths — per-kind RPC delegation", () => {
     );
   });
 
-  it("T_R7: voluntary_modify → RPC invoked with new_weight", async () => {
+  it("T_R7: voluntary_modify(legacy new_weight) → RPC invoked with percent_allocated = new_weight * 100, no new_weight key", async () => {
+    // P1956 (audit-2026-05-07 round 2): route.ts normalises new_weight → percent_allocated
+    // before forwarding to the RPC. Migration 128 dropped the SQL COALESCE
+    // fallback, so this transition shim is the single canonical encoding
+    // path until Block C/D's drawer/adapter stops emitting new_weight.
     mockRpc.mockResolvedValueOnce({
       data: {
         ok: true,
@@ -306,12 +310,90 @@ describe("happy paths — per-kind RPC delegation", () => {
 
     const res = await POST(mkReq({ diffs: [VALID_VM] }));
     expect(res.status).toBe(200);
-    expect(mockRpc).toHaveBeenCalledWith(
-      "commit_scenario_batch",
-      expect.objectContaining({
-        p_diffs: [expect.objectContaining({ kind: "voluntary_modify", new_weight: 0.08 })],
-      }),
-    );
+    const [, payload] = (mockRpc.mock.calls[0] ?? []) as [unknown, { p_diffs: Array<Record<string, unknown>> }];
+    const vm = payload.p_diffs[0];
+    expect(vm.kind).toBe("voluntary_modify");
+    expect(vm.percent_allocated).toBeCloseTo(8, 10); // 0.08 * 100 = 8 (P1956 canonical encoding)
+    expect("new_weight" in vm).toBe(false); // P1956: new_weight stripped before RPC
+  });
+
+  it("T_R7b: voluntary_modify(percent_allocated direct) → RPC invoked with percent_allocated unchanged", async () => {
+    // P1956: the canonical post-Block-D wire shape. Client sends percent_allocated
+    // directly; route.ts forwards as-is. Verified here so the future zod
+    // tightening (drop new_weight, require percent_allocated) doesn't break
+    // the contract being established now.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-vm-2",
+            bridge_outcome_id: "bo-vm-2",
+            kind: "voluntary_modify",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const VALID_VM_PCT = {
+      kind: "voluntary_modify" as const,
+      holding_ref: "holding:binance:BTC-USDT:spot",
+      percent_allocated: 12.5,
+      size_at_decision_usd: 1000,
+    };
+
+    const res = await POST(mkReq({ diffs: [VALID_VM_PCT] }));
+    expect(res.status).toBe(200);
+    const [, payload] = (mockRpc.mock.calls[0] ?? []) as [unknown, { p_diffs: Array<Record<string, unknown>> }];
+    expect(payload.p_diffs[0]).toMatchObject({ kind: "voluntary_modify", percent_allocated: 12.5 });
+    expect("new_weight" in (payload.p_diffs[0] as object)).toBe(false);
+  });
+
+  it("T_R7c: voluntary_modify(neither new_weight nor percent_allocated) → 400, RPC not called", async () => {
+    // The schema allows both fields optional, so the at-least-one check is
+    // enforced imperatively in the POST handler. Discriminated-union members
+    // must be ZodObjects (no .refine), hence the imperative validation.
+    const VALID_VM_MISSING = {
+      kind: "voluntary_modify" as const,
+      holding_ref: "holding:binance:BTC-USDT:spot",
+      size_at_decision_usd: 1000,
+    };
+
+    const res = await POST(mkReq({ diffs: [VALID_VM_MISSING] }));
+    expect(res.status).toBe(400);
+    expect(mockRpc).not.toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.error).toMatch(/Invalid request body/);
+  });
+
+  it("T_R7d: voluntary_modify(both fields) → percent_allocated wins, new_weight ignored", async () => {
+    // Defensive: if a transitional client sends both, the canonical field
+    // (percent_allocated) wins. Eliminates encoding ambiguity.
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          { index: 0, match_decision_id: "md-vm-3", bridge_outcome_id: "bo-vm-3", kind: "voluntary_modify" },
+        ],
+      },
+      error: null,
+    });
+
+    const VALID_VM_BOTH = {
+      kind: "voluntary_modify" as const,
+      holding_ref: "holding:binance:BTC-USDT:spot",
+      new_weight: 0.5, // would map to 50
+      percent_allocated: 25, // canonical — wins
+      size_at_decision_usd: 1000,
+    };
+
+    const res = await POST(mkReq({ diffs: [VALID_VM_BOTH] }));
+    expect(res.status).toBe(200);
+    const [, payload] = (mockRpc.mock.calls[0] ?? []) as [unknown, { p_diffs: Array<Record<string, unknown>> }];
+    expect(payload.p_diffs[0]).toMatchObject({ kind: "voluntary_modify", percent_allocated: 25 });
+    expect("new_weight" in (payload.p_diffs[0] as object)).toBe(false);
   });
 });
 

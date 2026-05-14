@@ -90,10 +90,21 @@ const VoluntaryAddDiff = z.object({
   note: z.string().max(2000).nullish(),
 });
 
+// P1956 (audit-2026-05-07 round 2): single canonical percent encoding.
+// Migration 128 removed the SQL-side `COALESCE(percent_allocated, new_weight*100)`
+// fallback, so the RPC reads ONLY `percent_allocated`. This zod schema accepts
+// either `new_weight` (legacy, 0..1 fraction) OR `percent_allocated` (0..100)
+// — the POST handler below validates at-least-one is set and normalises both
+// shapes into `percent_allocated` before the RPC call. Discriminated-union
+// constraints (each member must be a ZodObject) prevent putting the
+// at-least-one check via `.refine()`, so we do it imperatively post-parse.
+// Once Block C/D's drawer + adapter retarget lands and stops emitting
+// `new_weight`, this dual-shape can collapse to `percent_allocated` required.
 const VoluntaryModifyDiff = z.object({
   kind: z.literal("voluntary_modify"),
   holding_ref: z.string().regex(HOLDING_REF_RE),
-  new_weight: z.number().min(0).max(1),
+  new_weight: z.number().min(0).max(1).optional(),
+  percent_allocated: z.number().min(0).max(100).optional(),
   size_at_decision_usd: z.number().nonnegative(),
   effective_date: z.string().date().optional(),
   note: z.string().max(2000).nullish(),
@@ -160,6 +171,45 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
     );
   }
 
+  // P1956 (audit-2026-05-07 round 2): single canonical percent encoding.
+  // Migration 128 dropped the SQL-side `new_weight * 100` fallback — the RPC
+  // now reads ONLY `percent_allocated`. The VoluntaryModifyDiff schema accepts
+  // either shape; here we normalise into `percent_allocated`, returning 400
+  // if a voluntary_modify diff has neither (the schema allows this state so
+  // we have to enforce at-least-one imperatively — discriminated unions
+  // require each member to be a ZodObject, no `.refine()`).
+  const normalisedDiffs: typeof parsed.data.diffs = [];
+  for (let i = 0; i < parsed.data.diffs.length; i++) {
+    const d = parsed.data.diffs[i];
+    if (d.kind === "voluntary_modify") {
+      const hasPct = d.percent_allocated !== undefined;
+      const hasWeight = d.new_weight !== undefined;
+      if (!hasPct && !hasWeight) {
+        return NextResponse.json(
+          {
+            error: "Invalid request body",
+            issues: [
+              {
+                code: "custom",
+                path: ["diffs", i, "percent_allocated"],
+                message:
+                  "voluntary_modify requires either new_weight or percent_allocated",
+              },
+            ],
+          },
+          { status: 400 },
+        );
+      }
+      // percent_allocated wins when both are present (legacy clients sending
+      // both should be deterministic on the canonical field).
+      const pct = hasPct ? d.percent_allocated! : (d.new_weight as number) * 100;
+      const { new_weight: _drop, ...rest } = d;
+      normalisedDiffs.push({ ...rest, percent_allocated: pct });
+    } else {
+      normalisedDiffs.push(d);
+    }
+  }
+
   const supabase = await createClient();
 
   // H4 — single Postgres transaction via SECURITY DEFINER RPC. Invoked through
@@ -171,7 +221,7 @@ export const POST = withAuth(async (req: NextRequest, user: User): Promise<NextR
   // partial state — full-success or full-failure.
   const { data: rpcData, error: rpcErr } = await supabase.rpc(
     "commit_scenario_batch",
-    { p_allocator_id: user.id, p_diffs: parsed.data.diffs },
+    { p_allocator_id: user.id, p_diffs: normalisedDiffs },
   );
 
   if (rpcErr) {

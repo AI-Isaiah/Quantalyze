@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.27.0] - 2026-05-13
+
+### Fixed
+
+- **Scenario commit batch — single percent encoding (P1956)** — Migration 128 replaces `commit_scenario_batch` (uuid, jsonb) to drop the `COALESCE(percent_allocated, new_weight * 100)` dual-encoding in the voluntary_modify branch. The function now reads `percent_allocated` directly so the wire shape between API and SQL is unambiguous. Adds a NOT VALID + VALIDATE range CHECK `bridge_outcomes_percent_allocated_range_check` (0..100) as defense-in-depth alongside the stricter mig-059 inline CHECK (0.1..50). The `/api/allocator/scenario/commit` route normalises legacy `new_weight: 0.08` payloads into `percent_allocated: 8` before forwarding to the RPC, so existing clients keep working while Block C/D's drawer/adapter migrates to the canonical shape.
+- **Scenario commit batch — divested-holding probe (P1957)** — All three ownership probes (voluntary_remove, voluntary_modify, bridge_recommended) now filter to `asof = (MAX asof for that holding) AND value_usd > 0`. A divested allocator (most-recent allocator_holdings row has value_usd = 0) can no longer manufacture diffs against a holding they no longer own.
+- **Atomic strategy_analytics cutover (P2046 / P2047)** — Migration 129 replaces `cutover_strategy_metrics_keys(uuid, jsonb)` with `cutover_strategy_metrics_keys_atomic(uuid)`. The 12 heavy-kind allowlist now lives server-side in `v_allowlist` (callers can no longer widen it — P2046) and the read+strip runs inside one Postgres function body under `SELECT ... FOR UPDATE` so analytics_runner cannot race the snapshot (P2047). `GET DIAGNOSTICS rowcount = 1` plus a missing-strategy P0002 raise keep the contract fail-loud.
+- **Phase 12 kill-switch retargeted (P2024)** — `analytics-service/scripts/phase12_kill_switch.py` `cutover_strategy()` delegates the entire read+strip to the new atomic RPC with `p_strategy_id` only; the Python-side `HEAVY_KINDS` constant is gone so there is one source of truth (the SQL `v_allowlist`). New unit tests pin the contract: RPC name, single-arg signature, no client-side `SELECT metrics_json`, no resurrected `HEAVY_KINDS` constant.
+
+### Added
+
+- **SQL self-tests for migrations 128/129** — Four new `supabase/tests/test_*.sql` files exercise the new function bodies under `psql -v ON_ERROR_STOP=1`: percent-range CHECK at -1/0/100 boundaries with mig-128-vs-mig-059 isolation, P1957 divested-holding rejection, auth + input validation across all four diff kinds, and the atomic cutover happy path + idempotent replay (both replay-from-empty and replay-after-move=1).
+- **Multi-session concurrency tests** — `tests/integration/mig-129-cutover-concurrency.test.ts` and `mig-128-batch-concurrency.test.ts` use two service-role Supabase clients to exercise the FOR UPDATE serialisation in cutover and the ON CONFLICT race in bridge_recommended. Gated on `SUPABASE_TEST_URL` so local runs skip cleanly; CI exercises them.
+
 ## [0.22.26.1] - 2026-05-13
 
 ### Fixed
