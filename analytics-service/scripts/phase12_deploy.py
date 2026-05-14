@@ -19,12 +19,13 @@ starve sync_trades — the migration 086 RPC's ORDER BY + low-skip guard pace it
 
 Usage:
     cd analytics-service
-    python -m scripts.phase12_deploy
-    SKIP_KILL_SWITCH=1 python -m scripts.phase12_deploy   # bypass kill-switch
+    python -m scripts.phase12_deploy                          # kill-switch OFF by default (P2021)
+    RUN_KILL_SWITCH=true python -m scripts.phase12_deploy     # enable kill-switch
 """
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import subprocess
@@ -54,24 +55,26 @@ def _read_trade_mix_flag_from_todos() -> str:
     based on the is_maker coverage audit. We read it back here verbatim and
     propagate to .env.test for CI consumption.
 
-    Default 'false' on absent file or unmatched line — CI defaults to the safer
-    2-bucket Trade Mix path rather than booting the 4-bucket reader against
-    incomplete fixture data.
+    Fails loud (SystemExit) when TODOS.md is absent or the line is missing.
+    The audit decision must be explicit — a silent "false" default would
+    let a misconfigured deploy environment run parity tests against the
+    2-bucket path even when the strategy has maker/taker data.
     """
     if not TODOS_PATH.exists():
-        print(
-            f"phase12_deploy: WARNING — TODOS.md not found at {TODOS_PATH}; "
-            f"defaulting TRADE_MIX_HAS_MAKER_TAKER=false"
+        raise SystemExit(
+            f"phase12_deploy: TODOS.md not found at {TODOS_PATH}. "
+            f"The TRADE_MIX_HAS_MAKER_TAKER audit decision is required; "
+            f"either provide TODOS.md or pass the flag via env "
+            f"(TRADE_MIX_HAS_MAKER_TAKER=true|false)."
         )
-        return "false"
     text = TODOS_PATH.read_text()
     m = re.search(r"TRADE_MIX_HAS_MAKER_TAKER\s*=\s*(true|false)", text)
     if not m:
-        print(
-            "phase12_deploy: WARNING — TRADE_MIX_HAS_MAKER_TAKER not found in "
-            "TODOS.md; defaulting to false"
+        raise SystemExit(
+            f"phase12_deploy: TRADE_MIX_HAS_MAKER_TAKER line missing from "
+            f"{TODOS_PATH}. The audit decision must be explicit — refusing "
+            f"to default a flag that governs Trade Mix bucketing in CI."
         )
-        return "false"
     return m.group(1)
 
 
@@ -98,11 +101,34 @@ def _write_env_test(flag: str) -> None:
 
 # --- M-03: SQL probe -------------------------------------------------------
 
+def _parse_probe_value(raw: str) -> float:
+    """Reject NaN/inf/negative probe values — they would poison the
+    threshold compare. Empty/missing is rejected too (NULL row must not
+    silently become 0.0). Normalizes float("-0") → 0.0.
+    """
+    if raw is None or raw == "":
+        raise ValueError("phase12_deploy: empty probe value")
+    val = float(raw)
+    if not math.isfinite(val):
+        raise ValueError(
+            f"phase12_deploy: non-finite probe value {raw!r} (NaN/inf rejected)"
+        )
+    if val < 0:
+        raise ValueError(
+            f"phase12_deploy: negative probe value {raw!r} (size cannot be < 0)"
+        )
+    return 0.0 if val == 0 else val
+
+
 def _run_sql_probe() -> tuple[float, int]:
     """M-03: run analyze_metrics_size.sql via psql; return (p999_bytes, strategy_count).
 
     Single source of truth for size measurement — pg_column_size is the only
     quantity that correlates with the 1MB JSONB decompression ceiling.
+
+    P2022: parses keyed (k,v) output rows; requires `p999` and `count` keys
+    to be present; rejects NaN/inf/negative numeric values; uses explicit
+    `--dbname` flag.
     """
     db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not db_url:
@@ -111,22 +137,79 @@ def _run_sql_probe() -> tuple[float, int]:
             "cannot run pg_column_size SQL probe (M-03)."
         )
     sql = SQL_PROBE_PATH.read_text()
-    result = subprocess.run(
-        ["psql", db_url, "-tAF,", "-c", sql],
-        capture_output=True, text=True, check=False,
-    )
+    # Bounded timeout (see phase12_kill_switch._resolve_probe_timeout_s)
+    # so a hung connection cannot park the deploy with no diagnostic.
+    # Lazy resolution at probe time, so a malformed env var raises here
+    # rather than at module import.
+    timeout_s = phase12_kill_switch._resolve_probe_timeout_s()
+    try:
+        result = subprocess.run(
+            ["psql", "--dbname", db_url, "-tAF,", "-c", sql],
+            capture_output=True, text=True, check=False,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"phase12_deploy: SQL probe timed out after {timeout_s}s "
+            f"(DATABASE_URL host unreachable, pgbouncer hung, or "
+            f"strategy_analytics held under FOR UPDATE)"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"phase12_deploy: SQL probe failed: {result.stderr.strip()}"
         )
-    line = ""
-    if result.stdout.strip():
-        line = result.stdout.strip().splitlines()[-1]
-    parts = line.split(",")
-    if len(parts) < 6:
-        raise RuntimeError(f"phase12_deploy: unexpected SQL output: {line!r}")
-    p999 = float(parts[3]) if parts[3] else 0.0
-    n = int(parts[5]) if parts[5] else 0
+    parsed: dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split(",")
+        if len(parts) != 2:
+            raise RuntimeError(
+                f"phase12_deploy: unexpected SQL output line {line!r} "
+                f"(expected `key,value`)"
+            )
+        parsed[parts[0].strip()] = parts[1].strip()
+
+    for required in ("relation_visible", "row_security_active", "p999", "count", "total_rows"):
+        if required not in parsed:
+            raise RuntimeError(
+                f"phase12_deploy: SQL probe missing required key "
+                f"{required!r}; got keys {sorted(parsed.keys())!r}"
+            )
+
+    relation_visible = parsed["relation_visible"].strip().lower() in ("t", "true")
+    row_security_active = parsed["row_security_active"].strip().lower() in ("t", "true")
+    n = int(_parse_probe_value(parsed["count"]))
+    total_rows = int(_parse_probe_value(parsed["total_rows"]))
+
+    if not relation_visible:
+        raise RuntimeError(
+            "phase12_deploy: strategy_analytics is not visible to the "
+            "connecting role (table missing or SELECT denied). Check the "
+            "DATABASE_URL role/GRANTs before re-running."
+        )
+    if n == 0 and total_rows == 0 and row_security_active:
+        raise RuntimeError(
+            "phase12_deploy: strategy_analytics has RLS enabled AND the "
+            "connecting role lacks BYPASSRLS — every row appears filtered. "
+            "Re-run via service_role or grant BYPASSRLS before triggering "
+            "the kill-switch."
+        )
+
+    # Distinguish "table populated but no metrics yet" from "empty
+    # table / wrong DB" using the unfiltered total_rows key.
+    if n == 0:
+        if total_rows > 0:
+            raise RuntimeError(
+                f"phase12_deploy: strategy_analytics has {total_rows} rows "
+                f"but all metrics_json values are NULL — analytics_runner "
+                f"has not produced output yet. Re-run after the runner "
+                f"catches up."
+            )
+        raise RuntimeError(
+            "phase12_deploy: strategy_analytics is empty (0 rows) — "
+            "refusing to make a kill-switch decision. Check DATABASE_URL "
+            "points to the correct DB."
+        )
+    p999 = _parse_probe_value(parsed["p999"])
     return (p999, n)
 
 
@@ -165,9 +248,12 @@ async def main() -> int:
     # Step 4 (M-02): backfill enqueue with duplicate-job guard.
     rc = await phase12_backfill_enqueue.main()
     if rc != 0:
+        # P2025: surface a clear INCOMPLETE marker rather than letting the
+        # operator skim past a non-zero RC and assume "complete".
         print(
-            f"phase12_deploy: backfill enqueue returned {rc} — backfill may be partial"
+            f"phase12_deploy: backfill enqueue returned {rc} — backfill is partial"
         )
+        print("=== Phase 12 deploy: INCOMPLETE ===")
         return rc
 
     print("=== Phase 12 deploy: complete ===")

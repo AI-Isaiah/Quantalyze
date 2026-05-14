@@ -54,32 +54,72 @@ async def main() -> int:
         .eq("status", "published")
         .execute()
     )
-    strategies = rows.data or []
-    n = len(strategies)
+    # rows.data is None on PostgREST query failure; coercing to [] would
+    # silently print "enqueueing 0 published strategies" and exit 0 on a
+    # broken query (Rule 12 — fail loud).
+    if rows.data is None:
+        raise RuntimeError(
+            "phase12_backfill_enqueue: strategies select returned None "
+            "(PostgREST query failure); refusing to claim a zero-strategy "
+            "no-op against an unverified row set."
+        )
+    strategies = rows.data
+    total = len(strategies)
     print(
-        f"phase12_backfill_enqueue: enqueueing {n} published strategies as "
+        f"phase12_backfill_enqueue: enqueueing {total} published strategies as "
         f"priority='low'"
     )
 
+    # P2025: track per-row outcomes. The old loop had no try/except — a partial-
+    # unique-index violation on row K would raise and leave the caller thinking
+    # K-1 rows were enqueued, while the final message lied about `total`.
+    #
+    # Defensive id extraction: a row missing 'id' (schema rename, RLS-
+    # projection change, malformed response) must NOT raise KeyError
+    # mid-loop and skip the final summary. Match the kill_switch pattern.
     now_iso = datetime.now(timezone.utc).isoformat()
-    for r in strategies:
-        await db_execute(
-            lambda strategy_id=r["id"]: supabase.table("compute_jobs").insert(
-                {
-                    "strategy_id": strategy_id,
-                    "kind": "compute_analytics",
-                    "status": "pending",
-                    "priority": "low",
-                    "next_attempt_at": now_iso,
-                    "metadata": {"phase": "12-backfill"},
-                }
-            ).execute()
-        )
+    inserted = 0
+    failures: list[tuple[str, str]] = []
+    for idx, r in enumerate(strategies):
+        sid = r.get("id") if isinstance(r, dict) else None
+        if not isinstance(sid, str) or not sid:
+            failures.append((f"<row-{idx}>", f"missing/invalid 'id' in {r!r}"))
+            print(
+                f"phase12_backfill_enqueue: WARNING — strategy row {idx} "
+                f"missing/invalid 'id' field: {r!r} (continuing)"
+            )
+            continue
+        try:
+            await db_execute(
+                lambda strategy_id=sid: supabase.table("compute_jobs").insert(
+                    {
+                        "strategy_id": strategy_id,
+                        "kind": "compute_analytics",
+                        "status": "pending",
+                        "priority": "low",
+                        "next_attempt_at": now_iso,
+                        "metadata": {"phase": "12-backfill"},
+                    }
+                ).execute()
+            )
+            inserted += 1
+        except Exception as exc:
+            failures.append((sid, repr(exc)))
+            print(
+                f"phase12_backfill_enqueue: WARNING — insert failed for strategy "
+                f"{sid}: {exc!r} (continuing)"
+            )
 
     print(
-        f"phase12_backfill_enqueue: enqueued {n} jobs. Throttle "
+        f"phase12_backfill_enqueue: enqueued {inserted}/{total} jobs. Throttle "
         f"(claim_compute_jobs_with_priority RPC, ~5/min when sync_trades queued) will pace."
     )
+    if failures:
+        print(
+            f"phase12_backfill_enqueue: {len(failures)} per-row failures — "
+            f"see WARNING lines above"
+        )
+        return 1
     return 0
 
 
