@@ -18,6 +18,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from services.db import db_execute
 
@@ -31,27 +32,18 @@ logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 _LOCK_HOLD_LOG_THRESHOLD_S = 1.0
 
 
-# Audit-2026-05-07 P1101 (caller follow-up): per-worker process in-memory
-# locks keyed on strategy_id. Defense-in-depth above the SQL-side
-# pg_advisory_xact_lock (migration 113) + migration 119's
-# (strategy_id, symbol, side, opened_at) UNIQUE constraint. Prevents the
-# same-worker race where two coroutines (e.g. watchdog reclaim + scheduled
-# tick) both fire reconstruct_positions for the same strategy_id
-# concurrently. The first holder runs the full body; the second waits and
-# then re-runs against the now-up-to-date DB (cheap, no result-caching).
+# Audit-2026-05-07 P1101 (caller follow-up): per-worker per-strategy
+# asyncio.Lock registry — defense-in-depth above the SQL-side
+# pg_advisory_xact_lock (migration 113) + (strategy_id, symbol, side,
+# opened_at) UNIQUE constraint (migration 119).
 #
-# Lock ordering: the outer asyncio.Lock is always acquired BEFORE any DB
-# call. Inner code paths (atomic-rebuild RPC) then take the SQL-side
-# pg_advisory_xact_lock. Ordering is monotonic outer→inner across every
-# path in this module, so no deadlock surface exists between the two
-# layers.
+# Lock ordering invariant: the outer asyncio.Lock is always acquired
+# BEFORE the SQL advisory lock. Monotonic outer→inner across every path
+# in this module — no deadlock surface between the two layers.
 #
-# Lifetime: the registry is intentionally bounded by strategy-ID
-# cardinality (one entry per strategy ever reconstructed in this worker
-# process), not by request volume. At ~56 bytes per asyncio.Lock plus
-# dict overhead and a realistic O(10²–10³) strategy cardinality this is a
-# <1 MB resident-set cost. No eviction is necessary or desired — evicting
-# a Lock that has waiters would silently break serialization.
+# The dict grows unboundedly by design: evicting a Lock with waiters
+# parked on it would silently break serialization, and strategy_id
+# cardinality is bounded by the strategies table (O(10²–10³)).
 _RECONSTRUCT_LOCKS: dict[str, asyncio.Lock] = {}
 
 
@@ -64,24 +56,19 @@ def _lock_for(strategy_id: str) -> asyncio.Lock:
     return _RECONSTRUCT_LOCKS.setdefault(strategy_id, asyncio.Lock())
 
 
-async def reconstruct_positions(strategy_id, supabase) -> dict:
+async def reconstruct_positions(strategy_id: str | UUID, supabase) -> dict:
     """Public entry point — serializes per-strategy via in-memory
     asyncio.Lock so concurrent same-worker callers do not both fire the
     atomic-rebuild RPC. Cluster-wide serialization remains the SQL-side
     pg_advisory_xact_lock + migration 119 UNIQUE constraint's
-    responsibility. See the module-level comment on `_RECONSTRUCT_LOCKS`
-    for the full rationale (audit-2026-05-07 P1101 caller follow-up)."""
-    # Normalize to a canonical string key so a UUID, str, or whitespace
-    # variant of the same strategy can never end up in two different lock
-    # buckets. The SQL-side advisory lock hashes the text representation,
-    # so we mirror that here.
+    responsibility (audit-2026-05-07 P1101 caller follow-up)."""
+    # Mirror the SQL advisory lock's text hashing so UUID / str / padded
+    # variants of the same strategy share one lock bucket.
     strategy_id = str(strategy_id).strip()
     lock = _lock_for(strategy_id)
-    # Log AFTER acquire, gated on actual wait time. A pre-acquire log
-    # would be racy (the holder may release between `locked()` and
-    # `acquire`) and would spam INFO for trivial sub-RTT contention.
-    # Logging only the slow path matches the "30s stalls debuggable"
-    # operational goal without flooding log shipping under bursts.
+    # Log on the slow path only — pre-acquire `locked()` checks are racy
+    # (the holder may release between check and acquire), and INFO-level
+    # contention logging at burst rates would flood log shipping.
     t0 = time.monotonic()
     async with lock:
         wait_s = time.monotonic() - t0

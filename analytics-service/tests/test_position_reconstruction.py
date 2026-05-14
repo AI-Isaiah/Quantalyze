@@ -18,16 +18,9 @@ from services.position_reconstruction import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Autouse: clear the per-worker lock registry between tests
-# ---------------------------------------------------------------------------
-# pytest-asyncio (auto mode, function-scope loop) gives each test a fresh
-# event loop. `_RECONSTRUCT_LOCKS` is module-level state, so a Lock built
-# under loop A would survive into loop B's tests. The new idempotency
-# regressions clear the dict themselves, but every PRE-EXISTING test that
-# reuses the canonical "strat-1" / "strategy-xyz" ids does not. Clearing
-# here keeps tests isolated and prevents future parked waiters from
-# leaking across tests (audit-2026-05-07 P1101 red-team F1).
+# `_RECONSTRUCT_LOCKS` is module-level state; pytest-asyncio gives each
+# test a fresh event loop, so a parked waiter under loop A would leak
+# into loop B (audit-2026-05-07 P1101 red-team F1).
 
 @pytest.fixture(autouse=True)
 def _reset_reconstruct_locks():
@@ -1744,38 +1737,21 @@ class TestReconstructIdempotency:
         ]
         mock_supabase = _make_mock_supabase(fills=fills)
 
-        # Slow async hook on db_execute — the await asyncio.sleep is the
-        # yield point that lets the event loop schedule the other gather()
-        # coroutine. WITHOUT the lock, both callers reach the sleep and
-        # in_flight peaks at 2. WITH the lock, only one caller is ever
-        # inside _reconstruct_positions_inner at a time and in_flight stays
-        # at 1.
+        # The `await asyncio.sleep` is the yield point that lets the
+        # second gather() coroutine race in. Without the production
+        # lock, both callers reach the sleep and `in_flight` peaks at 2.
         in_flight = 0
         max_in_flight = 0
-        # Monotonically-increasing per-call sequence. We use this to
-        # establish the strict-ordering invariant: every db_execute call by
-        # the second-to-arrive caller must come AFTER every db_execute call
-        # by the first-to-arrive caller.
-        call_log: list[tuple[int, str]] = []  # (in_flight_at_entry, event)
-        call_counter = 0
 
         async def slow_db_execute(fn):
-            nonlocal in_flight, max_in_flight, call_counter
-            call_counter += 1
-            my_seq = call_counter
+            nonlocal in_flight, max_in_flight
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
-            call_log.append((my_seq, f"enter:{in_flight}"))
             try:
-                # Yield to the event loop. Without the lock, this is where
-                # the second coroutine wakes up and ALSO enters this hook,
-                # driving in_flight to 2.
                 await asyncio.sleep(0.005)
-                result = await asyncio.to_thread(fn)
-                return result
+                return await asyncio.to_thread(fn)
             finally:
                 in_flight -= 1
-                call_log.append((my_seq, f"exit:{in_flight}"))
 
         with patch(
             "services.position_reconstruction.db_execute",
@@ -1786,56 +1762,26 @@ class TestReconstructIdempotency:
                 reconstruct_positions("strat-lock-1", mock_supabase),
             )
 
-        # Both callers got the SAME result (value equality — content
-        # is deterministic given the same fills).
         assert r1 == r2
 
-        # The atomic-rebuild RPC was called by each caller, but never with
-        # both callers inside the critical section concurrently.
         atomic_rpc_calls = [
             c for c in mock_supabase.rpc_calls
             if c[0] == "reconstruct_positions_atomic"
         ]
-        # Each serialized caller invokes the RPC exactly once.
         assert len(atomic_rpc_calls) == 2, (
             f"Expected 2 sequential atomic-rebuild RPC calls (one per caller, "
             f"serialized under the lock), got {len(atomic_rpc_calls)}."
         )
 
-        # The critical-section invariant — load-bearing assertion. Without
-        # the asyncio.Lock, asyncio.gather + the await asyncio.sleep yield
-        # point in slow_db_execute would race both callers into
-        # _reconstruct_positions_inner simultaneously → max_in_flight == 2.
-        # With the lock, the second caller waits at `async with
-        # _lock_for(strategy_id)` and never enters until the first releases.
+        # Load-bearing assertion: with the lock, the second caller waits
+        # at `async with _lock_for(strategy_id)` and never enters until
+        # the first releases. Without the lock, both race through the
+        # `await asyncio.sleep` and max_in_flight reaches 2.
         assert max_in_flight == 1, (
             f"Expected at most 1 caller inside _reconstruct_positions_inner "
             f"at a time (serialized via asyncio.Lock on strategy_id), saw "
             f"max_in_flight={max_in_flight}. Caller-layer lock not serializing."
         )
-
-        # Strict-ordering invariant: ALL of caller A's db_execute events
-        # must complete before ANY of caller B's begin. We detect this by
-        # walking call_log and asserting in_flight never exceeded 1 and
-        # that the sequence shows two disjoint runs (enter→exit pairs do
-        # not interleave). The max_in_flight==1 check above already covers
-        # the no-overlap case, but this is the explicit "second caller
-        # runs strictly after first" form.
-        # Each db_execute call must enter and exit before the next enters.
-        prev_event = None
-        for seq, event in call_log:
-            kind = event.split(":")[0]
-            if prev_event is not None:
-                prev_kind = prev_event.split(":")[0]
-                # Allowed transitions under serialization: enter→exit,
-                # exit→enter. Forbidden: enter→enter (would mean two
-                # callers inside simultaneously).
-                assert not (prev_kind == "enter" and kind == "enter"), (
-                    f"Two consecutive 'enter' events in call_log "
-                    f"({prev_event} → {event}) — second db_execute started "
-                    f"before first finished, lock not serializing."
-                )
-            prev_event = event
 
     @pytest.mark.asyncio
     async def test_different_strategies_do_not_block_each_other(self) -> None:
