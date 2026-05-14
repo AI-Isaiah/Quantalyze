@@ -42,6 +42,12 @@ function buildAllowedHosts(): Set<string> {
 // Cache the allowed hosts at module load. Changes to env vars require a redeploy.
 const ALLOWED_HOSTS = buildAllowedHosts();
 
+// audit-2026-05-07 round-2 Block D / P1947 — the 403 rejection paths returned
+// from authenticated mutating routes must not be cached cross-tenant. The
+// header is cheap defense-in-depth even though 403s are already rarely
+// cached.
+const NO_STORE_HEADERS = { "Cache-Control": "private, no-store" } as const;
+
 export function assertSameOrigin(req: NextRequest): NextResponse | null {
   const origin = req.headers.get("origin");
   const referer = req.headers.get("referer");
@@ -50,7 +56,7 @@ export function assertSameOrigin(req: NextRequest): NextResponse | null {
   if (!source) {
     return NextResponse.json(
       { error: "Missing Origin or Referer header" },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -60,14 +66,14 @@ export function assertSameOrigin(req: NextRequest): NextResponse | null {
   } catch {
     return NextResponse.json(
       { error: "Invalid Origin header" },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!ALLOWED_HOSTS.has(host)) {
     return NextResponse.json(
       { error: "Origin not allowed" },
-      { status: 403 },
+      { status: 403, headers: NO_STORE_HEADERS },
     );
   }
 
