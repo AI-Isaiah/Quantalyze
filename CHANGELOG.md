@@ -6,7 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
-## [0.22.29.0] - 2026-05-14
+## [0.22.30.0] - 2026-05-14
+
+### Fixed
+
+- **Golden-fixture regen — corrupt prior fixture now SystemExits instead of silently disabling the drift gate (P2006 follow-up)** — `_check_drift_or_die` previously swallowed `OSError` and `JSONDecodeError` and returned silently, letting an unreadable / corrupt prior fixture bypass the gate entirely — the exact "silent fixture overwrite" the gate exists to prevent. Now exits with code 4 and a guidance message naming the path and underlying error. A truly fresh-from-empty regen still hits the `not fixture_path.exists()` early-return.
+- **Scalar drift summary — record `inf` on shape flips and exotic numerics instead of dropping the key** — `_scalar_drift_summary` previously fell through silently when (a) a key's value flipped from `dict` to scalar (or vice versa), or (b) `float()` conversion raised `TypeError` / `ValueError` after the `isinstance(int|float)` guard (numpy NaN / Inf, `Decimal` subclasses). Both cases now surface as `float("inf")` so the drift gate sees them. `(0, 0)` matches no longer get a spurious `0.0` entry in the summary.
+- **Drift gate — magnitude arm catches single-key catastrophic regressions (P2006 follow-up)** — Pre-fix the gate fired only on `> 3 heavy keys`; a 100% regression on a single critical scalar (e.g. `sharpe`) slipped through. Now any single drift `> 5%` trips the gate in addition to the population arm. Both arms acknowledge with the same `--accept-numpy-drift` flag.
+- **Parity test — `_fixture_has_maker_taker` missing/wrong-type now fails loud (P2005 follow-up)** — The previous `bool(.get(..., False))` silently masked a pre-P2005 fixture that didn't have the key pinned. Refuses to run if the key is absent or non-bool, with a regenerate-the-fixture message.
+- **Parity test — env-vs-fixture reconciliation is case-insensitive, matching production parsing** — `_resolve_has_maker_taker` previously rejected `TRADE_MIX_HAS_MAKER_TAKER=True` (capital T) as "contradicting" a fixture pinned `true`, but production at `services/analytics_runner.py` parses with `.lower() == "true"` — so the parity test would CI-fail on env values production accepts.
+- **Regen script env-parse aligned with production** — `regen_golden.py` previously used bare `== "true"`, while production uses `.lower() == "true"`. A developer regenerating with `TRADE_MIX_HAS_MAKER_TAKER=True` would silently pin the fixture to the opposite mode from what production reads. Now both use the same case-insensitive parse.
+- **Minigolden test scaffolding — fail loud on unknown supabase tables** — `_make_mock_supabase` previously returned a permissive `MagicMock()` for unrecognised tables, auto-vivifying any chain silently and returning wrong shapes downstream. Now raises `AssertionError` naming the unexpected table. Dead `mock_positions` branch removed (`reconstruct_positions` never calls `table("positions")`).
+- **Minigolden test docstrings — rewritten to post-Block-A semantics** — Six "tests will FAIL on main because Block A isn't applied" claims rewritten as forward-looking regression pins. Block A (P1994 — dollar-sum bucketing, breakeven exclusion, `data_quality_flags['breakeven_positions']`) landed in v0.22.28.0. Stale line-number reference `position_reconstruction.py:162-171` removed; partition operator description corrected from `roi <= 0` to `realized_pnl > 0` / `< 0`.
+- **Minigolden assertions — exact equality where the oracle is exact** — `pytest.approx(..., abs=1e-6)` tolerances dropped for dollar-mean and expectancy assertions that are exact by construction. `.get("data_quality_flags") or {}` replaced with explicit `assert "data_quality_flags" in metrics` so a missing key fails with an informative message, not `assert None == 1`.
+
+### Added
+
+- **`_resolve_has_maker_taker` helper extracted with 8 unit tests** — Env-vs-fixture reconciliation moved out of the inline `test_metrics_parity_full` body into a testable helper. Covers: fixture-only True/False, env agreement, env contradiction, missing-key refusal, wrong-type refusal, case-insensitive env match (`True`/`TRUE`/`False`), garbage env rejection (`""`, `"yes"`, `"1"`).
+- **9 new regen-guard branch tests** — Pin behaviour on: dict↔scalar shape flip → inf, `(0, 0)` matched-zero silence, magnitude trip with reason in stderr, magnitude trip honouring `--accept-numpy-drift`, corrupt prior fixture → SystemExit(4) with diagnostic, missing prior fixture → silent pass (fresh-from-empty regen), population trip unchanged (no regression of original behaviour), strict-greater-than boundary at exactly 3 keys and 4 keys at 2% drift, strict-greater-than boundary at 4.99% magnitude (passes) vs 5.0001% (trips).
+- **Minigolden `realized_pnl_per_trade` shape pin (P1994 follow-up)** — New test asserts the BE trade's `realized_pnl` round-trips as the literal `0.0` (not `None`), confirming the P1994 contract that distinguishes "this trade broke even" from "we don't know what happened" in the per-trade list.
+
+
 
 ### Fixed
 
