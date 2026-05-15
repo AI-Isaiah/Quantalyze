@@ -814,9 +814,21 @@ async def _fetch_raw_trades_okx(
     PAGE_CAP = 100
     for page in range(PAGE_CAP):
         params: dict[str, str] = {"instType": "SWAP", "limit": "100"}
+        # Audit-2026-05-07 H-0665 — OKX fills-history returns DESC-sorted
+        # data and uses ``after=<billId>`` to fetch records OLDER than the
+        # cursor (``before`` fetches NEWER). Pre-fix this used ``before``
+        # with ``data[-1].tradeId`` (the oldest row on the page), which
+        # asked for records NEWER than the oldest — oscillating until the
+        # 100-page cap silently truncated. ``after`` is the correct
+        # direction for paginating into older history.
         if cursor:
-            params["before"] = cursor
-        if since_ms and not cursor:
+            params["after"] = cursor
+        # Audit-2026-05-07 H-0666 — ``begin`` was only sent on page 1; on
+        # subsequent pages OKX could fall back to its default window
+        # (often 7 days) and silently truncate a 90-day backfill. Always
+        # send ``begin`` when we have a since_ms so the time bound is
+        # enforced for every page.
+        if since_ms:
             params["begin"] = str(since_ms)
 
         try:

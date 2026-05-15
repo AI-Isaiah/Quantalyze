@@ -2031,3 +2031,116 @@ class TestG12BBinancePaginationLoop:
             "page cap" in str(call) and "BTCUSDT" in str(call)
             for call in mock_warn.call_args_list
         )
+
+
+# ─── audit-2026-05-07 H-0665/H-0666 — OKX cursor direction + begin per-page ──
+
+
+class TestG12BOkxCursorAndBegin:
+    """Audit-2026-05-07 H-0665 + H-0666 — OKX fills-history pagination.
+
+    H-0665: cursor pagination must use ``after=<billId>`` (records older
+    than the cursor) not ``before=<billId>`` (newer). DESC-sorted data
+    means ``data[-1]`` is the OLDEST row; ``before`` on the oldest
+    asked for records newer than it — oscillating until the 100-page
+    cap silently truncated.
+
+    H-0666: ``begin`` must be sent on every page, not only page 1. Pre-fix
+    OKX defaulted to a 7-day window on later pages, silently truncating
+    a 90-day backfill.
+    """
+
+    @pytest.mark.asyncio
+    async def test_okx_pagination_uses_after_cursor(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        captured_params: list[dict] = []
+
+        page_1_fills = []
+        for i in range(100):
+            page_1_fills.append({
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": str(1700000000000 + i),
+                "ordId": f"ord-{i}",
+                "tradeId": f"trade-{i}",
+                "execType": "T",
+            })
+        page_2 = {"data": []}
+
+        async def _fills_history(params):
+            captured_params.append(dict(params))
+            if len(captured_params) == 1:
+                return {"data": page_1_fills}
+            return page_2
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = _fills_history
+
+        mock_supabase = MagicMock()
+        await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase
+        )
+
+        # Page 1: no cursor.
+        assert "after" not in captured_params[0]
+        assert "before" not in captured_params[0]
+        # Page 2: must use ``after`` (old-direction), not ``before``.
+        assert captured_params[1].get("after") == "trade-99"
+        assert "before" not in captured_params[1], (
+            "OKX must paginate with ``after`` to walk into older history; "
+            "``before`` walks toward newer records and oscillates."
+        )
+
+    @pytest.mark.asyncio
+    async def test_okx_begin_sent_on_every_page(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        captured_params: list[dict] = []
+
+        page_1_fills = []
+        for i in range(100):
+            page_1_fills.append({
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": str(1700000000000 + i),
+                "ordId": f"ord-{i}",
+                "tradeId": f"trade-{i}",
+                "execType": "T",
+            })
+
+        async def _fills_history(params):
+            captured_params.append(dict(params))
+            if len(captured_params) == 1:
+                return {"data": page_1_fills}
+            return {"data": []}
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = _fills_history
+
+        since_ms = 1690000000000  # caller-supplied window
+        mock_supabase = MagicMock()
+        await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase, since_ms=since_ms
+        )
+
+        # Both pages must carry the `begin` time bound (effective_since
+        # = since_ms - OVERLAP_WINDOW_MS = since_ms - 3_600_000).
+        expected_begin = str(since_ms - 3_600_000)
+        assert len(captured_params) >= 2
+        for i, p in enumerate(captured_params):
+            assert p.get("begin") == expected_begin, (
+                f"OKX page {i + 1} missing/wrong begin — pre-fix this was "
+                f"only sent on page 1 and later pages fell back to OKX's "
+                f"default 7-day window. Got: {p!r}"
+            )
