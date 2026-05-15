@@ -796,7 +796,13 @@ async def _fetch_raw_trades_binance(
             continue
         _symbol, trades = item
         for t in trades:
-            fills.append(_normalize_fill(t, exchange.id))
+            # Audit-2026-05-07 H-0673 — _normalize_fill returns None
+            # for fills with no parseable timestamp; drop those rather
+            # than persisting an empty-string `timestamp` that breaks
+            # downstream date math.
+            normalized = _normalize_fill(t, exchange.id)
+            if normalized is not None:
+                fills.append(normalized)
 
     return fills
 
@@ -1110,6 +1116,10 @@ def _normalize_fill(trade: dict, exchange_id: str) -> FillRow:
     Audit-2026-05-07 G12.B.4/G12.B.7 — delegates the dict construction
     to ``_make_fill_dict`` so the OKX, Bybit, and CCXT branches all
     share a single 16-key contract.
+
+    Returns ``None`` for fills with no usable timestamp (see H-0673);
+    callers must filter ``None`` out before passing to the persist
+    layer.
     """
     fee_info = trade.get("fee") or {}
     # Audit-2026-05-07 H-0671 — see OKX/Bybit branches: drop abs() so
@@ -1121,6 +1131,44 @@ def _normalize_fill(trade: dict, exchange_id: str) -> FillRow:
     price = float(trade.get("price", 0))
     amount = float(trade.get("amount", 0))
 
+    # Audit-2026-05-07 H-0673 — pre-fix this passed
+    # ``trade.get("datetime", "")`` straight through, producing rows with
+    # empty-string timestamps. Downstream ``datetime.fromisoformat("")``
+    # then raised ValueError that position_reconstruction silently
+    # swallowed (cascading into duration_days=None) and the React
+    # ``new Date(t.opened_at)`` rendered "Invalid Date". Normalize the
+    # CCXT input to a uniform UTC ISO-8601 string, preferring the
+    # numeric ``timestamp`` (millis) when available; if neither field
+    # produces a parseable value, return None so the caller can drop
+    # the fill instead of persisting a phantom row.
+    raw_datetime = trade.get("datetime") or ""
+    raw_ts = trade.get("timestamp")
+    timestamp_iso: str | None = None
+    if isinstance(raw_ts, (int, float)):
+        try:
+            timestamp_iso = datetime.fromtimestamp(
+                int(raw_ts) / 1000, tz=timezone.utc
+            ).isoformat()
+        except (ValueError, OSError, OverflowError):
+            timestamp_iso = None
+    if timestamp_iso is None and raw_datetime:
+        try:
+            parsed = datetime.fromisoformat(
+                raw_datetime.replace("Z", "+00:00")
+            )
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp_iso = parsed.isoformat()
+        except (TypeError, ValueError):
+            timestamp_iso = None
+    if timestamp_iso is None:
+        logger.error(
+            "CCXT fill dropped: unparseable timestamp (datetime=%r, "
+            "timestamp=%r) in fill=%r",
+            raw_datetime, raw_ts, trade,
+        )
+        return None  # type: ignore[return-value]
+
     return _make_fill_dict(
         exchange=exchange_id,
         symbol=(trade.get("symbol", "")
@@ -1130,7 +1178,7 @@ def _normalize_fill(trade: dict, exchange_id: str) -> FillRow:
         quantity=amount,
         fee=fee_cost,
         fee_currency=fee_currency,
-        timestamp=trade.get("datetime", ""),
+        timestamp=timestamp_iso,
         exchange_order_id=trade.get("order", ""),
         exchange_fill_id=trade.get("id", ""),
         is_maker=trade.get("takerOrMaker") == "maker",

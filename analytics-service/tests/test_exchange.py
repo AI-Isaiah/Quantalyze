@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt_async
@@ -2144,3 +2145,97 @@ class TestG12BOkxCursorAndBegin:
                 f"only sent on page 1 and later pages fell back to OKX's "
                 f"default 7-day window. Got: {p!r}"
             )
+
+
+# ─── audit-2026-05-07 H-0673 — CCXT timestamp normalized to ISO UTC ────
+
+
+class TestG12BCcxtTimestampNormalization:
+    """Audit-2026-05-07 H-0673 — pre-fix, _normalize_fill wrote
+    ``trade.get("datetime", "")`` straight through. An empty default
+    cascaded into ``datetime.fromisoformat("")`` (silently swallowed
+    by position_reconstruction) and ``new Date("")`` (Invalid Date in
+    PositionsTab.tsx). Post-fix the field is a uniform ISO-8601 UTC
+    string OR the fill is dropped with a logger.error."""
+
+    def test_normalize_fill_prefers_numeric_timestamp(self) -> None:
+        """CCXT unified shape carries both ``datetime`` (ISO string) and
+        ``timestamp`` (millis). The numeric form is canonical; ensure we
+        produce a tz-aware ISO string from it."""
+        from services.exchange import _normalize_fill
+
+        out = _normalize_fill(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "",  # Pre-fix would have persisted ""
+                "timestamp": 1700000000000,
+                "order": "ord-1",
+                "id": "fill-1",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            },
+            "binance",
+        )
+        assert out is not None
+        # Parseable, tz-aware ISO string.
+        parsed = datetime.fromisoformat(out["timestamp"])
+        assert parsed.tzinfo is not None
+        assert int(parsed.timestamp() * 1000) == 1700000000000
+
+    def test_normalize_fill_falls_back_to_datetime_string(self) -> None:
+        """If only ``datetime`` is provided (no numeric timestamp), the
+        ISO string is normalized to UTC with a +00:00 / Z suffix."""
+        from services.exchange import _normalize_fill
+
+        out = _normalize_fill(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": "ord-1",
+                "id": "fill-1",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "info": {},
+            },
+            "binance",
+        )
+        assert out is not None
+        parsed = datetime.fromisoformat(out["timestamp"])
+        assert parsed.tzinfo is not None
+
+    def test_normalize_fill_drops_fill_with_no_timestamp(self) -> None:
+        """No ``datetime`` and no ``timestamp`` — pre-fix this persisted
+        an empty-string field; post-fix the fill is dropped and a
+        logger.error fires so the malformed row is visible."""
+        import logging
+        from services.exchange import _normalize_fill
+
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "error",
+        ) as mock_err:
+            out = _normalize_fill(
+                {
+                    "symbol": "BTC/USDT:USDT",
+                    "side": "buy",
+                    "price": 60000.0,
+                    "amount": 0.1,
+                    # NO datetime, NO timestamp.
+                    "order": "ord-1",
+                    "id": "fill-1",
+                    "fee": {"cost": 0.6, "currency": "USDT"},
+                    "takerOrMaker": "taker",
+                    "info": {},
+                },
+                "binance",
+            )
+        assert out is None
+        assert mock_err.call_count == 1
+        assert "unparseable timestamp" in str(mock_err.call_args_list[0])
