@@ -112,12 +112,10 @@ async def _load_position_time_series(
     Args:
         strategy_id: UUID string of the strategy.
         supabase: PostgREST client (service-role).
-        account_balance: optional USD account balance from `api_keys`. When
-            present, NAV per date = account_balance + cumulative_realized_pnl.
-            When None, falls back to gross-exposure proxy
-            (sum(abs(positions[d].values()))) — turnover formula
-            `Σ(|Δposition × price|) / nav` is self-consistent under any
-            non-zero monotonic NAV proxy.
+        account_balance: optional USD account balance from `api_keys`. Kept
+            in the signature so callers can probe its presence, but the
+            value is NOT written into the returned nav_by_date — see
+            audit-2026-05-07 C-0221 below.
 
     Returns:
         positions_by_date: { 'YYYY-MM-DD': { symbol: signed_size_usd } }
@@ -125,6 +123,34 @@ async def _load_position_time_series(
         nav_by_date:       { 'YYYY-MM-DD': nav_usd }
 
     Empty dicts on missing snapshots — caller treats as graceful degradation.
+
+    Audit-2026-05-07 C-0221 (account-balance leak fix)
+    --------------------------------------------------
+    Previously, when `account_balance` was non-null this function wrote
+    `nav_by_date[d] = float(account_balance)` — the tenant's raw
+    `api_keys.account_balance_usdt`. That payload propagates into the
+    `turnover_series` sibling row of `strategy_analytics_series`, which the
+    `fetch_strategy_lazy_metrics` RPC exposes to anon for any *published*
+    strategy. An anonymous attacker reading two non-zero `turnover` entries
+    for a published strategy could divide them and recover the constant
+    USDT balance.
+
+    Mitigation: we now ALWAYS publish a normalized NAV proxy that contains
+    no tenant-secret information:
+
+      * if account_balance > 0 → NAV[d] = 1.0 (constant). The turnover
+        formula `Σ(|Δposition × price|) / NAV` is self-consistent under any
+        non-zero monotonic NAV proxy (the divisor cancels in the ratio
+        comparison consumers actually use). A constant 1.0 keeps the
+        existing math intact while leaking nothing.
+
+      * if account_balance is None / ≤ 0 → NAV[d] = sum(|positions[d]|)
+        (gross-exposure proxy, unchanged). Still self-consistent for the
+        turnover RATIO; never the raw balance.
+
+    The function-level signature retains `account_balance` so the caller
+    contract stays stable and the branch selection (constant vs gross
+    exposure) still reflects whether a real balance is known.
     """
     def _fetch_snapshots():
         return (
@@ -168,15 +194,18 @@ async def _load_position_time_series(
                 # Don't poison prices_by_date with NaN/non-numeric marks.
                 pass
 
-    # Build nav_by_date. With account_balance present, NAV is a constant
-    # (account-level scaling); turnover formula divides by NAV, so a
-    # constant non-zero NAV produces a self-consistent series. Without
-    # account_balance, use sum(abs(positions)) as a NAV proxy (gross
-    # exposure) — also self-consistent for the turnover ratio.
+    # Build nav_by_date. Audit-2026-05-07 C-0221: NEVER write
+    # `float(account_balance)` here — that leaks the raw tenant USDT
+    # balance through the published `turnover_series` sibling row. Instead,
+    # publish a constant 1.0 when the balance is known to be valid, and
+    # the gross-exposure proxy otherwise. The turnover formula
+    # `Σ(|Δposition × price|) / NAV` is self-consistent under any
+    # non-zero monotonic NAV proxy, so this preserves the ratio shape
+    # consumers compare while leaking no secret.
     nav_by_date: dict[str, float] = {}
     if account_balance is not None and account_balance > 0:
         for d in positions_by_date:
-            nav_by_date[d] = float(account_balance)
+            nav_by_date[d] = 1.0
     else:
         for d, pos_map in positions_by_date.items():
             nav_by_date[d] = sum(abs(v) for v in pos_map.values())

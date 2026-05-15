@@ -2239,3 +2239,231 @@ class TestPositionFlagsPropagateToTopLevel:
             f"If absent or empty, the runner is still calling the bare wrapper "
             f"that discards flags. Got: {top_flags}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 C-0221 — `_load_position_time_series` MUST NOT write the
+# raw tenant `account_balance` into `nav_by_date` (the value propagates to
+# the public `turnover_series` sibling row and is readable by anon via the
+# `fetch_strategy_lazy_metrics` RPC). Use a normalized constant proxy.
+# ---------------------------------------------------------------------------
+
+
+class TestLoadPositionTimeSeriesNavSafety:
+    @pytest.mark.asyncio
+    async def test_nav_does_not_leak_account_balance_when_balance_present(
+        self,
+    ) -> None:
+        """The constant 1.0 NAV proxy is the contract — if a future change
+        re-introduces `nav_by_date[d] = float(account_balance)`, this test
+        fails before the leak ships."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "65000",
+            },
+            {
+                "snapshot_date": "2024-01-16",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "12000",
+                "mark_price": "66000",
+            },
+        ]
+
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        secret_balance = 1234567.89  # canary value
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            _, _, nav_by_date = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=secret_balance
+            )
+
+        # Must NOT echo the raw balance.
+        assert secret_balance not in nav_by_date.values(), (
+            "C-0221 regression: raw account_balance leaked into nav_by_date. "
+            f"Got {nav_by_date}, secret={secret_balance}"
+        )
+        # Contract: every populated nav entry is the constant 1.0 proxy.
+        assert nav_by_date, "expected NAV entries for the two snapshot dates"
+        assert all(v == 1.0 for v in nav_by_date.values()), (
+            f"NAV proxy must be constant 1.0 when balance is known; got {nav_by_date}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nav_falls_back_to_gross_exposure_when_balance_missing(
+        self,
+    ) -> None:
+        """When account_balance is None, NAV uses sum(|positions|) per date —
+        gross-exposure proxy. Pins the H-0632 branch (untested previously)."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "65000",
+            },
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "ETHUSDT",
+                "side": "short",
+                "size_usd": "5000",
+                "mark_price": "3500",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            _, _, nav = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=None
+            )
+
+        # sum(|10000|, |-5000|) = 15000
+        assert nav.get("2024-01-15") == 15000.0, (
+            f"gross-exposure fallback should equal sum(|positions|); got {nav}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_snapshots_yields_empty_grids(self) -> None:
+        """H-0631 coverage: empty snapshots → all three grids empty."""
+        from services.analytics_runner import _load_position_time_series
+
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=[])
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, prices, nav = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=10000.0
+            )
+
+        assert positions == {} and prices == {} and nav == {}
+
+    @pytest.mark.asyncio
+    async def test_short_side_is_signed_negative(self) -> None:
+        """H-0631 coverage: short positions appear with negative signed size_usd."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "ETHUSDT",
+                "side": "short",
+                "size_usd": "5000",
+                "mark_price": "3500",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, _, _ = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=10000.0
+            )
+
+        assert positions["2024-01-15"]["ETHUSDT"] == -5000.0, (
+            f"shorts must store signed-negative size_usd; got {positions}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_malformed_mark_price_does_not_poison_prices_grid(
+        self,
+    ) -> None:
+        """H-0631 coverage: non-numeric mark_price must be skipped silently
+        without breaking the positions grid for that snapshot."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "garbage",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, prices, _ = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=10000.0
+            )
+
+        # Position recorded, price omitted.
+        assert positions["2024-01-15"]["BTCUSDT"] == 10000.0
+        assert "BTCUSDT" not in prices.get("2024-01-15", {})
