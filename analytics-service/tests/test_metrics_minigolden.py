@@ -314,5 +314,18 @@ def test_minigolden_expectancy_is_dollars():
     # Risk:Reward (dollar ratio) = avg_win / |avg_loss| = 350/75.
     # IEEE-754 ULP slack via approx (rel default 1e-6).
     assert derived["risk_reward_ratio"] == pytest.approx(350.0 / 75.0)
-    # Weighted R:R = (350*2) / (75*2) — symmetric case collapses to same.
-    assert derived["weighted_risk_reward_ratio"] == pytest.approx(350.0 / 75.0)
+    # Audit-2026-05-07 H-0627 / H-0628: Weighted R:R is now the genuine
+    # pnl-weighted average of per-trade R-multiples, NOT the algebraic
+    # equivalent of Profit Factor. For the inputs above with risk_unit=75:
+    #   R_i  = [500/75, 200/75, -100/75, -50/75]
+    #   |w_i|= [500,    200,    100,     50]
+    #   weighted_rr = Σ(R_i × |w_i|) / Σ|w_i|
+    #              = (500*500/75 + 200*200/75 + 100*100/75 + 50*50/75) / 850
+    risk_unit = 75.0
+    trades = trade_metrics_post_block_a["realized_pnl_per_trade"]
+    num = sum((p["realized_pnl"] / risk_unit) * abs(p["realized_pnl"]) for p in trades)
+    den = sum(abs(p["realized_pnl"]) for p in trades)
+    expected_weighted_rr = num / den
+    assert derived["weighted_risk_reward_ratio"] == pytest.approx(
+        expected_weighted_rr
+    )

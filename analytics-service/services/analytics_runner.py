@@ -411,13 +411,40 @@ def _compute_derived_trade_metrics(
     if avg_loss != 0:
         out["risk_reward_ratio"] = avg_win / abs(avg_loss)
 
-    # H-F / METRICS-07: Weighted R:R = (avg_win × winners_count) /
-    # (|avg_loss| × losers_count). Guards against zero divisor (no losers, or
-    # zero |avg_loss|).
-    num = avg_win * winners_count
-    den = abs(avg_loss) * losers_count
-    if den > 0:
-        out["weighted_risk_reward_ratio"] = num / den
+    # H-F / METRICS-07: Weighted R:R.
+    #
+    # Audit-2026-05-07 H-0627 / H-0628: the previous formulation
+    # `(avg_win × winners_count) / (|avg_loss| × losers_count)` is
+    # algebraically identical to Profit Factor (gross_profit / |gross_loss|)
+    # because `avg = sum / count`. Publishing the same number under two
+    # labels (weighted_risk_reward_ratio + profit_factor) is a metric
+    # disclosure hazard.
+    #
+    # Replace with a genuine pnl-weighted average of per-trade R-multiple:
+    #     Σ(R_i × |pnl_i|) / Σ|pnl_i|     where R_i = pnl_i / risk_unit
+    # This weights each trade's R by its own dollar magnitude (large trades
+    # carry more signal), which is what the canonical Van Tharp / Tharp's
+    # weighted-R formulation implies. Falls back to None when there is no
+    # risk_unit (avg_loss == 0) or no closed trade has a non-zero |pnl|.
+    pnl_weighted_num = 0.0
+    pnl_weighted_den = 0.0
+    if risk_unit_for_weighted := (abs(avg_loss) if avg_loss else 0.0):
+        for t in per_trade:
+            raw = t.get("realized_pnl")
+            if raw is None:
+                continue
+            try:
+                pnl_val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(pnl_val):
+                continue
+            r_i = pnl_val / risk_unit_for_weighted
+            w_i = abs(pnl_val)
+            pnl_weighted_num += r_i * w_i
+            pnl_weighted_den += w_i
+    if pnl_weighted_den > 0:
+        out["weighted_risk_reward_ratio"] = pnl_weighted_num / pnl_weighted_den
 
     # METRICS-08: SQN over per-trade R-multiples (R = realized_pnl / risk_unit).
     # risk_unit derived from |avg_loss| (the canonical Van Tharp denominator).

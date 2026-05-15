@@ -437,21 +437,80 @@ def test_derived_trade_metrics_risk_reward_ratio():
 
 
 def test_derived_trade_metrics_weighted_risk_reward_ratio():
-    """METRICS-07 (H-F): Weighted R:R = Σ(win_size × win_count) / Σ(loss_size × loss_count).
+    """METRICS-07 (H-F): Weighted R:R is the pnl-weighted average of per-trade
+    R-multiples: Σ(R_i × |pnl_i|) / Σ|pnl_i|.
 
-    Implemented as (avg_winning_trade × winners_count) / (|avg_losing_trade| × losers_count).
+    Audit-2026-05-07 H-0627 / H-0628 ratchet: the previous formulation
+    `(avg_win × winners_count) / (|avg_loss| × losers_count)` is algebraically
+    identical to Profit Factor and was reporting the same number under two
+    labels. The new pnl-weighted formula varies independently of Profit Factor
+    when individual trade magnitudes are heterogeneous.
     """
     from services.analytics_runner import _compute_derived_trade_metrics
 
     v, t = _sample_inputs()
     result = _compute_derived_trade_metrics(v, t)
     assert "weighted_risk_reward_ratio" in result
-    num = t["avg_winning_trade"] * t["winners_count"]
-    den = abs(t["avg_losing_trade"]) * t["losers_count"]
-    if den == 0:
+
+    risk_unit = abs(t["avg_losing_trade"])
+    if risk_unit == 0 or not t["realized_pnl_per_trade"]:
+        assert result["weighted_risk_reward_ratio"] is None
+        return
+
+    num = 0.0
+    den = 0.0
+    for trade in t["realized_pnl_per_trade"]:
+        pnl = float(trade["realized_pnl"])
+        r = pnl / risk_unit
+        w = abs(pnl)
+        num += r * w
+        den += w
+    expected = num / den if den > 0 else None
+    if expected is None:
         assert result["weighted_risk_reward_ratio"] is None
     else:
-        assert abs(result["weighted_risk_reward_ratio"] - num / den) < 1e-6
+        assert abs(result["weighted_risk_reward_ratio"] - expected) < 1e-6
+
+
+def test_weighted_rr_is_not_algebraically_profit_factor():
+    """Audit-2026-05-07 H-0627 / H-0628: the genuine pnl-weighted R:R formula
+    must produce a number distinct from Profit Factor when per-trade
+    magnitudes are heterogeneous. Construct a deliberately asymmetric cohort
+    and assert the two metrics diverge."""
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    t = {
+        "win_rate": 0.5,
+        "avg_winning_trade": 100.0,
+        "avg_losing_trade": -50.0,
+        "winners_count": 2,
+        "losers_count": 2,
+        # Heterogeneous magnitudes — large winners + small winners + medium
+        # losers. The old (broken) formula collapses to gross_profit/|gross_loss|;
+        # the new pnl-weighted formula weights each trade's R by its own |pnl|.
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 500.0},
+            {"side": "long", "realized_pnl": 10.0},
+            {"side": "short", "realized_pnl": -100.0},
+            {"side": "short", "realized_pnl": -50.0},
+        ],
+    }
+    result = _compute_derived_trade_metrics({}, t)
+
+    # Compute Profit Factor (aggregate, both sides).
+    pnls = [trade["realized_pnl"] for trade in t["realized_pnl_per_trade"]]
+    gross_profit = sum(p for p in pnls if p > 0)
+    gross_loss = abs(sum(p for p in pnls if p < 0))
+    profit_factor = gross_profit / gross_loss
+    weighted_rr = result["weighted_risk_reward_ratio"]
+
+    assert weighted_rr is not None
+    # The whole point: the two MUST diverge on heterogeneous magnitudes.
+    assert abs(weighted_rr - profit_factor) > 1e-3, (
+        "weighted_risk_reward_ratio must not equal Profit Factor for "
+        f"heterogeneous trade magnitudes; got weighted_rr={weighted_rr} "
+        f"profit_factor={profit_factor}"
+    )
 
 
 def test_derived_trade_metrics_sqn():
