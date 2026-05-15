@@ -535,13 +535,32 @@ def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
     Mirrors `_monthly_returns_grid_from_series` template above (D-03 storage
     decision: flat list serializes smaller and matches per-date shape of every
     other series kind per RESEARCH.md §5b).
+
+    Audit 2026-05-07 H-0715: previously this helper iterated `returns.items()`
+    with NO NaN/Inf filter — every other series helper routes through
+    `_finalize_rolling` which scrubs NaN. A single NaN value (gap day, upstream
+    backfill, attacker-crafted CSV import) would become `round(float(nan), 6)
+    == nan` in the comprehension; Postgres JSONB then rejects NaN, failing
+    the atomic batch upsert and knocking out ALL 12 sibling kinds for the
+    strategy. We now drop NaN/Inf rows here.
+
+    Audit 2026-05-07 H-0720: previously the output bypassed `cap_data_points`
+    that every other series helper uses (a 10-year backtest could emit ~2,520
+    raw rows). Routing through the same chokepoint as `_finalize_rolling` keeps
+    payload sizes bounded.
     """
     if len(returns) == 0:
         return []
-    return [
+    # H-0715: scrub NaN/Inf (mirrors the _finalize_rolling pattern). This MUST
+    # happen before the round/strftime comprehension because Postgres JSONB
+    # rejects NaN, which would knock out the entire atomic sibling-batch upsert.
+    cleaned = returns.replace([np.inf, -np.inf], np.nan).dropna()
+    rows = [
         {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
-        for d, v in returns.items()
+        for d, v in cleaned.items()
     ]
+    # H-0720: enforce the same payload cap as every other series kind.
+    return cap_data_points(rows)
 
 
 def compute_qstats_scalars(

@@ -617,6 +617,34 @@ def test_daily_returns_grid_empty_input(empty_returns):
     assert _daily_returns_grid_from_series(empty_returns) == []
 
 
+def test_daily_returns_grid_scrubs_nan_and_inf():
+    """Audit 2026-05-07 H-0715: a single NaN or Inf row must NOT appear in the
+    emitted list. Postgres JSONB rejects NaN, so an unscrubbed NaN would knock
+    out the entire atomic sibling-kind batch upsert for the strategy.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    values = np.array([0.01, 0.02, np.nan, -0.01, np.inf, 0.005, -np.inf, 0.003, 0.0, 0.004])
+    returns = pd.Series(values, index=dates, name="returns")
+    grid = _daily_returns_grid_from_series(returns)
+    # Only the 7 clean rows survive (3 dropped: NaN, +Inf, -Inf).
+    assert len(grid) == 7
+    for point in grid:
+        v = point["value"]
+        assert not math.isnan(v) and not math.isinf(v)
+
+
+def test_daily_returns_grid_caps_payload_size():
+    """Audit 2026-05-07 H-0720: a 10-year backtest must not bypass the
+    cap_data_points budget that every other series helper enforces. The cap
+    is 5000 points; we exercise a 7000-point series to prove the cap kicks in.
+    """
+    dates = pd.bdate_range("2010-01-01", periods=7000)
+    returns = pd.Series(np.full(7000, 0.001), index=dates, name="returns")
+    grid = _daily_returns_grid_from_series(returns)
+    # cap_data_points caps at 5000 (default) keeping the most recent.
+    assert len(grid) == 5000
+
+
 def test_qstats_scalars_complete_set(golden_returns, benchmark_returns):
     """METRICS-11: all 10 new scalars present (None if computation fails).
 
