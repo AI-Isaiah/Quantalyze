@@ -5,7 +5,18 @@ import { VerificationForm } from "./VerificationForm";
 import { VerificationProgress } from "./VerificationProgress";
 import { VerificationResults } from "./VerificationResults";
 
-type Status = "pending" | "processing" | "complete" | "failed";
+// "complete" = legacy verification_requests terminal status (pre-Phase 19).
+// "published" = canonical strategy_verifications terminal status, returned by
+// the unified /process-key pipeline post-PR-X5 (when the feature flag is on).
+// The status route at src/app/api/verify-strategy/[id]/status/route.ts:107
+// already surfaces results for either value; this client must accept both
+// so polling proceeds past the success transition under the unified path.
+type Status =
+  | "pending"
+  | "processing"
+  | "complete"
+  | "published"
+  | "failed";
 
 interface VerificationResultData {
   twr: number | null;
@@ -67,7 +78,10 @@ export function VerificationSection() {
         const newStatus = data.status as Status;
         setStatus(newStatus);
 
-        if (newStatus === "complete" && data.results) {
+        if (
+          (newStatus === "complete" || newStatus === "published") &&
+          data.results
+        ) {
           setResults(data.results);
           setPhase("results");
           return;

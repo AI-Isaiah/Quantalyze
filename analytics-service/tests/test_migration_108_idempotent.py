@@ -26,14 +26,14 @@ MIGRATION_108 = (
     REPO_ROOT
     / "supabase"
     / "migrations"
-    / "108_process_key_long_compute_job_kinds_repair.sql"
+    / "20260510175507_process_key_long_compute_job_kinds_repair.sql"
 )
 ROLLBACK_108 = (
     REPO_ROOT
     / "supabase"
     / "migrations"
     / "down"
-    / "108-rollback.sql"
+    / "20260510175507-rollback.sql"
 )
 
 

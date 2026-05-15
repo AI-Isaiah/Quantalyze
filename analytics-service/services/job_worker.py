@@ -94,7 +94,7 @@ EXCHANGE_COOLDOWNS: dict[str, int] = {
 # Severity ordering used by reconcile dedup. A new finding with a
 # higher rank than the existing unacked row escalates in place; equal-
 # or-lower rank skips. Source of truth lives in
-# supabase/migrations/047c_severity_critical.sql.
+# supabase/migrations/20260515113405_severity_critical.sql.
 SEVERITY_RANK: dict[str, int] = {
     "low": 0,
     "medium": 1,

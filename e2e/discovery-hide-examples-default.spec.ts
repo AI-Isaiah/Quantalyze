@@ -4,7 +4,7 @@
  * Proves the cross-plan invariant: with Plan 13-02's
  * `DEFAULTS.hide_examples = true` (src/lib/discovery-prefs.ts:42) AND
  * Plan 13-05's `is_example = true` backfill on the 8 seed strategy UUIDs
- * (supabase/migrations/091_seed_is_example_backfill.sql), a brand-new
+ * (supabase/migrations/20260429063138_seed_is_example_backfill.sql), a brand-new
  * allocator with no prior `discovery_view_preferences:*` localStorage
  * entries lands on `/discovery/[slug]` and sees ZERO example strategies.
  *

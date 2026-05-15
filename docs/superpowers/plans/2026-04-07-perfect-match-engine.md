@@ -94,7 +94,7 @@ Both reviewers independently arrived at the same first-principles insight: the f
 ### Task 1: Database migration (post-eng-review revisions)
 
 **Files:**
-- Create: `supabase/migrations/011_perfect_match.sql`
+- Create: `supabase/migrations/20260407164606_perfect_match.sql`
 
 **Eng review fixes baked in:**
 - Admin gate: add `profiles.is_admin BOOLEAN`, **backfill from `ADMIN_EMAIL` env var inside the migration itself**, update both `lib/admin.ts` and `withAdminAuth.ts` in Task 1.5 to check both mechanisms during transition.
@@ -1632,8 +1632,8 @@ All structural — auto-applied per autoplan rules ("Structural issues: auto-fix
 ### Step 0. Scope Challenge — actual code analysis
 
 The eng review read the actual files referenced by the plan, not just the plan text:
-- `supabase/migrations/001_initial_schema.sql` — confirmed `profiles.role CHECK ('manager','allocator','both')`, `contact_requests UNIQUE(allocator_id, strategy_id)`
-- `supabase/migrations/010_portfolio_intelligence.sql` — confirmed the correct RLS pattern (separate `service_insert` + `owner_read`)
+- `supabase/migrations/20260405061911_initial_schema.sql` — confirmed `profiles.role CHECK ('manager','allocator','both')`, `contact_requests UNIQUE(allocator_id, strategy_id)`
+- `supabase/migrations/20260407075303_portfolio_intelligence.sql` — confirmed the correct RLS pattern (separate `service_insert` + `owner_read`)
 - `analytics-service/services/portfolio_optimizer.py` — confirmed `_compute_sharpe`, `_avg_corr`, `_max_drawdown` are module-private with leading underscore; `find_improvement_candidates` hardcodes `add_weight=0.10`
 - `analytics-service/routers/portfolio.py` — confirmed cron uses `asyncio.Semaphore(3)` for portfolio compute
 - `src/lib/admin.ts`, `src/lib/api/withAdminAuth.ts`, `src/proxy.ts`, `src/app/(dashboard)/layout.tsx` — confirmed admin gate is currently email-based via `ADMIN_EMAIL`, not `is_admin`

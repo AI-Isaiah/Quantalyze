@@ -149,7 +149,7 @@ we already did it. The moat is ~18 months, not permanent. By then
 we need Year-1 allocator testimonials and a 20%+ hit rate, at which
 point the moat is the brand."
 
-**Evidence:** `supabase/migrations/011_perfect_match.sql` (match_decisions
+**Evidence:** `supabase/migrations/20260407164606_perfect_match.sql` (match_decisions
 schema for ground-truth), term-sheet-draft.md (partner-first economics),
 migration 012 (disclosure tier).
 

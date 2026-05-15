@@ -409,10 +409,10 @@ emission site — `alert.acknowledge` was already emitted from
 
 ## Evidence
 - Migration 010: `audit_log` table schema and original RLS policies.
-  `supabase/migrations/010_portfolio_intelligence.sql` (lines 66-75,
+  `supabase/migrations/20260407075303_portfolio_intelligence.sql` (lines 66-75,
   178-182).
 - Migration 049: deny policies + `log_audit_event` RPC.
-  `supabase/migrations/049_audit_log_hardening.sql`.
+  `supabase/migrations/20260416201929_audit_log_hardening.sql`.
 - TypeScript emitter: `src/lib/audit.ts`.
 - Unit tests (fire-and-forget contract):
   `src/lib/audit.test.ts`.
@@ -568,5 +568,5 @@ match-decision-record action remains the audited unit; the M7 reuse-or-create ju
 race-loser onto the same `match_decision_id` (and therefore the same audit row) the winner
 already wrote.
 
-Reference: `supabase/migrations/083_commit_scenario_batch_race_fix.sql`,
+Reference: `supabase/migrations/20260426131721_commit_scenario_batch_race_fix.sql`,
 `src/__tests__/scenario-commit-batch-race.test.ts`.

@@ -43,7 +43,7 @@ Everything downstream reads from these tables. Blocking dependency for all other
 ### Task 1: Database Migration
 
 **Files:**
-- Create: `supabase/migrations/010_portfolio_intelligence.sql`
+- Create: `supabase/migrations/20260407075303_portfolio_intelligence.sql`
 
 - [ ] **Step 1: Write the migration SQL**
 
@@ -246,7 +246,7 @@ Expected: New tables visible with correct columns and constraints.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add supabase/migrations/010_portfolio_intelligence.sql
+git add supabase/migrations/20260407075303_portfolio_intelligence.sql
 git commit -m "feat: add portfolio intelligence schema (migration 010)"
 ```
 

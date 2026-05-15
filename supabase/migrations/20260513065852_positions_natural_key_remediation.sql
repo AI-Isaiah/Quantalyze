@@ -1,3 +1,23 @@
+-- ⚠️  DEFERRED-APPLY WARNING (added 2026-05-15 by PR-Y1):
+-- ============================================================================
+-- This file's `schema_migrations` row was INSERTed on prod (project
+-- `khslejtfbuezsmvmtsdn`) with version=20260513065852 to keep
+-- `supabase db push` from re-applying. **The SQL body in this file has
+-- NEVER been executed on prod.** On prod, `positions_natural_key` UNIQUE
+-- constraint is MISSING and 8 duplicate (strategy_id, symbol, side, opened_at)
+-- groups exist (per migration body's own audit comments).
+--
+-- Deferred to PR-Y2 because the constraint install requires:
+--   1. First running reconstruct_positions_atomic per affected strategy_id to
+--      drain the 8 known dup groups (existing data-cleanup RPC, not destructive).
+--   2. Verifying duplicate count is zero before ALTER TABLE ADD CONSTRAINT.
+--
+-- To genuinely apply 119 in PR-Y2: write a NEW migration file with a different
+-- timestamp that (a) runs the dedupe pre-flight, (b) installs the constraint,
+-- (c) has a strict 0-duplicate self-verify DO block at the end. Do NOT remove
+-- this file's `schema_migrations` row without writing the replacement migration.
+-- ============================================================================
+--
 -- Migration 119: positions_natural_key remediation
 --
 -- Why this migration exists

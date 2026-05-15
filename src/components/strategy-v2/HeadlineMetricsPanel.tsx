@@ -71,7 +71,7 @@ type ActiveView = "cumulative" | "underwater" | "rolling_sharpe" | "log_returns"
  *   - Log returns view: lazily fires `fetchStrategyLazyMetricsClient(
  *     strategyId, "equity")` on first activation (migration 087 maps
  *     'equity' → ARRAY['log_returns_series'] — see
- *     supabase/migrations/087_strategy_analytics_series.sql:165). Result
+ *     supabase/migrations/20260428120919_strategy_analytics_series.sql:165). Result
  *     is cached in component state; subsequent toggles do NOT re-fetch.
  *     Empty payload / error path renders the standard PartialDataBanner.
  *

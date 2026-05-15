@@ -229,27 +229,30 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
   });
 
   /**
-   * PR-X3 regression — the teaser flow MUST forward
-   * `context.step='validate'` to `/process-key`. The upstream validator at
-   * analytics-service/routers/process_key.py:568 raises
-   * MISSING_STRATEGY_ID (422) unless either `context.strategy_id` OR
-   * `context.step='validate'` is set. The teaser flow has no caller-owned
-   * strategy_id (the user is testing keys against the universe of
-   * strategies — no strategy exists yet), so without `step='validate'`
-   * every landing-page submission breaks the moment the kill-switch flag
-   * is flipped ON.
+   * PR-X5 regression — teaser context MUST NOT forward
+   * `context.step='validate'`. Inverts the PR-X3 contract.
    *
-   * Captured during the abortive 2026-05-14T19:00 flag flip — gate was on
-   * for 3m43s before the bug was caught and the kill-switch flipped back
-   * to off. This test ensures the regression cannot ship again silently.
+   * Why: PR-X5's dispatch in
+   * analytics-service/routers/process_key.py injects the sentinel
+   * teaser-anchor strategy_id (migration 132) for `flow_type='teaser'`
+   * BEFORE the step check. With step='validate' still in the context,
+   * teaser would route into `_run_validate_only` which doesn't return
+   * `verification_id` — TS handler then 502s with "Verification service
+   * returned an invalid response." This was the failure mode of the
+   * second abortive flag flip on 2026-05-14T19:55 (~1m33s on-time
+   * before auto-rollback). Stripping `step='validate'` lets the
+   * unified pipeline run to completion and return a `verification_id`.
+   *
+   * Captured here so the PR-X3 workaround cannot regress into the
+   * post-PR-X5 contract silently.
    */
-  it("verify-strategy: teaser context forwards step='validate' (PR-X3)", async () => {
+  it("verify-strategy: teaser context does NOT include step='validate' (PR-X5)", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
 
     const { POST } = await import("@/app/api/verify-strategy/route");
     await POST(
       jsonReq("/api/verify-strategy", {
-        email: "step-validate-pr-x3@example.com",
+        email: "no-step-validate-pr-x5@example.com",
         exchange: "okx",
         api_key: "k",
         api_secret: "s",
@@ -262,7 +265,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.flow_type).toBe("teaser");
     const context = body!.context as Record<string, unknown>;
     expect(context).toBeDefined();
-    expect(context.step).toBe("validate");
+    expect(context.step).toBeUndefined();
     // Sanity: the original payload fields still pass through so the Python
     // validate_key_permissions step has the API key + secret it needs.
     expect(context.api_key).toBe("k");
