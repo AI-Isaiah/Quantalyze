@@ -721,10 +721,49 @@ async def _fetch_raw_trades_binance(
                         ccxt_symbol = mkt_symbol
                         break
 
+        # Audit-2026-05-07 H-0662 — Binance caps fetch_my_trades at 1000
+        # rows per call. Pre-fix this was a single call with limit=1000
+        # and no pagination loop; a high-frequency strategy with >1000
+        # fills since last_sync (or a 90-day cold-start backfill) had
+        # its trade history silently truncated. Now we paginate by
+        # advancing ``since`` past the last fill's timestamp until a
+        # short page is returned or we hit the per-symbol page cap
+        # (20 pages × 1000 = 20K fills). Mirrors the OKX/Bybit page-cap
+        # contract elsewhere in this file.
+        BINANCE_PAGE_CAP = 20
+        all_trades: list[dict] = []
+        current_since = since_ms
         async with sem:
-            return symbol, await exchange.fetch_my_trades(
-                ccxt_symbol, since=since_ms, limit=1000
-            )
+            for _page in range(BINANCE_PAGE_CAP):
+                batch = await exchange.fetch_my_trades(
+                    ccxt_symbol, since=current_since, limit=1000
+                )
+                if not batch:
+                    break
+                all_trades.extend(batch)
+                if len(batch) < 1000:
+                    break
+                last_ts = batch[-1].get("timestamp")
+                if not isinstance(last_ts, (int, float)):
+                    # CCXT unified shape uses int millis; if the venue
+                    # drops the field we can't safely advance the cursor
+                    # without risking an infinite loop. Stop here.
+                    logger.warning(
+                        "Binance fetch_my_trades %s: missing 'timestamp' "
+                        "on last fill, stopping pagination at %d fills",
+                        symbol, len(all_trades),
+                    )
+                    break
+                current_since = int(last_ts) + 1
+            else:
+                # Loop ran the full BINANCE_PAGE_CAP without natural
+                # break; possible truncation past the cap.
+                logger.warning(
+                    "Binance fetch_my_trades %s: hit %d-page cap; "
+                    "possible truncation past %d fills",
+                    symbol, BINANCE_PAGE_CAP, len(all_trades),
+                )
+        return symbol, all_trades
 
     tasks = [_fetch_one(s) for s in symbols]
     results = await asyncio.gather(*tasks, return_exceptions=True)

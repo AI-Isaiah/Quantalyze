@@ -1847,3 +1847,187 @@ class TestG12BMakerRebatePreservesSign:
             "binance",
         )
         assert out["fee"] == -0.4
+
+
+# ─── audit-2026-05-07 H-0662 — Binance fetch_my_trades paginates ────
+
+
+class TestG12BBinancePaginationLoop:
+    """Audit-2026-05-07 H-0662 — pre-fix _fetch_raw_trades_binance called
+    fetch_my_trades once with limit=1000 and no pagination loop. Binance
+    caps each call at 1000 rows, so a high-frequency strategy with
+    >1000 fills since last_sync silently truncated. Post-fix the loop
+    advances ``since`` past the last fill's timestamp until a short
+    page returns or the 20-page cap fires."""
+
+    @pytest.mark.asyncio
+    async def test_binance_paginates_past_1000_fills(self) -> None:
+        import asyncio
+        from services.exchange import fetch_raw_trades
+
+        # Page 1: exactly 1000 fills (full page → loop continues).
+        # Page 2: 1 fill (short page → loop breaks).
+        page_1 = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": f"ord-{i}",
+                "id": f"fill-{i}",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "timestamp": 1700000000000 + i,
+                "info": {},
+            }
+            for i in range(1000)
+        ]
+        page_2 = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "sell",
+                "price": 60500.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T01:00:00Z",
+                "order": "ord-tail",
+                "id": "fill-tail",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                "timestamp": 1700001000000,
+                "info": {},
+            }
+        ]
+
+        call_log: list[int | None] = []
+
+        async def _fetch_my_trades(symbol, since=None, limit=None):
+            call_log.append(since)
+            if len(call_log) == 1:
+                return page_1
+            return page_2
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_my_trades = _fetch_my_trades
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                mock_eq2.execute.return_value = MagicMock(data=[
+                    {"symbol": "BTCUSDT"}
+                ])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # We expect both pages to be merged: 1000 + 1 = 1001.
+        assert len(result) == 1001
+        # Two pages were fetched, second with since advanced past the
+        # last timestamp of page 1.
+        assert len(call_log) == 2
+        # Page 2's ``since`` must be > page 1's last timestamp.
+        assert call_log[1] == page_1[-1]["timestamp"] + 1
+
+    @pytest.mark.asyncio
+    async def test_binance_pagination_hits_page_cap(self) -> None:
+        """If the venue keeps returning full pages, the 20-page cap must
+        eventually terminate the loop (no runaway iteration)."""
+        import asyncio
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        # Always return a full page so the loop keeps going.
+        full_page = [
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": f"ord-{i}",
+                "id": f"fill-{i}",
+                "fee": {"cost": 0.6, "currency": "USDT"},
+                "takerOrMaker": "taker",
+                # Tick the timestamp forward so cursor advances.
+                "timestamp": 1700000000000 + i,
+                "info": {},
+            }
+            for i in range(1000)
+        ]
+
+        call_count = {"n": 0}
+
+        async def _fetch_my_trades(symbol, since=None, limit=None):
+            call_count["n"] += 1
+            # Increment timestamps so cursor moves forward; CCXT mutation
+            # safe since list reconstruction below.
+            return [
+                {**row, "timestamp": row["timestamp"] + call_count["n"] * 1_000_000}
+                for row in full_page
+            ]
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "binance"
+        mock_exchange.markets = {}
+        mock_exchange.fetch_my_trades = _fetch_my_trades
+
+        mock_supabase = MagicMock()
+
+        def _table(name):
+            mock_t = MagicMock()
+            mock_sel = MagicMock()
+            mock_eq1 = MagicMock()
+            mock_eq2 = MagicMock()
+            if name == "trades":
+                mock_eq2.execute.return_value = MagicMock(data=[
+                    {"symbol": "BTCUSDT"}
+                ])
+                mock_eq1.eq.return_value = mock_eq2
+            else:
+                mock_eq1.execute.return_value = MagicMock(data=[])
+            mock_sel.eq.return_value = mock_eq1
+            mock_t.select.return_value = mock_sel
+            return mock_t
+
+        mock_supabase.table = _table
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch("services.db.db_execute", side_effect=_mock_db_execute):
+            with patch.object(
+                logging.getLogger("quantalyze.analytics"),
+                "warning",
+            ) as mock_warn:
+                result = await fetch_raw_trades(
+                    mock_exchange, "strat-1", mock_supabase
+                )
+
+        # Exactly 20 fetch calls — the BINANCE_PAGE_CAP.
+        assert call_count["n"] == 20
+        assert len(result) == 20 * 1000
+        # Page-cap warning must fire.
+        assert any(
+            "page cap" in str(call) and "BTCUSDT" in str(call)
+            for call in mock_warn.call_args_list
+        )
