@@ -127,8 +127,11 @@ BEGIN
            SELECT 1
              FROM jsonb_each(scoring_weight_overrides) AS kv(key, value)
             WHERE jsonb_typeof(kv.value) <> 'number'
-               OR (kv.value)::numeric < 0.5
-               OR (kv.value)::numeric > 1.5
+               OR CASE
+                    WHEN jsonb_typeof(kv.value) = 'number'
+                    THEN (kv.value::text)::numeric NOT BETWEEN 0.5 AND 1.5
+                    ELSE false
+                  END
          )
        )
     RETURNING user_id
@@ -161,8 +164,11 @@ ALTER TABLE allocator_preferences
         SELECT 1
           FROM jsonb_each(scoring_weight_overrides) AS kv(key, value)
          WHERE jsonb_typeof(kv.value) <> 'number'
-            OR (kv.value)::numeric < 0.5
-            OR (kv.value)::numeric > 1.5
+            OR CASE
+                 WHEN jsonb_typeof(kv.value) = 'number'
+                 THEN (kv.value::text)::numeric NOT BETWEEN 0.5 AND 1.5
+                 ELSE false
+               END
       )
     )
   )
