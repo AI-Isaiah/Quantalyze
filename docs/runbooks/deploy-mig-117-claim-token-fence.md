@@ -306,7 +306,7 @@ Mitigation in production until a follow-up lands:
 
 - `.planning/audit-2026-05-07/INVEST-P97.md` — full investigation (the
   Race A / Race B taxonomy, why migrations 102 / 110 didn't close it).
-- `supabase/migrations/117_compute_jobs_claim_token_fencing.sql` — the
+- `supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql` — the
   migration this runbook deploys.
 - `analytics-service/main_worker.py` — the dispatch_tick + watchdog
   worker code; threads `p_claim_token` and detects 40001.

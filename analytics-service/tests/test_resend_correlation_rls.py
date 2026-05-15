@@ -8,7 +8,7 @@ Asserted invariants:
      attacker brute-forces a correlation_id, they cannot read the mapping
      table from a public-facing context.
 
-Migration under test: supabase/migrations/098_resend_message_correlation.sql
+Migration under test: supabase/migrations/20260515113637_resend_message_correlation.sql
 (Plan 16-05). Test framework + skipif gate mirror
 analytics-service/tests/test_trigger_rls_audit.py (Plan 16-04 deliverable).
 

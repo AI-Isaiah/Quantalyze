@@ -686,3 +686,56 @@ def test_paginated_select_accepts_composite_order_by():
     )
     assert rows == []
     assert recorded == [("allocator_id", False), ("computed_at", True)]
+
+
+def test_paginated_select_no_false_positive_at_exact_boundary():
+    """Audit-2026-05-07 red-team follow-up — a dataset of EXACTLY
+    hard_cap_pages × page_size rows must NOT raise PaginatedSelectTruncated.
+
+    Pre-fix the loop exhausted on a final full page without ever seeing
+    a short page, mistaking complete reads at the boundary for truncation.
+    The peek-one-extra-page step distinguishes "exactly all rows" (peek
+    returns empty → return) from "real overflow" (peek returns more → raise).
+    """
+    from services.match_eval import _paginated_select
+
+    page_size = 2
+    hard_cap_pages = 3
+    # Total dataset = 6 rows (exactly hard_cap_pages × page_size). The
+    # first 3 paginated calls each return a full 2-row page; the boundary
+    # peek (call #4) must return empty → no raise.
+    pages: list[list[dict]] = [
+        [{"id": "row-0"}, {"id": "row-1"}],
+        [{"id": "row-2"}, {"id": "row-3"}],
+        [{"id": "row-4"}, {"id": "row-5"}],
+        [],  # boundary peek → empty
+    ]
+    call_count = {"n": 0}
+
+    builder = MagicMock()
+    builder.order.return_value = builder
+
+    def _range_side_effect(start, end):
+        idx = call_count["n"]
+        call_count["n"] += 1
+        sliced = MagicMock()
+        sliced.execute.return_value = MagicMock(
+            data=pages[idx] if idx < len(pages) else []
+        )
+        return sliced
+
+    builder.range.side_effect = _range_side_effect
+
+    rows = _paginated_select(
+        builder,
+        order_by="id",
+        page_size=page_size,
+        hard_cap_pages=hard_cap_pages,
+        truncation_hint="boundary_test",
+    )
+    assert len(rows) == 6, (
+        f"Expected all 6 rows returned at exact boundary; got {len(rows)}: {rows}"
+    )
+    assert call_count["n"] == 4, (
+        f"Expected 3 paginated calls + 1 boundary peek = 4; got {call_count['n']}"
+    )

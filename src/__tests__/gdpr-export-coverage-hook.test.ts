@@ -75,6 +75,6 @@ describe("scripts/check-gdpr-export-coverage.ts", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("user_notes");
-    expect(result.stderr).toContain("037_user_notes.sql");
+    expect(result.stderr).toContain("20260412094453_user_notes.sql");
   }, 30_000);
 });

@@ -448,7 +448,7 @@ class TestClaimDedupe:
     when the SQL dedupes, dispatch_tick still processes the survivor
     cleanly and does not assume `len(jobs) == p_batch_size`. The actual
     SQL regression is gated by the migration's structural DO block (see
-    supabase/migrations/090_claim_dedupe_partition_keys.sql) plus the
+    supabase/migrations/20260428190907_claim_dedupe_partition_keys.sql) plus the
     one-shot live test recorded in the v0.17.0.2 deploy report.
     """
 

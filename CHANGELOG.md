@@ -6,6 +6,146 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.35.0] - 2026-05-15
+
+**audit-2026-05-07 — analytics-service/metrics.py audit closure (specialist + red-team round).** Closes 13 H-tier audit findings (H-0710..H-0730) on the `compute_all_metrics` pipeline. A subsequent /simplify pass + 5-specialist fan-out (security / correctness / performance / testing / maintainability) + Claude red-team adversarial review surfaced 14 additional issues, all addressed here. Analytics dashboards now stay continuous through upstream gap days, payloads are uniformly NaN/Inf-scrubbed and size-capped, and the `time_in_market` indicator no longer counts gap days as "in market". Allocator UI experience: equity curves stop silently truncating at the first missing benchmark day, the heat-map renderer gets a stable bounded daily-returns payload, and operators get explicit Railway log signals for upstream data corruption (returns ≤ -1, NaN gaps, qstats version drift, rolling_greeks column drift) instead of silent metric degradation.
+
+### Added
+- `analytics-service/services/metrics.py` — `_drop_nonfinite(series)` shared helper consolidates the NaN/Inf scrub pattern across every series writer (Postgres JSONB rejects NaN — the H-0715-class chokepoint).
+- `analytics-service/services/metrics.py` — `_format_series_points(series, decimals)` vectorized `{date, value}` dict construction with `DatetimeIndex` assertion and `strict=True` zip (fail-loud on length mismatch, ~10× faster strftime per call, byte-stable Python-decimal rounding).
+- `analytics-service/services/metrics.py` — `_safe_qstats_scalar(name, fn, returns, returns_len)` helper + module-level `_QSTATS_SINGLE_ARG_SCALARS` dispatch table replace 10 near-identical try/except blocks in `compute_qstats_scalars` (~60 LOC of dup removed; single logging contract; `getattr` resolved at call time so existing monkeypatch tests still work).
+- `analytics-service/services/metrics.py` — `_rolling_sortino_from_components(returns, neg_sq, window)` window-parameterized inner that lets the three Sortino windows (63 / 126 / 252) share a single `neg_sq = (returns.where(returns < MAR, 0.0)) ** 2` materialization (H-0721 hot-path fix).
+- `analytics-service/services/metrics.py` — `_rolling_alpha_beta(returns, benchmark, window)` returns both projections from ONE `qs.stats.rolling_greeks` regression pass (was 2× the work), plus inner-join alignment of the returns/benchmark indexes and a structured WARNING when qs returns a DataFrame missing the expected alpha/beta columns (H-0711 / H-0726.1 / .2 / .3).
+- `analytics-service/services/metrics.py` — `SeriesPoint` TypedDict mirrors the React-side `{date: string, value: number}` contract so a renamed key surfaces at type-check time instead of as runtime NaN (H-0730).
+- `analytics-service/services/metrics.py` — `MAR=0.0` and `_LOG_RETURN_FLOOR=-1.0+1e-9` module constants clustered at the top.
+- 25+ regression tests covering every H-XXXX finding plus the specialist + red-team follow-ups: divide-by-zero RuntimeWarning suppression on all-winning windows, NaN/Inf scrub on the daily-returns grid, payload cap at 5000 points, single-`rolling_greeks` pass invariant, single-`neg_sq` materialization, alpha/beta inner-join alignment, short / zero-overlap benchmark short-circuit, qs.stats.rolling_greeks failure logging, `MetricsResult` sibling-kind subscript guard, cumulative log equity contract + catastrophic-loss preservation, parametrized failure path across all 8 dispatch entries, `r_squared_status` ∈ {`no_benchmark`, `ok`, `error`} disambiguation including the NaN-from-qs path, `time_in_market` NaN exclusion regression.
+
+### Changed
+- `compute_all_metrics` — chart-feeding paths (`(1+returns).cumprod()`, `qs.stats.to_drawdown_series`, benchmark `bm_cumulative`) now consume `returns.fillna(0)` so a single upstream gap day doesn't silently truncate the entire equity curve at the gap (red-team F3). Raw `returns` still flows to `qs.stats.*` for statistics so NaN exclusion remains in the indicators that want it.
+- `compute_all_metrics` — emits `logger.warning` at entry when `returns` contains NaN or any `returns <= -1.0` (catastrophic-loss / oscillating-equity precondition; surfaces upstream-data corruption to Railway logs).
+- `compute_qstats_scalars` — `time_in_market` switched from `qs.stats.exposure` (which ceil-rounds UP to the nearest 1% — 1/252 displayed as 1% instead of 0.4%) to `(returns.notna() & (returns != 0)).sum() / len(returns)`, mirroring quantstats's NaN-exclusion predicate exactly so gap days don't inflate the fraction (H-0724 + red-team correctness fix).
+- `compute_qstats_scalars` — `r_squared_status` is now `"ok"` only when `_safe_float` returns a non-None value; `"error"` when qs returned NaN/Inf or raised; `"no_benchmark"` is the default. Status no longer lies when qs returns a non-finite r_squared (red-team F7).
+- `compute_qstats_scalars` — every qs.stats failure path now emits `logger.warning(name=..., returns_len=..., exc_info=True)` instead of `except: pass`. Converts "10 scalars silently degrade to None" into an operator-visible Railway signal (H-0710 / H-0713 / H-0723).
+- `qs.stats.sortino` is now called with `rf=MAR` explicitly so the scalar Sortino and `_rolling_sortino` share the SAME minimum acceptable return constant; relying on the qs default `rf=0` silently diverged the moment MAR was tuned (H-0725).
+- `_daily_returns_grid_from_series` — now routes through `_drop_nonfinite` + `cap_data_points` (was an unscrubbed comprehension that could leak NaN into the atomic sibling-batch upsert and a 10y backtest's 2,520 rows bypassed the 5000-point cap that every other helper enforces) (H-0715 / H-0720).
+- `_log_returns_series` — returns cumulative log equity (`np.log1p(returns).cumsum()`) instead of per-period log returns so the EquityCurve "Log Returns" toggle renders monotonically on a log axis instead of noise around zero (H-0719). Catastrophic-loss days (r ≤ -1, e.g. liquidation events) are clamped to `_LOG_RETURN_FLOOR = -1 + 1e-9` before `log1p` so they surface as `~-20.72` rather than vanishing through `_finalize_rolling.dropna()` (H-0728).
+- `_rolling_sortino_from_components` — explicit divide-by-zero guard via `np.where(roll_dstd > 0, ratio, np.nan)`. Previously an all-winning window (every observation ≥ MAR=0 → `roll_dstd == 0`) emitted a divide-by-zero `RuntimeWarning` AND produced ±Inf points that `_finalize_rolling` silently scrubbed — wiping the windows where the strategy performed BEST off the chart (H-0712 / H-0716).
+- `_finalize_rolling` + `_daily_returns_grid_from_series` — switched to the shared `_drop_nonfinite` + `_format_series_points` helpers. Eliminates a double-`dropna()` in `_finalize_rolling`, vectorizes per-row `strftime + round(float, n)` (estimated ~30-40ms saved per analytics refresh across the 10× per-strategy invocation), keeps Python-decimal rounding semantics (NOT NumPy banker rounding — preserves byte-stable stored JSONB across the refactor).
+- `MetricsResult.__getitem__` — sibling-kind subscript now raises a descriptive `KeyError` pointing to `result.sibling_kinds[...]`. Previously the bare proxy let a `result.sibling_kinds[k] → result[k]` refactor look correct in review while silently `KeyError`ing in production for every split-storage kind (H-0727).
+- `compute_qstats_scalars` — adds `r_squared_status` companion key so operators can disambiguate "benchmark missing" from "qs raised" from "qs returned NaN" without trawling logs (H-0718).
+
+### Fixed
+- HIGH (red-team carry-over from H-0715): `metrics_json["benchmark_returns"]` previously skipped the same NaN/Inf scrub + `cap_data_points` chokepoint as every other series — a single benchmark gap day plus the absent payload cap could either reject the JSONB upsert OR balloon a 10y BTC benchmark series past the 5000-row budget. Now scrubs + caps uniformly with `cap_data_points(_format_series_points(_drop_nonfinite(bm_cumulative), 6))`.
+- MEDIUM: `returns_series` and `drawdown_series` defense-in-depth NaN/Inf scrub at the helper boundary (was relying on the `sanitize_metrics` tail to catch JSONB-rejecting NaN; one upstream gap day through `(1+returns).cumprod()` propagated NaN to every subsequent row).
+- MEDIUM (correctness): `time_in_market` previously inflated the fraction whenever upstream CSV gaps injected NaN because `pandas.Series.NaN != 0` evaluates to `True`. Switched to the NaN-aware predicate `(returns.notna() & (returns != 0))`.
+- MEDIUM (Python 3.10+ safety): `_format_series_points` now asserts `isinstance(series.index, pd.DatetimeIndex)` and `zip(..., strict=True)` guards length mismatch — fail-loud on contract violations instead of silent truncation.
+
+### Removed
+- Duplicate NaN/Inf scrub + per-row formatting code paths from `_finalize_rolling` and `_daily_returns_grid_from_series` (consolidated into the shared helpers above).
+- 10 near-identical try/except blocks in `compute_qstats_scalars` (replaced by `_safe_qstats_scalar` + dispatch table).
+- Redundant `float(...)` casts in `time_in_market` (numpy true-division already returns float).
+
+## [0.22.34.6] - 2026-05-15
+
+**audit-2026-05-07 — analytics-runner.py audit closure (specialist + red-team round).** Closes the C-0221 tenant-balance leak via `turnover_series` and 10 H-tier findings against `analytics-service/services/analytics_runner.py`. A subsequent specialist fan-out (security / financial-math / concurrency / schema / test-quality) and red-team adversarial review surfaced 14 additional issues, all addressed in this version. Highlights: shared `_paginated_select` helper consolidates two duplicated pagination loops and now raises `PaginatedSelectTruncated` (fail-loud) on real overflow while correctly returning on the exact-boundary case; composite-tuple `order_by` for both snapshot and fills pagination eliminates cross-page row instability on non-unique sort keys; SQN citation corrected (Van Tharp textbook, NOT quantstats parity — quantstats has no SQN); weighted R:R docstring clarified as deliberately-non-canonical; `math.isfinite` boundary guard added on `avg_win` / `avg_loss` consumed by expectancy; `win_rate` boundary clamp tightened to `> 1.5` so ULP drift at 100% winners cannot silently divide by 100. Allocator-side TS interface gains `fills_missing_is_maker_pct?: number;` so the new DQF has a typed home.
+
+### Added
+- `analytics-service/services/db.py` — shared `_paginated_select(builder, order_by, ...)` helper and `PaginatedSelectTruncated` exception class, moved from `match_eval.py` so both `analytics_runner.py` and `match_eval.py` use a single implementation.
+- Test additions: `test_paginated_select_no_false_positive_at_exact_boundary` (db), `test_derived_trade_metrics_sqn_caps_at_sqrt_100` (N=50 vs N=200), `test_fills_missing_is_maker_pct_rounds_to_four_decimals` (1/7 → 0.1429), `test_fills_missing_is_maker_pct_omitted_when_zero`, plus an `order_calls` assertion on the snapshot pagination test pinning the composite `(snapshot_date, symbol, side)` order_by contract.
+- `AnalyticsDataQualityFlags.fills_missing_is_maker_pct?: number;` in `src/lib/types.ts` so frontend consumers can render the new DQF.
+
+### Changed
+- `_load_position_time_series` paginates via `_paginated_select` with composite `order_by=(("snapshot_date", False), ("symbol", False), ("side", False))` — matches `position_snapshots_unique_per_day` from migration 034 so cross-page row ties cannot duplicate or skip.
+- `run_strategy_analytics` fills fetch paginates via `_paginated_select` with composite `order_by=(("timestamp", False), ("id", False))` — OKX millisecond timestamps collide trivially and the UUID PK is a guaranteed tiebreaker.
+- `_paginated_select` now peeks one extra page before raising `PaginatedSelectTruncated` so a dataset of EXACTLY `hard_cap_pages × page_size` rows returns the full set instead of false-positive truncating.
+- Both snapshot and fills paths re-raise `PaginatedSelectTruncated` before the broad `except Exception` so audit #52's fail-loud intent is honored (the broad except previously downgraded truncation to a generic `SNAPSHOTS_LOAD_FAILED` / `FILLS_FETCH_FAILED` DQF, conflating scale overflow with transient failure).
+- `_compute_derived_trade_metrics`: `win_rate` boundary tightened to `> 1.5` (was `> 1.0`) so ULP drift at exactly 1.0 doesn't get divided by 100; `math.isfinite` boundary guard added for `avg_win` / `avg_loss` (zeroed independently so a healthy partner metric isn't wiped when only one side is non-finite); SQN comment corrected to cite Van Tharp's textbook rather than fabricated "quantstats parity"; weighted R:R docstring acknowledges the formula is deliberately not canonical Van Tharp.
+- `account_balance_unavailable` docstring clarified — post-C-0221, the flag is informational only (analytics no longer consumes `account_balance` for NAV regardless of the flag's value).
+
+### Removed
+- Duplicate pagination loops (~60 lines) replaced by `_paginated_select` calls.
+- Misleading "Forward-reference is fine — Python resolves at call time" comment (the helper is in fact defined BEFORE its uses).
+- Dead `else 0.0` branch in the weighted-R:R walrus expression.
+
+## [0.22.34.5] - 2026-05-15
+
+**audit-2026-05-07 — match router hardening + first router test suite.** Closes the C-0203 kill-chain (kill-switch fail-open + silent cron 200-OK + retention sweep cascade + blocking event loop), the C-0204 demo-allocator leak (real published strategies surfacing through the anon `/api/demo/match` endpoint), and 14 H-tier findings against `analytics-service/routers/match.py`. The new `analytics-service/tests/test_match_router.py` is the first test file to exercise the FastAPI surface (POST `/api/match/recompute`, GET `/api/match/eval`, POST `/api/match/cron-recompute`) — 30 cases covering kill-switch fail-open, skip/empty/exception branches, retention-sweep slice + ordering invariants, cron partial-failure isolation, total-failure structural logging, mandate parse-failure recompute, orphan-batch rollback, and the demo-only universe filter.
+
+### Added
+- `analytics-service/tests/test_match_router.py` (30 cases) exercising the recompute, eval, and cron-recompute endpoints plus the `_kill_switch_enabled`, `_should_skip_allocator`, `_retention_sweep`, and `_score_one_allocator` helpers.
+- `RecomputeMatchResponseSchema` now requires a `status` discriminator (`"disabled" | "skipped" | "ok"`) so callers can switch on a single field.
+
+### Changed
+- `_score_one_allocator` off-loads `score_candidates` AND `compute_holding_flags` to threads so pandas/numpy correlation work no longer blocks the FastAPI event loop. `_ScoredProxy` lifted out of the hot path to module scope.
+- `cron_recompute` returns a unified response shape on every early-return branch (`disabled`, `no_allocators`, `empty_universe`, `ok`) — every branch carries `status`, `processed`, `skipped`, `failed`, `retention_deleted`, and `duration_s`.
+- `_retention_sweep` paginates DELETEs to ≤ 50 IDs per request so the PostgREST IN-list URL stays under any reasonable cap.
+- `_should_skip_allocator` checks the age guard BEFORE consulting `mandate_edited_at`, saving O(allocators) Supabase round-trips per cron run.
+- `RecomputeRequest.allocator_id` is typed as `UUID` so the request boundary rejects malformed input with a 422 instead of round-tripping a 0-row Supabase result.
+
+### Fixed
+- **Kill-switch failure now logs at ERROR** so Supabase blips light up Sentry. The fail-open contract is preserved (engine keeps running on transient DB faults).
+- **Cron returns a TOTAL FAILURE error log** when every allocator fails (processed=0, failed>0) — previously a structural failure (schema drift, KEK missing) was silently 200-OK to the cron scheduler.
+- **Per-allocator failure isolation** in the cron loop. One bad allocator no longer aborts the daily recompute; failed/processed/skipped counters are honest.
+- **Mandate parse-failure** previously swallowed with bare `pass`, silently downgrading the "mandate edit invalidates cached batch" trigger into a no-op. Now logs a WARNING and forces a recompute.
+- **Orphan-batch rollback**: when the `match_candidates` insert fails or returns empty, the parent `match_batches` row is deleted so the admin queue never sees a `candidate_count > 0` row with zero children. The original insert exception is preserved via `raise from err` for triage.
+- **Retention sweep failure after a successful insert** no longer 500s the request — the batch already landed; log loudly and return the result.
+- **Demo-allocator universe** is post-filtered to `is_example=true` strategies only, plugging the leak where real published strategies could surface through the anon-public `/api/demo/match` endpoint.
+- **`eval` route boundary** now returns a structured 503 with page-count + page-size context when `_paginated_select` hits its hard cap (was a generic 500 that silently aggregated over a partial window).
+
+## [0.22.34.4] - 2026-05-15
+
+**phase-19 PR-Y1 — backfill audit-2026-05-07 schema + rename migrations to timestamp convention.** Production was silently missing ~11 migrations of hardening because the supabase-migrate workflow had been failing on every push to main since the migration-naming drift began (~May 12). This release closes the gap (live on prod) and reconciles local + remote naming so the workflow can be re-enabled cleanly after PR-Y2.
+
+The most consequential fixes now live on prod: migration 117 (CRITICAL P97/G12.A.2 `compute_jobs.claim_token` race fence + 5 RPC replacements — mark RPCs verify the fencing token to detect watchdog preemption), migration 124 (CRITICAL P455 `data_deletion_requests.user_id` FK changed from `ON DELETE CASCADE` to `ON DELETE SET NULL` so GDPR DSR audit trails survive user deletion), and migration 127 (audit-2026-05-07 red-team Findings 1/3/4/8: replaces a privesc-vulnerable GUC bypass design with an unforgeable `current_user` check on `guard_wizard_draft_updates` + `reject_sentinel_writes`). 127 supersedes intermediate migrations 120 (sentinel triggers), 125 (auth.uid hardening), and 126 (GUC bypass design). All five (120/125/126/127) ship as separate row entries to record full history, but the chronologically last body installed by `supabase db push` is 127's hardened end-state — the timestamp prefixes for 120/125/126 sort strictly before 127 (`20260513…` < `20260515114310`), so fresh-DB rebuilds and `supabase db reset` always land the hardened bodies last. This is the gate the security specialist review caught and that 0.22.34.4's fix-loop addressed.
+
+Migration 117 was applied as three rows to fit the MCP gateway's apply-time budget then consolidated into a single `compute_jobs_claim_token_fencing` row. Migration 127 was similarly split into 127a (`guard_wizard_draft_updates`) + 127b (`reject_sentinel_writes` + 3 triggers) and consolidated. 127c/d/e (function bodies for `create_wizard_strategy` / `finalize_wizard_strategy` / `sanitize_user`) are no-ops on prod because the never-applied 126 didn't introduce the GUC `set_config` calls 127c/d/e were meant to remove — verified via direct probing against `pg_get_functiondef`.
+
+Migrations 047b (`used_ack_tokens`), 118 (`_enqueue_compute_job_internal` ACL), 130 (`scenario_commit_idempotency`), and 131 (`commit_scenario_batch` idempotency parameter) had schema effects already on prod but no `schema_migrations` rows — INSERTed rows to record reality. 77 orphan `audit_log.user_id` values (rows pointing to deleted `auth.users`) were NULLed before 123's FK validation; this is exactly what `ON DELETE SET NULL` would have done historically had the FK existed at delete time.
+
+129 local migration files renamed from `NNN_*.sql` to `YYYYMMDDHHMMSS_*.sql` to match Supabase CLI conventions, plus 7 rollback files in `down/`. Timestamps derived from `git log --diff-filter=A --follow` UTC first-commit time, with collision-resolution by NNN order. `supabase_migrations.schema_migrations` on prod reconciled in the same transaction (80 NNN→TS UPDATEs, 5 NNN-vs-TS duplicate DELETEs, 7 INSERT-only rows, 2 INSERT rows for the deferred 107/119 — see deferred-apply warnings below).
+
+Migrations 107 (`verification_requests` view shim) and 119 (`positions_natural_key` UNIQUE constraint) carry **deferred-apply warning blocks** at the top of their SQL bodies. Both have `schema_migrations` rows on prod claiming "applied" but their SQL has NOT actually run on prod. 107 is deferred because its M-5 preflight assertion needs revalidation against post-PR-X5 prod data and `sanitize_user`'s `DELETE FROM verification_requests` needs to be updated to target `verification_requests_legacy`. 119 is deferred because 8 duplicate `(strategy_id, symbol, side, opened_at)` groups exist on prod that the constraint install would reject — PR-Y2 will run `reconstruct_positions_atomic` first then install the constraint via a new filename. Future devs MUST NOT remove these rows without writing replacement migrations; the warnings are explicit about this.
+
+The `.github/workflows/supabase-migrate.yml` `paths:` auto-trigger is stripped — workflow now runs only on `workflow_dispatch`. The inline comment names the four explicit re-enable conditions: (1) PR-Y2 has shipped 107 + 119, (2) test project schema_migrations is reconciled, (3) a manual `workflow_dispatch` shows `supabase db push` as a true no-op, (4) Phase 19 soak window has closed without rollback.
+
+The reconcile SQL and audit summary are committed to `docs/runbooks/pr-y1-schema-migrations-reconcile.sql` + `docs/runbooks/pr-y1-audit-summary.md` so the forensic record survives a fresh checkout (the `.planning/phase-19/audit/` working artifacts are gitignored).
+
+### Fixed
+- **chronological inversion of 120/125/126 vs 127** — the initial PR-Y1 commit used today's date (`20260515130002`–`20260515130004`) for migrations 120/125/126 because no prior `schema_migrations` row existed to derive timestamps from. Those timestamps sort AFTER 127 (`20260515114310`), so `supabase db push` against a fresh DB would have run 127 first and then 120/125/126 — overwriting 127's hardened bodies with the vulnerable GUC versions. Renamed to git-derived UTC timestamps (`20260513073518`, `20260513082230`, `20260513084844`) that sort correctly before 127. Audit-2026-05-07 red-team Findings 1/3/4/8 now stay closed across every fresh-DB rebuild path (DR, test-project reseed, `supabase db reset`).
+- **bare-filename references missed by initial find-replace** — the first pass only matched paths with the `supabase/migrations/` prefix. Bare filenames in backticks (e.g. `` `011_perfect_match.sql` ``), wildcards (`129_*.sql`), and `down/NNN-rollback.sql` rollback references in `audit/`, `docs/architecture/` ADRs, `docs/runbooks/` (match-engine, bridge-outcome-cron), `CHANGELOG.md`, and test path constants were left stale. Active runbook `docs/runbooks/match-engine.md` would have broken at step 1 for any new founder following the deploy flow. Updated 20 additional files via a second find-replace pass with broader patterns.
+- **107/119 SQL files now carry deferred-apply warning blocks at the top** — the original PR-Y1 commit inserted "applied" rows for these two migrations on prod but never ran their SQL bodies (see deferred-apply rationale above). Without an in-source warning, the next engineer running `supabase db diff` or attempting to re-apply via the dashboard would see the row already exists and skip, leaving the schema permanently missing the view shim / natural key constraint with no trace in the migration source. This is the failure shape the audit-2026-05-07 series was meant to prevent.
+- **reconcile SQL promoted out of gitignored `.planning/`** to `docs/runbooks/pr-y1-schema-migrations-reconcile.sql`. The 92-statement reconciliation that mutated prod's `schema_migrations` now survives a fresh clone.
+
+## [0.22.34.3] - 2026-05-15
+
+**phase-19 — unify teaser into the /process-key backbone (PR-X5).** Two abortive PR-B kill-switch flip attempts on 2026-05-14 confirmed teaser submissions to `/process-key` were returning `MISSING_STRATEGY_ID` 422 — the unified backend had no story for `flow_type='teaser'` without a caller-owned strategy. PR-X5 makes the unified backbone the single path for teaser too: the dispatch in `analytics-service/routers/process_key.py` now injects a sentinel anchor `strategy_id` (provisioned by new migration 132) plus a fresh `wizard_session_id` for `flow_type='teaser'` BEFORE the audit row write, then falls through to the existing synchronous pipeline at line 684 unchanged. Zero `if flow_type=='teaser'` branches downstream. Backend is one path. Same logic for every flow.
+
+The TS unified handler at `src/app/api/verify-strategy/route.ts` is hardened to allowlist the context fields forwarded upstream — `{email, exchange, api_key, api_secret, passphrase?}` only, never the raw request body. Defense in depth: the Python dispatch also OVERRIDES `strategy_id`/`wizard_session_id` unconditionally for teaser (not fill-if-null), so a future TS regression that spread the raw body can't reintroduce the cross-tenant write where an attacker pre-supplies a victim's `strategy_id`.
+
+The unified pipeline now enriches `metrics_snapshot` with the legacy `verify_strategy` response shape — `return_24h/return_mtd/return_ytd`, `equity_curve`, and `matched_strategy_id` — by reusing `services.transforms.trades_to_daily_returns`, `services.portfolio_metrics.compute_period_returns`, and the new `services.strategy_matching.find_matched_strategy` (extracted from `portfolio.py:1024-1051`). This runs for every flow_type so the SV row's `metrics_snapshot` column has the same shape regardless of where the row was created. Enrichment falls back to heuristic-capital returns when account_balance isn't available (same as the legacy path), and the whole block is best-effort — a math error logs `process_key.enrichment_failed` and ships the base shape rather than failing the verification.
+
+The TS legacy handler swaps its "anchor to most recent strategies row" SELECT — a documented privacy leak per migration 107 DM-3 — for the same `TEASER_ANCHOR_STRATEGY_ID` constant. One source of truth, mirrored in `src/lib/phase-19-constants.ts` (TS) and `analytics-service/services/teaser_anchor.py` (Python), pinned by a new `tests/integration/phase-19-constants-sync.test.ts` drift guard.
+
+The landing-page progress component now accepts `status='published'` (the unified pipeline's terminal state) in addition to the legacy `'complete'`. Pre-X5 the public-status poll surfaced the new status but the React `VerificationProgress` had `'complete' | 'failed'` hardcoded in its union — teaser users on the unified path would have seen eternal "processing" until the 5-minute poll timeout, then "failed."
+
+### Added
+
+- **Migration 132 — teaser-anchor sentinel** (`supabase/migrations/20260515095804_teaser_anchor_strategy.sql`). Seeds a permanent system pseudo-user at `auth.users.id='00000000-0000-0000-0000-000000000000'` (NULL password, non-routable `system-phase-19-sentinel@quantalyze.internal` email — sign-in path closed), a matching `profiles` row, and the sentinel strategy at `id='00000000-0000-0000-0000-000000000001'` with `status='archived'` so it never surfaces in marketplace queries. All three INSERTs idempotent via `ON CONFLICT (id) DO NOTHING` and gated by a self-verify `DO $$ … $$` block that raises if any row is missing post-INSERT. Mirror rollback at `supabase/migrations/down/132-rollback.sql` deletes in reverse-FK order.
+- **`TEASER_ANCHOR_STRATEGY_ID` shared constant** (`src/lib/phase-19-constants.ts` for TS, `analytics-service/services/teaser_anchor.py` for Python).
+- **`find_matched_strategy` shared helper** (`analytics-service/services/strategy_matching.py`). Extracted from the inline correlation block in legacy `verify_strategy` so both the legacy endpoint and the unified pipeline use one match implementation. 95% correlation threshold + 30-day minimum overlap window preserved verbatim.
+- **3 regression tests + 1 drift guard.** `analytics-service/tests/test_migration_132.py` pins the migration's INSERTs against the Python constant (7 static-AST checks). `test_process_key.py::test_process_key_teaser_injects_anchor_when_strategy_id_missing` pins the dispatch contract end-to-end. `tests/integration/process-key-thin-adapters.test.ts` replaces the PR-X3 forward `step='validate'` test with the inverse PR-X5 "context does NOT include step" test. `tests/integration/phase-19-constants-sync.test.ts` pins TS ↔ Python ↔ SQL drift.
+
+### Changed
+
+- **`analytics-service/routers/process_key.py`** — dispatch injection for teaser before audit-row write; unified pipeline's `metrics_captured` transition now persists the enriched `metrics_snapshot` (period returns + equity curve + matched_strategy_id) instead of the bare `MetricsSnapshot` dataclass; top-level response shape gains `matched_strategy_id` for legacy parity.
+- **`src/app/api/verify-strategy/route.ts`** — unified handler context allowlist (no raw body spread); legacy handler swaps "most recent strategies row" SELECT for the `TEASER_ANCHOR_STRATEGY_ID` constant.
+- **`src/components/landing/VerificationSection.tsx`** + `VerificationProgress.tsx` — `Status` union extended with `'published'`; success transition accepts both `'complete'` and `'published'`.
+
+### Removed
+
+- The PR-X3 forward test `verify-strategy: teaser context forwards step='validate'` (replaced with the inverse contract).
+- The pra-write graceful-degrade test for "no anchor strategies row" (the dynamic SELECT it gated on is gone; the migration's self-verify DO block is now the load-bearing guarantee).
+
 ## [0.22.34.2] - 2026-05-15
 
 **phase-19 — teaser legacy path writes terminal SV row with metrics (PR-X4a).** Pre-fix the legacy `teaserVerifyStrategyHandler` upserted `strategy_verifications` at `status='validated'` with no `metrics_snapshot` column. The public-status route at `verify-strategy/[id]/status/route.ts:107` only returns `results` when status is `'complete'` (legacy VR shape) or `'published'` (canonical SV terminal), so polling that row returned `{status:'validated'}` with no score. Teaser users on the legacy path never saw their results via the public URL — a bug present since BACKBONE-04 step (a) shipped. PR-X4a writes the terminal row in one shot: `status='published'` plus `metrics_snapshot` built from the Python `results` blob (with `matched_strategy_id` folded in since it isn't a first-class column on `strategy_verifications`). The unified `unifiedVerifyStrategyHandler` is unchanged in this PR — PR-X5 will do the real unified-path build-out for teaser inside `/process-key`. PR-X4a exists separately because the legacy path doubles as the kill-switch auto-rollback target; even after PR-X5 unifies teaser, a rollback must still surface metrics on the SV row.
@@ -333,7 +473,7 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Added
 
-- **Idempotent founder-CRM markers** (`supabase/migrations/115_for_quants_leads_notify_markers.sql`, G9.B.7) — `notify_attempted_at`, `notify_succeeded_at`, `notify_error` columns on `for_quants_leads` plus a partial index for the operator's "stuck pending notify" view. Pre-fix a transient Resend outage left the lead in the DB but the founder was never told and the CRM rendered "All caught up" with the in-flight failure invisible.
+- **Idempotent founder-CRM markers** (`supabase/migrations/20260510182622_for_quants_leads_notify_markers.sql`, G9.B.7) — `notify_attempted_at`, `notify_succeeded_at`, `notify_error` columns on `for_quants_leads` plus a partial index for the operator's "stuck pending notify" view. Pre-fix a transient Resend outage left the lead in the DB but the founder was never told and the CRM rendered "All caught up" with the in-flight failure invisible.
 - **Sentry coverage on every failure path** of `/api/for-quants-lead` (G9.B.6 + G9.B.7) — `admin_init` / `db_insert` / `founder_notify` / `founder_email_unset` reach Sentry via lazy-imported `@sentry/nextjs`. Missing `ADMIN_EMAIL` is detected once-per-process and surfaced as `level=error` so misconfigs surface even though the helper silently early-returns.
 - **8 KB body-size limit** before `JSON.parse` (G9.B.12) — `Content-Length` header gate + `req.text()` length check returning 413 short-circuits a memory-burn attack against an unauthenticated POST.
 - **Per-UA rate-limit scoping** when client IP is unknown (G9.B.15) — bucket key suffixed with a djb2 user-agent hash so one no-IP attacker stripping headers cannot DoS every other no-IP visitor.
@@ -403,7 +543,7 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Added
 
-- **Migration 113** (`113_positions_atomic_rebuild_rpc.sql`): `reconstruct_positions_atomic(p_strategy_id UUID, p_positions JSONB) RETURNS VOID` SECURITY DEFINER. Body: `pg_advisory_xact_lock(hashtext(p_strategy_id::text))` → DELETE → bulk INSERT from `jsonb_array_elements`, all in one transaction.
+- **Migration 113** (`20260510181748_positions_atomic_rebuild_rpc.sql`): `reconstruct_positions_atomic(p_strategy_id UUID, p_positions JSONB) RETURNS VOID` SECURITY DEFINER. Body: `pg_advisory_xact_lock(hashtext(p_strategy_id::text))` → DELETE → bulk INSERT from `jsonb_array_elements`, all in one transaction.
 - **`data_quality_flags` aggregation** in `reconstruct_positions` return dict for `posSide_side_mismatch` and `fills_dropped_no_symbol`.
 - **11 new regression tests** at `analytics-service/tests/test_position_reconstruction.py`.
 
@@ -422,7 +562,7 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Added
 
-- **Migration 114** (`114_positions_schema_rls_g12d.sql`):
+- **Migration 114** (`20260510182439_positions_schema_rls_g12d.sql`):
   - `positions.duration_seconds BIGINT NULL` for sub-day position granularity (paired with G12.C.9 in PR 5).
   - `positions_natural_key UNIQUE (strategy_id, symbol, side, opened_at)` constraint via `NOT VALID` + guarded `VALIDATE`.
   - `positions_open_recent` partial index on `(strategy_id, opened_at DESC) WHERE status='open'`.
@@ -522,9 +662,9 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Migrations
 
-- `109_compute_jobs_audit_2026_05_07_g10b.sql` — P2/P3/P4/P6/P12/P14/P17.
-- `110_sync_trades_date_range_scoped_delete.sql` — P1.
-- `111_compute_jobs_user_message_and_rate_limit_grief.sql` — P11/P16.
+- `20260510180226_compute_jobs_audit_2026_05_07_g10b.sql` — P2/P3/P4/P6/P12/P14/P17.
+- `20260510180535_sync_trades_date_range_scoped_delete.sql` — P1.
+- `20260510181014_compute_jobs_user_message_and_rate_limit_grief.sql` — P11/P16.
 
 Each migration ships a self-verifying DO block that asserts the expected function bodies / column shape / constraint presence so a future migration that drops a fix without realizing it `RAISES EXCEPTION` at apply time.
 
@@ -545,7 +685,7 @@ A two-wave specialist review army landed concurrently with the backbone work, ad
 - **EquityCurveBuilder + perp/TWR-YTD correctness (BACKBONE-08).** Open-perp positions now contribute to the live equity curve with a position-size-weighted unrealized PnL term. TWR (time-weighted return) and YTD diverged on cash-flow days — TWR now matches YTD when the input has no cash flows. Four golden fixtures pin the math.
 - **TS-side single-flight feature flag refresh (CT-9).** `src/lib/feature-flags.ts` collapses 100 concurrent cache-miss callers into a single Supabase round-trip. Mirrors the asyncio.Lock the Python sibling already had — without this, a Vercel cold-start spike or TTL expiry would hammer Supabase with N admin-client reads.
 - **`postProcessKey` thin-adapter helper.** `src/lib/process-key-client.ts` single-sources the `INTERNAL_API_TOKEN` 503 envelope, the `X-Correlation-Id`/`X-User-Id` headers (CT-4 — closes the cross-tenant rate-limit isolation gap), and a 60s `AbortSignal.timeout` (CT-7 — produces a clean `UPSTREAM_TIMEOUT` envelope instead of a Vercel maxDuration hang).
-- **Migration 108 forward-repair.** `108_process_key_long_compute_job_kinds_repair.sql` idempotently registers `process_key_long` in `compute_job_kinds` and extends the `compute_jobs_kind_target_coherence` CHECK constraint on databases that already applied migration 104 without those rows (the test Supabase project). The 104 source was retro-fixed so a fresh build is correct.
+- **Migration 108 forward-repair.** `20260510175507_process_key_long_compute_job_kinds_repair.sql` idempotently registers `process_key_long` in `compute_job_kinds` and extends the `compute_jobs_kind_target_coherence` CHECK constraint on databases that already applied migration 104 without those rows (the test Supabase project). The 104 source was retro-fixed so a fresh build is correct.
 - **Auto-rollback E2E + 11 new regression tests.** Specialist-army findings each landed with a test that fails without the fix and passes with it. New test files: `test_legacy_table_rls.py`, `test_migration_105_self_verify.py`, `test_migration_108_idempotent.py`, `test_long_fetch.py` advanced-status skip cases, `tests/lib/feature-flags.test.ts` outage prev-cache-hold + 100-concurrent single-flight, `tests/lib/process-key-client.test.ts` 503 short-circuit across all flow_types.
 
 ### Fixed
@@ -593,7 +733,7 @@ A two-wave specialist review army landed concurrently with the backbone work, ad
 
 ### Fixed
 
-- **`sync_trades` RPC no longer wipes raw fills (G12.A.1).** Migration `102_sync_trades_preserve_fills.sql` replaces the `sync_trades(UUID, JSONB)` body so its `DELETE FROM trades` clause is scoped `AND COALESCE(is_fill, false) = false`. The legacy daily_pnl summary path (`is_fill=false`) is unchanged; Phase-2 raw fills (`is_fill=true`) ingested by `analytics-service/services/job_worker.py` now survive every Phase-1 sync. A self-verifying DO block fails the migration if a future edit drops the `is_fill` guard. Live-DB regression test in `analytics-service/tests/test_sync_trades_preserves_fills.py` proves a seeded fill survives a sync_trades call and that two consecutive calls still replace summaries correctly. Also closes the watchdog-reclaim retry surface from G12.A.2.
+- **`sync_trades` RPC no longer wipes raw fills (G12.A.1).** Migration `20260510172558_sync_trades_preserve_fills.sql` replaces the `sync_trades(UUID, JSONB)` body so its `DELETE FROM trades` clause is scoped `AND COALESCE(is_fill, false) = false`. The legacy daily_pnl summary path (`is_fill=false`) is unchanged; Phase-2 raw fills (`is_fill=true`) ingested by `analytics-service/services/job_worker.py` now survive every Phase-1 sync. A self-verifying DO block fails the migration if a future edit drops the `is_fill` guard. Live-DB regression test in `analytics-service/tests/test_sync_trades_preserves_fills.py` proves a seeded fill survives a sync_trades call and that two consecutive calls still replace summaries correctly. Also closes the watchdog-reclaim retry surface from G12.A.2.
 - **`metrics.py` benchmark/drawdown excepts now log + emit error flags (G11.E.1, G11.E.2, G11.E.3).** `analytics-service/services/metrics.py` replaces three bare `except Exception: pass` blocks (drawdown_episodes, benchmark_metrics fan-out, benchmark_returns serialization) with `logger.warning(..., exc_info=True)` plus a sibling `_error` field on `metrics_json`. The frontend can now distinguish "no benchmark assigned" from "benchmark compute failed", and a regression in `_rolling_correlation` no longer silently kills alpha/beta/correlation/info_ratio/treynor along with it. New `logger = logging.getLogger("quantalyze.analytics.metrics")` follows the existing `analytics_runner` / `audit` / `analytics_status` pattern.
 - **`listForQuantsLeads` returns a typed error state on DB failure (G10.D.1).** `src/lib/for-quants-leads-admin.ts` now returns `{ rows, hitCap, error? }`; the admin page at `src/app/(dashboard)/admin/for-quants-leads/page.tsx` renders an explicit `role="alert"` banner ("Could not load leads. Check Supabase status…") when the new field is set instead of conflating an RLS / network / 5xx failure with the misleading "All caught up. No unprocessed leads." empty state. Regression test asserts the new field is populated.
 - **Trade Volume + Trading Activity Log widgets surface fetch failures (G12.G.2).** `src/app/(dashboard)/allocations/widgets/positions/TradeVolume.tsx` and `TradingActivityLog.tsx` replace `} catch { /* silent */ }` with `console.error` + an explicit `error` state and render a `role="alert"` "Couldn't load…" panel instead of falling through to the empty state. Allocators can now distinguish "no trades today" from a 5xx or RLS rejection.
@@ -615,7 +755,7 @@ A two-wave specialist review army landed concurrently with the backbone work, ad
 - **`parse_since_ms` logs malformed timestamps instead of silently returning None.** `analytics-service/services/exchange.py` previously swallowed every parse failure with a bare `except: return None`, which the caller treats as "fetch from the beginning of time" — burning API quota and risking collision with `sync_trades`' DELETE+INSERT. The function now emits a WARN containing the bad value and the parser exception so an operator can spot the malformed `last_sync_at` row.
 - **`_load_candidate_universe` logs malformed strategy `start_date` values.** `analytics-service/routers/match.py` previously caught `ValueError`/`AttributeError` with `pass`, silently producing `track_record_days=0` and biasing match scoring AGAINST the strategy. The except handler now logs the offending strategy id and the bad value at WARN.
 - **`ContactRequestStatus` union narrowed to match the DB.** `src/lib/types.ts` now exports a discrete `ContactRequestStatus` alias of `'pending' | 'intro_made' | 'completed' | 'declined'`. The legacy interim `'accepted'` literal — replaced by `'intro_made'` in migration 008 — is no longer in the alias, so a future code path writing `status: "accepted"` to `contact_requests` would fail at compile time.
-- **`partner_tag` CHECK constraint applied at the database level.** `supabase/migrations/101_partner_tag_check_constraint.sql` adds a `CHECK (partner_tag IS NULL OR partner_tag ~ '^[a-z0-9-]+$')` to `profiles`, `strategies`, `contact_requests`, and `match_batches` — mirroring `isValidPartnerTag` in `src/lib/partner.ts`. The migration runs a pre-flight scrub that fails loudly if any pre-existing row violates the regex, then a self-verifying assertion that fails the migration if any of the four constraints did not actually land.
+- **`partner_tag` CHECK constraint applied at the database level.** `supabase/migrations/20260510172412_partner_tag_check_constraint.sql` adds a `CHECK (partner_tag IS NULL OR partner_tag ~ '^[a-z0-9-]+$')` to `profiles`, `strategies`, `contact_requests`, and `match_batches` — mirroring `isValidPartnerTag` in `src/lib/partner.ts`. The migration runs a pre-flight scrub that fails loudly if any pre-existing row violates the regex, then a self-verifying assertion that fails the migration if any of the four constraints did not actually land.
 - **Plausible analytics whitelisted in CSP pre-emptively.** `next.config.ts` adds `https://plausible.io` to both `script-src` and `connect-src` so a future Plausible integration cannot silently fail under CSP. Adding the directive now is safer than discovering at deploy time that telemetry is blocked.
 - **Seed script refuses runs against any non-staging Supabase project ref.** `scripts/seed-full-app-demo.ts` replaces the never-matching `\b(prod|production)\b` URL guard with an explicit `STAGING_PROJECT_REF_ALLOWLIST` (containing the documented staging project ref `qmnijlgmdhviwzwfyzlc`) and a `SEED_ALLOW_SUPABASE_PROJECT_REF` env override for ad-hoc forks. Wrong project ref → `process.exit(3)` before any destructive write.
 - **Seed wipe surfaces `auth.admin.deleteUser` failures.** `scripts/seed-full-app-demo.ts` no longer swallows auth-delete errors with `.catch(() => {})`. Both the returned-`error` path and the thrown-exception path now log at WARN with the user id and reason, so an orphaned `auth.users` row is no longer invisible to subsequent runs.
@@ -717,7 +857,7 @@ Three independent v1.0.0 blockers, ratified during Phase 18 founder UAT (2026-05
 - **Single-source-of-truth `STRATEGY_SOURCES` constant** (`src/lib/strategy-sources.ts`) — the eight admitted values are now exported as a `as const` tuple plus an `isStrategySource` type guard. `AdminTabs.sourceBadgeLabel` is now a `Record<StrategySource, string>` lookup so adding a new value to the enum is a TypeScript build break until a paired badge label is added.
 - **Shared founder-LP readiness helper** (`src/lib/founder-lp/readiness.ts`) — both the cron route and the `npm run check:founder-lp-readiness` pre-flight script delegate to `checkFounderStrategyReadiness` so the runtime gate and the deploy gate cannot disagree on what "ready" means.
 - **/ship pre-flight gate scripts**: `scripts/verify-phase18-artifacts.ts` (`npm run verify:phase18`) and `scripts/check-founder-lp-readiness.ts` (`npm run check:founder-lp-readiness`).
-- **Migration 100** (`supabase/migrations/100_strategies_source_csv.sql`) — extends `strategies_source_check` to admit `{csv, okx, binance, bybit}`, with `SET lock_timeout = '3s'` to bound apply-time blast radius and a self-verifying `DO` block that `RAISE EXCEPTION` if `pg_constraint` doesn't reflect the change after apply.
+- **Migration 100** (`supabase/migrations/20260506211806_strategies_source_csv.sql`) — extends `strategies_source_check` to admit `{csv, okx, binance, bybit}`, with `SET lock_timeout = '3s'` to bound apply-time blast radius and a self-verifying `DO` block that `RAISE EXCEPTION` if `pg_constraint` doesn't reflect the change after apply.
 - **Centralized platform branding defaults** (`src/lib/platform.ts`) — `PLATFORM_NAME` / `PLATFORM_EMAIL` import sites replace inline `process.env.PLATFORM_NAME ?? "Quantalyze"` defaults.
 - **Hardening tests added this round (15 new test cases)**: factsheet R1 env-guard (preview rejects bypass + production positive control), factsheet INTERNAL_API_TOKEN delete-env, cron R6 (sub-1KB PDF → PdfTooSmall), cron R7 (>25MB PDF → PdfTooLarge), cron R1 (preview short-circuit), cron S2 (alert email HTML escape), cron T3 (Supabase select error → StrategyNotReady), Python `test_scrub_freeform_string_covers_every_denylist_key` (every canonical key + sb-ec- prefix redacts in `<key>: SECRET` shape), TS parity equivalent across all 17 keys, plus migration 100 regression test.
 
@@ -1034,7 +1174,7 @@ Second phase of the v1.0.0 milestone. Phases 17 (Design Contract) and 18+ ship n
 - **End-to-end `correlation_id` seam.** New `src/lib/correlation-id.ts` server-only helper reads `X-Correlation-Id` from the request or mints a UUID v4 fallback. Every analytics-client fetch propagates it as a request header; `src/app/layout.tsx` surfaces it client-side via `<meta name="x-correlation-id">` so error boundaries (`src/app/error.tsx`, `src/app/global-error.tsx`) can tag Sentry captures without round-tripping the server. The Python `analytics-service/services/logging_config.py` `CorrelationMiddleware` echoes the cid in every response header AND injects it into structlog contextvars so every log line on a request is automatically annotated.
 - **`/api/debug-key-flow` SSE diagnostic endpoint** at `src/app/api/debug-key-flow/route.ts`. Admin-only (CSRF + cookie-auth + isAdminUser gate), rate-limited (5/hour/admin via `src/app/api/debug-key-flow/rate-limit.ts`), audit-logged BEFORE the stream opens (so failed sessions appear in audit_log even if the stream aborts). Streams a 3-step diagnostic trace (validate / encrypt / fetch-trades) with per-step `AbortSignal.any()` 60s timeouts, 15s heartbeat keep-alive frames, and `X-Accel-Buffering: no` for Vercel proxy compatibility. The cancel handler emits a closed-loop `client_aborted` audit row so abandoned diagnostic sessions are still observable.
 - **Resend webhook receiver** at `src/app/api/webhooks/resend/route.ts` with Svix signature verification (replay-window check) and three correlation-recovery paths: Path A reads the cid from the `tags` array, Path A' from the `tags` dict variant, Path B looks up the new `resend_message_correlation` table by `email_id`. When all three miss, the handler logs `correlation_chain_broken` once and still returns 200 to acknowledge the webhook.
-- **`resend_message_correlation` table** in migration `098_resend_message_correlation.sql`. UNIQUE on `resend_message_id`, RLS-enabled with service-role-only GRANTs, 90-day retention via pg_cron `'15 3 * * *'`. Cron schedule wrapped in a `cron.unschedule()` guard so re-running the migration is idempotent across pg_cron versions.
+- **`resend_message_correlation` table** in migration `20260515113637_resend_message_correlation.sql`. UNIQUE on `resend_message_id`, RLS-enabled with service-role-only GRANTs, 90-day retention via pg_cron `'15 3 * * *'`. Cron schedule wrapped in a `cron.unschedule()` guard so re-running the migration is idempotent across pg_cron versions.
 - **`src/lib/email.ts` correlation-aware send wrapper.** Tags every Resend send with `correlation_id` (Path A) AND inserts a row into `resend_message_correlation` (Path B safety net) with one retry on transient failure.
 - **`buildEnvelope` + `WizardErrorEnvelope` UI** at `src/lib/envelope.ts` and `src/components/.../wizard/WizardErrorEnvelope.tsx`. Isomorphic `ErrorEnvelope` type renders with `role="alert"`, `aria-live`, copy-to-clipboard for the diagnostic JSON, retry button gated on the `recoverable` flag, and `type="button"` on every nested control to prevent accidental form submits. Wired into the three wizard steps (`ConnectKeyStep`, `SubmitStep`, `SyncPreviewStep`) so any error the user sees carries the cid and a retry path.
 - **Sentry observability for the analytics service** at `analytics-service/sentry_init.py`. Initializes `sentry-sdk[fastapi] 2.58.0` with `FastApiIntegration` + `StarletteIntegration`, full PII redaction in `before_send` covering `request.headers/cookies/query_string/data/json`, `extra`, `contexts`, `breadcrumbs[*].data` (HTTP capture surface), and `exception.values[*].stacktrace.frames[*].vars` (frame locals where wizard creds live). Denylist mirrors `src/lib/admin/pii-scrub.ts` exactly plus snake_case wire forms (`api_key`, `api_secret`) and the `x-internal-token` seam header.
@@ -1076,7 +1216,7 @@ First milestone of the v1.0.0 release. Phases 16 (Diagnostic Spike + Observabili
 
 - **`POST /api/strategies/csv-validate` and `POST /api/strategies/csv-finalize`** Next.js routes proxying the analytics service. The validate route reads multipart `file` + `fmt` + `wizard_session_id`, enforces the 10 MB cap (Content-Length pre-check + post-parse `file.size` defense-in-depth), validates the wizard_session_id UUID shape at the edge, and forwards to the Python service. The finalize route accepts a typed strategy name, validates length 1-80, and calls `finalize_csv_strategy(p_user_id, p_wizard_session_id, p_fmt, p_strategy_name)` to atomically create the strategy + verification rows.
 
-- **`finalize_csv_strategy` Postgres RPC** in migration `093_strategy_verifications.sql` — `SECURITY DEFINER` with manual `auth.uid() <> p_user_id` guard, distinct SQLSTATE 22023 messages for fmt/empty-name/oversized-name violations, and a self-verifying DO block at apply time that asserts each constraint individually with `RAISE NOTICE` on success. Migration 094 follows up with the `owner_select` RLS rebuild in EXISTS form.
+- **`finalize_csv_strategy` Postgres RPC** in migration `20260501055202_strategy_verifications.sql` — `SECURITY DEFINER` with manual `auth.uid() <> p_user_id` guard, distinct SQLSTATE 22023 messages for fmt/empty-name/oversized-name violations, and a self-verifying DO block at apply time that asserts each constraint individually with `RAISE NOTICE` on success. Migration 094 follows up with the `owner_select` RLS rebuild in EXISTS form.
 
 - **`strategy_verifications` table.** New row per CSV submission tracking flow_type, status (`pending_review` → `validated`), trust_tier (`csv_uploaded`), and an optional correlation_id slot for Phase 16. Three RLS policies — owner can SELECT their own row, admins can SELECT all, service-role bypasses for admin tooling.
 
@@ -1459,7 +1599,7 @@ The WR-04 guard at line 174-178 of the seed-gated step checks BOTH `ss` AND `lso
 
 ### Added
 
-- **`supabase/migrations/092_positions_duration_days_numeric.sql`** — applied to prod (`khslejtfbuezsmvmtsdn`) and the test E2E project (`qmnijlgmdhviwzwfyzlc`) via Supabase MCP before the code change ships, so the new fractional `duration_days` writes don't fail against an unmigrated INT column.
+- **`supabase/migrations/20260430105207_positions_duration_days_numeric.sql`** — applied to prod (`khslejtfbuezsmvmtsdn`) and the test E2E project (`qmnijlgmdhviwzwfyzlc`) via Supabase MCP before the code change ships, so the new fractional `duration_days` writes don't fail against an unmigrated INT column.
 - **7 regression tests** (5 in `test_analytics_runner.py` for position-side volume attribution + alias removal; 2 in `test_position_reconstruction.py` for ROI net-of-fees fee-only-loser classification + sub-day duration fractional). 48 tests pass total across the two suites (was 41).
 
 ### Why these were latent
@@ -1685,7 +1825,7 @@ No production behavior changes. v1 and v2 routes both continue to render exactly
 
 ### Internal
 
-- **MA-4 confirmed already enforced** by migration `032_compute_jobs_queue.sql:233-237` (`compute_jobs_deny_all USING (false) WITH CHECK (false)`). No later migration weakens it; the audit finding ("`USING (true)` — wide-open") referred to an unrelated `compute_job_kinds` reference table where wide-open SELECT is intentional (small read-only kinds registry). No code change.
+- **MA-4 confirmed already enforced** by migration `20260411144407_compute_jobs_queue.sql:233-237` (`compute_jobs_deny_all USING (false) WITH CHECK (false)`). No later migration weakens it; the audit finding ("`USING (true)` — wide-open") referred to an unrelated `compute_job_kinds` reference table where wide-open SELECT is intentional (small read-only kinds registry). No code change.
 
 ### Tests
 
@@ -1753,7 +1893,7 @@ DISCO-03 (filter-by-team) deferred to v0.18 per pre-shipment audit (`organizatio
 - **DISCO-01 Watchlist:** new `PUT /api/watchlist/[strategyId]` route with strict `{ action: "add" | "remove" }` body, `assertSameOrigin` CSRF guard, `mandateAutoSaveLimiter` (30/min, key `watchlist:{user.id}`), idempotent `upsert (ON CONFLICT DO NOTHING)` for add and `delete().eq("user_id", user.id).eq("strategy_id", id)` for remove. Reads `getMyWatchlist(user.id): Promise<Set<string>>` server-side from `user_favorites` (migration 024 RLS). New components: `<StarToggle>` (44×44 table / 32×32 card touch targets, useTransition optimistic UI with retry-once-on-failure + unmount cleanup), `<WatchlistTabs>` (WAI-ARIA tablist with auto-activation on arrow-key focus move + count badge), `<EmptyWatchlist>` (two-line copy when scope=watchlist + watchedSet.size===0). `StrategyTable` extended with `userId?` + `initialWatchedSet?` props; discovery page does 3-way `Promise.all`.
 - **DISCO-02 Customize prefs:** `useDiscoveryPrefs(uid: string | undefined, slug: string)` hook persisted at `localStorage.discovery_view_preferences:{auth.uid}:{slug}` with defaults `view: "table"`, `sort: { key: "sharpe", dir: "desc" }`, `hide_examples: true`. Right-edge slide-out `<CustomizeDrawer>` matches DESIGN.md modal style with explicit field-by-field dirty check on Save. Cog button at right end of `StrategyFilters` row; `leadingSlot` prop introduced for the watchlist tabs left of search. Cross-account isolation Playwright spec ships with `seedTestAllocator()` fallback (env-var path inactive — TODOS Q4 RESOLVED).
 - **DISCO-04 Sparkline single-accent:** new `sparklineColor(returns: number[]): string` helper at `src/lib/sparkline-color.ts` enforces DIFF-05 — `var(--color-positive)` when final value > 0, `var(--color-negative)` when < 0, `var(--color-neutral)` when == 0 or empty. Wired at the two `sparkline_returns` call sites in `StrategyTable` and `StrategyGrid`; drawdown sparkline stays static red per design exception. Component-level synthetic-fixture tests cover all three branches; Playwright regression spec asserts no SVG path mixes positive + negative strokes AND that the negative-color render path is exercised on live drawdown data.
-- **DISCO-05 seed `is_example` backfill:** new `supabase/migrations/091_seed_is_example_backfill.sql` (data-only DML — no DDL, no `ON CONFLICT`) flips `is_example=true` on the 8 canonical seed UUIDs from `scripts/seed-demo-data.ts:STRATEGY_UUIDS`. Idempotent UPDATE + post-update `DO $$` probe with `RAISE NOTICE` for deploy-log evidence. Fresh-allocator e2e spec proves first `/discovery/[slug]` visit shows zero example strategies.
+- **DISCO-05 seed `is_example` backfill:** new `supabase/migrations/20260429063138_seed_is_example_backfill.sql` (data-only DML — no DDL, no `ON CONFLICT`) flips `is_example=true` on the 8 canonical seed UUIDs from `scripts/seed-demo-data.ts:STRATEGY_UUIDS`. Idempotent UPDATE + post-update `DO $$` probe with `RAISE NOTICE` for deploy-log evidence. Fresh-allocator e2e spec proves first `/discovery/[slug]` visit shows zero example strategies.
 
 ### Changed
 
@@ -2712,7 +2852,7 @@ Six major waves of work plus the sidebar grouping refresh, all behind the
 
 ### Migration
 
-- **079_equity_defensive_heal.sql** mirrors migration 078 verbatim (purge
+- **20260424031238_equity_defensive_heal.sql** mirrors migration 078 verbatim (purge
   every `allocator_equity_snapshots` row, reset the per-api_key
   reconstruct idempotency gate, re-enqueue for every connected active
   key) because every row in the table was produced by pre-v0.15.4.2
@@ -2795,7 +2935,7 @@ Six major waves of work plus the sidebar grouping refresh, all behind the
 
 ### Migrations
 
-- **`078_equity_contract_size_healing.sql`** — purges every row in
+- **`20260424012820_equity_contract_size_healing.sql`** — purges every row in
   `allocator_equity_snapshots` (all of them were produced by pre-v0.15.4.0
   code, which was either v0.15.3.0's contract-size bug or the later
   refresh-job notional bug) and deletes `compute_jobs` rows where
@@ -2977,7 +3117,7 @@ new connections produced empty equity charts.
   per-`api_key_id` lookup against `compute_jobs` (status = `done`,
   kind = `reconstruct_allocator_history`) so each key gets exactly one
   reconstruction attempt regardless of allocator-level snapshot history.
-  Migration `076_reconstruct_per_api_key_gate.sql` + handler patch in
+  Migration `20260422122720_reconstruct_per_api_key_gate.sql` + handler patch in
   `analytics-service/services/equity_reconstruction.py`.
 
 ## [0.15.0.0] - 2026-04-20
@@ -3614,17 +3754,17 @@ permission scopes all land together.
   (previously returned 200 even on total failure).
 
 ### Migrations
-- `045_sync_checkpoints.sql` — `api_keys.last_fetched_trade_timestamp`
-- `046_reconciliation.sql` — `reconciliation_reports` table + `reconcile_strategy` job kind
-- `047b_used_ack_tokens.sql` — one-time-use ack token tracking (`ON DELETE SET NULL`)
-- `047c_severity_critical.sql` — extends `portfolio_alerts.severity` CHECK with `'critical'`
-- `048_contact_request_metadata.sql` — `mandate_context`, `portfolio_snapshot`, `source`,
+- `20260416125428_sync_checkpoints.sql` — `api_keys.last_fetched_trade_timestamp`
+- `20260416125429_reconciliation.sql` — `reconciliation_reports` table + `reconcile_strategy` job kind
+- `20260515130000_used_ack_tokens.sql` — one-time-use ack token tracking (`ON DELETE SET NULL`)
+- `20260515113405_severity_critical.sql` — extends `portfolio_alerts.severity` CHECK with `'critical'`
+- `20260416125430_contact_request_metadata.sql` — `mandate_context`, `portfolio_snapshot`, `source`,
   `replacement_for`, `snapshot_status` + `compute_intro_snapshot` job kind
-- `050_rebalance_drift_check_and_trigger.sql` — `rebalance_drift` alert type +
+- `20260416125431_rebalance_drift_check_and_trigger.sql` — `rebalance_drift` alert type +
   `portfolio_alerts.strategy_id` + portfolios/portfolio_strategies seed triggers
-- `051_rebalance_drift_weekly_index.sql` — `CREATE INDEX CONCURRENTLY` for weekly dedup
-- `052_key_permission_audit.sql` — audit log for internal permission probes
-- `053_session_count_rpc.sql` — atomic `increment_user_session_count` RPC
+- `20260416125432_rebalance_drift_weekly_index.sql` — `CREATE INDEX CONCURRENTLY` for weekly dedup
+- `20260416125433_key_permission_audit.sql` — audit log for internal permission probes
+- `20260416125434_session_count_rpc.sql` — atomic `increment_user_session_count` RPC
 
 ### Crons
 - `reconcile-strategies` (3:30 AM UTC daily) — enqueues `reconcile_strategy` per active strategy
@@ -3696,7 +3836,7 @@ our security posture at `/security` before handing over API keys.
   Type 1 preparation). Present-tense factual framing, no forward-looking promises.
 
 ### Infrastructure
-- Migration `044_funding_fees.sql` — single atomic transaction: create table + indexes +
+- Migration `20260416081039_funding_fees.sql` — single atomic transaction: create table + indexes +
   RLS policies + `positions.funding_pnl` column + register `sync_funding` in
   `compute_job_kinds`. Self-verifying `DO` block at the end. No generated columns (avoids
   table rewrite). Forward-only; no `daily_pnl` rewrite.

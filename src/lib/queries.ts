@@ -670,7 +670,7 @@ export const getStrategyDetailV2 = cache(async function getStrategyDetailV2(
 /**
  * Panel IDs accepted by the `fetch_strategy_lazy_metrics` RPC. MUST stay
  * in sync with the SQL `CASE` statement in
- * `supabase/migrations/087_strategy_analytics_series.sql`. Adding a new
+ * `supabase/migrations/20260428120919_strategy_analytics_series.sql`. Adding a new
  * panel here without a matching SQL CASE branch results in the RPC
  * silently returning `{}`.
  *

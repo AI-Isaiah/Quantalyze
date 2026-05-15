@@ -195,7 +195,7 @@ export async function stampOutcomeMarker(
  * symmetry with the other markers.
  *
  * WR-02 retired by migration 085 RPC — see
- * `supabase/migrations/085_stamp_first_bridge_surfaced.sql`. The previous
+ * `supabase/migrations/20260430055512_stamp_first_bridge_surfaced.sql`. The previous
  * deterministic-stamp-via-`user.created_at` mitigation (which leaned on
  * PostHog content-hash dedupe to collapse races) is replaced by an
  * atomic `SELECT ... FOR UPDATE` + idempotent stamp at the Postgres

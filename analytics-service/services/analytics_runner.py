@@ -43,7 +43,12 @@ from datetime import datetime
 from fastapi import HTTPException
 
 from services.benchmark import get_benchmark_returns
-from services.db import db_execute, get_supabase
+from services.db import (
+    PaginatedSelectTruncated,
+    _paginated_select,
+    db_execute,
+    get_supabase,
+)
 from services.metrics import compute_all_metrics
 from services.transforms import trades_to_daily_returns_with_status
 
@@ -112,12 +117,10 @@ async def _load_position_time_series(
     Args:
         strategy_id: UUID string of the strategy.
         supabase: PostgREST client (service-role).
-        account_balance: optional USD account balance from `api_keys`. When
-            present, NAV per date = account_balance + cumulative_realized_pnl.
-            When None, falls back to gross-exposure proxy
-            (sum(abs(positions[d].values()))) — turnover formula
-            `Σ(|Δposition × price|) / nav` is self-consistent under any
-            non-zero monotonic NAV proxy.
+        account_balance: optional USD account balance from `api_keys`. Kept
+            in the signature so callers can probe its presence, but the
+            value is NOT written into the returned nav_by_date — see
+            audit-2026-05-07 C-0221 below.
 
     Returns:
         positions_by_date: { 'YYYY-MM-DD': { symbol: signed_size_usd } }
@@ -125,18 +128,76 @@ async def _load_position_time_series(
         nav_by_date:       { 'YYYY-MM-DD': nav_usd }
 
     Empty dicts on missing snapshots — caller treats as graceful degradation.
+
+    Audit-2026-05-07 C-0221 (account-balance leak fix) + H-0636 follow-up
+    ---------------------------------------------------------------------
+    Previously, when `account_balance` was non-null this function wrote
+    `nav_by_date[d] = float(account_balance)` — the tenant's raw
+    `api_keys.account_balance_usdt`. That payload propagates into the
+    `turnover_series` sibling row of `strategy_analytics_series`, which the
+    `fetch_strategy_lazy_metrics` RPC exposes to anon for any *published*
+    strategy. An anonymous attacker reading two non-zero `turnover` entries
+    for a published strategy could divide them and recover the constant
+    USDT balance.
+
+    Mitigation: we now publish a PER-STRATEGY stable NAV proxy that contains
+    no tenant-secret information. Specifically:
+
+      * NAV[d] = max(1.0, max_t sum(|positions[t]|))
+        — the rolling/full-run maximum gross exposure observed across all
+        snapshot dates. Constant within a run (no per-day variation), so
+        turnover_series == Σ(|Δposition × price|) / max_gross_exposure for
+        every date. Two anonymous reads can divide to recover RATIOS of
+        position changes, but never the tenant's actual USDT balance —
+        gross_exposure is a function of position sizes (already published
+        as exposure_series) so leaking it adds no new information.
+
+      * If positions_by_date is empty or max_gross_exposure is 0, NAV
+        defaults to 1.0 (gives a degenerate but non-error series; the
+        upstream turnover_series builder also short-circuits to 0.0).
+
+    Known trade-off (documented per H-0636 fix preference (b)): an attacker
+    with access to BOTH `exposure_series` (already published per-day) AND
+    `turnover_series` can multiply `turnover_series[d] * max(exposure_series)`
+    to recover the absolute dollar position change for that date. This is
+    an order-of-magnitude smaller signal than `account_balance` leak (no
+    cross-account scaling — it's per-strategy and tied to already-published
+    exposure shape), and the brief accepted this trade-off explicitly in
+    return for keeping the turnover panel functional on demo / paper
+    strategies. Preferred alternative would be H-0636 option (a): require
+    account_balance and emit `data_quality_flags.turnover_unavailable`
+    otherwise — tracked in the follow-up backlog.
+
+    The `account_balance` parameter is retained in the signature for caller
+    compatibility but is NEVER written into the returned grid.
     """
-    def _fetch_snapshots():
-        return (
+    # Audit-2026-05-07 H-0629 / H-0643: paginate the snapshot fetch. The
+    # bare SELECT was bounded only by PostgREST's per-response cap
+    # (1000 rows by default on hosted Supabase), so any strategy with
+    # > 1000 snapshot rows (multi-symbol × multi-year backfills hit this
+    # easily) silently truncated to a sub-sample of the recent window —
+    # corrupting turnover / NAV grids without any signal. Delegate to the
+    # shared ``_paginated_select`` helper which raises
+    # ``PaginatedSelectTruncated`` on hard-cap overflow (audit #52
+    # convention) — we let it propagate so a 1M-row strategy fails loud
+    # rather than silently aggregating over a partial window.
+    #
+    # Composite order_by: (snapshot_date, symbol, side) matches the
+    # ``position_snapshots_unique_per_day`` index from migration 034 so
+    # cross-page row ties cannot duplicate or skip rows.
+    snapshots = await db_execute(
+        lambda: _paginated_select(
             supabase.table("position_snapshots")
             .select("snapshot_date, symbol, side, size_usd, mark_price")
-            .eq("strategy_id", strategy_id)
-            .order("snapshot_date")
-            .execute()
+            .eq("strategy_id", strategy_id),
+            order_by=(
+                ("snapshot_date", False),
+                ("symbol", False),
+                ("side", False),
+            ),
+            truncation_hint=f"position_snapshots strategy_id={strategy_id}",
         )
-
-    snaps_result = await db_execute(_fetch_snapshots)
-    snapshots = (snaps_result.data if snaps_result else None) or []
+    )
     if not snapshots:
         return {}, {}, {}
 
@@ -155,9 +216,13 @@ async def _load_position_time_series(
             size_usd = float(size_raw) if size_raw is not None else 0.0
         except (TypeError, ValueError):
             size_usd = 0.0
-        # Skip flat or zero-size rows (per migration 034 comment they're
-        # usually not stored, but defensive).
-        if side == "flat" or size_usd == 0.0:
+        # Skip flat or near-zero-size rows (per migration 034 comment they're
+        # usually not stored, but defensive). Audit-2026-05-07 H-0644 / H-0654:
+        # `size_usd == 0.0` exact-float equality fails on NUMERIC residuals
+        # round-tripped through PostgREST (e.g. 1e-15 from a partial-fill
+        # close), producing phantom positions in the turnover/exposure grids.
+        # Use a tight tolerance below any meaningful dollar amount.
+        if side == "flat" or abs(size_usd) < 1e-9:
             continue
         signed = size_usd if side == "long" else -size_usd
         positions_by_date.setdefault(d, {})[sym] = signed
@@ -168,18 +233,26 @@ async def _load_position_time_series(
                 # Don't poison prices_by_date with NaN/non-numeric marks.
                 pass
 
-    # Build nav_by_date. With account_balance present, NAV is a constant
-    # (account-level scaling); turnover formula divides by NAV, so a
-    # constant non-zero NAV produces a self-consistent series. Without
-    # account_balance, use sum(abs(positions)) as a NAV proxy (gross
-    # exposure) — also self-consistent for the turnover ratio.
-    nav_by_date: dict[str, float] = {}
-    if account_balance is not None and account_balance > 0:
-        for d in positions_by_date:
-            nav_by_date[d] = float(account_balance)
-    else:
-        for d, pos_map in positions_by_date.items():
-            nav_by_date[d] = sum(abs(v) for v in pos_map.values())
+    # Build nav_by_date. Audit-2026-05-07 C-0221 + H-0636: NEVER write
+    # `float(account_balance)` here — that leaks the raw tenant USDT balance
+    # through the published `turnover_series` sibling row. NEVER write 1.0
+    # constant either: that makes turnover_series leak the raw dollar
+    # position-change magnitude (numerator with denominator=1).
+    #
+    # Use the per-strategy rolling maximum gross exposure as a stable proxy:
+    # constant within the run, contains no balance information, and
+    # gross-exposure shape is already published in exposure_series so it
+    # adds no new disclosure surface. Defaults to 1.0 when the max is 0 to
+    # avoid divide-by-zero downstream (compute_turnover_series_with_flags
+    # short-circuits on nav <= 0 anyway, so this is belt-and-braces).
+    max_gross_exposure = max(
+        (sum(abs(v) for v in pos_map.values()) for pos_map in positions_by_date.values()),
+        default=0.0,
+    )
+    nav_proxy = max_gross_exposure if max_gross_exposure > 0 else 1.0
+    nav_by_date: dict[str, float] = {d: nav_proxy for d in positions_by_date}
+    # `account_balance` is intentionally NOT consumed below — see docstring.
+    _ = account_balance
 
     return positions_by_date, prices_by_date, nav_by_date
 
@@ -325,11 +398,24 @@ def _compute_derived_trade_metrics(
         inside the same function silently defaults all derived metrics to None.
 
     Formula (Weighted R:R per H-F / METRICS-07):
-      Σ(win_size × win_count) / Σ(loss_size × loss_count)
-    Implemented as (avg_winning_trade × winners_count) / (|avg_losing_trade| × losers_count).
-    Documented here as the canonical Phase 12 formula; if quantstats reference
-    defines a different canonical form, update this docstring + regen golden
-    fixture.
+      Σ(R_i × |pnl_i|) / Σ|pnl_i|   where R_i = pnl_i / risk_unit
+      and risk_unit = |avg_losing_trade| (canonical Van Tharp R denominator)
+
+    Audit-2026-05-07 H-0627 / H-0628 ratchet: the prior closed-form
+    `(avg_win × winners_count) / (|avg_loss| × losers_count)` is algebraically
+    identical to Profit Factor (gross_profit / |gross_loss|) because
+    `avg = sum / count`. The runner used to publish the same number under two
+    labels (weighted_risk_reward_ratio AND profit_factor), which is a metric
+    disclosure hazard for institutional allocators. The new pnl-weighted
+    average weights each trade's R-multiple by its own dollar magnitude, so
+    the metric varies independently of Profit Factor on heterogeneous
+    cohorts. Note: this is NOT a textbook Van Tharp metric — Tharp's
+    canonical Expectancy is simple-mean R (`Σ R_i / N`). The pnl-weighted
+    form was chosen deliberately by the audit to (a) emphasize the
+    contribution of larger trades and (b) ensure the published number
+    differs from Profit Factor on heterogeneous cohorts. Quantstats does
+    not implement a weighted-R metric so there is no external parity
+    oracle; the metric label and formula are this codebase's contract.
 
     Threat T-12-05-03 mitigation: every divisor is guarded with `> 0`; pure
     zero-loss / zero-divisor cases yield None (rendered downstream as "—") to
@@ -340,10 +426,44 @@ def _compute_derived_trade_metrics(
     # B-01 path-(b) contract literally.
     _ = volume_metrics
 
-    # Position-side primitives (B-01 path (b) extended reconstruct_positions output)
+    # Position-side primitives (B-01 path (b) extended reconstruct_positions output).
+    #
+    # Audit-2026-05-07 H-0645 / H-0653: defensively normalize win_rate to the
+    # canonical fraction-in-[0,1] convention. The producer
+    # (`reconstruct_positions`) historically returns a fraction (0.6 == 60%),
+    # but this is an unenforced cross-module contract. If a future refactor
+    # flips to percent (60.0 == 60%) without updating this consumer, the
+    # expectancy formula `win_rate * avg_win - (1 - win_rate) * |avg_loss|`
+    # blows up by ~100×. Normalize at the boundary so a single-character
+    # producer drift cannot ship inflated expectancy.
     win_rate = float(trade_metrics_from_positions.get("win_rate") or 0.0)
+    # Audit-2026-05-07 red-team follow-up: the prior `if win_rate > 1.0`
+    # threshold misclassified `1.0001` (ULP drift from `winners/total` at
+    # 100% winners) as a percent and divided by 100, shipping a 1% win-rate
+    # for a 100%-winner strategy — a catastrophic 100× expectancy error in
+    # the WRONG direction. Use `> 1.5` so legitimate fractional drift near
+    # 1.0 stays fractional, while any value clearly outside [0,1] (e.g.
+    # 60.0 == 60%) is still treated as a percent. Also drop non-finite
+    # values and clamp to [0,1] so `inf` / NaN producer drift cannot ship
+    # nonsense expectancy.
+    if not math.isfinite(win_rate) or win_rate < 0:
+        win_rate = 0.0
+    elif win_rate > 1.5:
+        win_rate = win_rate / 100.0
+    win_rate = min(win_rate, 1.0)
     avg_win = float(trade_metrics_from_positions.get("avg_winning_trade") or 0.0)
     avg_loss = float(trade_metrics_from_positions.get("avg_losing_trade") or 0.0)
+    # Audit-2026-05-07 H-0647 / H-0648 follow-up: per-trade aggregations
+    # below filter non-finite pnl via `_finite_pnl`, but `avg_winning_trade`
+    # / `avg_losing_trade` are pre-aggregated UPSTREAM by reconstruct_positions
+    # — a `+inf` realized_pnl passes `pnl > 0` there and inflates the
+    # winners' average. Zero only the non-finite side so a healthy partner
+    # metric (e.g. legitimate `avg_loss` when `avg_win` is poisoned) still
+    # contributes to `risk_reward_ratio` instead of being wiped silently.
+    if not math.isfinite(avg_win):
+        avg_win = 0.0
+    if not math.isfinite(avg_loss):
+        avg_loss = 0.0
     winners_count = int(trade_metrics_from_positions.get("winners_count") or 0)
     losers_count = int(trade_metrics_from_positions.get("losers_count") or 0)
     per_trade = trade_metrics_from_positions.get("realized_pnl_per_trade") or []
@@ -357,6 +477,23 @@ def _compute_derived_trade_metrics(
         "profit_factor_short": None,
     }
 
+    # Shared coercion helper. Audit-2026-05-07 H-0647 / H-0648: a NaN / inf /
+    # non-numeric `realized_pnl` (typically from an upstream divide-by-zero in
+    # `reconstruct_positions`) must be dropped at the boundary, not let pass
+    # into SQN / profit-factor / weighted-R:R math where it silently corrupts
+    # JSONB output. Used by all per-trade aggregations below.
+    def _finite_pnl(t: dict) -> float | None:
+        raw = t.get("realized_pnl")
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(val):
+            return None
+        return val
+
     # Expectancy: only meaningful when at least one of avg_win / avg_loss is
     # non-zero. All-zero position book → keep expectancy=None per the empty
     # test's contract.
@@ -367,22 +504,63 @@ def _compute_derived_trade_metrics(
     if avg_loss != 0:
         out["risk_reward_ratio"] = avg_win / abs(avg_loss)
 
-    # H-F / METRICS-07: Weighted R:R = (avg_win × winners_count) /
-    # (|avg_loss| × losers_count). Guards against zero divisor (no losers, or
-    # zero |avg_loss|).
-    num = avg_win * winners_count
-    den = abs(avg_loss) * losers_count
-    if den > 0:
-        out["weighted_risk_reward_ratio"] = num / den
+    # H-F / METRICS-07: Weighted R:R.
+    #
+    # Audit-2026-05-07 H-0627 / H-0628: the previous formulation
+    # `(avg_win × winners_count) / (|avg_loss| × losers_count)` is
+    # algebraically identical to Profit Factor (gross_profit / |gross_loss|)
+    # because `avg = sum / count`. Publishing the same number under two
+    # labels (weighted_risk_reward_ratio + profit_factor) is a metric
+    # disclosure hazard.
+    #
+    # Replace with a genuine pnl-weighted average of per-trade R-multiple:
+    #     Σ(R_i × |pnl_i|) / Σ|pnl_i|     where R_i = pnl_i / risk_unit
+    # This weights each trade's R by its own dollar magnitude (large trades
+    # carry more signal). NOT a textbook Van Tharp metric — see the docstring
+    # at the top of this function for the rationale and audit decision.
+    # Falls back to None when there is no risk_unit (avg_loss == 0) or no
+    # closed trade has a non-zero |pnl|.
+    pnl_weighted_num = 0.0
+    pnl_weighted_den = 0.0
+    risk_unit_for_weighted = abs(avg_loss) if avg_loss else 0.0
+    if risk_unit_for_weighted > 0:
+        for t in per_trade:
+            pnl_val = _finite_pnl(t)
+            if pnl_val is None:
+                continue
+            r_i = pnl_val / risk_unit_for_weighted
+            w_i = abs(pnl_val)
+            pnl_weighted_num += r_i * w_i
+            pnl_weighted_den += w_i
+    if pnl_weighted_den > 0:
+        out["weighted_risk_reward_ratio"] = pnl_weighted_num / pnl_weighted_den
 
     # METRICS-08: SQN over per-trade R-multiples (R = realized_pnl / risk_unit).
     # risk_unit derived from |avg_loss| (the canonical Van Tharp denominator).
+    #
+    # SQN scaling note (audit-2026-05-07 H-0652): we cap the scaling factor at
+    # sqrt(min(N, 100)) rather than the academic sqrt(N). The 100-cap is
+    # Van Tharp's original SQN definition (Tharp, *Trade Your Way to
+    # Financial Freedom*, 2nd ed., 2007) — quantstats does NOT implement
+    # SQN, so there is no external parity oracle for this metric and the
+    # golden-fixture value is self-anchored. Unbounded sqrt(N) inflates
+    # SQN for high-trade-count strategies, distorting cross-strategy
+    # comparison. If a future change moves to the academic sqrt(N) form,
+    # regen the golden fixture in the same change.
+    #
+    # Audit-2026-05-07 H-0647 / H-0648: NaN / inf realized_pnl values
+    # (commonly an upstream divide-by-zero from reconstruct_positions when
+    # entry_price == 0) pass the `is not None` filter and silently corrupt
+    # the SQN math (NaN propagates through mean/var) and the profit_factor
+    # math (NaN values evade BOTH `p > 0` and `p < 0` filters, draining
+    # gross profit and gross loss). Filter on `math.isfinite` so non-finite
+    # inputs are dropped at the boundary rather than poisoning JSONB.
     risk_unit = abs(avg_loss) if avg_loss else 0.0
     if risk_unit > 0 and per_trade:
         r_multiples = [
-            (t.get("realized_pnl") or 0.0) / risk_unit
+            v / risk_unit
             for t in per_trade
-            if t.get("realized_pnl") is not None
+            for v in [_finite_pnl(t)] if v is not None
         ]
         if len(r_multiples) >= 2:
             mean_r = sum(r_multiples) / len(r_multiples)
@@ -395,16 +573,16 @@ def _compute_derived_trade_metrics(
                     min(len(r_multiples), 100)
                 )
 
-    # Profit Factor segmented by side — uses position-side realized_pnl_per_trade
+    # Profit Factor segmented by side — uses position-side
+    # realized_pnl_per_trade. Same `_finite_pnl` coercion as SQN /
+    # weighted-R:R so a non-finite pnl can't poison either bucket.
     long_pnls = [
-        float(t.get("realized_pnl") or 0.0)
-        for t in per_trade
-        if t.get("side") == "long"
+        v for t in per_trade if t.get("side") == "long"
+        for v in [_finite_pnl(t)] if v is not None
     ]
     short_pnls = [
-        float(t.get("realized_pnl") or 0.0)
-        for t in per_trade
-        if t.get("side") == "short"
+        v for t in per_trade if t.get("side") == "short"
+        for v in [_finite_pnl(t)] if v is not None
     ]
 
     def _profit_factor(pnls: list[float]) -> float | None:
@@ -626,15 +804,18 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         # Link: strategies.api_key_id -> api_keys.id (api_keys has no
         # strategy_id column).
         #
-        # Two separate failure modes feed the turnover-denominator chip:
+        # Two separate flags persist post-C-0221 for OPERATOR visibility,
+        # not for analytics-degradation signaling:
         #   - no_linked_api_key: strategy has no api_key_id (demo / paper).
-        #     Inherent state, not a degraded computation. UI surfaces it
-        #     differently from a real failure so allocators don't read
-        #     "approximate" as a problem to fix on a demo strategy.
         #   - account_balance_unavailable: api_key_id IS set but the
         #     balance lookup didn't return a usable value (no balance
-        #     configured, or fetch threw). True degraded state — operator
-        #     should resolve.
+        #     configured, or fetch threw).
+        # Post-C-0221, NEITHER flag affects NAV semantics — `_load_position_
+        # time_series` always builds `nav_by_date` from `max_gross_exposure`
+        # regardless of whether `account_balance` was successfully fetched.
+        # The flags remain informational so the owner-side UI can distinguish
+        # "missing exchange credential" from "credential present, fetch broke"
+        # without falsely implying analytics ran with a degraded NAV.
         account_balance = None
         account_balance_unavailable = False
         no_linked_api_key = False
@@ -799,6 +980,13 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
             ) = await _load_position_time_series(
                 strategy_id, supabase, account_balance
             )
+        except PaginatedSelectTruncated:
+            # Audit #52 fail-loud contract: a 1M-row strategy hitting the
+            # pagination hard cap must surface as a stable typed error so
+            # operators can investigate, NOT be downgraded to the generic
+            # "SNAPSHOTS_LOAD_FAILED" DQF (which conflates RLS regressions,
+            # transient network blips, and scale overflow).
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Position snapshots load failed for %s: %s", strategy_id, str(exc)
@@ -817,14 +1005,29 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         fills_fetch_failed = False
         fills_fetch_error: str | None = None
         try:
-            fills_result = await db_execute(
-                lambda: supabase.table("trades")
-                .select("side, cost, is_maker, timestamp")
-                .eq("strategy_id", strategy_id)
-                .eq("is_fill", True)
-                .execute()
+            # Audit-2026-05-07 H-0630 / H-0643: paginate the fills fetch.
+            # Active live OKX strategies routinely have tens of thousands of
+            # fills; the bare SELECT was capped at PostgREST's default 1000
+            # rows, silently corrupting volume / turnover / trade_mix math.
+            # Shared ``_paginated_select`` raises on hard-cap overflow so
+            # pathological strategies fail loud rather than silently
+            # aggregating over a partial fills set.
+            #
+            # Composite order_by: (timestamp, id) — OKX millisecond
+            # timestamps collide trivially when one order fills against
+            # multiple makers in the same ms; the UUID primary key is a
+            # guaranteed tiebreaker so paginated rows cannot duplicate or
+            # skip at page boundaries.
+            raw_fills = await db_execute(
+                lambda: _paginated_select(
+                    supabase.table("trades")
+                    .select("side, cost, is_maker, timestamp")
+                    .eq("strategy_id", strategy_id)
+                    .eq("is_fill", True),
+                    order_by=(("timestamp", False), ("id", False)),
+                    truncation_hint=f"trades fills strategy_id={strategy_id}",
+                )
             )
-            raw_fills = (fills_result.data if fills_result else []) or []
             fills_data = [
                 {
                     **row,
@@ -833,6 +1036,11 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
                 }
                 for row in raw_fills
             ]
+        except PaginatedSelectTruncated:
+            # Audit #52 fail-loud contract: same as the snapshots path.
+            # A 1M-row fills strategy must not be silently downgraded to
+            # an empty fills set with "FILLS_FETCH_FAILED" DQF.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Fills fetch failed for %s: %s", strategy_id, str(exc)
@@ -903,14 +1111,28 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
 
         # Observability: when 4-bucket mode is on, _compute_trade_mix silently
         # skips fills missing is_maker. The coverage gate caps that at <1% by
-        # design, but log when it happens so operators see the count instead
-        # of a quiet panel-vs-volume discrepancy.
-        if has_maker_taker and fills_data:
-            dropped = sum(1 for f in fills_data if f.get("is_maker") is None)
-            if dropped > 0:
+        # design, but log AND emit a DQF when it happens so allocators see the
+        # count instead of a quiet panel-vs-volume discrepancy.
+        #
+        # Audit-2026-05-07 H-0646: a compromised exchange connector / malicious
+        # tenant emitting `is_maker: null` on every fill could otherwise
+        # suppress the entire trade_mix panel (all four buckets zero) with no
+        # signal — the per-run coverage gate then flips the mode back to
+        # 2-bucket, but only AFTER the gate is checked at the top of this
+        # block. Add a defense-in-depth observability flag here so any
+        # missing-is_maker fills surface in `data_quality_flags` regardless of
+        # which mode the gate picked.
+        fills_missing_is_maker_pct: float | None = None
+        if fills_data:
+            missing = sum(1 for f in fills_data if f.get("is_maker") is None)
+            if missing > 0:
+                fills_missing_is_maker_pct = missing / len(fills_data)
                 logger.info(
-                    "Trade Mix 4-bucket dropped %d/%d fills missing is_maker for strategy %s",
-                    dropped, len(fills_data), strategy_id,
+                    "Trade Mix: %d/%d fills missing is_maker for strategy %s "
+                    "(mode=%s, pct=%.4f)",
+                    missing, len(fills_data), strategy_id,
+                    "4-bucket" if has_maker_taker else "2-bucket",
+                    fills_missing_is_maker_pct,
                 )
 
         merged_trade_metrics = {
@@ -1014,6 +1236,14 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         if trade_mix_approximate:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["trade_mix_approximation"] = True
+        # Audit-2026-05-07 H-0646: surface the percentage of fills missing
+        # is_maker so allocators can see when the trade_mix panel is built
+        # from an incomplete view (silent suppression-attack mitigation).
+        if fills_missing_is_maker_pct is not None and fills_missing_is_maker_pct > 0:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["fills_missing_is_maker_pct"] = round(
+                fills_missing_is_maker_pct, 4
+            )
         if account_balance_unavailable:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["account_balance_unavailable"] = True

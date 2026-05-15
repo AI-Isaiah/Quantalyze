@@ -272,7 +272,7 @@ simultaneous processing of the same job id.
 
 ## Related files
 
-- Migration: `supabase/migrations/032_compute_jobs_queue.sql`
+- Migration: `supabase/migrations/20260411144407_compute_jobs_queue.sql`
 - pg_cron schedule: `supabase/migrations/033_compute_jobs_cron.sql`
 - Worker: `analytics-service/routers/jobs.py`,
   `analytics-service/services/jobs.py`

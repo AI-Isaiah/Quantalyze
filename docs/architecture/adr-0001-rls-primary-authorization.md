@@ -65,15 +65,15 @@ re-check row ownership except in two narrow cases:
   increases review burden.
 
 ## Evidence
-- RLS policies: `supabase/migrations/002_rls_policies.sql` (lines 1-69)
+- RLS policies: `supabase/migrations/20260405061912_rls_policies.sql` (lines 1-69)
   enables RLS on 9 tables with owner-scoped policies.
-- Security hardening: `supabase/migrations/007_security_hardening.sql`,
-  `011_perfect_match.sql`, `020_profile_pii_revoke_hardened.sql`,
-  `021_function_execute_hardening.sql`,
-  `022_public_profiles_view_security_invoker.sql`.
+- Security hardening: `supabase/migrations/20260406065011_security_hardening.sql`,
+  `20260407164606_perfect_match.sql`, `20260409133654_profile_pii_revoke_hardened.sql`,
+  `20260409133655_function_execute_hardening.sql`,
+  `20260409133656_public_profiles_view_security_invoker.sql`.
 - Server client (RLS-bound): `src/lib/supabase/server.ts` (lines 4-27).
 - Admin client (RLS bypass): `src/lib/supabase/admin.ts` (lines 1-12).
 - Ownership assertion pattern: `src/lib/queries.ts` (`assertPortfolioOwnership`).
-- Column-level REVOKE fix: `supabase/migrations/020_profile_pii_revoke_hardened.sql`.
+- Column-level REVOKE fix: `supabase/migrations/20260409133654_profile_pii_revoke_hardened.sql`.
 - Route handlers using server client: `src/app/api/preferences/route.ts`,
   `src/app/api/attestation/route.ts`.

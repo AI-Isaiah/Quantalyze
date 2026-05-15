@@ -1,4 +1,4 @@
--- supabase/migrations/098_resend_message_correlation.sql
+-- supabase/migrations/20260515113637_resend_message_correlation.sql
 -- 093-097 reserved for Phase 19 (see STATE.md Phase-Internal Gates table) — Phase 16 lands at 098
 --
 -- Phase 16 / OBSERV-03 — correlation_id ↔ resend_message_id mapping table.

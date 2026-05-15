@@ -1,3 +1,27 @@
+-- ⚠️  DEFERRED-APPLY WARNING (added 2026-05-15 by PR-Y1):
+-- ============================================================================
+-- This file's `schema_migrations` row was INSERTed on prod (project
+-- `khslejtfbuezsmvmtsdn`) with version=20260509082818 to keep
+-- `supabase db push` from re-applying. **The SQL body in this file has
+-- NEVER been executed on prod.** On prod, `verification_requests` is still
+-- a BASE TABLE (not a VIEW), `verification_requests_legacy` does NOT exist,
+-- and the INSTEAD OF triggers are absent.
+--
+-- Deferred to PR-Y2 because:
+--   1. The M-5 preflight assertion at STEP 1 needs to be revalidated against
+--      post-PR-X5 prod data (teaser flow now writes strategy_verifications rows
+--      that this body's M-5 gate would abort on).
+--   2. sanitize_user (mig 055 / mig 127) does `DELETE FROM verification_requests
+--      WHERE email = ...` — once this view ships, that DELETE hits an INSTEAD
+--      OF DELETE trigger that rejects. sanitize_user must be updated to delete
+--      from verification_requests_legacy instead.
+--
+-- To genuinely apply 107 in PR-Y2: write a NEW migration file with a different
+-- timestamp containing the corrected body + corresponding sanitize_user patch.
+-- Do NOT remove this file's `schema_migrations` row without also writing the
+-- replacement migration — that re-opens the original supabase-migrate failure.
+-- ============================================================================
+--
 -- Migration 107: Phase 19 / BACKBONE-04 step (d).
 -- Renames the legacy verification_requests table and replaces it with a
 -- read-only VIEW backed by strategy_verifications. INSTEAD OF triggers reject
