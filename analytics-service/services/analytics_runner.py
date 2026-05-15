@@ -151,6 +151,18 @@ async def _load_position_time_series(
         defaults to 1.0 (gives a degenerate but non-error series; the
         upstream turnover_series builder also short-circuits to 0.0).
 
+    Known trade-off (documented per H-0636 fix preference (b)): an attacker
+    with access to BOTH `exposure_series` (already published per-day) AND
+    `turnover_series` can multiply `turnover_series[d] * max(exposure_series)`
+    to recover the absolute dollar position change for that date. This is
+    an order-of-magnitude smaller signal than `account_balance` leak (no
+    cross-account scaling — it's per-strategy and tied to already-published
+    exposure shape), and the brief accepted this trade-off explicitly in
+    return for keeping the turnover panel functional on demo / paper
+    strategies. Preferred alternative would be H-0636 option (a): require
+    account_balance and emit `data_quality_flags.turnover_unavailable`
+    otherwise — tracked in the follow-up backlog.
+
     The `account_balance` parameter is retained in the signature for caller
     compatibility but is NEVER written into the returned grid.
     """
