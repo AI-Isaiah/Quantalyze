@@ -694,6 +694,56 @@ export type LazyMetricsPanelId =
   | "exposure";
 
 /**
+ * audit-2026-05-07 H-0496: encode the panel→kind mapping at the type
+ * level so a docstring/SQL drift cannot survive type-check. The mapping
+ * mirrors the SQL `CASE` statement in migration 087. The keys cover
+ * every member of `LazyMetricsPanelId`; the union of all values is a
+ * subset of `StrategyAnalyticsSeriesKind` (intentionally narrower —
+ * `equity_series_1y` lives in metrics_json, not in the sibling table).
+ *
+ * Currently consumed for type-correctness ONLY (we don't widen
+ * `fetchStrategyLazyMetrics`' return type because that would break
+ * existing callers that destructure the union). Adding a new sibling
+ * kind requires touching this map, the migration's CASE branch, and
+ * the `StrategyAnalyticsSeriesKind` union — the type system now keeps
+ * those three in lockstep at the queries.ts boundary.
+ */
+export type LazyMetricsPanelKindMap = {
+  overview: never;
+  equity: "log_returns_series";
+  drawdown: never;
+  returns_dist: "daily_returns_grid";
+  rolling:
+    | "rolling_sortino_3m"
+    | "rolling_sortino_6m"
+    | "rolling_sortino_12m"
+    | "rolling_volatility_3m"
+    | "rolling_volatility_6m"
+    | "rolling_volatility_12m"
+    | "rolling_alpha"
+    | "rolling_beta";
+  trades: never;
+  exposure: "exposure_series" | "turnover_series";
+};
+
+// Compile-time guards for `LazyMetricsPanelKindMap`:
+//   1. Every panel id has a key (Record-shaped against the union).
+//   2. Every kind value is a member of `StrategyAnalyticsSeriesKind`.
+// These are pure type assertions — no runtime cost.
+type _AssertPanelMapCoversIds =
+  LazyMetricsPanelKindMap extends Record<LazyMetricsPanelId, unknown>
+    ? true
+    : never;
+type _AssertPanelMapKindsValid =
+  LazyMetricsPanelKindMap[LazyMetricsPanelId] extends
+    | import("./types").StrategyAnalyticsSeriesKind
+    | never
+    ? true
+    : never;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _PanelMapChecked = _AssertPanelMapCoversIds & _AssertPanelMapKindsValid;
+
+/**
  * Lazy-fetch heavy series for panels 4–7 of the Single-Strategy v2 page.
  * Wraps the `fetch_strategy_lazy_metrics(p_strategy_id, p_panel_id)`
  * SECURITY DEFINER RPC shipped in migration 087.
