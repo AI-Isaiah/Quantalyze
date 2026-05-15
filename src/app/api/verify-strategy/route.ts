@@ -207,7 +207,24 @@ async function legacyVerifyStrategyHandler(args: {
     );
   }
 
-  let analyticsResult: { verification_id?: string };
+  /**
+   * Python `/api/verify-strategy` response shape (post-PR-X2):
+   *   verification_id     — UUID generated locally by Python (uuid.uuid4())
+   *   results             — JSONB blob with twr/sharpe/equity_curve/etc.
+   *   matched_strategy_id — UUID of closest correlated published strategy, or null
+   *   plus top-level twr / sharpe / return_24h / return_mtd / return_ytd
+   *
+   * `VerifyStrategyResponseSchema` (`src/lib/analytics-schemas.ts`) declares
+   * `verification_id` as the only required field and uses `.passthrough()`,
+   * so the extra fields flow through this typed alias without runtime parse
+   * failure. PR-X4a needs `results` + `matched_strategy_id` to stamp
+   * metrics_snapshot onto the SV row below.
+   */
+  let analyticsResult: {
+    verification_id?: string;
+    results?: Record<string, unknown> | null;
+    matched_strategy_id?: string | null;
+  };
   try {
     analyticsResult = await verifyStrategy({
       email,
@@ -262,6 +279,29 @@ async function legacyVerifyStrategyHandler(args: {
       // public_token + status), and audit_log requires a user_id which the
       // unauthenticated caller cannot provide. Follow-up landing-page-lead
       // audit lands in PostHog per ADR-0023 §3, not audit_log.
+      // PR-X4a: status='published' (was 'validated') + metrics_snapshot.
+      //
+      // Pre-fix the legacy path wrote `status='validated'` with no metrics.
+      // The public-status route at verify-strategy/[id]/status/route.ts:107
+      // only returns `results` when status is 'complete' (legacy VR shape)
+      // or 'published' (canonical SV terminal). So teaser users polling
+      // the public URL saw `{status:'validated'}` with no score — a bug
+      // present since BACKBONE-04 step (a) shipped.
+      //
+      // Now the upsert lands a terminal row in one shot:
+      //   - status='published' so [id]/status returns the metrics
+      //   - metrics_snapshot built from the Python `results` blob, with
+      //     `matched_strategy_id` folded in (no first-class column for it)
+      //
+      // PR-X5 will wire the unified path (kill-switch ON) to write the
+      // same shape from inside /process-key; this fix covers the legacy
+      // path (kill-switch OFF) which doubles as the auto-rollback target.
+      const metricsSnapshot = analyticsResult.results
+        ? {
+            ...analyticsResult.results,
+            matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
+          }
+        : null;
       const { error: upsertError } = await admin
         .from("strategy_verifications")
         .upsert(
@@ -269,12 +309,13 @@ async function legacyVerifyStrategyHandler(args: {
             id: verificationId,
             strategy_id: anchorStrategy.id,
             wizard_session_id: crypto.randomUUID(),
-            status: "validated",
+            status: "published",
             trust_tier: "self_reported",
             flow_type: "teaser",
             source: exchange,
             public_token: publicToken,
             expires_at: expiresAt,
+            metrics_snapshot: metricsSnapshot,
           },
           { onConflict: "id" },
         );

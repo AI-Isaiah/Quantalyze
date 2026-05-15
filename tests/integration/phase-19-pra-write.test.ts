@@ -158,7 +158,13 @@ describe("PR-A / phase-19-shim-step-a — strategy_verifications upsert (C-5)", 
     expect(row.strategy_id).toBe(ANCHOR_STRATEGY_ID);
     expect(typeof row.wizard_session_id).toBe("string");
     expect((row.wizard_session_id as string).length).toBeGreaterThan(0);
-    expect(row.status).toBe("validated");
+    // PR-X4a: was 'validated'. The public-status route at
+    // src/app/api/verify-strategy/[id]/status/route.ts:107 only returns
+    // `results` when status is 'complete' (legacy VR shape) or 'published'
+    // (canonical SV terminal). 'validated' is an intermediate state with
+    // no results surface, so teaser users polling the public URL never
+    // saw their score. Terminal write now lands here in one shot.
+    expect(row.status).toBe("published");
     expect(row.trust_tier).toBe("self_reported");
     expect(row.flow_type).toBe("teaser");
     expect(row.source).toBe("okx");
@@ -169,6 +175,96 @@ describe("PR-A / phase-19-shim-step-a — strategy_verifications upsert (C-5)", 
 
     // Conflict resolution onto the shared id (verification_id from analytics-service).
     expect(opts.onConflict).toBe("id");
+  });
+
+  /**
+   * PR-X4a regression — the SV upsert MUST populate metrics_snapshot with
+   * the `results` blob returned by the Python `/api/verify-strategy`
+   * endpoint. Without this, the public-status route returns
+   * `{status: 'published'}` with NO `results` field — teaser users see
+   * "verified" but no score.
+   *
+   * The legacy handler is the kill-switch rollback target; even after
+   * PR-X5 unifies the teaser path, an auto-rollback must surface metrics.
+   */
+  it("upserts metrics_snapshot from the Python results blob (PR-X4a)", async () => {
+    const PYTHON_RESULTS = {
+      twr: 0.42,
+      sharpe: 1.7,
+      return_24h: 0.01,
+      return_mtd: 0.05,
+      return_ytd: 0.31,
+      equity_curve: [{ date: "2026-05-01", value: 1.0 }],
+      trade_count: 142,
+    };
+    const MATCHED_STRATEGY_ID = "33333333-3333-3333-3333-333333333333";
+    verifyStrategyMock.mockResolvedValueOnce({
+      verification_id: TEST_VERIFICATION_ID,
+      status: "complete",
+      results: PYTHON_RESULTS,
+      matched_strategy_id: MATCHED_STRATEGY_ID,
+      twr: PYTHON_RESULTS.twr,
+      sharpe: PYTHON_RESULTS.sharpe,
+    });
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      postReq({
+        email: "metrics-snapshot@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const { row } = strategyVerificationsUpsertArgs as {
+      row: Record<string, unknown>;
+    };
+    const snapshot = row.metrics_snapshot as Record<string, unknown>;
+    expect(snapshot).toBeDefined();
+    expect(snapshot).not.toBeNull();
+    // Every field from the Python results blob is present.
+    expect(snapshot.twr).toBe(PYTHON_RESULTS.twr);
+    expect(snapshot.sharpe).toBe(PYTHON_RESULTS.sharpe);
+    expect(snapshot.return_24h).toBe(PYTHON_RESULTS.return_24h);
+    expect(snapshot.return_mtd).toBe(PYTHON_RESULTS.return_mtd);
+    expect(snapshot.return_ytd).toBe(PYTHON_RESULTS.return_ytd);
+    expect(snapshot.equity_curve).toEqual(PYTHON_RESULTS.equity_curve);
+    expect(snapshot.trade_count).toBe(PYTHON_RESULTS.trade_count);
+    // matched_strategy_id is folded into metrics_snapshot because it's
+    // not a first-class column on strategy_verifications. The public-
+    // status route consumer reads it via `resolved.results.matched_strategy_id`.
+    expect(snapshot.matched_strategy_id).toBe(MATCHED_STRATEGY_ID);
+  });
+
+  /**
+   * PR-X4a edge case — when Python returns a verification_id without a
+   * `results` blob (shouldn't happen post-PR-X2, but defensively), the
+   * upsert sets metrics_snapshot to null instead of crashing.
+   */
+  it("upserts metrics_snapshot=null when Python returns no results blob (PR-X4a)", async () => {
+    verifyStrategyMock.mockResolvedValueOnce({
+      verification_id: TEST_VERIFICATION_ID,
+      // no results, no matched_strategy_id
+    });
+
+    const { POST } = await import("@/app/api/verify-strategy/route");
+    const res = await POST(
+      postReq({
+        email: "no-results@example.com",
+        exchange: "okx",
+        api_key: "k",
+        api_secret: "s",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const { row } = strategyVerificationsUpsertArgs as {
+      row: Record<string, unknown>;
+    };
+    expect(row.metrics_snapshot).toBeNull();
+    expect(row.status).toBe("published");
   });
 
   it("source is derived from body.exchange (binance flows through)", async () => {

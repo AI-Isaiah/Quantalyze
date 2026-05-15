@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.2] - 2026-05-15
+
+**phase-19 — teaser legacy path writes terminal SV row with metrics (PR-X4a).** Pre-fix the legacy `teaserVerifyStrategyHandler` upserted `strategy_verifications` at `status='validated'` with no `metrics_snapshot` column. The public-status route at `verify-strategy/[id]/status/route.ts:107` only returns `results` when status is `'complete'` (legacy VR shape) or `'published'` (canonical SV terminal), so polling that row returned `{status:'validated'}` with no score. Teaser users on the legacy path never saw their results via the public URL — a bug present since BACKBONE-04 step (a) shipped. PR-X4a writes the terminal row in one shot: `status='published'` plus `metrics_snapshot` built from the Python `results` blob (with `matched_strategy_id` folded in since it isn't a first-class column on `strategy_verifications`). The unified `unifiedVerifyStrategyHandler` is unchanged in this PR — PR-X5 will do the real unified-path build-out for teaser inside `/process-key`. PR-X4a exists separately because the legacy path doubles as the kill-switch auto-rollback target; even after PR-X5 unifies teaser, a rollback must still surface metrics on the SV row.
+
+### Fixed
+
+- **Legacy teaser SV upsert** (`src/app/api/verify-strategy/route.ts`). Status flipped to `'published'` and `metrics_snapshot: { ...analyticsResult.results, matched_strategy_id }` added. `analyticsResult` typing extended to include `results` and `matched_strategy_id` so the TS side matches the post-PR-X2 Python response shape.
+
+### Added
+
+- **2 PR-X4a regression tests** (`tests/integration/phase-19-pra-write.test.ts`). `upserts metrics_snapshot from the Python results blob` asserts the full `{twr, sharpe, return_24h, return_mtd, return_ytd, equity_curve, trade_count, matched_strategy_id}` snapshot lands. `upserts metrics_snapshot=null when Python returns no results blob` covers the defensive edge case (shouldn't happen post-PR-X2, but null-safe regardless). Existing `upserts a complete strategy_verifications row` test updated to assert `status='published'`.
+
+### Notes
+
+The previous PR-X4 (#160) walked back the unified path for teaser entirely. That was the wrong direction — the unified backbone was supposed to handle teaser per `.planning/phases/19-unified-backbone-conditional-on-day-2-gate-commit/19-04-process-key-router-PLAN.md:19`, but the `/process-key` implementation never built the teaser-specific branch. PR-X4 has been closed unmerged; PR-X4a (this PR) ships only the metrics fix as a standalone safety net for the rollback target. PR-X5 will build the actual missing piece — the teaser branch inside `/process-key` plus a sentinel `teaser-anchor` strategy migration to avoid the existing privacy-leak strategy_id hack.
+
 ## [0.22.34.1] - 2026-05-14
 
 **phase-19 pre-PR-D prep (PR-X3 of 3).** Fixes a P0 bug in the unified-backbone teaser handler discovered during the abortive 2026-05-14T19:00 kill-switch flip. The TS `unifiedVerifyStrategyHandler` at `src/app/api/verify-strategy/route.ts` forwarded the request body verbatim as `context` without setting `step='validate'`. The `/process-key` validator at `analytics-service/routers/process_key.py:568` rejects every teaser submission with `MISSING_STRATEGY_ID` (422) because the teaser flow has no caller-owned `strategy_id` (the user is testing keys against the universe of strategies — no strategy exists yet). When the kill-switch was flipped ON, the landing-page submit was broken for 3m43s before the bug was caught and the flag was rolled back. PR-X3 ships the 1-line `context: { ...body, step: "validate" }` fix and an integration regression test that asserts `body.context.step === 'validate'` for the teaser flow.
