@@ -200,99 +200,16 @@ function parseFetchBody(call: { init: RequestInit } | undefined) {
 }
 
 describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", () => {
-  it("verify-strategy: flow_type=teaser, source from body.exchange", async () => {
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
-
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    const res = await POST(
-      jsonReq("/api/verify-strategy", {
-        email: "test@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
-
-    expect(res.status).toBe(200);
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    expect(call!.url).toBe("https://analytics.test/process-key");
-    expect((call!.init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer test-internal-token",
-    );
-    expect(
-      (call!.init.headers as Record<string, string>)["X-Correlation-Id"],
-    ).toBe(TEST_CORRELATION_ID);
-    const body = parseFetchBody(call);
-    expect(body!.flow_type).toBe("teaser");
-    expect(body!.source).toBe("okx");
-  });
-
-  /**
-   * PR-X3 regression — the teaser flow MUST forward
-   * `context.step='validate'` to `/process-key`. The upstream validator at
-   * analytics-service/routers/process_key.py:568 raises
-   * MISSING_STRATEGY_ID (422) unless either `context.strategy_id` OR
-   * `context.step='validate'` is set. The teaser flow has no caller-owned
-   * strategy_id (the user is testing keys against the universe of
-   * strategies — no strategy exists yet), so without `step='validate'`
-   * every landing-page submission breaks the moment the kill-switch flag
-   * is flipped ON.
-   *
-   * Captured during the abortive 2026-05-14T19:00 flag flip — gate was on
-   * for 3m43s before the bug was caught and the kill-switch flipped back
-   * to off. This test ensures the regression cannot ship again silently.
-   */
-  it("verify-strategy: teaser context forwards step='validate' (PR-X3)", async () => {
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
-
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    await POST(
-      jsonReq("/api/verify-strategy", {
-        email: "step-validate-pr-x3@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
-
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    const body = parseFetchBody(call);
-    expect(body!.flow_type).toBe("teaser");
-    const context = body!.context as Record<string, unknown>;
-    expect(context).toBeDefined();
-    expect(context.step).toBe("validate");
-    // Sanity: the original payload fields still pass through so the Python
-    // validate_key_permissions step has the API key + secret it needs.
-    expect(context.api_key).toBe("k");
-    expect(context.api_secret).toBe("s");
-    expect(context.exchange).toBe("okx");
-  });
-
-  // CT-4 (army2) — every thin adapter must forward X-User-Id on the
-  // upstream POST to /process-key. The Python rate limiter keys on
-  // (token_hash, X-User-Id) for cross-tenant isolation. Pre-fix the
-  // header was never sent, so every request bucketed to the same key
-  // and one tenant's burst could starve every other tenant. Public
-  // (unauthenticated) flows pass the literal 'public'.
-  it("verify-strategy unified path forwards X-User-Id='public' (CT-4)", async () => {
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    await POST(
-      jsonReq("/api/verify-strategy", {
-        email: "test@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    expect(
-      (call!.init.headers as Record<string, string>)["X-User-Id"],
-    ).toBe("public");
-  });
+  // PR-X4 (2026-05-15): the verify-strategy route NO LONGER delegates to
+  // /process-key. After two abortive 2026-05-14 flag-flip attempts exposed
+  // that the unified /process-key has no branch that fits the teaser flow
+  // (PR-X3 added step='validate' to clear MISSING_STRATEGY_ID, but the
+  // resulting _run_validate_only path returns no verification_id and the
+  // TS handler 502s), the route was walked back to always run the legacy
+  // verifyStrategy() path. The CT-3/CT-4/PR-X3/flow_type=teaser tests that
+  // used to live here have moved to tests/integration/phase-19-pra-write.test.ts
+  // which exercises the legacy SV upsert directly. The kill-switch still
+  // gates the wizard flows (onboard / resync / csv) tested below.
 
   it("keys/sync unified path forwards X-User-Id=user.id (CT-4)", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
@@ -490,14 +407,15 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     globalThis.fetch = abortingFetch as unknown as typeof globalThis.fetch;
 
     try {
-      const { POST } = await import("@/app/api/verify-strategy/route");
+      // PR-X4 swap: was importing verify-strategy/route, but that route no
+      // longer delegates to /process-key after the 2026-05-14 walk-back.
+      // keys/sync still rides postProcessKey so the CT-7 abort contract
+      // applies there. The test is otherwise unchanged — the contract under
+      // test is `postProcessKey passes AbortSignal to fetch and returns the
+      // UPSTREAM_TIMEOUT envelope on TimeoutError`, which is route-agnostic.
+      const { POST } = await import("@/app/api/keys/sync/route");
       const res = await POST(
-        jsonReq("/api/verify-strategy", {
-          email: "test@example.com",
-          exchange: "okx",
-          api_key: "k",
-          api_secret: "s",
-        }),
+        jsonReq("/api/keys/sync", { strategy_id: TEST_STRATEGY_ID }),
       );
 
       expect(res.status).toBe(504);
@@ -511,35 +429,9 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     }
   });
 
-  // CT-3 (army2) — the unified verify-strategy path must mint a public_token
-  // and persist it to strategy_verifications, then return BOTH verification_id
-  // and public_token. Without this, landing-page <VerificationForm/> throws
-  // "invalid response" when the unified-backbone flag flips on.
-  it("verify-strategy unified path mints public_token + expires_at (CT-3)", async () => {
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
-
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    const res = await POST(
-      jsonReq("/api/verify-strategy", {
-        email: "test@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
-
-    expect(res.status).toBe(200);
-    const respBody = (await res.json()) as Record<string, unknown>;
-    expect(respBody.verification_id).toBe("v-thin-adapter");
-    // 32 random bytes → 43 base64url chars (no padding).
-    expect(typeof respBody.public_token).toBe("string");
-    expect(respBody.public_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(typeof respBody.expires_at).toBe("string");
-    // 90-day window matches migration 107 M-6 policy.
-    const expiresAt = new Date(respBody.expires_at as string).getTime();
-    const ninetyDaysFromNow = Date.now() + 90 * 24 * 60 * 60 * 1000;
-    expect(Math.abs(expiresAt - ninetyDaysFromNow)).toBeLessThan(60_000);
-  });
+  // PR-X4: the CT-3 mint-public_token assertion moved to phase-19-pra-write.test.ts
+  // (it now runs against the always-legacy path; the route no longer has a
+  // unified delegation branch that mints tokens).
 
   // API-2: validate-and-encrypt is locked to the legacy code path even
   // when the unified-backbone flag is on, because the unified `/process-key`
@@ -732,26 +624,42 @@ describe("thin adapters — flag=off preserves legacy path", () => {
   // csv-finalize) — validate-and-encrypt is special-cased by API-2 so its
   // flag-off behavior is identical to flag-on.
   // -------------------------------------------------------------------------
-  it("I-T2a: verify-strategy flag=off does NOT call /process-key (legacy verifyStrategy runs)", async () => {
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(false);
+  /**
+   * PR-X4 — the verify-strategy route always runs the legacy verifyStrategy
+   * path now, regardless of the kill-switch flag state. Whether the flag is
+   * ON or OFF, /process-key is never called. This test enforces that
+   * walk-back invariant.
+   *
+   * Was: "I-T2a: verify-strategy flag=off does NOT call /process-key
+   *      (legacy verifyStrategy runs)" — asserted flag-OFF only.
+   */
+  it("I-T2a: verify-strategy NEVER calls /process-key, regardless of flag (PR-X4)", async () => {
     const analyticsClient = await import("@/lib/analytics-client");
-    vi.mocked(analyticsClient.verifyStrategy).mockResolvedValue({
-      verification_id: "v-legacy-it2a",
-    });
 
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    const res = await POST(
-      jsonReq("/api/verify-strategy", {
-        email: "test@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
+    for (const flagState of [true, false]) {
+      vi.mocked(isUnifiedBackboneActive).mockResolvedValue(flagState);
+      vi.mocked(analyticsClient.verifyStrategy).mockResolvedValue({
+        verification_id: "v-legacy-it2a",
+      });
+      fetchCalls.length = 0; // reset before each iteration
 
-    expect(res.status).toBe(200);
-    expect(findProcessKeyCall()).toBeUndefined();
-    expect(analyticsClient.verifyStrategy).toHaveBeenCalled();
+      const { POST } = await import("@/app/api/verify-strategy/route");
+      const res = await POST(
+        jsonReq("/api/verify-strategy", {
+          email: "test@example.com",
+          exchange: "okx",
+          api_key: "k",
+          api_secret: "s",
+        }),
+      );
+
+      expect(res.status, `flag=${flagState}: legacy path returns 200`).toBe(200);
+      expect(
+        findProcessKeyCall(),
+        `flag=${flagState}: /process-key must not be invoked`,
+      ).toBeUndefined();
+      expect(analyticsClient.verifyStrategy).toHaveBeenCalled();
+    }
   });
 
   it("I-T2b: keys/validate-and-encrypt flag=off does NOT call /process-key", async () => {
@@ -866,21 +774,12 @@ describe("thin adapters — flag=off preserves legacy path", () => {
 // the legacy path regardless.
 // -----------------------------------------------------------------------------
 describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () => {
-  it("I-T3a: verify-strategy missing token → 503, no /process-key call", async () => {
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);
-    delete process.env.INTERNAL_API_TOKEN;
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    const res = await POST(
-      jsonReq("/api/verify-strategy", {
-        email: "test@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
-    expect(res.status).toBe(503);
-    expect(findProcessKeyCall()).toBeUndefined();
-  });
+  // PR-X4: the verify-strategy route no longer delegates to /process-key, so
+  // it has no INTERNAL_API_TOKEN gate that would fire 503 on the unified
+  // path. The route always runs the legacy verifyStrategy() (analytics
+  // service), which has its own auth-header semantics tested elsewhere
+  // (analytics-client.test.ts). I-T3a removed in PR-X4; the remaining
+  // I-T3b..e cover the 4 routes that still ride /process-key.
 
   it("I-T3b: keys/sync missing token → 503, no /process-key call", async () => {
     vi.mocked(isUnifiedBackboneActive).mockResolvedValue(true);

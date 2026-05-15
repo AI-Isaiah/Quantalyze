@@ -5,8 +5,6 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { verifyStrategy } from "@/lib/analytics-client";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
-import { postProcessKey } from "@/lib/process-key-client";
 
 const MAX_REQUESTS_PER_DAY = 5;
 
@@ -60,14 +58,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
-  // Public-route protections (CSRF + IP rate-limit + payload validation)
-  // run BEFORE the flag check so unified delegation cannot bypass them.
-  if (await isUnifiedBackboneActive()) {
-    return await unifiedVerifyStrategyHandler(body);
-  }
-
-  return await legacyVerifyStrategyHandler({
+  return await teaserVerifyStrategyHandler({
     email,
     exchange,
     api_key,
@@ -77,106 +68,44 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
- * `flow_type=teaser`. Source is the user-supplied exchange (already validated
- * against SUPPORTED_EXCHANGES above).
+ * Phase 19 / PR-X4 — teaser verification path.
  *
- * CT-3 (army2) — the upstream `/process-key` teaser flow returns
- * `{verification_id, status, trust_tier, metrics_snapshot, fingerprint, ...}`
- * but does NOT mint a public_token. The landing-page <VerificationForm/>
- * (src/components/landing/VerificationForm.tsx:56) requires `data.public_token`
- * and throws "invalid response" otherwise. Without minting+returning here,
- * flipping the unified-backbone flag ON breaks the landing-page teaser flow
- * end-to-end. Mint a 32-byte base64url token, persist to strategy_verifications
- * with a 90-day expires_at (matching migration 107 M-6 policy window), and
- * return both fields alongside whatever the upstream emits.
+ * Background: Phase 19's unified `/process-key` backbone was designed around
+ * the wizard's multi-step flow (validate → finalize). The teaser submission
+ * doesn't fit that shape — it is a one-shot synchronous probe with no
+ * caller-owned `strategy_id` and no follow-up step. PR-X3's attempt to
+ * shoehorn the teaser into `step='validate'` got past `MISSING_STRATEGY_ID`
+ * but tripped a second contract gap: `_run_validate_only` in
+ * `analytics-service/routers/process_key.py` returns no `verification_id`.
+ * Two consecutive 3-minute production outages during 2026-05-14 flag-flip
+ * attempts confirmed the unified pipeline is structurally wrong for teaser.
+ *
+ * PR-X4 walks back: the teaser route always runs this handler, regardless
+ * of the `process_key_unified_backbone` kill-switch. The kill-switch still
+ * gates the wizard flows that legitimately go through `/process-key`
+ * (onboard / resync / csv); it just no longer gates teaser.
+ *
+ * What this handler does:
+ *   1. Per-email 5-per-24h rate limit (DEGRADES to no-op once migration 107
+ *      ships and `verification_requests` becomes a VIEW with `email` mapped
+ *      to NULL; the IP-based Upstash limiter at the route entry still applies).
+ *   2. Call the analytics-service `/api/verify-strategy` (Python) endpoint
+ *      which (post-PR-X2) no longer writes to `verification_requests` and
+ *      returns `{verification_id, status, results, matched_strategy_id,
+ *      twr, sharpe, return_24h, return_mtd, return_ytd}`.
+ *   3. Mint a 32-byte hex `public_token` + 24h `expires_at` (TODO: bump to
+ *      90 days to match migration 107's M-6 retention window).
+ *   4. Upsert `strategy_verifications` at status `published` with
+ *      `metrics_snapshot` populated from the Python `results` blob. PR-X4
+ *      fix: previously the upsert wrote `status='validated'` with no
+ *      metrics_snapshot, so the public-status route at
+ *      verify-strategy/[id]/status/route.ts returned `{status:'validated'}`
+ *      with no results — teaser users never saw their score.
+ *   5. UPDATE `verification_requests` for backwards-compat. After migration
+ *      107 ships this UPDATE hits the INSTEAD OF trigger; the error is
+ *      tolerated (warning-logged) as long as the SV upsert succeeded.
  */
-async function unifiedVerifyStrategyHandler(
-  body: Record<string, unknown>,
-): Promise<NextResponse> {
-  const exchange = (body.exchange as string) ?? "okx";
-  const result = await postProcessKey({
-    flow_type: "teaser",
-    source: exchange,
-    // PR-X3 (post 2026-05-14 abortive flag flip) — the teaser flow has no
-    // caller-owned `strategy_id` (the user is testing keys against the
-    // universe of strategies; no strategy exists yet). The `/process-key`
-    // validator at analytics-service/routers/process_key.py:568 raises
-    // MISSING_STRATEGY_ID (422) unless either `context.strategy_id` OR
-    // `context.step='validate'` is set. Without this marker, the kill-switch
-    // gate-on state breaks every landing-page teaser submission. Mirrors
-    // the same pattern used by strategies/csv-validate's unified handler
-    // (route.ts:189) and keys/validate-and-encrypt.
-    context: { ...body, step: "validate" },
-    routeTag: "verify-strategy",
-    // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
-    // so the upstream rate limiter buckets all anonymous landing-page
-    // traffic to a shared key, isolated from authenticated tenants.
-    userId: "public",
-  });
-  if (!result.ok) return result.response;
-
-  const upstream = (result.body ?? {}) as Record<string, unknown>;
-  const verificationId =
-    typeof upstream.verification_id === "string" ? upstream.verification_id : null;
-  if (!verificationId) {
-    return NextResponse.json(
-      { error: "Verification service returned an invalid response" },
-      { status: 502 },
-    );
-  }
-
-  // CT-3: 32-byte base64url public_token + 90-day TTL persisted on the
-  // strategy_verifications row. Falls back to a 502 if the persist fails so
-  // the client never sees a token that isn't queryable.
-  const publicToken = crypto.randomBytes(32).toString("base64url");
-  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
-
-  try {
-    const admin = createAdminClient();
-    // @audit-skip: unauthenticated public endpoint (no user session). The
-    // strategy_verifications row carries no PII (only a public_token +
-    // status), and audit_log requires a user_id which the unauthenticated
-    // teaser caller cannot provide. Mirrors the legacy verify-strategy
-    // path's @audit-skip rationale; landing-page-lead audit lands in
-    // PostHog per ADR-0023 §3, not audit_log.
-    const { error: persistError } = await admin
-      .from("strategy_verifications")
-      .update({ public_token: publicToken, expires_at: expiresAt })
-      .eq("id", verificationId);
-    if (persistError) {
-      console.error(
-        "[verify-strategy] CT-3 public_token persist failed:",
-        persistError,
-      );
-      return NextResponse.json(
-        { error: "Failed to finalize verification" },
-        { status: 500 },
-      );
-    }
-  } catch (err) {
-    console.error("[verify-strategy] CT-3 public_token persist threw:", err);
-    return NextResponse.json(
-      { error: "Failed to finalize verification" },
-      { status: 500 },
-    );
-  }
-
-  return NextResponse.json({
-    ...upstream,
-    verification_id: verificationId,
-    public_token: publicToken,
-    expires_at: expiresAt,
-  });
-}
-
-/**
- * Legacy path preserved verbatim from the pre-Phase-19 implementation.
- * Runs when `isUnifiedBackboneActive()` returns false. Will be removed in a
- * follow-up cleanup PR after the 7-day stability window passes.
- */
-// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
-async function legacyVerifyStrategyHandler(args: {
+async function teaserVerifyStrategyHandler(args: {
   email: string;
   exchange: string;
   api_key: string;
@@ -207,7 +136,23 @@ async function legacyVerifyStrategyHandler(args: {
     );
   }
 
-  let analyticsResult: { verification_id?: string };
+  /**
+   * Python `/api/verify-strategy` response shape (post-PR-X2):
+   *   verification_id     — UUID generated locally by Python (uuid.uuid4())
+   *   results             — JSONB blob with twr/sharpe/equity_curve/etc.
+   *   matched_strategy_id — UUID of closest correlated published strategy, or null
+   *   plus top-level twr / sharpe / return_24h / return_mtd / return_ytd
+   *
+   * `VerifyStrategyResponseSchema` (`src/lib/analytics-schemas.ts`) declares
+   * `verification_id` as the only required field and uses `.passthrough()`,
+   * so the extra fields flow through this typed alias without runtime parse
+   * failure.
+   */
+  let analyticsResult: {
+    verification_id?: string;
+    results?: Record<string, unknown> | null;
+    matched_strategy_id?: string | null;
+  };
   try {
     analyticsResult = await verifyStrategy({
       email,
@@ -262,6 +207,23 @@ async function legacyVerifyStrategyHandler(args: {
       // public_token + status), and audit_log requires a user_id which the
       // unauthenticated caller cannot provide. Follow-up landing-page-lead
       // audit lands in PostHog per ADR-0023 §3, not audit_log.
+      // PR-X4: status='published' (was 'validated' which the public-status
+      // route does NOT recognize as terminal → results never surface).
+      // The [id]/status route at line 107 accepts BOTH 'complete' (legacy
+      // VR shape) AND 'published' (canonical SV terminal per migration 103).
+      //
+      // metrics_snapshot: PR-X4 fix — was null, leaving the user with a
+      // status row but no score on the public-status URL. The Python
+      // verify_strategy endpoint returns the full results blob in
+      // `analyticsResult.results` (sanitize_metrics output). Include
+      // matched_strategy_id alongside since it's not a first-class SV
+      // column.
+      const metricsSnapshot = analyticsResult.results
+        ? {
+            ...analyticsResult.results,
+            matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
+          }
+        : null;
       const { error: upsertError } = await admin
         .from("strategy_verifications")
         .upsert(
@@ -269,12 +231,13 @@ async function legacyVerifyStrategyHandler(args: {
             id: verificationId,
             strategy_id: anchorStrategy.id,
             wizard_session_id: crypto.randomUUID(),
-            status: "validated",
+            status: "published",
             trust_tier: "self_reported",
             flow_type: "teaser",
             source: exchange,
             public_token: publicToken,
             expires_at: expiresAt,
+            metrics_snapshot: metricsSnapshot,
           },
           { onConflict: "id" },
         );
