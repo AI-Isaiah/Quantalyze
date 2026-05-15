@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import statistics
 import time
 from collections import defaultdict
@@ -23,31 +24,18 @@ from uuid import UUID
 from services.db import db_execute
 
 
-# Audit-2026-05-07 H-0733 / H-0743: wire schemas for the two new
-# unbounded-by-input JSONB payloads. Pre-fix both were typed as bare
-# `list[dict[str, Any]]`, so any future producer typo (e.g. `side='LONG'`
-# instead of `'long'`) silently fed the wrong bucket in
-# `_compute_derived_trade_metrics` downstream. TypedDicts give static
-# checkers a contract to enforce; runtime behavior is unchanged (Python
-# does not enforce TypedDict at runtime — the value is in the type
-# narrowing for downstream consumers and the fact that the contract is
-# now grep-able from a single declaration).
+# Audit-2026-05-07 H-0733 / H-0743: wire schemas for the JSONB
+# payloads. Pre-fix both were typed as `list[dict[str, Any]]`, so a
+# producer typo (e.g. `side='LONG'`) silently fed the wrong bucket in
+# `_compute_derived_trade_metrics` downstream.
 class RealizedPnLRecord(TypedDict):
     """Wire shape of an entry in `trade_metrics.realized_pnl_per_trade`.
 
     Consumed by `analytics_runner._compute_derived_trade_metrics` to
-    derive SQN (over realized_pnl values) and segment profit_factor by
-    side. `side` is `None` only for the data-quality-failure path
-    (closed position whose `side` could not be classified — should be
-    surfaced via the position's `data_quality_flags`, not silently
-    bucketed). `realized_pnl` is `None` when the position has no
-    computable PnL; the producer must not coerce that to 0.0.
-
-    NB: `Literal['long', 'short']` would be tighter but the in-memory
-    position dicts (`dict[str, Any]`) currently allow `None` to escape;
-    fixing that requires the broader Position dataclass refactor
-    deferred from this audit. The TypedDict still pins the wire field
-    names + the None-allowed-on-failure contract.
+    derive SQN and segment profit_factor by side. `side` is `None` only
+    for the data-quality-failure path; `realized_pnl` is `None` when
+    the position has no computable PnL — the producer must not coerce
+    either to a default.
     """
 
     side: Literal["long", "short"] | None
@@ -98,10 +86,60 @@ _EXPOSURE_SERIES_CAP = 10_000
 # gap_dates / series_dropped_dates) so a grid-flood can't bloat the
 # strategy_analytics.data_quality_flags JSONB. 1 000 is generous: a
 # strategy with 1 000 NAV-missing dates is already in a triage state
-# the truncation flag will surface. When truncated we append a
-# companion `*_truncated=True` flag so consumers know more were
-# silently dropped.
+# the truncation flag will surface. On truncation, emit sibling
+# counter keys (`{name}_truncated`, `*_kept`, `*_total`) matching the
+# convention already used at the realized_pnl_per_trade and
+# exposure_series cap sites — keeps the list[str] payload semantically
+# pure and makes the merge-into-top-level-flags math (sum counters,
+# OR booleans) consistent across all three truncation surfaces.
 _FLAG_LIST_CAP = 1_000
+
+
+def _coerce_finite_float(value: Any, label: str) -> float:
+    """Coerce value to a finite float or raise ValueError.
+
+    Why: Supabase numeric driver returns Decimal; downstream JSONB
+    serializes via str(Decimal) and silently drifts precision. `float()`
+    on its own also accepts `Decimal('NaN')` and `float('inf')`, which
+    poison the turnover series with `nan`/`inf` in JSONB. Centralizing
+    coercion + finiteness lets the three callers (positions, prices, NAV)
+    share one rejection path.
+
+    Re-raises `OverflowError` (raised by `float(huge_int)` for ints
+    outside double-precision range) as `ValueError` so callers can use
+    a single catch tuple `(AttributeError, TypeError, ValueError)` and
+    route the bad date into `dropped_dates` instead of aborting the
+    whole series.
+    """
+    try:
+        out = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"overflow coercing {label} value {value!r}: {exc}") from exc
+    if not math.isfinite(out):
+        raise ValueError(f"non-finite {label} value {value!r}")
+    return out
+
+
+def _emit_capped_flag_list(
+    flags: dict[str, Any], name: str, lst: list[str]
+) -> None:
+    """Attach `lst` to `flags[name]`, truncating at `_FLAG_LIST_CAP`.
+
+    On truncation, emit sibling counter keys (`{name}_truncated`,
+    `{name}_truncated_kept`, `{name}_truncated_total`) so consumers can
+    detect the partial-window state without parsing magic strings out of
+    the list. Mirrors the convention used at the realized_pnl_per_trade
+    and exposure_series cap sites.
+    """
+    if not lst:
+        return
+    if len(lst) > _FLAG_LIST_CAP:
+        flags[name] = lst[:_FLAG_LIST_CAP]
+        flags[f"{name}_truncated"] = True
+        flags[f"{name}_truncated_kept"] = _FLAG_LIST_CAP
+        flags[f"{name}_truncated_total"] = len(lst)
+    else:
+        flags[name] = lst
 
 
 # Audit-2026-05-07 P1101 (caller follow-up): per-worker per-strategy
@@ -344,18 +382,9 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     # "this position broke even" from "we don't know what happened".
     #
     # Audit H-0736: cap cardinality so a fill-flood can't bloat the
-    # strategy_analytics JSONB. Cap is generous (see
-    # _REALIZED_PNL_PER_TRADE_CAP). When truncated, surface a flag so
-    # the dashboard can warn the allocator their derived KPIs (SQN /
-    # profit factor / R:R) are computed over a partial window.
-    realized_pnl_per_trade_truncated = (
-        len(closed) > _REALIZED_PNL_PER_TRADE_CAP
-    )
-    closed_for_per_trade = (
-        closed[:_REALIZED_PNL_PER_TRADE_CAP]
-        if realized_pnl_per_trade_truncated
-        else closed
-    )
+    # strategy_analytics JSONB. Sibling counter keys surface partial
+    # window state to the dashboard (SQN / profit factor / R:R are
+    # then known to be computed over the kept slice only).
     realized_pnl_per_trade: list[RealizedPnLRecord] = [
         RealizedPnLRecord(
             side=p.get("side"),
@@ -363,9 +392,9 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
                 float(p["realized_pnl"]) if p.get("realized_pnl") is not None else None
             ),
         )
-        for p in closed_for_per_trade
+        for p in closed[:_REALIZED_PNL_PER_TRADE_CAP]
     ]
-    if realized_pnl_per_trade_truncated:
+    if len(closed) > _REALIZED_PNL_PER_TRADE_CAP:
         aggregated_data_quality_flags["realized_pnl_per_trade_truncated"] = True
         aggregated_data_quality_flags["realized_pnl_per_trade_truncated_kept"] = (
             _REALIZED_PNL_PER_TRADE_CAP
@@ -927,20 +956,12 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     """
 
     # Detect shared api_key_id BEFORE we touch snapshots — short-circuits
-    # the contamination case quickly. Failure to read strategies (e.g.
-    # transient DB error) is treated as "unknown" and we proceed: better
-    # to publish exposure than to silently zero it out for everyone.
-    #
-    # Audit H-0738: when the api_key lookup fails the contamination
-    # guard cannot run. We still publish (fail-open policy preserved
-    # for back-compat with allocator dashboards) BUT we attach a
-    # `exposure_metrics_apikey_lookup_failed` marker so downstream
-    # consumers can tell "exposure published normally" apart from
-    # "exposure published WITHOUT the cross-strategy contamination
-    # check" — a materially different trust state for security
-    # reviewers. Without this flag the three failure modes (no shared
-    # key → safe / shared key → skipped / lookup failed → unknown)
-    # collapsed into a single output shape.
+    # the contamination case quickly. Failure to read strategies is
+    # treated as "unknown" and we publish anyway (fail-open beats
+    # silently zeroing out exposure for everyone), but Audit H-0738
+    # adds an `exposure_metrics_apikey_lookup_failed` marker so the
+    # three failure modes — no shared key (safe), shared key (skipped),
+    # lookup failed (unknown) — stay discriminable to security reviewers.
     api_key_lookup_failed = False
     try:
         def _fetch_self():
@@ -1005,17 +1026,22 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     result = await db_execute(_fetch_snapshots)
     snapshots = result.data or []
 
+    # Audit H-0738: collect data-quality markers in one place. The
+    # apikey-lookup-failed marker is shared across the no-snapshots
+    # and normal-return paths — without it, three failure modes
+    # (no shared key → safe / shared key → skipped / lookup failed →
+    # unknown) collapsed into a single output shape.
+    dq_flags: dict[str, Any] = {}
+    if api_key_lookup_failed:
+        dq_flags["exposure_metrics_apikey_lookup_failed"] = True
+
     if not snapshots:
         # Audit H-0747: previously returned bare {} — VolumeExposureTab
         # rendered $0 across mean/std/max as if those were real
-        # measurements. Surface an explicit "no snapshots" marker via
-        # data_quality_flags so analytics_runner can merge it into the
-        # strategy-level flags and the dashboard can show
-        # "Position snapshots not yet collected — exposure unavailable"
+        # measurements. Surface an explicit "no snapshots" marker so
+        # the dashboard shows "Position snapshots not yet collected"
         # rather than spurious zeros.
-        dq_flags: dict[str, Any] = {"exposure_metrics_no_snapshots": True}
-        if api_key_lookup_failed:
-            dq_flags["exposure_metrics_apikey_lookup_failed"] = True
+        dq_flags["exposure_metrics_no_snapshots"] = True
         return {"data_quality_flags": dq_flags}
 
     # Group by snapshot_date to compute per-date exposure
@@ -1026,7 +1052,6 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     gross_exposures: list[float] = []
     net_exposures: list[float] = []
     # METRICS-05: per-date exposure points for sibling-table persistence.
-    # Uses iteration over the same loop that previously discarded the data.
     # Audit H-0743: wire shape pinned by `ExposurePoint` TypedDict.
     exposure_series_records: list[ExposurePoint] = []
 
@@ -1041,31 +1066,16 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
                 net -= abs(size_usd)
             else:
                 net += abs(size_usd)
-        # Aggregates (mean/std/max) still see the full set — capping
-        # only the per-date series persisted to JSONB. Caller can
-        # always recompute the full series from position_snapshots.
+        # Aggregates (mean/std/max) see the full set — only the per-date
+        # series persisted to JSONB is capped.
         gross_exposures.append(gross)
         net_exposures.append(net)
-        # Audit H-0736: cap exposure_series cardinality so a
-        # snapshot-flood can't bloat strategy_analytics JSONB.
         if len(exposure_series_records) < _EXPOSURE_SERIES_CAP:
             exposure_series_records.append(ExposurePoint(
                 date=str(date_key),
                 gross=round(gross, 2),
                 net=round(net, 2),
             ))
-
-    exposure_series_truncated = len(by_date) > _EXPOSURE_SERIES_CAP
-
-    if not gross_exposures:
-        # Defensive: with `by_date` non-empty above this branch is
-        # currently unreachable (every key triggers an append). Kept
-        # as a safety net in case future refactors filter rows mid-loop.
-        # Audit H-0747: never return bare {} — surface a marker.
-        dq_flags = {"exposure_metrics_no_gross_exposure": True}
-        if api_key_lookup_failed:
-            dq_flags["exposure_metrics_apikey_lookup_failed"] = True
-        return {"data_quality_flags": dq_flags}
 
     mean_gross = statistics.mean(gross_exposures)
     std_gross = statistics.stdev(gross_exposures) if len(gross_exposures) > 1 else 0.0
@@ -1084,16 +1094,8 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         "max_net_exposure": round(max_net, 2),
         "exposure_series": exposure_series_records,
     }
-    dq_flags: dict[str, Any] = {}
-    # Audit H-0738: contamination-guard could not run because the
-    # api_key_id lookup failed. We still publish (fail-open policy
-    # for back-compat) but the marker tells consumers/auditors the
-    # output is NOT guaranteed shared-key-safe. Three failure modes
-    # are now discriminable in the JSONB blob.
-    if api_key_lookup_failed:
-        dq_flags["exposure_metrics_apikey_lookup_failed"] = True
     # Audit H-0736: exposure_series truncated at cardinality cap.
-    if exposure_series_truncated:
+    if len(by_date) > _EXPOSURE_SERIES_CAP:
         dq_flags["exposure_series_truncated"] = True
         dq_flags["exposure_series_truncated_kept"] = _EXPOSURE_SERIES_CAP
         dq_flags["exposure_series_truncated_total"] = len(by_date)
@@ -1106,7 +1108,7 @@ def compute_turnover_series_with_flags(
     positions_by_date: dict[str, dict[str, float]],
     prices_by_date: dict[str, dict[str, float]],
     nav_by_date: dict[str, float],
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Compute daily turnover series + sparse-day quality flags.
 
     Pitfall #19 mitigation: contract is documented inline.
@@ -1159,7 +1161,7 @@ def compute_turnover_series_with_flags(
     PRIOR `prev_positions` so the next valid date computes a true delta
     across the gap rather than seeing a phantom no-op.
     """
-    flags: dict[str, list[str]] = {}
+    flags: dict[str, Any] = {}
     if not positions_by_date:
         return [], flags
     dates = sorted(positions_by_date.keys())
@@ -1177,41 +1179,27 @@ def compute_turnover_series_with_flags(
     # "turnover unavailable due to data-type drift".
     dropped_dates: list[str] = []
     for date in dates:
-        # Audit H-0741: validate the per-date payload BEFORE the math
-        # runs. A caller passing `None` as a date's value would raise
-        # `AttributeError` on `.keys()` and silently commit the
-        # partial-series; passing `Decimal` (the default Supabase
-        # numeric driver shape) bypasses the float contract and the
-        # downstream `round(..., 6)` returns a Decimal that JSONB
-        # serializes via `str(Decimal)` — silent precision drift.
-        # Coerce to plain dict[str, float] up front; on failure
-        # record the date in dropped_dates and continue.
+        # Audit H-0741: coerce the per-date payload to plain
+        # dict[str, float] (rejecting NaN/Inf and non-numeric values)
+        # BEFORE the math runs. Pre-fix a Decimal payload would silently
+        # propagate via `round(..., 6) → Decimal` into JSONB, and a None
+        # row would raise AttributeError mid-loop. On failure, record
+        # the date in dropped_dates and continue without advancing
+        # prev_positions — the next valid date then measures delta
+        # against the last known-good snapshot.
         try:
             positions_raw = positions_by_date.get(date, {})
             prices_raw = prices_by_date.get(date, {})
             if positions_raw is None or prices_raw is None:
                 raise TypeError("positions/prices row is None")
-            positions: dict[str, float] = {}
-            for sym, qty in positions_raw.items():
-                qty_f = float(qty)
-                # Audit H-0741 follow-up (specialist pass): float()
-                # accepts Decimal('NaN') / float('inf') and propagates
-                # silently to turnover=nan/inf in JSONB. Reject so the
-                # date is recorded in dropped_dates instead of poisoning
-                # the series.
-                if qty_f != qty_f or qty_f in (float("inf"), float("-inf")):
-                    raise ValueError(
-                        f"non-finite position value {qty!r} for symbol {sym!r}"
-                    )
-                positions[str(sym)] = qty_f
-            prices: dict[str, float] = {}
-            for sym, p in prices_raw.items():
-                p_f = float(p)
-                if p_f != p_f or p_f in (float("inf"), float("-inf")):
-                    raise ValueError(
-                        f"non-finite price value {p!r} for symbol {sym!r}"
-                    )
-                prices[str(sym)] = p_f
+            positions: dict[str, float] = {
+                str(sym): _coerce_finite_float(qty, f"position[{sym!r}]")
+                for sym, qty in positions_raw.items()
+            }
+            prices: dict[str, float] = {
+                str(sym): _coerce_finite_float(p, f"price[{sym!r}]")
+                for sym, p in prices_raw.items()
+            }
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning(
                 "compute_turnover_series: skipping date=%r due to "
@@ -1219,8 +1207,6 @@ def compute_turnover_series_with_flags(
                 date, exc,
             )
             dropped_dates.append(date)
-            # Do NOT advance prev_positions / prev_date — next valid
-            # date measures delta against the last KNOWN-good snapshot.
             continue
 
         # Audit H-0744: explicit presence check — distinguishes 'NAV
@@ -1228,18 +1214,9 @@ def compute_turnover_series_with_flags(
         # (key present, value <= 0). The pre-fix `.get(date, 0.0)`
         # collapsed both into a turnover=0 short-circuit.
         nav_present = date in nav_by_date
-        # Audit H-0741: also coerce nav. A Decimal NAV would propagate
-        # to `total_change_usd / nav` and produce a Decimal turnover
-        # value that breaks downstream float arithmetic.
         if nav_present:
             try:
-                nav = float(nav_by_date[date])
-                # H-0741 follow-up: reject NaN/Inf NAV — silent
-                # propagation otherwise turns turnover to nan in JSONB.
-                if nav != nav or nav in (float("inf"), float("-inf")):
-                    raise ValueError(
-                        f"non-finite NAV value {nav_by_date[date]!r}"
-                    )
+                nav = _coerce_finite_float(nav_by_date[date], "NAV")
             except (TypeError, ValueError) as exc:
                 logger.warning(
                     "compute_turnover_series: skipping date=%r — NAV "
@@ -1313,28 +1290,14 @@ def compute_turnover_series_with_flags(
         if current_date_parsed is not None:
             prev_date = current_date_parsed
 
-    # Red-team pass: cap each flag list. An attacker-controlled grid
-    # with 10⁶ distinct dates could otherwise fill these lists
-    # unboundedly into the strategy_analytics.data_quality_flags JSONB.
-    # On truncation we append a sentinel marker as the LAST element so
-    # the wire-shape contract (`list[str]`) is preserved and downstream
-    # consumers (`_merge_into_top_level_flags`) don't need to special-
-    # case a new key shape.
-    def _capped(name: str, lst: list[str]) -> None:
-        if not lst:
-            return
-        if len(lst) > _FLAG_LIST_CAP:
-            truncated_marker = (
-                f"__truncated__:{len(lst) - _FLAG_LIST_CAP}_more_dropped"
-            )
-            flags[name] = lst[:_FLAG_LIST_CAP] + [truncated_marker]
-        else:
-            flags[name] = lst
-
-    _capped("turnover_nav_missing_dates", nav_missing_dates)
-    _capped("turnover_nav_invalid_dates", nav_invalid_dates)
-    _capped("turnover_gap_dates", gap_dates)
-    _capped("turnover_series_dropped_dates", dropped_dates)
+    # Red-team pass: cap each flag list at _FLAG_LIST_CAP so a grid
+    # flood can't bloat the strategy_analytics.data_quality_flags JSONB.
+    # Truncation surfaces as sibling counter keys via
+    # `_emit_capped_flag_list`.
+    _emit_capped_flag_list(flags, "turnover_nav_missing_dates", nav_missing_dates)
+    _emit_capped_flag_list(flags, "turnover_nav_invalid_dates", nav_invalid_dates)
+    _emit_capped_flag_list(flags, "turnover_gap_dates", gap_dates)
+    _emit_capped_flag_list(flags, "turnover_series_dropped_dates", dropped_dates)
     return series, flags
 
 

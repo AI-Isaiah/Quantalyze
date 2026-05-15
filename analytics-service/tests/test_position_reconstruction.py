@@ -2419,36 +2419,129 @@ class TestTurnoverSeriesTypeValidation:
         """Red-team pass: an attacker-controlled grid with 10⁶ distinct
         dates could otherwise fill `turnover_nav_missing_dates` (and
         siblings) unboundedly into strategy_analytics.data_quality_flags.
-        Cap each list at _FLAG_LIST_CAP with a truncation sentinel as
-        the LAST element."""
+        Cap each list at _FLAG_LIST_CAP and emit sibling counter keys
+        (`*_truncated`, `*_truncated_kept`, `*_truncated_total`) — same
+        convention used at the realized_pnl_per_trade and exposure_series
+        cap sites, so the list[str] payload stays semantically pure."""
         import services.position_reconstruction as pr_mod
         from services.position_reconstruction import (
             compute_turnover_series_with_flags,
         )
 
-        # Small cap so the test is cheap.
         monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
 
-        # 5 nav-missing dates → cap to 3 + sentinel = 4 entries.
+        # 5 dates, NAV present only on day 1 → 4 nav-missing dates
+        # (days 2-5), capped to 3 with sibling counters reporting the
+        # 4-total/3-kept partition.
         positions_by_date = {
             f"2025-01-{i:02d}": {"BTC": float(i)} for i in range(1, 6)
         }
         prices_by_date = {
             f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
         }
-        nav_by_date: dict[str, float] = {
-            "2025-01-01": 10000.0,
-            # 2 → 5 deliberately absent
-        }
+        nav_by_date: dict[str, float] = {"2025-01-01": 10000.0}
         series, flags = compute_turnover_series_with_flags(
             positions_by_date, prices_by_date, nav_by_date
         )
         nav_missing = flags.get("turnover_nav_missing_dates", [])
-        # 4 dates flagged (2-5), capped to 3 + 1 sentinel.
-        assert len(nav_missing) == 4
-        assert nav_missing[-1].startswith("__truncated__")
-        # Sentinel encodes the dropped count (4 missing - 3 kept = 1).
-        assert "1_more_dropped" in nav_missing[-1]
+        assert len(nav_missing) == 3
+        # No sentinel string pollutes the date list.
+        for entry in nav_missing:
+            assert not entry.startswith("__truncated__")
+        # Sibling counters encode the partial-window state.
+        assert flags.get("turnover_nav_missing_dates_truncated") is True
+        assert flags.get("turnover_nav_missing_dates_truncated_kept") == 3
+        assert flags.get("turnover_nav_missing_dates_truncated_total") == 4
+
+    def test_flag_list_capped_nav_invalid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sibling test: `turnover_nav_invalid_dates` cap path. Days
+        2-5 carry NAV<=0; with cap=3 the helper emits 3 kept dates +
+        sibling counters reporting the 4/3 partition. Guards against
+        a miswired call site that swaps list-name arguments."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        positions_by_date = {
+            f"2025-01-{i:02d}": {"BTC": float(i)} for i in range(1, 6)
+        }
+        prices_by_date = {
+            f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
+        }
+        # NAV present on every day but <=0 from day 2.
+        nav_by_date: dict[str, float] = {"2025-01-01": 10000.0}
+        for i in range(2, 6):
+            nav_by_date[f"2025-01-{i:02d}"] = 0.0
+        _series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(flags.get("turnover_nav_invalid_dates", [])) == 3
+        assert flags.get("turnover_nav_invalid_dates_truncated") is True
+        assert flags.get("turnover_nav_invalid_dates_truncated_kept") == 3
+        assert flags.get("turnover_nav_invalid_dates_truncated_total") == 4
+
+    def test_flag_list_capped_gap_dates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sibling test: `turnover_gap_dates` cap path. 5 dates each
+        spaced >1 day apart trigger 4 gap entries; cap=3 partitions
+        them as 3 kept + 1 truncated. Same miswire guard."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        # Dates spaced 2 calendar days apart → every transition is a gap.
+        dates = [f"2025-01-{i:02d}" for i in (1, 3, 5, 7, 9)]
+        positions_by_date = {d: {"BTC": 1.0} for d in dates}
+        prices_by_date = {d: {"BTC": 100.0} for d in dates}
+        nav_by_date = {d: 10000.0 for d in dates}
+        _series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(flags.get("turnover_gap_dates", [])) == 3
+        assert flags.get("turnover_gap_dates_truncated") is True
+        assert flags.get("turnover_gap_dates_truncated_kept") == 3
+        assert flags.get("turnover_gap_dates_truncated_total") == 4
+
+    def test_flag_list_capped_dropped_dates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sibling test: `turnover_series_dropped_dates` cap path. Days
+        2-5 carry NaN positions that the coercion guard rejects; cap=3
+        partitions the 4 dropped dates as 3 kept + 1 truncated."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        positions_by_date: dict[str, dict[str, float]] = {
+            "2025-01-01": {"BTC": 1.0},
+        }
+        for i in range(2, 6):
+            positions_by_date[f"2025-01-{i:02d}"] = {"BTC": float("nan")}
+        prices_by_date = {
+            f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
+        }
+        nav_by_date = {
+            f"2025-01-{i:02d}": 10000.0 for i in range(1, 6)
+        }
+        _series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert len(flags.get("turnover_series_dropped_dates", [])) == 3
+        assert flags.get("turnover_series_dropped_dates_truncated") is True
+        assert flags.get("turnover_series_dropped_dates_truncated_kept") == 3
+        assert flags.get("turnover_series_dropped_dates_truncated_total") == 4
 
     def test_inf_nav_rejected(self) -> None:
         """Specialist-pass follow-up to H-0741: `float('inf')` NAV
@@ -2469,6 +2562,69 @@ class TestTurnoverSeriesTypeValidation:
         nav_by_date = {
             "2025-01-01": 10000.0,
             "2025-01-02": float("inf"),
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+
+    def test_overflow_position_rejected(self) -> None:
+        """Specialist-pass red-team: `float(10**400)` raises
+        `OverflowError` (NOT `ValueError`). Pre-fix the caller's
+        `(AttributeError, TypeError, ValueError)` catch tuple missed
+        this, so a single poisoned position value would abort the
+        entire turnover loop instead of dropping just that date.
+        `_coerce_finite_float` now re-raises as `ValueError`.
+        """
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": 10**400},  # overflows float
+            "2025-01-03": {"BTC": 3.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+        # Series still emits rows for 01-01 (first) and 01-03 (recovered)
+        # — overflow on 01-02 did NOT abort the whole loop.
+        emitted_dates = [row["date"] for row in series]
+        assert "2025-01-01" in emitted_dates
+        assert "2025-01-03" in emitted_dates
+
+    def test_overflow_nav_rejected(self) -> None:
+        """Mirror of test_overflow_position_rejected for the NAV
+        coercion path — same OverflowError-via-_coerce_finite_float
+        regression guard.
+        """
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10**400,  # overflows float
         }
         series, flags = compute_turnover_series_with_flags(
             positions_by_date, prices_by_date, nav_by_date

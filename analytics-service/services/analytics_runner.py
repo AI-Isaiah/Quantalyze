@@ -76,6 +76,15 @@ def _merge_into_top_level_flags(
       - ints / floats: sum (counters accumulate)
       - everything else (e.g. lists, strings): replace (last write wins)
 
+    Single-producer invariant on `*_truncated_kept` / `*_truncated_total`
+    counter keys: each list-truncation key name (e.g.
+    `turnover_nav_missing_dates_truncated_kept`,
+    `realized_pnl_per_trade_truncated_total`) is emitted by EXACTLY ONE
+    producer (named after the specific list it caps). The int-sum rule
+    above would otherwise double-count under a hypothetical cross-
+    producer key collision and make `_kept` exceed its cardinality cap.
+    New producers MUST keep their truncation keys uniquely namespaced.
+
     Returns the (possibly None) target dict. None is preserved when both
     sides are empty so the upsert payload can keep emitting `null` rather
     than `{}` for strategies with zero flags.
