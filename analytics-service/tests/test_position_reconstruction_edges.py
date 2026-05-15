@@ -156,14 +156,20 @@ class TestComputeExposureMetrics:
     """Covers services/position_reconstruction.py lines 441-489."""
 
     @pytest.mark.asyncio
-    async def test_empty_snapshots_returns_empty_dict(self) -> None:
+    async def test_empty_snapshots_returns_no_snapshots_flag(self) -> None:
+        """Audit H-0747: prior contract was `result == {}` (silent {}
+        which the frontend rendered as $0). Post-fix the contract is
+        a data_quality_flags marker; no aggregate keys are populated."""
         mock = _make_snapshots_mock([])
         with patch(
             "services.position_reconstruction.db_execute",
             side_effect=_mock_db_execute,
         ):
             result = await compute_exposure_metrics("s-1", mock)
-        assert result == {}
+        assert result.get("data_quality_flags", {}).get(
+            "exposure_metrics_no_snapshots"
+        ) is True
+        assert "mean_gross_exposure" not in result
 
     @pytest.mark.asyncio
     async def test_single_date_long_position(self) -> None:
