@@ -358,7 +358,12 @@ class TestFetchRawTrades:
         assert result[0]["side"] == "buy"
         assert result[0]["price"] == 60000.0
         assert result[0]["quantity"] == 0.1
-        assert result[0]["fee"] == 0.6
+        # Audit-2026-05-07 H-0671 — fee is the signed value from the
+        # exchange. The fixture uses fee="-0.6" (a maker rebate) and the
+        # post-fix branch persists it unchanged so downstream
+        # ``realized_pnl = ... - total_fees`` reduces by the rebate
+        # instead of inflating the apparent fee via abs().
+        assert result[0]["fee"] == -0.6
         assert result[0]["is_fill"] is True
         assert result[0]["exchange_order_id"] == "ord-1"
         assert result[0]["exchange_fill_id"] == "trade-1"
@@ -1739,3 +1744,106 @@ class TestG12BPaginationFailureReRaises:
             await fetch_raw_trades(
                 mock_exchange, "strat-1", mock_supabase
             )
+
+
+# ─── audit-2026-05-07 H-0671 — maker rebates preserve negative sign ────
+
+
+class TestG12BMakerRebatePreservesSign:
+    """Audit-2026-05-07 H-0671 — pre-fix the OKX/Bybit/CCXT branches all
+    applied ``abs(fee)`` so a maker rebate (negative fee on the
+    exchange) silently became a positive cost. Downstream
+    ``realized_pnl = ... - total_fees`` then subtracted an inflated
+    fee, under-reporting P&L for maker-heavy strategies. Post-fix the
+    signed value flows through unchanged."""
+
+    @pytest.mark.asyncio
+    async def test_okx_maker_rebate_stays_negative(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.4",  # maker rebate
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-1",
+                    "tradeId": "trade-1",
+                    "execType": "M",
+                },
+            ]
+        })
+
+        mock_supabase = MagicMock()
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase
+        )
+        assert len(result) == 1
+        # Sign must be preserved — this is the contract H-0671 fixes.
+        assert result[0]["fee"] == -0.4
+
+    @pytest.mark.asyncio
+    async def test_bybit_maker_rebate_stays_negative(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execPrice": "60000",
+                        "execQty": "0.1",
+                        "execFee": "-0.4",  # maker rebate
+                        "feeCurrency": "USDT",
+                        "execTime": "1700000000000",
+                        "orderId": "ord-1",
+                        "execId": "exec-1",
+                        "isMaker": True,
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase
+        )
+        assert len(result) == 1
+        assert result[0]["fee"] == -0.4
+
+    def test_normalize_fill_ccxt_maker_rebate_stays_negative(self) -> None:
+        """CCXT unified shape — _normalize_fill must also preserve sign.
+        Used by the Binance branch via fetch_my_trades. Pre-fix this was
+        ``abs(float(fee_info.get('cost', 0) or 0))``."""
+        from services.exchange import _normalize_fill
+
+        out = _normalize_fill(
+            {
+                "symbol": "BTC/USDT:USDT",
+                "side": "buy",
+                "price": 60000.0,
+                "amount": 0.1,
+                "datetime": "2024-01-01T00:00:00Z",
+                "order": "ord-1",
+                "id": "fill-1",
+                "fee": {"cost": -0.4, "currency": "USDT"},
+                "takerOrMaker": "maker",
+                "info": {},
+            },
+            "binance",
+        )
+        assert out["fee"] == -0.4

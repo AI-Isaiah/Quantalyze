@@ -813,7 +813,16 @@ async def _fetch_raw_trades_okx(
                 side = fill.get("side", "").lower()
                 price = float(fill.get("fillPx", 0))
                 amount = float(fill.get("fillSz", 0))
-                fee = abs(float(fill.get("fee", 0)))
+                # Audit-2026-05-07 H-0671 — pre-fix this was abs(...).
+                # OKX maker fills carry NEGATIVE fees (rebates); abs()
+                # silently flipped the sign so a $-0.40 rebate became
+                # +$0.40 and position_reconstruction subtracted an
+                # inflated total from realized_pnl, under-reporting P&L
+                # for maker-heavy strategies. Persist the signed fee so
+                # rebates remain negative and ``total_fees += fee`` at
+                # services/position_reconstruction.py:536 reduces to a
+                # smaller subtraction.
+                fee = float(fill.get("fee", 0))
                 fee_currency = fill.get("feeCcy", "USDT")
                 is_maker = fill.get("execType", "") == "M"
 
@@ -969,7 +978,10 @@ async def _fetch_raw_trades_bybit(
                 side = fill.get("side", "").lower()
                 price = float(fill.get("execPrice", 0))
                 amount = float(fill.get("execQty", 0))
-                fee = abs(float(fill.get("execFee", 0)))
+                # Audit-2026-05-07 H-0671 — see OKX branch above. Bybit
+                # maker rebates also come through with negative
+                # ``execFee``; preserve the sign instead of abs().
+                fee = float(fill.get("execFee", 0))
                 fee_currency = fill.get("feeCurrency", "USDT")
                 # Audit-2026-05-07 G12.B.9 — Bybit V5 sometimes returns
                 # boolean true/false (post JSON decode) and sometimes
@@ -1049,7 +1061,11 @@ def _normalize_fill(trade: dict, exchange_id: str) -> FillRow:
     share a single 16-key contract.
     """
     fee_info = trade.get("fee") or {}
-    fee_cost = abs(float(fee_info.get("cost", 0) or 0))
+    # Audit-2026-05-07 H-0671 — see OKX/Bybit branches: drop abs() so
+    # maker rebates (negative fee.cost in CCXT's unified shape) remain
+    # signed all the way to position_reconstruction's
+    # ``realized_pnl = ... - total_fees`` formula.
+    fee_cost = float(fee_info.get("cost", 0) or 0)
     fee_currency = fee_info.get("currency", "USDT") or "USDT"
     price = float(trade.get("price", 0))
     amount = float(trade.get("amount", 0))
