@@ -740,8 +740,10 @@ type _AssertPanelMapKindsValid =
     | never
     ? true
     : never;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _PanelMapChecked = _AssertPanelMapCoversIds & _AssertPanelMapKindsValid;
+// Keep the symbol referenced so future linters that flag type-only
+// unused declarations don't remove the guard at the top.
+export type _LazyMetricsPanelMapInvariantChecked = _PanelMapChecked;
 
 /**
  * Lazy-fetch heavy series for panels 4–7 of the Single-Strategy v2 page.
