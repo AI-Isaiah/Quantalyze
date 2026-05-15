@@ -836,6 +836,18 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     # the contamination case quickly. Failure to read strategies (e.g.
     # transient DB error) is treated as "unknown" and we proceed: better
     # to publish exposure than to silently zero it out for everyone.
+    #
+    # Audit H-0738: when the api_key lookup fails the contamination
+    # guard cannot run. We still publish (fail-open policy preserved
+    # for back-compat with allocator dashboards) BUT we attach a
+    # `exposure_metrics_apikey_lookup_failed` marker so downstream
+    # consumers can tell "exposure published normally" apart from
+    # "exposure published WITHOUT the cross-strategy contamination
+    # check" — a materially different trust state for security
+    # reviewers. Without this flag the three failure modes (no shared
+    # key → safe / shared key → skipped / lookup failed → unknown)
+    # collapsed into a single output shape.
+    api_key_lookup_failed = False
     try:
         def _fetch_self():
             return (
@@ -855,6 +867,7 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
             strategy_id, exc,
         )
         api_key_id = None
+        api_key_lookup_failed = True
 
     if api_key_id:
         try:
@@ -906,11 +919,10 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         # strategy-level flags and the dashboard can show
         # "Position snapshots not yet collected — exposure unavailable"
         # rather than spurious zeros.
-        return {
-            "data_quality_flags": {
-                "exposure_metrics_no_snapshots": True,
-            },
-        }
+        flags: dict[str, Any] = {"exposure_metrics_no_snapshots": True}
+        if api_key_lookup_failed:
+            flags["exposure_metrics_apikey_lookup_failed"] = True
+        return {"data_quality_flags": flags}
 
     # Group by snapshot_date to compute per-date exposure
     by_date: dict[str, list[dict]] = defaultdict(list)
@@ -947,11 +959,10 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         # currently unreachable (every key triggers an append). Kept
         # as a safety net in case future refactors filter rows mid-loop.
         # Audit H-0747: never return bare {} — surface a marker.
-        return {
-            "data_quality_flags": {
-                "exposure_metrics_no_gross_exposure": True,
-            },
-        }
+        flags = {"exposure_metrics_no_gross_exposure": True}
+        if api_key_lookup_failed:
+            flags["exposure_metrics_apikey_lookup_failed"] = True
+        return {"data_quality_flags": flags}
 
     mean_gross = statistics.mean(gross_exposures)
     std_gross = statistics.stdev(gross_exposures) if len(gross_exposures) > 1 else 0.0
@@ -961,7 +972,7 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     std_net = statistics.stdev(net_exposures) if len(net_exposures) > 1 else 0.0
     max_net = max(net_exposures, key=abs)
 
-    return {
+    out: dict[str, Any] = {
         "mean_gross_exposure": round(mean_gross, 2),
         "std_gross_exposure": round(std_gross, 2),
         "max_gross_exposure": round(max_gross, 2),
@@ -970,6 +981,16 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         "max_net_exposure": round(max_net, 2),
         "exposure_series": exposure_series_records,
     }
+    # Audit H-0738: contamination-guard could not run because the
+    # api_key_id lookup failed. We still publish (fail-open policy
+    # for back-compat) but the marker tells consumers/auditors the
+    # output is NOT guaranteed shared-key-safe. Three failure modes
+    # are now discriminable in the JSONB blob.
+    if api_key_lookup_failed:
+        out["data_quality_flags"] = {
+            "exposure_metrics_apikey_lookup_failed": True,
+        }
+    return out
 
 
 def compute_turnover_series_with_flags(

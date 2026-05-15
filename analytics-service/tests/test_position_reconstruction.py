@@ -890,6 +890,70 @@ class TestExposureSharedApiKeyGuard:
             ) is True
         )
 
+    @pytest.mark.asyncio
+    async def test_apikey_lookup_failure_flags_fail_open(self) -> None:
+        """Audit H-0738: when the api_key_id lookup raises, the
+        contamination guard cannot run. The pre-fix code silently
+        swallowed the error and proceeded — collapsing 'safe
+        publish' and 'unverified publish' into the same output shape.
+        Post-fix the output must surface
+        `exposure_metrics_apikey_lookup_failed=True` so security
+        reviewers and downstream consumers can distinguish the trust
+        states without having to re-derive them from worker logs."""
+
+        mock = MagicMock()
+
+        # strategies.select(...).eq(...).limit(1).execute() RAISES
+        strategies_table = MagicMock()
+        select_handle = MagicMock()
+        eq_handle = MagicMock()
+        limit_handle = MagicMock()
+        limit_handle.execute.side_effect = RuntimeError(
+            "transient DB error on strategies lookup"
+        )
+        eq_handle.limit.return_value = limit_handle
+        select_handle.eq.return_value = eq_handle
+        strategies_table.select.return_value = select_handle
+
+        # position_snapshots returns one valid row so exposure is
+        # ACTUALLY computed (the fail-open path) rather than
+        # short-circuiting on no-snapshots.
+        snapshots_table = MagicMock()
+        sn_sel = MagicMock()
+        sn_eq = MagicMock()
+        sn_order = MagicMock()
+        sn_order.execute.return_value = MagicMock(data=[
+            {"snapshot_date": "2024-01-01", "side": "long", "size_usd": 500.0},
+        ])
+        sn_eq.order.return_value = sn_order
+        sn_sel.eq.return_value = sn_eq
+        snapshots_table.select.return_value = sn_sel
+
+        def _table(name: str):
+            if name == "strategies":
+                return strategies_table
+            if name == "position_snapshots":
+                return snapshots_table
+            return MagicMock()
+
+        mock.table = _table
+
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            result = await compute_exposure_metrics("strat-A", mock)
+
+        # Fail-open publish: aggregates ARE present.
+        assert "mean_gross_exposure" in result
+        # But the marker MUST be present so the trust state is
+        # discriminable — this is the H-0738 contract.
+        assert (
+            result.get("data_quality_flags", {}).get(
+                "exposure_metrics_apikey_lookup_failed"
+            ) is True
+        )
+
 
 class TestDurationSecondsWritten:
     """G12.C.9 (paired with D.3): position duration_seconds is written
