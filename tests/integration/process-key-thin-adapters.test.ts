@@ -81,9 +81,19 @@ vi.mock("@/lib/supabase/server", () => ({
     from: () => ({
       select: () => ({
         eq: () => ({
+          // audit-2026-05-07 C-0119/H-0329 — finalize-wizard now applies
+          // .eq('user_id', user.id) as belt-and-braces ownership defense
+          // on top of RLS, so the strategies lookup chain is
+          // .select().eq().eq().maybeSingle(). Other adapters still use
+          // a single .eq() chain, so we keep maybeSingle/single on the
+          // outer level too.
           eq: () => ({
             single: async () => ({
               data: { id: TEST_STRATEGY_ID, user_id: TEST_USER.id },
+              error: null,
+            }),
+            maybeSingle: async () => ({
+              data: { api_key_id: TEST_API_KEY_ID },
               error: null,
             }),
           }),
