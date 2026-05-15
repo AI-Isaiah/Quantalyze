@@ -796,8 +796,19 @@ def test_process_key_validate_only_onboard_succeeds_without_strategy_id(client):
 
 
 def test_process_key_missing_strategy_id_returns_422(client):
-    """CR-02: when step != 'validate' AND strategy_id is missing, return a
-    structured 422 envelope instead of an unhandled KeyError 500."""
+    """CR-02: when flow_type ∈ {onboard, resync} AND step != 'validate'
+    AND strategy_id is missing, return a structured 422 envelope instead
+    of an unhandled KeyError 500.
+
+    PR-X5 (2026-05-15) — the teaser variant of this test no longer
+    applies: the new dispatch injection in process_key.py supplies the
+    sentinel teaser-anchor strategy_id (migration 132) for
+    flow_type='teaser' without strategy_id BEFORE the
+    MISSING_STRATEGY_ID check. Onboard / resync remain 422 because they
+    expect a caller-owned strategy_id by design; see
+    test_process_key_teaser_injects_anchor_when_strategy_id_missing
+    below for the post-PR-X5 teaser contract.
+    """
     fake = _build_supabase_mock(existing_row=None)
 
     with patch(
@@ -810,7 +821,7 @@ def test_process_key_missing_strategy_id_returns_422(client):
         r = client.post(
             "/process-key",
             json={
-                "flow_type": "teaser",
+                "flow_type": "onboard",
                 "source": "okx",
                 "context": {
                     "wizard_session_id": "wiz-no-sid",
@@ -830,6 +841,129 @@ def test_process_key_missing_strategy_id_returns_422(client):
     assert body["code"] == "MISSING_STRATEGY_ID"
     assert "human_message" in body
     assert "correlation_id" in body
+
+
+def test_process_key_teaser_injects_anchor_when_strategy_id_missing(client):
+    """PR-X5 regression: flow_type='teaser' with no strategy_id and no
+    wizard_session_id MUST get both injected by the dispatch and proceed
+    to the synchronous pipeline. The strategy_verifications INSERT MUST
+    receive strategy_id=TEASER_ANCHOR_STRATEGY_ID (migration 132 sentinel).
+
+    Pre-X5 this 422'd with MISSING_STRATEGY_ID; the two 2026-05-14
+    abortive PR-B kill-switch flips auto-rolled-back because of that.
+    PR-X3 added step='validate' to the teaser context as a workaround,
+    but that routed teaser into `_run_validate_only` (no
+    verification_id returned) → TS handler 502 "Verification service
+    returned an invalid response." PR-X5 fixes the root cause: inject
+    the sentinel anchor + a fresh wizard_session_id at dispatch time so
+    the unified pipeline runs end-to-end and returns
+    `{verification_id, status: 'published', ...}` from one path that
+    every flow_type shares.
+    """
+    from services.ingestion.adapter import ValidationResult
+    from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-x5")
+
+    okx_adapter = MagicMock()
+    okx_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=True,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    okx_adapter.fetch_raw = AsyncMock(return_value=[])
+    okx_adapter.compute_metrics = MagicMock(return_value=MagicMock())
+    okx_adapter.compute_fingerprint = MagicMock(
+        return_value=MagicMock(to_jsonb=MagicMock(return_value={}))
+    )
+    okx_adapter.reconstruct_positions = AsyncMock(return_value=[])
+
+    # Patch the encryption step — process_key.py:698 does a function-local
+    # import of services.encryption.{encrypt_credentials, get_kek}. Without
+    # this, the synchronous pipeline at line 735 raises RuntimeError on the
+    # missing KEK env var. The encrypt step is unrelated to the dispatch
+    # contract this test pins, so mocking it out keeps the test focused.
+    import services.encryption as _enc_mod
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=okx_adapter,
+    ), patch.object(
+        _enc_mod, "get_kek", return_value=b"0" * 32,
+    ), patch.object(
+        _enc_mod, "encrypt_credentials", return_value={"ciphertext": "stub"},
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    # No strategy_id, no wizard_session_id, no step —
+                    # mirrors what verify-strategy/route.ts sends post-X5.
+                    "api_key": "k",
+                    "api_secret": "s",
+                    "email": "test@example.com",
+                    "exchange": "okx",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    # The pipeline ran to completion (NOT 422) and returned the
+    # canonical synchronous-pipeline shape.
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["verification_id"] == "ver-teaser-x5"
+    assert body["status"] == "published"
+
+    # The strategy_verifications INSERT received the sentinel anchor as
+    # strategy_id. Walk the recorded .table('strategy_verifications')
+    # .insert(<row>) calls to find the row payload.
+    sv_insert_payloads = []
+    for table_call in fake.table.call_args_list:
+        if not table_call.args or table_call.args[0] != "strategy_verifications":
+            continue
+        # fake.table.return_value is a single shared MagicMock — its
+        # .insert.call_args_list captures every insert across tables. We
+        # know all .insert calls in this test target strategy_verifications
+        # (no other table is inserted), so it's safe to walk that list.
+        for ins_call in fake.table.return_value.insert.call_args_list:
+            if ins_call.args:
+                sv_insert_payloads.append(ins_call.args[0])
+
+    assert sv_insert_payloads, (
+        "strategy_verifications INSERT must fire; got no call_args"
+    )
+    row = sv_insert_payloads[0]
+    assert row["strategy_id"] == TEASER_ANCHOR_STRATEGY_ID, (
+        f"PR-X5: teaser dispatch must inject sentinel anchor; "
+        f"got strategy_id={row['strategy_id']!r}"
+    )
+    # The dispatch ALSO injected a wizard_session_id (uuid4 string) so
+    # the NOT NULL + UNIQUE constraint at mig 093 + 104 holds.
+    assert isinstance(row["wizard_session_id"], str)
+    assert len(row["wizard_session_id"]) > 0
+    assert row["flow_type"] == "teaser"
+    assert row["source"] == "okx"
+
+    # PR-X5 — response top-level must include matched_strategy_id (legacy
+    # shape parity). With no trades and a mocked compute_metrics, this
+    # is None — but the KEY must be present so the TS handler's
+    # `analyticsResult.matched_strategy_id ?? null` lookup never sees
+    # `undefined` (which would change the SV upsert's metrics_snapshot
+    # shape compared with the legacy path).
+    assert "matched_strategy_id" in body
 
 
 def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):

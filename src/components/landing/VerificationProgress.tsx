@@ -2,8 +2,12 @@
 
 import { cn } from "@/lib/utils";
 
+// PR-X5 — accept both terminal statuses. "complete" is the legacy
+// verification_requests terminal; "published" is the canonical
+// strategy_verifications terminal returned by the unified /process-key
+// pipeline. The status route accepts both; this component must too.
 interface VerificationProgressProps {
-  status: "pending" | "processing" | "complete" | "failed";
+  status: "pending" | "processing" | "complete" | "published" | "failed";
 }
 
 const STEPS = [
@@ -17,6 +21,7 @@ const STATUS_TO_STEP: Record<VerificationProgressProps["status"], number> = {
   pending: 0,
   processing: 1,
   complete: 3,
+  published: 3,
   failed: -1,
 };
 
@@ -53,9 +58,16 @@ export function VerificationProgress({ status }: VerificationProgressProps) {
     <div className="mx-auto max-w-lg py-8">
       <div className="flex items-center justify-between">
         {STEPS.map((step, i) => {
-          const isComplete = i < activeStep || status === "complete";
-          const isCurrent = i === activeStep && status !== "complete" && status !== "failed";
-          const isPending = i > activeStep && status !== "complete";
+          const isComplete = i < activeStep || (status === "complete" || status === "published");
+          const isCurrent =
+            i === activeStep &&
+            status !== "complete" &&
+            status !== "published" &&
+            status !== "failed";
+          const isPending =
+            i > activeStep &&
+            status !== "complete" &&
+            status !== "published";
 
           return (
             <div key={step.key} className="flex items-center flex-1 last:flex-none">
@@ -93,7 +105,7 @@ export function VerificationProgress({ status }: VerificationProgressProps) {
                 <div
                   className={cn(
                     "mx-2 h-0.5 flex-1 rounded-full transition-colors",
-                    i < activeStep || status === "complete" ? "bg-accent" : "bg-border",
+                    i < activeStep || (status === "complete" || status === "published") ? "bg-accent" : "bg-border",
                   )}
                 />
               )}

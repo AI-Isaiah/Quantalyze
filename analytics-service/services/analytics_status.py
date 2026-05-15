@@ -13,7 +13,7 @@ strategy_analytics.computation_status in a single statement. This avoids
 the read-then-write race that Eng review Finding 2-B (2026-04-11) called
 out when two workers finish strategy jobs near-simultaneously.
 
-See supabase/migrations/038_sync_strategy_analytics_status.sql for the RPC
+See supabase/migrations/20260412094454_sync_strategy_analytics_status.sql for the RPC
 body and mapping semantics. The no-compute_jobs-rows path preserves
 whatever the existing strategy_analytics row says (pending default from
 migration 001) so brand-new strategies don't get their default 'pending'

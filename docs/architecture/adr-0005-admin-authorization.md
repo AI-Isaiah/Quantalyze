@@ -50,7 +50,7 @@ no Supabase client. Legacy pattern.
    authoritative check is `withAdminAuth` at the handler level.
 
 ### V2 (Sprint 6 closeout Task 7.2, migrating through Sprint 7): `user_app_roles` join table
-1. **Schema** (`supabase/migrations/054_user_app_roles.sql`):
+1. **Schema** (`supabase/migrations/20260417031851_user_app_roles.sql`):
    ```
    CREATE TABLE user_app_roles (
      user_id UUID REFERENCES auth.users ON DELETE CASCADE,
@@ -180,11 +180,11 @@ migration SQL stays as ground truth; the TS side is one file).
 - Pattern B (email helper): `src/lib/admin.ts` (lines 13-16).
 - Pattern C (DB check): `src/lib/admin.ts` (lines 25-43).
 - `withAdminAuth` wrapper: `src/lib/api/withAdminAuth.ts` (lines 12-31).
-- V2 migration: `supabase/migrations/054_user_app_roles.sql`.
+- V2 migration: `supabase/migrations/20260417031851_user_app_roles.sql`.
 - V2 TS helpers: `src/lib/auth.ts`.
 - Pilot route: `src/app/api/admin/users/[id]/roles/route.ts`.
 - Admin UI: `src/app/(dashboard)/admin/users/page.tsx`,
   `src/app/(dashboard)/admin/users/[id]/page.tsx`, and
   `src/components/admin/UserRolesPanel.tsx`.
-- `profiles.is_admin` column: `supabase/migrations/011_perfect_match.sql`.
+- `profiles.is_admin` column: `supabase/migrations/20260407164606_perfect_match.sql`.
 - Audit integration: ADR-0023 §4 (role.grant + role.revoke mapping).

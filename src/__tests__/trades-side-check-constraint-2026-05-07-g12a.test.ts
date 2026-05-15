@@ -26,7 +26,7 @@ const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
 
 describe("trades.side CHECK constraint (audit-2026-05-07 G12.A.3 regression guard)", () => {
-  const filename = "112_trades_side_check_constraint.sql";
+  const filename = "20260510181440_trades_side_check_constraint.sql";
   const path = join(MIGRATIONS_DIR, filename);
 
   it("migration 112 exists", () => {
@@ -74,12 +74,15 @@ describe("trades.side CHECK constraint (audit-2026-05-07 G12.A.3 regression guar
   it("no later migration silently drops trades_side_check without re-adding it", () => {
     // If a future migration drops the constraint, it MUST re-add an
     // equivalent or stronger CHECK that includes both 'buy' and 'sell'.
+    // Boundary: trades_side_check was introduced at NNN=112 → timestamp
+    // 20260510181440. Skip anything chronologically before that.
+    const TRADES_SIDE_INTRO_TS = "20260510181440";
     const files = readdirSync(MIGRATIONS_DIR)
-      .filter((f) => /^\d{3,}_.+\.sql$/.test(f))
+      .filter((f) => /^\d{14}_.+\.sql$/.test(f))
       .sort();
     for (const file of files) {
-      const num = Number.parseInt(file.slice(0, 3), 10);
-      if (Number.isNaN(num) || num <= 112) continue;
+      const ts = file.slice(0, 14);
+      if (ts <= TRADES_SIDE_INTRO_TS) continue;
       const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
       const drops = sql.match(/DROP\s+CONSTRAINT[^;]*trades_side_check/gi);
       if (!drops) continue;

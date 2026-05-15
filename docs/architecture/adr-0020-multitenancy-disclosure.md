@@ -68,7 +68,7 @@ reading the migration's preamble:
   as new tables may need the column added retroactively.
 
 ## Evidence
-- Migration 012: `supabase/migrations/012_disclosure_and_tenancy.sql`
+- Migration 012: `supabase/migrations/20260408113028_disclosure_and_tenancy.sql`
   (lines 1-50) -- creates `disclosure_tier` CHECK column, nullable
   `tenant_id`, and adds bio/years_trading/aum_range to profiles.
 - Manager identity gate: `src/lib/queries.ts` (lines 41-50) --

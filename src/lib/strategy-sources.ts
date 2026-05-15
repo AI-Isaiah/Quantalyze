@@ -1,6 +1,6 @@
 /**
  * Single source of truth for the `strategies.source` enum admitted by
- * `supabase/migrations/100_strategies_source_csv.sql`.
+ * `supabase/migrations/20260506211806_strategies_source_csv.sql`.
  *
  * Every code path that branches on `strategies.source` must import from
  * here. Hand-coded literals across the codebase silently lose new values

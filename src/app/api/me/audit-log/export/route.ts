@@ -16,7 +16,7 @@ import { auditLogExportLimiter, checkLimit } from "@/lib/ratelimit";
  *
  * Authority chain:
  *   - Per-user isolation is enforced by the existing `audit_log_owner_read`
- *     RLS policy (migration 010_portfolio_intelligence.sql:179):
+ *     RLS policy (migration 20260407075303_portfolio_intelligence.sql:179):
  *       USING (user_id = auth.uid())
  *     We use the user-scoped Supabase client (cookies-bridged) rather
  *     than the service-role admin client so RLS does the gating at the

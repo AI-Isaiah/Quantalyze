@@ -81,5 +81,5 @@ Three hostnames exist in the trust boundary, all wired via env vars:
 - CI workflows: `.github/workflows/` directory.
 - Env vars wiring: `.env.example` (lines 1-33).
 - Service-to-service calls: `src/lib/analytics-client.ts` (ADR-0006).
-- pg_cron direct calls: `supabase/migrations/013_cron_heartbeat.sql`,
-  `supabase/migrations/015_schedule_match_cron_hourly.sql`.
+- pg_cron direct calls: `supabase/migrations/20260408113029_cron_heartbeat.sql`,
+  `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql`.

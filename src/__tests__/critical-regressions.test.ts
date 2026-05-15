@@ -254,7 +254,7 @@ describe("Critical regression guards", () => {
   // self-verifying assertion that fails loudly if any CHECK is missing.
   describe("[AUDIT-2026-05-07 #28] migration 101 partner_tag CHECK constraint", () => {
     const MIGRATION_PATH =
-      "supabase/migrations/101_partner_tag_check_constraint.sql";
+      "supabase/migrations/20260510172412_partner_tag_check_constraint.sql";
 
     it("migration file exists", () => {
       expect(() => readText(MIGRATION_PATH)).not.toThrow();
