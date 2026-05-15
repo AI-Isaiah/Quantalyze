@@ -1501,3 +1501,147 @@ class TestFetchUsdtBalanceWithStatus:
         )
         balance = await fetch_usdt_balance(mock_exchange)
         assert balance is None
+
+
+# ─── audit-2026-05-07 C-0226 / H-0667 — unparseable timestamps dropped ────
+
+
+class TestG12BUnparseableTimestampDrops:
+    """Audit-2026-05-07 C-0226 / H-0667 — pre-fix, an OKX/Bybit fill with
+    a missing or non-digit timestamp silently fell back to
+    ``datetime.now(timezone.utc)``. That phantom wall-clock timestamp
+    then became the most-recent fill for the symbol in FIFO
+    reconstruction, breaking position open/close ordering, ROI, duration
+    and daily volume attribution. Post-fix the fill is dropped (with a
+    logger.error) so the malformed input is visible instead of silently
+    corrupting downstream analytics."""
+
+    @pytest.mark.asyncio
+    async def test_okx_unparseable_ts_dropped(self) -> None:
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        good_ts = "1700000000000"
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
+            "data": [
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": good_ts,
+                    "ordId": "ord-good",
+                    "tradeId": "trade-good",
+                    "execType": "T",
+                },
+                {
+                    # Missing ``ts`` entirely — pre-fix this synthesized
+                    # ``datetime.now()`` and persisted a phantom-now row.
+                    "instId": "ETH-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "3000",
+                    "fillSz": "1",
+                    "fee": "-0.3",
+                    "feeCcy": "USDT",
+                    "ordId": "ord-bad",
+                    "tradeId": "trade-bad",
+                    "execType": "T",
+                },
+                {
+                    # Non-digit ``ts`` — also pre-fix collapsed to now().
+                    "instId": "SOL-USDT-SWAP",
+                    "side": "sell",
+                    "fillPx": "100",
+                    "fillSz": "1",
+                    "fee": "-0.05",
+                    "feeCcy": "USDT",
+                    "ts": "not-a-number",
+                    "ordId": "ord-bad2",
+                    "tradeId": "trade-bad2",
+                    "execType": "T",
+                },
+            ]
+        })
+
+        mock_supabase = MagicMock()
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "error",
+        ) as mock_err:
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # Only the well-formed fill makes it through; the two bad rows
+        # are dropped.
+        assert len(result) == 1
+        assert result[0]["exchange_fill_id"] == "trade-good"
+        # Both drops must emit a logger.error pinning the malformed row.
+        assert mock_err.call_count == 2
+        assert all(
+            "unparseable ts" in str(call)
+            for call in mock_err.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_bybit_unparseable_execTime_dropped(self) -> None:
+        import logging
+        from services.exchange import fetch_raw_trades
+
+        page = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execPrice": "60000",
+                        "execQty": "0.1",
+                        "execFee": "0.6",
+                        "feeCurrency": "USDT",
+                        "execTime": "1700000000000",
+                        "orderId": "ord-good",
+                        "execId": "exec-good",
+                        "isMaker": "false",
+                    },
+                    {
+                        # Missing ``execTime`` — pre-fix → datetime.now().
+                        "symbol": "ETHUSDT",
+                        "side": "Buy",
+                        "execPrice": "3000",
+                        "execQty": "1",
+                        "execFee": "0.3",
+                        "feeCurrency": "USDT",
+                        "orderId": "ord-bad",
+                        "execId": "exec-bad",
+                        "isMaker": "false",
+                    },
+                ],
+                "nextPageCursor": "",
+            }
+        }
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = AsyncMock(
+            return_value=page
+        )
+
+        mock_supabase = MagicMock()
+        with patch.object(
+            logging.getLogger("quantalyze.analytics"),
+            "error",
+        ) as mock_err:
+            result = await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+        # Only the well-formed fill survives.
+        assert len(result) == 1
+        assert result[0]["exchange_fill_id"] == "exec-good"
+        assert mock_err.call_count == 1
+        assert "unparseable execTime" in str(mock_err.call_args_list[0])

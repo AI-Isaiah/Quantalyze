@@ -794,7 +794,20 @@ async def _fetch_raw_trades_okx(
                         int(ts_raw) / 1000, tz=timezone.utc
                     )
                 else:
-                    ts_dt = datetime.now(timezone.utc)
+                    # Audit-2026-05-07 C-0226 / H-0667 — pre-fix, an OKX fill
+                    # with a missing/non-digit ``ts`` silently substituted
+                    # ``datetime.now()``. That phantom wall-clock timestamp
+                    # then became the most-recent fill for the symbol in
+                    # FIFO reconstruction, corrupting position open/close
+                    # ordering, ROI, duration, and daily volume attribution
+                    # — all with no log, flag, or skip telemetry. Now we
+                    # drop the fill entirely and surface it as an error so
+                    # operators can spot a malformed exchange response.
+                    logger.error(
+                        "OKX fill dropped: unparseable ts=%r in fill=%r",
+                        ts_raw, fill,
+                    )
+                    continue
 
                 symbol = fill.get("instId", "").replace("-", "")
                 side = fill.get("side", "").lower()
@@ -930,7 +943,15 @@ async def _fetch_raw_trades_bybit(
                         int(ts_raw) / 1000, tz=timezone.utc
                     )
                 else:
-                    ts_dt = datetime.now(timezone.utc)
+                    # Audit-2026-05-07 C-0226 / H-0667 — same fix as the
+                    # OKX branch: drop fills with unparseable ``execTime``
+                    # rather than fabricating ``datetime.now()`` and
+                    # silently corrupting FIFO ordering downstream.
+                    logger.error(
+                        "Bybit fill dropped: unparseable execTime=%r in fill=%r",
+                        ts_raw, fill,
+                    )
+                    continue
 
                 symbol = fill.get("symbol", "")
                 side = fill.get("side", "").lower()
