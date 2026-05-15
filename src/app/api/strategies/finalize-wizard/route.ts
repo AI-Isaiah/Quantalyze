@@ -209,13 +209,16 @@ function validatePayload(
       ? max_capacity
       : null;
 
+  // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
+  // string), so the prior `as string` casts were redundant. Removing
+  // them keeps the parse boundary statically verified end-to-end.
   return {
     ok: true,
     fields: {
-      strategy_id: strategy_id as string,
+      strategy_id,
       name,
       description,
-      category_id: category_id as string,
+      category_id,
       strategy_types: validateStringArray(strategy_types),
       subtypes: validateStringArray(subtypes),
       markets: validateStringArray(markets),
