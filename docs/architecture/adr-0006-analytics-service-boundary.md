@@ -25,8 +25,8 @@ component throws at runtime.
 3. **Inline fetch in `warm-analytics` cron** --
    `src/app/api/cron/warm-analytics/route.ts` (lines 60-64) does its own
    `/health` fetch.
-4. **Supabase pg_cron** -- `supabase/migrations/013_cron_heartbeat.sql`
-   and `015_schedule_match_cron_hourly.sql` call the FastAPI service
+4. **Supabase pg_cron** -- `supabase/migrations/20260408113029_cron_heartbeat.sql`
+   and `20260408215026_schedule_match_cron_hourly.sql` call the FastAPI service
    directly via `pg_net` with `X-Service-Key` from a Postgres GUC.
 5. **Supabase Edge Function** --
    `supabase/functions/compute-trigger/index.ts` (lines 43-72) calls
@@ -82,7 +82,7 @@ its own fetch to the analytics service.
   (lines 60-64).
 - Warmup module: `src/lib/warmup-analytics.ts` (lines 27-55).
 - FastAPI service auth: `analytics-service/main.py` (lines 51-66).
-- pg_cron to FastAPI: `supabase/migrations/013_cron_heartbeat.sql`
-  (lines 162-176), `supabase/migrations/015_schedule_match_cron_hourly.sql`
+- pg_cron to FastAPI: `supabase/migrations/20260408113029_cron_heartbeat.sql`
+  (lines 162-176), `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql`
   (lines 65-79).
 - Edge Function: `supabase/functions/compute-trigger/index.ts` (lines 43-72).

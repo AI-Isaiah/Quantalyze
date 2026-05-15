@@ -19,7 +19,7 @@
  *
  * Round-2 hardening:
  *  - Sort migrations by extracted leading numeric prefix, NOT lex (so
- *    `1000_*.sql` doesn't sort before `100_*.sql`).
+ *    `1000_*.sql` doesn't sort before `20260506211806_*.sql`).
  *  - Use matchAll + last-match-per-file (matches Postgres last-wins
  *    semantics for repeated ADD CONSTRAINT in one file).
  *  - Strip SQL comments (-- and / * ... * /) before regex so a comment

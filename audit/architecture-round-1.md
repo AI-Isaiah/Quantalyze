@@ -26,11 +26,11 @@ Priority rubric:
 - **Status**: Accepted-retroactively
 - **Priority**: Critical
 - **Evidence in code**:
-  - RLS policies: `supabase/migrations/002_rls_policies.sql` lines 1-69 enable
+  - RLS policies: `supabase/migrations/20260405061912_rls_policies.sql` lines 1-69 enable
     RLS on 9 tables and define owner-scoped policies.
-  - Hardened variants: `supabase/migrations/007_security_hardening.sql`,
-    `011_perfect_match.sql`, `020_profile_pii_revoke_hardened.sql`,
-    `021_function_execute_hardening.sql`, `022_public_profiles_view_security_invoker.sql`.
+  - Hardened variants: `supabase/migrations/20260406065011_security_hardening.sql`,
+    `20260407164606_perfect_match.sql`, `20260409133654_profile_pii_revoke_hardened.sql`,
+    `20260409133655_function_execute_hardening.sql`, `20260409133656_public_profiles_view_security_invoker.sql`.
   - Every server component reads via `createClient()` in
     `src/lib/supabase/server.ts:4-27` (runs under the caller's JWT so RLS applies).
   - Route handlers repeat the pattern: see
@@ -252,8 +252,8 @@ Priority rubric:
   - Warmup: `src/lib/warmup-analytics.ts:27-55` — separate fire-and-forget
     warmup module.
   - Cron from Supabase pg_cron directly to Railway:
-    `supabase/migrations/013_cron_heartbeat.sql:162-176` and
-    `supabase/migrations/015_schedule_match_cron_hourly.sql:65-79`.
+    `supabase/migrations/20260408113029_cron_heartbeat.sql:162-176` and
+    `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql:65-79`.
     Calls `POST /api/match/cron-recompute` with `X-Service-Key`.
   - Supabase Edge Function invoking analytics:
     `supabase/functions/compute-trigger/index.ts:43-72` — yet another path.
@@ -322,7 +322,7 @@ Priority rubric:
     `src/app/api/alert-digest/route.ts:19-24` uses `!==` (NOT constant-time)
     for the CRON_SECRET compare. Divergent from Mechanism 1.
   - Mechanism 3 — Supabase pg_cron calling the FastAPI service:
-    `supabase/migrations/013_cron_heartbeat.sql:162-176` (daily,
+    `supabase/migrations/20260408113029_cron_heartbeat.sql:162-176` (daily,
     superseded by 015's hourly). Uses `pg_net` + `current_setting()` for
     secret hygiene.
   - Mechanism 4 — Supabase Edge Functions (Deno) triggered by DB:
@@ -553,11 +553,11 @@ Priority rubric:
     and `src/app/api/alert-digest/route.ts:22` (divergent compare styles).
   - `HMAC_SECRET` for demo PDF tokens: `src/lib/demo-pdf-token.ts`.
   - Database-layer secret (cleanest pattern):
-    `supabase/migrations/013_cron_heartbeat.sql:144-151` uses
+    `supabase/migrations/20260408113029_cron_heartbeat.sql:144-151` uses
     `current_setting('app.analytics_service_url', true)` — Postgres GUCs
     as secret storage, rotated via `ALTER DATABASE postgres SET`.
   - Envelope encryption for exchange API keys: `analytics-service/services/encryption.py`
-    (documented at `supabase/migrations/001_initial_schema.sql:19`).
+    (documented at `supabase/migrations/20260405061911_initial_schema.sql:19`).
     Per-row DEK, KEK in env (plan was Vault, shipped as env).
   - GUC pattern for pg_cron is strong; env-var pattern for Next/Python
     is weaker (secret appears in shell history on any developer who
@@ -735,7 +735,7 @@ Priority rubric:
 - **Status**: Accepted-retroactively
 - **Priority**: Low
 - **Evidence in code**:
-  - `supabase/migrations/011_perfect_match.sql:44-52` creates
+  - `supabase/migrations/20260407164606_perfect_match.sql:44-52` creates
     `system_flags(key, enabled)` with a single seeded row
     `match_engine_enabled = true`.
   - `src/app/api/admin/match/kill-switch/route.ts:1-73` is the entire
@@ -761,7 +761,7 @@ Priority rubric:
 - **Status**: Accepted-retroactively
 - **Priority**: High
 - **Evidence in code**:
-  - `supabase/migrations/012_disclosure_and_tenancy.sql:1-50` creates
+  - `supabase/migrations/20260408113028_disclosure_and_tenancy.sql:1-50` creates
     the disclosure-tier CHECK column on strategies, the tenant_id
     nullable column ("single-tenant in v1, partner becomes config
     change not schema migration"), and adds bio/years_trading/aum_range

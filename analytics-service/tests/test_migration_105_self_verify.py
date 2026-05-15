@@ -20,7 +20,7 @@ _MIGRATION_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "supabase"
     / "migrations"
-    / "105_strategies_fingerprint_compute_similarity.sql"
+    / "20260510173116_strategies_fingerprint_compute_similarity.sql"
 )
 
 

@@ -247,20 +247,20 @@ cron architecture.
 
 ## Evidence
 - Migration 056: cold table + append-only policies + 6 cron jobs.
-  `supabase/migrations/056_retention_crons.sql`.
+  `supabase/migrations/20260417110539_retention_crons.sql`.
 - Migration 057: relax `organizations.created_by NOT NULL` (required
   for `sanitize_user` to succeed when the target user created an org),
   add `idx_audit_log_cold_created_at` for the cold-purge cron, and
   install the `test_force_hot_to_cold_move` service_role-only RPC used
   by the live-DB integration test.
-  `supabase/migrations/057_relax_organizations_created_by.sql`.
+  `supabase/migrations/20260417135856_relax_organizations_created_by.sql`.
 - Migration 055: `sanitize_user` RPC and its PRESERVE-audit_log decision
   in the per-table matrix.
-  `supabase/migrations/055_sanitize_user.sql`.
+  `supabase/migrations/20260417110538_sanitize_user.sql`.
 - Migration 049: hot-table append-only invariant (mirrored on cold).
-  `supabase/migrations/049_audit_log_hardening.sql`.
+  `supabase/migrations/20260416201929_audit_log_hardening.sql`.
 - Migration 010: original `audit_log` table schema.
-  `supabase/migrations/010_portfolio_intelligence.sql` (lines 66-75).
+  `supabase/migrations/20260407075303_portfolio_intelligence.sql` (lines 66-75).
 - ADR-0023: audit event taxonomy + §6 append-only invariant.
   `docs/architecture/adr-0023-audit-event-taxonomy.md`.
 - ADR-0008: background job / cron architecture (context for the pg_cron

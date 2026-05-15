@@ -5,7 +5,7 @@ Mirrors src/lib/phase-19-constants.ts. Keep both in sync.
 The TEASER_ANCHOR_STRATEGY_ID UUID satisfies the
 strategy_verifications.strategy_id NOT NULL FK for the teaser flow,
 which has no caller-owned strategy by design. Provisioned by
-supabase/migrations/132_teaser_anchor_strategy.sql alongside its
+supabase/migrations/20260515095804_teaser_anchor_strategy.sql alongside its
 sentinel auth.users + profiles rows.
 """
 

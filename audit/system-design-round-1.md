@@ -162,7 +162,7 @@ The **biggest weaknesses**, in order of severity:
 ### [SD-HIGH-04] Match engine cron lives in `pg_cron` and is invisible to ops
 - **Priority**: High
 - **Category**: reliability / observability
-- **Files/paths**: `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/013_cron_heartbeat.sql`, `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/015_schedule_match_cron_hourly.sql`, `/Users/helios-mammut/claude-projects/quantalyze/docs/runbooks/match-engine.md`, `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/routers/match.py` (`cron-recompute` handler starting line 449)
+- **Files/paths**: `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/20260408113029_cron_heartbeat.sql`, `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/20260408215026_schedule_match_cron_hourly.sql`, `/Users/helios-mammut/claude-projects/quantalyze/docs/runbooks/match-engine.md`, `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/routers/match.py` (`cron-recompute` handler starting line 449)
 - **What's wrong**: the match engine's `cron-recompute` is triggered by a `pg_net.http_post` inside a `pg_cron` job (migration 013 → 015 reschedules hourly). This means:
   1. The Railway URL + `X-Service-Key` live in Postgres GUC settings (`app.analytics_service_url`, `app.analytics_service_key`).
   2. Rotating the service key requires `ALTER DATABASE postgres SET app.analytics_service_key = '...'` — zero indication in the Vercel or Railway dashboards.
@@ -256,7 +256,7 @@ The **biggest weaknesses**, in order of severity:
 ### [SD-MEDIUM-05] `notification_dispatches` audit trail has no retention policy
 - **Priority**: Medium
 - **Category**: scale
-- **Files/paths**: `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/018_notification_dispatches.sql`, `/Users/helios-mammut/claude-projects/quantalyze/src/lib/email.ts`
+- **Files/paths**: `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/20260409002118_notification_dispatches.sql`, `/Users/helios-mammut/claude-projects/quantalyze/src/lib/email.ts`
 - **What's wrong**: every email send writes a row to `notification_dispatches`. There's no TTL, no partition, no cleanup cron. At institutional scale this table grows unbounded. It also has no index on `(status, created_at)` per the inline comment ("operators can spot stuck rows via the queued + age > threshold query") — so the "find stuck rows" query does a full table scan.
 - **What could break**: over 12 months of production the table accumulates hundreds of thousands of rows. Queries for "find stuck" slow from 20ms to 2s. Supabase storage costs rise.
 - **Proposed fix**: add a retention cron (Supabase pg_cron) that deletes rows older than 90 days with `status = 'sent'`. Keep `failed` and `queued` indefinitely. Add a composite index `(status, created_at)`.
@@ -364,7 +364,7 @@ The **biggest weaknesses**, in order of severity:
 ### [SD-LOW-09] Missing index on `notification_dispatches (status, created_at)` & partition story
 - **Priority**: Low
 - **Category**: scale
-- **Files/paths**: `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/018_notification_dispatches.sql`
+- **Files/paths**: `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/20260409002118_notification_dispatches.sql`
 - **What's wrong**: as above, the "find stuck rows" query is unindexed.
 - **Proposed fix**: DB migration (out of scope for this pass — flag for DB pass).
 - **Effort**: trivial
