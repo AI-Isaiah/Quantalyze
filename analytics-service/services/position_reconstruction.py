@@ -704,8 +704,20 @@ def _match_positions_fifo(
                         seconds = 0.0
                     duration_days = round(seconds / 86400, 4)
                     duration_seconds = int(seconds)
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    # Audit H-0745: a silently-dropped duration is
+                    # indistinguishable downstream from a still-open
+                    # position. Log + flag so allocators can tell the
+                    # two apart in the dashboard.
+                    logger.warning(
+                        "Duration parse failed for strategy=%s symbol=%s "
+                        "open=%r close=%r: %s",
+                        strategy_id, symbol,
+                        position_open_time, close_time, exc,
+                    )
+                    position_quality_flags["duration_parse_errors"] = (
+                        position_quality_flags.get("duration_parse_errors", 0) + 1
+                    )
 
             position_dict: dict[str, Any] = {
                 "strategy_id": strategy_id,

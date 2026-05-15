@@ -1916,3 +1916,43 @@ class TestReconstructIdempotency:
             "Lock not released after CancelledError — future reconstructs "
             "for this strategy_id will deadlock."
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0745: duration parse failure surfaces via
+# data_quality_flags rather than silently dropping duration_days.
+# ---------------------------------------------------------------------------
+class TestDurationParseFailureSurfaced:
+    """A closed position whose timestamps fail ISO parsing must surface
+    `duration_parse_errors` in the position's data_quality_flags. Before
+    the fix the except clause was `pass` — duration_days/duration_seconds
+    became silently None, indistinguishable from an open position when
+    rendered on the allocator dashboard."""
+
+    def test_unparseable_close_time_flags_position(self) -> None:
+        fills = [
+            _make_fill(
+                side="buy", price=100.0, quantity=1.0,
+                timestamp="2024-01-01T00:00:00+00:00",
+            ),
+            _make_fill(
+                side="sell", price=110.0, quantity=1.0,
+                timestamp="not-a-valid-iso-timestamp",
+            ),
+        ]
+        positions = _match_positions_fifo("BTCUSDT", fills, "strat-parse-fail")
+
+        assert len(positions) == 1
+        pos = positions[0]
+        # The position still closes (FIFO matching is independent of
+        # duration math) but duration values are None because the parse
+        # failed — and the quality flag must surface that fact.
+        assert pos["status"] == "closed"
+        assert pos["duration_days"] is None
+        assert pos["duration_seconds"] is None
+        flags = pos.get("data_quality_flags") or {}
+        assert flags.get("duration_parse_errors") == 1, (
+            "duration_parse_errors counter must be set when ISO parsing "
+            "fails; otherwise the silent-None duration is indistinguishable "
+            "from a still-open position downstream."
+        )
