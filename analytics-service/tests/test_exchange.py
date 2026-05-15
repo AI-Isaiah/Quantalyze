@@ -2239,3 +2239,84 @@ class TestG12BCcxtTimestampNormalization:
         assert out is None
         assert mock_err.call_count == 1
         assert "unparseable timestamp" in str(mock_err.call_args_list[0])
+
+
+# ─── audit-2026-05-07 H-0663 — OKX funding-row contract ────
+
+
+class TestG12BOkxFundingRowContract:
+    """Audit-2026-05-07 H-0663 — OKX's
+    ``private_get_trade_fills_history`` endpoint is documented to
+    return trade fills only (execType: T/M, etc.); funding rate entries
+    live in ``private_get_account_bills``. This test codifies the
+    contract: a fills_history response is treated as trades. If OKX
+    ever changes the endpoint shape to mix funding rows in, the
+    qty<=0 guard in services/position_reconstruction.py:533 would still
+    skip them — but the regression test below pins the current
+    behavior so an accidental change in either layer is visible.
+
+    The test treats a hypothetical funding-shaped row (fillSz='0',
+    subType='8' — the OKX bill subType for funding fee) as a non-fill:
+    qty<=0 means it's filtered downstream and contributes 0 quantity.
+    """
+
+    @pytest.mark.asyncio
+    async def test_okx_zero_qty_row_passes_through_with_qty_zero(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = AsyncMock(return_value={
+            "data": [
+                # Normal fill — must be ingested as qty 0.1.
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "buy",
+                    "fillPx": "60000",
+                    "fillSz": "0.1",
+                    "fee": "-0.6",
+                    "feeCcy": "USDT",
+                    "ts": "1700000000000",
+                    "ordId": "ord-fill",
+                    "tradeId": "trade-fill",
+                    "execType": "T",
+                },
+                # Funding-shaped row (qty=0, OKX bill subType=8) — if
+                # this ever shows up in fills_history (it shouldn't),
+                # the qty=0 carries through and downstream filters at
+                # qty<=0 in position_reconstruction.
+                {
+                    "instId": "BTC-USDT-SWAP",
+                    "side": "",
+                    "fillPx": "0",
+                    "fillSz": "0",
+                    "fee": "-0.5",
+                    "feeCcy": "USDT",
+                    "ts": "1700001000000",
+                    "ordId": "",
+                    "tradeId": "trade-funding",
+                    "execType": "",
+                    "subType": "8",  # OKX bill funding-fee subType
+                },
+            ]
+        })
+
+        mock_supabase = MagicMock()
+        result = await fetch_raw_trades(
+            mock_exchange, "strat-1", mock_supabase
+        )
+
+        # Both rows are returned by fetch_raw_trades (no client-side
+        # filter); the funding-shaped row has quantity=0 so the
+        # downstream qty<=0 guard skips it.
+        assert len(result) == 2
+        normal = [r for r in result if r["exchange_fill_id"] == "trade-fill"][0]
+        funding = [
+            r for r in result if r["exchange_fill_id"] == "trade-funding"
+        ][0]
+        assert normal["quantity"] == 0.1
+        assert funding["quantity"] == 0.0, (
+            "Funding-shaped row must carry quantity=0 so the qty<=0 "
+            "guard at services/position_reconstruction.py:533 filters "
+            "it out without inflating fill totals."
+        )
