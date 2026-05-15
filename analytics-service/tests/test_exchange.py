@@ -1645,3 +1645,97 @@ class TestG12BUnparseableTimestampDrops:
         assert result[0]["exchange_fill_id"] == "exec-good"
         assert mock_err.call_count == 1
         assert "unparseable execTime" in str(mock_err.call_args_list[0])
+
+
+# ─── audit-2026-05-07 C-0227 — pagination must not silently truncate ────
+
+
+class TestG12BPaginationFailureReRaises:
+    """Audit-2026-05-07 C-0227 — pre-fix the OKX/Bybit per-page exception
+    handler logged a warning and ``break``'d, returning fills collected
+    so far. A transient 429 / 5xx on page 7 of 12 silently truncated
+    history — the caller treated it as success, leaving the allocator's
+    Volume/Positions tabs stale with no data_quality_flag. Post-fix the
+    exception is re-raised so the sync_trades job is marked failed_retry
+    and resumes via cursor on the next attempt."""
+
+    @pytest.mark.asyncio
+    async def test_okx_per_page_failure_re_raises(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        # Page 1 succeeds with a FULL page (so the loop will try page 2);
+        # page 2 raises.
+        fills_page_1 = []
+        for i in range(100):
+            fills_page_1.append({
+                "instId": "BTC-USDT-SWAP",
+                "side": "buy",
+                "fillPx": "60000",
+                "fillSz": "0.1",
+                "fee": "-0.6",
+                "feeCcy": "USDT",
+                "ts": str(1700000000000 + i),
+                "ordId": f"ord-{i}",
+                "tradeId": f"trade-{i}",
+                "execType": "T",
+            })
+
+        call_count = {"n": 0}
+
+        async def _fills_history(params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return {"data": fills_page_1}
+            raise RuntimeError("simulated 5xx on page 2")
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "okx"
+        mock_exchange.private_get_trade_fills_history = _fills_history
+
+        mock_supabase = MagicMock()
+        with pytest.raises(RuntimeError, match="simulated 5xx"):
+            await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )
+
+    @pytest.mark.asyncio
+    async def test_bybit_per_page_failure_re_raises(self) -> None:
+        from services.exchange import fetch_raw_trades
+
+        page_1 = {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execPrice": "60000",
+                        "execQty": "0.1",
+                        "execFee": "0.6",
+                        "feeCurrency": "USDT",
+                        "execTime": "1700000000000",
+                        "orderId": "ord-1",
+                        "execId": "exec-1",
+                        "isMaker": "false",
+                    },
+                ],
+                "nextPageCursor": "page-2-cursor",
+            }
+        }
+
+        call_count = {"n": 0}
+
+        async def _execution_list(params):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return page_1
+            raise RuntimeError("simulated 429 on page 2")
+
+        mock_exchange = AsyncMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_execution_list = _execution_list
+
+        mock_supabase = MagicMock()
+        with pytest.raises(RuntimeError, match="simulated 429"):
+            await fetch_raw_trades(
+                mock_exchange, "strat-1", mock_supabase
+            )

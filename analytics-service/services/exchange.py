@@ -897,8 +897,20 @@ async def _fetch_raw_trades_okx(
             prev_cursor = new_cursor
             cursor = new_cursor
         except Exception as e:
-            logger.warning("OKX fills fetch failed page %d: %s", page, str(e))
-            break
+            # Audit-2026-05-07 C-0227 — pre-fix, an exception on page N
+            # logged a warning and broke out of the loop, returning the
+            # fills already collected from pages 1..N-1. The caller saw
+            # a short list and treated the sync as success — silently
+            # truncating multi-page fill history with no data_quality
+            # flag. Now we re-raise so ``fetch_raw_trades``'s outer
+            # handler surfaces the failure to the caller, which will
+            # mark the sync_trades job failed_retry (cursor pagination
+            # is resumable on the next attempt).
+            logger.error(
+                "OKX fills fetch failed page %d (re-raising to fail the sync): %s",
+                page, str(e),
+            )
+            raise
 
     if not natural_break:
         # Audit-2026-05-07 G12.B.6 — exhausted the 100-page cap without a
@@ -1008,8 +1020,15 @@ async def _fetch_raw_trades_bybit(
                 break
             cursor = next_cursor
         except Exception as e:
-            logger.warning("Bybit execution list failed page %d: %s", page, str(e))
-            break
+            # Audit-2026-05-07 C-0227 — same fix as the OKX branch:
+            # re-raise per-page failures so the sync_trades job is
+            # marked failed_retry and resumes via cursor next attempt
+            # instead of silently truncating mid-pagination.
+            logger.error(
+                "Bybit execution list failed page %d (re-raising to fail the sync): %s",
+                page, str(e),
+            )
+            raise
 
     if not natural_break:
         # Audit-2026-05-07 G12.B.6 — exhausted the 100-page cap without a
