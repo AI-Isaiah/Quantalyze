@@ -2373,3 +2373,67 @@ class TestTurnoverSeriesTypeValidation:
             positions_by_date, prices_by_date, nav_by_date
         )
         assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+
+    def test_nan_value_rejected_not_silently_propagated(self) -> None:
+        """Specialist-pass follow-up to H-0741: `float(Decimal('NaN'))`
+        returns nan, propagating silently through arithmetic to a
+        turnover=nan value in JSONB. The contract is to reject non-
+        finite values and record the date in dropped_dates instead."""
+        from decimal import Decimal as _D
+
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": _D("NaN")},
+            "2025-01-03": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        # The NaN date is recorded as dropped; downstream rows are
+        # finite numerics, never nan.
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+        for row in series:
+            t = row["turnover"]
+            if t is not None:
+                # Reject NaN: NaN != NaN, so this catches a regression
+                # if the float coercion path ever lets NaN through.
+                assert t == t, f"turnover NaN leaked to JSONB row {row!r}"
+
+    def test_inf_nav_rejected(self) -> None:
+        """Specialist-pass follow-up to H-0741: `float('inf')` NAV
+        would yield turnover=0.0 (any_finite / inf), masking real
+        rebalances. Reject up front."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": float("inf"),
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]

@@ -1003,10 +1003,10 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         # strategy-level flags and the dashboard can show
         # "Position snapshots not yet collected — exposure unavailable"
         # rather than spurious zeros.
-        flags: dict[str, Any] = {"exposure_metrics_no_snapshots": True}
+        dq_flags: dict[str, Any] = {"exposure_metrics_no_snapshots": True}
         if api_key_lookup_failed:
-            flags["exposure_metrics_apikey_lookup_failed"] = True
-        return {"data_quality_flags": flags}
+            dq_flags["exposure_metrics_apikey_lookup_failed"] = True
+        return {"data_quality_flags": dq_flags}
 
     # Group by snapshot_date to compute per-date exposure
     by_date: dict[str, list[dict]] = defaultdict(list)
@@ -1052,10 +1052,10 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         # currently unreachable (every key triggers an append). Kept
         # as a safety net in case future refactors filter rows mid-loop.
         # Audit H-0747: never return bare {} — surface a marker.
-        flags = {"exposure_metrics_no_gross_exposure": True}
+        dq_flags = {"exposure_metrics_no_gross_exposure": True}
         if api_key_lookup_failed:
-            flags["exposure_metrics_apikey_lookup_failed"] = True
-        return {"data_quality_flags": flags}
+            dq_flags["exposure_metrics_apikey_lookup_failed"] = True
+        return {"data_quality_flags": dq_flags}
 
     mean_gross = statistics.mean(gross_exposures)
     std_gross = statistics.stdev(gross_exposures) if len(gross_exposures) > 1 else 0.0
@@ -1181,12 +1181,27 @@ def compute_turnover_series_with_flags(
             prices_raw = prices_by_date.get(date, {})
             if positions_raw is None or prices_raw is None:
                 raise TypeError("positions/prices row is None")
-            positions: dict[str, float] = {
-                str(sym): float(qty) for sym, qty in positions_raw.items()
-            }
-            prices: dict[str, float] = {
-                str(sym): float(p) for sym, p in prices_raw.items()
-            }
+            positions: dict[str, float] = {}
+            for sym, qty in positions_raw.items():
+                qty_f = float(qty)
+                # Audit H-0741 follow-up (specialist pass): float()
+                # accepts Decimal('NaN') / float('inf') and propagates
+                # silently to turnover=nan/inf in JSONB. Reject so the
+                # date is recorded in dropped_dates instead of poisoning
+                # the series.
+                if qty_f != qty_f or qty_f in (float("inf"), float("-inf")):
+                    raise ValueError(
+                        f"non-finite position value {qty!r} for symbol {sym!r}"
+                    )
+                positions[str(sym)] = qty_f
+            prices: dict[str, float] = {}
+            for sym, p in prices_raw.items():
+                p_f = float(p)
+                if p_f != p_f or p_f in (float("inf"), float("-inf")):
+                    raise ValueError(
+                        f"non-finite price value {p!r} for symbol {sym!r}"
+                    )
+                prices[str(sym)] = p_f
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning(
                 "compute_turnover_series: skipping date=%r due to "
@@ -1209,6 +1224,12 @@ def compute_turnover_series_with_flags(
         if nav_present:
             try:
                 nav = float(nav_by_date[date])
+                # H-0741 follow-up: reject NaN/Inf NAV — silent
+                # propagation otherwise turns turnover to nan in JSONB.
+                if nav != nav or nav in (float("inf"), float("-inf")):
+                    raise ValueError(
+                        f"non-finite NAV value {nav_by_date[date]!r}"
+                    )
             except (TypeError, ValueError) as exc:
                 logger.warning(
                     "compute_turnover_series: skipping date=%r — NAV "
