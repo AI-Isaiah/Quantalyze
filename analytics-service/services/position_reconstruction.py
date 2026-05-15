@@ -17,10 +17,50 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, TypedDict
 from uuid import UUID
 
 from services.db import db_execute
+
+
+# Audit-2026-05-07 H-0733 / H-0743: wire schemas for the two new
+# unbounded-by-input JSONB payloads. Pre-fix both were typed as bare
+# `list[dict[str, Any]]`, so any future producer typo (e.g. `side='LONG'`
+# instead of `'long'`) silently fed the wrong bucket in
+# `_compute_derived_trade_metrics` downstream. TypedDicts give static
+# checkers a contract to enforce; runtime behavior is unchanged (Python
+# does not enforce TypedDict at runtime — the value is in the type
+# narrowing for downstream consumers and the fact that the contract is
+# now grep-able from a single declaration).
+class RealizedPnLRecord(TypedDict):
+    """Wire shape of an entry in `trade_metrics.realized_pnl_per_trade`.
+
+    Consumed by `analytics_runner._compute_derived_trade_metrics` to
+    derive SQN (over realized_pnl values) and segment profit_factor by
+    side. `side` is `None` only for the data-quality-failure path
+    (closed position whose `side` could not be classified — should be
+    surfaced via the position's `data_quality_flags`, not silently
+    bucketed). `realized_pnl` is `None` when the position has no
+    computable PnL; the producer must not coerce that to 0.0.
+
+    NB: `Literal['long', 'short']` would be tighter but the in-memory
+    position dicts (`dict[str, Any]`) currently allow `None` to escape;
+    fixing that requires the broader Position dataclass refactor
+    deferred from this audit. The TypedDict still pins the wire field
+    names + the None-allowed-on-failure contract.
+    """
+
+    side: Literal["long", "short"] | None
+    realized_pnl: float | None
+
+
+class ExposurePoint(TypedDict):
+    """Wire shape of an entry in `exposure_metrics.exposure_series`
+    (also published as the `exposure_series` sibling-kind row, D-01)."""
+
+    date: str  # 'YYYY-MM-DD' per docstring contract
+    gross: float
+    net: float
 
 logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 
@@ -306,13 +346,13 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
         if realized_pnl_per_trade_truncated
         else closed
     )
-    realized_pnl_per_trade = [
-        {
-            "side": p.get("side"),
-            "realized_pnl": (
+    realized_pnl_per_trade: list[RealizedPnLRecord] = [
+        RealizedPnLRecord(
+            side=p.get("side"),
+            realized_pnl=(
                 float(p["realized_pnl"]) if p.get("realized_pnl") is not None else None
             ),
-        }
+        )
         for p in closed_for_per_trade
     ]
     if realized_pnl_per_trade_truncated:
@@ -977,7 +1017,8 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     net_exposures: list[float] = []
     # METRICS-05: per-date exposure points for sibling-table persistence.
     # Uses iteration over the same loop that previously discarded the data.
-    exposure_series_records: list[dict[str, Any]] = []
+    # Audit H-0743: wire shape pinned by `ExposurePoint` TypedDict.
+    exposure_series_records: list[ExposurePoint] = []
 
     for date_key, date_snaps in by_date.items():
         gross = 0.0
@@ -998,11 +1039,11 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         # Audit H-0736: cap exposure_series cardinality so a
         # snapshot-flood can't bloat strategy_analytics JSONB.
         if len(exposure_series_records) < _EXPOSURE_SERIES_CAP:
-            exposure_series_records.append({
-                "date": str(date_key),
-                "gross": round(gross, 2),
-                "net": round(net, 2),
-            })
+            exposure_series_records.append(ExposurePoint(
+                date=str(date_key),
+                gross=round(gross, 2),
+                net=round(net, 2),
+            ))
 
     exposure_series_truncated = len(by_date) > _EXPOSURE_SERIES_CAP
 
