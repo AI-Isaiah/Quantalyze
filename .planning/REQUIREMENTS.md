@@ -6,7 +6,7 @@
 **Milestone goal:** Ship the version Quantalyze can credibly put in front of LPs and managers. Fix the recurring API-key wizard failure at the root, unify three divergent code paths into one observable backbone, unblock the 10 quant teams in pipeline (CSV-bridged immediately + API-fixed by Day 10), and establish a working dogfood loop with the founder's own LP report.
 
 **Success gate (falsifiable, observable at week 4):** running the full wizard against test credentials per source (OKX, Binance, Bybit) plus a sample daily-returns CSV plus the founder's own fund data, every check passes:
-- Wizard accepts the test OKX key → `strategies` row at `status='active'` with `encrypted_key` decrypting cleanly via Vault
+- Wizard accepts the test OKX key → `strategies` row at `status='active'` with `encrypted_key` decrypting cleanly via KEK env-var
 - All 10 onboarding teams reach `strategy_verifications.status='published'` (API path for OKX/Binance/Bybit teams; CSV path for MT5/IBKR teams)
 - Sharpe matches an independently-computed quantstats reference within ±0.05 per source
 - TWR ≠ YTD when the strategy has multi-period history (no single-period mock-data symptom)
@@ -56,8 +56,8 @@
 
 ### FIX — Root-cause fix (Phase 18)
 
-- [ ] **FIX-01**: Whatever root cause Phase 16 surfaced (Vault KEK access / finalize-wizard FK / Resend env drift / Supabase RLS / OKX passphrase encoding / off-list cause) is fixed at the source layer; regression test that fails without the fix is committed alongside the fix
-- [ ] **FIX-02**: Founder's own OKX test key passes the wizard end-to-end in the production-equivalent environment; `strategies` row at `status='active'`, `encrypted_key` decrypts cleanly via Vault to the exact original tuple
+- [ ] **FIX-01**: Whatever root cause Phase 16 surfaced (KEK env-var access / finalize-wizard FK / Resend env drift / Supabase RLS / OKX passphrase encoding / off-list cause) is fixed at the source layer; regression test that fails without the fix is committed alongside the fix
+- [ ] **FIX-02**: Founder's own OKX test key passes the wizard end-to-end in the production-equivalent environment; `strategies` row at `status='active'`, `encrypted_key` decrypts cleanly via KEK env-var to the exact original tuple
 - [ ] **FIX-03**: All 10 onboarding teams' keys flow through end-to-end: `strategy_verifications.status='published'` for OKX/Binance/Bybit teams via API path; `status='validated'` (or higher) for MT5/IBKR teams via CSV path from Phase 15; per-team status tracked in TODOS.md
 - [ ] **FIX-04**: PII redaction utility — `analytics-service/services/redact.py` mirrors existing `src/lib/admin/pii-scrub.ts` denylist (8 keys: `apikey`, `apisecret`, `secret`, `signature`, `passphrase`, `authorization`, `x-mbx-apikey`, `ok-access-sign`) with case-insensitive regex `/^.*(key|secret|pass|token|credential|cookie|session|auth|bearer)$/i`, recursive walker, JWT-shape detector, account-id truncator; shared fixture corpus across TS + Python (20 bad / 5 good); grep over Supabase log table after a test run shows zero PII. **Do NOT create `src/lib/redact.ts` — `pii-scrub.ts` already exists.**
 
@@ -163,7 +163,7 @@ These are blocking gates the roadmapper must encode as phase entry/exit conditio
 
 | Gate | Phase | Resolution |
 |------|-------|------------|
-| Day 0.5 — Vault-from-Railway pre-flight | Phase 16 | Read known KEK row from Supabase Vault and decrypt test ciphertext. If access denied: skip ahead to Phase 18 with "fix Vault access" as first task. |
+| Day 0.5 — Vault-from-Railway pre-flight | Phase 16 | Read known KEK env-var value and decrypt test ciphertext. If access denied: skip ahead to Phase 18 with "fix KEK env-var" (see `.planning/phase-16/vault-from-railway-preflight.md` for architectural reality) as first task. |
 | 10/10 teams onboarded via CSV by Day 2 (≥3 reply threshold) | Phase 15 | Per-team `strategy_verifications.status='validated'` row check. Below ≥3-of-10 reply threshold logs gap to `.planning/phase-15/customer-signal-gap.md` and ships anyway. |
 | Theme 4 founder-interview pass | Phase 18 entry | ≥1 verbal-in-writing Metaworld commitment (text logged in `.planning/phase-18/metaworld-commitment.md`) before Phase 18 starts |
 | Day-2 decision gate (Day 4) | Phase 16 → Phase 19 | Founder reviews `/api/debug-key-flow` output. Decides: COMMIT Phase 19 OR apply 1-line fix and skip Phase 19 (close milestone at ~10 CC days). 2-hour minimum deliberation floor; falsifiable SKIP/COMMIT/HOLD criteria + correlation_id evidence chain + regression test snippet documented in `.planning/phase-16/day-2-decision.md` before Phase 18 or 19 code lands. |
