@@ -639,8 +639,14 @@ async function unifiedFinalizeWizardHandler(args: {
   // returns the WIZARD_DUPLICATE envelope. Pre-fix the translation
   // stripped both fields, so SubmitStep.tsx never rendered the
   // wizardErrors WIZARD_DUPLICATE copy on the idempotent-resume path.
-  const upstream = (result.body ?? {}) as Record<string, unknown>;
-  if (upstream && typeof upstream === "object" && "queued" in upstream) {
+  //
+  // audit-2026-05-07 H-0327 — narrow the upstream body with a local type
+  // guard so each field's type is statically verified at the read site
+  // instead of probing an opaque `Record<string, unknown>`. A backbone-
+  // side rename of `verification_id` / `queued` now surfaces here as a
+  // missing branch, not as a silent null/false fallback.
+  const upstream = result.body;
+  if (isProcessKeyOnboardResponse(upstream)) {
     return NextResponse.json({
       strategy_id: args.strategy_id,
       status: "pending_review",
@@ -650,5 +656,27 @@ async function unifiedFinalizeWizardHandler(args: {
       ...(upstream.idempotent === true ? { idempotent: true } : {}),
     });
   }
-  return NextResponse.json(upstream);
+  return NextResponse.json(upstream ?? {});
+}
+
+/**
+ * audit-2026-05-07 H-0327 — local narrow over the /process-key response
+ * shape this handler depends on. Avoids the `Record<string, unknown>`
+ * cast at the call site so subsequent property accesses are typed.
+ */
+interface ProcessKeyOnboardResponse {
+  queued?: boolean;
+  verification_id?: string | null;
+  code?: string;
+  idempotent?: boolean;
+}
+
+function isProcessKeyOnboardResponse(
+  body: unknown,
+): body is ProcessKeyOnboardResponse {
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    "queued" in (body as Record<string, unknown>)
+  );
 }
