@@ -1898,6 +1898,31 @@ export const getMyAllocationDashboard = cache(
         }),
       };
     };
+    // audit-2026-05-07 H-0484: explicit field assignment instead of
+    // `{ ...(row as unknown as BridgeOutcome), ... }`. The previous
+    // spread + force-cast hid drift: if the SELECT column list ever
+    // drops a `BridgeOutcome` key (e.g. `needs_recompute`, `delta_30d`),
+    // the cast silently produces an object missing that field and
+    // downstream consumers would read `undefined` instead of failing
+    // type-check. Pull each `BridgeOutcome` key from the raw row by
+    // name so a missing column becomes a TS error.
+    const pickBridgeOutcomeFields = (row: RawRow): BridgeOutcome => ({
+      id: row.id as string,
+      kind: row.kind as BridgeOutcome["kind"],
+      percent_allocated: (row.percent_allocated as number | null) ?? null,
+      allocated_at: (row.allocated_at as string | null) ?? null,
+      rejection_reason:
+        (row.rejection_reason as BridgeOutcome["rejection_reason"]) ?? null,
+      note: (row.note as string | null) ?? null,
+      delta_30d: (row.delta_30d as number | null) ?? null,
+      delta_90d: (row.delta_90d as number | null) ?? null,
+      delta_180d: (row.delta_180d as number | null) ?? null,
+      estimated_delta_bps: (row.estimated_delta_bps as number | null) ?? null,
+      estimated_days: (row.estimated_days as number | null) ?? null,
+      needs_recompute: Boolean(row.needs_recompute),
+      created_at: row.created_at as string,
+    });
+
     const outcomes: OutcomeRow[] = ((outcomesFullRes.data ?? []) as RawRow[]).map(
       (row) => {
         const replRaw = row.replacement_strategy;
@@ -1909,7 +1934,7 @@ export const getMyAllocationDashboard = cache(
           ? normalizeEmbed((mdObj as RawRow).original_strategy)
           : null;
         return {
-          ...(row as unknown as BridgeOutcome),
+          ...pickBridgeOutcomeFields(row),
           match_decision_id: (row.match_decision_id as string | null) ?? null,
           replacement_strategy: normalizeEmbed(replRaw),
           match_decision: origInner ? { original_strategy: origInner } : null,
