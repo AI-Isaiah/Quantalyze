@@ -38,12 +38,17 @@ const buildResult = vi.hoisted(() => ({
   countByTable: {} as Record<string, number>,
   // For `.maybeSingle()` results — keyed by table.
   maybeSingleByTable: {} as Record<string, MockResult>,
+  // audit-2026-05-07 H-0502: getMyAllocationDashboard now asserts
+  // auth.uid() === userId. Tests that exercise the happy path keep
+  // authUserId = "user-1"; the H-0502 mismatch test overrides it.
+  authUserId: "user-1" as string | null,
 }));
 
 function reset() {
   buildResult.byTable = {};
   buildResult.countByTable = {};
   buildResult.maybeSingleByTable = {};
+  buildResult.authUserId = "user-1";
 }
 
 function chainFor(table: string) {
@@ -95,7 +100,11 @@ vi.mock("@/lib/supabase/server", () => ({
     from: (table: string) => chainFor(table),
     auth: {
       getUser: async () => ({
-        data: { user: { id: "user-1" } },
+        data: {
+          user: buildResult.authUserId
+            ? { id: buildResult.authUserId }
+            : null,
+        },
         error: null,
       }),
     },
@@ -468,6 +477,33 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     expect(payload.flaggedHoldings[0].top_candidate_name).not.toBe(
       "Leaked Candidate Name",
     );
+  });
+});
+
+describe("getMyAllocationDashboard — audit-2026-05-07 H-0502 / C-0172 / H-0481 (auth backstop)", () => {
+  it("throws when the userId argument does not match the authenticated user", async () => {
+    // Simulate a caller passing a userId that wasn't sourced from
+    // auth.getUser() (the foot-gun: a future caller takes the id from
+    // a query param / header / cookie without auth verification). The
+    // admin-client reads below would otherwise happily return THAT
+    // user's full holdings + outcomes history.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.authUserId = "attacker"; // logged-in as attacker, queries victim
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("victim")).rejects.toThrow(
+      /userId does not match authenticated user/,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("throws when there is no authenticated user at all", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.authUserId = null;
+    const { getMyAllocationDashboard } = await import("./queries");
+    await expect(getMyAllocationDashboard("user-1")).rejects.toThrow(
+      /userId does not match authenticated user/,
+    );
+    errSpy.mockRestore();
   });
 });
 

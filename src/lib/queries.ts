@@ -1707,6 +1707,34 @@ export const getMyAllocationDashboard = cache(
     const supabase = await createClient();
     const admin = createAdminClient();
 
+    // audit-2026-05-07 H-0502 / C-0172 / H-0481: defensive auth backstop.
+    // Every read below (api_keys via .eq('user_id', userId); bridge_outcomes,
+    // match_decisions, match_batches, allocator_equity_snapshots,
+    // allocator_holdings via .eq('allocator_id', userId)) uses the inline
+    // userId argument as its sole tenant boundary — the admin client
+    // bypasses RLS by design. Today every caller resolves userId via
+    // supabase.auth.getUser() server-side, but if a future caller ever
+    // accepts userId from a query param / header / cookie without that
+    // check, this function would happily exfiltrate that allocator's full
+    // holdings + outcomes history. Assert auth.uid()===userId here so the
+    // foot-gun fails closed instead of silent cross-tenant disclosure.
+    //
+    // The guard is STRICT: it requires an authenticated session whose
+    // user.id matches the argument. Live integration tests that
+    // previously called this function with an admin-seeded user id and
+    // no session must sign in as that user first (see
+    // src/__tests__/outcomes-join-rls.test.ts for the existing pattern).
+    const { data: { user: authUser } } = await supabase.auth.getUser();
+    if (!authUser || authUser.id !== userId) {
+      console.error(
+        "[queries.getMyAllocationDashboard] userId / auth.uid() mismatch",
+        { argUserId: userId, authUid: authUser?.id ?? null },
+      );
+      throw new Error(
+        "getMyAllocationDashboard: userId does not match authenticated user",
+      );
+    }
+
     // Step 1: fan out every userId-keyed fetch in one wave. The Phase 07
     // inputs (equity snapshots, allocator holdings, api keys) don't depend
     // on the portfolio row, so we parallelise them with getRealPortfolio
