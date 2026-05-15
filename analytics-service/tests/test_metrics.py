@@ -459,26 +459,110 @@ def test_daily_returns_grid_empty_input(empty_returns):
 
 
 def test_qstats_scalars_complete_set(golden_returns, benchmark_returns):
-    """METRICS-11: all 10 new scalars present (None if computation fails)."""
+    """METRICS-11: all 10 new scalars present (None if computation fails).
+
+    Audit 2026-05-07 H-0718: also exposes `r_squared_status` companion field
+    so operators can disambiguate 'no benchmark' / 'ok' / 'error'.
+    """
     result = compute_qstats_scalars(golden_returns, benchmark_returns)
     expected_keys = {
         "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
         "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
         "serenity_index", "r_squared", "time_in_market",
+        "r_squared_status",
     }
     assert set(result.keys()) == expected_keys
     for key, val in result.items():
-        assert val is None or isinstance(val, (int, float))
+        if key == "r_squared_status":
+            assert val in {"no_benchmark", "ok", "error"}
+        else:
+            assert val is None or isinstance(val, (int, float))
 
 
 def test_qstats_scalars_handle_missing_benchmark(golden_returns):
-    """METRICS-11: r_squared returns None when benchmark missing (graceful)."""
+    """METRICS-11: r_squared returns None when benchmark missing (graceful).
+
+    Audit 2026-05-07 H-0718: `r_squared_status` must be 'no_benchmark' (not 'error')
+    when the caller did not pass a benchmark series.
+    """
     result = compute_qstats_scalars(golden_returns, None)
     assert result["r_squared"] is None
+    assert result["r_squared_status"] == "no_benchmark"
     # Non-benchmark scalars still computed (tolerate qs failures via try/except)
     expected_keys = {
         "recovery_factor", "ulcer_index", "upi", "kelly_criterion",
         "probabilistic_sharpe_ratio", "common_sense_ratio", "cpc_index",
         "serenity_index", "r_squared", "time_in_market",
+        "r_squared_status",
     }
     assert set(result.keys()) == expected_keys
+
+
+def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monkeypatch):
+    """Audit 2026-05-07 H-0710 / H-0713 / H-0723: a qs.stats.* failure must emit
+    `logger.warning` with the scalar name + returns length so operators can detect
+    silent regressions. Failure-soft contract (other 9 scalars unaffected) is
+    preserved.
+    """
+    import logging
+    import services.metrics as metrics_module
+
+    def boom_recovery_factor(_returns):
+        raise RuntimeError("simulated qs.stats.recovery_factor failure")
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "recovery_factor", boom_recovery_factor
+    )
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_qstats_scalars(golden_returns, None)
+
+    # The failing scalar is None as before, the other 9 are still computed.
+    assert result["recovery_factor"] is None
+    # And the failure produced a WARNING log naming the scalar.
+    failing_records = [
+        r for r in caplog.records
+        if "recovery_factor" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert failing_records, (
+        "compute_qstats_scalars must log WARNING with scalar name on failure"
+    )
+
+
+def test_qstats_scalars_r_squared_status_error_on_qs_failure(
+    golden_returns, benchmark_returns, monkeypatch
+):
+    """Audit 2026-05-07 H-0718: when a benchmark IS present but qs.stats.r_squared
+    raises, the companion `r_squared_status` field must be 'error' (not 'no_benchmark'
+    and not 'ok'). This is the disambiguation that lets operators see the failure
+    state without trawling logs.
+    """
+    import services.metrics as metrics_module
+
+    def boom_r_squared(_returns, _benchmark):
+        raise RuntimeError("simulated qs.stats.r_squared failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", boom_r_squared)
+
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    assert result["r_squared"] is None
+    assert result["r_squared_status"] == "error"
+
+
+def test_qstats_scalars_time_in_market_is_unbiased_fraction():
+    """Audit 2026-05-07 H-0724: `time_in_market` must be the true fraction
+    `(returns != 0).sum() / len(returns)`, NOT `qs.stats.exposure` which
+    ceil-rounds UP to the nearest 1% (a strategy with 1 active day in 252
+    would otherwise display as 1.0% instead of ~0.4%).
+    """
+    dates = pd.bdate_range("2024-01-01", periods=252)
+    # 1 non-zero return day in 252: true exposure ≈ 0.00397, qs.stats.exposure → 0.01
+    values = np.zeros(252)
+    values[100] = 0.05
+    returns = pd.Series(values, index=dates, name="returns")
+    result = compute_qstats_scalars(returns, None)
+    expected = 1.0 / 252.0
+    assert result["time_in_market"] is not None
+    # Must be the true fraction (< 0.005), NOT the ceil-rounded 0.01 from qs.
+    assert abs(result["time_in_market"] - expected) < 1e-9
+    assert result["time_in_market"] < 0.005

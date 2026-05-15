@@ -532,22 +532,42 @@ def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
 def compute_qstats_scalars(
     returns: pd.Series,
     benchmark: pd.Series | None,
-) -> dict[str, float | None]:
+) -> dict[str, float | None | str]:
     """METRICS-11: Compute the 10 new qstats scalars.
 
-    Each scalar is wrapped in try/except so a single qs failure doesn't take
-    down the whole metrics computation (mirrors existing pattern at
-    metrics.py:97-138). All keys are always present in the output dict; the
-    value is None when the underlying computation fails or input is missing
-    (e.g., r_squared without benchmark).
+    Audit 2026-05-07 H-0710 / H-0713 / H-0723:
+        Each scalar is still wrapped in try/except so a single qs failure
+        doesn't take down the whole metrics computation, but each `except`
+        now emits `logger.warning(..., exc_info=True)` with the scalar name
+        + returns length context. This converts "10 scalars silently degrade
+        to None" into a triggerable operator signal (Railway log). Also closes
+        the timing-oracle side channel insofar as the per-scalar throw is now
+        attributable in logs rather than only inferrable from latency.
+
+    Audit 2026-05-07 H-0718:
+        `r_squared` previously collapsed three states ('no benchmark',
+        'benchmark present but qs raised', 'benchmark present + qs returned
+        NaN/Inf') into the single None sentinel. We now emit a companion
+        `r_squared_status` key with one of 'no_benchmark' | 'ok' | 'error'
+        so operators can disambiguate the failure mode without reading logs.
+
+    Audit 2026-05-07 H-0724:
+        `time_in_market` previously used `qs.stats.exposure(returns)`, whose
+        internal `_ceil(ex * 100) / 100` rounds UP to the nearest percent
+        (e.g., 1 active day in 252 displays as 1% instead of 0.4%). We now
+        compute the unbiased fraction directly: `(returns != 0).sum() / len(returns)`.
+
+    All keys are always present in the output dict; the value is None when
+    the underlying computation fails or input is missing.
 
     Output keys (D-01 sibling-table contract):
         recovery_factor, ulcer_index, upi (ulcer_performance_index),
         kelly_criterion, probabilistic_sharpe_ratio (qs.stats.probabilistic_ratio),
         common_sense_ratio, cpc_index, serenity_index, r_squared (vs benchmark),
-        time_in_market (qstats name = `exposure`, output key per CONTEXT.md).
+        time_in_market (fraction in [0, 1], not ceil-rounded percent),
+        r_squared_status (companion: 'no_benchmark' | 'ok' | 'error').
     """
-    result: dict[str, float | None] = {
+    result: dict[str, float | None | str] = {
         "recovery_factor": None,
         "ulcer_index": None,
         "upi": None,
@@ -557,50 +577,89 @@ def compute_qstats_scalars(
         "cpc_index": None,
         "serenity_index": None,
         "r_squared": None,
+        "r_squared_status": "no_benchmark",
         "time_in_market": None,
     }
+    returns_len = len(returns) if returns is not None else None
 
     try:
         result["recovery_factor"] = _safe_float(qs.stats.recovery_factor(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar recovery_factor failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["ulcer_index"] = _safe_float(qs.stats.ulcer_index(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar ulcer_index failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["upi"] = _safe_float(qs.stats.ulcer_performance_index(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar upi failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["kelly_criterion"] = _safe_float(qs.stats.kelly_criterion(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar kelly_criterion failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["probabilistic_sharpe_ratio"] = _safe_float(qs.stats.probabilistic_ratio(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar probabilistic_sharpe_ratio failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["common_sense_ratio"] = _safe_float(qs.stats.common_sense_ratio(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar common_sense_ratio failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["cpc_index"] = _safe_float(qs.stats.cpc_index(returns))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar cpc_index failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
     try:
         result["serenity_index"] = _safe_float(qs.stats.serenity_index(returns))
-    except Exception:
-        pass
-    try:
-        if benchmark is not None and len(benchmark) > 0:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar serenity_index failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
+    # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.
+    if benchmark is not None and len(benchmark) > 0:
+        try:
             result["r_squared"] = _safe_float(qs.stats.r_squared(returns, benchmark))
-    except Exception:
-        pass
+            result["r_squared_status"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            result["r_squared_status"] = "error"
+            logger.warning(
+                "qstats scalar r_squared failed (returns_len=%s, benchmark_len=%s): %s",
+                returns_len, len(benchmark), exc, exc_info=True,
+            )
+    # H-0724: unbiased time-in-market fraction (qs.stats.exposure ceil-rounds UP).
     try:
-        result["time_in_market"] = _safe_float(qs.stats.exposure(returns))
-    except Exception:
-        pass
+        if returns_len and returns_len > 0:
+            result["time_in_market"] = _safe_float(
+                float((returns != 0).sum()) / float(returns_len)
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar time_in_market failed (returns_len=%s): %s",
+            returns_len, exc, exc_info=True,
+        )
 
     return result
 
