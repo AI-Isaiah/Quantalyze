@@ -2144,3 +2144,126 @@ class TestTurnoverNavGapsDifferentiated:
         # Pre-fix, prev_positions advanced to Day 2's {BTC: 5.0} and
         # Day 3 turnover was silently 0.0.
         assert days["2025-01-03"] == pytest.approx(0.04, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0736: cardinality caps on unbounded JSONB payloads
+# (realized_pnl_per_trade, exposure_series). Truncation surfaces a flag
+# so the dashboard can warn the allocator the derived KPIs are partial.
+# ---------------------------------------------------------------------------
+class TestUnboundedJsonbCaps:
+    """A fill-flood or snapshot-flood on a single strategy must NOT
+    inflate strategy_analytics JSONB without bound. The cap keeps the
+    PostgREST response sizes deterministic and flips a flag so the
+    dashboard can warn allocators the per-trade / per-date series is
+    truncated."""
+
+    @pytest.mark.asyncio
+    async def test_realized_pnl_per_trade_capped_with_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When N closed positions > cap, only the first `cap` records
+        are persisted to realized_pnl_per_trade and the data_quality
+        flag set surfaces truncation."""
+        import services.position_reconstruction as pr_mod
+
+        # Use a small cap so the test stays fast (3 closed positions,
+        # cap=2 → truncated to first 2).
+        monkeypatch.setattr(pr_mod, "_REALIZED_PNL_PER_TRADE_CAP", 2)
+
+        # 3 closed long positions (buy → sell → buy → sell → buy → sell)
+        fills = []
+        for i in range(3):
+            fills.append({
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+                "price": 100.0 + i, "quantity": 1.0, "fee": 0.0,
+                "timestamp": f"2024-01-0{i*2+1}T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            })
+            fills.append({
+                "symbol": "BTCUSDT", "exchange": "binance", "side": "sell",
+                "price": 110.0 + i, "quantity": 1.0, "fee": 0.0,
+                "timestamp": f"2024-01-0{i*2+2}T00:00:00+00:00",
+                "raw_data": {}, "is_fill": True,
+            })
+
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            out = await reconstruct_positions("strat-1", mock_supabase)
+
+        # All 3 positions reach the aggregate KPIs — closed_positions etc.
+        assert out["closed_positions"] == 3
+        assert out["winners_count"] == 3
+        # But realized_pnl_per_trade is truncated to the cap.
+        assert len(out["realized_pnl_per_trade"]) == 2
+        flags = out.get("data_quality_flags") or {}
+        assert flags.get("realized_pnl_per_trade_truncated") is True
+        assert flags.get("realized_pnl_per_trade_truncated_kept") == 2
+        assert flags.get("realized_pnl_per_trade_truncated_total") == 3
+
+    @pytest.mark.asyncio
+    async def test_realized_pnl_per_trade_no_flag_below_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Strategies below the cap MUST NOT carry the truncation flag
+        — pinning the no-false-positive contract."""
+        import services.position_reconstruction as pr_mod
+
+        monkeypatch.setattr(pr_mod, "_REALIZED_PNL_PER_TRADE_CAP", 10_000)
+
+        fills = [
+            {"symbol": "BTCUSDT", "exchange": "binance", "side": "buy",
+             "price": 100.0, "quantity": 1.0, "fee": 0.0,
+             "timestamp": "2024-01-01T00:00:00+00:00",
+             "raw_data": {}, "is_fill": True},
+            {"symbol": "BTCUSDT", "exchange": "binance", "side": "sell",
+             "price": 110.0, "quantity": 1.0, "fee": 0.0,
+             "timestamp": "2024-01-02T00:00:00+00:00",
+             "raw_data": {}, "is_fill": True},
+        ]
+        mock_supabase = _make_mock_supabase(fills=fills)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            out = await reconstruct_positions("strat-1", mock_supabase)
+        flags = out.get("data_quality_flags") or {}
+        assert "realized_pnl_per_trade_truncated" not in flags
+
+    @pytest.mark.asyncio
+    async def test_exposure_series_capped_with_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """exposure_series persisted to JSONB is capped at
+        _EXPOSURE_SERIES_CAP; aggregates (mean/std/max) still see the
+        full set so KPIs do NOT degrade — only the per-date list."""
+        import services.position_reconstruction as pr_mod
+
+        monkeypatch.setattr(pr_mod, "_EXPOSURE_SERIES_CAP", 2)
+
+        # 3 distinct snapshot dates → exposure_series_records expected
+        # to be 3 pre-cap, 2 post-cap.
+        snaps = [
+            {"snapshot_date": "2024-01-01", "side": "long", "size_usd": 500.0},
+            {"snapshot_date": "2024-01-02", "side": "long", "size_usd": 600.0},
+            {"snapshot_date": "2024-01-03", "side": "long", "size_usd": 700.0},
+        ]
+        mock = _make_exposure_snapshots_mock(snaps)
+        with patch(
+            "services.position_reconstruction.db_execute",
+            side_effect=_run_sync,
+        ):
+            result = await compute_exposure_metrics("strat-1", mock)
+
+        assert "mean_gross_exposure" in result
+        # Aggregates over the FULL set, not the capped one.
+        assert result["mean_gross_exposure"] == pytest.approx(600.0)
+        # exposure_series truncated to 2.
+        assert len(result["exposure_series"]) == 2
+        flags = result.get("data_quality_flags") or {}
+        assert flags.get("exposure_series_truncated") is True
+        assert flags.get("exposure_series_truncated_kept") == 2
+        assert flags.get("exposure_series_truncated_total") == 3

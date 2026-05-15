@@ -32,6 +32,28 @@ logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 _LOCK_HOLD_LOG_THRESHOLD_S = 1.0
 
 
+# Audit-2026-05-07 H-0736: cardinality caps on the unbounded JSONB
+# payloads (`realized_pnl_per_trade`, `exposure_series`) persisted to
+# strategy_analytics. Without a cap, a fill-flood or snapshot-flood on
+# any single strategy bloats the JSONB blob → PostgREST response sizes
+# slow every reader, TOAST pressure on strategy_analytics, and the
+# frontend metrics-parity helper allocates O(N) per render.
+#
+# Caps are deliberately generous: a real strategy with daily fills for
+# 10 years × 50 symbols stays well under 10 000. Truncation surfaces a
+# flag (`realized_pnl_per_trade_truncated` / `exposure_series_truncated`)
+# so the dashboard can warn the allocator their analytics are partial.
+#
+# Downstream consumer (`analytics_runner._compute_derived_trade_metrics`)
+# computes SQN over the per-trade list and segments profit-factor by
+# side, so we keep the FIRST N records (chronologically — closed by
+# closing-fill timestamp via iteration order from FIFO matching). Tail
+# truncation preserves the open-of-history characterization sample;
+# the dashboard flag makes the partial-window state explicit.
+_REALIZED_PNL_PER_TRADE_CAP = 10_000
+_EXPOSURE_SERIES_CAP = 10_000
+
+
 # Audit-2026-05-07 P1101 (caller follow-up): per-worker per-strategy
 # asyncio.Lock registry — defense-in-depth above the SQL-side
 # pg_advisory_xact_lock (migration 113) + (strategy_id, symbol, side,
@@ -270,6 +292,20 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     # P1994 fix: emit None (not phantom 0.0) for closed positions
     # missing realized_pnl. Downstream consumers can now distinguish
     # "this position broke even" from "we don't know what happened".
+    #
+    # Audit H-0736: cap cardinality so a fill-flood can't bloat the
+    # strategy_analytics JSONB. Cap is generous (see
+    # _REALIZED_PNL_PER_TRADE_CAP). When truncated, surface a flag so
+    # the dashboard can warn the allocator their derived KPIs (SQN /
+    # profit factor / R:R) are computed over a partial window.
+    realized_pnl_per_trade_truncated = (
+        len(closed) > _REALIZED_PNL_PER_TRADE_CAP
+    )
+    closed_for_per_trade = (
+        closed[:_REALIZED_PNL_PER_TRADE_CAP]
+        if realized_pnl_per_trade_truncated
+        else closed
+    )
     realized_pnl_per_trade = [
         {
             "side": p.get("side"),
@@ -277,8 +313,16 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
                 float(p["realized_pnl"]) if p.get("realized_pnl") is not None else None
             ),
         }
-        for p in closed
+        for p in closed_for_per_trade
     ]
+    if realized_pnl_per_trade_truncated:
+        aggregated_data_quality_flags["realized_pnl_per_trade_truncated"] = True
+        aggregated_data_quality_flags["realized_pnl_per_trade_truncated_kept"] = (
+            _REALIZED_PNL_PER_TRADE_CAP
+        )
+        aggregated_data_quality_flags["realized_pnl_per_trade_truncated_total"] = (
+            len(closed)
+        )
 
     # P1994 fix: merge breakeven + missing-PnL counters into the
     # aggregated quality flags so the analytics_runner can surface them
@@ -946,13 +990,21 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
                 net -= abs(size_usd)
             else:
                 net += abs(size_usd)
+        # Aggregates (mean/std/max) still see the full set — capping
+        # only the per-date series persisted to JSONB. Caller can
+        # always recompute the full series from position_snapshots.
         gross_exposures.append(gross)
         net_exposures.append(net)
-        exposure_series_records.append({
-            "date": str(date_key),
-            "gross": round(gross, 2),
-            "net": round(net, 2),
-        })
+        # Audit H-0736: cap exposure_series cardinality so a
+        # snapshot-flood can't bloat strategy_analytics JSONB.
+        if len(exposure_series_records) < _EXPOSURE_SERIES_CAP:
+            exposure_series_records.append({
+                "date": str(date_key),
+                "gross": round(gross, 2),
+                "net": round(net, 2),
+            })
+
+    exposure_series_truncated = len(by_date) > _EXPOSURE_SERIES_CAP
 
     if not gross_exposures:
         # Defensive: with `by_date` non-empty above this branch is
@@ -981,15 +1033,21 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         "max_net_exposure": round(max_net, 2),
         "exposure_series": exposure_series_records,
     }
+    dq_flags: dict[str, Any] = {}
     # Audit H-0738: contamination-guard could not run because the
     # api_key_id lookup failed. We still publish (fail-open policy
     # for back-compat) but the marker tells consumers/auditors the
     # output is NOT guaranteed shared-key-safe. Three failure modes
     # are now discriminable in the JSONB blob.
     if api_key_lookup_failed:
-        out["data_quality_flags"] = {
-            "exposure_metrics_apikey_lookup_failed": True,
-        }
+        dq_flags["exposure_metrics_apikey_lookup_failed"] = True
+    # Audit H-0736: exposure_series truncated at cardinality cap.
+    if exposure_series_truncated:
+        dq_flags["exposure_series_truncated"] = True
+        dq_flags["exposure_series_truncated_kept"] = _EXPOSURE_SERIES_CAP
+        dq_flags["exposure_series_truncated_total"] = len(by_date)
+    if dq_flags:
+        out["data_quality_flags"] = dq_flags
     return out
 
 
