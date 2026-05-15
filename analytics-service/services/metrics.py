@@ -901,17 +901,47 @@ def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) ->
     return beta
 
 
-def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
-    """Log returns series = np.log1p(returns).
+# H-0728: Catastrophic-loss floor. `np.log1p(r)` is NaN for r <= -1
+# (a 100%+ loss day — liquidation event, gap-down, leveraged blow-up).
+# We clamp returns to (-1 + 1e-9) before log1p so the event surfaces as a
+# very large negative log return rather than disappearing through
+# `_finalize_rolling.dropna()`. The chosen floor preserves dataset fidelity
+# while keeping the result finite — `log1p(-1 + 1e-9) ≈ -20.72`.
+_LOG_RETURN_FLOOR: float = -1.0 + 1e-9
 
-    Same length as input (no window dropoff). Used by EquityCurve "Log Returns"
-    toggle (METRICS-12). Routed through _finalize_rolling for NaN/Inf scrubbing
-    + cap_data_points consistency with the other series helpers.
+
+def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
+    """Cumulative log-equity series = `np.log1p(returns).cumsum()`.
+
+    Audit 2026-05-07 H-0719: this helper previously returned per-period
+    `np.log1p(returns)` — values oscillating around zero (e.g. 0.005, -0.012,
+    0.003). The TS consumer (HeadlineMetricsPanel.tsx) feeds the output
+    directly into an EquityCurve renderer; for a 'Log Returns' toggle on an
+    equity curve the meaningful payload is the CUMULATIVE log equity
+    (`np.log((1+returns).cumprod())`, equivalently `np.log1p(returns).cumsum()`),
+    which trends monotonically with the equity curve on a log axis. The
+    per-period series rendered as noise hovering around zero. We now emit
+    cumulative log equity so the toggle is semantically meaningful.
+
+    Audit 2026-05-07 H-0728: `np.log1p(r)` is NaN for r <= -1 (a 100%+ loss
+    day — liquidation event). `_finalize_rolling.dropna()` would silently
+    remove the SINGLE most important day from the time series. We clamp
+    returns to `_LOG_RETURN_FLOOR = -1 + 1e-9` before log1p so the
+    catastrophic event surfaces as a very large negative log return
+    (`log1p(-1+1e-9) ≈ -20.72`) instead of vanishing. Same length as input
+    (no window dropoff). Routed through _finalize_rolling for NaN/Inf scrubbing
+    (any non-finite returns survive the clamp via dropna) + cap_data_points
+    consistency with the other series helpers.
     """
     if len(returns) == 0:
         return []
-    log_rets = np.log1p(returns)
-    return _finalize_rolling(pd.Series(log_rets, index=returns.index))
+    # H-0728: clamp to keep r <= -1 within log1p's domain. Anything > -1 is
+    # unchanged so this is a no-op for non-catastrophic strategies.
+    clamped = returns.clip(lower=_LOG_RETURN_FLOOR)
+    log_rets = np.log1p(clamped)
+    # H-0719: cumulative log equity, not per-period log returns.
+    cumulative = log_rets.cumsum()
+    return _finalize_rolling(pd.Series(cumulative, index=returns.index))
 
 
 def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[dict[str, Any]]:

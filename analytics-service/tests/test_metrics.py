@@ -610,12 +610,58 @@ def test_log_returns_series_full_length(golden_returns):
 
 
 def test_log_returns_series_values(golden_returns):
-    """METRICS-12: values match np.log1p(returns)."""
-    expected = np.log1p(golden_returns)
+    """METRICS-12: values match cumulative `np.log1p(returns).cumsum()`.
+
+    Audit 2026-05-07 H-0719: the EquityCurve "Log Returns" toggle renders
+    this series on a log axis where the meaningful shape is cumulative log
+    equity, NOT per-period log returns. The previous contract (per-period)
+    rendered as noise hovering around 0.
+    """
+    expected = np.log1p(golden_returns).cumsum()
     result = _log_returns_series(golden_returns)
     # _finalize_rolling rounds to 4 decimals
     for point, exp in zip(result, expected):
         assert abs(point["value"] - round(float(exp), 4)) < 1e-4
+
+
+def test_log_returns_series_monotonic_when_returns_positive():
+    """Audit 2026-05-07 H-0719: cumulative log equity must be MONOTONIC
+    NON-DECREASING when every input return is non-negative. The old per-period
+    contract failed this — values oscillated around zero even on a strictly
+    upward-trending strategy.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=100)
+    returns = pd.Series(np.full(100, 0.001), index=dates, name="returns")
+    result = _log_returns_series(returns)
+    values = [p["value"] for p in result]
+    for i in range(len(values) - 1):
+        assert values[i + 1] >= values[i] - 1e-9, (
+            f"cumulative log equity must be monotonic for positive returns; "
+            f"got {values[i]} → {values[i+1]} at index {i}"
+        )
+
+
+def test_log_returns_series_preserves_catastrophic_loss():
+    """Audit 2026-05-07 H-0728: a return of -1 or worse (100%+ loss — a
+    liquidation event) previously hit `np.log1p(-1.05)` → NaN, which
+    `_finalize_rolling.dropna()` silently removed. The SINGLE most important
+    risk event for the strategy would vanish from the chart. We now clamp to
+    -1+1e-9 before log1p so the event surfaces as a large negative log
+    return (~-20.72), not a dropped row.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    values = np.array([0.01, 0.02, 0.01, -1.0, 0.005, -0.5, 0.003, 0.0, 0.004, 0.001])
+    returns = pd.Series(values, index=dates, name="returns")
+    result = _log_returns_series(returns)
+    # Catastrophic event preserved (no row dropped).
+    assert len(result) == 10
+    # The cumulative log equity at the catastrophic day must be very large
+    # negative — the strategy is essentially wiped out.
+    cat_idx = 3  # 4th day in the values array (zero-indexed)
+    assert result[cat_idx]["value"] < -19.0, (
+        "catastrophic-loss day must surface as a very negative cumulative "
+        f"log equity; got {result[cat_idx]['value']}"
+    )
 
 
 # ---------------------------------------------------------------------------
