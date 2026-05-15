@@ -12,15 +12,43 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import statistics
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, TypedDict
 from uuid import UUID
 
 from services.db import db_execute
+
+
+# Audit-2026-05-07 H-0733 / H-0743: wire schemas for the JSONB
+# payloads. Pre-fix both were typed as `list[dict[str, Any]]`, so a
+# producer typo (e.g. `side='LONG'`) silently fed the wrong bucket in
+# `_compute_derived_trade_metrics` downstream.
+class RealizedPnLRecord(TypedDict):
+    """Wire shape of an entry in `trade_metrics.realized_pnl_per_trade`.
+
+    Consumed by `analytics_runner._compute_derived_trade_metrics` to
+    derive SQN and segment profit_factor by side. `side` is `None` only
+    for the data-quality-failure path; `realized_pnl` is `None` when
+    the position has no computable PnL — the producer must not coerce
+    either to a default.
+    """
+
+    side: Literal["long", "short"] | None
+    realized_pnl: float | None
+
+
+class ExposurePoint(TypedDict):
+    """Wire shape of an entry in `exposure_metrics.exposure_series`
+    (also published as the `exposure_series` sibling-kind row, D-01)."""
+
+    date: str  # 'YYYY-MM-DD' per docstring contract
+    gross: float
+    net: float
 
 logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 
@@ -30,6 +58,88 @@ logger = logging.getLogger("quantalyze.analytics.position_reconstruction")
 # while still surfacing the 30s stalls the lock was added to make
 # debuggable. See `reconstruct_positions` log site below.
 _LOCK_HOLD_LOG_THRESHOLD_S = 1.0
+
+
+# Audit-2026-05-07 H-0736: cardinality caps on the unbounded JSONB
+# payloads (`realized_pnl_per_trade`, `exposure_series`) persisted to
+# strategy_analytics. Without a cap, a fill-flood or snapshot-flood on
+# any single strategy bloats the JSONB blob → PostgREST response sizes
+# slow every reader, TOAST pressure on strategy_analytics, and the
+# frontend metrics-parity helper allocates O(N) per render.
+#
+# Caps are deliberately generous: a real strategy with daily fills for
+# 10 years × 50 symbols stays well under 10 000. Truncation surfaces a
+# flag (`realized_pnl_per_trade_truncated` / `exposure_series_truncated`)
+# so the dashboard can warn the allocator their analytics are partial.
+#
+# Downstream consumer (`analytics_runner._compute_derived_trade_metrics`)
+# computes SQN over the per-trade list and segments profit-factor by
+# side, so we keep the FIRST N records (chronologically — closed by
+# closing-fill timestamp via iteration order from FIFO matching). Tail
+# truncation preserves the open-of-history characterization sample;
+# the dashboard flag makes the partial-window state explicit.
+_REALIZED_PNL_PER_TRADE_CAP = 10_000
+_EXPOSURE_SERIES_CAP = 10_000
+
+# Audit-2026-05-07 red-team pass: bound the data_quality_flags
+# per-date lists (turnover_nav_missing_dates / nav_invalid_dates /
+# gap_dates / series_dropped_dates) so a grid-flood can't bloat the
+# strategy_analytics.data_quality_flags JSONB. 1 000 is generous: a
+# strategy with 1 000 NAV-missing dates is already in a triage state
+# the truncation flag will surface. On truncation, emit sibling
+# counter keys (`{name}_truncated`, `*_kept`, `*_total`) matching the
+# convention already used at the realized_pnl_per_trade and
+# exposure_series cap sites — keeps the list[str] payload semantically
+# pure and makes the merge-into-top-level-flags math (sum counters,
+# OR booleans) consistent across all three truncation surfaces.
+_FLAG_LIST_CAP = 1_000
+
+
+def _coerce_finite_float(value: Any, label: str) -> float:
+    """Coerce value to a finite float or raise ValueError.
+
+    Why: Supabase numeric driver returns Decimal; downstream JSONB
+    serializes via str(Decimal) and silently drifts precision. `float()`
+    on its own also accepts `Decimal('NaN')` and `float('inf')`, which
+    poison the turnover series with `nan`/`inf` in JSONB. Centralizing
+    coercion + finiteness lets the three callers (positions, prices, NAV)
+    share one rejection path.
+
+    Re-raises `OverflowError` (raised by `float(huge_int)` for ints
+    outside double-precision range) as `ValueError` so callers can use
+    a single catch tuple `(AttributeError, TypeError, ValueError)` and
+    route the bad date into `dropped_dates` instead of aborting the
+    whole series.
+    """
+    try:
+        out = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"overflow coercing {label} value {value!r}: {exc}") from exc
+    if not math.isfinite(out):
+        raise ValueError(f"non-finite {label} value {value!r}")
+    return out
+
+
+def _emit_capped_flag_list(
+    flags: dict[str, Any], name: str, lst: list[str]
+) -> None:
+    """Attach `lst` to `flags[name]`, truncating at `_FLAG_LIST_CAP`.
+
+    On truncation, emit sibling counter keys (`{name}_truncated`,
+    `{name}_truncated_kept`, `{name}_truncated_total`) so consumers can
+    detect the partial-window state without parsing magic strings out of
+    the list. Mirrors the convention used at the realized_pnl_per_trade
+    and exposure_series cap sites.
+    """
+    if not lst:
+        return
+    if len(lst) > _FLAG_LIST_CAP:
+        flags[name] = lst[:_FLAG_LIST_CAP]
+        flags[f"{name}_truncated"] = True
+        flags[f"{name}_truncated_kept"] = _FLAG_LIST_CAP
+        flags[f"{name}_truncated_total"] = len(lst)
+    else:
+        flags[name] = lst
 
 
 # Audit-2026-05-07 P1101 (caller follow-up): per-worker per-strategy
@@ -270,15 +380,28 @@ async def _reconstruct_positions_inner(strategy_id: str, supabase) -> dict:
     # P1994 fix: emit None (not phantom 0.0) for closed positions
     # missing realized_pnl. Downstream consumers can now distinguish
     # "this position broke even" from "we don't know what happened".
-    realized_pnl_per_trade = [
-        {
-            "side": p.get("side"),
-            "realized_pnl": (
+    #
+    # Audit H-0736: cap cardinality so a fill-flood can't bloat the
+    # strategy_analytics JSONB. Sibling counter keys surface partial
+    # window state to the dashboard (SQN / profit factor / R:R are
+    # then known to be computed over the kept slice only).
+    realized_pnl_per_trade: list[RealizedPnLRecord] = [
+        RealizedPnLRecord(
+            side=p.get("side"),
+            realized_pnl=(
                 float(p["realized_pnl"]) if p.get("realized_pnl") is not None else None
             ),
-        }
-        for p in closed
+        )
+        for p in closed[:_REALIZED_PNL_PER_TRADE_CAP]
     ]
+    if len(closed) > _REALIZED_PNL_PER_TRADE_CAP:
+        aggregated_data_quality_flags["realized_pnl_per_trade_truncated"] = True
+        aggregated_data_quality_flags["realized_pnl_per_trade_truncated_kept"] = (
+            _REALIZED_PNL_PER_TRADE_CAP
+        )
+        aggregated_data_quality_flags["realized_pnl_per_trade_truncated_total"] = (
+            len(closed)
+        )
 
     # P1994 fix: merge breakeven + missing-PnL counters into the
     # aggregated quality flags so the analytics_runner can surface them
@@ -704,8 +827,20 @@ def _match_positions_fifo(
                         seconds = 0.0
                     duration_days = round(seconds / 86400, 4)
                     duration_seconds = int(seconds)
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    # Audit H-0745: a silently-dropped duration is
+                    # indistinguishable downstream from a still-open
+                    # position. Log + flag so allocators can tell the
+                    # two apart in the dashboard.
+                    logger.warning(
+                        "Duration parse failed for strategy=%s symbol=%s "
+                        "open=%r close=%r: %s",
+                        strategy_id, symbol,
+                        position_open_time, close_time, exc,
+                    )
+                    position_quality_flags["duration_parse_errors"] = (
+                        position_quality_flags.get("duration_parse_errors", 0) + 1
+                    )
 
             position_dict: dict[str, Any] = {
                 "strategy_id": strategy_id,
@@ -821,9 +956,13 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     """
 
     # Detect shared api_key_id BEFORE we touch snapshots — short-circuits
-    # the contamination case quickly. Failure to read strategies (e.g.
-    # transient DB error) is treated as "unknown" and we proceed: better
-    # to publish exposure than to silently zero it out for everyone.
+    # the contamination case quickly. Failure to read strategies is
+    # treated as "unknown" and we publish anyway (fail-open beats
+    # silently zeroing out exposure for everyone), but Audit H-0738
+    # adds an `exposure_metrics_apikey_lookup_failed` marker so the
+    # three failure modes — no shared key (safe), shared key (skipped),
+    # lookup failed (unknown) — stay discriminable to security reviewers.
+    api_key_lookup_failed = False
     try:
         def _fetch_self():
             return (
@@ -843,6 +982,7 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
             strategy_id, exc,
         )
         api_key_id = None
+        api_key_lookup_failed = True
 
     if api_key_id:
         try:
@@ -886,8 +1026,23 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     result = await db_execute(_fetch_snapshots)
     snapshots = result.data or []
 
+    # Audit H-0738: collect data-quality markers in one place. The
+    # apikey-lookup-failed marker is shared across the no-snapshots
+    # and normal-return paths — without it, three failure modes
+    # (no shared key → safe / shared key → skipped / lookup failed →
+    # unknown) collapsed into a single output shape.
+    dq_flags: dict[str, Any] = {}
+    if api_key_lookup_failed:
+        dq_flags["exposure_metrics_apikey_lookup_failed"] = True
+
     if not snapshots:
-        return {}
+        # Audit H-0747: previously returned bare {} — VolumeExposureTab
+        # rendered $0 across mean/std/max as if those were real
+        # measurements. Surface an explicit "no snapshots" marker so
+        # the dashboard shows "Position snapshots not yet collected"
+        # rather than spurious zeros.
+        dq_flags["exposure_metrics_no_snapshots"] = True
+        return {"data_quality_flags": dq_flags}
 
     # Group by snapshot_date to compute per-date exposure
     by_date: dict[str, list[dict]] = defaultdict(list)
@@ -897,8 +1052,8 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     gross_exposures: list[float] = []
     net_exposures: list[float] = []
     # METRICS-05: per-date exposure points for sibling-table persistence.
-    # Uses iteration over the same loop that previously discarded the data.
-    exposure_series_records: list[dict[str, Any]] = []
+    # Audit H-0743: wire shape pinned by `ExposurePoint` TypedDict.
+    exposure_series_records: list[ExposurePoint] = []
 
     for date_key, date_snaps in by_date.items():
         gross = 0.0
@@ -911,16 +1066,16 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
                 net -= abs(size_usd)
             else:
                 net += abs(size_usd)
+        # Aggregates (mean/std/max) see the full set — only the per-date
+        # series persisted to JSONB is capped.
         gross_exposures.append(gross)
         net_exposures.append(net)
-        exposure_series_records.append({
-            "date": str(date_key),
-            "gross": round(gross, 2),
-            "net": round(net, 2),
-        })
-
-    if not gross_exposures:
-        return {}
+        if len(exposure_series_records) < _EXPOSURE_SERIES_CAP:
+            exposure_series_records.append(ExposurePoint(
+                date=str(date_key),
+                gross=round(gross, 2),
+                net=round(net, 2),
+            ))
 
     mean_gross = statistics.mean(gross_exposures)
     std_gross = statistics.stdev(gross_exposures) if len(gross_exposures) > 1 else 0.0
@@ -930,7 +1085,7 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     std_net = statistics.stdev(net_exposures) if len(net_exposures) > 1 else 0.0
     max_net = max(net_exposures, key=abs)
 
-    return {
+    out: dict[str, Any] = {
         "mean_gross_exposure": round(mean_gross, 2),
         "std_gross_exposure": round(std_gross, 2),
         "max_gross_exposure": round(max_gross, 2),
@@ -939,13 +1094,21 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         "max_net_exposure": round(max_net, 2),
         "exposure_series": exposure_series_records,
     }
+    # Audit H-0736: exposure_series truncated at cardinality cap.
+    if len(by_date) > _EXPOSURE_SERIES_CAP:
+        dq_flags["exposure_series_truncated"] = True
+        dq_flags["exposure_series_truncated_kept"] = _EXPOSURE_SERIES_CAP
+        dq_flags["exposure_series_truncated_total"] = len(by_date)
+    if dq_flags:
+        out["data_quality_flags"] = dq_flags
+    return out
 
 
 def compute_turnover_series_with_flags(
     positions_by_date: dict[str, dict[str, float]],
     prices_by_date: dict[str, dict[str, float]],
     nav_by_date: dict[str, float],
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Compute daily turnover series + sparse-day quality flags.
 
     Pitfall #19 mitigation: contract is documented inline.
@@ -972,15 +1135,33 @@ def compute_turnover_series_with_flags(
 
     Returns:
         Tuple of (series, flags) where:
-          - series: [{date: 'YYYY-MM-DD', turnover: float}, ...] sorted by date asc.
-                    Empty list when positions_by_date is empty.
-          - flags:  dict with optional 'turnover_gap_dates' key listing
-                    dates whose row spans more than one calendar day.
+          - series: [{date: 'YYYY-MM-DD', turnover: float | None}, ...]
+                    sorted by date asc. `turnover` is None when the NAV
+                    row for that date is absent from `nav_by_date` —
+                    distinguishing 'data not yet ingested' from a real
+                    zero-turnover day. Empty list when positions_by_date
+                    is empty.
+          - flags:  dict with optional keys:
+                      'turnover_gap_dates': dates whose row spans more
+                        than one calendar day.
+                      'turnover_nav_missing_dates': dates absent from
+                        nav_by_date (turnover emitted as None).
+                      'turnover_nav_invalid_dates': dates whose NAV row
+                        is present but <= 0 (turnover emitted as 0.0).
 
-    Threat model T-12-04-02: nav <= 0 short-circuits to turnover=0.0
-    rather than raising ZeroDivisionError on a stray zero/negative NAV row.
+    Audit-2026-05-07 H-0744: previously a missing NAV row defaulted to
+    0.0 and short-circuited to turnover=0.0, collapsing three distinct
+    conditions (real margin-call NAV<=0, data-not-yet-ingested, genuine
+    no-rebalances day) into a single zero. The fix differentiates:
+      - date not in nav_by_date → turnover=None + nav_missing_dates flag
+      - date in nav_by_date but nav<=0 → turnover=0.0 + nav_invalid_dates
+        flag (preserves T-12-04-02 short-circuit semantics for back-compat)
+      - normal day → unchanged
+    Additionally, both NAV-missing and NAV-invalid days preserve the
+    PRIOR `prev_positions` so the next valid date computes a true delta
+    across the gap rather than seeing a phantom no-op.
     """
-    flags: dict[str, list[str]] = {}
+    flags: dict[str, Any] = {}
     if not positions_by_date:
         return [], flags
     dates = sorted(positions_by_date.keys())
@@ -988,10 +1169,64 @@ def compute_turnover_series_with_flags(
     prev_positions: dict[str, float] | None = None
     prev_date: datetime | None = None
     gap_dates: list[str] = []
+    nav_missing_dates: list[str] = []
+    nav_invalid_dates: list[str] = []
+    # Audit H-0741: rows the type-validation guard dropped (non-dict
+    # positions / prices payload, or scalar values that can't coerce
+    # to float). Pre-fix the entire date was silently dropped mid-loop
+    # if Decimal/str slipped in from Supabase — no signal reached the
+    # consumer. Surfaced now so dashboards can report
+    # "turnover unavailable due to data-type drift".
+    dropped_dates: list[str] = []
     for date in dates:
-        positions = positions_by_date.get(date, {})
-        prices = prices_by_date.get(date, {})
-        nav = nav_by_date.get(date, 0.0)
+        # Audit H-0741: coerce the per-date payload to plain
+        # dict[str, float] (rejecting NaN/Inf and non-numeric values)
+        # BEFORE the math runs. Pre-fix a Decimal payload would silently
+        # propagate via `round(..., 6) → Decimal` into JSONB, and a None
+        # row would raise AttributeError mid-loop. On failure, record
+        # the date in dropped_dates and continue without advancing
+        # prev_positions — the next valid date then measures delta
+        # against the last known-good snapshot.
+        try:
+            positions_raw = positions_by_date.get(date, {})
+            prices_raw = prices_by_date.get(date, {})
+            if positions_raw is None or prices_raw is None:
+                raise TypeError("positions/prices row is None")
+            positions: dict[str, float] = {
+                str(sym): _coerce_finite_float(qty, f"position[{sym!r}]")
+                for sym, qty in positions_raw.items()
+            }
+            prices: dict[str, float] = {
+                str(sym): _coerce_finite_float(p, f"price[{sym!r}]")
+                for sym, p in prices_raw.items()
+            }
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "compute_turnover_series: skipping date=%r due to "
+                "type-coercion failure: %s",
+                date, exc,
+            )
+            dropped_dates.append(date)
+            continue
+
+        # Audit H-0744: explicit presence check — distinguishes 'NAV
+        # not yet ingested' (key absent) from 'NAV present but bad'
+        # (key present, value <= 0). The pre-fix `.get(date, 0.0)`
+        # collapsed both into a turnover=0 short-circuit.
+        nav_present = date in nav_by_date
+        if nav_present:
+            try:
+                nav = _coerce_finite_float(nav_by_date[date], "NAV")
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "compute_turnover_series: skipping date=%r — NAV "
+                    "value %r not numeric: %s",
+                    date, nav_by_date.get(date), exc,
+                )
+                dropped_dates.append(date)
+                continue
+        else:
+            nav = 0.0
 
         # P1995 fix #1: first observed date has no meaningful
         # prev_positions snapshot — emit turnover=0 instead of
@@ -1020,9 +1255,26 @@ def compute_turnover_series_with_flags(
         ):
             gap_dates.append(date)
 
+        if not nav_present:
+            # Audit H-0744: NAV row absent — emit turnover=None (not 0.0)
+            # so dashboards can render a "data unavailable" marker. Do
+            # NOT update prev_positions so the next valid date still
+            # measures a true delta across the gap.
+            series.append({"date": date, "turnover": None})
+            nav_missing_dates.append(date)
+            if current_date_parsed is not None:
+                prev_date = current_date_parsed
+            continue
+
         if nav <= 0:
+            # NAV present but invalid (margin-call / liquidation /
+            # stray zero row). Preserve T-12-04-02 short-circuit
+            # semantics (turnover=0.0) for back-compat, but surface
+            # the row in nav_invalid_dates and (per H-0744) preserve
+            # prev_positions so the next valid date computes a true
+            # delta over the gap.
             series.append({"date": date, "turnover": 0.0})
-            prev_positions = positions
+            nav_invalid_dates.append(date)
             if current_date_parsed is not None:
                 prev_date = current_date_parsed
             continue
@@ -1038,8 +1290,14 @@ def compute_turnover_series_with_flags(
         if current_date_parsed is not None:
             prev_date = current_date_parsed
 
-    if gap_dates:
-        flags["turnover_gap_dates"] = gap_dates
+    # Red-team pass: cap each flag list at _FLAG_LIST_CAP so a grid
+    # flood can't bloat the strategy_analytics.data_quality_flags JSONB.
+    # Truncation surfaces as sibling counter keys via
+    # `_emit_capped_flag_list`.
+    _emit_capped_flag_list(flags, "turnover_nav_missing_dates", nav_missing_dates)
+    _emit_capped_flag_list(flags, "turnover_nav_invalid_dates", nav_invalid_dates)
+    _emit_capped_flag_list(flags, "turnover_gap_dates", gap_dates)
+    _emit_capped_flag_list(flags, "turnover_series_dropped_dates", dropped_dates)
     return series, flags
 
 
