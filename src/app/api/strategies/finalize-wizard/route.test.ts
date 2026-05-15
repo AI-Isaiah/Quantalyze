@@ -400,6 +400,71 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * the target code. We assert (i) the HTTP status, (ii) a stable error
  * code/text, and (iii) that the raw Postgres message does NOT leak.
  */
+/**
+ * audit-2026-05-07 H-0325/H-0326 — dollar-amount fail-LOUD validation.
+ *
+ * Pre-fix, invalid aum / max_capacity values (negative, NaN, > 1e12,
+ * non-number) were silently coerced to NULL and the strategy finalized
+ * with missing AUM. That produced "Verified by Quantalyze" factsheets
+ * with zero AUM — at minimum bad UX, at worst regulatory exposure.
+ *
+ * Contract: client must send a finite number in [0, 1e12) or omit the
+ * field entirely (null / undefined). Invalid values now return 400.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validation", () => {
+  it("rejects negative aum with 400", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, aum: -5_000_000 }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/aum/);
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+  });
+
+  it("rejects aum at-or-above the 1e12 ceiling with 400", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, aum: 1e20 }));
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects non-numeric aum (string) with 400", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, aum: "foo" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid max_capacity with 400", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, max_capacity: -1 }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/max_capacity/);
+  });
+
+  it("accepts omitted aum (undefined / null)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const POST = await importPost();
+    const bodyNoAum: Record<string, unknown> = { ...VALID_BODY };
+    delete bodyNoAum.aum;
+    const res = await POST(makeReq(bodyNoAum));
+    expect(res.status).toBe(200);
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping", () => {
   function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
     return vi.spyOn(globalThis, "fetch").mockResolvedValue(

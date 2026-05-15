@@ -193,21 +193,44 @@ function validatePayload(
     };
   }
 
+  // audit-2026-05-07 H-0325/H-0326 — fail-LOUD on invalid dollar values
+  // instead of coercing to NULL. Pre-fix a client typo like '-5' or
+  // '1e20' silently dropped to NULL on the server and a strategy
+  // finalized with missing AUM — at minimum bad UX, at worst regulatory
+  // exposure for a "Verified by Quantalyze" factsheet with no AUM. The
+  // contract: client must send a finite number in [0, 1e12), or omit
+  // the field (null / undefined) entirely.
   const MAX_DOLLAR_VALUE = 1_000_000_000_000;
-  const aumNum =
-    typeof aum === "number" &&
-    Number.isFinite(aum) &&
-    aum >= 0 &&
-    aum < MAX_DOLLAR_VALUE
-      ? aum
-      : null;
-  const maxCapacityNum =
-    typeof max_capacity === "number" &&
-    Number.isFinite(max_capacity) &&
-    max_capacity >= 0 &&
-    max_capacity < MAX_DOLLAR_VALUE
-      ? max_capacity
-      : null;
+  const isValidDollar = (v: unknown): v is number =>
+    typeof v === "number" &&
+    Number.isFinite(v) &&
+    v >= 0 &&
+    v < MAX_DOLLAR_VALUE;
+  const isOmitted = (v: unknown): boolean => v === undefined || v === null;
+  if (!isOmitted(aum) && !isValidDollar(aum)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: `aum must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
+        },
+        { status: 400 },
+      ),
+    };
+  }
+  if (!isOmitted(max_capacity) && !isValidDollar(max_capacity)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error: `max_capacity must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
+        },
+        { status: 400 },
+      ),
+    };
+  }
+  const aumNum = isValidDollar(aum) ? aum : null;
+  const maxCapacityNum = isValidDollar(max_capacity) ? max_capacity : null;
 
   // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
   // string), so the prior `as string` casts were redundant. Removing
