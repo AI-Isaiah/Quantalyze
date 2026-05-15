@@ -754,6 +754,19 @@ def _rolling_sortino_from_components(
     rebuilt from scratch on every call. Splitting this inner lets the caller
     materialize `neg_sq` once and pass it into all three window passes.
 
+    Audit 2026-05-07 H-0712 / H-0716: when a rolling window contains zero
+    returns below MAR (an all-winning window — the strategy's BEST state),
+    `neg_sq.rolling(window).sum() == 0`, `roll_dstd == 0`, and
+    `roll_mean / roll_dstd` → ±Inf. Python emits a divide-by-zero RuntimeWarning
+    that nobody catches; `_finalize_rolling` then scrubs Inf → NaN → dropna(),
+    silently removing the windows where the strategy performed BEST. We now
+    do the divide-by-zero check EXPLICITLY via `np.where(roll_dstd > 0, ...,
+    np.nan)` so (a) no RuntimeWarning is emitted on healthy strategies and
+    (b) the intent (undefined-but-good is treated as 'point absent') is visible
+    in the code. The provenance issue (UI cannot tell warmup from undefined
+    from error) is documented in H-0717 and is out of scope here as it requires
+    a downstream contract change.
+
     Mirrors qs.stats.sortino math (downside RMS / N, NOT pandas std / N-1) per
     the contract documented in `_rolling_sortino`.
     """
@@ -761,7 +774,13 @@ def _rolling_sortino_from_components(
         return []
     roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
     roll_mean = returns.rolling(window).mean()
-    return _finalize_rolling((roll_mean / roll_dstd) * np.sqrt(252))
+    # H-0712 / H-0716: explicit divide-by-zero guard. roll_dstd is a pandas
+    # Series; the boolean comparison produces a Series mask we feed into
+    # np.where. NaN-where-undefined preserves the index so _finalize_rolling
+    # can attach the original dates to the surviving points.
+    ratio = np.where(roll_dstd > 0, roll_mean / roll_dstd, np.nan)
+    ratio_series = pd.Series(ratio, index=returns.index)
+    return _finalize_rolling(ratio_series * np.sqrt(252))
 
 
 def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[dict[str, Any]]:

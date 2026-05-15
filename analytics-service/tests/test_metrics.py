@@ -394,6 +394,47 @@ def test_rolling_sortino_converges_to_scalar_at_full_window():
     assert abs(rolling_90[-1]["value"] - scalar) < 0.05
 
 
+def test_rolling_sortino_all_positive_window_no_inf_no_warning():
+    """Audit 2026-05-07 H-0712 / H-0716: an all-positive returns window has
+    zero observations below MAR=0 → downside std = 0 → naive `roll_mean /
+    roll_dstd` produces ±Inf and a divide-by-zero RuntimeWarning. The fix
+    uses np.where to set those windows to NaN explicitly so:
+      (a) no RuntimeWarning is emitted to noisy logs / poison parity gates
+      (b) the result list contains no ±Inf rows
+    The 'best' windows are still dropped — fixing the provenance (warmup vs
+    undefined-but-good) is H-0717, which requires a downstream UI contract
+    change and is out of scope here.
+    """
+    import warnings
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    # All returns strictly > 0 — every window has zero downside.
+    returns = pd.Series(np.full(120, 0.005), index=dates, name="returns")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        # Must NOT raise — the divide-by-zero is handled explicitly via np.where.
+        result = _rolling_sortino(returns, 63)
+    # And the result must not contain any Inf entries.
+    for point in result:
+        assert not math.isinf(point["value"])
+
+
+def test_rolling_sortino_all_zero_window_no_inf():
+    """Audit 2026-05-07 H-0712: an all-zero returns window also produces
+    downside std = 0 (no observations < MAR=0 because none are strictly less
+    than 0). The numerator `roll_mean` is also 0 so the naive division is 0/0
+    → NaN, not Inf. Either way, no Inf/NaN survives in the output.
+    """
+    import warnings
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    returns = pd.Series(np.zeros(120), index=dates, name="returns")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = _rolling_sortino(returns, 63)
+    for point in result:
+        assert not math.isinf(point["value"])
+        assert not math.isnan(point["value"])
+
+
 def test_rolling_volatility_annualized(golden_returns):
     """METRICS-02: annualized = std * sqrt(252)."""
     result = _rolling_volatility(golden_returns, 63)
