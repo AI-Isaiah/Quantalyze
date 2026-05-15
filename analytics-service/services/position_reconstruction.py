@@ -899,7 +899,18 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
     snapshots = result.data or []
 
     if not snapshots:
-        return {}
+        # Audit H-0747: previously returned bare {} — VolumeExposureTab
+        # rendered $0 across mean/std/max as if those were real
+        # measurements. Surface an explicit "no snapshots" marker via
+        # data_quality_flags so analytics_runner can merge it into the
+        # strategy-level flags and the dashboard can show
+        # "Position snapshots not yet collected — exposure unavailable"
+        # rather than spurious zeros.
+        return {
+            "data_quality_flags": {
+                "exposure_metrics_no_snapshots": True,
+            },
+        }
 
     # Group by snapshot_date to compute per-date exposure
     by_date: dict[str, list[dict]] = defaultdict(list)
@@ -932,7 +943,15 @@ async def compute_exposure_metrics(strategy_id: str, supabase) -> dict:
         })
 
     if not gross_exposures:
-        return {}
+        # Defensive: with `by_date` non-empty above this branch is
+        # currently unreachable (every key triggers an append). Kept
+        # as a safety net in case future refactors filter rows mid-loop.
+        # Audit H-0747: never return bare {} — surface a marker.
+        return {
+            "data_quality_flags": {
+                "exposure_metrics_no_gross_exposure": True,
+            },
+        }
 
     mean_gross = statistics.mean(gross_exposures)
     std_gross = statistics.stdev(gross_exposures) if len(gross_exposures) > 1 else 0.0

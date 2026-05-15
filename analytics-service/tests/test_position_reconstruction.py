@@ -456,11 +456,23 @@ async def test_exposure_metrics_includes_series() -> None:
 
 @pytest.mark.asyncio
 async def test_exposure_metrics_empty_when_no_snapshots() -> None:
-    """METRICS-05: empty input still returns empty dict (no exposure_series key)."""
+    """Audit H-0747: empty position_snapshots must NOT return a bare {} —
+    that was the silent-failure pin VolumeExposureTab rendered as $0
+    across all exposure cards. The contract is now: return a
+    data_quality_flags marker so dashboards can render an explicit
+    'no data' state. Aggregate keys are NOT populated (no spurious zeros)."""
     mock = _make_exposure_snapshots_mock([])
     with patch("services.position_reconstruction.db_execute", side_effect=_run_sync):
         result = await compute_exposure_metrics("strat-1", mock)
-    assert result == {}
+    # Must not regress to bare {} (silent fail) and must not invent
+    # zero aggregates.
+    assert result.get("data_quality_flags", {}).get(
+        "exposure_metrics_no_snapshots"
+    ) is True
+    assert "mean_gross_exposure" not in result
+    assert "exposure_series" not in result
+
+
 
 
 def test_turnover_series_contract() -> None:
