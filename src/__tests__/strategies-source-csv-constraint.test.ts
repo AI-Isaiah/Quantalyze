@@ -58,14 +58,16 @@ describe("strategies.source check constraint admits 'csv' (Phase 18 / FIX-03 reg
   it("no later migration silently re-narrows the strategies_source_check constraint", () => {
     // If a future migration drops the constraint without re-adding it with
     // 'csv' included, that re-introduces the bug. Walk every migration file
-    // numbered >= 100 and assert: any DROP CONSTRAINT strategies_source_check
+    // whose timestamp is >= the csv-introducing migration (20260506211806,
+    // formerly NNN=100) and assert: any DROP CONSTRAINT strategies_source_check
     // is followed by an ADD CONSTRAINT that includes 'csv'.
+    const CSV_INTRO_TS = "20260506211806";
     const files = readdirSync(MIGRATIONS_DIR)
-      .filter((f) => /^\d{3,}_.+\.sql$/.test(f))
+      .filter((f) => /^\d{14}_.+\.sql$/.test(f))
       .sort();
     for (const file of files) {
-      const num = Number.parseInt(file.slice(0, 3), 10);
-      if (Number.isNaN(num) || num < 100) continue;
+      const ts = file.slice(0, 14);
+      if (ts < CSV_INTRO_TS) continue;
       const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
       const drops = sql.match(/DROP\s+CONSTRAINT[^;]+strategies_source_check/gi);
       if (!drops) continue;
