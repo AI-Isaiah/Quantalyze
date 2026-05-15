@@ -32,6 +32,7 @@ import type {
 } from "./types";
 import { getOwnPreferences, type AllocatorPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -724,11 +725,26 @@ export async function fetchStrategyLazyMetrics(
     // Log for developer observability but never propagate the error to
     // UI. Returning `{}` matches the visibility-miss path so a caller
     // cannot distinguish "private strategy" from "transient error".
+    //
+    // audit-2026-05-07 H-0488: console.error alone is invisible to
+    // operators (Vercel runtime logs aren't monitored continuously). A
+    // 100% transient PostgREST outage looked identical to "4 private
+    // strategies, panels empty". Capture to Sentry so an outage is
+    // surfaced even though the UI path stays graceful.
     console.error("fetchStrategyLazyMetrics RPC error:", {
       strategyId,
       panelId,
       code: error.code,
       message: error.message,
+    });
+    captureToSentry(error, {
+      tags: {
+        op: "fetchStrategyLazyMetrics",
+        panel_id: panelId,
+        rpc_code: error.code ?? "unknown",
+      },
+      extra: { strategyId, panelId, message: error.message },
+      level: "error",
     });
     return {} as LazyMetricsPayload;
   }
