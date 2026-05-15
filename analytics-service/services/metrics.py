@@ -131,7 +131,11 @@ def compute_all_metrics(
     cagr = _safe_float(qs.stats.cagr(returns))
     volatility = _safe_float(qs.stats.volatility(returns))
     sharpe = _safe_float(qs.stats.sharpe(returns))
-    sortino = _safe_float(qs.stats.sortino(returns))
+    # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
+    # and `_rolling_sortino` share the SAME minimum acceptable return constant.
+    # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
+    # the moment MAR is ever tuned away from 0.
+    sortino = _safe_float(qs.stats.sortino(returns, rf=MAR))
     calmar = _safe_float(qs.stats.calmar(returns))
     max_dd = _safe_float(qs.stats.max_drawdown(returns))
 

@@ -330,6 +330,31 @@ def test_mar_constant_is_zero():
     assert isinstance(MAR, float)
 
 
+def test_scalar_sortino_passes_mar_as_rf(golden_returns, monkeypatch):
+    """Audit 2026-05-07 H-0725: compute_all_metrics must pass `rf=MAR` to
+    `qs.stats.sortino` explicitly. If the call relies on qs's default `rf=0`,
+    any future tune of MAR away from 0 silently diverges the scalar sortino
+    from `_rolling_sortino` (which IS MAR-floored).
+    """
+    import services.metrics as metrics_module
+
+    captured: dict[str, object] = {}
+    real_sortino = metrics_module.qs.stats.sortino
+
+    def spy_sortino(series, rf=None, **kwargs):
+        captured["rf"] = rf
+        return real_sortino(series, rf=rf, **kwargs) if rf is not None else real_sortino(series, **kwargs)
+
+    monkeypatch.setattr(metrics_module.qs.stats, "sortino", spy_sortino)
+    compute_all_metrics(golden_returns)
+    assert "rf" in captured, "compute_all_metrics did not call qs.stats.sortino"
+    # MAR is currently 0.0 — the contract is that the rf kwarg is forwarded explicitly
+    # (not omitted), so future MAR tunes flow through automatically.
+    assert captured["rf"] == MAR, (
+        f"qs.stats.sortino must be called with rf=MAR ({MAR}); got rf={captured['rf']}"
+    )
+
+
 def test_rolling_sortino_short_circuit_on_insufficient_data(empty_returns):
     """METRICS-01: short returns when len(returns) < window — mirrors _rolling_sharpe."""
     assert _rolling_sortino(empty_returns, 63) == []
