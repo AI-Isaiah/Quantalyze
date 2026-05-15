@@ -2413,6 +2413,43 @@ class TestTurnoverSeriesTypeValidation:
                 # if the float coercion path ever lets NaN through.
                 assert t == t, f"turnover NaN leaked to JSONB row {row!r}"
 
+    def test_flag_list_capped_against_grid_flood(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Red-team pass: an attacker-controlled grid with 10⁶ distinct
+        dates could otherwise fill `turnover_nav_missing_dates` (and
+        siblings) unboundedly into strategy_analytics.data_quality_flags.
+        Cap each list at _FLAG_LIST_CAP with a truncation sentinel as
+        the LAST element."""
+        import services.position_reconstruction as pr_mod
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        # Small cap so the test is cheap.
+        monkeypatch.setattr(pr_mod, "_FLAG_LIST_CAP", 3)
+
+        # 5 nav-missing dates → cap to 3 + sentinel = 4 entries.
+        positions_by_date = {
+            f"2025-01-{i:02d}": {"BTC": float(i)} for i in range(1, 6)
+        }
+        prices_by_date = {
+            f"2025-01-{i:02d}": {"BTC": 100.0} for i in range(1, 6)
+        }
+        nav_by_date: dict[str, float] = {
+            "2025-01-01": 10000.0,
+            # 2 → 5 deliberately absent
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        nav_missing = flags.get("turnover_nav_missing_dates", [])
+        # 4 dates flagged (2-5), capped to 3 + 1 sentinel.
+        assert len(nav_missing) == 4
+        assert nav_missing[-1].startswith("__truncated__")
+        # Sentinel encodes the dropped count (4 missing - 3 kept = 1).
+        assert "1_more_dropped" in nav_missing[-1]
+
     def test_inf_nav_rejected(self) -> None:
         """Specialist-pass follow-up to H-0741: `float('inf')` NAV
         would yield turnover=0.0 (any_finite / inf), masking real

@@ -93,6 +93,16 @@ _LOCK_HOLD_LOG_THRESHOLD_S = 1.0
 _REALIZED_PNL_PER_TRADE_CAP = 10_000
 _EXPOSURE_SERIES_CAP = 10_000
 
+# Audit-2026-05-07 red-team pass: bound the data_quality_flags
+# per-date lists (turnover_nav_missing_dates / nav_invalid_dates /
+# gap_dates / series_dropped_dates) so a grid-flood can't bloat the
+# strategy_analytics.data_quality_flags JSONB. 1 000 is generous: a
+# strategy with 1 000 NAV-missing dates is already in a triage state
+# the truncation flag will surface. When truncated we append a
+# companion `*_truncated=True` flag so consumers know more were
+# silently dropped.
+_FLAG_LIST_CAP = 1_000
+
 
 # Audit-2026-05-07 P1101 (caller follow-up): per-worker per-strategy
 # asyncio.Lock registry — defense-in-depth above the SQL-side
@@ -1303,14 +1313,28 @@ def compute_turnover_series_with_flags(
         if current_date_parsed is not None:
             prev_date = current_date_parsed
 
-    if nav_missing_dates:
-        flags["turnover_nav_missing_dates"] = nav_missing_dates
-    if nav_invalid_dates:
-        flags["turnover_nav_invalid_dates"] = nav_invalid_dates
-    if gap_dates:
-        flags["turnover_gap_dates"] = gap_dates
-    if dropped_dates:
-        flags["turnover_series_dropped_dates"] = dropped_dates
+    # Red-team pass: cap each flag list. An attacker-controlled grid
+    # with 10⁶ distinct dates could otherwise fill these lists
+    # unboundedly into the strategy_analytics.data_quality_flags JSONB.
+    # On truncation we append a sentinel marker as the LAST element so
+    # the wire-shape contract (`list[str]`) is preserved and downstream
+    # consumers (`_merge_into_top_level_flags`) don't need to special-
+    # case a new key shape.
+    def _capped(name: str, lst: list[str]) -> None:
+        if not lst:
+            return
+        if len(lst) > _FLAG_LIST_CAP:
+            truncated_marker = (
+                f"__truncated__:{len(lst) - _FLAG_LIST_CAP}_more_dropped"
+            )
+            flags[name] = lst[:_FLAG_LIST_CAP] + [truncated_marker]
+        else:
+            flags[name] = lst
+
+    _capped("turnover_nav_missing_dates", nav_missing_dates)
+    _capped("turnover_nav_invalid_dates", nav_invalid_dates)
+    _capped("turnover_gap_dates", gap_dates)
+    _capped("turnover_series_dropped_dates", dropped_dates)
     return series, flags
 
 
