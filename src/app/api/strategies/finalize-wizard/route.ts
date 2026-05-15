@@ -316,10 +316,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // the caller doesn't own. A "no api_key_id" row is the CSV branch
   // (no exchange key linked) — we skip the probe because the CSV
   // branch's data lives in csv_uploads, not api_keys.
+  //
+  // audit-2026-05-07 C-0119/H-0329 — belt-and-braces user_id filter so
+  // ownership defense does NOT rely on RLS alone. If RLS on `strategies`
+  // ever regresses, an attacker who guesses a victim's strategy_id could
+  // (a) trigger the Railway probe revealing it's a real API-keyed
+  // strategy, then (b) read the api_keys.exchange via the admin client.
+  // The downstream SECURITY DEFINER RPC re-checks ownership, but the
+  // probe + admin-client lookup BOTH fire before that point.
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
     .select("api_key_id")
     .eq("id", fields.strategy_id)
+    .eq("user_id", user.id)
     .maybeSingle();
 
   if (strategyErr) {

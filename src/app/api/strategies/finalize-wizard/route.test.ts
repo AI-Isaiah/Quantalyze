@@ -53,6 +53,9 @@ const STATE = vi.hoisted(() => ({
   // Strategy lookup result for the user-scoped client.
   strategyRow: null as { api_key_id: string | null } | null,
   strategyError: null as { message: string } | null,
+  // C-0119/H-0329 — capture user-scoped strategies SELECT filters so we
+  // can assert ownership defense-in-depth (.eq('user_id', user.id)).
+  strategySelectEqFilters: [] as Array<{ column: string; value: unknown }>,
   // RPC call capture.
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   rpcResult: { data: null as unknown, error: null as unknown },
@@ -66,15 +69,20 @@ vi.mock("@/lib/supabase/server", () => ({
       if (table !== "strategies") {
         throw new Error(`unexpected user-scoped from(${table})`);
       }
-      return {
-        select: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({
-              data: STATE.strategyRow,
-              error: STATE.strategyError,
-            }),
-          }),
+      // Chainable .eq() so we can capture each filter the route applies
+      // (id + user_id) and assert the belt-and-braces ownership filter.
+      const buildEqChain = () => ({
+        eq: (column: string, value: unknown) => {
+          STATE.strategySelectEqFilters.push({ column, value });
+          return buildEqChain();
+        },
+        maybeSingle: async () => ({
+          data: STATE.strategyRow,
+          error: STATE.strategyError,
         }),
+      });
+      return {
+        select: () => buildEqChain(),
       };
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -165,6 +173,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   STATE.strategyRow = { api_key_id: API_KEY_ID };
   STATE.strategyError = null;
+  STATE.strategySelectEqFilters = [];
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
   STATE.adminApiKeyId = API_KEY_ID;
@@ -333,6 +342,38 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
+  });
+
+  // audit-2026-05-07 C-0119/H-0329 — belt-and-braces ownership filter.
+  // RLS on `strategies` is the primary defense, but if it ever regresses
+  // the route MUST still scope the SELECT by user_id so an attacker
+  // can't trigger the Railway probe + admin-client api_keys lookup on a
+  // victim's strategy_id.
+  it("scopes the strategies lookup with .eq('user_id', user.id) for defense-in-depth", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expect(STATE.strategySelectEqFilters).toContainEqual({
+      column: "id",
+      value: STRATEGY_ID,
+    });
+    expect(STATE.strategySelectEqFilters).toContainEqual({
+      column: "user_id",
+      value: USER.id,
+    });
+    fetchSpy.mockRestore();
   });
 });
 
