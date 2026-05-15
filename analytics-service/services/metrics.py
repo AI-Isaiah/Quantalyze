@@ -4,11 +4,24 @@ import pandas as pd
 import numpy as np
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypedDict
 
 from .transforms import downsample_series, cap_data_points
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
+
+
+# Audit 2026-05-07 H-0730: every series helper in this file returns the same
+# concrete shape {date: str, value: float} but typed it as
+# `list[dict[str, Any]]`, erasing the contract. TS consumers
+# (HeadlineMetricsPanel / ReturnsDistributionPanel) type the same shape
+# explicitly. Mirroring it here with a TypedDict means a renamed key (`val`
+# instead of `value`) would surface at type-check time instead of as runtime
+# NaN on the React side — the same drift class that produced the v0.17.1
+# KPI-17 column saga.
+class SeriesPoint(TypedDict):
+    date: str
+    value: float
 
 
 # Phase 12 / Pitfall 11: minimum acceptable return for Sortino.
@@ -51,6 +64,20 @@ class MetricsResult:
     def __getitem__(self, key: str) -> Any:
         # Backward-compat shim: old callers expected a bare dict; proxy
         # subscript access to metrics_json so legacy tests still work.
+        #
+        # Audit 2026-05-07 H-0727: `__getitem__` proxies to `metrics_json`
+        # ONLY — sibling_kinds is invisible under subscript by design (split
+        # storage per D-01/D-02). A refactor that mechanically replaces
+        # `result.sibling_kinds[kind]` with `result[kind]` "looks fine" in
+        # review but silently KeyErrors in production for every sibling kind.
+        # We detect the most likely misuse pattern explicitly so operators
+        # see a descriptive error pointing to `.sibling_kinds[...]`.
+        if key not in self.metrics_json and key in self.sibling_kinds:
+            raise KeyError(
+                f"MetricsResult subscript does NOT proxy sibling_kinds; "
+                f"use `result.sibling_kinds[{key!r}]` for split-storage kinds "
+                f"(D-01/D-02). See metrics.py:MetricsResult docstring."
+            )
         return self.metrics_json[key]
 
     def __contains__(self, key: str) -> bool:
@@ -103,7 +130,7 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
 def compute_all_metrics(
     returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
-) -> "MetricsResult":
+) -> MetricsResult:  # H-0729: in-module class, no forward-ref needed.
     """Compute all analytics from a daily returns series.
 
     Phase 12: returns a `MetricsResult` dataclass (NOT a bare dict) split per D-01/D-02:
@@ -524,7 +551,7 @@ def _monthly_returns_grid_from_series(monthly: pd.Series) -> dict[str, dict[str,
     return grid
 
 
-def _daily_returns_grid_from_series(returns: pd.Series) -> list[dict[str, Any]]:
+def _daily_returns_grid_from_series(returns: pd.Series) -> list[SeriesPoint]:
     """Flat per-day return list. Sibling-table kind = 'daily_returns_grid'.
 
     Output shape: [{date: 'YYYY-MM-DD', value: float}, …].
@@ -698,7 +725,7 @@ def compute_qstats_scalars(
     return result
 
 
-def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
+def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
     """Drop NaN/±inf, format as {date, value} rounded to 4 decimals, cap size.
 
     Audit 2026-05-07 G11.E.17: when a significant fraction of points are
@@ -734,7 +761,7 @@ def _finalize_rolling(series: pd.Series) -> list[dict[str, Any]]:
     return cap_data_points(result)
 
 
-def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+def _rolling_sharpe(returns: pd.Series, window: int) -> list[SeriesPoint]:
     """Compute rolling annualized Sharpe using vectorized pandas rolling."""
     if len(returns) < window:
         return []
@@ -745,7 +772,7 @@ def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
 
 def _rolling_sortino_from_components(
     returns: pd.Series, neg_sq: pd.Series, window: int
-) -> list[dict[str, Any]]:
+) -> list[SeriesPoint]:
     """Window-parameterized inner for `_rolling_sortino`.
 
     Audit 2026-05-07 H-0721: `_rolling_sortino` was being called 3x (windows
@@ -783,7 +810,7 @@ def _rolling_sortino_from_components(
     return _finalize_rolling(ratio_series * np.sqrt(252))
 
 
-def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[dict[str, Any]]:
+def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[SeriesPoint]:
     """Compute rolling annualized Sortino using downside RMS (MAR-floored).
 
     Pitfall 11 single source of truth: this MUST mirror `qs.stats.sortino`'s
@@ -813,7 +840,7 @@ def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[
     return _rolling_sortino_from_components(returns, neg_sq, window)
 
 
-def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]:
+def _rolling_volatility(returns: pd.Series, window: int) -> list[SeriesPoint]:
     """Annualized rolling volatility = std * sqrt(252).
 
     Mirrors `qs.stats.volatility` (which is `returns.std() * sqrt(252)`) on a
@@ -826,7 +853,7 @@ def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]
 
 def _rolling_alpha_beta(
     returns: pd.Series, benchmark: pd.Series, window: int = 90
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[SeriesPoint], list[SeriesPoint]]:
     """Rolling (alpha, beta) projections from ONE `qs.stats.rolling_greeks` call.
 
     Audit 2026-05-07 H-0711: previously `_rolling_alpha` and `_rolling_beta`
@@ -877,7 +904,7 @@ def _rolling_alpha_beta(
     return _finalize_rolling(greeks["alpha"]), _finalize_rolling(greeks["beta"])
 
 
-def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
     """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat with
@@ -891,7 +918,7 @@ def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -
     return alpha
 
 
-def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
+def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
     """Rolling beta vs benchmark via qs.stats.rolling_greeks.
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat.
@@ -910,7 +937,7 @@ def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) ->
 _LOG_RETURN_FLOOR: float = -1.0 + 1e-9
 
 
-def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
+def _log_returns_series(returns: pd.Series) -> list[SeriesPoint]:
     """Cumulative log-equity series = `np.log1p(returns).cumsum()`.
 
     Audit 2026-05-07 H-0719: this helper previously returned per-period
@@ -944,7 +971,7 @@ def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
     return _finalize_rolling(pd.Series(cumulative, index=returns.index))
 
 
-def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[dict[str, Any]]:
+def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[SeriesPoint]:
     """Vectorized rolling Pearson correlation between two aligned series."""
     if len(a) < window:
         return []

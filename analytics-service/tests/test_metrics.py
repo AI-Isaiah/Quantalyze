@@ -330,6 +330,28 @@ def test_mar_constant_is_zero():
     assert isinstance(MAR, float)
 
 
+def test_metrics_result_subscript_rejects_sibling_kind_keys():
+    """Audit 2026-05-07 H-0727: `result[<sibling_kind>]` must raise a KeyError
+    that names the correct accessor (`result.sibling_kinds[...]`). The plain
+    proxy used to silently KeyError, which made a `result.sibling_kinds[k]`
+    → `result[k]` refactor look correct in review while breaking every sibling
+    kind in production.
+    """
+    from services.metrics import MetricsResult
+
+    result = MetricsResult(
+        metrics_json={"sharpe": 1.2},
+        sibling_kinds={"rolling_sortino_3m": [{"date": "2024-01-01", "value": 1.0}]},
+    )
+    # metrics_json access still works.
+    assert result["sharpe"] == 1.2
+    # Sibling-kind subscript raises a descriptive KeyError naming .sibling_kinds.
+    with pytest.raises(KeyError, match=r"sibling_kinds"):
+        _ = result["rolling_sortino_3m"]
+    # Direct attribute access remains the correct path.
+    assert result.sibling_kinds["rolling_sortino_3m"][0]["value"] == 1.0
+
+
 def test_scalar_sortino_passes_mar_as_rf(golden_returns, monkeypatch):
     """Audit 2026-05-07 H-0725: compute_all_metrics must pass `rf=MAR` to
     `qs.stats.sortino` explicitly. If the call relies on qs's default `rf=0`,
