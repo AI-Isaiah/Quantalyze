@@ -984,13 +984,31 @@ def compute_turnover_series_with_flags(
 
     Returns:
         Tuple of (series, flags) where:
-          - series: [{date: 'YYYY-MM-DD', turnover: float}, ...] sorted by date asc.
-                    Empty list when positions_by_date is empty.
-          - flags:  dict with optional 'turnover_gap_dates' key listing
-                    dates whose row spans more than one calendar day.
+          - series: [{date: 'YYYY-MM-DD', turnover: float | None}, ...]
+                    sorted by date asc. `turnover` is None when the NAV
+                    row for that date is absent from `nav_by_date` —
+                    distinguishing 'data not yet ingested' from a real
+                    zero-turnover day. Empty list when positions_by_date
+                    is empty.
+          - flags:  dict with optional keys:
+                      'turnover_gap_dates': dates whose row spans more
+                        than one calendar day.
+                      'turnover_nav_missing_dates': dates absent from
+                        nav_by_date (turnover emitted as None).
+                      'turnover_nav_invalid_dates': dates whose NAV row
+                        is present but <= 0 (turnover emitted as 0.0).
 
-    Threat model T-12-04-02: nav <= 0 short-circuits to turnover=0.0
-    rather than raising ZeroDivisionError on a stray zero/negative NAV row.
+    Audit-2026-05-07 H-0744: previously a missing NAV row defaulted to
+    0.0 and short-circuited to turnover=0.0, collapsing three distinct
+    conditions (real margin-call NAV<=0, data-not-yet-ingested, genuine
+    no-rebalances day) into a single zero. The fix differentiates:
+      - date not in nav_by_date → turnover=None + nav_missing_dates flag
+      - date in nav_by_date but nav<=0 → turnover=0.0 + nav_invalid_dates
+        flag (preserves T-12-04-02 short-circuit semantics for back-compat)
+      - normal day → unchanged
+    Additionally, both NAV-missing and NAV-invalid days preserve the
+    PRIOR `prev_positions` so the next valid date computes a true delta
+    across the gap rather than seeing a phantom no-op.
     """
     flags: dict[str, list[str]] = {}
     if not positions_by_date:
@@ -1000,10 +1018,17 @@ def compute_turnover_series_with_flags(
     prev_positions: dict[str, float] | None = None
     prev_date: datetime | None = None
     gap_dates: list[str] = []
+    nav_missing_dates: list[str] = []
+    nav_invalid_dates: list[str] = []
     for date in dates:
         positions = positions_by_date.get(date, {})
         prices = prices_by_date.get(date, {})
-        nav = nav_by_date.get(date, 0.0)
+        # Audit H-0744: explicit presence check — distinguishes 'NAV
+        # not yet ingested' (key absent) from 'NAV present but bad'
+        # (key present, value <= 0). The pre-fix `.get(date, 0.0)`
+        # collapsed both into a turnover=0 short-circuit.
+        nav_present = date in nav_by_date
+        nav = nav_by_date.get(date, 0.0) if nav_present else 0.0
 
         # P1995 fix #1: first observed date has no meaningful
         # prev_positions snapshot — emit turnover=0 instead of
@@ -1032,9 +1057,26 @@ def compute_turnover_series_with_flags(
         ):
             gap_dates.append(date)
 
+        if not nav_present:
+            # Audit H-0744: NAV row absent — emit turnover=None (not 0.0)
+            # so dashboards can render a "data unavailable" marker. Do
+            # NOT update prev_positions so the next valid date still
+            # measures a true delta across the gap.
+            series.append({"date": date, "turnover": None})
+            nav_missing_dates.append(date)
+            if current_date_parsed is not None:
+                prev_date = current_date_parsed
+            continue
+
         if nav <= 0:
+            # NAV present but invalid (margin-call / liquidation /
+            # stray zero row). Preserve T-12-04-02 short-circuit
+            # semantics (turnover=0.0) for back-compat, but surface
+            # the row in nav_invalid_dates and (per H-0744) preserve
+            # prev_positions so the next valid date computes a true
+            # delta over the gap.
             series.append({"date": date, "turnover": 0.0})
-            prev_positions = positions
+            nav_invalid_dates.append(date)
             if current_date_parsed is not None:
                 prev_date = current_date_parsed
             continue
@@ -1050,6 +1092,10 @@ def compute_turnover_series_with_flags(
         if current_date_parsed is not None:
             prev_date = current_date_parsed
 
+    if nav_missing_dates:
+        flags["turnover_nav_missing_dates"] = nav_missing_dates
+    if nav_invalid_dates:
+        flags["turnover_nav_invalid_dates"] = nav_invalid_dates
     if gap_dates:
         flags["turnover_gap_dates"] = gap_dates
     return series, flags

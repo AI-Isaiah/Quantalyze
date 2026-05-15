@@ -1956,3 +1956,115 @@ class TestDurationParseFailureSurfaced:
             "fails; otherwise the silent-None duration is indistinguishable "
             "from a still-open position downstream."
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0744: compute_turnover_series differentiates
+# NAV-missing (data not ingested) from NAV<=0 (margin call) from
+# genuine quiet day, preserving prev_positions across NAV gaps.
+# ---------------------------------------------------------------------------
+class TestTurnoverNavGapsDifferentiated:
+    """Three previously-indistinguishable cases must now be visibly
+    distinct in the output:
+      1) NAV row absent for a date → turnover=None + nav_missing flag
+      2) NAV row present but <= 0 → turnover=0.0 + nav_invalid flag
+      3) NAV row valid → turnover computed as before
+
+    Also: across both gap kinds, `prev_positions` is preserved so the
+    delta on the next valid day is measured against the LAST valid
+    snapshot, not the snapshot inside the gap (the pre-fix behavior
+    silently zeroed the next-day delta as a side effect of advancing
+    prev_positions through the gap).
+    """
+
+    def test_missing_nav_date_emits_none_turnover_and_flag(self) -> None:
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 0.0},
+            "2025-01-02": {"BTC": 1.0},  # NAV row absent for this date
+            "2025-01-03": {"BTC": 1.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            # 2025-01-02 deliberately missing
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # NAV-missing day → None (not 0.0). Distinguishes the case
+        # from a true quiet day or a NAV-invalid day.
+        assert days["2025-01-02"] is None
+        assert flags.get("turnover_nav_missing_dates") == ["2025-01-02"]
+
+    def test_invalid_nav_date_emits_zero_and_separate_flag(self) -> None:
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 0.0},
+            "2025-01-02": {"BTC": 1.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 0.0,  # present-but-invalid
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # T-12-04-02 short-circuit preserved (turnover=0.0) but now
+        # discriminable from a missing NAV row via the separate flag.
+        assert days["2025-01-02"] == 0.0
+        assert flags.get("turnover_nav_invalid_dates") == ["2025-01-02"]
+        # AND nav_missing_dates must NOT trigger for present-but-invalid.
+        assert "turnover_nav_missing_dates" not in flags
+
+    def test_prev_positions_preserved_across_nav_gap(self) -> None:
+        """The next valid date after a NAV gap must measure delta
+        against the LAST valid snapshot — not against the snapshot
+        inside the gap. Pre-fix, prev_positions was silently
+        advanced through the nav<=0 branch, zeroing the recovery
+        day's true turnover."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},   # baseline
+            "2025-01-02": {"BTC": 5.0},   # NAV invalid (margin call)
+            "2025-01-03": {"BTC": 5.0},   # recovery — no NEW rebalance
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 0.0,   # invalid
+            "2025-01-03": 10000.0,
+        }
+        series, _flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days = {p["date"]: p["turnover"] for p in series}
+        # Day 3 delta is measured vs Day 1 (last valid snapshot), so
+        # the change from 1.0 → 5.0 BTC is captured: |4 * 100| / 10000.
+        # Pre-fix, prev_positions advanced to Day 2's {BTC: 5.0} and
+        # Day 3 turnover was silently 0.0.
+        assert days["2025-01-03"] == pytest.approx(0.04, abs=1e-9)
