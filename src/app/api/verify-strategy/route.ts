@@ -272,6 +272,27 @@ async function legacyVerifyStrategyHandler(args: {
       .limit(1)
       .maybeSingle();
     if (anchorStrategy?.id) {
+      // PR-X4a — fix the pre-existing "metrics never reach SV" gap.
+      // Pre-fix the legacy path wrote `status='validated'` with no
+      // metrics_snapshot. The public-status route at
+      // verify-strategy/[id]/status/route.ts:107 only returns `results`
+      // when status is 'complete' (legacy VR shape) or 'published'
+      // (canonical SV terminal), so teaser users polling the public URL
+      // saw `{status:'validated'}` with no score — a bug present since
+      // BACKBONE-04 step (a) shipped. The upsert below now lands a
+      // terminal row in one shot: status='published' + metrics_snapshot
+      // built from the Python `results` blob (with `matched_strategy_id`
+      // folded in since it isn't a first-class column on
+      // strategy_verifications). PR-X5 will wire the unified path
+      // (kill-switch ON) to write the same shape from inside
+      // /process-key; this fix covers the legacy / kill-switch-OFF path
+      // which doubles as the auto-rollback target.
+      const metricsSnapshot = analyticsResult.results
+        ? {
+            ...analyticsResult.results,
+            matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
+          }
+        : null;
       // C-5: every NOT NULL column populated; FK satisfied via anchor row.
       // @audit-skip: unauthenticated public endpoint (no user session). The
       // strategy_verifications row is the canonical write target post-PR-A
@@ -279,29 +300,6 @@ async function legacyVerifyStrategyHandler(args: {
       // public_token + status), and audit_log requires a user_id which the
       // unauthenticated caller cannot provide. Follow-up landing-page-lead
       // audit lands in PostHog per ADR-0023 §3, not audit_log.
-      // PR-X4a: status='published' (was 'validated') + metrics_snapshot.
-      //
-      // Pre-fix the legacy path wrote `status='validated'` with no metrics.
-      // The public-status route at verify-strategy/[id]/status/route.ts:107
-      // only returns `results` when status is 'complete' (legacy VR shape)
-      // or 'published' (canonical SV terminal). So teaser users polling
-      // the public URL saw `{status:'validated'}` with no score — a bug
-      // present since BACKBONE-04 step (a) shipped.
-      //
-      // Now the upsert lands a terminal row in one shot:
-      //   - status='published' so [id]/status returns the metrics
-      //   - metrics_snapshot built from the Python `results` blob, with
-      //     `matched_strategy_id` folded in (no first-class column for it)
-      //
-      // PR-X5 will wire the unified path (kill-switch ON) to write the
-      // same shape from inside /process-key; this fix covers the legacy
-      // path (kill-switch OFF) which doubles as the auto-rollback target.
-      const metricsSnapshot = analyticsResult.results
-        ? {
-            ...analyticsResult.results,
-            matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
-          }
-        : null;
       const { error: upsertError } = await admin
         .from("strategy_verifications")
         .upsert(
