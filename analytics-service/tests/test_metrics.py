@@ -427,6 +427,140 @@ def test_rolling_beta_returns_finalized_list(golden_returns, benchmark_returns):
     assert len(result) > 0
 
 
+def test_rolling_alpha_beta_single_rolling_greeks_call(
+    golden_returns, benchmark_returns, monkeypatch
+):
+    """Audit 2026-05-07 H-0711: rolling alpha + beta must share ONE
+    qs.stats.rolling_greeks pass. Previously _rolling_alpha and _rolling_beta
+    each called rolling_greeks independently, doubling the rolling-OLS work.
+    """
+    import services.metrics as metrics_module
+
+    call_count = {"n": 0}
+    real_rg = metrics_module.qs.stats.rolling_greeks
+
+    def counting_rolling_greeks(*args, **kwargs):
+        call_count["n"] += 1
+        return real_rg(*args, **kwargs)
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "rolling_greeks", counting_rolling_greeks
+    )
+    result = compute_all_metrics(golden_returns, benchmark_returns)
+    # The siblings should still be populated...
+    assert len(result.sibling_kinds["rolling_alpha"]) > 0
+    assert len(result.sibling_kinds["rolling_beta"]) > 0
+    # ...from EXACTLY ONE rolling_greeks pass.
+    assert call_count["n"] == 1, (
+        f"rolling_greeks should be called once per analytics run; got {call_count['n']}"
+    )
+
+
+def test_rolling_alpha_beta_aligns_misaligned_series():
+    """Audit 2026-05-07 H-0726.1: rolling alpha/beta must inner-join the
+    returns and benchmark indexes BEFORE calling qs.stats.rolling_greeks.
+    Previously raw un-aligned series were passed, letting qs internally NaN-pad
+    across mismatched trading calendars and producing skewed greeks.
+    """
+    from services.metrics import _rolling_alpha_beta
+
+    np.random.seed(31)
+    dates_strat = pd.bdate_range("2024-01-01", periods=200)
+    # Benchmark covers a partially-overlapping window — only ~150 days in
+    # common. With alignment, that's enough for window=90 rolling greeks.
+    # Without alignment qs sees 200 strat rows vs 200 bench rows with mismatched
+    # indexes and produces garbage (or raises) depending on version.
+    dates_bench = pd.bdate_range("2024-02-15", periods=200)
+    strat = pd.Series(np.random.normal(0.001, 0.01, 200), index=dates_strat, name="returns")
+    bench = pd.Series(np.random.normal(0.0005, 0.012, 200), index=dates_bench, name="BTC")
+
+    alpha, beta = _rolling_alpha_beta(strat, bench, 90)
+    # The helper aligned and produced output (the un-aligned implementation
+    # either raised or produced NaN-only output that finalize_rolling dropped).
+    assert isinstance(alpha, list)
+    assert isinstance(beta, list)
+    assert len(alpha) > 0
+    assert len(beta) > 0
+
+
+def test_rolling_alpha_beta_short_benchmark_returns_empty():
+    """Audit 2026-05-07 H-0726.2: a benchmark with fewer than `window` aligned
+    observations must return ([], []). The old guard only checked
+    `len(returns) < window`, letting a short benchmark slip through and either
+    raise or produce malformed greeks that hit the silent 'alpha not in greeks'
+    fallback.
+    """
+    from services.metrics import _rolling_alpha_beta
+
+    np.random.seed(41)
+    dates_strat = pd.bdate_range("2024-01-01", periods=200)
+    # 50-day benchmark — less than window=90 after alignment.
+    dates_bench = pd.bdate_range("2024-01-01", periods=50)
+    strat = pd.Series(np.random.normal(0.001, 0.01, 200), index=dates_strat, name="returns")
+    bench = pd.Series(np.random.normal(0.0005, 0.012, 50), index=dates_bench, name="BTC")
+
+    alpha, beta = _rolling_alpha_beta(strat, bench, 90)
+    assert alpha == []
+    assert beta == []
+
+
+def test_rolling_alpha_beta_logs_warning_on_qs_failure(
+    golden_returns, benchmark_returns, monkeypatch, caplog
+):
+    """Audit 2026-05-07 H-0726.3: when qs.stats.rolling_greeks raises (e.g.
+    qs version drift, missing columns), the helper must emit a WARNING and
+    return ([], []) — NOT swallow it silently as before.
+    """
+    import logging
+    import services.metrics as metrics_module
+
+    def boom_rolling_greeks(_returns, _benchmark, _window):
+        raise RuntimeError("simulated qs.stats.rolling_greeks failure")
+
+    monkeypatch.setattr(
+        metrics_module.qs.stats, "rolling_greeks", boom_rolling_greeks
+    )
+
+    from services.metrics import _rolling_alpha_beta
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
+    assert alpha == []
+    assert beta == []
+    matching = [r for r in caplog.records if "rolling_greeks" in r.getMessage()]
+    assert matching, "rolling_greeks failure must emit WARNING with helper name"
+
+
+def test_rolling_sortino_single_neg_sq_in_compute_all_metrics(
+    golden_returns, monkeypatch
+):
+    """Audit 2026-05-07 H-0721: compute_all_metrics must materialize the
+    window-independent neg_sq series exactly ONCE across the three rolling
+    Sortino windows (63 / 126 / 252). The shared component is now passed to
+    `_rolling_sortino_from_components`.
+    """
+    import services.metrics as metrics_module
+
+    call_count = {"n": 0}
+    real_from_components = metrics_module._rolling_sortino_from_components
+    seen_neg_sq_ids: set[int] = set()
+
+    def counting_from_components(returns, neg_sq, window):
+        call_count["n"] += 1
+        seen_neg_sq_ids.add(id(neg_sq))
+        return real_from_components(returns, neg_sq, window)
+
+    monkeypatch.setattr(
+        metrics_module, "_rolling_sortino_from_components", counting_from_components
+    )
+    compute_all_metrics(golden_returns)
+    # Three windows → three calls, but the SAME neg_sq object is reused.
+    assert call_count["n"] == 3
+    assert len(seen_neg_sq_ids) == 1, (
+        "neg_sq must be materialized ONCE and reused across all three sortino windows"
+    )
+
+
 def test_log_returns_series_full_length(golden_returns):
     """METRICS-12: log_returns has same length as input (no window dropoff)."""
     result = _log_returns_series(golden_returns)

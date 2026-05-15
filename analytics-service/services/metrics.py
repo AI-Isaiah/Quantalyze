@@ -443,16 +443,27 @@ def compute_all_metrics(
     # Heavy-series storage per D-02 — these go to strategy_analytics_series via
     # the atomic batch RPC (M-Grok-1) at the runner level, NOT into metrics_json.
     has_benchmark = benchmark_returns is not None and len(benchmark_returns) > 0
+    # H-0711: compute rolling alpha + beta from ONE rolling_greeks pass.
+    if has_benchmark:
+        rolling_alpha_series, rolling_beta_series = _rolling_alpha_beta(
+            returns, benchmark_returns, 90
+        )
+    else:
+        rolling_alpha_series, rolling_beta_series = [], []
+    # H-0721: hoist the window-independent neg_sq derivation ONCE so the three
+    # _rolling_sortino windows (63/126/252) share it instead of re-materializing
+    # the boolean-mask + squaring on every call.
+    sortino_neg_sq = (returns.where(returns < MAR, 0.0)) ** 2
     sibling_kinds: dict[str, Any] = {
         "daily_returns_grid": _daily_returns_grid_from_series(returns),
-        "rolling_sortino_3m": _rolling_sortino(returns, 63),
-        "rolling_sortino_6m": _rolling_sortino(returns, 126),
-        "rolling_sortino_12m": _rolling_sortino(returns, 252),
+        "rolling_sortino_3m": _rolling_sortino_from_components(returns, sortino_neg_sq, 63),
+        "rolling_sortino_6m": _rolling_sortino_from_components(returns, sortino_neg_sq, 126),
+        "rolling_sortino_12m": _rolling_sortino_from_components(returns, sortino_neg_sq, 252),
         "rolling_volatility_3m": _rolling_volatility(returns, 63),
         "rolling_volatility_6m": _rolling_volatility(returns, 126),
         "rolling_volatility_12m": _rolling_volatility(returns, 252),
-        "rolling_alpha": _rolling_alpha(returns, benchmark_returns, 90) if has_benchmark else [],
-        "rolling_beta": _rolling_beta(returns, benchmark_returns, 90) if has_benchmark else [],
+        "rolling_alpha": rolling_alpha_series,
+        "rolling_beta": rolling_beta_series,
         "log_returns_series": _log_returns_series(returns),
     }
 
@@ -713,6 +724,27 @@ def _rolling_sharpe(returns: pd.Series, window: int) -> list[dict[str, Any]]:
     return _finalize_rolling((roll_mean / roll_std) * np.sqrt(252))
 
 
+def _rolling_sortino_from_components(
+    returns: pd.Series, neg_sq: pd.Series, window: int
+) -> list[dict[str, Any]]:
+    """Window-parameterized inner for `_rolling_sortino`.
+
+    Audit 2026-05-07 H-0721: `_rolling_sortino` was being called 3x (windows
+    63/126/252) on the same returns series. The `neg_sq = (returns.where(...))**2`
+    derivation depends only on (returns, MAR) — NOT on window — and was being
+    rebuilt from scratch on every call. Splitting this inner lets the caller
+    materialize `neg_sq` once and pass it into all three window passes.
+
+    Mirrors qs.stats.sortino math (downside RMS / N, NOT pandas std / N-1) per
+    the contract documented in `_rolling_sortino`.
+    """
+    if len(returns) < window:
+        return []
+    roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
+    roll_mean = returns.rolling(window).mean()
+    return _finalize_rolling((roll_mean / roll_dstd) * np.sqrt(252))
+
+
 def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[dict[str, Any]]:
     """Compute rolling annualized Sortino using downside RMS (MAR-floored).
 
@@ -739,10 +771,8 @@ def _rolling_sortino(returns: pd.Series, window: int, mar: float = MAR) -> list[
     if len(returns) < window:
         return []
     neg_sq = (returns.where(returns < mar, 0.0)) ** 2
-    roll_dstd = (neg_sq.rolling(window).sum() / window) ** 0.5
-    roll_mean = returns.rolling(window).mean()
     # _finalize_rolling scrubs NaN/Inf so the consumer never sees them.
-    return _finalize_rolling((roll_mean / roll_dstd) * np.sqrt(252))
+    return _rolling_sortino_from_components(returns, neg_sq, window)
 
 
 def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]:
@@ -756,29 +786,81 @@ def _rolling_volatility(returns: pd.Series, window: int) -> list[dict[str, Any]]
     return _finalize_rolling(returns.rolling(window).std() * np.sqrt(252))
 
 
+def _rolling_alpha_beta(
+    returns: pd.Series, benchmark: pd.Series, window: int = 90
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rolling (alpha, beta) projections from ONE `qs.stats.rolling_greeks` call.
+
+    Audit 2026-05-07 H-0711: previously `_rolling_alpha` and `_rolling_beta`
+    each independently called `qs.stats.rolling_greeks(returns, benchmark, window)`
+    — doubling the rolling OLS regression work on every analytics run. The
+    expensive part is the regression; alpha and beta come out of the SAME pass
+    on the same DataFrame. This helper computes greeks once and returns both
+    projections.
+
+    Audit 2026-05-07 H-0726: scalar greeks computation upstream aligns returns
+    and benchmark via `returns.align(benchmark, join='inner')` before calling
+    qs; the rolling pair was passing raw un-aligned series, letting qs internally
+    NaN-pad or shift across mismatched trading calendars. We now (1) align the
+    two series before calling rolling_greeks, (2) validate that BOTH the
+    strategy AND the benchmark have at least `window` aligned observations
+    (the old guard only checked `len(returns) < window`, allowing a too-short
+    benchmark to slip through), and (3) log a WARNING when the qs DataFrame
+    is missing the expected alpha/beta columns instead of silently returning
+    empty lists — that path masked qs version drift.
+    """
+    if returns is None or benchmark is None:
+        return [], []
+    aligned_returns, aligned_benchmark = returns.align(benchmark, join="inner")
+    aligned_n = len(aligned_returns)
+    if aligned_n < window:
+        return [], []
+    try:
+        greeks = qs.stats.rolling_greeks(aligned_returns, aligned_benchmark, window)
+    except Exception as exc:  # noqa: BLE001
+        # H-0726.3: surface qs-side rolling_greeks failures explicitly instead
+        # of letting them propagate to the caller's `except Exception` (or worse,
+        # to an uncaught path on a new qs version).
+        logger.warning(
+            "rolling_greeks failed (aligned_n=%s, window=%s): %s",
+            aligned_n, window, exc, exc_info=True,
+        )
+        return [], []
+    columns = set(getattr(greeks, "columns", []))
+    if "alpha" not in columns or "beta" not in columns:
+        # H-0726.3: silent fallback on missing columns previously masked qs
+        # version drift (column rename). Log it so a future qs bump that drops
+        # one of the columns produces an operator-visible signal.
+        logger.warning(
+            "rolling_greeks missing expected alpha/beta columns (got %s)",
+            sorted(columns),
+        )
+        return [], []
+    return _finalize_rolling(greeks["alpha"]), _finalize_rolling(greeks["beta"])
+
+
 def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
     """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
 
-    Window default 90d trading per UC#6 BTC-only scope. qs.stats.rolling_greeks
-    returns a DataFrame with columns ["beta", "alpha"]; we project the alpha
-    column and finalize.
+    Thin wrapper around `_rolling_alpha_beta` retained for backward compat with
+    tests that import the public helper directly. Production code paths
+    (`compute_all_metrics`) call `_rolling_alpha_beta` once so the underlying
+    OLS regression runs ONCE per analytics run, not twice (H-0711).
+
+    Window default 90d trading per UC#6 BTC-only scope.
     """
-    if benchmark is None or len(returns) < window:
-        return []
-    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
-    if "alpha" not in greeks:
-        return []
-    return _finalize_rolling(greeks["alpha"])
+    alpha, _ = _rolling_alpha_beta(returns, benchmark, window)
+    return alpha
 
 
 def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[dict[str, Any]]:
-    """Rolling beta vs benchmark via qs.stats.rolling_greeks."""
-    if benchmark is None or len(returns) < window:
-        return []
-    greeks = qs.stats.rolling_greeks(returns, benchmark, window)
-    if "beta" not in greeks:
-        return []
-    return _finalize_rolling(greeks["beta"])
+    """Rolling beta vs benchmark via qs.stats.rolling_greeks.
+
+    Thin wrapper around `_rolling_alpha_beta` retained for backward compat.
+    See `_rolling_alpha` docstring for rationale.
+    """
+    _, beta = _rolling_alpha_beta(returns, benchmark, window)
+    return beta
 
 
 def _log_returns_series(returns: pd.Series) -> list[dict[str, Any]]:
