@@ -124,8 +124,8 @@ async def _load_position_time_series(
 
     Empty dicts on missing snapshots — caller treats as graceful degradation.
 
-    Audit-2026-05-07 C-0221 (account-balance leak fix)
-    --------------------------------------------------
+    Audit-2026-05-07 C-0221 (account-balance leak fix) + H-0636 follow-up
+    ---------------------------------------------------------------------
     Previously, when `account_balance` was non-null this function wrote
     `nav_by_date[d] = float(account_balance)` — the tenant's raw
     `api_keys.account_balance_usdt`. That payload propagates into the
@@ -135,22 +135,24 @@ async def _load_position_time_series(
     for a published strategy could divide them and recover the constant
     USDT balance.
 
-    Mitigation: we now ALWAYS publish a normalized NAV proxy that contains
-    no tenant-secret information:
+    Mitigation: we now publish a PER-STRATEGY stable NAV proxy that contains
+    no tenant-secret information. Specifically:
 
-      * if account_balance > 0 → NAV[d] = 1.0 (constant). The turnover
-        formula `Σ(|Δposition × price|) / NAV` is self-consistent under any
-        non-zero monotonic NAV proxy (the divisor cancels in the ratio
-        comparison consumers actually use). A constant 1.0 keeps the
-        existing math intact while leaking nothing.
+      * NAV[d] = max(1.0, max_t sum(|positions[t]|))
+        — the rolling/full-run maximum gross exposure observed across all
+        snapshot dates. Constant within a run (no per-day variation), so
+        turnover_series == Σ(|Δposition × price|) / max_gross_exposure for
+        every date. Two anonymous reads can divide to recover RATIOS of
+        position changes, but never the tenant's actual USDT balance —
+        gross_exposure is a function of position sizes (already published
+        as exposure_series) so leaking it adds no new information.
 
-      * if account_balance is None / ≤ 0 → NAV[d] = sum(|positions[d]|)
-        (gross-exposure proxy, unchanged). Still self-consistent for the
-        turnover RATIO; never the raw balance.
+      * If positions_by_date is empty or max_gross_exposure is 0, NAV
+        defaults to 1.0 (gives a degenerate but non-error series; the
+        upstream turnover_series builder also short-circuits to 0.0).
 
-    The function-level signature retains `account_balance` so the caller
-    contract stays stable and the branch selection (constant vs gross
-    exposure) still reflects whether a real balance is known.
+    The `account_balance` parameter is retained in the signature for caller
+    compatibility but is NEVER written into the returned grid.
     """
     # Audit-2026-05-07 H-0629 / H-0643: paginate the snapshot fetch. The
     # bare SELECT was bounded only by PostgREST's per-response cap
@@ -223,21 +225,26 @@ async def _load_position_time_series(
                 # Don't poison prices_by_date with NaN/non-numeric marks.
                 pass
 
-    # Build nav_by_date. Audit-2026-05-07 C-0221: NEVER write
-    # `float(account_balance)` here — that leaks the raw tenant USDT
-    # balance through the published `turnover_series` sibling row. Instead,
-    # publish a constant 1.0 when the balance is known to be valid, and
-    # the gross-exposure proxy otherwise. The turnover formula
-    # `Σ(|Δposition × price|) / NAV` is self-consistent under any
-    # non-zero monotonic NAV proxy, so this preserves the ratio shape
-    # consumers compare while leaking no secret.
-    nav_by_date: dict[str, float] = {}
-    if account_balance is not None and account_balance > 0:
-        for d in positions_by_date:
-            nav_by_date[d] = 1.0
-    else:
-        for d, pos_map in positions_by_date.items():
-            nav_by_date[d] = sum(abs(v) for v in pos_map.values())
+    # Build nav_by_date. Audit-2026-05-07 C-0221 + H-0636: NEVER write
+    # `float(account_balance)` here — that leaks the raw tenant USDT balance
+    # through the published `turnover_series` sibling row. NEVER write 1.0
+    # constant either: that makes turnover_series leak the raw dollar
+    # position-change magnitude (numerator with denominator=1).
+    #
+    # Use the per-strategy rolling maximum gross exposure as a stable proxy:
+    # constant within the run, contains no balance information, and
+    # gross-exposure shape is already published in exposure_series so it
+    # adds no new disclosure surface. Defaults to 1.0 when the max is 0 to
+    # avoid divide-by-zero downstream (compute_turnover_series_with_flags
+    # short-circuits on nav <= 0 anyway, so this is belt-and-braces).
+    max_gross_exposure = max(
+        (sum(abs(v) for v in pos_map.values()) for pos_map in positions_by_date.values()),
+        default=0.0,
+    )
+    nav_proxy = max_gross_exposure if max_gross_exposure > 0 else 1.0
+    nav_by_date: dict[str, float] = {d: nav_proxy for d in positions_by_date}
+    # `account_balance` is intentionally NOT consumed below — see docstring.
+    _ = account_balance
 
     return positions_by_date, prices_by_date, nav_by_date
 
@@ -383,11 +390,18 @@ def _compute_derived_trade_metrics(
         inside the same function silently defaults all derived metrics to None.
 
     Formula (Weighted R:R per H-F / METRICS-07):
-      Σ(win_size × win_count) / Σ(loss_size × loss_count)
-    Implemented as (avg_winning_trade × winners_count) / (|avg_losing_trade| × losers_count).
-    Documented here as the canonical Phase 12 formula; if quantstats reference
-    defines a different canonical form, update this docstring + regen golden
-    fixture.
+      Σ(R_i × |pnl_i|) / Σ|pnl_i|   where R_i = pnl_i / risk_unit
+      and risk_unit = |avg_losing_trade| (canonical Van Tharp denominator)
+
+    Audit-2026-05-07 H-0627 / H-0628 ratchet: the prior closed-form
+    `(avg_win × winners_count) / (|avg_loss| × losers_count)` is algebraically
+    identical to Profit Factor (gross_profit / |gross_loss|) because
+    `avg = sum / count`. The runner used to publish the same number under two
+    labels (weighted_risk_reward_ratio AND profit_factor), which is a metric
+    disclosure hazard for institutional allocators. The new pnl-weighted
+    average weights each trade's R-multiple by its own dollar magnitude, so
+    the metric varies independently of Profit Factor on heterogeneous
+    cohorts.
 
     Threat T-12-05-03 mitigation: every divisor is guarded with `> 0`; pure
     zero-loss / zero-divisor cases yield None (rendered downstream as "—") to
@@ -426,6 +440,23 @@ def _compute_derived_trade_metrics(
         "profit_factor_short": None,
     }
 
+    # Shared coercion helper. Audit-2026-05-07 H-0647 / H-0648: a NaN / inf /
+    # non-numeric `realized_pnl` (typically from an upstream divide-by-zero in
+    # `reconstruct_positions`) must be dropped at the boundary, not let pass
+    # into SQN / profit-factor / weighted-R:R math where it silently corrupts
+    # JSONB output. Used by all per-trade aggregations below.
+    def _finite_pnl(t: dict) -> float | None:
+        raw = t.get("realized_pnl")
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(val):
+            return None
+        return val
+
     # Expectancy: only meaningful when at least one of avg_win / avg_loss is
     # non-zero. All-zero position book → keep expectancy=None per the empty
     # test's contract.
@@ -455,14 +486,8 @@ def _compute_derived_trade_metrics(
     pnl_weighted_den = 0.0
     if risk_unit_for_weighted := (abs(avg_loss) if avg_loss else 0.0):
         for t in per_trade:
-            raw = t.get("realized_pnl")
-            if raw is None:
-                continue
-            try:
-                pnl_val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(pnl_val):
+            pnl_val = _finite_pnl(t)
+            if pnl_val is None:
                 continue
             r_i = pnl_val / risk_unit_for_weighted
             w_i = abs(pnl_val)
@@ -491,11 +516,14 @@ def _compute_derived_trade_metrics(
     # inputs are dropped at the boundary rather than poisoning JSONB.
     risk_unit = abs(avg_loss) if avg_loss else 0.0
     if risk_unit > 0 and per_trade:
+        # Use the shared _finite_pnl coercion (defined below) so a
+        # non-numeric / non-finite realized_pnl is dropped, not re-raised.
+        # Forward-reference is fine — Python resolves at call time, and the
+        # helper is defined later in the same function scope.
         r_multiples = [
-            float(t["realized_pnl"]) / risk_unit
+            v / risk_unit
             for t in per_trade
-            if t.get("realized_pnl") is not None
-            and math.isfinite(float(t.get("realized_pnl") or 0.0))
+            for v in [_finite_pnl(t)] if v is not None
         ]
         if len(r_multiples) >= 2:
             mean_r = sum(r_multiples) / len(r_multiples)
@@ -508,20 +536,9 @@ def _compute_derived_trade_metrics(
                     min(len(r_multiples), 100)
                 )
 
-    # Profit Factor segmented by side — uses position-side realized_pnl_per_trade.
-    # Same H-0647 / H-0648 isfinite filter applied here.
-    def _finite_pnl(t: dict) -> float | None:
-        raw = t.get("realized_pnl")
-        if raw is None:
-            return None
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(val):
-            return None
-        return val
-
+    # Profit Factor segmented by side — uses position-side
+    # realized_pnl_per_trade. Same `_finite_pnl` coercion as SQN /
+    # weighted-R:R so a non-finite pnl can't poison either bucket.
     long_pnls = [
         v for t in per_trade if t.get("side") == "long"
         for v in [_finite_pnl(t)] if v is not None

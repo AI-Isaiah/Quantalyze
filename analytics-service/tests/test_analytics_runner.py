@@ -2835,18 +2835,23 @@ class TestLoadPositionTimeSeriesNavSafety:
             "C-0221 regression: raw account_balance leaked into nav_by_date. "
             f"Got {nav_by_date}, secret={secret_balance}"
         )
-        # Contract: every populated nav entry is the constant 1.0 proxy.
+        # Contract: NAV proxy is per-strategy rolling max gross exposure,
+        # constant within a run. max(|10000| over 2024-01-15, |12000| over
+        # 2024-01-16) = 12000.
         assert nav_by_date, "expected NAV entries for the two snapshot dates"
-        assert all(v == 1.0 for v in nav_by_date.values()), (
-            f"NAV proxy must be constant 1.0 when balance is known; got {nav_by_date}"
+        nav_values = set(nav_by_date.values())
+        assert nav_values == {12000.0}, (
+            f"NAV proxy must be the rolling-max gross exposure (12000) and "
+            f"constant within the run; got distinct values {nav_values}"
         )
 
     @pytest.mark.asyncio
-    async def test_nav_falls_back_to_gross_exposure_when_balance_missing(
+    async def test_nav_proxy_is_rolling_max_when_balance_missing(
         self,
     ) -> None:
-        """When account_balance is None, NAV uses sum(|positions|) per date —
-        gross-exposure proxy. Pins the H-0632 branch (untested previously)."""
+        """When account_balance is None, NAV uses the per-strategy rolling
+        max gross exposure (same as when balance is present, per C-0221
+        + H-0636 follow-up). Pins the H-0632 branch."""
         from services.analytics_runner import _load_position_time_series
 
         snapshot_rows = [
@@ -2887,9 +2892,10 @@ class TestLoadPositionTimeSeriesNavSafety:
                 "strat-test", mock_supabase, account_balance=None
             )
 
-        # sum(|10000|, |-5000|) = 15000
-        assert nav.get("2024-01-15") == 15000.0, (
-            f"gross-exposure fallback should equal sum(|positions|); got {nav}"
+        # max_gross_exposure on 2024-01-15 = |10000| + |-5000| = 15000.
+        # Constant within the run.
+        assert set(nav.values()) == {15000.0}, (
+            f"NAV proxy should be rolling-max gross exposure (15000); got {nav}"
         )
 
     @pytest.mark.asyncio
