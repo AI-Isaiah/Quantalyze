@@ -31,6 +31,79 @@ class SeriesPoint(TypedDict):
 # asserts the rolling helper at window == period agrees with the scalar to within 0.05.
 MAR: float = 0.0
 
+# H-0728: Catastrophic-loss floor. `np.log1p(r)` is NaN for r <= -1
+# (a 100%+ loss day — liquidation event, gap-down, leveraged blow-up).
+# We clamp returns to (-1 + 1e-9) before log1p so the event surfaces as a
+# very large negative log return rather than disappearing through
+# `_finalize_rolling.dropna()`. `log1p(-1 + 1e-9) ≈ -20.72`.
+_LOG_RETURN_FLOOR: float = -1.0 + 1e-9
+
+# H-0710 / H-0713 / H-0723 dispatch table: (result_key, qs.stats attribute name).
+# `r_squared` (needs benchmark) and `time_in_market` (not a qs call) are handled
+# inline since their shapes differ from the single-arg pattern below.
+_QSTATS_SINGLE_ARG_SCALARS: tuple[tuple[str, str], ...] = (
+    ("recovery_factor", "recovery_factor"),
+    ("ulcer_index", "ulcer_index"),
+    ("upi", "ulcer_performance_index"),
+    ("kelly_criterion", "kelly_criterion"),
+    ("probabilistic_sharpe_ratio", "probabilistic_ratio"),
+    ("common_sense_ratio", "common_sense_ratio"),
+    ("cpc_index", "cpc_index"),
+    ("serenity_index", "serenity_index"),
+)
+
+
+def _drop_nonfinite(series: pd.Series) -> pd.Series:
+    """Single source of truth: drop NaN AND ±Inf rows. Used by every series
+    helper that writes to JSONB (Postgres rejects NaN — H-0715/H-0720 class).
+    """
+    return series.replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def _format_series_points(
+    series: pd.Series, decimals: int
+) -> list[SeriesPoint]:
+    """Vectorized {date, value} dict construction. Replaces the per-row
+    `d.strftime + round(float(v), n)` comprehension hot-path.
+
+    Uses Python's `round(float, n)` (not `Series.round`) because the two use
+    different rounding strategies on binary floats — Series.round uses NumPy
+    half-to-even on the IEEE representation; Python round uses float-aware
+    decimal rounding. Matching the pre-helper contract keeps stored JSONB
+    values byte-stable across the refactor.
+    """
+    if len(series) == 0:
+        return []
+    if not isinstance(series.index, pd.DatetimeIndex):
+        raise TypeError(
+            f"_format_series_points requires a DatetimeIndex; got {type(series.index).__name__}"
+        )
+    dates = series.index.strftime("%Y-%m-%d").tolist()
+    values = [round(float(v), decimals) for v in series.tolist()]
+    return [{"date": d, "value": v} for d, v in zip(dates, values, strict=True)]
+
+
+def _safe_qstats_scalar(
+    name: str,
+    fn: Any,
+    returns: pd.Series,
+    returns_len: int | None,
+) -> float | None:
+    """Run a single-arg qs.stats scalar, returning None and logging on failure.
+
+    Failure-soft contract (H-0710 / H-0713 / H-0723): one failing scalar must
+    not take down the other nine. Logs include the scalar `name` so operators
+    can spot silent regressions in Railway logs without inferring from latency.
+    """
+    try:
+        return _safe_float(fn(returns))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "qstats scalar %s failed (returns_len=%s): %s",
+            name, returns_len, exc, exc_info=True,
+        )
+        return None
+
 
 @dataclass
 class MetricsResult:
@@ -152,8 +225,33 @@ def compute_all_metrics(
     if len(returns) < 2:
         raise ValueError("Insufficient trade history. At least 2 trading days required.")
 
+    # Red-team F3: NaN in `returns` propagates through `cumprod` so one upstream
+    # gap day silently truncates the equity curve at the gap (post-NaN rows
+    # drop out at serialization). For chart-feeding paths, treat NaN as a
+    # 0-return day so equity carries forward. The unmodified `returns` is still
+    # used for statistics (qs.stats.* handle NaN per their own contracts).
+    nan_in_returns = int(returns.isna().sum())
+    if nan_in_returns > 0:
+        logger.warning(
+            "compute_all_metrics: %d NaN day(s) in returns (returns_len=%d); "
+            "chart paths use fillna(0), statistics keep NaN handling",
+            nan_in_returns, len(returns),
+        )
+    # Red-team F6: an r <= -1 day produces non-positive equity after cumprod
+    # (oscillating sign on subsequent multiplications). Surface upstream-data
+    # corruption so operators can fix it at ingestion rather than chasing a
+    # nonsensical equity chart.
+    catastrophic_count = int((returns <= -1.0).sum())
+    if catastrophic_count > 0:
+        logger.warning(
+            "compute_all_metrics: %d return(s) <= -1.0 (>=100%% loss day) in returns "
+            "(returns_len=%d). Equity curve may show sign flips — check upstream CSV.",
+            catastrophic_count, len(returns),
+        )
+    returns_for_chart = returns.fillna(0)
+
     # Core metrics (safe_float handles NaN/Inf from quantstats)
-    cumulative = (1 + returns).cumprod()
+    cumulative = (1 + returns_for_chart).cumprod()
     total_return = _safe_float(cumulative.iloc[-1] - 1)
     cagr = _safe_float(qs.stats.cagr(returns))
     volatility = _safe_float(qs.stats.volatility(returns))
@@ -166,8 +264,8 @@ def compute_all_metrics(
     calmar = _safe_float(qs.stats.calmar(returns))
     max_dd = _safe_float(qs.stats.max_drawdown(returns))
 
-    # Drawdown series
-    dd_series = qs.stats.to_drawdown_series(returns)
+    # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
+    dd_series = qs.stats.to_drawdown_series(returns_for_chart)
     dd_duration = _max_dd_duration(dd_series)
 
     # Monthly returns (computed once, reused for grid + best/worst + VaR)
@@ -184,14 +282,19 @@ def compute_all_metrics(
     # Return quantiles
     quantiles = _return_quantiles(returns)
 
-    # Equity curve + drawdown as time series
+    # Equity curve + drawdown as time series.
+    # H-0715 defense-in-depth: scrub NaN/Inf at the helper boundary, not just at
+    # the sanitize_metrics tail — JSONB rejects NaN and one upstream gap day
+    # propagates through `(1+returns).cumprod()` to every subsequent row.
+    _cumulative_clean = _drop_nonfinite(cumulative)
     returns_series = [
         {"date": d.strftime("%Y-%m-%d"), "value": float(v)}
-        for d, v in cumulative.items()
+        for d, v in _cumulative_clean.items()
     ]
+    _dd_clean = _drop_nonfinite(dd_series)
     drawdown_series = [
         {"date": d.strftime("%Y-%m-%d"), "value": float(v)}
-        for d, v in dd_series.items()
+        for d, v in _dd_clean.items()
     ]
 
     # Sparklines (downsampled)
@@ -412,11 +515,14 @@ def compute_all_metrics(
             strat_end = returns.index.max()
             bm_slice = benchmark_returns[(benchmark_returns.index >= strat_start) & (benchmark_returns.index <= strat_end)]
             if len(bm_slice) > 0:
-                bm_cumulative = (1 + bm_slice).cumprod()
-                metrics_json["benchmark_returns"] = [
-                    {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
-                    for d, v in bm_cumulative.items()
-                ]
+                # F3: fillna(0) so a single missing benchmark day doesn't
+                # truncate the entire benchmark curve via NaN propagation.
+                bm_cumulative = (1 + bm_slice.fillna(0)).cumprod()
+                # H-0715/H-0720 defense-in-depth: scrub NaN/Inf + cap payload.
+                # Defensive scrub remains in case bm_slice contained ±Inf.
+                metrics_json["benchmark_returns"] = cap_data_points(
+                    _format_series_points(_drop_nonfinite(bm_cumulative), 6)
+                )
         except Exception as exc:  # noqa: BLE001
             # audit-2026-05-07 G11.E.3: silently dropping benchmark_returns also
             # kills the client-side correlation fallback in
@@ -578,16 +684,9 @@ def _daily_returns_grid_from_series(returns: pd.Series) -> list[SeriesPoint]:
     """
     if len(returns) == 0:
         return []
-    # H-0715: scrub NaN/Inf (mirrors the _finalize_rolling pattern). This MUST
-    # happen before the round/strftime comprehension because Postgres JSONB
-    # rejects NaN, which would knock out the entire atomic sibling-batch upsert.
-    cleaned = returns.replace([np.inf, -np.inf], np.nan).dropna()
-    rows = [
-        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 6)}
-        for d, v in cleaned.items()
-    ]
-    # H-0720: enforce the same payload cap as every other series kind.
-    return cap_data_points(rows)
+    # H-0715: scrub NaN/Inf before serialization — Postgres JSONB rejects NaN.
+    # H-0720: enforce payload cap (shared chokepoint with _finalize_rolling).
+    return cap_data_points(_format_series_points(_drop_nonfinite(returns), 6))
 
 
 def compute_qstats_scalars(
@@ -643,67 +742,20 @@ def compute_qstats_scalars(
     }
     returns_len = len(returns) if returns is not None else None
 
-    try:
-        result["recovery_factor"] = _safe_float(qs.stats.recovery_factor(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar recovery_factor failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
+    for result_key, qs_attr in _QSTATS_SINGLE_ARG_SCALARS:
+        result[result_key] = _safe_qstats_scalar(
+            result_key, getattr(qs.stats, qs_attr), returns, returns_len
         )
-    try:
-        result["ulcer_index"] = _safe_float(qs.stats.ulcer_index(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar ulcer_index failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
-    try:
-        result["upi"] = _safe_float(qs.stats.ulcer_performance_index(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar upi failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
-    try:
-        result["kelly_criterion"] = _safe_float(qs.stats.kelly_criterion(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar kelly_criterion failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
-    try:
-        result["probabilistic_sharpe_ratio"] = _safe_float(qs.stats.probabilistic_ratio(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar probabilistic_sharpe_ratio failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
-    try:
-        result["common_sense_ratio"] = _safe_float(qs.stats.common_sense_ratio(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar common_sense_ratio failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
-    try:
-        result["cpc_index"] = _safe_float(qs.stats.cpc_index(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar cpc_index failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
-    try:
-        result["serenity_index"] = _safe_float(qs.stats.serenity_index(returns))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "qstats scalar serenity_index failed (returns_len=%s): %s",
-            returns_len, exc, exc_info=True,
-        )
+
     # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.
+    # Red-team F7: collapse NaN/Inf into 'error' (not 'ok') — qs may return a
+    # finite-looking number that `_safe_float` then strips to None; status must
+    # not promise 'ok' when r_squared is actually None.
     if benchmark is not None and len(benchmark) > 0:
         try:
-            result["r_squared"] = _safe_float(qs.stats.r_squared(returns, benchmark))
-            result["r_squared_status"] = "ok"
+            r_squared_val = _safe_float(qs.stats.r_squared(returns, benchmark))
+            result["r_squared"] = r_squared_val
+            result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
         except Exception as exc:  # noqa: BLE001
             result["r_squared_status"] = "error"
             logger.warning(
@@ -711,10 +763,13 @@ def compute_qstats_scalars(
                 returns_len, len(benchmark), exc, exc_info=True,
             )
     # H-0724: unbiased time-in-market fraction (qs.stats.exposure ceil-rounds UP).
+    # NaN-aware: `returns != 0` evaluates `NaN != 0 → True` in pandas, which
+    # would inflate the fraction whenever upstream CSV gaps inject NaN. Mirror
+    # qs.stats.exposure's `(~isnan(r)) & (r != 0)` predicate exactly.
     try:
-        if returns_len and returns_len > 0:
+        if returns_len:
             result["time_in_market"] = _safe_float(
-                float((returns != 0).sum()) / float(returns_len)
+                (returns.notna() & (returns != 0)).sum() / returns_len
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -742,7 +797,7 @@ def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
     a follow-up: this fix surfaces the signal in server logs.
     """
     total = len(series)
-    cleaned = series.dropna().replace([np.inf, -np.inf], np.nan).dropna()
+    cleaned = _drop_nonfinite(series)
     dropped = total - len(cleaned)
     # 10% threshold — below that, the legitimate window-warmup phase of
     # any rolling indicator dominates and we'd spam the log on every
@@ -754,11 +809,7 @@ def _finalize_rolling(series: pd.Series) -> list[SeriesPoint]:
             total,
             100.0 * dropped / total,
         )
-    result = [
-        {"date": d.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
-        for d, v in cleaned.items()
-    ]
-    return cap_data_points(result)
+    return cap_data_points(_format_series_points(cleaned, 4))
 
 
 def _rolling_sharpe(returns: pd.Series, window: int) -> list[SeriesPoint]:
@@ -926,15 +977,6 @@ def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) ->
     """
     _, beta = _rolling_alpha_beta(returns, benchmark, window)
     return beta
-
-
-# H-0728: Catastrophic-loss floor. `np.log1p(r)` is NaN for r <= -1
-# (a 100%+ loss day — liquidation event, gap-down, leveraged blow-up).
-# We clamp returns to (-1 + 1e-9) before log1p so the event surfaces as a
-# very large negative log return rather than disappearing through
-# `_finalize_rolling.dropna()`. The chosen floor preserves dataset fidelity
-# while keeping the result finite — `log1p(-1 + 1e-9) ≈ -20.72`.
-_LOG_RETURN_FLOOR: float = -1.0 + 1e-9
 
 
 def _log_returns_series(returns: pd.Series) -> list[SeriesPoint]:

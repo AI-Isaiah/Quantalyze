@@ -1,7 +1,12 @@
-import pytest
+import logging
 import math
+import warnings
+
 import numpy as np
 import pandas as pd
+import pytest
+import quantstats as qs
+
 from services.metrics import compute_all_metrics, _safe_float, sanitize_metrics
 
 
@@ -316,9 +321,11 @@ class TestComputeAllMetrics:
 
 from services.metrics import (
     MAR,
+    MetricsResult,
     _rolling_sortino,
     _rolling_volatility,
     _rolling_alpha,
+    _rolling_alpha_beta,
     _rolling_beta,
     _log_returns_series,
 )
@@ -337,8 +344,6 @@ def test_metrics_result_subscript_rejects_sibling_kind_keys():
     → `result[k]` refactor look correct in review while breaking every sibling
     kind in production.
     """
-    from services.metrics import MetricsResult
-
     result = MetricsResult(
         metrics_json={"sharpe": 1.2},
         sibling_kinds={"rolling_sortino_3m": [{"date": "2024-01-01", "value": 1.0}]},
@@ -405,7 +410,6 @@ def test_rolling_sortino_converges_to_scalar_at_full_window():
     downside RMS = sqrt(sum(x^2 where x<MAR else 0) / N), NOT pandas .std() over a
     zero-floored series. Both formulas annualize via sqrt(252).
     """
-    import quantstats as qs
     np.random.seed(11)
     dates = pd.bdate_range("2024-01-01", periods=90)
     returns = pd.Series(np.random.normal(0.0005, 0.015, 90), index=dates, name="returns")
@@ -427,7 +431,6 @@ def test_rolling_sortino_all_positive_window_no_inf_no_warning():
     undefined-but-good) is H-0717, which requires a downstream UI contract
     change and is out of scope here.
     """
-    import warnings
     dates = pd.bdate_range("2024-01-01", periods=120)
     # All returns strictly > 0 — every window has zero downside.
     returns = pd.Series(np.full(120, 0.005), index=dates, name="returns")
@@ -446,7 +449,6 @@ def test_rolling_sortino_all_zero_window_no_inf():
     than 0). The numerator `roll_mean` is also 0 so the naive division is 0/0
     → NaN, not Inf. Either way, no Inf/NaN survives in the output.
     """
-    import warnings
     dates = pd.bdate_range("2024-01-01", periods=120)
     returns = pd.Series(np.zeros(120), index=dates, name="returns")
     with warnings.catch_warnings():
@@ -525,8 +527,6 @@ def test_rolling_alpha_beta_aligns_misaligned_series():
     Previously raw un-aligned series were passed, letting qs internally NaN-pad
     across mismatched trading calendars and producing skewed greeks.
     """
-    from services.metrics import _rolling_alpha_beta
-
     np.random.seed(31)
     dates_strat = pd.bdate_range("2024-01-01", periods=200)
     # Benchmark covers a partially-overlapping window — only ~150 days in
@@ -553,8 +553,6 @@ def test_rolling_alpha_beta_short_benchmark_returns_empty():
     raise or produce malformed greeks that hit the silent 'alpha not in greeks'
     fallback.
     """
-    from services.metrics import _rolling_alpha_beta
-
     np.random.seed(41)
     dates_strat = pd.bdate_range("2024-01-01", periods=200)
     # 50-day benchmark — less than window=90 after alignment.
@@ -574,7 +572,6 @@ def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     qs version drift, missing columns), the helper must emit a WARNING and
     return ([], []) — NOT swallow it silently as before.
     """
-    import logging
     import services.metrics as metrics_module
 
     def boom_rolling_greeks(_returns, _benchmark, _window):
@@ -583,8 +580,6 @@ def test_rolling_alpha_beta_logs_warning_on_qs_failure(
     monkeypatch.setattr(
         metrics_module.qs.stats, "rolling_greeks", boom_rolling_greeks
     )
-
-    from services.metrics import _rolling_alpha_beta
 
     with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
         alpha, beta = _rolling_alpha_beta(golden_returns, benchmark_returns, 90)
@@ -697,6 +692,7 @@ def test_log_returns_series_preserves_catastrophic_loss():
 
 from services.metrics import (
     _daily_returns_grid_from_series,
+    _QSTATS_SINGLE_ARG_SCALARS,
     compute_qstats_scalars,
 )
 
@@ -800,7 +796,6 @@ def test_qstats_scalars_logs_warning_on_qs_failure(golden_returns, caplog, monke
     silent regressions. Failure-soft contract (other 9 scalars unaffected) is
     preserved.
     """
-    import logging
     import services.metrics as metrics_module
 
     def boom_recovery_factor(_returns):
@@ -845,6 +840,26 @@ def test_qstats_scalars_r_squared_status_error_on_qs_failure(
     assert result["r_squared_status"] == "error"
 
 
+def test_qstats_scalars_r_squared_status_error_when_qs_returns_nan(
+    golden_returns, benchmark_returns, monkeypatch
+):
+    """Red-team F7: qs.stats.r_squared may RETURN NaN/Inf (not raise) — e.g.
+    zero-variance benchmark, degenerate covariance. `_safe_float` collapses
+    that to None, but the previous code unconditionally set status='ok'.
+    Status must be 'error' whenever the final r_squared value is None.
+    """
+    import services.metrics as metrics_module
+
+    def nan_r_squared(_returns, _benchmark):
+        return float("nan")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "r_squared", nan_r_squared)
+
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    assert result["r_squared"] is None
+    assert result["r_squared_status"] == "error"
+
+
 def test_qstats_scalars_time_in_market_is_unbiased_fraction():
     """Audit 2026-05-07 H-0724: `time_in_market` must be the true fraction
     `(returns != 0).sum() / len(returns)`, NOT `qs.stats.exposure` which
@@ -862,3 +877,73 @@ def test_qstats_scalars_time_in_market_is_unbiased_fraction():
     # Must be the true fraction (< 0.005), NOT the ceil-rounded 0.01 from qs.
     assert abs(result["time_in_market"] - expected) < 1e-9
     assert result["time_in_market"] < 0.005
+
+
+def test_qstats_scalars_time_in_market_excludes_nan_rows():
+    """Specialist red-team: pandas evaluates `NaN != 0` as True, so the naive
+    `(returns != 0).sum() / len` counts upstream-CSV gap days as 'in market',
+    inflating the fraction. Mirrors qs.stats.exposure's NaN-exclusion predicate.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    # 2 active days, 3 zero days, 5 NaN gap days → true exposure = 2/10.
+    values = np.array([0.01, 0.0, np.nan, np.nan, 0.02, 0.0, np.nan, np.nan, np.nan, 0.0])
+    returns = pd.Series(values, index=dates, name="returns")
+    result = compute_qstats_scalars(returns, None)
+    assert result["time_in_market"] == pytest.approx(0.2, abs=1e-9)
+
+
+def test_qstats_scalars_r_squared_status_ok_when_benchmark_present(
+    golden_returns, benchmark_returns
+):
+    """Specialist test-gap: the 'ok' status was never explicitly pinned. A
+    regression that hard-coded 'no_benchmark' would have passed the membership
+    check in test_qstats_scalars_complete_set.
+    """
+    result = compute_qstats_scalars(golden_returns, benchmark_returns)
+    assert result["r_squared_status"] == "ok"
+    assert result["r_squared"] is not None
+
+
+def test_rolling_alpha_beta_zero_overlap_returns_empty():
+    """Specialist test-gap (H-0726.1 follow-up): when the inner-join produces
+    an EMPTY aligned index (completely disjoint date ranges), the helper must
+    short-circuit to ([], []) instead of letting qs.stats.rolling_greeks see
+    a zero-length input.
+    """
+    np.random.seed(53)
+    strat = pd.Series(
+        np.random.normal(0.001, 0.01, 100),
+        index=pd.bdate_range("2023-01-01", periods=100),
+        name="returns",
+    )
+    bench = pd.Series(
+        np.random.normal(0.0005, 0.012, 100),
+        index=pd.bdate_range("2024-06-01", periods=100),
+        name="BTC",
+    )
+    alpha, beta = _rolling_alpha_beta(strat, bench, 90)
+    assert alpha == []
+    assert beta == []
+
+
+@pytest.mark.parametrize("result_key,qs_attr", _QSTATS_SINGLE_ARG_SCALARS)
+def test_qstats_scalars_dispatch_table_per_entry(
+    golden_returns, caplog, monkeypatch, result_key, qs_attr
+):
+    """Specialist test-gap: the dispatch table (`_QSTATS_SINGLE_ARG_SCALARS`)
+    is the single source of truth for 8 (key, qs.stats attr) pairs after the
+    simplify refactor. A typo would silently produce None in production for
+    one scalar. Parametrize the failure path across every entry so a regression
+    fails the matching attribute's row, not a generic "scalar None" assertion.
+    """
+    import services.metrics as metrics_module
+
+    def boom(_returns):
+        raise RuntimeError(f"simulated qs.stats.{qs_attr} failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, qs_attr, boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_qstats_scalars(golden_returns, None)
+    assert result[result_key] is None
+    matching = [r for r in caplog.records if result_key in r.getMessage()]
+    assert matching, f"failure for qs.stats.{qs_attr} must log WARNING naming {result_key!r}"
