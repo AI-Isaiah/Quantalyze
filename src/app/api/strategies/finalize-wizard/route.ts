@@ -366,11 +366,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     let resolvedSource = "okx";
     if (apiKeyId) {
       const admin = createAdminClient();
-      const { data: keyRow } = await admin
+      // audit-2026-05-07 H-0323 — capture the error so a transient admin
+      // lookup failure doesn't silently fall back to the 'okx' default
+      // and route a Binance/Bybit key through the wrong exchange-specific
+      // code path with no forensic trail.
+      const { data: keyRow, error: keyRowErr } = await admin
         .from("api_keys")
         .select("exchange")
         .eq("id", apiKeyId)
         .single();
+      if (keyRowErr) {
+        console.warn(
+          "[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source:",
+          keyRowErr.message,
+        );
+      }
       if (keyRow?.exchange) {
         resolvedSource = keyRow.exchange;
       }
