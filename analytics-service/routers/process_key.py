@@ -31,6 +31,7 @@ import asyncio
 import os
 import secrets
 import time
+import uuid
 from typing import Annotated, Any
 
 import hashlib
@@ -46,6 +47,7 @@ from services.ingestion import get_adapter
 from services.ingestion.adapter import KeySubmissionRequest
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.rate_limit import limiter
+from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
 log = structlog.get_logger("quantalyze.analytics.process_key")
@@ -385,6 +387,41 @@ async def process_key(
     # wizard_session_id (a UUID, schema-compatible with the entity_id UUID
     # column). The cron's denominator query keys on entity_type='process_key'
     # only, so the entity_id sentinel does not affect the rollback math.
+    # PR-X5 / D7 (2026-05-15) — unify the API key ingestion path. Teaser
+    # submissions arrive from the public landing page without a
+    # caller-owned strategy (the user is probing keys against the
+    # universe of published strategies; no strategy exists yet) AND
+    # without a wizard_session_id (no wizard — single-shot submission).
+    #
+    # Inject BOTH here, BEFORE audit_entity_id is computed below, so the
+    # H-2 audit row write does not fail with NULL p_entity_id (which
+    # log_audit_event_service raises). That keeps teaser submissions in
+    # the flag-monitor cron's denominator post-flag-flip, preserving the
+    # auto-rollback math.
+    #
+    # SECURITY (PR-X5 review fix): override UNCONDITIONALLY for teaser.
+    # The TS handler at src/app/api/verify-strategy/route.ts is supposed
+    # to allowlist context fields (post-X5), but if a future change
+    # regresses and spreads the raw body again, an unauthenticated
+    # attacker could POST `{strategy_id:<victim-uuid>,
+    # wizard_session_id:<chosen>}` and bypass a fill-if-null injection,
+    # writing an SV row anchored to an arbitrary strategy. Treating
+    # teaser as anchor-less by definition closes that hole at the
+    # backend boundary regardless of upstream input shape.
+    #
+    # NO downstream branches on `flow_type == 'teaser'` — that would be
+    # unification cosplay. The fingerprint write on the sentinel and
+    # reconstruct_positions(trades) on a discarded return value are both
+    # harmless side effects, so they run unmodified.
+    #
+    # The injected wizard_session_id is a fresh uuid4 per submission;
+    # teaser submissions are deliberately NOT idempotent (each landing-
+    # page submission is a separate verification, so a fresh UUID
+    # always misses the SELECT-pre-check below and writes a new row).
+    if body.flow_type == "teaser":
+        body.context["strategy_id"] = TEASER_ANCHOR_STRATEGY_ID
+        body.context["wizard_session_id"] = str(uuid.uuid4())
+
     audit_entity_id = (
         body.context.get("strategy_id") or body.context.get("wizard_session_id")
     )
@@ -683,12 +720,92 @@ async def process_key(
 
     # compute_metrics
     metrics = adapter.compute_metrics(trades)
+
+    # PR-X5 (2026-05-15) — Enrich metrics_snapshot with the legacy
+    # verify_strategy response shape so the landing-page card
+    # (src/components/landing/VerificationSection.tsx::VerificationResultData)
+    # renders fully for every flow_type. Pre-X5 the unified pipeline
+    # only persisted MetricsSnapshot fields (sharpe/twr/ytd/...),
+    # missing return_24h/mtd, equity_curve, and matched_strategy_id —
+    # the legacy verify_strategy (portfolio.py:1055-1063) computed all
+    # of them. D7 unification: enrichment runs for ALL flow_types so the
+    # SV row's metrics_snapshot column has the same shape regardless of
+    # how the row was created.
+    #
+    # account_balance is None here (the unified adapter pipeline doesn't
+    # fetch USDT balance — that's an exchange-API call the legacy path
+    # makes via fetch_usdt_balance). trades_to_daily_returns falls back
+    # to the heuristic-capital path documented in services/transforms.py
+    # (degrades 5–10× on volatile strategies). Same fallback the legacy
+    # path uses when fetch_usdt_balance fails — no regression vs status
+    # quo. Wiring real balance is a follow-up that touches the adapter
+    # Protocol.
+    enriched_metrics_snapshot: dict[str, Any] = _metrics_to_jsonb(metrics)
+    matched_strategy_id: str | None = None
+    try:
+        import dataclasses
+
+        from services.portfolio_metrics import compute_period_returns
+        from services.strategy_matching import find_matched_strategy
+        from services.transforms import trades_to_daily_returns
+
+        trades_as_dicts = [
+            dataclasses.asdict(t)
+            if dataclasses.is_dataclass(t) and not isinstance(t, type)
+            else t
+            for t in trades
+        ]
+        returns = trades_to_daily_returns(
+            trades_as_dicts, account_balance=None
+        )
+        if returns is not None and len(returns) >= 2:
+            period_returns = compute_period_returns(returns)
+            cumulative = (1 + returns).cumprod()
+            equity_curve = [
+                {"date": d.isoformat(), "value": float(v)}
+                for d, v in cumulative.items()
+            ]
+            matched_strategy_id = find_matched_strategy(returns, supabase)
+            enriched_metrics_snapshot.update(
+                {
+                    "return_24h": period_returns.get("return_24h"),
+                    "return_mtd": period_returns.get("return_mtd"),
+                    "return_ytd": period_returns.get("return_ytd"),
+                    "equity_curve": equity_curve,
+                    "matched_strategy_id": matched_strategy_id,
+                }
+            )
+        else:
+            # Insufficient trade history — null out the legacy-shape
+            # fields so the landing-page card explicitly renders dashes
+            # rather than silently omitting the keys.
+            enriched_metrics_snapshot.update(
+                {
+                    "return_24h": None,
+                    "return_mtd": None,
+                    "return_ytd": None,
+                    "equity_curve": None,
+                    "matched_strategy_id": None,
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        # Enrichment is best-effort. If the pandas math or the matching
+        # SELECT raises, persist the base MetricsSnapshot shape and let
+        # the user see partial data rather than failing the entire
+        # verification. Same precedent as the legacy verify_strategy's
+        # try/except around find_matched_strategy (portfolio.py:1052).
+        log.warning(
+            "process_key.enrichment_failed",
+            error=str(exc)[:200],
+            verification_id=verification_id,
+        )
+
     supabase.rpc(
         "transition_strategy_verification",
         {
             "p_verification_id": verification_id,
             "p_new_status": "metrics_captured",
-            "p_metadata": {"metrics_snapshot": _metrics_to_jsonb(metrics)},
+            "p_metadata": {"metrics_snapshot": enriched_metrics_snapshot},
         },
     ).execute()
 
@@ -753,7 +870,17 @@ async def process_key(
         "verification_id": verification_id,
         "status": "published",
         "trust_tier": trust_tier,
-        "metrics_snapshot": _metrics_to_jsonb(metrics),
+        # PR-X5 — return the enriched snapshot (with return_24h/mtd/ytd,
+        # equity_curve, matched_strategy_id) so the response shape
+        # mirrors the SV row's metrics_snapshot column. Mirrors the
+        # legacy verify_strategy's `results` payload shape.
+        "metrics_snapshot": enriched_metrics_snapshot,
+        # PR-X5 — top-level matched_strategy_id matches the legacy
+        # verify_strategy response shape (portfolio.py:1075). The TS
+        # legacy handler at src/app/api/verify-strategy/route.ts already
+        # folds it into metrics_snapshot when stamping the SV row;
+        # unified callers can read either location.
+        "matched_strategy_id": matched_strategy_id,
         "fingerprint": fp.to_jsonb(),
         "encrypted_credentials": encrypted,
         "errors": [],
