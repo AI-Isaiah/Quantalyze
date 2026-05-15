@@ -448,7 +448,12 @@ async function runLegacyFinalize(args: {
   // not block the response or reverse the finalize.
   after(async () => {
     const admin = createAdminClient();
-    const [managerName, { data: keyLink }] = await Promise.all([
+    // audit-2026-05-07 H-0322 — capture the api_key_id lookup error so a
+    // transient Postgres blip doesn't silently drop the last_sync_at
+    // touch (Sprint-2 cleanup would then treat the key as abandoned and
+    // GC it). Failure here logs to Sentry below; the founder email is
+    // independent so it still runs.
+    const [managerName, keyLinkResult] = await Promise.all([
       resolveManagerName(admin, user),
       admin
         .from("strategies")
@@ -456,6 +461,28 @@ async function runLegacyFinalize(args: {
         .eq("id", resolvedId)
         .single(),
     ]);
+    const { data: keyLink, error: keyLinkErr } = keyLinkResult;
+    if (keyLinkErr) {
+      console.warn(
+        "[strategies/finalize-wizard] api_key_id lookup failed in after():",
+        keyLinkErr.message,
+      );
+      if (process.env.SENTRY_DSN) {
+        try {
+          const Sentry = await import("@sentry/nextjs");
+          Sentry.captureException(keyLinkErr, {
+            tags: {
+              surface: "finalize-wizard-after",
+              side_effect: "api_key_id_lookup",
+            },
+            extra: { strategy_id: resolvedId },
+          });
+        } catch {
+          // Sentry import failure is non-fatal — the warn line above
+          // already emitted the signal.
+        }
+      }
+    }
 
     // audit-2026-05-07 G10.E.1: name each side effect so a future grep /
     // Sentry filter can disambiguate. Index-based logging (`side effect 0`)
