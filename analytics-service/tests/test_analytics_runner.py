@@ -505,6 +505,44 @@ def test_derived_trade_metrics_handles_empty_positions():
     assert result["profit_factor_short"] is None
 
 
+def test_derived_trade_metrics_normalizes_percent_win_rate():
+    """Audit-2026-05-07 H-0645 / H-0653: if a future refactor of
+    `reconstruct_positions` returns win_rate in percent (60.0) instead of
+    fraction (0.6), the consumer here MUST normalize defensively so
+    expectancy doesn't blow up ~100×.
+
+    Compare expectancy from win_rate=0.6 vs win_rate=60.0 — both should
+    collapse to the same number after normalization.
+    """
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v = {
+        "buy_volume_pct": 0.0,
+        "sell_volume_pct": 0.0,
+        "total_fills": 0,
+        "total_volume_usd": 0.0,
+    }
+    base = {
+        "avg_winning_trade": 0.05,
+        "avg_losing_trade": -0.025,
+        "winners_count": 30,
+        "losers_count": 20,
+        "realized_pnl_per_trade": [],
+    }
+    fraction_result = _compute_derived_trade_metrics(
+        v, {**base, "win_rate": 0.6}
+    )
+    percent_result = _compute_derived_trade_metrics(
+        v, {**base, "win_rate": 60.0}
+    )
+    assert fraction_result["expectancy"] == percent_result["expectancy"], (
+        "win_rate=60.0 (percent) must be normalized to 0.6 (fraction). "
+        f"Without the normalize, expectancy diverges by ~100×: "
+        f"fraction={fraction_result['expectancy']} "
+        f"percent={percent_result['expectancy']}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 12 Plan 05 / METRICS-09 — volume aggregator over raw fills
 # Phase 12 Plan 05 / METRICS-10 — Trade Mix (audit-gated 4-bucket vs 2-bucket)

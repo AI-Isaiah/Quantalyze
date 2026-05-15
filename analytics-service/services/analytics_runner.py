@@ -373,8 +373,19 @@ def _compute_derived_trade_metrics(
     # B-01 path-(b) contract literally.
     _ = volume_metrics
 
-    # Position-side primitives (B-01 path (b) extended reconstruct_positions output)
+    # Position-side primitives (B-01 path (b) extended reconstruct_positions output).
+    #
+    # Audit-2026-05-07 H-0645 / H-0653: defensively normalize win_rate to the
+    # canonical fraction-in-[0,1] convention. The producer
+    # (`reconstruct_positions`) historically returns a fraction (0.6 == 60%),
+    # but this is an unenforced cross-module contract. If a future refactor
+    # flips to percent (60.0 == 60%) without updating this consumer, the
+    # expectancy formula `win_rate * avg_win - (1 - win_rate) * |avg_loss|`
+    # blows up by ~100×. Normalize at the boundary so a single-character
+    # producer drift cannot ship inflated expectancy.
     win_rate = float(trade_metrics_from_positions.get("win_rate") or 0.0)
+    if win_rate > 1.0:
+        win_rate = win_rate / 100.0
     avg_win = float(trade_metrics_from_positions.get("avg_winning_trade") or 0.0)
     avg_loss = float(trade_metrics_from_positions.get("avg_losing_trade") or 0.0)
     winners_count = int(trade_metrics_from_positions.get("winners_count") or 0)
