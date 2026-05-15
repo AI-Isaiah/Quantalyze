@@ -505,6 +505,56 @@ def test_derived_trade_metrics_handles_empty_positions():
     assert result["profit_factor_short"] is None
 
 
+def test_derived_trade_metrics_drops_non_finite_realized_pnl():
+    """Audit-2026-05-07 H-0647 / H-0648: NaN / inf realized_pnl (commonly an
+    upstream divide-by-zero from reconstruct_positions when entry price is 0)
+    must NOT poison SQN, profit_factor_long, or profit_factor_short.
+
+    Compare two inputs that differ only by an extra NaN / inf trade per side.
+    The output for the clean cohort and the polluted-but-filtered cohort
+    must match — pinning that the non-finite values were dropped at the
+    boundary rather than silently propagating into JSONB.
+    """
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v = {}
+    clean = {
+        "avg_winning_trade": 100.0,
+        "avg_losing_trade": -50.0,
+        "winners_count": 2,
+        "losers_count": 2,
+        "win_rate": 0.5,
+        "realized_pnl_per_trade": [
+            {"side": "long", "realized_pnl": 100.0},
+            {"side": "long", "realized_pnl": -50.0},
+            {"side": "short", "realized_pnl": 200.0},
+            {"side": "short", "realized_pnl": -75.0},
+        ],
+    }
+    polluted = {
+        **clean,
+        "realized_pnl_per_trade": clean["realized_pnl_per_trade"] + [
+            {"side": "long", "realized_pnl": float("nan")},
+            {"side": "short", "realized_pnl": float("inf")},
+        ],
+    }
+    a = _compute_derived_trade_metrics(v, clean)
+    b = _compute_derived_trade_metrics(v, polluted)
+
+    assert a["sqn"] == b["sqn"], (
+        f"NaN/inf must be filtered out of r_multiples before SQN math. "
+        f"clean={a['sqn']} polluted={b['sqn']}"
+    )
+    assert a["profit_factor_long"] == b["profit_factor_long"], (
+        "NaN long-side realized_pnl must NOT change profit_factor_long. "
+        f"clean={a['profit_factor_long']} polluted={b['profit_factor_long']}"
+    )
+    assert a["profit_factor_short"] == b["profit_factor_short"], (
+        "inf short-side realized_pnl must NOT change profit_factor_short. "
+        f"clean={a['profit_factor_short']} polluted={b['profit_factor_short']}"
+    )
+
+
 def test_derived_trade_metrics_normalizes_percent_win_rate():
     """Audit-2026-05-07 H-0645 / H-0653: if a future refactor of
     `reconstruct_positions` returns win_rate in percent (60.0) instead of

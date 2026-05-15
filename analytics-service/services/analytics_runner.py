@@ -421,12 +421,21 @@ def _compute_derived_trade_metrics(
 
     # METRICS-08: SQN over per-trade R-multiples (R = realized_pnl / risk_unit).
     # risk_unit derived from |avg_loss| (the canonical Van Tharp denominator).
+    #
+    # Audit-2026-05-07 H-0647 / H-0648: NaN / inf realized_pnl values
+    # (commonly an upstream divide-by-zero from reconstruct_positions when
+    # entry_price == 0) pass the `is not None` filter and silently corrupt
+    # the SQN math (NaN propagates through mean/var) and the profit_factor
+    # math (NaN values evade BOTH `p > 0` and `p < 0` filters, draining
+    # gross profit and gross loss). Filter on `math.isfinite` so non-finite
+    # inputs are dropped at the boundary rather than poisoning JSONB.
     risk_unit = abs(avg_loss) if avg_loss else 0.0
     if risk_unit > 0 and per_trade:
         r_multiples = [
-            (t.get("realized_pnl") or 0.0) / risk_unit
+            float(t["realized_pnl"]) / risk_unit
             for t in per_trade
             if t.get("realized_pnl") is not None
+            and math.isfinite(float(t.get("realized_pnl") or 0.0))
         ]
         if len(r_multiples) >= 2:
             mean_r = sum(r_multiples) / len(r_multiples)
@@ -439,16 +448,27 @@ def _compute_derived_trade_metrics(
                     min(len(r_multiples), 100)
                 )
 
-    # Profit Factor segmented by side — uses position-side realized_pnl_per_trade
+    # Profit Factor segmented by side — uses position-side realized_pnl_per_trade.
+    # Same H-0647 / H-0648 isfinite filter applied here.
+    def _finite_pnl(t: dict) -> float | None:
+        raw = t.get("realized_pnl")
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(val):
+            return None
+        return val
+
     long_pnls = [
-        float(t.get("realized_pnl") or 0.0)
-        for t in per_trade
-        if t.get("side") == "long"
+        v for t in per_trade if t.get("side") == "long"
+        for v in [_finite_pnl(t)] if v is not None
     ]
     short_pnls = [
-        float(t.get("realized_pnl") or 0.0)
-        for t in per_trade
-        if t.get("side") == "short"
+        v for t in per_trade if t.get("side") == "short"
+        for v in [_finite_pnl(t)] if v is not None
     ]
 
     def _profit_factor(pnls: list[float]) -> float | None:
