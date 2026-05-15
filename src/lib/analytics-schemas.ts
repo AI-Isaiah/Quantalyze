@@ -78,8 +78,11 @@ export const VerifyStrategyResponseSchema = z.object({
 }).passthrough();
 
 // --- /api/match/recompute ---
+// Every branch carries a `status` discriminator so callers can switch on a
+// single field instead of probing key presence. `.passthrough()` is retained
+// for forward-compat with per-branch extra fields.
 export const RecomputeMatchResponseSchema = z.object({
-  status: z.string().optional(),
+  status: z.enum(["disabled", "skipped", "ok"]),
   allocator_id: z.string().optional(),
 }).passthrough();
 

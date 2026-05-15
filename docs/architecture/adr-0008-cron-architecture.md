@@ -80,10 +80,10 @@ Assign each mechanism a workload class:
   (lines 30-35).
 - Vercel Cron (timing-unsafe): `src/app/api/alert-digest/route.ts`
   (lines 19-24).
-- pg_cron: `supabase/migrations/013_cron_heartbeat.sql` (lines 162-176),
-  `supabase/migrations/015_schedule_match_cron_hourly.sql` (lines 65-79).
+- pg_cron: `supabase/migrations/20260408113029_cron_heartbeat.sql` (lines 162-176),
+  `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql` (lines 65-79).
 - Edge Functions: `supabase/functions/compute-trigger/index.ts`,
   `supabase/functions/notify-admin/index.ts`.
 - Python cron: `analytics-service/routers/cron.py` (lines 148-281).
-- `cron_runs` table: `supabase/migrations/013_cron_heartbeat.sql`.
+- `cron_runs` table: `supabase/migrations/20260408113029_cron_heartbeat.sql`.
 - `vercel.json` crons block: `vercel.json` (lines 6-9).

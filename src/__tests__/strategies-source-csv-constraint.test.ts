@@ -27,8 +27,8 @@ const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
 
 describe("strategies.source check constraint admits 'csv' (Phase 18 / FIX-03 regression guard)", () => {
-  it("migration 100_strategies_source_csv.sql exists and extends the constraint", () => {
-    const filename = "100_strategies_source_csv.sql";
+  it("migration 20260506211806_strategies_source_csv.sql exists and extends the constraint", () => {
+    const filename = "20260506211806_strategies_source_csv.sql";
     const path = join(MIGRATIONS_DIR, filename);
     const sql = readFileSync(path, "utf8");
 
@@ -49,7 +49,7 @@ describe("strategies.source check constraint admits 'csv' (Phase 18 / FIX-03 reg
     // this test would still need to be updated — but the new behavior would
     // also need to be intentional. The contract is: whatever value the RPC
     // inserts, the strategies_source_check constraint must admit it.
-    const path = join(MIGRATIONS_DIR, "093_strategy_verifications.sql");
+    const path = join(MIGRATIONS_DIR, "20260501055202_strategy_verifications.sql");
     const sql = readFileSync(path, "utf8");
     // The INSERT INTO strategies block in 093 sets source = 'csv'.
     expect(sql).toMatch(/INSERT\s+INTO\s+strategies[\s\S]+?'pending_review',\s*'csv'/i);
@@ -58,14 +58,16 @@ describe("strategies.source check constraint admits 'csv' (Phase 18 / FIX-03 reg
   it("no later migration silently re-narrows the strategies_source_check constraint", () => {
     // If a future migration drops the constraint without re-adding it with
     // 'csv' included, that re-introduces the bug. Walk every migration file
-    // numbered >= 100 and assert: any DROP CONSTRAINT strategies_source_check
+    // whose timestamp is >= the csv-introducing migration (20260506211806,
+    // formerly NNN=100) and assert: any DROP CONSTRAINT strategies_source_check
     // is followed by an ADD CONSTRAINT that includes 'csv'.
+    const CSV_INTRO_TS = "20260506211806";
     const files = readdirSync(MIGRATIONS_DIR)
-      .filter((f) => /^\d{3,}_.+\.sql$/.test(f))
+      .filter((f) => /^\d{14}_.+\.sql$/.test(f))
       .sort();
     for (const file of files) {
-      const num = Number.parseInt(file.slice(0, 3), 10);
-      if (Number.isNaN(num) || num < 100) continue;
+      const ts = file.slice(0, 14);
+      if (ts < CSV_INTRO_TS) continue;
       const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
       const drops = sql.match(/DROP\s+CONSTRAINT[^;]+strategies_source_check/gi);
       if (!drops) continue;

@@ -178,7 +178,7 @@ COMMENT ON COLUMN strategy_verifications.source IS
 -- writes it to strategies.name.
 --
 -- Pattern: copy the structure of create_wizard_strategy at
--- supabase/migrations/031_wizard_source_column.sql:118-186 (atomic two-table
+-- supabase/migrations/20260411103316_wizard_source_column.sql:118-186 (atomic two-table
 -- insert with SECURITY DEFINER + manual auth.uid() guard) but adapt for the
 -- CSV path: no api_keys insert; instead an immediate strategy_verifications
 -- insert at status='validated', trust_tier='csv_uploaded'.

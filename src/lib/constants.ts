@@ -124,8 +124,8 @@ export type ApiKeyUserColumn = (typeof API_KEY_USER_COLUMNS_ARR)[number];
  * and audits can reference the same list the migration uses.
  *
  * NOTE: SQL migrations cannot import TS, so the same list also appears
- * verbatim in `supabase/migrations/027_api_keys_column_revoke.sql` and
- * `supabase/migrations/029_sec005_follow_ups.sql`. Keep them in sync.
+ * verbatim in `supabase/migrations/20260410225608_api_keys_column_revoke.sql` and
+ * `supabase/migrations/20260410225610_sec005_follow_ups.sql`. Keep them in sync.
  */
 export const API_KEY_ENCRYPTED_COLUMNS = [
   "api_key_encrypted",
