@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException
@@ -52,7 +53,11 @@ FLAG_COMPOSITE_THRESHOLD = 50
 
 
 class RecomputeRequest(BaseModel):
-    allocator_id: str
+    # Audit-2026-05-07 H-0548: typed as UUID so FastAPI/Pydantic reject
+    # arbitrary strings ('', SQL injection bait, path traversal) at the
+    # request boundary with a structured 422 instead of round-tripping a
+    # 0-row Supabase result. profiles.id is `UUID NOT NULL` upstream.
+    allocator_id: UUID
     force: bool = False
 
 
@@ -71,7 +76,16 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
 
 
 def _kill_switch_enabled() -> bool:
-    """Check the kill switch. Returns True if the engine should run."""
+    """Check the kill switch. Returns True if the engine should run.
+
+    Fail-open contract (Audit-2026-05-07 H-0554/H-0561): on any Supabase
+    exception (network blip, RLS rejection, schema drift, table missing
+    post-rollback) we KEEP the engine running and emit `logger.error` so
+    operators get a loud signal in Sentry/log aggregators rather than the
+    previous silent `logger.warning`. Flipping to fail-closed would silently
+    disable the engine on transient DB blips and is a worse failure mode
+    for a manual founder-kill-switch surface.
+    """
     supabase = get_supabase()
     try:
         result = supabase.table("system_flags").select("enabled").eq(
@@ -81,12 +95,23 @@ def _kill_switch_enabled() -> bool:
             return True  # No row = default enabled
         return bool(result.data.get("enabled", True))
     except Exception as err:
-        logger.warning("match_engine: kill switch check failed, defaulting to enabled: %s", err)
+        logger.error(
+            "match_engine: kill switch check FAILED (fail-open, engine "
+            "still running): %s",
+            err,
+        )
         return True
 
 
-def _load_candidate_universe() -> dict[str, Any]:
+def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     """Load all strategies, analytics, and returns ONCE per cron run.
+
+    Args:
+      demo_only: When True, restricts the universe to `is_example=true` rows.
+        Audit-2026-05-07 C-0204 fix — the demo-allocator path (migration 015
+        hourly cron + /api/demo/match) MUST NOT leak real published strategies
+        through the anon public demo endpoint. Default False preserves the
+        normal admin cron behaviour (all published).
 
     Returns a dict:
     {
@@ -96,15 +121,17 @@ def _load_candidate_universe() -> dict[str, Any]:
     """
     supabase = get_supabase()
 
-    strategies_result = (
+    strategies_query = (
         supabase.table("strategies")
         .select(
             "id, name, codename, strategy_types, subtypes, supported_exchanges, "
-            "status, aum, max_capacity, user_id, start_date"
+            "status, aum, max_capacity, user_id, start_date, is_example"
         )
         .eq("status", "published")
-        .execute()
     )
+    if demo_only:
+        strategies_query = strategies_query.eq("is_example", True)
+    strategies_result = strategies_query.execute()
     strategies = strategies_result.data or []
     strategy_ids = [s["id"] for s in strategies]
 
@@ -555,7 +582,12 @@ async def _score_one_allocator(
         candidate_strategies = list(universe["strategies_by_id"].values())
         candidate_returns = universe["returns_by_id"]
 
-        result = score_candidates(
+        # H-0550: score_candidates runs pandas/numpy heavy work
+        # (DataFrame builds, correlation calculations, min-max normalization
+        # across the entire candidate universe). Off-load to a thread so we
+        # do not block the FastAPI event loop for seconds per allocator.
+        result = await asyncio.to_thread(
+            score_candidates,
             allocator_id=allocator_id,
             preferences=ctx["preferences"],
             portfolio_strategies=ctx["portfolio_strategies"],
@@ -659,9 +691,19 @@ async def _score_one_allocator(
             })
 
         if rows_to_insert:
-            await asyncio.to_thread(
+            # Audit-2026-05-07 H-0566: capture and inspect the result so a
+            # silent FK/CHECK violation (e.g. strategy_id deleted between the
+            # universe snapshot and the insert) cannot leave the match_batches
+            # row claiming `candidate_count > 0` with zero child rows. The
+            # admin queue would otherwise show non-zero count + empty list.
+            cand_insert = await asyncio.to_thread(
                 lambda: supabase.table("match_candidates").insert(rows_to_insert).execute()
             )
+            if not cand_insert.data:
+                raise RuntimeError(
+                    f"match_candidates insert returned no data for batch {batch_id} "
+                    f"(allocator={allocator_id}, expected {len(rows_to_insert)} rows)"
+                )
 
         logger.info(
             "match_engine recompute: allocator=%s batch=%s mode=%s "
@@ -714,9 +756,18 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
         last_at = datetime.fromisoformat(last_row["computed_at"].replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return False
+    # Audit-2026-05-07 H-0556/H-0557: age guard FIRST. If the batch is older
+    # than RECOMPUTE_MIN_AGE_HOURS we already need to recompute regardless of
+    # Trigger 3, so the second Supabase round-trip to allocator_preferences
+    # would be wasted. Only consult mandate_edited_at when the age guard
+    # would otherwise SKIP — saves O(allocators) RTTs per cron run with no
+    # behaviour change.
+    age_hours = (datetime.now(timezone.utc) - last_at).total_seconds() / 3600
+    if age_hours >= RECOMPUTE_MIN_AGE_HOURS:
+        return False
     # Trigger 3: mandate_edited_at > computed_at — mandate edit invalidates
     # the cached batch. One extra query against allocator_preferences
-    # (indexed by user_id PK, O(1) lookup).
+    # (indexed by user_id PK, O(1) lookup), only on the SKIP path.
     prefs_result = await asyncio.to_thread(
         lambda: supabase.table("allocator_preferences")
         .select("mandate_edited_at")
@@ -731,10 +782,29 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
             edited_at = datetime.fromisoformat(edited_raw.replace("Z", "+00:00"))
             if edited_at > last_at:
                 return False
-        except (ValueError, AttributeError):
-            pass
-    age_hours = (datetime.now(timezone.utc) - last_at).total_seconds() / 3600
-    return age_hours < RECOMPUTE_MIN_AGE_HOURS
+        except (ValueError, AttributeError) as exc:
+            # Audit-2026-05-07 H-0549/H-0559: a malformed mandate_edited_at
+            # (legacy backup, unix-epoch int, timezone serializer drift)
+            # used to silently `pass` and fall through to the age guard.
+            # That downgraded D-11 Trigger 3 (mandate edit invalidates the
+            # cached batch) into a no-op — allocator edits mandate, parse
+            # fails, cron skips, stale batches served indefinitely. Rule
+            # 12 (fail loud): log and treat as "recompute needed".
+            logger.warning(
+                "match_engine: bad mandate_edited_at %r for allocator %s "
+                "— forcing recompute: %s",
+                edited_raw, allocator_id, exc,
+            )
+            return False
+    return True
+
+
+# Audit-2026-05-07 H-0568: cap the DELETE IN-list so the PostgREST URL
+# cannot grow unbounded. supabase-py serializes `.in_('id', ids)` into the
+# query string; at sufficient batch count this exceeds PostgREST's URL
+# limit (HTTP 414 or silent filter truncation = old batches survive the
+# sweep). 50 IDs per page keeps URLs well under any reasonable cap.
+_RETENTION_DELETE_BATCH_SIZE = 50
 
 
 def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
@@ -756,8 +826,15 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
     if len(rows) <= keep:
         return 0
     ids_to_delete = [row["id"] for row in rows[keep:]]
-    supabase.table("match_batches").delete().in_("id", ids_to_delete).execute()
-    return len(ids_to_delete)
+    deleted = 0
+    # Paginate the DELETE in chunks of _RETENTION_DELETE_BATCH_SIZE so the
+    # IN-list URL stays bounded (H-0568). Each chunk is its own request,
+    # so partial progress is preserved on transient failures.
+    for start in range(0, len(ids_to_delete), _RETENTION_DELETE_BATCH_SIZE):
+        chunk = ids_to_delete[start:start + _RETENTION_DELETE_BATCH_SIZE]
+        supabase.table("match_batches").delete().in_("id", chunk).execute()
+        deleted += len(chunk)
+    return deleted
 
 
 # ---------------------------------------------------------------------------
@@ -768,27 +845,38 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
 @router.post("/recompute")
 async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     """Single-allocator recompute. Called from the Next.js admin /api/admin/match/recompute."""
-    if not _kill_switch_enabled():
-        logger.info("match_engine recompute: kill switch off, skipping allocator=%s", req.allocator_id)
-        return {"disabled": True}
+    # H-0548: stringify the UUID once for Supabase / downstream sync helpers.
+    allocator_id = str(req.allocator_id)
+    if not await asyncio.to_thread(_kill_switch_enabled):
+        logger.info("match_engine recompute: kill switch off, skipping allocator=%s", allocator_id)
+        return {"status": "disabled", "disabled": True}
 
-    if await _should_skip_allocator(req.allocator_id, req.force):
-        logger.info("match_engine recompute: skipping recent batch for %s", req.allocator_id)
-        return {"skipped": True, "reason": "recent_batch"}
+    if await _should_skip_allocator(allocator_id, req.force):
+        logger.info("match_engine recompute: skipping recent batch for %s", allocator_id)
+        return {"status": "skipped", "skipped": True, "reason": "recent_batch"}
 
     universe = await asyncio.to_thread(_load_candidate_universe)
     if not universe["strategies_by_id"]:
         raise HTTPException(status_code=400, detail="No eligible strategies in the directory")
 
     try:
-        result = await _score_one_allocator(req.allocator_id, universe)
+        result = await _score_one_allocator(allocator_id, universe)
     except Exception as err:
-        logger.exception("match_engine recompute failed for %s", req.allocator_id)
+        logger.exception("match_engine recompute failed for %s", allocator_id)
         raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
 
-    # Retention sweep for this allocator (keep last 7)
-    await asyncio.to_thread(_retention_sweep, req.allocator_id)
+    # Retention sweep for this allocator (keep last 7). H-0564: do not let a
+    # retention failure 500 the request after the batch was successfully
+    # persisted; log loudly and return the result.
+    try:
+        await asyncio.to_thread(_retention_sweep, allocator_id)
+    except Exception as err:
+        logger.error(
+            "match_engine recompute: retention sweep failed for %s after successful insert: %s",
+            allocator_id, err,
+        )
 
+    result["status"] = "ok"
     return result
 
 
@@ -834,9 +922,26 @@ async def cron_recompute() -> dict[str, Any]:
     """Daily cron. Loops every allocator (+ role 'both'), recomputes their batch."""
     overall_start = time.monotonic()
 
-    if not _kill_switch_enabled():
+    def _duration() -> float:
+        return round(time.monotonic() - overall_start, 2)
+
+    # H-0565: kill switch check makes a sync Supabase call — off-load to a
+    # thread so the FastAPI event loop is not blocked on each round-trip.
+    if not await asyncio.to_thread(_kill_switch_enabled):
         logger.info("match_engine cron: kill switch off, skipping")
-        return {"disabled": True, "processed": 0}
+        # H-0569: unify response shape — include duration_s and
+        # retention_deleted on every branch, plus a `status` discriminator
+        # so monitoring can switch on a single field rather than guessing
+        # at key presence.
+        return {
+            "status": "disabled",
+            "disabled": True,
+            "processed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "retention_deleted": 0,
+            "duration_s": _duration(),
+        }
 
     supabase = get_supabase()
 
@@ -850,13 +955,28 @@ async def cron_recompute() -> dict[str, Any]:
     allocators = allocators_result.data or []
     if not allocators:
         logger.info("match_engine cron: no allocators found")
-        return {"processed": 0, "skipped": 0, "failed": 0, "duration_s": 0}
+        return {
+            "status": "no_allocators",
+            "processed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "retention_deleted": 0,
+            "duration_s": _duration(),
+        }
 
     # Load universe ONCE (eng review E16)
     universe = await asyncio.to_thread(_load_candidate_universe)
     if not universe["strategies_by_id"]:
         logger.warning("match_engine cron: no strategies in universe")
-        return {"processed": 0, "skipped": 0, "failed": 0, "reason": "empty_universe"}
+        return {
+            "status": "empty_universe",
+            "processed": 0,
+            "skipped": 0,
+            "failed": 0,
+            "retention_deleted": 0,
+            "reason": "empty_universe",
+            "duration_s": _duration(),
+        }
 
     processed = 0
     skipped = 0
@@ -865,8 +985,9 @@ async def cron_recompute() -> dict[str, Any]:
     for profile in allocators:
         allocator_id = profile["id"]
 
-        # Re-check kill switch mid-run (founder may flip it)
-        if not _kill_switch_enabled():
+        # Re-check kill switch mid-run (founder may flip it). H-0565: also
+        # off-loaded to a thread.
+        if not await asyncio.to_thread(_kill_switch_enabled):
             logger.info("match_engine cron: kill switch flipped mid-run, aborting")
             break
 
@@ -882,21 +1003,47 @@ async def cron_recompute() -> dict[str, Any]:
             failed += 1
             # Continue the loop — one allocator failure doesn't fail the cron
 
-    # Retention sweep at end (per allocator that had a batch this run)
+    # Retention sweep at end (per allocator that had a batch this run).
+    # H-0564: elevate to `logger.error` so a silently-broken sweep
+    # (RLS regression, FK error, URL truncation) lands in alerts instead
+    # of buried in a log file.
     retention_total = 0
     for profile in allocators:
         try:
             retention_total += await asyncio.to_thread(_retention_sweep, profile["id"])
         except Exception as err:
-            logger.warning("match_engine cron: retention sweep failed for %s: %s", profile["id"], err)
+            logger.error(
+                "match_engine cron: retention sweep failed for %s: %s",
+                profile["id"], err,
+            )
 
-    duration_s = round(time.monotonic() - overall_start, 2)
+    duration_s = _duration()
+
+    # H-0555: if EVERY allocator failed, this is a structural problem
+    # (schema drift, KEK missing, supabase client raising) that the
+    # Vercel cron scheduler would otherwise treat as a successful 200.
+    # Emit a logger.error so Sentry/log aggregators light up. We still
+    # return 200 with the failure breakdown so the cron caller does not
+    # retry-loop on a structural failure — but no longer silently.
+    if failed > 0 and processed == 0:
+        logger.error(
+            "match_engine cron: TOTAL FAILURE — processed=0 failed=%d "
+            "(structural; see preceding exceptions)",
+            failed,
+        )
+    elif failed > 0 and failed > processed:
+        logger.error(
+            "match_engine cron: majority failure — processed=%d failed=%d",
+            processed, failed,
+        )
+
     logger.info(
         "match_engine cron complete: processed=%d skipped=%d failed=%d "
         "retention_deleted=%d duration_s=%.2f",
         processed, skipped, failed, retention_total, duration_s,
     )
     return {
+        "status": "ok",
         "processed": processed,
         "skipped": skipped,
         "failed": failed,
