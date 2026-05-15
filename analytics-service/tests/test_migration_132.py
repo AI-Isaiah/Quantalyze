@@ -1,7 +1,7 @@
 """Phase 19 / PR-X5 — static-AST test for migration 132 (teaser-anchor
 sentinel).
 
-Reads ``supabase/migrations/132_teaser_anchor_strategy.sql`` and asserts
+Reads ``supabase/migrations/20260515095804_teaser_anchor_strategy.sql`` and asserts
 the three sentinel INSERTs all reference the expected UUIDs and shape
 constants. Catches drift between the migration source and the
 TEASER_ANCHOR_STRATEGY_ID constants that the application code reads from

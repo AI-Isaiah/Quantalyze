@@ -14,7 +14,7 @@
  *      "unowned" and "nonexistent" (D-15 proof).
  *
  * The RLS policies under test are in:
- *   supabase/migrations/070_allocator_equity_snapshots.sql lines 391-413
+ *   supabase/migrations/20260420213754_allocator_equity_snapshots.sql lines 391-413
  *   (owner + admin + service_role three-tier gate)
  *
  * Gate: requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.

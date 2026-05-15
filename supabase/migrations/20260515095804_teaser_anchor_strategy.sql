@@ -18,7 +18,7 @@
 -- forces us to seed BOTH a sentinel auth.users row AND a sentinel profiles
 -- row before the strategies INSERT. We seed the auth.users row with
 -- minimal columns (id + email) following the precedent at
--- supabase/migrations/062_scoring_weight_overrides.sql:589 — except that
+-- supabase/migrations/20260418194206_scoring_weight_overrides.sql:589 — except that
 -- the 062 sentinel was temporary (cleaned up in the same DO block) and
 -- this one is permanent. Sign-in is implicitly blocked because:
 --   (a) encrypted_password is NULL (no password)

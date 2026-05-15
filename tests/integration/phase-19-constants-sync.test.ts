@@ -4,7 +4,7 @@
  * The sentinel anchor UUID is duplicated literally in three places:
  *   1. src/lib/phase-19-constants.ts                 (TS callers)
  *   2. analytics-service/services/teaser_anchor.py   (Python callers)
- *   3. supabase/migrations/132_teaser_anchor_strategy.sql (the row that satisfies the FK)
+ *   3. supabase/migrations/20260515095804_teaser_anchor_strategy.sql (the row that satisfies the FK)
  *
  * A typo in any single location would surface only at runtime — post
  * flag flip, every teaser submission would 23503 against the
@@ -44,7 +44,7 @@ describe("Phase 19 / PR-X5 — TEASER_ANCHOR_STRATEGY_ID drift guard", () => {
 
   it("TS constant matches the value INSERTed by migration 132", () => {
     const migrationSource = readFile(
-      "supabase/migrations/132_teaser_anchor_strategy.sql",
+      "supabase/migrations/20260515095804_teaser_anchor_strategy.sql",
     );
     // The migration's strategies INSERT references the sentinel UUID
     // as a literal `'00000000-...-0001'::uuid`. Assert presence directly.

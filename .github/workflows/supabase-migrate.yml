@@ -31,10 +31,12 @@ name: Supabase Migrate
 # apply).
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'supabase/migrations/**'
+  # Manual-only since 2026-05-15 (PR-Y1 prep). The auto-on-push trigger
+  # caused the workflow to fail on every migration-touching merge because
+  # the local sequential-numbered files (NNN_*.sql) do not match the
+  # timestamp-versioned rows the remote schema_migrations table records.
+  # Re-enable the push trigger only AFTER PR-Y1 reconciles file names and
+  # `supabase db push` is verified as a no-op.
   workflow_dispatch:
 
 concurrency:

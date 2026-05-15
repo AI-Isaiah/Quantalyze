@@ -2,7 +2,7 @@
 
 Operational guide for the `compute_bridge_outcome_deltas` daily cron job. See the
 implementation plan at `.planning/phases/01-outcome-tracker/01-04-PLAN.md` and the
-migration at `supabase/migrations/060_bridge_outcome_cron.sql`.
+migration at `supabase/migrations/20260418074935_bridge_outcome_cron.sql`.
 
 ## Overview
 

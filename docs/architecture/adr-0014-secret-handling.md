@@ -122,15 +122,15 @@ A rotation runbook should be created for each class, covering:
 - CRON_SECRET: `src/app/api/cron/warm-analytics/route.ts` (line 39),
   `src/app/api/alert-digest/route.ts` (line 22).
 - HMAC_SECRET: `src/lib/demo-pdf-token.ts`.
-- Postgres GUC pattern: `supabase/migrations/013_cron_heartbeat.sql`
+- Postgres GUC pattern: `supabase/migrations/20260408113029_cron_heartbeat.sql`
   (lines 144-151).
 - Envelope encryption: `analytics-service/services/encryption.py`.
-- KEK schema: `supabase/migrations/001_initial_schema.sql` (line 19).
+- KEK schema: `supabase/migrations/20260405061911_initial_schema.sql` (line 19).
 - Analytics service key: `src/lib/analytics-client.ts` (line 2).
-- SEC-005 column REVOKE: `supabase/migrations/027_api_keys_column_revoke.sql`.
-- Cross-tenant tenant check trigger: `supabase/migrations/028_strategy_api_key_tenant_check.sql`.
+- SEC-005 column REVOKE: `supabase/migrations/20260410225608_api_keys_column_revoke.sql`.
+- Cross-tenant tenant check trigger: `supabase/migrations/20260410225609_strategy_api_key_tenant_check.sql`.
 - Follow-up hardening (WITH CHECK, FOR SHARE, retro-scan):
-  `supabase/migrations/029_sec005_follow_ups.sql`.
+  `supabase/migrations/20260410225610_sec005_follow_ups.sql`.
 - Allowlist constant: `src/lib/constants.ts::API_KEY_USER_COLUMNS`.
 - Regression test (static scan): `src/lib/sec-005-api-keys-projection.test.ts`.
 - Integration test (live DB): `src/lib/migration-028-tenant-check.test.ts`.

@@ -2,7 +2,7 @@
  * Phase 19 / PR-X5 — shared constants for the teaser flow.
  *
  * Sentinel strategy_id for the teaser flow's strategy_verifications rows.
- * Provisioned by supabase/migrations/132_teaser_anchor_strategy.sql.
+ * Provisioned by supabase/migrations/20260515095804_teaser_anchor_strategy.sql.
  *
  * The teaser submission has no caller-owned strategy by design — the user
  * is probing keys against the universe of published strategies; no

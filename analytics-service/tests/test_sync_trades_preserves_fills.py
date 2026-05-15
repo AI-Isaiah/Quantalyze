@@ -7,7 +7,7 @@ Asserted invariants:
   2. The legacy is_fill=false rows are still replaced atomically (the
      RPC returns the count of newly-inserted summary rows).
 
-Migration under test: supabase/migrations/102_sync_trades_preserve_fills.sql.
+Migration under test: supabase/migrations/20260510172558_sync_trades_preserve_fills.sql.
 Original bug: migration 007's sync_trades did
   `DELETE FROM trades WHERE strategy_id = p_strategy_id`
 unconditionally, which silently wiped the Phase 2 raw fills written by the
