@@ -152,17 +152,42 @@ async def _load_position_time_series(
     contract stays stable and the branch selection (constant vs gross
     exposure) still reflects whether a real balance is known.
     """
-    def _fetch_snapshots():
-        return (
-            supabase.table("position_snapshots")
-            .select("snapshot_date, symbol, side, size_usd, mark_price")
-            .eq("strategy_id", strategy_id)
-            .order("snapshot_date")
-            .execute()
-        )
+    # Audit-2026-05-07 H-0629 / H-0643: paginate the snapshot fetch. The
+    # bare SELECT was bounded only by PostgREST's per-response cap
+    # (1000 rows by default on hosted Supabase), so any strategy with
+    # > 1000 snapshot rows (multi-symbol × multi-year backfills hit this
+    # easily) silently truncated to a sub-sample of the recent window —
+    # corrupting turnover / NAV grids without any signal. Page through
+    # in 1000-row batches with a stable order; stop on a short page.
+    page_size = 1000
+    snapshots: list[dict] = []
+    for page_idx in range(1000):  # 1000 pages × 1000 rows = 1M-row sanity belt
+        start = page_idx * page_size
+        end = start + page_size - 1
 
-    snaps_result = await db_execute(_fetch_snapshots)
-    snapshots = (snaps_result.data if snaps_result else None) or []
+        def _fetch_snapshots_page(_s=start, _e=end):
+            return (
+                supabase.table("position_snapshots")
+                .select("snapshot_date, symbol, side, size_usd, mark_price")
+                .eq("strategy_id", strategy_id)
+                .order("snapshot_date")
+                .range(_s, _e)
+                .execute()
+            )
+
+        page_result = await db_execute(_fetch_snapshots_page)
+        chunk = (page_result.data if page_result else None) or []
+        snapshots.extend(chunk)
+        if len(chunk) < page_size:
+            break
+    else:
+        # Hit the 1M-row sanity belt without a natural break — log so
+        # operators can investigate before silently aggregating over a
+        # truncated window.
+        logger.error(
+            "position_snapshots pagination hit %d-page sanity belt for %s",
+            1000, strategy_id,
+        )
     if not snapshots:
         return {}, {}, {}
 
@@ -908,14 +933,38 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         fills_fetch_failed = False
         fills_fetch_error: str | None = None
         try:
-            fills_result = await db_execute(
-                lambda: supabase.table("trades")
-                .select("side, cost, is_maker, timestamp")
-                .eq("strategy_id", strategy_id)
-                .eq("is_fill", True)
-                .execute()
-            )
-            raw_fills = (fills_result.data if fills_result else []) or []
+            # Audit-2026-05-07 H-0630 / H-0643: paginate the fills fetch.
+            # Active live OKX strategies routinely have tens of thousands of
+            # fills; the bare SELECT was capped at PostgREST's default 1000
+            # rows, silently corrupting volume / turnover / trade_mix math.
+            # Same pagination pattern as _load_position_time_series above.
+            fills_page_size = 1000
+            raw_fills: list[dict] = []
+            for fills_page_idx in range(1000):  # 1M-row sanity belt
+                fills_start = fills_page_idx * fills_page_size
+                fills_end = fills_start + fills_page_size - 1
+
+                def _fetch_fills_page(_s=fills_start, _e=fills_end):
+                    return (
+                        supabase.table("trades")
+                        .select("side, cost, is_maker, timestamp")
+                        .eq("strategy_id", strategy_id)
+                        .eq("is_fill", True)
+                        .order("timestamp")
+                        .range(_s, _e)
+                        .execute()
+                    )
+
+                fills_page = await db_execute(_fetch_fills_page)
+                fills_chunk = (fills_page.data if fills_page else []) or []
+                raw_fills.extend(fills_chunk)
+                if len(fills_chunk) < fills_page_size:
+                    break
+            else:
+                logger.error(
+                    "trades fills pagination hit %d-page sanity belt for %s",
+                    1000, strategy_id,
+                )
             fills_data = [
                 {
                     **row,

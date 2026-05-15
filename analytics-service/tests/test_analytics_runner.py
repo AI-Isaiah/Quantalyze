@@ -1128,6 +1128,11 @@ def _build_balance_flag_mock_supabase(
             def _eq_fill(field, value):
                 r = MagicMock()
                 r.execute.return_value = MagicMock(data=[])
+                # H-0630 pagination support.
+                order = MagicMock()
+                order.execute.return_value = MagicMock(data=[])
+                order.range = _make_paged_range([])
+                r.order.return_value = order
                 return r
 
             eq_strat.neq = _neq
@@ -1172,6 +1177,7 @@ def _build_balance_flag_mock_supabase(
             eq = MagicMock()
             order = MagicMock()
             order.execute.return_value = MagicMock(data=[])
+            order.range = _make_paged_range([])
             eq.order = MagicMock(return_value=order)
             sel.eq.return_value = eq
             t.select.return_value = sel
@@ -1749,6 +1755,31 @@ class TestComputeVolumeMetrics:
 # `test_graceful_degradation_position_failure` tests above.
 
 
+def _make_paged_range(rows: list[dict]):
+    """Build a `.range(start, end)` mock that simulates PostgREST pagination.
+
+    Returns a chainable that:
+      - on the first call returns the full ``rows`` payload (the runner's
+        page-1 fetch), and
+      - on every subsequent call returns an empty list (so the runner's
+        bounded pagination loop terminates after one page).
+
+    Used by the H-0629 / H-0630 / H-0643 paginated SELECTs in the runner.
+    """
+    state = {"called": False}
+
+    def _range(start, end):
+        r = MagicMock()
+        if not state["called"]:
+            state["called"] = True
+            r.execute.return_value = MagicMock(data=rows)
+        else:
+            r.execute.return_value = MagicMock(data=[])
+        return r
+
+    return MagicMock(side_effect=_range)
+
+
 def _build_runner_mock_supabase(
     *,
     daily_pnl_rows: list[dict],
@@ -1809,7 +1840,13 @@ def _build_runner_mock_supabase(
             def _eq_fill(field, value):
                 # is_fill = True → raw fills for B-01 path b
                 r = MagicMock()
+                # Legacy unpaginated path: .execute() still returns all rows.
                 r.execute.return_value = MagicMock(data=fills_rows)
+                # H-0630 pagination: .order(...).range(...).execute()
+                order = MagicMock()
+                order.execute.return_value = MagicMock(data=fills_rows)
+                order.range = _make_paged_range(fills_rows)
+                r.order.return_value = order
                 return r
 
             eq_strat.neq = _neq
@@ -1839,6 +1876,10 @@ def _build_runner_mock_supabase(
             eq = MagicMock()
             order = MagicMock()
             order.execute.return_value = MagicMock(data=snapshot_rows)
+            # H-0629 pagination: simulate a paged response. First page
+            # returns the full snapshot_rows list; subsequent pages
+            # return [] so the runner's pagination loop terminates.
+            order.range = _make_paged_range(snapshot_rows)
             eq.order = MagicMock(return_value=order)
             sel.eq.return_value = eq
             t.select.return_value = sel
@@ -2526,6 +2567,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         eq = MagicMock()
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2583,6 +2625,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         eq = MagicMock()
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2614,6 +2657,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         eq = MagicMock()
         order = MagicMock()
         order.execute.return_value = MagicMock(data=[])
+        order.range = _make_paged_range([])
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2630,6 +2674,85 @@ class TestLoadPositionTimeSeriesNavSafety:
             )
 
         assert positions == {} and prices == {} and nav == {}
+
+    @pytest.mark.asyncio
+    async def test_snapshot_fetch_uses_pagination(self) -> None:
+        """H-0629 / H-0643 regression: `_load_position_time_series` paginates
+        through `.range()` so PostgREST's 1000-row default cap does not
+        silently truncate snapshot reads for multi-year / multi-symbol
+        strategies. The runner should iterate `.range()` until a short page
+        appears.
+        """
+        from services.analytics_runner import _load_position_time_series
+
+        # Build a 2-page paginated mock: page 0 yields 1000 rows, page 1
+        # yields 200 rows (short page → loop terminates).
+        page_size = 1000
+        page0_rows = [
+            {
+                "snapshot_date": "2024-01-01",
+                "symbol": f"SYM{i}",
+                "side": "long",
+                "size_usd": "100",
+                "mark_price": "1",
+            }
+            for i in range(page_size)
+        ]
+        page1_rows = [
+            {
+                "snapshot_date": "2024-01-02",
+                "symbol": f"SYM{i}",
+                "side": "long",
+                "size_usd": "100",
+                "mark_price": "1",
+            }
+            for i in range(200)
+        ]
+        pages = [page0_rows, page1_rows]
+        range_calls: list[tuple[int, int]] = []
+
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=[])
+
+        def _range(start, end):
+            range_calls.append((start, end))
+            page_idx = start // page_size
+            data = pages[page_idx] if page_idx < len(pages) else []
+            r = MagicMock()
+            r.execute.return_value = MagicMock(data=data)
+            return r
+
+        order.range = MagicMock(side_effect=_range)
+
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, _, _ = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=None
+            )
+
+        # Both pages worth of symbols must appear in positions.
+        assert len(range_calls) == 2, (
+            f".range() should be invoked once per page until short-page; "
+            f"got {len(range_calls)} calls: {range_calls}"
+        )
+        assert range_calls[0] == (0, page_size - 1)
+        assert range_calls[1] == (page_size, 2 * page_size - 1)
+        # Page 0 has 1000 unique symbols on 2024-01-01; page 1 has 200 on 2024-01-02.
+        assert len(positions["2024-01-01"]) == 1000
+        assert len(positions["2024-01-02"]) == 200
 
     @pytest.mark.asyncio
     async def test_short_side_is_signed_negative(self) -> None:
@@ -2651,6 +2774,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         eq = MagicMock()
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2700,6 +2824,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         eq = MagicMock()
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2746,6 +2871,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         eq = MagicMock()
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
+        order.range = _make_paged_range(snapshot_rows)
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
