@@ -270,9 +270,16 @@ async function runScopeBroadeningProbe(
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
   } catch (probeErr) {
+    // audit-2026-05-07 H-0328 — log only the error name + message, never
+    // the raw error object. Some fetch / undici stack traces include the
+    // outgoing request init (including X-Internal-Token: $INTERNAL_API_TOKEN)
+    // which would land in Vercel runtime logs and be readable by any team
+    // member with log access. Discard everything except the safe primitives.
+    const safeName = probeErr instanceof Error ? probeErr.name : "Error";
+    const safeMessage =
+      probeErr instanceof Error ? probeErr.message : "unknown";
     console.error(
-      "[strategies/finalize-wizard] live permissions probe failed:",
-      probeErr,
+      `[strategies/finalize-wizard] live permissions probe failed: ${safeName}: ${safeMessage}`,
     );
     return {
       ok: false,
