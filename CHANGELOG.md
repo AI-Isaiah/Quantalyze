@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.6] - 2026-05-15
+
+**audit-2026-05-07 — analytics-runner.py audit closure (specialist + red-team round).** Closes the C-0221 tenant-balance leak via `turnover_series` and 10 H-tier findings against `analytics-service/services/analytics_runner.py`. A subsequent specialist fan-out (security / financial-math / concurrency / schema / test-quality) and red-team adversarial review surfaced 14 additional issues, all addressed in this version. Highlights: shared `_paginated_select` helper consolidates two duplicated pagination loops and now raises `PaginatedSelectTruncated` (fail-loud) on real overflow while correctly returning on the exact-boundary case; composite-tuple `order_by` for both snapshot and fills pagination eliminates cross-page row instability on non-unique sort keys; SQN citation corrected (Van Tharp textbook, NOT quantstats parity — quantstats has no SQN); weighted R:R docstring clarified as deliberately-non-canonical; `math.isfinite` boundary guard added on `avg_win` / `avg_loss` consumed by expectancy; `win_rate` boundary clamp tightened to `> 1.5` so ULP drift at 100% winners cannot silently divide by 100. Allocator-side TS interface gains `fills_missing_is_maker_pct?: number;` so the new DQF has a typed home.
+
+### Added
+- `analytics-service/services/db.py` — shared `_paginated_select(builder, order_by, ...)` helper and `PaginatedSelectTruncated` exception class, moved from `match_eval.py` so both `analytics_runner.py` and `match_eval.py` use a single implementation.
+- Test additions: `test_paginated_select_no_false_positive_at_exact_boundary` (db), `test_derived_trade_metrics_sqn_caps_at_sqrt_100` (N=50 vs N=200), `test_fills_missing_is_maker_pct_rounds_to_four_decimals` (1/7 → 0.1429), `test_fills_missing_is_maker_pct_omitted_when_zero`, plus an `order_calls` assertion on the snapshot pagination test pinning the composite `(snapshot_date, symbol, side)` order_by contract.
+- `AnalyticsDataQualityFlags.fills_missing_is_maker_pct?: number;` in `src/lib/types.ts` so frontend consumers can render the new DQF.
+
+### Changed
+- `_load_position_time_series` paginates via `_paginated_select` with composite `order_by=(("snapshot_date", False), ("symbol", False), ("side", False))` — matches `position_snapshots_unique_per_day` from migration 034 so cross-page row ties cannot duplicate or skip.
+- `run_strategy_analytics` fills fetch paginates via `_paginated_select` with composite `order_by=(("timestamp", False), ("id", False))` — OKX millisecond timestamps collide trivially and the UUID PK is a guaranteed tiebreaker.
+- `_paginated_select` now peeks one extra page before raising `PaginatedSelectTruncated` so a dataset of EXACTLY `hard_cap_pages × page_size` rows returns the full set instead of false-positive truncating.
+- Both snapshot and fills paths re-raise `PaginatedSelectTruncated` before the broad `except Exception` so audit #52's fail-loud intent is honored (the broad except previously downgraded truncation to a generic `SNAPSHOTS_LOAD_FAILED` / `FILLS_FETCH_FAILED` DQF, conflating scale overflow with transient failure).
+- `_compute_derived_trade_metrics`: `win_rate` boundary tightened to `> 1.5` (was `> 1.0`) so ULP drift at exactly 1.0 doesn't get divided by 100; `math.isfinite` boundary guard added for `avg_win` / `avg_loss` (zeroed independently so a healthy partner metric isn't wiped when only one side is non-finite); SQN comment corrected to cite Van Tharp's textbook rather than fabricated "quantstats parity"; weighted R:R docstring acknowledges the formula is deliberately not canonical Van Tharp.
+- `account_balance_unavailable` docstring clarified — post-C-0221, the flag is informational only (analytics no longer consumes `account_balance` for NAV regardless of the flag's value).
+
+### Removed
+- Duplicate pagination loops (~60 lines) replaced by `_paginated_select` calls.
+- Misleading "Forward-reference is fine — Python resolves at call time" comment (the helper is in fact defined BEFORE its uses).
+- Dead `else 0.0` branch in the weighted-R:R walrus expression.
+
 ## [0.22.34.5] - 2026-05-15
 
 **audit-2026-05-07 — match router hardening + first router test suite.** Closes the C-0203 kill-chain (kill-switch fail-open + silent cron 200-OK + retention sweep cascade + blocking event loop), the C-0204 demo-allocator leak (real published strategies surfacing through the anon `/api/demo/match` endpoint), and 14 H-tier findings against `analytics-service/routers/match.py`. The new `analytics-service/tests/test_match_router.py` is the first test file to exercise the FastAPI surface (POST `/api/match/recompute`, GET `/api/match/eval`, POST `/api/match/cron-recompute`) — 30 cases covering kill-switch fail-open, skip/empty/exception branches, retention-sweep slice + ordering invariants, cron partial-failure isolation, total-failure structural logging, mandate parse-failure recompute, orphan-batch rollback, and the demo-only universe filter.

@@ -203,6 +203,14 @@ export interface AnalyticsDataQualityFlags {
    *  Note: Quantalyze is crypto-first (24/7 markets, no weekends), so
    *  any gap > 1 day is a real data hole. Absent when no gaps. */
   turnover_gap_dates?: string[];
+  /** Audit-2026-05-07 H-0646: fraction of fills missing `is_maker`
+   *  metadata, rounded to 4 decimals (e.g. 0.1429 == 14.29%). Trade Mix
+   *  4-bucket mode silently skips fills without `is_maker`; the per-run
+   *  coverage gate caps that at <1% by design, but this DQF surfaces the
+   *  exact percentage so allocators can spot a compromised exchange
+   *  connector / malicious tenant emitting `is_maker: null` to suppress
+   *  the trade_mix panel. Absent when zero. */
+  fills_missing_is_maker_pct?: number;
 }
 
 export interface VolumeMetrics {
