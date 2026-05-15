@@ -26,7 +26,7 @@ component throws at runtime.
    `src/app/api/cron/warm-analytics/route.ts` (lines 60-64) does its own
    `/health` fetch.
 4. **Supabase pg_cron** -- `supabase/migrations/20260408113029_cron_heartbeat.sql`
-   and `015_schedule_match_cron_hourly.sql` call the FastAPI service
+   and `20260408215026_schedule_match_cron_hourly.sql` call the FastAPI service
    directly via `pg_net` with `X-Service-Key` from a Postgres GUC.
 5. **Supabase Edge Function** --
    `supabase/functions/compute-trigger/index.ts` (lines 43-72) calls

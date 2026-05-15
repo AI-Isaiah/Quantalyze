@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.4] - 2026-05-15
+
+**phase-19 PR-Y1 — backfill audit-2026-05-07 schema + rename migrations to timestamp convention.** Production was silently missing ~11 migrations of hardening because the supabase-migrate workflow had been failing on every push to main since the migration-naming drift began (~May 12). This release closes the gap (live on prod) and reconciles local + remote naming so the workflow can be re-enabled cleanly after PR-Y2.
+
+The most consequential fixes now live on prod: migration 117 (CRITICAL P97/G12.A.2 `compute_jobs.claim_token` race fence + 5 RPC replacements — mark RPCs verify the fencing token to detect watchdog preemption), migration 124 (CRITICAL P455 `data_deletion_requests.user_id` FK changed from `ON DELETE CASCADE` to `ON DELETE SET NULL` so GDPR DSR audit trails survive user deletion), and migration 127 (audit-2026-05-07 red-team Findings 1/3/4/8: replaces a privesc-vulnerable GUC bypass design with an unforgeable `current_user` check on `guard_wizard_draft_updates` + `reject_sentinel_writes`). 127 supersedes intermediate migrations 120 (sentinel triggers), 125 (auth.uid hardening), and 126 (GUC bypass design). All five (120/125/126/127) ship as separate row entries to record full history, but the chronologically last body installed by `supabase db push` is 127's hardened end-state — the timestamp prefixes for 120/125/126 sort strictly before 127 (`20260513…` < `20260515114310`), so fresh-DB rebuilds and `supabase db reset` always land the hardened bodies last. This is the gate the security specialist review caught and that 0.22.34.4's fix-loop addressed.
+
+Migration 117 was applied as three rows to fit the MCP gateway's apply-time budget then consolidated into a single `compute_jobs_claim_token_fencing` row. Migration 127 was similarly split into 127a (`guard_wizard_draft_updates`) + 127b (`reject_sentinel_writes` + 3 triggers) and consolidated. 127c/d/e (function bodies for `create_wizard_strategy` / `finalize_wizard_strategy` / `sanitize_user`) are no-ops on prod because the never-applied 126 didn't introduce the GUC `set_config` calls 127c/d/e were meant to remove — verified via direct probing against `pg_get_functiondef`.
+
+Migrations 047b (`used_ack_tokens`), 118 (`_enqueue_compute_job_internal` ACL), 130 (`scenario_commit_idempotency`), and 131 (`commit_scenario_batch` idempotency parameter) had schema effects already on prod but no `schema_migrations` rows — INSERTed rows to record reality. 77 orphan `audit_log.user_id` values (rows pointing to deleted `auth.users`) were NULLed before 123's FK validation; this is exactly what `ON DELETE SET NULL` would have done historically had the FK existed at delete time.
+
+129 local migration files renamed from `NNN_*.sql` to `YYYYMMDDHHMMSS_*.sql` to match Supabase CLI conventions, plus 7 rollback files in `down/`. Timestamps derived from `git log --diff-filter=A --follow` UTC first-commit time, with collision-resolution by NNN order. `supabase_migrations.schema_migrations` on prod reconciled in the same transaction (80 NNN→TS UPDATEs, 5 NNN-vs-TS duplicate DELETEs, 7 INSERT-only rows, 2 INSERT rows for the deferred 107/119 — see deferred-apply warnings below).
+
+Migrations 107 (`verification_requests` view shim) and 119 (`positions_natural_key` UNIQUE constraint) carry **deferred-apply warning blocks** at the top of their SQL bodies. Both have `schema_migrations` rows on prod claiming "applied" but their SQL has NOT actually run on prod. 107 is deferred because its M-5 preflight assertion needs revalidation against post-PR-X5 prod data and `sanitize_user`'s `DELETE FROM verification_requests` needs to be updated to target `verification_requests_legacy`. 119 is deferred because 8 duplicate `(strategy_id, symbol, side, opened_at)` groups exist on prod that the constraint install would reject — PR-Y2 will run `reconstruct_positions_atomic` first then install the constraint via a new filename. Future devs MUST NOT remove these rows without writing replacement migrations; the warnings are explicit about this.
+
+The `.github/workflows/supabase-migrate.yml` `paths:` auto-trigger is stripped — workflow now runs only on `workflow_dispatch`. The inline comment names the four explicit re-enable conditions: (1) PR-Y2 has shipped 107 + 119, (2) test project schema_migrations is reconciled, (3) a manual `workflow_dispatch` shows `supabase db push` as a true no-op, (4) Phase 19 soak window has closed without rollback.
+
+The reconcile SQL and audit summary are committed to `docs/runbooks/pr-y1-schema-migrations-reconcile.sql` + `docs/runbooks/pr-y1-audit-summary.md` so the forensic record survives a fresh checkout (the `.planning/phase-19/audit/` working artifacts are gitignored).
+
+### Fixed
+- **chronological inversion of 120/125/126 vs 127** — the initial PR-Y1 commit used today's date (`20260515130002`–`20260515130004`) for migrations 120/125/126 because no prior `schema_migrations` row existed to derive timestamps from. Those timestamps sort AFTER 127 (`20260515114310`), so `supabase db push` against a fresh DB would have run 127 first and then 120/125/126 — overwriting 127's hardened bodies with the vulnerable GUC versions. Renamed to git-derived UTC timestamps (`20260513073518`, `20260513082230`, `20260513084844`) that sort correctly before 127. Audit-2026-05-07 red-team Findings 1/3/4/8 now stay closed across every fresh-DB rebuild path (DR, test-project reseed, `supabase db reset`).
+- **bare-filename references missed by initial find-replace** — the first pass only matched paths with the `supabase/migrations/` prefix. Bare filenames in backticks (e.g. `` `011_perfect_match.sql` ``), wildcards (`129_*.sql`), and `down/NNN-rollback.sql` rollback references in `audit/`, `docs/architecture/` ADRs, `docs/runbooks/` (match-engine, bridge-outcome-cron), `CHANGELOG.md`, and test path constants were left stale. Active runbook `docs/runbooks/match-engine.md` would have broken at step 1 for any new founder following the deploy flow. Updated 20 additional files via a second find-replace pass with broader patterns.
+- **107/119 SQL files now carry deferred-apply warning blocks at the top** — the original PR-Y1 commit inserted "applied" rows for these two migrations on prod but never ran their SQL bodies (see deferred-apply rationale above). Without an in-source warning, the next engineer running `supabase db diff` or attempting to re-apply via the dashboard would see the row already exists and skip, leaving the schema permanently missing the view shim / natural key constraint with no trace in the migration source. This is the failure shape the audit-2026-05-07 series was meant to prevent.
+- **reconcile SQL promoted out of gitignored `.planning/`** to `docs/runbooks/pr-y1-schema-migrations-reconcile.sql`. The 92-statement reconciliation that mutated prod's `schema_migrations` now survives a fresh clone.
+
 ## [0.22.34.3] - 2026-05-15
 
 **phase-19 — unify teaser into the /process-key backbone (PR-X5).** Two abortive PR-B kill-switch flip attempts on 2026-05-14 confirmed teaser submissions to `/process-key` were returning `MISSING_STRATEGY_ID` 422 — the unified backend had no story for `flow_type='teaser'` without a caller-owned strategy. PR-X5 makes the unified backbone the single path for teaser too: the dispatch in `analytics-service/routers/process_key.py` now injects a sentinel anchor `strategy_id` (provisioned by new migration 132) plus a fresh `wizard_session_id` for `flow_type='teaser'` BEFORE the audit row write, then falls through to the existing synchronous pipeline at line 684 unchanged. Zero `if flow_type=='teaser'` branches downstream. Backend is one path. Same logic for every flow.
@@ -433,7 +457,7 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Added
 
-- **Migration 113** (`113_positions_atomic_rebuild_rpc.sql`): `reconstruct_positions_atomic(p_strategy_id UUID, p_positions JSONB) RETURNS VOID` SECURITY DEFINER. Body: `pg_advisory_xact_lock(hashtext(p_strategy_id::text))` → DELETE → bulk INSERT from `jsonb_array_elements`, all in one transaction.
+- **Migration 113** (`20260510181748_positions_atomic_rebuild_rpc.sql`): `reconstruct_positions_atomic(p_strategy_id UUID, p_positions JSONB) RETURNS VOID` SECURITY DEFINER. Body: `pg_advisory_xact_lock(hashtext(p_strategy_id::text))` → DELETE → bulk INSERT from `jsonb_array_elements`, all in one transaction.
 - **`data_quality_flags` aggregation** in `reconstruct_positions` return dict for `posSide_side_mismatch` and `fills_dropped_no_symbol`.
 - **11 new regression tests** at `analytics-service/tests/test_position_reconstruction.py`.
 
@@ -452,7 +476,7 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Added
 
-- **Migration 114** (`114_positions_schema_rls_g12d.sql`):
+- **Migration 114** (`20260510182439_positions_schema_rls_g12d.sql`):
   - `positions.duration_seconds BIGINT NULL` for sub-day position granularity (paired with G12.C.9 in PR 5).
   - `positions_natural_key UNIQUE (strategy_id, symbol, side, opened_at)` constraint via `NOT VALID` + guarded `VALIDATE`.
   - `positions_open_recent` partial index on `(strategy_id, opened_at DESC) WHERE status='open'`.
@@ -552,9 +576,9 @@ A coordinated multi-lane sweep that closes the remaining CRITICAL findings from 
 
 ### Migrations
 
-- `109_compute_jobs_audit_2026_05_07_g10b.sql` — P2/P3/P4/P6/P12/P14/P17.
-- `110_sync_trades_date_range_scoped_delete.sql` — P1.
-- `111_compute_jobs_user_message_and_rate_limit_grief.sql` — P11/P16.
+- `20260510180226_compute_jobs_audit_2026_05_07_g10b.sql` — P2/P3/P4/P6/P12/P14/P17.
+- `20260510180535_sync_trades_date_range_scoped_delete.sql` — P1.
+- `20260510181014_compute_jobs_user_message_and_rate_limit_grief.sql` — P11/P16.
 
 Each migration ships a self-verifying DO block that asserts the expected function bodies / column shape / constraint presence so a future migration that drops a fix without realizing it `RAISES EXCEPTION` at apply time.
 
@@ -575,7 +599,7 @@ A two-wave specialist review army landed concurrently with the backbone work, ad
 - **EquityCurveBuilder + perp/TWR-YTD correctness (BACKBONE-08).** Open-perp positions now contribute to the live equity curve with a position-size-weighted unrealized PnL term. TWR (time-weighted return) and YTD diverged on cash-flow days — TWR now matches YTD when the input has no cash flows. Four golden fixtures pin the math.
 - **TS-side single-flight feature flag refresh (CT-9).** `src/lib/feature-flags.ts` collapses 100 concurrent cache-miss callers into a single Supabase round-trip. Mirrors the asyncio.Lock the Python sibling already had — without this, a Vercel cold-start spike or TTL expiry would hammer Supabase with N admin-client reads.
 - **`postProcessKey` thin-adapter helper.** `src/lib/process-key-client.ts` single-sources the `INTERNAL_API_TOKEN` 503 envelope, the `X-Correlation-Id`/`X-User-Id` headers (CT-4 — closes the cross-tenant rate-limit isolation gap), and a 60s `AbortSignal.timeout` (CT-7 — produces a clean `UPSTREAM_TIMEOUT` envelope instead of a Vercel maxDuration hang).
-- **Migration 108 forward-repair.** `108_process_key_long_compute_job_kinds_repair.sql` idempotently registers `process_key_long` in `compute_job_kinds` and extends the `compute_jobs_kind_target_coherence` CHECK constraint on databases that already applied migration 104 without those rows (the test Supabase project). The 104 source was retro-fixed so a fresh build is correct.
+- **Migration 108 forward-repair.** `20260510175507_process_key_long_compute_job_kinds_repair.sql` idempotently registers `process_key_long` in `compute_job_kinds` and extends the `compute_jobs_kind_target_coherence` CHECK constraint on databases that already applied migration 104 without those rows (the test Supabase project). The 104 source was retro-fixed so a fresh build is correct.
 - **Auto-rollback E2E + 11 new regression tests.** Specialist-army findings each landed with a test that fails without the fix and passes with it. New test files: `test_legacy_table_rls.py`, `test_migration_105_self_verify.py`, `test_migration_108_idempotent.py`, `test_long_fetch.py` advanced-status skip cases, `tests/lib/feature-flags.test.ts` outage prev-cache-hold + 100-concurrent single-flight, `tests/lib/process-key-client.test.ts` 503 short-circuit across all flow_types.
 
 ### Fixed
@@ -623,7 +647,7 @@ A two-wave specialist review army landed concurrently with the backbone work, ad
 
 ### Fixed
 
-- **`sync_trades` RPC no longer wipes raw fills (G12.A.1).** Migration `102_sync_trades_preserve_fills.sql` replaces the `sync_trades(UUID, JSONB)` body so its `DELETE FROM trades` clause is scoped `AND COALESCE(is_fill, false) = false`. The legacy daily_pnl summary path (`is_fill=false`) is unchanged; Phase-2 raw fills (`is_fill=true`) ingested by `analytics-service/services/job_worker.py` now survive every Phase-1 sync. A self-verifying DO block fails the migration if a future edit drops the `is_fill` guard. Live-DB regression test in `analytics-service/tests/test_sync_trades_preserves_fills.py` proves a seeded fill survives a sync_trades call and that two consecutive calls still replace summaries correctly. Also closes the watchdog-reclaim retry surface from G12.A.2.
+- **`sync_trades` RPC no longer wipes raw fills (G12.A.1).** Migration `20260510172558_sync_trades_preserve_fills.sql` replaces the `sync_trades(UUID, JSONB)` body so its `DELETE FROM trades` clause is scoped `AND COALESCE(is_fill, false) = false`. The legacy daily_pnl summary path (`is_fill=false`) is unchanged; Phase-2 raw fills (`is_fill=true`) ingested by `analytics-service/services/job_worker.py` now survive every Phase-1 sync. A self-verifying DO block fails the migration if a future edit drops the `is_fill` guard. Live-DB regression test in `analytics-service/tests/test_sync_trades_preserves_fills.py` proves a seeded fill survives a sync_trades call and that two consecutive calls still replace summaries correctly. Also closes the watchdog-reclaim retry surface from G12.A.2.
 - **`metrics.py` benchmark/drawdown excepts now log + emit error flags (G11.E.1, G11.E.2, G11.E.3).** `analytics-service/services/metrics.py` replaces three bare `except Exception: pass` blocks (drawdown_episodes, benchmark_metrics fan-out, benchmark_returns serialization) with `logger.warning(..., exc_info=True)` plus a sibling `_error` field on `metrics_json`. The frontend can now distinguish "no benchmark assigned" from "benchmark compute failed", and a regression in `_rolling_correlation` no longer silently kills alpha/beta/correlation/info_ratio/treynor along with it. New `logger = logging.getLogger("quantalyze.analytics.metrics")` follows the existing `analytics_runner` / `audit` / `analytics_status` pattern.
 - **`listForQuantsLeads` returns a typed error state on DB failure (G10.D.1).** `src/lib/for-quants-leads-admin.ts` now returns `{ rows, hitCap, error? }`; the admin page at `src/app/(dashboard)/admin/for-quants-leads/page.tsx` renders an explicit `role="alert"` banner ("Could not load leads. Check Supabase status…") when the new field is set instead of conflating an RLS / network / 5xx failure with the misleading "All caught up. No unprocessed leads." empty state. Regression test asserts the new field is populated.
 - **Trade Volume + Trading Activity Log widgets surface fetch failures (G12.G.2).** `src/app/(dashboard)/allocations/widgets/positions/TradeVolume.tsx` and `TradingActivityLog.tsx` replace `} catch { /* silent */ }` with `console.error` + an explicit `error` state and render a `role="alert"` "Couldn't load…" panel instead of falling through to the empty state. Allocators can now distinguish "no trades today" from a 5xx or RLS rejection.
@@ -1064,7 +1088,7 @@ Second phase of the v1.0.0 milestone. Phases 17 (Design Contract) and 18+ ship n
 - **End-to-end `correlation_id` seam.** New `src/lib/correlation-id.ts` server-only helper reads `X-Correlation-Id` from the request or mints a UUID v4 fallback. Every analytics-client fetch propagates it as a request header; `src/app/layout.tsx` surfaces it client-side via `<meta name="x-correlation-id">` so error boundaries (`src/app/error.tsx`, `src/app/global-error.tsx`) can tag Sentry captures without round-tripping the server. The Python `analytics-service/services/logging_config.py` `CorrelationMiddleware` echoes the cid in every response header AND injects it into structlog contextvars so every log line on a request is automatically annotated.
 - **`/api/debug-key-flow` SSE diagnostic endpoint** at `src/app/api/debug-key-flow/route.ts`. Admin-only (CSRF + cookie-auth + isAdminUser gate), rate-limited (5/hour/admin via `src/app/api/debug-key-flow/rate-limit.ts`), audit-logged BEFORE the stream opens (so failed sessions appear in audit_log even if the stream aborts). Streams a 3-step diagnostic trace (validate / encrypt / fetch-trades) with per-step `AbortSignal.any()` 60s timeouts, 15s heartbeat keep-alive frames, and `X-Accel-Buffering: no` for Vercel proxy compatibility. The cancel handler emits a closed-loop `client_aborted` audit row so abandoned diagnostic sessions are still observable.
 - **Resend webhook receiver** at `src/app/api/webhooks/resend/route.ts` with Svix signature verification (replay-window check) and three correlation-recovery paths: Path A reads the cid from the `tags` array, Path A' from the `tags` dict variant, Path B looks up the new `resend_message_correlation` table by `email_id`. When all three miss, the handler logs `correlation_chain_broken` once and still returns 200 to acknowledge the webhook.
-- **`resend_message_correlation` table** in migration `098_resend_message_correlation.sql`. UNIQUE on `resend_message_id`, RLS-enabled with service-role-only GRANTs, 90-day retention via pg_cron `'15 3 * * *'`. Cron schedule wrapped in a `cron.unschedule()` guard so re-running the migration is idempotent across pg_cron versions.
+- **`resend_message_correlation` table** in migration `20260515113637_resend_message_correlation.sql`. UNIQUE on `resend_message_id`, RLS-enabled with service-role-only GRANTs, 90-day retention via pg_cron `'15 3 * * *'`. Cron schedule wrapped in a `cron.unschedule()` guard so re-running the migration is idempotent across pg_cron versions.
 - **`src/lib/email.ts` correlation-aware send wrapper.** Tags every Resend send with `correlation_id` (Path A) AND inserts a row into `resend_message_correlation` (Path B safety net) with one retry on transient failure.
 - **`buildEnvelope` + `WizardErrorEnvelope` UI** at `src/lib/envelope.ts` and `src/components/.../wizard/WizardErrorEnvelope.tsx`. Isomorphic `ErrorEnvelope` type renders with `role="alert"`, `aria-live`, copy-to-clipboard for the diagnostic JSON, retry button gated on the `recoverable` flag, and `type="button"` on every nested control to prevent accidental form submits. Wired into the three wizard steps (`ConnectKeyStep`, `SubmitStep`, `SyncPreviewStep`) so any error the user sees carries the cid and a retry path.
 - **Sentry observability for the analytics service** at `analytics-service/sentry_init.py`. Initializes `sentry-sdk[fastapi] 2.58.0` with `FastApiIntegration` + `StarletteIntegration`, full PII redaction in `before_send` covering `request.headers/cookies/query_string/data/json`, `extra`, `contexts`, `breadcrumbs[*].data` (HTTP capture surface), and `exception.values[*].stacktrace.frames[*].vars` (frame locals where wizard creds live). Denylist mirrors `src/lib/admin/pii-scrub.ts` exactly plus snake_case wire forms (`api_key`, `api_secret`) and the `x-internal-token` seam header.
@@ -1106,7 +1130,7 @@ First milestone of the v1.0.0 release. Phases 16 (Diagnostic Spike + Observabili
 
 - **`POST /api/strategies/csv-validate` and `POST /api/strategies/csv-finalize`** Next.js routes proxying the analytics service. The validate route reads multipart `file` + `fmt` + `wizard_session_id`, enforces the 10 MB cap (Content-Length pre-check + post-parse `file.size` defense-in-depth), validates the wizard_session_id UUID shape at the edge, and forwards to the Python service. The finalize route accepts a typed strategy name, validates length 1-80, and calls `finalize_csv_strategy(p_user_id, p_wizard_session_id, p_fmt, p_strategy_name)` to atomically create the strategy + verification rows.
 
-- **`finalize_csv_strategy` Postgres RPC** in migration `093_strategy_verifications.sql` — `SECURITY DEFINER` with manual `auth.uid() <> p_user_id` guard, distinct SQLSTATE 22023 messages for fmt/empty-name/oversized-name violations, and a self-verifying DO block at apply time that asserts each constraint individually with `RAISE NOTICE` on success. Migration 094 follows up with the `owner_select` RLS rebuild in EXISTS form.
+- **`finalize_csv_strategy` Postgres RPC** in migration `20260501055202_strategy_verifications.sql` — `SECURITY DEFINER` with manual `auth.uid() <> p_user_id` guard, distinct SQLSTATE 22023 messages for fmt/empty-name/oversized-name violations, and a self-verifying DO block at apply time that asserts each constraint individually with `RAISE NOTICE` on success. Migration 094 follows up with the `owner_select` RLS rebuild in EXISTS form.
 
 - **`strategy_verifications` table.** New row per CSV submission tracking flow_type, status (`pending_review` → `validated`), trust_tier (`csv_uploaded`), and an optional correlation_id slot for Phase 16. Three RLS policies — owner can SELECT their own row, admins can SELECT all, service-role bypasses for admin tooling.
 
@@ -1715,7 +1739,7 @@ No production behavior changes. v1 and v2 routes both continue to render exactly
 
 ### Internal
 
-- **MA-4 confirmed already enforced** by migration `032_compute_jobs_queue.sql:233-237` (`compute_jobs_deny_all USING (false) WITH CHECK (false)`). No later migration weakens it; the audit finding ("`USING (true)` — wide-open") referred to an unrelated `compute_job_kinds` reference table where wide-open SELECT is intentional (small read-only kinds registry). No code change.
+- **MA-4 confirmed already enforced** by migration `20260411144407_compute_jobs_queue.sql:233-237` (`compute_jobs_deny_all USING (false) WITH CHECK (false)`). No later migration weakens it; the audit finding ("`USING (true)` — wide-open") referred to an unrelated `compute_job_kinds` reference table where wide-open SELECT is intentional (small read-only kinds registry). No code change.
 
 ### Tests
 
@@ -2742,7 +2766,7 @@ Six major waves of work plus the sidebar grouping refresh, all behind the
 
 ### Migration
 
-- **079_equity_defensive_heal.sql** mirrors migration 078 verbatim (purge
+- **20260424031238_equity_defensive_heal.sql** mirrors migration 078 verbatim (purge
   every `allocator_equity_snapshots` row, reset the per-api_key
   reconstruct idempotency gate, re-enqueue for every connected active
   key) because every row in the table was produced by pre-v0.15.4.2
@@ -2825,7 +2849,7 @@ Six major waves of work plus the sidebar grouping refresh, all behind the
 
 ### Migrations
 
-- **`078_equity_contract_size_healing.sql`** — purges every row in
+- **`20260424012820_equity_contract_size_healing.sql`** — purges every row in
   `allocator_equity_snapshots` (all of them were produced by pre-v0.15.4.0
   code, which was either v0.15.3.0's contract-size bug or the later
   refresh-job notional bug) and deletes `compute_jobs` rows where
@@ -3007,7 +3031,7 @@ new connections produced empty equity charts.
   per-`api_key_id` lookup against `compute_jobs` (status = `done`,
   kind = `reconstruct_allocator_history`) so each key gets exactly one
   reconstruction attempt regardless of allocator-level snapshot history.
-  Migration `076_reconstruct_per_api_key_gate.sql` + handler patch in
+  Migration `20260422122720_reconstruct_per_api_key_gate.sql` + handler patch in
   `analytics-service/services/equity_reconstruction.py`.
 
 ## [0.15.0.0] - 2026-04-20
@@ -3644,17 +3668,17 @@ permission scopes all land together.
   (previously returned 200 even on total failure).
 
 ### Migrations
-- `045_sync_checkpoints.sql` — `api_keys.last_fetched_trade_timestamp`
-- `046_reconciliation.sql` — `reconciliation_reports` table + `reconcile_strategy` job kind
-- `047b_used_ack_tokens.sql` — one-time-use ack token tracking (`ON DELETE SET NULL`)
-- `047c_severity_critical.sql` — extends `portfolio_alerts.severity` CHECK with `'critical'`
-- `048_contact_request_metadata.sql` — `mandate_context`, `portfolio_snapshot`, `source`,
+- `20260416125428_sync_checkpoints.sql` — `api_keys.last_fetched_trade_timestamp`
+- `20260416125429_reconciliation.sql` — `reconciliation_reports` table + `reconcile_strategy` job kind
+- `20260515130000_used_ack_tokens.sql` — one-time-use ack token tracking (`ON DELETE SET NULL`)
+- `20260515113405_severity_critical.sql` — extends `portfolio_alerts.severity` CHECK with `'critical'`
+- `20260416125430_contact_request_metadata.sql` — `mandate_context`, `portfolio_snapshot`, `source`,
   `replacement_for`, `snapshot_status` + `compute_intro_snapshot` job kind
-- `050_rebalance_drift_check_and_trigger.sql` — `rebalance_drift` alert type +
+- `20260416125431_rebalance_drift_check_and_trigger.sql` — `rebalance_drift` alert type +
   `portfolio_alerts.strategy_id` + portfolios/portfolio_strategies seed triggers
-- `051_rebalance_drift_weekly_index.sql` — `CREATE INDEX CONCURRENTLY` for weekly dedup
-- `052_key_permission_audit.sql` — audit log for internal permission probes
-- `053_session_count_rpc.sql` — atomic `increment_user_session_count` RPC
+- `20260416125432_rebalance_drift_weekly_index.sql` — `CREATE INDEX CONCURRENTLY` for weekly dedup
+- `20260416125433_key_permission_audit.sql` — audit log for internal permission probes
+- `20260416125434_session_count_rpc.sql` — atomic `increment_user_session_count` RPC
 
 ### Crons
 - `reconcile-strategies` (3:30 AM UTC daily) — enqueues `reconcile_strategy` per active strategy
@@ -3726,7 +3750,7 @@ our security posture at `/security` before handing over API keys.
   Type 1 preparation). Present-tense factual framing, no forward-looking promises.
 
 ### Infrastructure
-- Migration `044_funding_fees.sql` — single atomic transaction: create table + indexes +
+- Migration `20260416081039_funding_fees.sql` — single atomic transaction: create table + indexes +
   RLS policies + `positions.funding_pnl` column + register `sync_funding` in
   `compute_job_kinds`. Self-verifying `DO` block at the end. No generated columns (avoids
   table rewrite). Forward-only; no `daily_pnl` rewrite.

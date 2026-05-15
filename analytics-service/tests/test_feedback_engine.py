@@ -1184,7 +1184,7 @@ def test_migration_063_body_has_enqueue():
     """
     migration_path = (
         Path(__file__).parent.parent.parent
-        / "supabase" / "migrations" / "063_feedback_delta_enqueue.sql"
+        / "supabase" / "migrations" / "20260419061003_feedback_delta_enqueue.sql"
     )
     assert migration_path.exists(), (
         f"Migration 063 not found at {migration_path}"
@@ -1265,7 +1265,7 @@ def test_migration_063_enqueues_only_transitioned_allocators():
     """
     migration_path = (
         Path(__file__).parent.parent.parent
-        / "supabase" / "migrations" / "063_feedback_delta_enqueue.sql"
+        / "supabase" / "migrations" / "20260419061003_feedback_delta_enqueue.sql"
     )
     assert migration_path.exists(), (
         f"Migration 063 not found at {migration_path}"

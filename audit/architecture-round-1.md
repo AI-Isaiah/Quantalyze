@@ -29,8 +29,8 @@ Priority rubric:
   - RLS policies: `supabase/migrations/20260405061912_rls_policies.sql` lines 1-69 enable
     RLS on 9 tables and define owner-scoped policies.
   - Hardened variants: `supabase/migrations/20260406065011_security_hardening.sql`,
-    `011_perfect_match.sql`, `020_profile_pii_revoke_hardened.sql`,
-    `021_function_execute_hardening.sql`, `022_public_profiles_view_security_invoker.sql`.
+    `20260407164606_perfect_match.sql`, `20260409133654_profile_pii_revoke_hardened.sql`,
+    `20260409133655_function_execute_hardening.sql`, `20260409133656_public_profiles_view_security_invoker.sql`.
   - Every server component reads via `createClient()` in
     `src/lib/supabase/server.ts:4-27` (runs under the caller's JWT so RLS applies).
   - Route handlers repeat the pattern: see

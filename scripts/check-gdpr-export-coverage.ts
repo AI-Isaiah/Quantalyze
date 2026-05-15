@@ -31,7 +31,7 @@
  *
  * If the CI fails with a table you believe should be allowlisted, add
  * it to EXCLUDED_TABLES below AND document the rationale in the
- * per-table matrix comment block of migration 055_sanitize_user.sql.
+ * per-table matrix comment block of migration 20260417110538_sanitize_user.sql.
  *
  * Invocation
  * ----------

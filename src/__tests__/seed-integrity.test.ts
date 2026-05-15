@@ -469,7 +469,7 @@ describe("PURGE-05 / VOICES-ACCEPTED f4: no migration file co-occurs ON auth.use
   });
 
   it("migration 002 has the benign handle_new_user trigger (positive control)", () => {
-    const file = resolve(MIGRATIONS_ROOT, "002_rls_policies.sql");
+    const file = resolve(MIGRATIONS_ROOT, "20260405061912_rls_policies.sql");
     const content = readFileSync(file, "utf-8");
     // Benign trigger: on_auth_user_created → handle_new_user → INSERT INTO public.profiles
     expect(content).toMatch(/CREATE\s+TRIGGER\s+on_auth_user_created/);

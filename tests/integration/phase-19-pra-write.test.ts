@@ -298,7 +298,7 @@ describe("PR-A / phase-19-shim-step-a — strategy_verifications upsert (C-5)", 
   // dynamic SELECT it gated on is gone. The route now anchors on a
   // hardcoded sentinel constant provisioned by migration 132 — there is no
   // "no anchor" branch to graceful-degrade through. The migration's
-  // self-verify DO block (132_teaser_anchor_strategy.sql) is the new
+  // self-verify DO block (20260515095804_teaser_anchor_strategy.sql) is the new
   // guarantee that the sentinel exists; if it doesn't, every teaser
   // submission is meant to fail loudly with an FK violation, not silently
   // skip the SV write.

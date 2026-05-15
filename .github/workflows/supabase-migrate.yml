@@ -31,12 +31,25 @@ name: Supabase Migrate
 # apply).
 
 on:
-  # Manual-only since 2026-05-15 (PR-Y1 prep). The auto-on-push trigger
-  # caused the workflow to fail on every migration-touching merge because
-  # the local sequential-numbered files (NNN_*.sql) do not match the
+  # Manual-only since 2026-05-15 (PR-Y1). The auto-on-push trigger caused
+  # the workflow to fail on every migration-touching merge because the
+  # local sequential-numbered files (NNN_*.sql) did not match the
   # timestamp-versioned rows the remote schema_migrations table records.
-  # Re-enable the push trigger only AFTER PR-Y1 reconciles file names and
-  # `supabase db push` is verified as a no-op.
+  # PR-Y1 reconciled local file names + remote schema_migrations rows.
+  #
+  # RE-ENABLE THE PUSH TRIGGER ONLY WHEN ALL OF THE FOLLOWING ARE TRUE:
+  #   1. PR-Y2 has shipped: migrations 107 (verification_requests view shim)
+  #      and 119 (positions_natural_key UNIQUE constraint) — both currently
+  #      have "applied" rows in prod's schema_migrations but their SQL bodies
+  #      have NOT been executed (see deferred-apply warnings in those files).
+  #   2. PR-Y2 has reconciled the test project (qmnijlgmdhviwzwfyzlc) the
+  #      same way prod was reconciled — currently test still has stale TS
+  #      versions for ~100 rows that don't match local filenames.
+  #   3. A manual workflow_dispatch run shows `supabase db push` is a true
+  #      no-op against prod (`Remote database is up to date` in the log).
+  #   4. Phase 19 soak window has closed (kill-switch flip completed,
+  #      168h soak passed without rollback).
+  # Re-enabling early risks resurfacing the same workflow-failing drift.
   workflow_dispatch:
 
 concurrency:

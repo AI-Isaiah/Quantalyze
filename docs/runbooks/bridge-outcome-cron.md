@@ -12,7 +12,7 @@ migration at `supabase/migrations/20260418074935_bridge_outcome_cron.sql`.
   deltas plus an in-window estimate (when the allocation is less than 30 days old).
 - **Who sees results:** allocators — delta values drive the D-12 label progression
   (`Pending` → `Estimated: +X.X% (Nd)` → `30-day: +X.X%` → `90-day` → `180-day`).
-- **Phase 1 artifact:** migration `060_bridge_outcome_cron.sql`.
+- **Phase 1 artifact:** migration `20260418074935_bridge_outcome_cron.sql`.
 
 ## Schedule
 

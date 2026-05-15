@@ -29,14 +29,14 @@ _MIGRATION_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "supabase"
     / "migrations"
-    / "132_teaser_anchor_strategy.sql"
+    / "20260515095804_teaser_anchor_strategy.sql"
 )
 _ROLLBACK_PATH = (
     pathlib.Path(__file__).resolve().parents[2]
     / "supabase"
     / "migrations"
     / "down"
-    / "132-rollback.sql"
+    / "20260515095804-rollback.sql"
 )
 
 SENTINEL_USER_UUID = "00000000-0000-0000-0000-000000000000"

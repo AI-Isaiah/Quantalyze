@@ -26,7 +26,7 @@ const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
 
 describe("trades.side CHECK constraint (audit-2026-05-07 G12.A.3 regression guard)", () => {
-  const filename = "112_trades_side_check_constraint.sql";
+  const filename = "20260510181440_trades_side_check_constraint.sql";
   const path = join(MIGRATIONS_DIR, filename);
 
   it("migration 112 exists", () => {
