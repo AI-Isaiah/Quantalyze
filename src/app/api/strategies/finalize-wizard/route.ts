@@ -532,7 +532,10 @@ async function runLegacyFinalize(args: {
     // was impossible to triage and didn't reach Sentry — console.warn on
     // Vercel is best-effort log capture, not alertable.
     const sideEffects: Array<{
-      label: "notify_founder_new_strategy" | "api_keys_last_sync_at_touch";
+      label:
+        | "notify_founder_new_strategy"
+        | "api_keys_last_sync_at_touch"
+        | "enqueue_sync_trades_job";
       run: () => Promise<unknown>;
     }> = [
       {
@@ -557,6 +560,40 @@ async function runLegacyFinalize(args: {
             .from("api_keys")
             .update({ last_sync_at: new Date().toISOString() })
             .eq("id", keyLink.api_key_id);
+        },
+      },
+      // audit-2026-05-07 H-0330 — enqueue the sync_trades compute job so
+      // the strategy advances past computation_status='pending' on Round 2
+      // cutover (USE_COMPUTE_JOBS_QUEUE=true). Pre-fix the wizard finalize
+      // path NEVER enqueued; the only enqueue lived in /api/keys/sync
+      // behind a manual "Sync now" button. Removing that button on cutover
+      // would orphan every new wizard submission.
+      //
+      // Gated by the same env flag /api/keys/sync uses so the legacy path
+      // (button-driven sync) keeps working while the flag is off. The
+      // partial unique index on compute_jobs handles double-submit, and
+      // the after() Promise.allSettled wrapper means a failed enqueue
+      // does not block the 200 response or reverse the finalize.
+      {
+        label: "enqueue_sync_trades_job",
+        run: async () => {
+          if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+          if (!keyLink?.api_key_id) return;
+          const { error: enqueueErr } = await admin.rpc(
+            "enqueue_compute_job",
+            {
+              p_strategy_id: resolvedId,
+              p_kind: "sync_trades",
+              p_metadata: { source: "finalize-wizard" },
+            },
+          );
+          if (enqueueErr) {
+            // Throw so Promise.allSettled marks this side effect as
+            // rejected and the Sentry capture below picks it up.
+            throw new Error(
+              `enqueue_compute_job failed: ${enqueueErr.message}`,
+            );
+          }
         },
       },
     ];

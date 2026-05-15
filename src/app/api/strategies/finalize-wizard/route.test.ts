@@ -56,11 +56,17 @@ const STATE = vi.hoisted(() => ({
   // C-0119/H-0329 — capture user-scoped strategies SELECT filters so we
   // can assert ownership defense-in-depth (.eq('user_id', user.id)).
   strategySelectEqFilters: [] as Array<{ column: string; value: unknown }>,
-  // RPC call capture.
+  // RPC call capture (user-scoped).
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   rpcResult: { data: null as unknown, error: null as unknown },
+  // Admin RPC capture (after() block).
+  adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   // Admin client api_keys lookup (api_key_id) for the after() block.
   adminApiKeyId: null as string | null,
+  // H-0330 — when true, the next/server after() mock invokes the
+  // callback synchronously so tests can assert the side-effect fan-out
+  // (enqueue_compute_job, api_keys touch, founder notify).
+  runAfterCallback: false as boolean,
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -116,6 +122,10 @@ vi.mock("@/lib/supabase/admin", () => ({
       }
       throw new Error(`unexpected admin from(${table})`);
     },
+    rpc: async (name: string, args: Record<string, unknown>) => {
+      STATE.adminRpcCalls.push({ name, args });
+      return { data: "fake-job-id", error: null };
+    },
   }),
 }));
 
@@ -125,15 +135,23 @@ vi.mock("@/lib/email", () => ({
 }));
 
 // next/server's `after` keeps the after-callback running outside the
-// request lifetime; tests don't need to wait on it. Stub to a no-op.
+// request lifetime; tests don't need to wait on it. Stub to a no-op by
+// default. Tests that need to assert side-effect fan-out (H-0330
+// enqueue_compute_job, etc.) set STATE.runAfterCallback=true to invoke
+// the callback synchronously.
 vi.mock("next/server", async () => {
   const actual =
     await vi.importActual<typeof import("next/server")>("next/server");
   return {
     ...actual,
-    after: (_fn: () => unknown) => {
-      // intentionally do not invoke — keeps fetch mocks below from
-      // bleeding into the after() block's analytics calls.
+    after: (fn: () => unknown) => {
+      if (STATE.runAfterCallback) {
+        // Invoke and swallow rejections so test-mode after() failures
+        // can't mask the response assertions the test is making.
+        Promise.resolve()
+          .then(fn)
+          .catch(() => {});
+      }
     },
   };
 });
@@ -177,6 +195,9 @@ beforeEach(async () => {
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
   STATE.adminApiKeyId = API_KEY_ID;
+  STATE.adminRpcCalls = [];
+  STATE.runAfterCallback = false;
+  delete process.env.USE_COMPUTE_JOBS_QUEUE;
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
   process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
   // Resolve a real allowed name for the body.
@@ -400,6 +421,93 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * the target code. We assert (i) the HTTP status, (ii) a stable error
  * code/text, and (iii) that the raw Postgres message does NOT leak.
  */
+/**
+ * audit-2026-05-07 H-0330 — wizard finalize MUST enqueue the
+ * sync_trades compute job (gated by USE_COMPUTE_JOBS_QUEUE) so the
+ * strategy advances past computation_status='pending' on Round 2
+ * cutover. Pre-fix the only enqueue lived in /api/keys/sync behind a
+ * manual "Sync now" button; removing that button would orphan every
+ * new wizard submission.
+ *
+ * Tests assert:
+ *   - With the flag ON + a linked api_key, the after() block calls
+ *     enqueue_compute_job exactly once with p_kind='sync_trades'.
+ *   - With the flag OFF (default), no enqueue runs.
+ *   - With the flag ON but no api_key (CSV branch), no enqueue runs.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", () => {
+  function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }
+
+  it("enqueues sync_trades when USE_COMPUTE_JOBS_QUEUE=true and a key is linked", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // Wait for the queued microtask to flush (after callback runs via
+    // Promise.resolve().then(fn) in the mock).
+    await new Promise((r) => setImmediate(r));
+
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeDefined();
+    expect(enqueueCall!.args.p_kind).toBe("sync_trades");
+    expect(enqueueCall!.args.p_strategy_id).toBe(STRATEGY_ID);
+
+    fetchSpy.mockRestore();
+  });
+
+  it("does NOT enqueue when USE_COMPUTE_JOBS_QUEUE is unset (legacy default)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    await new Promise((r) => setImmediate(r));
+
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeUndefined();
+
+    fetchSpy.mockRestore();
+  });
+
+  it("does NOT enqueue when the strategy has no linked api_key (CSV branch)", async () => {
+    STATE.strategyRow = { api_key_id: null };
+    STATE.adminApiKeyId = null;
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    await new Promise((r) => setImmediate(r));
+
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeUndefined();
+  });
+});
+
 /**
  * audit-2026-05-07 H-0325/H-0326 — dollar-amount fail-LOUD validation.
  *
