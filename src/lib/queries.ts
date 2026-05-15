@@ -2252,5 +2252,16 @@ export async function getMyWatchlist(
     return null;
   }
   if (!data) return new Set<string>();
-  return new Set(data.map((row) => row.strategy_id as string));
+  // audit-2026-05-07 H-0490: filter out non-string strategy_id values
+  // before constructing the Set. The previous `row.strategy_id as string`
+  // cast hid the case where a column drift / nullable schema change leaks
+  // null/undefined into the Set — `Set.has(undefined)` then returns true
+  // for any caller that probes with `set.has(s.id)` when `s.id` is also
+  // undefined, falsely marking unrelated rows as starred.
+  const ids = new Set<string>();
+  for (const row of data) {
+    const sid = (row as { strategy_id?: unknown }).strategy_id;
+    if (typeof sid === "string" && sid.length > 0) ids.add(sid);
+  }
+  return ids;
 }

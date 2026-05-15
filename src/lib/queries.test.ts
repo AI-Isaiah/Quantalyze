@@ -392,6 +392,37 @@ describe("getMyWatchlist (Plan 13-01 / DISCO-01)", () => {
     // — the function is meant to read ALL of the user's favorites).
     expect(recorders.favoritesEqCalls).toEqual([["user_id", USER_ID]]);
   });
+
+  // audit-2026-05-07 H-0490 regression: rows with null/undefined
+  // strategy_id must NOT make it into the Set. The old code did
+  // `data.map((row) => row.strategy_id as string)` which let `null` /
+  // `undefined` flow through as Set members; `Set.has(undefined)` then
+  // returns true for any caller probing with `s.id` that itself happens
+  // to be undefined, falsely flagging unrelated strategies as starred.
+  it("drops rows where strategy_id is null or undefined (column-drift defence)", async () => {
+    recorders.favoritesResponse = {
+      data: [
+        { strategy_id: "cccccccc-0001-4000-8000-000000000001" },
+        { strategy_id: null },
+        { strategy_id: undefined },
+        { strategy_id: "" },
+        { strategy_id: "cccccccc-0001-4000-8000-000000000002" },
+      ],
+      error: null,
+    };
+    const result = await getMyWatchlist(USER_ID);
+    expect(result).toBeInstanceOf(Set);
+    if (!result) throw new Error("expected Set, got null");
+    expect(result.size).toBe(2);
+    expect(result.has("cccccccc-0001-4000-8000-000000000001")).toBe(true);
+    expect(result.has("cccccccc-0001-4000-8000-000000000002")).toBe(true);
+    // Critically: the set must NOT contain undefined — Set.has(undefined)
+    // would otherwise return true for callers probing with `s.id`
+    // when `s.id` is also undefined (the false-star regression).
+    expect(result.has(undefined as unknown as string)).toBe(false);
+    expect(result.has(null as unknown as string)).toBe(false);
+    expect(result.has("")).toBe(false);
+  });
 });
 
 /**
