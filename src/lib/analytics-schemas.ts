@@ -78,11 +78,9 @@ export const VerifyStrategyResponseSchema = z.object({
 }).passthrough();
 
 // --- /api/match/recompute ---
-// Audit-2026-05-07 H-0567: every branch now carries a `status` discriminator
-// (`disabled` | `skipped` | `ok`) so callers can switch on a single field
-// instead of probing key presence. The analytics-service router has been
-// updated to emit `status` on all three return paths; `.passthrough()` is
-// retained for forward-compat with extra fields added per branch.
+// Every branch carries a `status` discriminator so callers can switch on a
+// single field instead of probing key presence. `.passthrough()` is retained
+// for forward-compat with per-branch extra fields.
 export const RecomputeMatchResponseSchema = z.object({
   status: z.enum(["disabled", "skipped", "ok"]),
   allocator_id: z.string().optional(),

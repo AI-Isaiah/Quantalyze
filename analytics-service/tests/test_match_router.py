@@ -1,27 +1,16 @@
-"""Audit-2026-05-07 C-0205 / H-0552 / H-0553 / H-0560 / H-0561 — coverage for
-routers/match.py endpoints + helpers.
+"""Coverage for routers/match.py endpoints and helpers.
 
-Pre-fix gap: zero tests exercised the FastAPI surface
-(POST /api/match/recompute, GET /api/match/eval, POST /api/match/cron-recompute).
-A regression that flipped a slice direction in `_retention_sweep`, removed the
-inner try/except in the cron loop, or moved the retention sweep above the
-allocator loop would have shipped silently.
-
-Strategy:
-  * Mount routers.match on a bare FastAPI app via TestClient — bypasses the
-    main.py X-Service-Key middleware so the tests can hit the endpoints
-    directly. Mocking targets the module-level Supabase factory only.
-  * No live DB, no live Supabase, no live Sentry. Pure stdlib + pytest.
-  * Each helper test is parameterised by (input) -> (expected outcome) on the
-    smallest mock surface that drives the code under test.
+The FastAPI surface (POST /api/match/recompute, GET /api/match/eval,
+POST /api/match/cron-recompute) is exercised against a bare FastAPI app —
+no main.py middleware, no live Supabase, no Sentry. Mocking targets the
+module-level Supabase factory only.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
-from contextlib import contextmanager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -51,15 +40,8 @@ def _utc(offset_hours: float) -> str:
     ).isoformat().replace("+00:00", "Z")
 
 
-@contextmanager
-def _patch_supabase(monkeypatch, mock_sb: MagicMock):
-    """Patch every `get_supabase()` call inside routers.match."""
-    monkeypatch.setattr("routers.match.get_supabase", lambda: mock_sb)
-    yield
-
-
 # ---------------------------------------------------------------------------
-# H-0561 — _kill_switch_enabled fail-open contract
+# _kill_switch_enabled fail-open contract
 # ---------------------------------------------------------------------------
 
 
@@ -91,10 +73,9 @@ class TestKillSwitchEnabled:
         assert _kill_switch_enabled() is True
 
     def test_fail_open_on_supabase_exception(self, monkeypatch, caplog):
-        """H-0554/H-0561: a Supabase exception logs ERROR and engine stays
-        running. Flipping to fail-closed would silently disable the engine on
-        any transient DB blip — a worse failure mode than the (loud) current
-        contract."""
+        """A Supabase exception logs at ERROR and the engine stays running.
+        Flipping to fail-closed would silently disable the engine on any
+        transient DB blip — a worse failure mode than the (loud) contract."""
         from routers.match import _kill_switch_enabled
 
         sb = MagicMock()
@@ -108,7 +89,7 @@ class TestKillSwitchEnabled:
         assert any(
             "kill switch check FAILED" in rec.getMessage()
             for rec in caplog.records
-        ), "H-0554: kill-switch failure must log at ERROR level (was WARNING)"
+        ), "kill-switch failure must log at ERROR level"
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +99,7 @@ class TestKillSwitchEnabled:
 
 class TestRecomputeEndpoint:
     def test_kill_switch_off_returns_disabled_status(self, client, monkeypatch):
-        """H-0567: every branch carries a `status` discriminator. Kill-switch
-        off path must return status='disabled'."""
+        """Every branch carries a `status` discriminator; kill-switch off → 'disabled'."""
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: False)
 
         r = client.post(
@@ -132,7 +112,7 @@ class TestRecomputeEndpoint:
         assert body["disabled"] is True
 
     def test_skip_path_returns_skipped_status(self, client, monkeypatch):
-        """H-0567: skipped branch carries status='skipped' + reason."""
+        """Skipped branch carries status='skipped' + reason."""
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _skip(allocator_id, force):
@@ -150,7 +130,7 @@ class TestRecomputeEndpoint:
         assert body["reason"] == "recent_batch"
 
     def test_empty_universe_returns_400(self, client, monkeypatch):
-        """C-0205: empty candidate universe → 400."""
+        """Empty candidate universe → 400."""
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -169,7 +149,7 @@ class TestRecomputeEndpoint:
         assert r.status_code == 400
 
     def test_score_exception_returns_500(self, client, monkeypatch):
-        """C-0205: _score_one_allocator raising → 500."""
+        """_score_one_allocator raising → 500."""
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -195,10 +175,10 @@ class TestRecomputeEndpoint:
         )
         assert r.status_code == 500
 
-    def test_h0548_rejects_non_uuid_with_422(self, client):
-        """H-0548: allocator_id is typed as UUID — non-UUID strings must
-        be rejected at the request boundary with a structured 422, not
-        round-tripped to Supabase as a 0-row query."""
+    def test_rejects_non_uuid_with_422(self, client):
+        """allocator_id is typed as UUID — non-UUID strings must be rejected
+        at the request boundary with a 422, not round-tripped to Supabase
+        as a 0-row query."""
         r = client.post(
             "/api/match/recompute",
             json={"allocator_id": "../../etc/passwd", "force": False},
@@ -212,7 +192,7 @@ class TestRecomputeEndpoint:
         assert r.status_code == 422
 
     def test_ok_path_carries_status_ok(self, client, monkeypatch):
-        """H-0567: success branch carries status='ok' alongside the result fields."""
+        """Success branch carries status='ok' alongside the result fields."""
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
 
         async def _no_skip(allocator_id, force):
@@ -250,11 +230,11 @@ class TestRecomputeEndpoint:
         assert body["status"] == "ok"
         assert body["batch_id"] == "batch-1"
 
-    def test_h0564_retention_failure_after_insert_does_not_500(
+    def test_retention_failure_after_insert_does_not_500(
         self, client, monkeypatch, caplog
     ):
-        """H-0564: retention sweep failure AFTER successful insert must not
-        500 the request — the batch already landed; tearing down the response
+        """A retention sweep failure AFTER a successful insert must not 500
+        the request — the batch already landed, and tearing down the response
         produces a partial-success state with no rollback. Log loudly and
         return the result."""
         monkeypatch.setattr("routers.match._kill_switch_enabled", lambda: True)
@@ -301,14 +281,14 @@ class TestRecomputeEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# H-0560 — eval lookback_days boundaries
+# eval lookback_days boundaries
 # ---------------------------------------------------------------------------
 
 
 class TestEvalLookbackBoundaries:
-    """H-0560: 1-365 must accept both endpoints; 0 and 366 must reject. A
-    refactor to `<= 0` / `>= 365` would silently flip behaviour at the
-    canonical 7/28/90/365 buttons on the eval dashboard."""
+    """1-365 must accept both endpoints; 0 and 366 must reject. A refactor to
+    `<= 0` / `>= 365` would silently flip behaviour at the canonical
+    7/28/90/365 buttons on the eval dashboard."""
 
     def test_lookback_0_rejected(self, client, monkeypatch):
         async def _noop(*args, **kwargs):
@@ -340,15 +320,15 @@ class TestEvalLookbackBoundaries:
 
 
 # ---------------------------------------------------------------------------
-# H-0552 — _retention_sweep slice + ordering invariants
+# _retention_sweep slice + ordering invariants
 # ---------------------------------------------------------------------------
 
 
 class TestRetentionSweep:
-    """H-0552: a regression that flipped `rows[keep:]` to `rows[:keep]` or
-    sorted ASC would silently delete the NEWEST batches instead of the
-    oldest — invisible until an allocator's queue is empty. Lock both
-    invariants with a deterministic batch ordering."""
+    """A regression that flipped `rows[keep:]` to `rows[:keep]` or sorted ASC
+    would silently delete the NEWEST batches instead of the oldest —
+    invisible until an allocator's queue empties. Lock both invariants with
+    a deterministic batch ordering."""
 
     def test_deletes_oldest_when_above_keep(self, monkeypatch):
         from routers import match as match_mod
@@ -403,9 +383,9 @@ class TestRetentionSweep:
         deleted = match_mod._retention_sweep("alloc-1", keep=7)
         assert deleted == 0
 
-    def test_h0568_delete_paginates_large_in_list(self, monkeypatch):
-        """H-0568: an unbounded IN-list DELETE can exceed PostgREST URL
-        limits. Verify the sweep chunks deletes into _RETENTION_DELETE_BATCH_SIZE
+    def test_delete_paginates_large_in_list(self, monkeypatch):
+        """An unbounded IN-list DELETE can exceed PostgREST URL limits.
+        Verify the sweep chunks deletes into _RETENTION_DELETE_BATCH_SIZE
         pages so the IN-list stays bounded."""
         from routers import match as match_mod
 
@@ -434,14 +414,13 @@ class TestRetentionSweep:
 
 
 # ---------------------------------------------------------------------------
-# H-0553 — cron partial-failure resilience
+# cron partial-failure resilience
 # ---------------------------------------------------------------------------
 
 
 class TestCronPartialFailure:
-    """H-0553: lock the per-allocator try/except contract. A regression that
-    re-raises in the inner except would let one bad allocator nuke the
-    entire daily cron."""
+    """Lock the per-allocator try/except contract. A regression that re-raises
+    in the inner except would let one bad allocator nuke the entire daily cron."""
 
     def test_one_allocator_failure_does_not_abort_cron(self, client, monkeypatch):
         """3 allocators, second raises → processed=2, failed=1, cron returns 200."""
@@ -483,7 +462,7 @@ class TestCronPartialFailure:
         assert call_order == ["a1", "a2", "a3"]
 
     def test_kill_switch_flip_mid_run_breaks_loop(self, client, monkeypatch):
-        """H-0553: mid-run kill-switch detection must abort the loop early."""
+        """Mid-run kill-switch detection must abort the loop early."""
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
@@ -530,9 +509,8 @@ class TestCronPartialFailure:
     def test_retention_sweep_failure_for_one_allocator_does_not_abort_total(
         self, client, monkeypatch
     ):
-        """H-0553: per-allocator retention failures must not abort the sweep
-        loop. Verify total retention is still summed across the surviving
-        allocators."""
+        """Per-allocator retention failures must not abort the sweep loop.
+        Verify total retention is still summed across the surviving allocators."""
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}, {"id": "a3"}])
@@ -570,13 +548,13 @@ class TestCronPartialFailure:
 
 
 # ---------------------------------------------------------------------------
-# H-0569 — cron response shape contract
+# cron response shape contract
 # ---------------------------------------------------------------------------
 
 
 class TestCronResponseShape:
-    """H-0569: lock the unified response shape across all early-return paths.
-    A monitoring dashboard reading `duration_s` must never get None back."""
+    """Lock the unified response shape across all early-return paths so a
+    monitoring dashboard reading `duration_s` never gets None back."""
 
     _REQUIRED_KEYS = {
         "status",
@@ -630,15 +608,15 @@ class TestCronResponseShape:
 
 
 # ---------------------------------------------------------------------------
-# H-0555 — total-failure structural-error logging
+# total-failure structural-error logging
 # ---------------------------------------------------------------------------
 
 
 class TestCronTotalFailureLogging:
     def test_all_allocators_fail_logs_error(self, client, monkeypatch, caplog):
-        """H-0555: processed=0 + failed>0 = structural problem (schema drift,
-        KEK missing, supabase down). Must emit logger.error so Sentry alerts
-        fire — was silently 200-OK before."""
+        """processed=0 + failed>0 = structural problem (schema drift, KEK
+        missing, supabase down). Must emit logger.error so Sentry alerts
+        fire — would otherwise be silently 200-OK."""
         sb = MagicMock()
         sb.table.return_value.select.return_value.in_.return_value.execute.return_value = (
             MagicMock(data=[{"id": "a1"}, {"id": "a2"}])
@@ -668,20 +646,20 @@ class TestCronTotalFailureLogging:
         body = r.json()
         assert body["processed"] == 0
         assert body["failed"] == 2
-        # H-0555: must emit a TOTAL FAILURE error log.
+        # Must emit a TOTAL FAILURE error log so Sentry alerts fire.
         assert any(
             "TOTAL FAILURE" in rec.getMessage() for rec in caplog.records
         )
 
 
 # ---------------------------------------------------------------------------
-# C-0204 — demo_only filter on _load_candidate_universe
+# demo_only filter on _load_candidate_universe
 # ---------------------------------------------------------------------------
 
 
 class TestLoadCandidateUniverseDemoOnly:
     def test_demo_only_filters_is_example_true(self, monkeypatch):
-        """C-0204: demo-allocator path must restrict universe to is_example=true
+        """The demo-allocator path must restrict the universe to is_example=true
         strategies so /api/demo/match cannot leak real published strategies via
         the anon public endpoint."""
         from routers import match as match_mod
@@ -735,7 +713,7 @@ class TestLoadCandidateUniverseDemoOnly:
 
 
 # ---------------------------------------------------------------------------
-# H-0549 / H-0559 — mandate_edited_at parse-failure must not silently pass
+# mandate_edited_at parse-failure must not silently pass
 # ---------------------------------------------------------------------------
 
 
@@ -743,10 +721,9 @@ class TestShouldSkipMandateParseFailure:
     async def test_malformed_mandate_edited_at_forces_recompute(
         self, monkeypatch, caplog
     ):
-        """H-0549/H-0559: a corrupted mandate_edited_at used to be swallowed
-        with bare `pass`, silently downgrading D-11 Trigger 3 into a no-op.
-        Now: log a WARNING and treat parse failure as 'recompute needed'
-        (return False) per Rule 12 (fail loud)."""
+        """A corrupted mandate_edited_at used to be swallowed with bare `pass`,
+        silently downgrading Trigger 3 into a no-op. Now: log a WARNING and
+        treat parse failure as 'recompute needed' (return False)."""
         from routers.match import ENGINE_VERSION, _should_skip_allocator
 
         now = _dt.datetime.now(_dt.timezone.utc)
@@ -773,7 +750,7 @@ class TestShouldSkipMandateParseFailure:
             result = await _should_skip_allocator("alloc-1", force=False)
 
         assert result is False, (
-            "H-0549: bad mandate_edited_at must force a recompute, not silently skip"
+            "bad mandate_edited_at must force a recompute, not silently skip"
         )
         assert any(
             "bad mandate_edited_at" in rec.getMessage() for rec in caplog.records
@@ -781,20 +758,19 @@ class TestShouldSkipMandateParseFailure:
 
 
 # ---------------------------------------------------------------------------
-# Specialist-review (post-fix self-audit) — CR-3 orphan rollback + C-0204 wire-up
+# Orphan rollback + demo-allocator filter at the orchestrator boundary
 # ---------------------------------------------------------------------------
 
 
 class TestScoreOneAllocatorOrphanRollback:
-    """Specialist-review CR-3: when match_candidates insert fails, the parent
-    match_batches row must be deleted so we never leave an orphan batch with
-    candidate_count > 0 and zero children (the exact dataloss shape H-0566
-    was raised to protect against).
+    """When match_candidates insert fails, the parent match_batches row must
+    be deleted so we never leave an orphan batch with candidate_count > 0
+    and zero children (the dataloss shape the recompute pipeline is designed
+    to avoid).
 
-    The unit-of-work here is the orchestration in _score_one_allocator — we
-    monkey-patch every dependency below the supabase boundary so we can
-    drive the candidate-insert failure path deterministically.
-    """
+    The unit-of-work here is the orchestration in _score_one_allocator. We
+    monkey-patch every dependency below the Supabase boundary so the
+    candidate-insert failure path can be driven deterministically."""
 
     async def test_failed_candidate_insert_rolls_back_batch_row(
         self, monkeypatch, caplog
@@ -886,21 +862,19 @@ class TestScoreOneAllocatorOrphanRollback:
 
         # The rollback DELETE must have fired with the parent batch id.
         assert ("id", "batch-xyz") in captured_deletes, (
-            "Specialist-review CR-3: orphan batch row must be deleted on "
-            "candidate-insert failure"
+            "orphan batch row must be deleted on candidate-insert failure"
         )
         assert any(
-            "rolling back batch row" in rec.getMessage() for rec in caplog.records
+            "rolling back" in rec.getMessage() for rec in caplog.records
         )
 
 
 class TestScoreOneAllocatorDemoFilter:
-    """Specialist-review pass on C-0204: when the allocator being scored is
-    the seeded demo allocator (ALLOCATOR_ACTIVE_ID), the candidate universe
-    must be post-filtered to is_example=true strategies only. Real published
-    strategies must NEVER land in match_candidates for that allocator —
-    otherwise the public /api/demo/match endpoint would leak them.
-    """
+    """When the allocator being scored is the seeded demo allocator
+    (ALLOCATOR_ACTIVE_ID), the candidate universe must be post-filtered to
+    is_example=true strategies only. Real published strategies must NEVER
+    land in match_candidates for that allocator — otherwise the public
+    /api/demo/match endpoint would leak them."""
 
     async def test_demo_allocator_universe_is_filtered_to_examples(
         self, monkeypatch
@@ -980,7 +954,7 @@ class TestScoreOneAllocatorDemoFilter:
             s["strategy_id"] for s in captured_kw["candidate_strategies"]
         }
         assert scored_ids == {"ex-1", "ex-2"}, (
-            "C-0204: demo allocator must only score is_example=true strategies; "
+            "demo allocator must only score is_example=true strategies; "
             f"got {scored_ids}"
         )
 
@@ -1055,5 +1029,5 @@ class TestScoreOneAllocatorDemoFilter:
             s["strategy_id"] for s in captured_kw["candidate_strategies"]
         }
         assert scored_ids == {"ex-1", "real-1"}, (
-            "C-0204: non-demo allocator must see the full universe"
+            "non-demo allocator must see the full universe"
         )

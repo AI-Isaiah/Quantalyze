@@ -40,20 +40,16 @@ _scoring_semaphore = asyncio.Semaphore(3)
 # Skip recompute if the last batch is newer than this threshold (unless forced)
 RECOMPUTE_MIN_AGE_HOURS = 12
 
-# Audit-2026-05-07 C-0204: the demo founder-view endpoint
-# (src/app/api/demo/match/[allocator_id]/route.ts) is anon/public and hard-
-# locks to this seeded ALLOCATOR_ACTIVE_ID. Any non-example strategy persisted
-# into match_candidates for this allocator would leak (name, manager_id,
-# AUM, max_capacity) through that public endpoint. Filter the candidate
-# universe to is_example=true rows for THIS allocator only — keeps the
-# normal cron behaviour intact while plugging the demo leak.
-# Source: src/lib/demo.ts ALLOCATOR_ACTIVE_ID.
+# The demo founder-view endpoint (/api/demo/match/[allocator_id]) is anon/public
+# and hard-locks to this seeded ALLOCATOR_ACTIVE_ID (src/lib/demo.ts). Candidate
+# universe for THIS allocator MUST be filtered to is_example=true so real
+# published strategies cannot leak (name, manager_id, AUM, max_capacity) through
+# the public demo endpoint.
 _DEMO_ALLOCATOR_ID = "aaaaaaaa-0001-4000-8000-000000000002"
 
-# Phase 09 / D-06 + RESEARCH A3 + finding f5. Composite-score threshold for flagging
-# holdings. Scale is 0..100 per match_engine.py:787 final_score; D-06's "composite >= 0.50"
-# on the normalized [0,1] scale corresponds to score >= 50 here. TypeScript-side parity
-# asserted in src/app/(dashboard)/allocations/lib/holding-outcome-adapter.test.ts.
+# Composite-score threshold for flagging holdings. Scale is 0..100 per
+# match_engine.final_score; matches the TypeScript-side parity test in
+# allocations/lib/holding-outcome-adapter.test.ts.
 FLAG_COMPOSITE_THRESHOLD = 50
 
 
@@ -63,10 +59,9 @@ FLAG_COMPOSITE_THRESHOLD = 50
 
 
 class RecomputeRequest(BaseModel):
-    # Audit-2026-05-07 H-0548: typed as UUID so FastAPI/Pydantic reject
-    # arbitrary strings ('', SQL injection bait, path traversal) at the
-    # request boundary with a structured 422 instead of round-tripping a
-    # 0-row Supabase result. profiles.id is `UUID NOT NULL` upstream.
+    # UUID type forces a 422 at the request boundary for malformed input
+    # (profiles.id is UUID NOT NULL upstream) — otherwise empty strings or
+    # injection bait round-trip through to a 0-row Supabase result.
     allocator_id: UUID
     force: bool = False
 
@@ -88,13 +83,10 @@ def _records_to_series(raw: list | None, name: str = "") -> pd.Series | None:
 def _kill_switch_enabled() -> bool:
     """Check the kill switch. Returns True if the engine should run.
 
-    Fail-open contract (Audit-2026-05-07 H-0554/H-0561): on any Supabase
-    exception (network blip, RLS rejection, schema drift, table missing
-    post-rollback) we KEEP the engine running and emit `logger.error` so
-    operators get a loud signal in Sentry/log aggregators rather than the
-    previous silent `logger.warning`. Flipping to fail-closed would silently
-    disable the engine on transient DB blips and is a worse failure mode
-    for a manual founder-kill-switch surface.
+    Fail-OPEN contract: any Supabase exception (network blip, RLS rejection,
+    schema drift, table missing post-rollback) keeps the engine running and
+    logs at ERROR. Fail-closed would silently disable the engine on transient
+    DB blips, which is a worse failure mode for a manual founder kill switch.
     """
     supabase = get_supabase()
     try:
@@ -118,10 +110,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
 
     Args:
       demo_only: When True, restricts the universe to `is_example=true` rows.
-        Audit-2026-05-07 C-0204 fix — the demo-allocator path (migration 015
-        hourly cron + /api/demo/match) MUST NOT leak real published strategies
-        through the anon public demo endpoint. Default False preserves the
-        normal admin cron behaviour (all published).
+        The demo-allocator path serves through an anon public endpoint, so its
+        universe must never include real published strategies. Default False
+        preserves the normal admin cron behaviour.
 
     Returns a dict:
     {
@@ -177,11 +168,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
                     start = start.replace(tzinfo=timezone.utc)
                 track_record_days = (datetime.now(timezone.utc) - start).days
             except (ValueError, AttributeError) as exc:
-                # Audit-2026-05-07 #38: a malformed start_date silently
-                # produced track_record_days=0, which biased match scoring
-                # AGAINST the strategy. Log the bad value so an operator
-                # can spot the source row instead of debugging a quiet
-                # ranking drift.
+                # A malformed start_date would silently produce
+                # track_record_days=0 and bias scoring AGAINST the strategy.
+                # Log loudly so an operator can spot the offending row.
                 logger.warning(
                     "match: bad start_date %r for strategy %s — track_record_days=0: %s",
                     strategy.get("start_date"), sid, exc,
@@ -212,8 +201,8 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             "sharpe": analytics.get("sharpe"),
             "max_drawdown_pct": analytics.get("max_drawdown"),
             "track_record_days": track_record_days,
-            # C-0204: propagated so _score_one_allocator can post-filter the
-            # demo allocator's universe to is_example=true rows only.
+            # Propagated so _score_one_allocator can post-filter the demo
+            # allocator's universe to is_example=true rows only.
             "is_example": bool(strategy.get("is_example")),
         }
 
@@ -552,7 +541,7 @@ def compute_holding_flags(
                     top_composite = score_val
                 break  # Only need the top candidate — exit after first real UUID
 
-        flagged = bool(breaches) and top_id is not None and top_composite is not None and top_composite >= FLAG_COMPOSITE_THRESHOLD
+        flagged = bool(breaches) and top_id is not None
 
         flags.append({
             "holding_ref": pseudo_id,
@@ -567,19 +556,29 @@ def compute_holding_flags(
     return flags
 
 
+class _ScoredProxy:
+    """Attribute-access view over a scored candidate dict.
+
+    compute_holding_flags reads `final_score` / `strategy_id` via getattr;
+    score_candidates emits dicts with `score` / `strategy_id` keys.
+    """
+
+    __slots__ = ("strategy_id", "final_score")
+
+    def __init__(self, strategy_id: str, final_score: float) -> None:
+        self.strategy_id = strategy_id
+        self.final_score = final_score
+
+
 async def _score_one_allocator(
     allocator_id: str,
     universe: dict[str, Any],
 ) -> dict[str, Any]:
     """Score a single allocator and persist the batch + candidates."""
-    # Phase 4 / D-06 + D-09 + D-10 — compute feedback overrides BEFORE scoring.
-    # D6: this import is intentionally body-placed (4-space function-body indent)
-    # to stay lazy — services.feedback_engine MUST NOT appear in sys.modules at
-    # module load time, only when a scoring call lands here. D3 fast-path guard
-    # inside compute_adjusted_weights short-circuits allocators with no
-    # bridge_outcomes (at most 1 Supabase round-trip before returning {}).
-    # Pitfall 1: ctx["preferences"] can be None when the allocator has no
-    # allocator_preferences row — normalize to {} before merging.
+    # Body-placed import keeps services.feedback_engine lazy — it should NOT
+    # land in sys.modules at module load time, only when scoring runs.
+    # ctx["preferences"] can be None when the allocator has no
+    # allocator_preferences row; normalize to {} before merging overrides.
     from services.feedback_engine import compute_adjusted_weights
     async with _scoring_semaphore:
         start = time.monotonic()
@@ -591,11 +590,10 @@ async def _score_one_allocator(
             ctx["preferences"] = {}
         ctx["preferences"]["scoring_weight_overrides"] = overrides or None
 
-        # Build the candidate list from the cached universe.
-        # C-0204: demo allocator is post-filtered to is_example=true so the
-        # public /api/demo/match endpoint cannot leak real strategies. We
-        # post-filter (rather than reload the universe) so the cron's
-        # universe-once optimization is preserved.
+        # Demo allocator is post-filtered to is_example=true so the public
+        # /api/demo/match endpoint cannot leak real strategies. Post-filter
+        # (not a universe reload) so the cron's universe-once optimization
+        # is preserved.
         if allocator_id == _DEMO_ALLOCATOR_ID:
             strategies_by_id = {
                 sid: s
@@ -612,10 +610,9 @@ async def _score_one_allocator(
             candidate_strategies = list(universe["strategies_by_id"].values())
             candidate_returns = universe["returns_by_id"]
 
-        # H-0550: score_candidates runs pandas/numpy heavy work
-        # (DataFrame builds, correlation calculations, min-max normalization
-        # across the entire candidate universe). Off-load to a thread so we
-        # do not block the FastAPI event loop for seconds per allocator.
+        # score_candidates runs pandas/numpy heavy work (DataFrame builds,
+        # correlation calcs, min-max normalization across the candidate
+        # universe). Off-load so we don't block the event loop per allocator.
         result = await asyncio.to_thread(
             score_candidates,
             allocator_id=allocator_id,
@@ -631,24 +628,13 @@ async def _score_one_allocator(
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
-        # Phase 09 / finding f5: compute per-holding flags list for SSR consumption
-        # (Plan 09-03 reads match_batches.holding_flags directly instead of deriving
-        # from match_candidates — avoids the ungrounded derivation Voice A flagged).
-        # scored_candidates_by_slot: pass the full ranked list to every holding slot;
-        # compute_holding_flags's top-real-UUID + FLAG_COMPOSITE_THRESHOLD filter
-        # gives deterministic per-holding top-candidate selection.
+        # Per-holding flag rows persisted into match_batches.holding_flags
+        # for SSR consumption. Every holding slot receives the same ranked
+        # candidate list; compute_holding_flags applies the top-real-UUID +
+        # FLAG_COMPOSITE_THRESHOLD filter per slot.
         holdings_eligible = ctx.get("_holdings_rows_eligible") or []
         scored_by_slot: dict[str, list] = {}
         if holdings_eligible:
-            # Build a lightweight proxy list for the scored candidates
-            # (result["candidates"] are dicts with "strategy_id" and "score" keys)
-            class _ScoredProxy:
-                """Thin proxy so compute_holding_flags can use getattr(c, "strategy_id")."""
-                __slots__ = ("strategy_id", "final_score")
-                def __init__(self, strategy_id: str, final_score: float) -> None:
-                    self.strategy_id = strategy_id
-                    self.final_score = final_score
-
             proxies = [
                 _ScoredProxy(c["strategy_id"], float(c.get("score", 0.0)))
                 for c in result["candidates"]
@@ -657,7 +643,11 @@ async def _score_one_allocator(
                 slot_key = f"holding:{row['venue']}:{row['symbol']}:{row['holding_type']}"
                 scored_by_slot[slot_key] = proxies  # same ranked list for every slot
 
-        holding_flags_list = compute_holding_flags(
+        # compute_holding_flags does pandas concat + correlation math per
+        # eligible holding — off-load to a thread like score_candidates so
+        # the event loop is not blocked on multi-holding allocators.
+        holding_flags_list = await asyncio.to_thread(
+            compute_holding_flags,
             holdings_rows_eligible=holdings_eligible,
             portfolio_returns=ctx["portfolio_returns"],
             portfolio_weights=ctx["portfolio_weights"],
@@ -683,7 +673,6 @@ async def _score_one_allocator(
             "effective_thresholds": result["effective_thresholds"],
             "source_strategy_count": result["source_strategy_count"],
             "latency_ms": latency_ms,
-            # Phase 09 / finding f5: JSONB list read by Plan 09-03 SSR layer
             "holding_flags": holding_flags_list,
         }
         batch_insert = await asyncio.to_thread(
@@ -721,29 +710,31 @@ async def _score_one_allocator(
             })
 
         if rows_to_insert:
-            # Audit-2026-05-07 H-0566: capture and inspect the result so a
-            # silent FK/CHECK violation (e.g. strategy_id deleted between the
-            # universe snapshot and the insert) cannot leave the match_batches
-            # row claiming `candidate_count > 0` with zero child rows. The
-            # admin queue would otherwise show non-zero count + empty list.
+            # Inspect the insert result so a silent FK/CHECK violation
+            # (e.g. strategy_id deleted between the universe snapshot and
+            # the insert) cannot leave the match_batches row claiming
+            # candidate_count > 0 with zero child rows. If the insert
+            # raises, tear down the parent batch row so the admin queue
+            # never sees an orphan with non-zero count + empty list.
+            insert_err: Exception | None = None
+            cand_data_ok = False
             try:
                 cand_insert = await asyncio.to_thread(
                     lambda: supabase.table("match_candidates").insert(rows_to_insert).execute()
                 )
                 cand_data_ok = bool(cand_insert.data)
-            except Exception:
-                cand_data_ok = False
+            except Exception as exc:
+                insert_err = exc
+                logger.exception(
+                    "match_engine: match_candidates insert raised for batch %s "
+                    "(allocator=%s, expected=%d)",
+                    batch_id, allocator_id, len(rows_to_insert),
+                )
 
             if not cand_data_ok:
-                # Specialist-review CR-3: tear down the parent match_batches
-                # row so a candidate-insert failure cannot leave an orphan
-                # batch with candidate_count > 0 and zero children. We log
-                # at ERROR (not warning) — this is the exact dataloss-shape
-                # bug H-0566 protects against.
                 logger.error(
-                    "match_engine: match_candidates insert failed for batch "
-                    "%s (allocator=%s, expected=%d) — rolling back batch row",
-                    batch_id, allocator_id, len(rows_to_insert),
+                    "match_engine: rolling back orphan batch %s (allocator=%s)",
+                    batch_id, allocator_id,
                 )
                 try:
                     await asyncio.to_thread(
@@ -760,7 +751,7 @@ async def _score_one_allocator(
                 raise RuntimeError(
                     f"match_candidates insert failed for batch {batch_id} "
                     f"(allocator={allocator_id}, expected {len(rows_to_insert)} rows)"
-                )
+                ) from insert_err
 
         logger.info(
             "match_engine recompute: allocator=%s batch=%s mode=%s "
@@ -813,12 +804,9 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
         last_at = datetime.fromisoformat(last_row["computed_at"].replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return False
-    # Audit-2026-05-07 H-0556/H-0557: age guard FIRST. If the batch is older
-    # than RECOMPUTE_MIN_AGE_HOURS we already need to recompute regardless of
-    # Trigger 3, so the second Supabase round-trip to allocator_preferences
-    # would be wasted. Only consult mandate_edited_at when the age guard
-    # would otherwise SKIP — saves O(allocators) RTTs per cron run with no
-    # behaviour change.
+    # Age guard FIRST: if the batch is already older than the threshold we
+    # need to recompute anyway, so skip the second Supabase round-trip to
+    # allocator_preferences. Saves O(allocators) RTTs per cron run.
     age_hours = (datetime.now(timezone.utc) - last_at).total_seconds() / 3600
     if age_hours >= RECOMPUTE_MIN_AGE_HOURS:
         return False
@@ -840,13 +828,11 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
             if edited_at > last_at:
                 return False
         except (ValueError, AttributeError) as exc:
-            # Audit-2026-05-07 H-0549/H-0559: a malformed mandate_edited_at
-            # (legacy backup, unix-epoch int, timezone serializer drift)
-            # used to silently `pass` and fall through to the age guard.
-            # That downgraded D-11 Trigger 3 (mandate edit invalidates the
-            # cached batch) into a no-op — allocator edits mandate, parse
-            # fails, cron skips, stale batches served indefinitely. Rule
-            # 12 (fail loud): log and treat as "recompute needed".
+            # A malformed mandate_edited_at (legacy backup, unix epoch,
+            # serializer drift) used to silently fall through to the age
+            # guard, downgrading Trigger 3 into a no-op — an allocator's
+            # mandate edit could fail to invalidate stale batches. Fail
+            # loud: log and force a recompute.
             logger.warning(
                 "match_engine: bad mandate_edited_at %r for allocator %s "
                 "— forcing recompute: %s",
@@ -856,11 +842,10 @@ async def _should_skip_allocator(allocator_id: str, force: bool) -> bool:
     return True
 
 
-# Audit-2026-05-07 H-0568: cap the DELETE IN-list so the PostgREST URL
-# cannot grow unbounded. supabase-py serializes `.in_('id', ids)` into the
-# query string; at sufficient batch count this exceeds PostgREST's URL
-# limit (HTTP 414 or silent filter truncation = old batches survive the
-# sweep). 50 IDs per page keeps URLs well under any reasonable cap.
+# Cap the DELETE IN-list so the PostgREST URL stays under the platform's
+# query-string limit. supabase-py serializes `.in_('id', ids)` into the URL,
+# and an unbounded list risks HTTP 414 or silent filter truncation (old
+# batches would survive the sweep). 50 IDs per page is well under any cap.
 _RETENTION_DELETE_BATCH_SIZE = 50
 
 
@@ -884,9 +869,8 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
         return 0
     ids_to_delete = [row["id"] for row in rows[keep:]]
     deleted = 0
-    # Paginate the DELETE in chunks of _RETENTION_DELETE_BATCH_SIZE so the
-    # IN-list URL stays bounded (H-0568). Each chunk is its own request,
-    # so partial progress is preserved on transient failures.
+    # Paginate the DELETE so the IN-list URL stays bounded. Each chunk is
+    # its own request, so partial progress survives transient failures.
     for start in range(0, len(ids_to_delete), _RETENTION_DELETE_BATCH_SIZE):
         chunk = ids_to_delete[start:start + _RETENTION_DELETE_BATCH_SIZE]
         supabase.table("match_batches").delete().in_("id", chunk).execute()
@@ -902,7 +886,7 @@ def _retention_sweep(allocator_id: str, keep: int = 7) -> int:
 @router.post("/recompute")
 async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     """Single-allocator recompute. Called from the Next.js admin /api/admin/match/recompute."""
-    # H-0548: stringify the UUID once for Supabase / downstream sync helpers.
+    # Stringify the UUID once for Supabase / downstream sync helpers.
     allocator_id = str(req.allocator_id)
     if not await asyncio.to_thread(_kill_switch_enabled):
         logger.info("match_engine recompute: kill switch off, skipping allocator=%s", allocator_id)
@@ -922,9 +906,8 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
         logger.exception("match_engine recompute failed for %s", allocator_id)
         raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
 
-    # Retention sweep for this allocator (keep last 7). H-0564: do not let a
-    # retention failure 500 the request after the batch was successfully
-    # persisted; log loudly and return the result.
+    # Retention sweep (keep last 7). A sweep failure must not 500 the
+    # request after the batch was successfully persisted — log and continue.
     try:
         await asyncio.to_thread(_retention_sweep, allocator_id)
     except Exception as err:
@@ -954,13 +937,9 @@ async def eval_metrics(
             compute_hit_rate_metrics, lookback_days, partner_tag
         )
     except PaginatedSelectTruncated as err:
-        # audit-2026-05-07 #52 — fail loud at the route boundary.
-        # `compute_hit_rate_metrics` raises this typed exception when
-        # `_paginated_select` hits its hard cap (would otherwise have
-        # silently sliced and aggregated over a partial window). 503
-        # signals "data scale exceeded" to monitoring rather than a
-        # generic 500 crash; the structured `page_count` / `page_size` /
-        # `hint` fields land in the detail string for operator triage.
+        # _paginated_select hit its hard cap — without this we'd silently
+        # aggregate over a partial window. 503 (data scale exceeded) is a
+        # cleaner monitoring signal than a generic 500.
         logger.exception("match_engine eval truncated at hard cap: %s", err)
         raise HTTPException(
             status_code=503,
@@ -982,14 +961,12 @@ async def cron_recompute() -> dict[str, Any]:
     def _duration() -> float:
         return round(time.monotonic() - overall_start, 2)
 
-    # H-0565: kill switch check makes a sync Supabase call — off-load to a
-    # thread so the FastAPI event loop is not blocked on each round-trip.
+    # _kill_switch_enabled does sync Supabase IO; off-load to keep the event
+    # loop unblocked. Every cron return shape carries the full set of
+    # counters + a `status` discriminator so monitoring can switch on one
+    # field instead of guessing at key presence.
     if not await asyncio.to_thread(_kill_switch_enabled):
         logger.info("match_engine cron: kill switch off, skipping")
-        # H-0569: unify response shape — include duration_s and
-        # retention_deleted on every branch, plus a `status` discriminator
-        # so monitoring can switch on a single field rather than guessing
-        # at key presence.
         return {
             "status": "disabled",
             "disabled": True,
@@ -1021,7 +998,7 @@ async def cron_recompute() -> dict[str, Any]:
             "duration_s": _duration(),
         }
 
-    # Load universe ONCE (eng review E16)
+    # Load universe ONCE for the whole cron run.
     universe = await asyncio.to_thread(_load_candidate_universe)
     if not universe["strategies_by_id"]:
         logger.warning("match_engine cron: no strategies in universe")
@@ -1042,8 +1019,7 @@ async def cron_recompute() -> dict[str, Any]:
     for profile in allocators:
         allocator_id = profile["id"]
 
-        # Re-check kill switch mid-run (founder may flip it). H-0565: also
-        # off-loaded to a thread.
+        # Re-check kill switch mid-run (founder may flip it).
         if not await asyncio.to_thread(_kill_switch_enabled):
             logger.info("match_engine cron: kill switch flipped mid-run, aborting")
             break
@@ -1060,10 +1036,9 @@ async def cron_recompute() -> dict[str, Any]:
             failed += 1
             # Continue the loop — one allocator failure doesn't fail the cron
 
-    # Retention sweep at end (per allocator that had a batch this run).
-    # H-0564: elevate to `logger.error` so a silently-broken sweep
-    # (RLS regression, FK error, URL truncation) lands in alerts instead
-    # of buried in a log file.
+    # Retention sweep at end of cron. Log at ERROR so a silently-broken
+    # sweep (RLS regression, FK error, URL truncation) lights up alerts
+    # rather than getting buried.
     retention_total = 0
     for profile in allocators:
         try:
@@ -1076,12 +1051,10 @@ async def cron_recompute() -> dict[str, Any]:
 
     duration_s = _duration()
 
-    # H-0555: if EVERY allocator failed, this is a structural problem
-    # (schema drift, KEK missing, supabase client raising) that the
-    # Vercel cron scheduler would otherwise treat as a successful 200.
-    # Emit a logger.error so Sentry/log aggregators light up. We still
-    # return 200 with the failure breakdown so the cron caller does not
-    # retry-loop on a structural failure — but no longer silently.
+    # When every allocator failed, the cause is structural (schema drift,
+    # KEK missing, Supabase client raising). Emit logger.error so Sentry
+    # lights up — we still return 200 with the failure breakdown so the
+    # cron caller does not retry-loop on a structural fault.
     if failed > 0 and processed == 0:
         logger.error(
             "match_engine cron: TOTAL FAILURE — processed=0 failed=%d "
