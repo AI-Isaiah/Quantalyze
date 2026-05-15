@@ -994,14 +994,28 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
 
         # Observability: when 4-bucket mode is on, _compute_trade_mix silently
         # skips fills missing is_maker. The coverage gate caps that at <1% by
-        # design, but log when it happens so operators see the count instead
-        # of a quiet panel-vs-volume discrepancy.
-        if has_maker_taker and fills_data:
-            dropped = sum(1 for f in fills_data if f.get("is_maker") is None)
-            if dropped > 0:
+        # design, but log AND emit a DQF when it happens so allocators see the
+        # count instead of a quiet panel-vs-volume discrepancy.
+        #
+        # Audit-2026-05-07 H-0646: a compromised exchange connector / malicious
+        # tenant emitting `is_maker: null` on every fill could otherwise
+        # suppress the entire trade_mix panel (all four buckets zero) with no
+        # signal — the per-run coverage gate then flips the mode back to
+        # 2-bucket, but only AFTER the gate is checked at the top of this
+        # block. Add a defense-in-depth observability flag here so any
+        # missing-is_maker fills surface in `data_quality_flags` regardless of
+        # which mode the gate picked.
+        fills_missing_is_maker_pct: float | None = None
+        if fills_data:
+            missing = sum(1 for f in fills_data if f.get("is_maker") is None)
+            if missing > 0:
+                fills_missing_is_maker_pct = missing / len(fills_data)
                 logger.info(
-                    "Trade Mix 4-bucket dropped %d/%d fills missing is_maker for strategy %s",
-                    dropped, len(fills_data), strategy_id,
+                    "Trade Mix: %d/%d fills missing is_maker for strategy %s "
+                    "(mode=%s, pct=%.4f)",
+                    missing, len(fills_data), strategy_id,
+                    "4-bucket" if has_maker_taker else "2-bucket",
+                    fills_missing_is_maker_pct,
                 )
 
         merged_trade_metrics = {
@@ -1105,6 +1119,14 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         if trade_mix_approximate:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["trade_mix_approximation"] = True
+        # Audit-2026-05-07 H-0646: surface the percentage of fills missing
+        # is_maker so allocators can see when the trade_mix panel is built
+        # from an incomplete view (silent suppression-attack mitigation).
+        if fills_missing_is_maker_pct is not None and fills_missing_is_maker_pct > 0:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["fills_missing_is_maker_pct"] = round(
+                fills_missing_is_maker_pct, 4
+            )
         if account_balance_unavailable:
             data_quality_flags = data_quality_flags or {}
             data_quality_flags["account_balance_unavailable"] = True

@@ -2297,6 +2297,103 @@ class TestPositionFlagsPropagateToTopLevel:
         )
 
     @pytest.mark.asyncio
+    async def test_fills_missing_is_maker_pct_reaches_top_level(self) -> None:
+        """Audit-2026-05-07 H-0646: when fills lack `is_maker` (e.g., a
+        compromised connector or a venue that doesn't tag fills), the runner
+        must surface the missing-pct in top-level data_quality_flags so the
+        UI can warn that the trade_mix panel is built from an incomplete view.
+        """
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        # 5 fills total — 2 missing is_maker → 40% missing. The 2-bucket
+        # path runs because per-strategy coverage (60%) is below the 99% gate.
+        fills_rows = [
+            {
+                "side": "buy", "cost": 100.0, "is_maker": True,
+                "notional_usd": 1000.0, "filled_at": "2024-01-15T10:00:00+00:00",
+            },
+            {
+                "side": "buy", "cost": 100.0, "is_maker": False,
+                "notional_usd": 1000.0, "filled_at": "2024-01-15T11:00:00+00:00",
+            },
+            {
+                "side": "sell", "cost": 100.0, "is_maker": True,
+                "notional_usd": 1000.0, "filled_at": "2024-01-15T12:00:00+00:00",
+            },
+            {
+                "side": "buy", "cost": 100.0, "is_maker": None,
+                "notional_usd": 1000.0, "filled_at": "2024-01-15T13:00:00+00:00",
+            },
+            {
+                "side": "sell", "cost": 100.0, "is_maker": None,
+                "notional_usd": 1000.0, "filled_at": "2024-01-15T14:00:00+00:00",
+            },
+        ]
+        mock_supabase = _build_runner_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(),
+            fills_rows=fills_rows,
+            snapshot_rows=[],
+            rpc_calls=[],
+            sa_upsert_calls=sa_upsert_calls,
+        )
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        with patch(
+            "services.analytics_runner.get_supabase", return_value=mock_supabase
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ), patch(
+            "services.analytics_runner.trades_to_daily_returns_with_status",
+            return_value=(mock_returns, _DEFAULT_RETURNS_META),
+        ), patch(
+            "services.analytics_runner.compute_all_metrics",
+            return_value=mock_metrics,
+        ), patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ), patch(
+            "services.position_reconstruction.reconstruct_positions",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "services.position_reconstruction.compute_exposure_metrics",
+            new=AsyncMock(return_value={}),
+        ):
+            result = await run_strategy_analytics("strat-test")
+
+        assert result["status"] == "complete"
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        assert successes, f"no success upsert; saw {sa_upsert_calls!r}"
+        top_flags = successes[-1].get("data_quality_flags") or {}
+        # 2/5 = 0.4 expected.
+        assert top_flags.get("fills_missing_is_maker_pct") == 0.4, (
+            "H-0646: fills_missing_is_maker_pct must reach top-level "
+            f"data_quality_flags. Got top_flags={top_flags}"
+        )
+
+    @pytest.mark.asyncio
     async def test_turnover_gap_dates_flag_reaches_top_level(self) -> None:
         """The turnover series helper returns `flags['turnover_gap_dates']`.
         The runner must merge that into the top-level data_quality_flags
