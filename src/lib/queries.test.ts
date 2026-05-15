@@ -333,6 +333,36 @@ describe("fetchStrategyLazyMetrics — RPC consumer (Plan 12-08 / METRICS-15)", 
     const result = await fetchStrategyLazyMetrics("strategy-id", "overview");
     expect(result).toEqual({});
   });
+
+  // audit-2026-05-07 H-0489/H-0494: the RPC response is `any` and the
+  // function previously did `(data ?? {}) as LazyMetricsPayload`, which
+  // accepted ANY shape (arrays, primitives, false, 0). A typo'd panelId
+  // / SECURITY DEFINER mis-return would silently corrupt every consumer
+  // that destructures `payload.rolling_sortino_3m`. Reject non-plain-object
+  // payloads at the boundary and collapse to `{}` to match the
+  // visibility-miss contract.
+  it("returns {} when RPC returns an array (non-object payload)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = { data: [1, 2, 3] as unknown, error: null };
+    const result = await fetchStrategyLazyMetrics("strategy-id", "rolling");
+    expect(result).toEqual({});
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("unexpected RPC payload shape"),
+      expect.objectContaining({ type: "array" }),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("returns {} when RPC returns a primitive (false / number / string)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    recorders.rpcResponse = { data: false as unknown, error: null };
+    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
+    recorders.rpcResponse = { data: 0 as unknown, error: null };
+    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
+    recorders.rpcResponse = { data: "oops" as unknown, error: null };
+    expect(await fetchStrategyLazyMetrics("strategy-id", "rolling")).toEqual({});
+    errSpy.mockRestore();
+  });
 });
 
 /**

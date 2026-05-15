@@ -733,7 +733,31 @@ export async function fetchStrategyLazyMetrics(
     return {} as LazyMetricsPayload;
   }
 
-  return (data ?? {}) as LazyMetricsPayload;
+  // audit-2026-05-07 H-0489/H-0494: runtime shape check before the
+  // `as LazyMetricsPayload` cast. The RPC contract is "plain JSON
+  // object with kind keys", but the response is typed `any` so a typo
+  // in the SECURITY DEFINER function that returns SQL NULL, an array,
+  // a primitive, etc. would otherwise sail through the cast and corrupt
+  // every downstream consumer that expects `data.rolling_sortino_3m` to
+  // be either undefined or an array. Reject anything that isn't a
+  // plain object (the visibility-miss + null-data path collapses to
+  // `{}`, matching the existing contract).
+  if (
+    data === null ||
+    typeof data !== "object" ||
+    Array.isArray(data)
+  ) {
+    if (data !== null && data !== undefined) {
+      console.error("fetchStrategyLazyMetrics: unexpected RPC payload shape", {
+        strategyId,
+        panelId,
+        type: Array.isArray(data) ? "array" : typeof data,
+      });
+    }
+    return {} as LazyMetricsPayload;
+  }
+
+  return data as LazyMetricsPayload;
 }
 
 export async function getUserPortfolios(): Promise<PortfolioWithCount[]> {
