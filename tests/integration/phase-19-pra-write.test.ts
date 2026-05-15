@@ -52,13 +52,17 @@ vi.mock("@/lib/correlation-id", () => ({
   CORRELATION_HEADER: "x-correlation-id",
 }));
 
-const ANCHOR_STRATEGY_ID = "11111111-1111-1111-1111-111111111111";
+// PR-X5 (2026-05-15): the route resolves strategy_id via the sentinel
+// teaser-anchor constant (migration 132) instead of a dynamic
+// "most recent strategies row" SELECT. The mock no longer needs a
+// `strategies` table branch; the assertion below pins the constant.
+import { TEASER_ANCHOR_STRATEGY_ID } from "@/lib/phase-19-constants";
+
 const TEST_VERIFICATION_ID = "22222222-2222-2222-2222-222222222222";
 
 // Capture upsert + UPDATE arguments for assertion.
 let strategyVerificationsUpsertArgs: unknown = null;
 let verificationRequestsUpdateArgs: unknown = null;
-let strategiesAnchorReturned: { id: string } | null = { id: ANCHOR_STRATEGY_ID };
 // I-T-pra-write: optional upsert error injection. When set, the
 // strategy_verifications.upsert mock returns this error instead of {error:null}.
 let strategyVerificationsUpsertError: { message: string } | null = null;
@@ -66,17 +70,6 @@ let strategyVerificationsUpsertError: { message: string } | null = null;
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from(table: string) {
-      if (table === "strategies") {
-        return {
-          select: () => ({
-            order: () => ({
-              limit: () => ({
-                maybeSingle: async () => ({ data: strategiesAnchorReturned, error: null }),
-              }),
-            }),
-          }),
-        };
-      }
       if (table === "strategy_verifications") {
         return {
           upsert: async (
@@ -114,7 +107,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   strategyVerificationsUpsertArgs = null;
   verificationRequestsUpdateArgs = null;
-  strategiesAnchorReturned = { id: ANCHOR_STRATEGY_ID };
   strategyVerificationsUpsertError = null;
   verifyStrategyMock.mockResolvedValue({ verification_id: TEST_VERIFICATION_ID });
 });
@@ -155,7 +147,7 @@ describe("PR-A / phase-19-shim-step-a — strategy_verifications upsert (C-5)", 
 
     // C-5: every NOT NULL column from migration 093 lines 79-93 populated.
     expect(row.id).toBe(TEST_VERIFICATION_ID);
-    expect(row.strategy_id).toBe(ANCHOR_STRATEGY_ID);
+    expect(row.strategy_id).toBe(TEASER_ANCHOR_STRATEGY_ID);
     expect(typeof row.wizard_session_id).toBe("string");
     expect((row.wizard_session_id as string).length).toBeGreaterThan(0);
     // PR-X4a: was 'validated'. The public-status route at
@@ -301,24 +293,15 @@ describe("PR-A / phase-19-shim-step-a — strategy_verifications upsert (C-5)", 
     expect(typeof patch.expires_at).toBe("string");
   });
 
-  it("when no anchor strategies row exists, the upsert is skipped (graceful degrade)", async () => {
-    strategiesAnchorReturned = null;
-
-    const { POST } = await import("@/app/api/verify-strategy/route");
-    const res = await POST(
-      postReq({
-        email: "test@example.com",
-        exchange: "okx",
-        api_key: "k",
-        api_secret: "s",
-      }),
-    );
-
-    // Request still succeeds because the legacy UPDATE preserves correctness.
-    expect(res.status).toBe(200);
-    expect(strategyVerificationsUpsertArgs).toBeNull();
-    expect(verificationRequestsUpdateArgs).not.toBeNull();
-  });
+  // PR-X5 (2026-05-15) — the previous "when no anchor strategies row exists,
+  // the upsert is skipped (graceful degrade)" test is deleted because the
+  // dynamic SELECT it gated on is gone. The route now anchors on a
+  // hardcoded sentinel constant provisioned by migration 132 — there is no
+  // "no anchor" branch to graceful-degrade through. The migration's
+  // self-verify DO block (132_teaser_anchor_strategy.sql) is the new
+  // guarantee that the sentinel exists; if it doesn't, every teaser
+  // submission is meant to fail loudly with an FK violation, not silently
+  // skip the SV write.
 
   /**
    * I-T-pra-write — strategy_verifications upsert FAILURE branch.
