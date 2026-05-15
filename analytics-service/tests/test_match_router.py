@@ -778,3 +778,282 @@ class TestShouldSkipMandateParseFailure:
         assert any(
             "bad mandate_edited_at" in rec.getMessage() for rec in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Specialist-review (post-fix self-audit) — CR-3 orphan rollback + C-0204 wire-up
+# ---------------------------------------------------------------------------
+
+
+class TestScoreOneAllocatorOrphanRollback:
+    """Specialist-review CR-3: when match_candidates insert fails, the parent
+    match_batches row must be deleted so we never leave an orphan batch with
+    candidate_count > 0 and zero children (the exact dataloss shape H-0566
+    was raised to protect against).
+
+    The unit-of-work here is the orchestration in _score_one_allocator — we
+    monkey-patch every dependency below the supabase boundary so we can
+    drive the candidate-insert failure path deterministically.
+    """
+
+    async def test_failed_candidate_insert_rolls_back_batch_row(
+        self, monkeypatch, caplog
+    ):
+        from routers import match as match_mod
+
+        # Capture the delete that the rollback fires.
+        captured_deletes: list[tuple[str, str]] = []
+
+        # Build a chained supabase mock where match_batches.insert returns
+        # data (so we get a batch_id) but match_candidates.insert returns
+        # empty data (silent FK violation shape).
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-xyz"}]
+                )
+                # Capture the rollback delete
+                def _eq_capture(col, val):
+                    captured_deletes.append((col, val))
+                    return MagicMock(execute=MagicMock(return_value=MagicMock(data=[{"id": val}])))
+                t.delete.return_value.eq.side_effect = _eq_capture
+            elif name == "match_candidates":
+                # Insert "succeeds" at the network level but returns empty
+                # data — exactly the silent FK-violation shape.
+                t.insert.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        # Stub out the helpers _score_one_allocator awaits before the insert.
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        # Patch the lazy import inside _score_one_allocator
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+        # Stub score_candidates to return a candidate set non-empty enough to
+        # trigger the match_candidates insert branch.
+        monkeypatch.setattr(
+            match_mod,
+            "score_candidates",
+            lambda **kw: {
+                "candidates": [
+                    {
+                        "strategy_id": "strat-1",
+                        "score": 88,
+                        "score_breakdown": {},
+                        "reasons": [],
+                        "rank": 1,
+                    }
+                ],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "personalized",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": 1,
+            },
+        )
+
+        universe = {
+            "strategies_by_id": {"strat-1": {"strategy_id": "strat-1"}},
+            "returns_by_id": {},
+        }
+
+        with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+            with pytest.raises(RuntimeError, match="match_candidates insert failed"):
+                await match_mod._score_one_allocator(
+                    "11111111-1111-1111-1111-111111111111", universe
+                )
+
+        # The rollback DELETE must have fired with the parent batch id.
+        assert ("id", "batch-xyz") in captured_deletes, (
+            "Specialist-review CR-3: orphan batch row must be deleted on "
+            "candidate-insert failure"
+        )
+        assert any(
+            "rolling back batch row" in rec.getMessage() for rec in caplog.records
+        )
+
+
+class TestScoreOneAllocatorDemoFilter:
+    """Specialist-review pass on C-0204: when the allocator being scored is
+    the seeded demo allocator (ALLOCATOR_ACTIVE_ID), the candidate universe
+    must be post-filtered to is_example=true strategies only. Real published
+    strategies must NEVER land in match_candidates for that allocator —
+    otherwise the public /api/demo/match endpoint would leak them.
+    """
+
+    async def test_demo_allocator_universe_is_filtered_to_examples(
+        self, monkeypatch
+    ):
+        from routers import match as match_mod
+
+        # Capture which candidates were passed to score_candidates.
+        captured_kw: dict[str, Any] = {}
+
+        def _fake_score(**kw):
+            captured_kw.update(kw)
+            return {
+                "candidates": [],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": len(kw.get("candidate_strategies", [])),
+            }
+
+        monkeypatch.setattr(match_mod, "score_candidates", _fake_score)
+
+        # Stub the dependencies the function awaits.
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+
+        # Supabase mock — match_batches.insert returns a row, no candidates
+        # actually insert (empty result triggers cleanup, but we don't care
+        # here — we only care about which strategies WERE passed to scoring).
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-1"}]
+                )
+                t.delete.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        universe = {
+            "strategies_by_id": {
+                "ex-1": {"strategy_id": "ex-1", "name": "Example A", "is_example": True},
+                "ex-2": {"strategy_id": "ex-2", "name": "Example B", "is_example": True},
+                "real-1": {"strategy_id": "real-1", "name": "Real Strat", "is_example": False},
+                "real-2": {"strategy_id": "real-2", "name": "Other Real", "is_example": False},
+            },
+            "returns_by_id": {},
+        }
+
+        # Score the DEMO allocator — universe must be filtered to is_example=true
+        await match_mod._score_one_allocator(match_mod._DEMO_ALLOCATOR_ID, universe)
+
+        scored_ids = {
+            s["strategy_id"] for s in captured_kw["candidate_strategies"]
+        }
+        assert scored_ids == {"ex-1", "ex-2"}, (
+            "C-0204: demo allocator must only score is_example=true strategies; "
+            f"got {scored_ids}"
+        )
+
+    async def test_non_demo_allocator_sees_full_universe(self, monkeypatch):
+        """Default path: a real allocator's universe is NOT filtered."""
+        from routers import match as match_mod
+
+        captured_kw: dict[str, Any] = {}
+
+        def _fake_score(**kw):
+            captured_kw.update(kw)
+            return {
+                "candidates": [],
+                "excluded": [],
+                "excluded_total": 0,
+                "mode": "screening",
+                "filter_relaxed": False,
+                "effective_preferences": {},
+                "effective_thresholds": {},
+                "source_strategy_count": len(kw.get("candidate_strategies", [])),
+            }
+
+        monkeypatch.setattr(match_mod, "score_candidates", _fake_score)
+        monkeypatch.setattr(
+            match_mod,
+            "_load_allocator_context",
+            lambda aid: {
+                "preferences": {},
+                "portfolio_strategies": [],
+                "portfolio_weights": {},
+                "portfolio_returns": {},
+                "portfolio_aum": None,
+                "thumbs_down_ids": set(),
+                "_holdings_rows_eligible": [],
+            },
+        )
+        import services.feedback_engine
+        monkeypatch.setattr(
+            services.feedback_engine, "compute_adjusted_weights", lambda aid: {}
+        )
+
+        sb = MagicMock()
+
+        def _table(name):
+            t = MagicMock()
+            if name == "match_batches":
+                t.insert.return_value.execute.return_value = MagicMock(
+                    data=[{"id": "batch-1"}]
+                )
+                t.delete.return_value.eq.return_value.execute.return_value = (
+                    MagicMock(data=[])
+                )
+            return t
+
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+
+        universe = {
+            "strategies_by_id": {
+                "ex-1": {"strategy_id": "ex-1", "is_example": True},
+                "real-1": {"strategy_id": "real-1", "is_example": False},
+            },
+            "returns_by_id": {},
+        }
+
+        # Real allocator UUID — must see BOTH example and real strategies.
+        await match_mod._score_one_allocator(
+            "22222222-2222-2222-2222-222222222222", universe
+        )
+
+        scored_ids = {
+            s["strategy_id"] for s in captured_kw["candidate_strategies"]
+        }
+        assert scored_ids == {"ex-1", "real-1"}, (
+            "C-0204: non-demo allocator must see the full universe"
+        )

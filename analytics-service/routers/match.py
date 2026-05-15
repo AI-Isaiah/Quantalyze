@@ -40,6 +40,16 @@ _scoring_semaphore = asyncio.Semaphore(3)
 # Skip recompute if the last batch is newer than this threshold (unless forced)
 RECOMPUTE_MIN_AGE_HOURS = 12
 
+# Audit-2026-05-07 C-0204: the demo founder-view endpoint
+# (src/app/api/demo/match/[allocator_id]/route.ts) is anon/public and hard-
+# locks to this seeded ALLOCATOR_ACTIVE_ID. Any non-example strategy persisted
+# into match_candidates for this allocator would leak (name, manager_id,
+# AUM, max_capacity) through that public endpoint. Filter the candidate
+# universe to is_example=true rows for THIS allocator only — keeps the
+# normal cron behaviour intact while plugging the demo leak.
+# Source: src/lib/demo.ts ALLOCATOR_ACTIVE_ID.
+_DEMO_ALLOCATOR_ID = "aaaaaaaa-0001-4000-8000-000000000002"
+
 # Phase 09 / D-06 + RESEARCH A3 + finding f5. Composite-score threshold for flagging
 # holdings. Scale is 0..100 per match_engine.py:787 final_score; D-06's "composite >= 0.50"
 # on the normalized [0,1] scale corresponds to score >= 50 here. TypeScript-side parity
@@ -202,6 +212,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             "sharpe": analytics.get("sharpe"),
             "max_drawdown_pct": analytics.get("max_drawdown"),
             "track_record_days": track_record_days,
+            # C-0204: propagated so _score_one_allocator can post-filter the
+            # demo allocator's universe to is_example=true rows only.
+            "is_example": bool(strategy.get("is_example")),
         }
 
         returns_series = _records_to_series(analytics.get("returns_series"), name=sid)
@@ -578,9 +591,26 @@ async def _score_one_allocator(
             ctx["preferences"] = {}
         ctx["preferences"]["scoring_weight_overrides"] = overrides or None
 
-        # Build the candidate list from the cached universe
-        candidate_strategies = list(universe["strategies_by_id"].values())
-        candidate_returns = universe["returns_by_id"]
+        # Build the candidate list from the cached universe.
+        # C-0204: demo allocator is post-filtered to is_example=true so the
+        # public /api/demo/match endpoint cannot leak real strategies. We
+        # post-filter (rather than reload the universe) so the cron's
+        # universe-once optimization is preserved.
+        if allocator_id == _DEMO_ALLOCATOR_ID:
+            strategies_by_id = {
+                sid: s
+                for sid, s in universe["strategies_by_id"].items()
+                if s.get("is_example") is True
+            }
+            candidate_strategies = list(strategies_by_id.values())
+            candidate_returns = {
+                sid: universe["returns_by_id"][sid]
+                for sid in strategies_by_id
+                if sid in universe["returns_by_id"]
+            }
+        else:
+            candidate_strategies = list(universe["strategies_by_id"].values())
+            candidate_returns = universe["returns_by_id"]
 
         # H-0550: score_candidates runs pandas/numpy heavy work
         # (DataFrame builds, correlation calculations, min-max normalization
@@ -696,12 +726,39 @@ async def _score_one_allocator(
             # universe snapshot and the insert) cannot leave the match_batches
             # row claiming `candidate_count > 0` with zero child rows. The
             # admin queue would otherwise show non-zero count + empty list.
-            cand_insert = await asyncio.to_thread(
-                lambda: supabase.table("match_candidates").insert(rows_to_insert).execute()
-            )
-            if not cand_insert.data:
+            try:
+                cand_insert = await asyncio.to_thread(
+                    lambda: supabase.table("match_candidates").insert(rows_to_insert).execute()
+                )
+                cand_data_ok = bool(cand_insert.data)
+            except Exception:
+                cand_data_ok = False
+
+            if not cand_data_ok:
+                # Specialist-review CR-3: tear down the parent match_batches
+                # row so a candidate-insert failure cannot leave an orphan
+                # batch with candidate_count > 0 and zero children. We log
+                # at ERROR (not warning) — this is the exact dataloss-shape
+                # bug H-0566 protects against.
+                logger.error(
+                    "match_engine: match_candidates insert failed for batch "
+                    "%s (allocator=%s, expected=%d) — rolling back batch row",
+                    batch_id, allocator_id, len(rows_to_insert),
+                )
+                try:
+                    await asyncio.to_thread(
+                        lambda: supabase.table("match_batches")
+                        .delete()
+                        .eq("id", batch_id)
+                        .execute()
+                    )
+                except Exception as cleanup_err:
+                    logger.error(
+                        "match_engine: failed to roll back orphan batch %s: %s",
+                        batch_id, cleanup_err,
+                    )
                 raise RuntimeError(
-                    f"match_candidates insert returned no data for batch {batch_id} "
+                    f"match_candidates insert failed for batch {batch_id} "
                     f"(allocator={allocator_id}, expected {len(rows_to_insert)} rows)"
                 )
 
