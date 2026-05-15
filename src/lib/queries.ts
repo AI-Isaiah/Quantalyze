@@ -1283,11 +1283,28 @@ export function deriveMandateIsSet(
  */
 export async function getUserApiKeys(userId: string) {
   const supabase = await createClient();
-  const { data } = await supabase
+  // audit-2026-05-07 H-0499: destructure + surface `error`. Previously
+  // the function discarded `error` and returned `[]` on RLS/grant
+  // failures, which then rendered the empty-state "connect your first
+  // exchange" UI for an allocator who actually had keys — masking a
+  // real infra failure on a money-display path. Log to console.error
+  // (Sentry hooks via instrumentation.ts:onRequestError pick this up
+  // through the thrown Error below) and throw so the page error
+  // boundary fires instead of a misleading empty state.
+  const { data, error } = await supabase
     .from("api_keys")
     .select(API_KEY_USER_COLUMNS)
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
+  if (error) {
+    console.error(
+      "[queries.getUserApiKeys] supabase error:",
+      { userId, message: error.message ?? error },
+    );
+    throw new Error(
+      `getUserApiKeys failed: ${error.message ?? "unknown supabase error"}`,
+    );
+  }
   return (data ?? []) as Array<{
     id: string;
     exchange: string;

@@ -470,3 +470,29 @@ describe("getMyAllocationDashboard — audit-2026-05-07 G8.A.2 (P35) follow-up: 
     );
   });
 });
+
+describe("getUserApiKeys — audit-2026-05-07 H-0499", () => {
+  it("throws when supabase reports an error (was: silently empty array)", async () => {
+    // Force the api_keys chain to resolve with an error. Previously the
+    // function only destructured `data` and returned `[]`, so a real RLS
+    // / grant / schema-drift failure rendered the empty-state
+    // "connect your first exchange" UI for allocators who actually had
+    // keys, masking the regression on a money-display path.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    buildResult.byTable["api_keys"] = {
+      data: null,
+      error: { message: "permission denied for table api_keys" },
+    };
+    const { getUserApiKeys } = await import("./queries");
+    await expect(getUserApiKeys("user-1")).rejects.toThrow(
+      /getUserApiKeys failed: permission denied for table api_keys/,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("returns an empty array when no rows exist (no error, no data)", async () => {
+    buildResult.byTable["api_keys"] = { data: [], error: null };
+    const { getUserApiKeys } = await import("./queries");
+    await expect(getUserApiKeys("user-1")).resolves.toEqual([]);
+  });
+});
