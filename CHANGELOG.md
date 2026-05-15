@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.5] - 2026-05-15
+
+**audit-2026-05-07 — match router hardening + first router test suite.** Closes the C-0203 kill-chain (kill-switch fail-open + silent cron 200-OK + retention sweep cascade + blocking event loop), the C-0204 demo-allocator leak (real published strategies surfacing through the anon `/api/demo/match` endpoint), and 14 H-tier findings against `analytics-service/routers/match.py`. The new `analytics-service/tests/test_match_router.py` is the first test file to exercise the FastAPI surface (POST `/api/match/recompute`, GET `/api/match/eval`, POST `/api/match/cron-recompute`) — 30 cases covering kill-switch fail-open, skip/empty/exception branches, retention-sweep slice + ordering invariants, cron partial-failure isolation, total-failure structural logging, mandate parse-failure recompute, orphan-batch rollback, and the demo-only universe filter.
+
+### Added
+- `analytics-service/tests/test_match_router.py` (30 cases) exercising the recompute, eval, and cron-recompute endpoints plus the `_kill_switch_enabled`, `_should_skip_allocator`, `_retention_sweep`, and `_score_one_allocator` helpers.
+- `RecomputeMatchResponseSchema` now requires a `status` discriminator (`"disabled" | "skipped" | "ok"`) so callers can switch on a single field.
+
+### Changed
+- `_score_one_allocator` off-loads `score_candidates` AND `compute_holding_flags` to threads so pandas/numpy correlation work no longer blocks the FastAPI event loop. `_ScoredProxy` lifted out of the hot path to module scope.
+- `cron_recompute` returns a unified response shape on every early-return branch (`disabled`, `no_allocators`, `empty_universe`, `ok`) — every branch carries `status`, `processed`, `skipped`, `failed`, `retention_deleted`, and `duration_s`.
+- `_retention_sweep` paginates DELETEs to ≤ 50 IDs per request so the PostgREST IN-list URL stays under any reasonable cap.
+- `_should_skip_allocator` checks the age guard BEFORE consulting `mandate_edited_at`, saving O(allocators) Supabase round-trips per cron run.
+- `RecomputeRequest.allocator_id` is typed as `UUID` so the request boundary rejects malformed input with a 422 instead of round-tripping a 0-row Supabase result.
+
+### Fixed
+- **Kill-switch failure now logs at ERROR** so Supabase blips light up Sentry. The fail-open contract is preserved (engine keeps running on transient DB faults).
+- **Cron returns a TOTAL FAILURE error log** when every allocator fails (processed=0, failed>0) — previously a structural failure (schema drift, KEK missing) was silently 200-OK to the cron scheduler.
+- **Per-allocator failure isolation** in the cron loop. One bad allocator no longer aborts the daily recompute; failed/processed/skipped counters are honest.
+- **Mandate parse-failure** previously swallowed with bare `pass`, silently downgrading the "mandate edit invalidates cached batch" trigger into a no-op. Now logs a WARNING and forces a recompute.
+- **Orphan-batch rollback**: when the `match_candidates` insert fails or returns empty, the parent `match_batches` row is deleted so the admin queue never sees a `candidate_count > 0` row with zero children. The original insert exception is preserved via `raise from err` for triage.
+- **Retention sweep failure after a successful insert** no longer 500s the request — the batch already landed; log loudly and return the result.
+- **Demo-allocator universe** is post-filtered to `is_example=true` strategies only, plugging the leak where real published strategies could surface through the anon-public `/api/demo/match` endpoint.
+- **`eval` route boundary** now returns a structured 503 with page-count + page-size context when `_paginated_select` hits its hard cap (was a generic 500 that silently aggregated over a partial window).
+
 ## [0.22.34.4] - 2026-05-15
 
 **phase-19 PR-Y1 — backfill audit-2026-05-07 schema + rename migrations to timestamp convention.** Production was silently missing ~11 migrations of hardening because the supabase-migrate workflow had been failing on every push to main since the migration-naming drift began (~May 12). This release closes the gap (live on prod) and reconciles local + remote naming so the workflow can be re-enabled cleanly after PR-Y2.
