@@ -2267,3 +2267,109 @@ class TestUnboundedJsonbCaps:
         assert flags.get("exposure_series_truncated") is True
         assert flags.get("exposure_series_truncated_kept") == 2
         assert flags.get("exposure_series_truncated_total") == 3
+
+
+# ---------------------------------------------------------------------------
+# Audit-2026-05-07 H-0741: compute_turnover_series type-coerces inputs
+# and surfaces dropped dates in flags['turnover_series_dropped_dates'].
+# ---------------------------------------------------------------------------
+class TestTurnoverSeriesTypeValidation:
+    """Inputs from Supabase arrive as Decimal (numeric driver default)
+    or occasionally None for unpopulated rows. Pre-fix the loop either
+    (a) raised AttributeError on a None payload (propagating up and
+    silently committing the partial series built so far), or (b)
+    silently produced Decimal arithmetic results that round-tripped to
+    JSONB via str() with no float-precision contract. Validate at the
+    top of the loop and surface dropped dates."""
+
+    def test_none_positions_for_date_dropped_with_flag(self) -> None:
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": None,  # type: ignore[dict-item]   # injected by caller bug
+            "2025-01-03": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        days_in_series = {row["date"] for row in series}
+        # The bad date is omitted from the series and surfaced via flags.
+        assert "2025-01-02" not in days_in_series
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]
+        # Day 3 still computes — prev_positions kept on Day 1 across
+        # the dropped Day 2, so delta = (2.0 - 1.0) BTC = $100 / NAV.
+        days = {row["date"]: row["turnover"] for row in series}
+        assert days["2025-01-03"] == pytest.approx(0.01, abs=1e-9)
+
+    def test_decimal_nav_coerced_to_float(self) -> None:
+        """Supabase numeric values arrive as `Decimal`. Coercion to
+        float must not raise; the math path must still produce a
+        plain float turnover (not a Decimal that JSONB renders as
+        str)."""
+        from decimal import Decimal as _D
+
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": _D("0")},
+            "2025-01-02": {"BTC": _D("1")},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": _D("100")},
+            "2025-01-02": {"BTC": _D("100")},
+        }
+        nav_by_date = {
+            "2025-01-01": _D("10000"),
+            "2025-01-02": _D("10000"),
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        # No dates dropped: every value coerces to float cleanly.
+        assert "turnover_series_dropped_dates" not in flags
+        days = {row["date"]: row["turnover"] for row in series}
+        assert isinstance(days["2025-01-02"], float)
+        assert days["2025-01-02"] == pytest.approx(0.01, abs=1e-9)
+
+    def test_unparseable_scalar_value_dropped(self) -> None:
+        """A symbol value that can't be coerced to float (e.g. a stray
+        string from a bad CSV import) drops the date rather than
+        propagating up."""
+        from services.position_reconstruction import (
+            compute_turnover_series_with_flags,
+        )
+
+        positions_by_date = {
+            "2025-01-01": {"BTC": 1.0},
+            "2025-01-02": {"BTC": "not-a-number"},  # type: ignore[dict-item]
+            "2025-01-03": {"BTC": 2.0},
+        }
+        prices_by_date = {
+            "2025-01-01": {"BTC": 100.0},
+            "2025-01-02": {"BTC": 100.0},
+            "2025-01-03": {"BTC": 100.0},
+        }
+        nav_by_date = {
+            "2025-01-01": 10000.0,
+            "2025-01-02": 10000.0,
+            "2025-01-03": 10000.0,
+        }
+        series, flags = compute_turnover_series_with_flags(
+            positions_by_date, prices_by_date, nav_by_date
+        )
+        assert flags.get("turnover_series_dropped_dates") == ["2025-01-02"]

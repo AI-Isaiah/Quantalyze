@@ -1159,15 +1159,66 @@ def compute_turnover_series_with_flags(
     gap_dates: list[str] = []
     nav_missing_dates: list[str] = []
     nav_invalid_dates: list[str] = []
+    # Audit H-0741: rows the type-validation guard dropped (non-dict
+    # positions / prices payload, or scalar values that can't coerce
+    # to float). Pre-fix the entire date was silently dropped mid-loop
+    # if Decimal/str slipped in from Supabase — no signal reached the
+    # consumer. Surfaced now so dashboards can report
+    # "turnover unavailable due to data-type drift".
+    dropped_dates: list[str] = []
     for date in dates:
-        positions = positions_by_date.get(date, {})
-        prices = prices_by_date.get(date, {})
+        # Audit H-0741: validate the per-date payload BEFORE the math
+        # runs. A caller passing `None` as a date's value would raise
+        # `AttributeError` on `.keys()` and silently commit the
+        # partial-series; passing `Decimal` (the default Supabase
+        # numeric driver shape) bypasses the float contract and the
+        # downstream `round(..., 6)` returns a Decimal that JSONB
+        # serializes via `str(Decimal)` — silent precision drift.
+        # Coerce to plain dict[str, float] up front; on failure
+        # record the date in dropped_dates and continue.
+        try:
+            positions_raw = positions_by_date.get(date, {})
+            prices_raw = prices_by_date.get(date, {})
+            if positions_raw is None or prices_raw is None:
+                raise TypeError("positions/prices row is None")
+            positions: dict[str, float] = {
+                str(sym): float(qty) for sym, qty in positions_raw.items()
+            }
+            prices: dict[str, float] = {
+                str(sym): float(p) for sym, p in prices_raw.items()
+            }
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "compute_turnover_series: skipping date=%r due to "
+                "type-coercion failure: %s",
+                date, exc,
+            )
+            dropped_dates.append(date)
+            # Do NOT advance prev_positions / prev_date — next valid
+            # date measures delta against the last KNOWN-good snapshot.
+            continue
+
         # Audit H-0744: explicit presence check — distinguishes 'NAV
         # not yet ingested' (key absent) from 'NAV present but bad'
         # (key present, value <= 0). The pre-fix `.get(date, 0.0)`
         # collapsed both into a turnover=0 short-circuit.
         nav_present = date in nav_by_date
-        nav = nav_by_date.get(date, 0.0) if nav_present else 0.0
+        # Audit H-0741: also coerce nav. A Decimal NAV would propagate
+        # to `total_change_usd / nav` and produce a Decimal turnover
+        # value that breaks downstream float arithmetic.
+        if nav_present:
+            try:
+                nav = float(nav_by_date[date])
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "compute_turnover_series: skipping date=%r — NAV "
+                    "value %r not numeric: %s",
+                    date, nav_by_date.get(date), exc,
+                )
+                dropped_dates.append(date)
+                continue
+        else:
+            nav = 0.0
 
         # P1995 fix #1: first observed date has no meaningful
         # prev_positions snapshot — emit turnover=0 instead of
@@ -1237,6 +1288,8 @@ def compute_turnover_series_with_flags(
         flags["turnover_nav_invalid_dates"] = nav_invalid_dates
     if gap_dates:
         flags["turnover_gap_dates"] = gap_dates
+    if dropped_dates:
+        flags["turnover_series_dropped_dates"] = dropped_dates
     return series, flags
 
 
