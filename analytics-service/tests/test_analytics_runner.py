@@ -2427,6 +2427,59 @@ class TestLoadPositionTimeSeriesNavSafety:
         )
 
     @pytest.mark.asyncio
+    async def test_near_zero_size_is_skipped(self) -> None:
+        """H-0644 / H-0654 regression: a NUMERIC residual like 1e-15 must be
+        skipped just like an exact 0.0 — otherwise it poisons the
+        positions/prices grids with phantom entries that show up as
+        artificial turnover_series datapoints."""
+        from services.analytics_runner import _load_position_time_series
+
+        snapshot_rows = [
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "BTCUSDT",
+                "side": "long",
+                "size_usd": "1e-15",  # NUMERIC residual after partial close
+                "mark_price": "65000",
+            },
+            {
+                "snapshot_date": "2024-01-15",
+                "symbol": "ETHUSDT",
+                "side": "long",
+                "size_usd": "10000",
+                "mark_price": "3500",
+            },
+        ]
+        mock_supabase = MagicMock()
+        t = MagicMock()
+        sel = MagicMock()
+        eq = MagicMock()
+        order = MagicMock()
+        order.execute.return_value = MagicMock(data=snapshot_rows)
+        eq.order = MagicMock(return_value=order)
+        sel.eq.return_value = eq
+        t.select.return_value = sel
+        mock_supabase.table.return_value = t
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        with patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ):
+            positions, prices, _ = await _load_position_time_series(
+                "strat-test", mock_supabase, account_balance=10000.0
+            )
+
+        # ETH is kept, BTC residual is skipped.
+        assert "BTCUSDT" not in positions.get("2024-01-15", {}), (
+            f"near-zero size_usd should be filtered out; got {positions}"
+        )
+        assert positions["2024-01-15"]["ETHUSDT"] == 10000.0
+        # Prices grid likewise must not carry the residual symbol.
+        assert "BTCUSDT" not in prices.get("2024-01-15", {})
+
+    @pytest.mark.asyncio
     async def test_malformed_mark_price_does_not_poison_prices_grid(
         self,
     ) -> None:

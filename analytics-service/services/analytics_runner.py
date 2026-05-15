@@ -181,9 +181,13 @@ async def _load_position_time_series(
             size_usd = float(size_raw) if size_raw is not None else 0.0
         except (TypeError, ValueError):
             size_usd = 0.0
-        # Skip flat or zero-size rows (per migration 034 comment they're
-        # usually not stored, but defensive).
-        if side == "flat" or size_usd == 0.0:
+        # Skip flat or near-zero-size rows (per migration 034 comment they're
+        # usually not stored, but defensive). Audit-2026-05-07 H-0644 / H-0654:
+        # `size_usd == 0.0` exact-float equality fails on NUMERIC residuals
+        # round-tripped through PostgREST (e.g. 1e-15 from a partial-fill
+        # close), producing phantom positions in the turnover/exposure grids.
+        # Use a tight tolerance below any meaningful dollar amount.
+        if side == "flat" or abs(size_usd) < 1e-9:
             continue
         signed = size_usd if side == "long" else -size_usd
         positions_by_date.setdefault(d, {})[sym] = signed
