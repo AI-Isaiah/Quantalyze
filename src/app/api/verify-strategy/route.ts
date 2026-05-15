@@ -7,6 +7,7 @@ import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
+import { TEASER_ANCHOR_STRATEGY_ID } from "@/lib/phase-19-constants";
 
 const MAX_REQUESTS_PER_DAY = 5;
 
@@ -95,19 +96,34 @@ async function unifiedVerifyStrategyHandler(
   body: Record<string, unknown>,
 ): Promise<NextResponse> {
   const exchange = (body.exchange as string) ?? "okx";
+  // PR-X5 (2026-05-15) security fix — DO NOT spread the raw body into
+  // context. This endpoint is unauthenticated public input. Spreading
+  // would let an attacker pre-supply `strategy_id`, `wizard_session_id`,
+  // `user_id`, `step`, etc. The Python dispatch at process_key.py only
+  // injects the sentinel anchor when those fields are absent, so a
+  // pre-supplied strategy_id bypasses the sentinel — writing an SV row
+  // anchored to an arbitrary (possibly victim-owned) strategy with
+  // attacker-controlled metrics_snapshot. Defense in depth: allowlist
+  // the fields the teaser flow actually needs. Python further enforces
+  // unconditional overwrite for flow_type='teaser' (process_key.py).
+  const teaserContext: Record<string, unknown> = {
+    email: body.email,
+    exchange: body.exchange,
+    api_key: body.api_key,
+    api_secret: body.api_secret,
+  };
+  if (body.passphrase !== undefined) {
+    teaserContext.passphrase = body.passphrase;
+  }
   const result = await postProcessKey({
     flow_type: "teaser",
     source: exchange,
-    // PR-X3 (post 2026-05-14 abortive flag flip) — the teaser flow has no
-    // caller-owned `strategy_id` (the user is testing keys against the
-    // universe of strategies; no strategy exists yet). The `/process-key`
-    // validator at analytics-service/routers/process_key.py:568 raises
-    // MISSING_STRATEGY_ID (422) unless either `context.strategy_id` OR
-    // `context.step='validate'` is set. Without this marker, the kill-switch
-    // gate-on state breaks every landing-page teaser submission. Mirrors
-    // the same pattern used by strategies/csv-validate's unified handler
-    // (route.ts:189) and keys/validate-and-encrypt.
-    context: { ...body, step: "validate" },
+    // PR-X5 — the PR-X3 workaround `step: "validate"` is no longer
+    // needed because process_key.py injects the sentinel teaser-anchor
+    // strategy_id (migration 132) for `flow_type === "teaser"` BEFORE
+    // the step check. With it stripped, the unified pipeline runs
+    // end-to-end and returns `verification_id` + `status: "published"`.
+    context: teaserContext,
     routeTag: "verify-strategy",
     // CT-4 (army2) — public/unauthenticated flow: pass literal 'public'
     // so the upstream rate limiter buckets all anonymous landing-page
@@ -256,82 +272,74 @@ async function legacyVerifyStrategyHandler(args: {
   // re-pointed to strategy_verifications. C-5: strategy_verifications has 5
   // NOT NULL columns + a strategy_id FK to strategies(id) ON DELETE CASCADE,
   // so the upsert constructs a complete row. The teaser flow has no caller-
-  // owned strategies row, so we resolve the FK using the same backfill
-  // pattern migration 107 STEP 2 uses (find the most recent strategies row).
-  // If no strategies row exists at all (cold-start prod), the upsert is
-  // skipped — the legacy verification_requests UPDATE preserves runtime
-  // correctness during the PR-A → PR-D window. After migration 107 ships
-  // (PR-D), the verification_requests VIEW reads from strategy_verifications
-  // and the legacy UPDATE becomes a no-op via INSTEAD OF triggers.
+  // owned strategies row by design (the user is probing keys against the
+  // universe of published strategies; no strategy exists yet).
+  //
+  // PR-X5 (2026-05-15) — the FK is resolved via the sentinel teaser-anchor
+  // strategy provisioned by migration 132 (owned by the all-zeros system
+  // pseudo-user; status='archived' so it never surfaces in marketplace /
+  // allocator queries). This replaces the pre-X5 "anchor on the most recent
+  // strategies row" hack that migration 107's DM-3 commentary flagged as a
+  // privacy leak (the SV row would inherit the random strategy's RLS
+  // user_id). The constant lives in src/lib/phase-19-constants.ts and
+  // mirrors analytics-service/services/teaser_anchor.py.
   let strategyVerificationsUpserted = false;
   try {
-    const { data: anchorStrategy } = await admin
-      .from("strategies")
-      .select("id")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (anchorStrategy?.id) {
-      // PR-X4a — fix the pre-existing "metrics never reach SV" gap.
-      // Pre-fix the legacy path wrote `status='validated'` with no
-      // metrics_snapshot. The public-status route at
-      // verify-strategy/[id]/status/route.ts:107 only returns `results`
-      // when status is 'complete' (legacy VR shape) or 'published'
-      // (canonical SV terminal), so teaser users polling the public URL
-      // saw `{status:'validated'}` with no score — a bug present since
-      // BACKBONE-04 step (a) shipped. The upsert below now lands a
-      // terminal row in one shot: status='published' + metrics_snapshot
-      // built from the Python `results` blob (with `matched_strategy_id`
-      // folded in since it isn't a first-class column on
-      // strategy_verifications). PR-X5 will wire the unified path
-      // (kill-switch ON) to write the same shape from inside
-      // /process-key; this fix covers the legacy / kill-switch-OFF path
-      // which doubles as the auto-rollback target.
-      const metricsSnapshot = analyticsResult.results
-        ? {
-            ...analyticsResult.results,
-            matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
-          }
-        : null;
-      // C-5: every NOT NULL column populated; FK satisfied via anchor row.
-      // @audit-skip: unauthenticated public endpoint (no user session). The
-      // strategy_verifications row is the canonical write target post-PR-A
-      // for the landing-page teaser flow; the row carries no PII (only a
-      // public_token + status), and audit_log requires a user_id which the
-      // unauthenticated caller cannot provide. Follow-up landing-page-lead
-      // audit lands in PostHog per ADR-0023 §3, not audit_log.
-      const { error: upsertError } = await admin
-        .from("strategy_verifications")
-        .upsert(
-          {
-            id: verificationId,
-            strategy_id: anchorStrategy.id,
-            wizard_session_id: crypto.randomUUID(),
-            status: "published",
-            trust_tier: "self_reported",
-            flow_type: "teaser",
-            source: exchange,
-            public_token: publicToken,
-            expires_at: expiresAt,
-            metrics_snapshot: metricsSnapshot,
-          },
-          { onConflict: "id" },
-        );
-      if (upsertError) {
-        // Don't fail the request — the legacy UPDATE below preserves
-        // correctness. Surface to Sentry via console.error so the
-        // stability-log can spot trends.
-        console.error(
-          "[verify-strategy] phase-19-shim-step-a strategy_verifications upsert failed:",
-          upsertError,
-        );
-      } else {
-        strategyVerificationsUpserted = true;
-      }
-    } else {
-      console.warn(
-        "[verify-strategy] phase-19-shim-step-a skipped — no strategies row available to anchor FK",
+    // PR-X4a — fix the pre-existing "metrics never reach SV" gap.
+    // Pre-fix the legacy path wrote `status='validated'` with no
+    // metrics_snapshot. The public-status route at
+    // verify-strategy/[id]/status/route.ts:107 only returns `results`
+    // when status is 'complete' (legacy VR shape) or 'published'
+    // (canonical SV terminal), so teaser users polling the public URL
+    // saw `{status:'validated'}` with no score — a bug present since
+    // BACKBONE-04 step (a) shipped. The upsert below now lands a
+    // terminal row in one shot: status='published' + metrics_snapshot
+    // built from the Python `results` blob (with `matched_strategy_id`
+    // folded in since it isn't a first-class column on
+    // strategy_verifications). PR-X5 wires the unified path
+    // (kill-switch ON) to write the same shape from inside
+    // /process-key; this code covers the legacy / kill-switch-OFF path
+    // which doubles as the auto-rollback target.
+    const metricsSnapshot = analyticsResult.results
+      ? {
+          ...analyticsResult.results,
+          matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
+        }
+      : null;
+    // C-5: every NOT NULL column populated; FK satisfied via the sentinel.
+    // @audit-skip: unauthenticated public endpoint (no user session). The
+    // strategy_verifications row is the canonical write target post-PR-A
+    // for the landing-page teaser flow; the row carries no PII (only a
+    // public_token + status), and audit_log requires a user_id which the
+    // unauthenticated caller cannot provide. Follow-up landing-page-lead
+    // audit lands in PostHog per ADR-0023 §3, not audit_log.
+    const { error: upsertError } = await admin
+      .from("strategy_verifications")
+      .upsert(
+        {
+          id: verificationId,
+          strategy_id: TEASER_ANCHOR_STRATEGY_ID,
+          wizard_session_id: crypto.randomUUID(),
+          status: "published",
+          trust_tier: "self_reported",
+          flow_type: "teaser",
+          source: exchange,
+          public_token: publicToken,
+          expires_at: expiresAt,
+          metrics_snapshot: metricsSnapshot,
+        },
+        { onConflict: "id" },
       );
+    if (upsertError) {
+      // Don't fail the request — the legacy UPDATE below preserves
+      // correctness. Surface to Sentry via console.error so the
+      // stability-log can spot trends.
+      console.error(
+        "[verify-strategy] phase-19-shim-step-a strategy_verifications upsert failed:",
+        upsertError,
+      );
+    } else {
+      strategyVerificationsUpserted = true;
     }
   } catch (svErr) {
     console.error(

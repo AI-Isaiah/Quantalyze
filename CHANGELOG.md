@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
+## [0.22.34.3] - 2026-05-15
+
+**phase-19 — unify teaser into the /process-key backbone (PR-X5).** Two abortive PR-B kill-switch flip attempts on 2026-05-14 confirmed teaser submissions to `/process-key` were returning `MISSING_STRATEGY_ID` 422 — the unified backend had no story for `flow_type='teaser'` without a caller-owned strategy. PR-X5 makes the unified backbone the single path for teaser too: the dispatch in `analytics-service/routers/process_key.py` now injects a sentinel anchor `strategy_id` (provisioned by new migration 132) plus a fresh `wizard_session_id` for `flow_type='teaser'` BEFORE the audit row write, then falls through to the existing synchronous pipeline at line 684 unchanged. Zero `if flow_type=='teaser'` branches downstream. Backend is one path. Same logic for every flow.
+
+The TS unified handler at `src/app/api/verify-strategy/route.ts` is hardened to allowlist the context fields forwarded upstream — `{email, exchange, api_key, api_secret, passphrase?}` only, never the raw request body. Defense in depth: the Python dispatch also OVERRIDES `strategy_id`/`wizard_session_id` unconditionally for teaser (not fill-if-null), so a future TS regression that spread the raw body can't reintroduce the cross-tenant write where an attacker pre-supplies a victim's `strategy_id`.
+
+The unified pipeline now enriches `metrics_snapshot` with the legacy `verify_strategy` response shape — `return_24h/return_mtd/return_ytd`, `equity_curve`, and `matched_strategy_id` — by reusing `services.transforms.trades_to_daily_returns`, `services.portfolio_metrics.compute_period_returns`, and the new `services.strategy_matching.find_matched_strategy` (extracted from `portfolio.py:1024-1051`). This runs for every flow_type so the SV row's `metrics_snapshot` column has the same shape regardless of where the row was created. Enrichment falls back to heuristic-capital returns when account_balance isn't available (same as the legacy path), and the whole block is best-effort — a math error logs `process_key.enrichment_failed` and ships the base shape rather than failing the verification.
+
+The TS legacy handler swaps its "anchor to most recent strategies row" SELECT — a documented privacy leak per migration 107 DM-3 — for the same `TEASER_ANCHOR_STRATEGY_ID` constant. One source of truth, mirrored in `src/lib/phase-19-constants.ts` (TS) and `analytics-service/services/teaser_anchor.py` (Python), pinned by a new `tests/integration/phase-19-constants-sync.test.ts` drift guard.
+
+The landing-page progress component now accepts `status='published'` (the unified pipeline's terminal state) in addition to the legacy `'complete'`. Pre-X5 the public-status poll surfaced the new status but the React `VerificationProgress` had `'complete' | 'failed'` hardcoded in its union — teaser users on the unified path would have seen eternal "processing" until the 5-minute poll timeout, then "failed."
+
+### Added
+
+- **Migration 132 — teaser-anchor sentinel** (`supabase/migrations/132_teaser_anchor_strategy.sql`). Seeds a permanent system pseudo-user at `auth.users.id='00000000-0000-0000-0000-000000000000'` (NULL password, non-routable `system-phase-19-sentinel@quantalyze.internal` email — sign-in path closed), a matching `profiles` row, and the sentinel strategy at `id='00000000-0000-0000-0000-000000000001'` with `status='archived'` so it never surfaces in marketplace queries. All three INSERTs idempotent via `ON CONFLICT (id) DO NOTHING` and gated by a self-verify `DO $$ … $$` block that raises if any row is missing post-INSERT. Mirror rollback at `supabase/migrations/down/132-rollback.sql` deletes in reverse-FK order.
+- **`TEASER_ANCHOR_STRATEGY_ID` shared constant** (`src/lib/phase-19-constants.ts` for TS, `analytics-service/services/teaser_anchor.py` for Python).
+- **`find_matched_strategy` shared helper** (`analytics-service/services/strategy_matching.py`). Extracted from the inline correlation block in legacy `verify_strategy` so both the legacy endpoint and the unified pipeline use one match implementation. 95% correlation threshold + 30-day minimum overlap window preserved verbatim.
+- **3 regression tests + 1 drift guard.** `analytics-service/tests/test_migration_132.py` pins the migration's INSERTs against the Python constant (7 static-AST checks). `test_process_key.py::test_process_key_teaser_injects_anchor_when_strategy_id_missing` pins the dispatch contract end-to-end. `tests/integration/process-key-thin-adapters.test.ts` replaces the PR-X3 forward `step='validate'` test with the inverse PR-X5 "context does NOT include step" test. `tests/integration/phase-19-constants-sync.test.ts` pins TS ↔ Python ↔ SQL drift.
+
+### Changed
+
+- **`analytics-service/routers/process_key.py`** — dispatch injection for teaser before audit-row write; unified pipeline's `metrics_captured` transition now persists the enriched `metrics_snapshot` (period returns + equity curve + matched_strategy_id) instead of the bare `MetricsSnapshot` dataclass; top-level response shape gains `matched_strategy_id` for legacy parity.
+- **`src/app/api/verify-strategy/route.ts`** — unified handler context allowlist (no raw body spread); legacy handler swaps "most recent strategies row" SELECT for the `TEASER_ANCHOR_STRATEGY_ID` constant.
+- **`src/components/landing/VerificationSection.tsx`** + `VerificationProgress.tsx` — `Status` union extended with `'published'`; success transition accepts both `'complete'` and `'published'`.
+
+### Removed
+
+- The PR-X3 forward test `verify-strategy: teaser context forwards step='validate'` (replaced with the inverse contract).
+- The pra-write graceful-degrade test for "no anchor strategies row" (the dynamic SELECT it gated on is gone; the migration's self-verify DO block is now the load-bearing guarantee).
+
 ## [0.22.34.2] - 2026-05-15
 
 **phase-19 — teaser legacy path writes terminal SV row with metrics (PR-X4a).** Pre-fix the legacy `teaserVerifyStrategyHandler` upserted `strategy_verifications` at `status='validated'` with no `metrics_snapshot` column. The public-status route at `verify-strategy/[id]/status/route.ts:107` only returns `results` when status is `'complete'` (legacy VR shape) or `'published'` (canonical SV terminal), so polling that row returned `{status:'validated'}` with no score. Teaser users on the legacy path never saw their results via the public URL — a bug present since BACKBONE-04 step (a) shipped. PR-X4a writes the terminal row in one shot: `status='published'` plus `metrics_snapshot` built from the Python `results` blob (with `matched_strategy_id` folded in since it isn't a first-class column on `strategy_verifications`). The unified `unifiedVerifyStrategyHandler` is unchanged in this PR — PR-X5 will do the real unified-path build-out for teaser inside `/process-key`. PR-X4a exists separately because the legacy path doubles as the kill-switch auto-rollback target; even after PR-X5 unifies teaser, a rollback must still surface metrics on the SV row.
