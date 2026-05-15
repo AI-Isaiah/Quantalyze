@@ -523,6 +523,66 @@ def test_derived_trade_metrics_sqn():
     assert result["sqn"] is None or isinstance(result["sqn"], float)
 
 
+def test_derived_trade_metrics_sqn_caps_at_sqrt_100():
+    """Audit-2026-05-07 H-0652 regression — SQN scaling factor is capped at
+    sqrt(min(N, 100)), NOT the academic sqrt(N).
+
+    Build two cohorts with IDENTICAL R-multiple shape (same mean and std)
+    but different N. If the cap is active, sqn(N=200) / sqn(N=50) ==
+    sqrt(100)/sqrt(50) == sqrt(2). Without the cap, the ratio would be
+    sqrt(200)/sqrt(50) == 2. A future refactor that drops the cap would
+    fail THIS test specifically (assertNotEqual on the wrong-formula
+    ratio).
+    """
+    import math
+
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    # Asymmetric pattern produces positive mean R-multiple so SQN ≠ 0.
+    # [+15, -10] alternating, avg_loss=-10 → risk_unit=10 → R = [1.5, -1.0].
+    # Identical (mean_R, std_R) across N, so any SQN scale ratio comes
+    # purely from sqrt(min(N, cap)).
+    def _pnls(n: int) -> list[dict]:
+        pattern = [15.0, -10.0]
+        return [
+            {"side": "long", "realized_pnl": pattern[i % 2]}
+            for i in range(n)
+        ]
+
+    v = {
+        "buy_volume_pct": 50.0, "sell_volume_pct": 50.0,
+        "long_volume_pct": 100.0, "short_volume_pct": 0.0,
+        "total_fills": 0, "total_volume_usd": 0.0,
+    }
+    base_metrics = {
+        "win_rate": 0.5,
+        "avg_winning_trade": 15.0,
+        "avg_losing_trade": -10.0,
+        "winners_count": 0,  # set below
+        "losers_count": 0,   # set below
+    }
+
+    t50 = {**base_metrics, "winners_count": 25, "losers_count": 25,
+           "realized_pnl_per_trade": _pnls(50)}
+    t200 = {**base_metrics, "winners_count": 100, "losers_count": 100,
+            "realized_pnl_per_trade": _pnls(200)}
+
+    sqn_50 = _compute_derived_trade_metrics(v, t50)["sqn"]
+    sqn_200 = _compute_derived_trade_metrics(v, t200)["sqn"]
+
+    assert sqn_50 is not None and sqn_200 is not None
+    # With cap: ratio ≈ sqrt(100/50) ≈ 1.414. Without cap: ratio ≈
+    # sqrt(200/50) ≈ 2.0. Slight deviation from the exact ratio arises
+    # from the N-1 sample-variance denominator differing between cohorts;
+    # 2% relative tolerance keeps the assertion robust while still
+    # distinguishing the two formulas (gap > 40%).
+    ratio = sqn_200 / sqn_50
+    assert ratio == pytest.approx(math.sqrt(2), rel=0.02), (
+        f"SQN cap regression: ratio={ratio} expected≈{math.sqrt(2)}. "
+        "If this jumps to ~2.0 the sqrt(min(N,100)) cap was dropped."
+    )
+
+
 def test_derived_trade_metrics_profit_factor_segmented():
     """METRICS-07: separate PF for long and short via realized_pnl_per_trade."""
     from services.analytics_runner import _compute_derived_trade_metrics
@@ -1128,10 +1188,12 @@ def _build_balance_flag_mock_supabase(
             def _eq_fill(field, value):
                 r = MagicMock()
                 r.execute.return_value = MagicMock(data=[])
-                # H-0630 pagination support.
+                # H-0630 pagination support. Composite order_by chains
+                # multiple .order() calls — make .order chainable to self.
                 order = MagicMock()
                 order.execute.return_value = MagicMock(data=[])
                 order.range = _make_paged_range([])
+                order.order.return_value = order
                 r.order.return_value = order
                 return r
 
@@ -1178,6 +1240,7 @@ def _build_balance_flag_mock_supabase(
             order = MagicMock()
             order.execute.return_value = MagicMock(data=[])
             order.range = _make_paged_range([])
+            order.order.return_value = order
             eq.order = MagicMock(return_value=order)
             sel.eq.return_value = eq
             t.select.return_value = sel
@@ -1780,6 +1843,22 @@ def _make_paged_range(rows: list[dict]):
     return MagicMock(side_effect=_range)
 
 
+def _make_paginated_order_mock(rows: list[dict]) -> MagicMock:
+    """Build a chainable `.order(...).order(...)...range(start, end).execute()` mock.
+
+    The runner now uses composite order_by tuples (e.g. (snapshot_date,
+    symbol, side) for snapshots, (timestamp, id) for fills) so
+    ``_paginated_select`` chains multiple ``.order(col, desc=...)`` calls
+    before ``.range()``. Each ``.order()`` must land back on the same
+    configured mock so the final ``.range()`` exposes ``_make_paged_range``.
+    """
+    order = MagicMock()
+    order.execute.return_value = MagicMock(data=rows)
+    order.range = _make_paged_range(rows)
+    order.order.return_value = order
+    return order
+
+
 def _build_runner_mock_supabase(
     *,
     daily_pnl_rows: list[dict],
@@ -1842,10 +1921,14 @@ def _build_runner_mock_supabase(
                 r = MagicMock()
                 # Legacy unpaginated path: .execute() still returns all rows.
                 r.execute.return_value = MagicMock(data=fills_rows)
-                # H-0630 pagination: .order(...).range(...).execute()
+                # H-0630 pagination: .order(...).order(...).range(...).execute()
+                # — composite order_by (timestamp, id) chains two .order()
+                # calls, so the second .order() must land back on the same
+                # configured mock to expose .range().
                 order = MagicMock()
                 order.execute.return_value = MagicMock(data=fills_rows)
                 order.range = _make_paged_range(fills_rows)
+                order.order.return_value = order
                 r.order.return_value = order
                 return r
 
@@ -1879,7 +1962,11 @@ def _build_runner_mock_supabase(
             # H-0629 pagination: simulate a paged response. First page
             # returns the full snapshot_rows list; subsequent pages
             # return [] so the runner's pagination loop terminates.
+            # Composite order_by (snapshot_date, symbol, side) chains three
+            # .order() calls — make .order chainable to self so the last
+            # call exposes .range().
             order.range = _make_paged_range(snapshot_rows)
+            order.order.return_value = order
             eq.order = MagicMock(return_value=order)
             sel.eq.return_value = eq
             t.select.return_value = sel
@@ -2681,6 +2768,143 @@ class TestPositionFlagsPropagateToTopLevel:
         )
 
     @pytest.mark.asyncio
+    async def test_fills_missing_is_maker_pct_rounds_to_four_decimals(self) -> None:
+        """Audit-2026-05-07 H-0646 contract: the published ratio is rounded to
+        4 decimals. Build a 7-fill set with 1 missing is_maker (1/7 ≈
+        0.142857...) and assert the flag equals exactly 0.1429.
+
+        Pins the rounding precision so a future refactor that drops the
+        ``round(..., 4)`` or changes the precision (e.g. to 2) is caught.
+        """
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        # 7 fills, 1 missing is_maker → 1/7 ≈ 0.142857142... → rounds to 0.1429.
+        fills_rows = (
+            [{"side": "buy", "cost": 100.0, "is_maker": True,
+              "notional_usd": 1000.0,
+              "filled_at": f"2024-01-15T{h:02d}:00:00+00:00"}
+             for h in range(6)]
+            + [{"side": "sell", "cost": 100.0, "is_maker": None,
+                "notional_usd": 1000.0,
+                "filled_at": "2024-01-15T06:00:00+00:00"}]
+        )
+        mock_supabase = _build_runner_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(), fills_rows=fills_rows,
+            snapshot_rows=[], rpc_calls=[], sa_upsert_calls=sa_upsert_calls,
+        )
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+             patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+             patch("services.analytics_runner.trades_to_daily_returns_with_status",
+                   return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
+             patch("services.analytics_runner.compute_all_metrics", return_value=mock_metrics), \
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=AsyncMock(return_value=(None, True))), \
+             patch("services.position_reconstruction.reconstruct_positions",
+                   new=AsyncMock(return_value={})), \
+             patch("services.position_reconstruction.compute_exposure_metrics",
+                   new=AsyncMock(return_value={})):
+            await run_strategy_analytics("strat-test")
+
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        top_flags = successes[-1].get("data_quality_flags") or {}
+        # 1/7 = 0.142857142... → MUST round to 0.1429 (4 decimals).
+        assert top_flags.get("fills_missing_is_maker_pct") == 0.1429, (
+            "H-0646 rounding contract: 1/7 must round to 0.1429 at 4 "
+            f"decimals. Got {top_flags.get('fills_missing_is_maker_pct')!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_fills_missing_is_maker_pct_omitted_when_zero(self) -> None:
+        """Audit-2026-05-07 H-0646 contract: the flag is OMITTED (not emitted
+        as 0.0) when every fill has `is_maker` set. Prevents slot-leak in
+        DQF JSONB and matches the existing convention for other count-style
+        flags (e.g. ``breakeven_positions``, ``positions_missing_realized_pnl``).
+        """
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        # Every fill has is_maker set → flag must be omitted.
+        fills_rows = [
+            {"side": "buy", "cost": 100.0, "is_maker": True,
+             "notional_usd": 1000.0,
+             "filled_at": f"2024-01-15T{h:02d}:00:00+00:00"}
+            for h in range(5)
+        ]
+        mock_supabase = _build_runner_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(), fills_rows=fills_rows,
+            snapshot_rows=[], rpc_calls=[], sa_upsert_calls=sa_upsert_calls,
+        )
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        with patch("services.analytics_runner.get_supabase", return_value=mock_supabase), \
+             patch("services.analytics_runner.db_execute", side_effect=_mock_db_execute), \
+             patch("services.analytics_runner.trades_to_daily_returns_with_status",
+                   return_value=(mock_returns, _DEFAULT_RETURNS_META)), \
+             patch("services.analytics_runner.compute_all_metrics", return_value=mock_metrics), \
+             patch("services.analytics_runner.get_benchmark_returns",
+                   new=AsyncMock(return_value=(None, True))), \
+             patch("services.position_reconstruction.reconstruct_positions",
+                   new=AsyncMock(return_value={})), \
+             patch("services.position_reconstruction.compute_exposure_metrics",
+                   new=AsyncMock(return_value={})):
+            await run_strategy_analytics("strat-test")
+
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        top_flags = successes[-1].get("data_quality_flags") or {}
+        assert "fills_missing_is_maker_pct" not in top_flags, (
+            "H-0646 omission contract: when 0 fills are missing is_maker, "
+            "the flag must be ABSENT from data_quality_flags (no 0.0 slot). "
+            f"Got top_flags={top_flags}"
+        )
+
+    @pytest.mark.asyncio
     async def test_turnover_gap_dates_flag_reaches_top_level(self) -> None:
         """The turnover series helper returns `flags['turnover_gap_dates']`.
         The runner must merge that into the top-level data_quality_flags
@@ -2814,6 +3038,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
         order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2877,6 +3102,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
         order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2910,6 +3136,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         order = MagicMock()
         order.execute.return_value = MagicMock(data=[])
         order.range = _make_paged_range([])
+        order.order.return_value = order
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -2962,6 +3189,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         ]
         pages = [page0_rows, page1_rows]
         range_calls: list[tuple[int, int]] = []
+        order_calls: list[tuple[str, bool]] = []
 
         order = MagicMock()
         order.execute.return_value = MagicMock(data=[])
@@ -2976,11 +3204,26 @@ class TestLoadPositionTimeSeriesNavSafety:
 
         order.range = MagicMock(side_effect=_range)
 
+        # Capture every .order() call on the configured mock so the
+        # composite order_by contract (snapshot_date, symbol, side) is
+        # pinned. A regression that drops a column or reorders them
+        # would surface here instead of going latent.
+        def _order_side_effect(column, *, desc=False, **_kw):
+            order_calls.append((column, bool(desc)))
+            return order
+
+        order.order.side_effect = _order_side_effect
+
         mock_supabase = MagicMock()
         t = MagicMock()
         sel = MagicMock()
         eq = MagicMock()
-        eq.order = MagicMock(return_value=order)
+
+        def _eq_order_side_effect(column, *, desc=False, **_kw):
+            order_calls.append((column, bool(desc)))
+            return order
+
+        eq.order = MagicMock(side_effect=_eq_order_side_effect)
         sel.eq.return_value = eq
         t.select.return_value = sel
         mock_supabase.table.return_value = t
@@ -3006,6 +3249,21 @@ class TestLoadPositionTimeSeriesNavSafety:
         assert len(positions["2024-01-01"]) == 1000
         assert len(positions["2024-01-02"]) == 200
 
+        # Audit-2026-05-07 follow-up: pin the composite order_by contract.
+        # Non-unique sort keys allow PostgREST to reorder ties across
+        # pages → cross-page duplicates / skips → corrupted aggregates.
+        # The composite (snapshot_date, symbol, side) matches the
+        # `position_snapshots_unique_per_day` index from migration 034.
+        assert order_calls == [
+            ("snapshot_date", False),
+            ("symbol", False),
+            ("side", False),
+        ], (
+            "Snapshot pagination must order by the unique composite "
+            "(snapshot_date, symbol, side) so cross-page ties cannot "
+            f"duplicate or skip rows. Got order calls: {order_calls!r}"
+        )
+
     @pytest.mark.asyncio
     async def test_short_side_is_signed_negative(self) -> None:
         """H-0631 coverage: short positions appear with negative signed size_usd."""
@@ -3027,6 +3285,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
         order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -3077,6 +3336,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
         order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
@@ -3124,6 +3384,7 @@ class TestLoadPositionTimeSeriesNavSafety:
         order = MagicMock()
         order.execute.return_value = MagicMock(data=snapshot_rows)
         order.range = _make_paged_range(snapshot_rows)
+        order.order.return_value = order
         eq.order = MagicMock(return_value=order)
         sel.eq.return_value = eq
         t.select.return_value = sel
