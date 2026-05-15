@@ -63,6 +63,12 @@ const STATE = vi.hoisted(() => ({
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   // Admin client api_keys lookup (api_key_id) for the after() block.
   adminApiKeyId: null as string | null,
+  // H-0331 — name on the DB row (admin strategies SELECT) used by
+  // the founder-notify email instead of the form input.
+  adminStrategyName: "Alpha Centauri" as string | null,
+  // H-0331 — capture the strategy name actually passed to
+  // notifyFounderNewStrategy so tests can assert it came from the DB row.
+  notifyFounderCalls: [] as Array<{ name: unknown; managerName: unknown }>,
   // H-0330 — when true, the next/server after() mock invokes the
   // callback synchronously so tests can assert the side-effect fan-out
   // (enqueue_compute_job, api_keys touch, founder notify).
@@ -106,7 +112,10 @@ vi.mock("@/lib/supabase/admin", () => ({
           select: () => ({
             eq: () => ({
               single: async () => ({
-                data: { api_key_id: STATE.adminApiKeyId },
+                data: {
+                  api_key_id: STATE.adminApiKeyId,
+                  name: STATE.adminStrategyName,
+                },
                 error: null,
               }),
             }),
@@ -130,7 +139,10 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 vi.mock("@/lib/email", () => ({
-  notifyFounderNewStrategy: async () => undefined,
+  notifyFounderNewStrategy: async (name: unknown, managerName: unknown) => {
+    STATE.notifyFounderCalls.push({ name, managerName });
+    return undefined;
+  },
   resolveManagerName: async () => "Test Manager",
 }));
 
@@ -195,6 +207,8 @@ beforeEach(async () => {
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
   STATE.adminApiKeyId = API_KEY_ID;
+  STATE.adminStrategyName = "Alpha Centauri";
+  STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
   STATE.runAfterCallback = false;
   delete process.env.USE_COMPUTE_JOBS_QUEUE;
@@ -505,6 +519,57 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", 
       (c) => c.name === "enqueue_compute_job",
     );
     expect(enqueueCall).toBeUndefined();
+  });
+});
+
+/**
+ * audit-2026-05-07 H-0331 — founder email name comes from the DB row,
+ * not the form input. The validated form value may diverge from the row
+ * because finalize_wizard_strategy is allowed to sanitize/transform
+ * names. Pulling from the row keeps the founder email and admin UI on
+ * one source of truth.
+ */
+describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonical name", () => {
+  function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }
+
+  it("uses the DB-row name when it differs from the form input", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.adminStrategyName = "Sanitized DB Name";
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+    await new Promise((r) => setImmediate(r));
+
+    expect(STATE.notifyFounderCalls.length).toBe(1);
+    expect(STATE.notifyFounderCalls[0].name).toBe("Sanitized DB Name");
+  });
+
+  it("falls back to the form input when the DB-row name is missing", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.adminStrategyName = null;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+    await new Promise((r) => setImmediate(r));
+
+    expect(STATE.notifyFounderCalls.length).toBe(1);
+    // VALID_BODY.name is set to STRATEGY_NAMES[0] in beforeEach.
+    expect(STATE.notifyFounderCalls[0].name).toBe(VALID_BODY.name);
+    fetchSpy.mockRestore();
   });
 });
 

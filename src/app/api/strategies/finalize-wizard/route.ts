@@ -496,15 +496,25 @@ async function runLegacyFinalize(args: {
     // touch (Sprint-2 cleanup would then treat the key as abandoned and
     // GC it). Failure here logs to Sentry below; the founder email is
     // independent so it still runs.
+    // audit-2026-05-07 H-0331 — fetch `name` from the DB row so the
+    // founder email matches what the admin UI shows. The validated form
+    // input (fields.name) is the user's intent, but the
+    // finalize_wizard_strategy RPC may sanitize/transform it; pulling
+    // from the row keeps founder email and admin UI on a single source
+    // of truth.
     const [managerName, keyLinkResult] = await Promise.all([
       resolveManagerName(admin, user),
       admin
         .from("strategies")
-        .select("api_key_id")
+        .select("api_key_id, name")
         .eq("id", resolvedId)
         .single(),
     ]);
     const { data: keyLink, error: keyLinkErr } = keyLinkResult;
+    const canonicalName =
+      keyLink && typeof keyLink.name === "string" && keyLink.name.length > 0
+        ? keyLink.name
+        : fields.name;
     if (keyLinkErr) {
       console.warn(
         "[strategies/finalize-wizard] api_key_id lookup failed in after():",
@@ -540,7 +550,9 @@ async function runLegacyFinalize(args: {
     }> = [
       {
         label: "notify_founder_new_strategy",
-        run: () => notifyFounderNewStrategy(fields.name, managerName),
+        // audit-2026-05-07 H-0331 — use canonicalName (DB row) instead of
+        // form input so the founder email matches the admin UI.
+        run: () => notifyFounderNewStrategy(canonicalName, managerName),
       },
       // @audit-skip: denormalization timestamp. api_keys.last_sync_at
       // is a sync-state hint, not a user-visible state change. The
