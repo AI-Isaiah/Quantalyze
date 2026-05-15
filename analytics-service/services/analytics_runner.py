@@ -474,6 +474,14 @@ def _compute_derived_trade_metrics(
     # METRICS-08: SQN over per-trade R-multiples (R = realized_pnl / risk_unit).
     # risk_unit derived from |avg_loss| (the canonical Van Tharp denominator).
     #
+    # SQN scaling note (audit-2026-05-07 H-0652): we cap the scaling factor at
+    # sqrt(min(N, 100)) rather than the academic sqrt(N). The 100-cap is the
+    # Van Tharp variant used by quantstats (the parity oracle this codebase
+    # gates against): unbounded sqrt(N) inflates SQN for high-trade-count
+    # strategies, which would diverge from the TS parity layer. If a future
+    # parity bump moves to the academic sqrt(N) form, regen the golden
+    # fixture in the same change.
+    #
     # Audit-2026-05-07 H-0647 / H-0648: NaN / inf realized_pnl values
     # (commonly an upstream divide-by-zero from reconstruct_positions when
     # entry_price == 0) pass the `is not None` filter and silently corrupt

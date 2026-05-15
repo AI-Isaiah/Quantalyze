@@ -2338,6 +2338,252 @@ class TestPositionFlagsPropagateToTopLevel:
         )
 
     @pytest.mark.asyncio
+    async def test_snapshot_failure_does_not_set_reconstruction_flag(
+        self,
+    ) -> None:
+        """Audit-2026-05-07 H-0633: WR-03 split. A `_load_position_time_series`
+        failure must set `position_snapshots_unavailable` but MUST NOT set
+        `position_reconstruction_failed` (those are distinct surfaces:
+        snapshots is for the turnover/exposure grid, reconstruction is the
+        FIFO matching on raw fills). A regression that conflates them would
+        be caught here.
+        """
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        mock_supabase = _build_balance_flag_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(),
+            sa_upsert_calls=sa_upsert_calls,
+            strategy_api_key_id="key-1",
+        )
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        async def _snapshot_failure(*_args, **_kwargs):
+            raise RuntimeError("simulated snapshot RLS failure")
+
+        with patch(
+            "services.analytics_runner.get_supabase", return_value=mock_supabase
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ), patch(
+            "services.analytics_runner.trades_to_daily_returns_with_status",
+            return_value=(mock_returns, _DEFAULT_RETURNS_META),
+        ), patch(
+            "services.analytics_runner.compute_all_metrics",
+            return_value=mock_metrics,
+        ), patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ), patch(
+            "services.position_reconstruction.reconstruct_positions",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "services.position_reconstruction.compute_exposure_metrics",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "services.analytics_runner._load_position_time_series",
+            side_effect=_snapshot_failure,
+        ):
+            result = await run_strategy_analytics("strat-test")
+
+        assert result["status"] == "complete"
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        assert successes
+        flags = successes[-1].get("data_quality_flags") or {}
+        # Distinct surface flag SET.
+        assert flags.get("position_snapshots_unavailable") is True, (
+            f"snapshots-side failure must set position_snapshots_unavailable. "
+            f"Got flags={flags}"
+        )
+        # Reconstruction-side flag MUST NOT fire (FIFO matching is healthy).
+        assert flags.get("position_reconstruction_failed") is not True, (
+            "snapshots-side failure must NOT set position_reconstruction_failed "
+            f"(the two surfaces are distinct). Got flags={flags}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconstruction_failure_does_not_set_snapshots_flag(
+        self,
+    ) -> None:
+        """Audit-2026-05-07 H-0633 mirror: a `reconstruct_positions` failure
+        must set `position_reconstruction_failed` but MUST NOT set
+        `position_snapshots_unavailable`."""
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        mock_supabase = _build_balance_flag_mock_supabase(
+            daily_pnl_rows=_minimal_daily_rows(),
+            sa_upsert_calls=sa_upsert_calls,
+            strategy_api_key_id="key-1",
+        )
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 15, index=pd.bdate_range("2024-01-01", periods=15)
+        )
+        mock_metrics = MetricsResult(
+            metrics_json={
+                "cumulative_return": 0.01, "cagr": 0.05, "volatility": 0.1,
+                "sharpe": 0.5, "sortino": 0.7, "calmar": 0.3,
+                "max_drawdown": -0.02, "max_drawdown_duration_days": 3,
+                "six_month_return": 0.02, "sparkline_returns": [],
+                "sparkline_drawdown": [], "metrics_json": {},
+                "returns_series": [], "drawdown_series": [],
+                "monthly_returns": {}, "rolling_metrics": {},
+                "return_quantiles": {},
+            },
+            sibling_kinds={},
+        )
+
+        async def _reconstruct_failure(*_args, **_kwargs):
+            raise RuntimeError("simulated FIFO failure")
+
+        with patch(
+            "services.analytics_runner.get_supabase", return_value=mock_supabase
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ), patch(
+            "services.analytics_runner.trades_to_daily_returns_with_status",
+            return_value=(mock_returns, _DEFAULT_RETURNS_META),
+        ), patch(
+            "services.analytics_runner.compute_all_metrics",
+            return_value=mock_metrics,
+        ), patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ), patch(
+            "services.position_reconstruction.reconstruct_positions",
+            side_effect=_reconstruct_failure,
+        ), patch(
+            "services.position_reconstruction.compute_exposure_metrics",
+            new=AsyncMock(return_value={}),
+        ):
+            result = await run_strategy_analytics("strat-test")
+
+        assert result["status"] == "complete"
+        successes = [
+            u for u in sa_upsert_calls
+            if u.get("computation_status") in ("complete", "complete_with_warnings")
+        ]
+        assert successes
+        flags = successes[-1].get("data_quality_flags") or {}
+        assert flags.get("position_reconstruction_failed") is True, (
+            f"reconstruction failure must set position_reconstruction_failed. "
+            f"Got flags={flags}"
+        )
+        assert flags.get("position_snapshots_unavailable") is not True, (
+            "reconstruction failure must NOT set position_snapshots_unavailable "
+            f"(the two surfaces are distinct). Got flags={flags}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sibling_kinds_rpc_failure_sets_flag(self) -> None:
+        """Audit-2026-05-07 H-0634: when the atomic batch RPC
+        `upsert_strategy_analytics_series_batch` raises, the runner must
+        emit `data_quality_flags.sibling_kinds_failed=True` on the
+        strategy_analytics row so the UI can route around the empty panels.
+        """
+        from services.analytics_runner import run_strategy_analytics
+
+        sa_upsert_calls: list[dict] = []
+        rpc_calls: list[dict] = []
+        snap_rows = _sample_position_snapshot_rows()
+
+        mock_supabase = _build_runner_mock_supabase(
+            daily_pnl_rows=[
+                {
+                    "id": f"trade-{i}",
+                    "strategy_id": "strat-test",
+                    "symbol": "PORTFOLIO",
+                    "side": "buy" if i % 2 == 0 else "sell",
+                    "price": 100 + i,
+                    "quantity": 1,
+                    "fee": 0,
+                    "timestamp": f"2024-01-{i+1:02d}T00:00:00+00:00",
+                    "is_fill": False,
+                }
+                for i in range(30)
+            ],
+            fills_rows=[],
+            snapshot_rows=snap_rows,
+            rpc_calls=rpc_calls,
+            sa_upsert_calls=sa_upsert_calls,
+        )
+
+        # Make supabase.rpc raise for the batch RPC.
+        def _rpc_raises(name, params):
+            rpc_calls.append({"name": name, "params": params})
+            r = MagicMock()
+            r.execute.side_effect = RuntimeError("simulated RPC outage")
+            return r
+
+        mock_supabase.rpc = _rpc_raises
+
+        async def _mock_db_execute(fn):
+            return await asyncio.to_thread(fn)
+
+        mock_returns = pd.Series(
+            [0.001] * 30, index=pd.bdate_range("2024-01-01", periods=30)
+        )
+
+        with patch(
+            "services.analytics_runner.get_supabase", return_value=mock_supabase
+        ), patch(
+            "services.analytics_runner.db_execute", side_effect=_mock_db_execute
+        ), patch(
+            "services.analytics_runner.trades_to_daily_returns_with_status",
+            return_value=(mock_returns, _DEFAULT_RETURNS_META),
+        ), patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ), patch(
+            "services.position_reconstruction.reconstruct_positions",
+            new=AsyncMock(return_value={}),
+        ), patch(
+            "services.position_reconstruction.compute_exposure_metrics",
+            new=AsyncMock(return_value={}),
+        ):
+            result = await run_strategy_analytics("strat-test")
+
+        assert result["status"] == "complete"
+        # The successful upsert sets `computation_status=complete`, then the
+        # nested fail-handler upsert sets data_quality_flags including
+        # `sibling_kinds_failed=True`. Look at the LAST upsert which carries
+        # data_quality_flags (the recovery upsert).
+        flag_upserts = [
+            u for u in sa_upsert_calls
+            if (u.get("data_quality_flags") or {}).get("sibling_kinds_failed")
+        ]
+        assert flag_upserts, (
+            f"H-0634: sibling-batch failure must trigger a recovery upsert "
+            f"with sibling_kinds_failed=True. All upserts: {sa_upsert_calls!r}"
+        )
+
+    @pytest.mark.asyncio
     async def test_fills_missing_is_maker_pct_reaches_top_level(self) -> None:
         """Audit-2026-05-07 H-0646: when fills lack `is_maker` (e.g., a
         compromised connector or a venue that doesn't tag fills), the runner
