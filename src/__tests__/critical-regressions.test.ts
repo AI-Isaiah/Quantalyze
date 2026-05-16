@@ -447,6 +447,21 @@ describe("Critical regression guards", () => {
       ".github/workflows/supabase-migrate.yml",
     ];
 
+    // Test helpers — collapse the repeated regex-assertion pattern below.
+    function expectMatch(haystack: string, re: RegExp, msg: string): void {
+      expect(re.test(haystack), msg).toBe(true);
+    }
+    function expectNoMatch(haystack: string, re: RegExp, msg: string): void {
+      expect(re.test(haystack), msg).toBe(false);
+    }
+    // Locate a substring via regex, fail with a clear message if missing,
+    // and return the first capture group (or full match if no group).
+    function findOrFail(src: string, re: RegExp, msg: string): string {
+      const m = src.match(re);
+      expect(m, msg).not.toBeNull();
+      return m![1] ?? m![0];
+    }
+
     // retro-PR179-H2: SHA-pin policy. Every `uses:` must reference a
     // 40-character lowercase hex SHA — never a mutable tag (vN, main,
     // latest) or a partial SHA. First-party reusable workflows (`./...`)
@@ -493,17 +508,16 @@ describe("Critical regression guards", () => {
       for (const rel of WORKFLOW_FILES) {
         it(`${rel} — declares a top-level permissions: block with contents: read`, () => {
           const src = readText(rel);
-          const hasPermissions = PERMISSIONS_BLOCK_RE.test(src);
-          expect(
-            hasPermissions,
+          const block = findOrFail(
+            src,
+            PERMISSIONS_BLOCK_RE,
             `${rel} has no top-level permissions: block — GITHUB_TOKEN would inherit repo default (writes)`,
-          ).toBe(true);
-          // contents: read must appear within the top-level block.
-          const block = src.match(PERMISSIONS_BLOCK_RE)?.[0] ?? "";
-          expect(
-            /contents:\s*read/.test(block),
+          );
+          expectMatch(
+            block,
+            /contents:\s*read/,
             `${rel} top-level permissions block does not include 'contents: read'`,
-          ).toBe(true);
+          );
         });
       }
     });
@@ -514,31 +528,34 @@ describe("Critical regression guards", () => {
     // uploaded artifact. A regression that re-introduces the ternary
     // (or any non-placeholder value) re-opens the exfil pivot.
     describe("frontend-build env: placeholder NEXT_PUBLIC_* values only", () => {
-      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_SUPABASE_URL", () => {
+      it("ci.yml frontend-build env block uses placeholder NEXT_PUBLIC_* values and does not reference secrets.TEST_SUPABASE_URL", () => {
         const src = readText(".github/workflows/ci.yml");
         // Find the frontend-build job's `npm run build` step env block.
         // The placeholder MUST appear directly in the env literal, not
         // via a secret/var expression.
-        const buildEnvMatch = src.match(
+        const envBlock = findOrFail(
+          src,
           /frontend-build:[\s\S]*?-\s*run:\s*npm run build[\s\S]*?env:\s*\n([\s\S]*?)(?=\n\s{0,6}-\s|\n[a-z])/,
+          "ci.yml: could not locate frontend-build npm run build env block",
         );
-        expect(buildEnvMatch, "ci.yml: could not locate frontend-build npm run build env block").not.toBeNull();
-        const envBlock = buildEnvMatch![1];
-        expect(
-          /NEXT_PUBLIC_SUPABASE_URL:\s*https:\/\/placeholder\.supabase\.co/.test(envBlock),
+        expectMatch(
+          envBlock,
+          /NEXT_PUBLIC_SUPABASE_URL:\s*https:\/\/placeholder\.supabase\.co/,
           "frontend-build env NEXT_PUBLIC_SUPABASE_URL is not the literal placeholder — C-0293(c) regression",
-        ).toBe(true);
-        expect(
-          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*placeholder\b/.test(envBlock),
+        );
+        expectMatch(
+          envBlock,
+          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*placeholder\b/,
           "frontend-build env NEXT_PUBLIC_SUPABASE_ANON_KEY is not the literal placeholder — C-0293(c) regression",
-        ).toBe(true);
+        );
         // Defensive: secrets.TEST_SUPABASE_URL must NOT appear in the
         // frontend-build env block (it belongs only in the rebuild
         // step further down in the e2e job).
-        expect(
-          /secrets\.TEST_SUPABASE_URL/.test(envBlock),
+        expectNoMatch(
+          envBlock,
+          /secrets\.TEST_SUPABASE_URL/,
           "frontend-build env references secrets.TEST_SUPABASE_URL — C-0293(c) seed-aware ternary regression",
-        ).toBe(false);
+        );
       });
 
       // retro-PR179-H4: seed-gated rebuild step contract. The step
@@ -548,36 +565,37 @@ describe("Critical regression guards", () => {
       it("ci.yml seed-gated rebuild step has the required shape (contract for C-0293(c) Path 2)", () => {
         const src = readText(".github/workflows/ci.yml");
         // The rebuild step's identifying name is unique in the file.
-        const rebuildMatch = src.match(
+        const step = findOrFail(
+          src,
           /-\s*name:\s*Rebuild Next\.js with real test-Supabase env[\s\S]*?(?=\n\s{0,6}-\s)/,
+          "ci.yml: rebuild step name not found — Path 2 contract drifted",
         );
-        expect(rebuildMatch, "ci.yml: rebuild step name not found — Path 2 contract drifted").not.toBeNull();
-        const step = rebuildMatch![0];
         // (a) gated on vars.E2E_TEST_DB_CONFIGURED
-        expect(
-          /if:\s*\$\{\{\s*vars\.E2E_TEST_DB_CONFIGURED\s*==\s*'true'\s*\}\}/.test(step),
+        expectMatch(
+          step,
+          /if:\s*\$\{\{\s*vars\.E2E_TEST_DB_CONFIGURED\s*==\s*'true'\s*\}\}/,
           "rebuild step not gated on vars.E2E_TEST_DB_CONFIGURED — would run on fork PRs and burn rebuild cost",
-        ).toBe(true);
+        );
         // (b) wipes the placeholder manifests before rebuild
-        expect(
-          /rm\s+-rf\s+\.next\/server\s+\.next\/static/.test(step),
+        expectMatch(
+          step,
+          /rm\s+-rf\s+\.next\/server\s+\.next\/static/,
           "rebuild step no longer wipes .next/server + .next/static — placeholder chunks could leak through",
-        ).toBe(true);
+        );
         // (c) re-runs `npm run build` with REAL secrets in env (not
         // placeholder values). secrets.TEST_SUPABASE_URL must appear
         // in the env block.
-        expect(
-          /npm run build/.test(step),
-          "rebuild step no longer runs `npm run build`",
-        ).toBe(true);
-        expect(
-          /NEXT_PUBLIC_SUPABASE_URL:\s*\$\{\{\s*secrets\.TEST_SUPABASE_URL\s*\}\}/.test(step),
+        expectMatch(step, /npm run build/, "rebuild step no longer runs `npm run build`");
+        expectMatch(
+          step,
+          /NEXT_PUBLIC_SUPABASE_URL:\s*\$\{\{\s*secrets\.TEST_SUPABASE_URL\s*\}\}/,
           "rebuild step env no longer wires secrets.TEST_SUPABASE_URL — seed-gated specs would run against placeholder bundle",
-        ).toBe(true);
-        expect(
-          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.TEST_SUPABASE_ANON_KEY\s*\}\}/.test(step),
+        );
+        expectMatch(
+          step,
+          /NEXT_PUBLIC_SUPABASE_ANON_KEY:\s*\$\{\{\s*secrets\.TEST_SUPABASE_ANON_KEY\s*\}\}/,
           "rebuild step env no longer wires secrets.TEST_SUPABASE_ANON_KEY",
-        ).toBe(true);
+        );
       });
     });
 
@@ -590,15 +608,16 @@ describe("Critical regression guards", () => {
     describe("upload-artifact invariants", () => {
       it("ci.yml frontend-build upload step must set include-hidden-files: true", () => {
         const src = readText(".github/workflows/ci.yml");
-        const uploadMatch = src.match(
+        const step = findOrFail(
+          src,
           /-\s*name:\s*Upload \.next \+ public artifact for e2e[\s\S]*?(?=\n\s{0,6}-\s|\n[a-z])/,
+          "ci.yml: frontend-build upload step name not found",
         );
-        expect(uploadMatch, "ci.yml: frontend-build upload step name not found").not.toBeNull();
-        const step = uploadMatch![0];
-        expect(
-          /include-hidden-files:\s*true/.test(step),
+        expectMatch(
+          step,
+          /include-hidden-files:\s*true/,
           "frontend-build upload step missing include-hidden-files: true — .next/ silently excluded, e2e crashes",
-        ).toBe(true);
+        );
       });
     });
   });
