@@ -153,6 +153,59 @@ jobs:
           # between manual dispatches). Bump deliberately when reviewing
           # supabase/cli release notes.
           version: 2.98.2
+      - name: Backdated-migration safety guard
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        # Mechanical guard against the silent-history-rewrite attack that
+        # --include-all enables: an attacker (or an honest mistake) lands a
+        # local migration with a timestamp slotted BEFORE the remote tip, and
+        # --include-all happily applies it as a gap-fill. Without this guard
+        # an attacker who can land a PR could backdoor RLS / SECDEF / role
+        # changes through an "innocent" old-looking filename.
+        #
+        # Allowlist (.github/migrate-backdated-allowlist.txt) is the
+        # exception channel: history-only restorations like PR #174 and
+        # PR #176 are listed there with a comment citing the PR + reason.
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$SUPABASE_PROJECT_REF"
+
+          # Query the most-recently-applied remote migration timestamp.
+          # `db query --linked --agent=no --output json` returns a plain
+          # JSON array `[{"max_version": "<ts>"}]` (no security envelope).
+          REMOTE_TIP_JSON=$(supabase db query --linked --agent=no --output json \
+            "SELECT MAX(version) AS max_version FROM supabase_migrations.schema_migrations")
+          REMOTE_TIP=$(echo "$REMOTE_TIP_JSON" | jq -r '.[0].max_version // "00000000000000"')
+          echo "Remote tip: $REMOTE_TIP"
+
+          # Read allowlist (one timestamp per line; lines starting with # or
+          # blank lines are ignored).
+          ALLOWLIST_FILE=".github/migrate-backdated-allowlist.txt"
+          ALLOWLIST=$(grep -Ev '^\s*(#|$)' "$ALLOWLIST_FILE" 2>/dev/null || true)
+
+          # For every local migration with timestamp < REMOTE_TIP that's not
+          # on the allowlist, record a violation.
+          VIOLATIONS=""
+          for f in supabase/migrations/[0-9]*.sql; do
+            base=$(basename "$f")
+            ts="${base%%_*}"
+            # Skip files whose basename prefix is not 14 digits (defensive).
+            if [[ ${#ts} -ne 14 ]] || ! [[ "$ts" =~ ^[0-9]{14}$ ]]; then continue; fi
+            if [[ "$ts" < "$REMOTE_TIP" ]]; then
+              if ! echo "$ALLOWLIST" | grep -qFx "$ts"; then
+                VIOLATIONS="${VIOLATIONS}"$'\n'"  - $base (timestamp $ts < remote tip $REMOTE_TIP)"
+              fi
+            fi
+          done
+
+          if [[ -n "$VIOLATIONS" ]]; then
+            echo "::error::Backdated migrations detected without allowlist entry:${VIOLATIONS}"
+            echo "::error::Add legitimate history-only restorations to ${ALLOWLIST_FILE} with justification comments."
+            exit 1
+          fi
+          echo "All local migrations are forward-only or allowlisted."
       - name: Push migrations to production
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
