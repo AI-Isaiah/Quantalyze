@@ -189,24 +189,44 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
   // role-switch, in-tab navigation).
   const unknownLoggedRef = useRef<Set<string>>(new Set());
 
-  // retro audit (red-team L8 c8): the widget_viewed dedup ref persists
-  // across `tweaks.showOutcomes` toggles. When a user hides outcomes
-  // then shows them again, the outcomes tile re-mounts but its id
-  // remains in the Set — telemetry never re-fires. Clear the dedup ref
-  // when the visible-tile composition changes via Tweaks, so the
-  // "fire once per session per widget" contract resets on a deliberate
-  // visibility toggle.
+  // retro audit (red-team L8 c8 + L10 c7): the widget_viewed dedup ref
+  // and the unknown-widget log ref both live at component-instance scope
+  // and were never reset:
+  //   - tweaks.showOutcomes toggle hides-then-shows the outcomes tile;
+  //     stale dedup suppresses widget_viewed on the re-mounted tile.
+  //   - portfolio?.id switch inside a single mounted instance (admin
+  //     role-switch, in-tab nav) carries the previous allocator's
+  //     warn-dedup into the new allocator's view, so different
+  //     allocators stranded on the same id only log for the first.
+  //
+  // Use a ref-tracked previous-value pattern so the first render does
+  // NOT trigger a reset (refs initialise unset; the FIRST observation
+  // of each dep is the baseline, not a transition). Resets only fire
+  // on real subsequent changes.
+  const lastShowOutcomesRef = useRef<boolean | null>(null);
   useEffect(() => {
-    widgetViewsFiredRef.current = new Set();
+    if (lastShowOutcomesRef.current === null) {
+      lastShowOutcomesRef.current = tweaks.showOutcomes;
+      return;
+    }
+    if (lastShowOutcomesRef.current !== tweaks.showOutcomes) {
+      lastShowOutcomesRef.current = tweaks.showOutcomes;
+      widgetViewsFiredRef.current = new Set();
+    }
   }, [tweaks.showOutcomes]);
 
-  // retro audit (red-team L10 c7): both refs live at component-instance
-  // scope, but the dashboard stays MOUNTED across portfolio switches
-  // (admin role-switch, in-tab navigation). Clear both per-portfolio so
-  // observability resets when the underlying data identity changes.
+  const lastPortfolioIdRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    widgetViewsFiredRef.current = new Set();
-    unknownLoggedRef.current = new Set();
+    const currentId = portfolio?.id ?? null;
+    if (lastPortfolioIdRef.current === undefined) {
+      lastPortfolioIdRef.current = currentId;
+      return;
+    }
+    if (lastPortfolioIdRef.current !== currentId) {
+      lastPortfolioIdRef.current = currentId;
+      widgetViewsFiredRef.current = new Set();
+      unknownLoggedRef.current = new Set();
+    }
   }, [portfolio?.id]);
 
   useEffect(() => {
