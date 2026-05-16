@@ -176,3 +176,41 @@ Counts (apply pass):
 - Findings written: 14 total — 10 new / 3 chain / 1 challenge
 - Severity breakdown: 0 CRITICAL / 6 HIGH (conf≥7) / 8 MEDIUM (conf≥8) / 0 LOW (conf≥9)
 - File: .review/red-team.jsonl
+
+## Red-team apply pass (post-gap-closure)
+- Findings closed: 13 of 13 actionable (6 HIGH + 7 MED ≥8; 1 challenge meta-skipped)
+- Decision recorded: rowsForTable/projectedRowsForTable WIRED into production path
+  (route.ts:230 invokes `rowsForTable(bundle, "profiles")` as a load-bearing
+  manifest-drift detector that surfaces export_manifest_drift + refunds the
+  rate-limit token when the helper returns null). Not deleted, per user direction.
+- Test status: typecheck=clean, lint=clean, vitest=PASS
+  - gdpr suite: 81 passed / 1 skipped (was 57 → +23 new tests + 1 fixture amendment)
+  - full suite: 3574 passed / 209 skipped / 0 failed
+- Commits:
+  - f1f1b509 — Round 1 route-level (#1 schema-recon, #2 rate-limit refund,
+    #7 wiring, #13 concurrent-WeakMap doc invariant)
+  - 366e2187 — Round 2-3 core (#3 null parent tolerance, #5 deep freeze,
+    #6 row.user_id redaction, #8 safeStringify, #10 .in() chunking,
+    #11 source_truncated doc, #12 fetch_error suppresses parent_id_truncated)
+  - 70b22ad3 — Round 4a CI hook (#9 projection-parity + stale-allowlist)
+  - cdfa06be — Round 4b tests (encodeExportBundle direct + freeze + chunking
+    + concurrent-cache + manifest-drift + user_id redaction; #1 + #2 route spies)
+  - (this commit) — Round 5 FIX-REPORT update
+
+### Per-finding map (red-team JSONL order vs. spec order)
+| Spec # | JSONL # | Severity / conf | Title (truncated) | Status |
+| -- | -- | -- | -- | -- |
+| #1 | 1 | HIGH 9 new | account.export_refused leaks schema recon via audit | CLOSED |
+| #2 | 2 | HIGH 8 new | rate-limit token consumed before refusal gate | CLOSED |
+| #3 | 3 | HIGH 8 chain | indirect orphan id fails the whole export | CLOSED |
+| #4 | 4 | HIGH 8 new | encodeExportBundle has no direct unit tests | CLOSED |
+| #5 | 5 | HIGH 7 new | ROW_JSON_CACHE staleness on in-place mutation | CLOSED |
+| #6 | 6 | HIGH 7 new | top-level row.user_id (admin) not redacted | CLOSED |
+| #7 | 7 | MED 9 new | rowsForTable/projectedRowsForTable dead code | CLOSED (WIRED) |
+| #8 | 8 | MED 8 new | encodeExportBundle ships invalid JSON on undefined | CLOSED |
+| #9 | 9 | MED 8 new | sanitize-parity CI does not enforce source_table | CLOSED |
+| #10 | 10 | MED 8 new | indirect .in() URL-length cliff under proxies | CLOSED |
+| #11 | 11 | MED 8 new | source_truncated mislabels projected audit_log | CLOSED (doc) |
+| #12 | 12 | MED 8 chain | fetch_error + parent_id_truncated double-signal | CLOSED |
+| #13 | 14 | MED 8 chain | concurrent same-user exports + module WeakMap | CLOSED (regr.) |
+| (skip) | 13 | MED 8 challenge | challenge: happy-path metadata assertion | SKIPPED per spec |
