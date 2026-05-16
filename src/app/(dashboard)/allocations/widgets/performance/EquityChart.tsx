@@ -527,8 +527,11 @@ export function EquityChart({
         );
       }
       // Fixed 3-tick render: yMin / 1.0 / yMax keeps the baseline tick
-      // and bounds visible without flooding the DOM.
-      return [yMin, 1, yMax].sort((a, b) => a - b);
+      // and bounds visible without flooding the DOM. Dedup via Set in
+      // case yMin / yMax round-trip to exactly 1.0 (truly-flat series
+      // post-padding); the existing render code is tolerant of either
+      // 1-tick or 3-tick output here.
+      return Array.from(new Set([yMin, 1, yMax])).sort((a, b) => a - b);
     }
     const stepVal = stepPct / 100;
     const ticks = new Set<number>();

@@ -565,6 +565,71 @@ describe("OutcomesWidget — Expanded panel (inline ExpandedPanel)", () => {
     // 5. The fresh panel must NOT show the stale fetch #1 error.
     expect(screen.queryByText("Failed to load curves")).not.toBeInTheDocument();
   });
+
+  // audit-2026-05-07 H-0162 + H-1217 c8/c9 silent-failure — curves fetch
+  // failures (non-AbortError) were caught and stored on state, but the
+  // populated sparkline branch silently substitutes `null` rather than
+  // surfacing the error. Pin the breadcrumb: console.error must fire
+  // with the outcome_id + raw error so dev-tools / Sentry catch real
+  // backend regressions.
+  it("H-0162/H-1217: curves fetch failure emits console.error with outcome_id and the raw error", async () => {
+    let rejectCurves: ((err: Error) => void) | null = null;
+    fetchMock = vi.fn().mockImplementation((input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/curves")) {
+        return new Promise((_resolve, reject) => {
+          rejectCurves = reject;
+        });
+      }
+      // /api/notes GET — 404 so the note section is quiet.
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = fetchMock as unknown as typeof fetch;
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderWidget([makeOutcome({ id: "o-fetch-fail-1" })]);
+      const caret = screen.getByRole("button", {
+        name: /Expand outcome detail/,
+      });
+      fireEvent.click(caret);
+
+      // Wait for the curves fetch to be in flight.
+      await waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter((c) => String(c[0]).includes("/curves"))
+            .length,
+        ).toBe(1);
+      });
+
+      // Reject with a non-AbortError — the catch path must reach
+      // console.error and pass the outcome_id along.
+      await act(async () => {
+        rejectCurves!(new Error("HTTP 500 — upstream curves regression"));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const matchingCall = errorSpy.mock.calls.find((args) =>
+        String(args[0]).includes("[OutcomesWidget] curves fetch failed"),
+      );
+      expect(matchingCall, "expected console.error with the curves-fetch tag").toBeTruthy();
+      // The metadata object must contain the outcome_id so Sentry can
+      // demux occurrences. Match either the bare object or the third
+      // arg layout — the source emits `(tag, { outcome_id }, err)`.
+      const hasOutcomeId = matchingCall!.some(
+        (arg) =>
+          typeof arg === "object" &&
+          arg !== null &&
+          "outcome_id" in arg &&
+          (arg as { outcome_id: string }).outcome_id === "o-fetch-fail-1",
+      );
+      expect(hasOutcomeId, "expected outcome_id in the error metadata").toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 // ===========================================================================

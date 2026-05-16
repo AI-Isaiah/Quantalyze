@@ -354,5 +354,46 @@ describe("EquityChart", () => {
   });
 });
 
+describe("EquityChart — audit-2026-05-07 safety guards", () => {
+  // M-1063 c8 silent-failure — when sliceByPeriod's date window excludes
+  // the f7 anchor and lands on post-anchor zero rows, visible[0].value
+  // can be 0. The previous code `?? 1` only caught undefined and
+  // produced Infinity/NaN paths. The guard reuses the 'Equity data
+  // warming up' empty-state copy when basePort is not finite-positive.
+  it("M-1063: visible window starting on a post-anchor zero row falls back to 'Equity data warming up'", () => {
+    // 35-day series: day 0 has the f7 anchor (value=1), days 1..34 are 0.
+    // With initialPeriod='1M' (30-day lookback) the slice starts at day 5,
+    // so visible[0].value = 0 after the f7 anchor preserves the post-
+    // anchor zeros.
+    const series: DailyPoint[] = [];
+    const d = new Date(Date.UTC(2024, 0, 1));
+    for (let i = 0; i < 35; i++) {
+      series.push({
+        date: d.toISOString().slice(0, 10),
+        value: i === 0 ? 1 : 0,
+      });
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    const { container, getByLabelText } = render(
+      <EquityChart equityDailyPoints={series} initialPeriod="1M" />,
+    );
+    expect(getByLabelText("Equity chart")).toBeTruthy();
+    expect(container.textContent).toMatch(/Equity data warming up/);
+    // No chart SVG path in the warm-up state — just the placeholder div.
+    expect(container.querySelector("svg path")).toBeNull();
+  });
+
+  // M-1065 — defensive guard, no triggerable regression test. The
+  // pre-fix walker only collapses to the seed-stuck behavior when
+  // tickCount(candidates[0]) < MIN_TICKS; given the existing
+  // `(yMax - yMin) * 0.04 || 0.002` padding rule the smallest seed
+  // (0.001%) always satisfies MIN_TICKS=5 on real and synthetic
+  // inputs. The fallback exists for forward-defensive value (e.g.
+  // future padding-rule changes or pathological data injected via
+  // tests) — see the source-comment in EquityChart.tsx around the
+  // `satisfied` flag. Not exercising it here would require manufacturing
+  // data the runtime cannot actually produce.
+});
+
 // Re-export to silence a "vi unused" lint nit on jsdom-only test env.
 void vi;
