@@ -35,6 +35,7 @@ const {
   userAppRolesInsertMock,
   userAppRolesDeleteMock,
   adminUserAppRolesSelectMock,
+  adminUserAppRolesPreExistingMock,
   afterSpy,
   logAuditRpcMock,
   createAdminClientMock,
@@ -49,6 +50,12 @@ const {
   // envelope. The admin client must therefore support
   // `from("user_app_roles").select("role").eq("user_id", id)`.
   adminUserAppRolesSelectMock: vi.fn(),
+  // audit-2026-05-07 fix M-0288: the grant path reads the pre-existing
+  // row via `.select("granted_at").eq("user_id", X).eq("role", Y)
+  // .maybeSingle()` to compute `was_new_grant`. Mock that chain
+  // separately so the matrix tests can default it to "no pre-existing
+  // row" without forcing every caller to mock the new shape.
+  adminUserAppRolesPreExistingMock: vi.fn(),
   afterSpy: vi.fn<(cb: () => void | Promise<void>) => void>((cb) => {
     queueMicrotask(() => {
       try {
@@ -123,13 +130,27 @@ function makeAdminClient() {
         throw new Error(`Unexpected table in admin client: ${table}`);
       }
       return {
-        // P462 — `fetchUserRoles` in the route reads the post-mutation
-        // role set via select("role").eq("user_id", id). Mirror that
-        // chain here so the audit-event assertion path doesn't blow up
-        // on an unmocked `.select`. The promise resolves to the canonical
-        // PostgREST shape `{ data, error }`.
+        // The route uses TWO different select chains on the admin client:
+        //   (1) P462 — `fetchUserRoles(admin, X)` post-mutation read:
+        //       `.select("role").eq("user_id", X)` (awaited directly,
+        //       returns `{ data: row[], error }`).
+        //   (2) M-0288 — pre-grant existence check:
+        //       `.select("granted_at").eq("user_id", X).eq("role", Y)
+        //        .maybeSingle()` (returns `{ data: row|null, error }`).
+        // The first .eq() returns a chain node that is BOTH awaitable
+        // (shape 1) and chainable (shape 2). The two mocks let tests
+        // pin each shape independently.
         select: (_cols: string) => ({
-          eq: (_col: string, userId: string) => adminUserAppRolesSelectMock(userId),
+          eq: (_col: string, userId: string) => {
+            const postMutationPromise =
+              adminUserAppRolesSelectMock(userId);
+            return Object.assign(postMutationPromise, {
+              eq: (_col2: string, role: string) => ({
+                maybeSingle: async () =>
+                  adminUserAppRolesPreExistingMock({ userId, role }),
+              }),
+            });
+          },
         }),
         upsert: (row: unknown, opts: unknown) =>
           userAppRolesInsertMock(row, opts),
@@ -298,6 +319,14 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
       data: [],
       error: null,
     });
+    // audit-2026-05-07 fix M-0288 — pre-grant existence check default.
+    // The new grant path reads (user_id, role) before upsert to compute
+    // `was_new_grant`. Default to "no row exists" (new grant). Tests
+    // that exercise the re-grant path override this locally.
+    adminUserAppRolesPreExistingMock.mockResolvedValue({
+      data: null,
+      error: null,
+    });
     // Default: caller is admin.
     getUserMock.mockResolvedValue({
       data: { user: { id: "admin-user-id", email: "a@test.com" } },
@@ -401,16 +430,20 @@ describe("POST /api/admin/users/[id]/roles — pilot route", () => {
     );
   });
 
-  it("blocks self-revoke of own admin role with 400", async () => {
-    // Admin user targeting themself.
+  it("blocks self-revoke of own admin role with 403 (C-0066)", async () => {
+    // audit-2026-05-07 fix C-0066 (api-contract conf-7): self-action
+    // rejection standardized on 403 across admin routes (matches
+    // deletion-requests/[id]/_shared.ts:84-94). Pre-fix this returned
+    // 400 — but the request is well-formed, the action is just
+    // forbidden, so 403 is the correct semantic.
     const { POST } = await loadRoute();
     const req = makeRequest(
       { action: "revoke", role: "admin" },
       "http://localhost:3000/api/admin/users/admin-user-id/roles",
     );
     const res = await POST(req, makeParamsCtx({ id: "admin-user-id" }));
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/cannot revoke (your|their) own admin/i);
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toMatch(/another admin must act/i);
     expect(userAppRolesDeleteMock).not.toHaveBeenCalled();
   });
 

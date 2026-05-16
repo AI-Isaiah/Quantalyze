@@ -54,6 +54,15 @@ vi.mock("@/lib/supabase/server", () => ({
 // Issue 3 (audit-2026-05-07 follow-up): `rolesReadError` lets a test
 // inject a Postgres-style error into the post-mutation re-read so we can
 // pin the "mutation succeeded but read failed → 500" contract.
+//
+// audit-2026-05-07 fix M-0288: `preExistingGrant` controls the pre-upsert
+// select-by-(user_id,role).maybeSingle() the route now does to populate
+// `was_new_grant` in the role.grant audit metadata. `null` = new grant;
+// `{granted_at: "..."}` = re-grant.
+//
+// audit-2026-05-07 fix M-0287 / M-0289: `revokeCount` controls the
+// rows-affected count on the delete chain so tests can pin the no-op
+// revoke (count=0 → 404) vs successful revoke (count>0) behavior.
 const adminMockState = vi.hoisted(() => ({
   profileExists: true as boolean,
   rolesRows: [
@@ -62,6 +71,11 @@ const adminMockState = vi.hoisted(() => ({
   rolesReadError: null as
     | null
     | { code: string | null; message: string },
+  preExistingGrant: null as null | { granted_at: string },
+  preExistingGrantError: null as
+    | null
+    | { code: string | null; message: string },
+  revokeCount: 1 as number,
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -75,17 +89,50 @@ vi.mock("@/lib/supabase/admin", () => ({
           },
           delete: () => ({
             eq: () => ({
-              eq: async () => ({ error: null, count: 1 }),
+              eq: async () => ({
+                error: null,
+                count: adminMockState.revokeCount,
+              }),
             }),
           }),
-          select: (_cols: string) => ({
-            eq: async () => ({
+          // The route now uses TWO different select chains:
+          //   (1) Post-mutation read: `.select("role").eq("user_id", X)`
+          //       (awaited directly — returns role rows).
+          //   (2) Pre-grant existence check (M-0288):
+          //       `.select("granted_at").eq("user_id", X).eq("role", Y).maybeSingle()`
+          //       (returns single row or null).
+          // The chain object exposes BOTH the directly-awaited shape (for
+          // shape (1)) and a second `.eq().maybeSingle()` for shape (2).
+          select: (_cols: string) => {
+            const postMutationPromise = Promise.resolve({
               data: adminMockState.rolesReadError
                 ? null
                 : adminMockState.rolesRows,
               error: adminMockState.rolesReadError,
-            }),
-          }),
+            });
+            // First .eq() — shape (1) awaits this directly; shape (2)
+            // chains another .eq() + .maybeSingle().
+            return {
+              eq: (...args: unknown[]) => {
+                void args;
+                const node = {
+                  // shape (1): direct await on first .eq()
+                  then: postMutationPromise.then.bind(postMutationPromise),
+                  catch: postMutationPromise.catch.bind(postMutationPromise),
+                  finally:
+                    postMutationPromise.finally.bind(postMutationPromise),
+                  // shape (2): another .eq(), then .maybeSingle()
+                  eq: () => ({
+                    maybeSingle: async () => ({
+                      data: adminMockState.preExistingGrant,
+                      error: adminMockState.preExistingGrantError,
+                    }),
+                  }),
+                };
+                return node;
+              },
+            };
+          },
         };
       }
       if (table === "profiles") {
@@ -132,6 +179,9 @@ describe("POST /api/admin/users/[id]/roles — rate limit (I4)", () => {
     adminMockState.profileExists = true;
     adminMockState.rolesRows = [{ role: "analyst" }];
     adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.resetModules();
@@ -251,6 +301,9 @@ describe("response envelope consistency (P462)", () => {
     adminMockState.profileExists = true;
     adminMockState.rolesRows = [{ role: "analyst" }];
     adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -340,6 +393,9 @@ describe("Issue 3 — fetchUserRoles error propagation (audit-2026-05-07 follow-
     adminMockState.profileExists = true;
     adminMockState.rolesRows = [{ role: "analyst" }];
     adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     vi.doUnmock("@/lib/ratelimit");
@@ -395,5 +451,529 @@ describe("Issue 3 — fetchUserRoles error propagation (audit-2026-05-07 follow-
     const body = await res.json();
     expect(body.code).toBe("mutation_succeeded_but_read_failed");
     expect(body).not.toHaveProperty("roles");
+  });
+});
+
+/**
+ * audit-2026-05-07 fix M-0287 + M-0289 (silent-failure-hunter + code-reviewer
+ * conf-8): revoke on a role the user does not hold must NOT emit a
+ * role.revoke audit row and must NOT echo a 2xx (which the UI parrots as
+ * "Revoked '<role>'" — a false success). Pre-fix the route emitted the
+ * audit row + 200 envelope with `removed_rows: 0` metadata, producing
+ * ghost-revoke entries in the audit_log that say "admin X revoked role Y
+ * from user Z" when Y was never granted.
+ *
+ * These tests pin:
+ *   - count=0 → 404 with `code: "role_not_held"`.
+ *   - count=0 → NO audit RPC is fired (no log_audit_event call lands).
+ *   - count=0 → the response body is the error envelope, not the unified
+ *     `{ user_id, roles[] }` shape.
+ *   - count>0 → the existing happy path still passes (regression guard).
+ */
+describe("revoke no-op suppression — M-0287 + M-0289 (audit-2026-05-07)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("revoke with count=0 returns 404 with code=role_not_held and the error envelope", async () => {
+    adminMockState.revokeCount = 0;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.code).toBe("role_not_held");
+    // Crucial: the unified `{ user_id, roles[] }` happy-path envelope
+    // must NOT be returned — that would let the UI flash "Revoked
+    // 'analyst'" as a success toast for a no-op.
+    expect(body).not.toHaveProperty("roles");
+    expect(body).not.toHaveProperty("user_id");
+  });
+
+  it("revoke with count=0 does NOT emit a role.revoke audit RPC (audit-ghost-row gate)", async () => {
+    // Capture every RPC call against the user-scoped supabase client.
+    // The route now uses awaited `emit()` from @/lib/audit — if the
+    // no-op revoke path leaks an audit emit, the rpc spy will see it.
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    adminMockState.revokeCount = 0;
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(404);
+    // Pre-fix this would have been 1 (the role.revoke ghost row).
+    expect(rpcSpy).not.toHaveBeenCalled();
+  });
+
+  it("revoke with count>0 still emits the audit RPC and returns 200 with the unified envelope", async () => {
+    // Regression guard for M-0287: tightening the no-op path must not
+    // affect the happy path.
+    adminMockState.revokeCount = 1;
+    adminMockState.rolesRows = [];
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      user_id: "00000000-0000-0000-0000-000000000999",
+      roles: [],
+    });
+    // role.revoke + role.state_observed = 2 RPC calls.
+    expect(rpcSpy).toHaveBeenCalledTimes(2);
+    const actions = rpcSpy.mock.calls.map(
+      (c) => (c[1] as { p_action: string }).p_action,
+    );
+    expect(actions).toContain("role.revoke");
+    expect(actions).toContain("role.state_observed");
+  });
+});
+
+/**
+ * audit-2026-05-07 fix M-0288 (silent-failure-hunter conf-8): the grant
+ * path's `.upsert(..., { ignoreDuplicates: true })` returns `{ error: null }`
+ * whether a new row landed or a duplicate was ignored. Pre-fix the route
+ * emitted role.grant with NO discriminator — every UI double-click
+ * looked exactly like a fresh grant and the forensic query "when did
+ * user X first acquire admin" silently returned the latest re-grant
+ * timestamp instead of the original.
+ *
+ * The fix reads the existing (user_id, role) row BEFORE the upsert and
+ * threads `was_new_grant: boolean` into the audit metadata — analogous
+ * to `was_first_run` in account.sanitize.
+ */
+describe("grant was_new_grant discriminator — M-0288 (audit-2026-05-07)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("first-time grant: audit metadata carries was_new_grant=true", async () => {
+    adminMockState.preExistingGrant = null;
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const grantCall = rpcSpy.mock.calls.find(
+      (c) => (c[1] as { p_action: string }).p_action === "role.grant",
+    );
+    expect(grantCall).toBeDefined();
+    expect(
+      (grantCall![1] as { p_metadata: Record<string, unknown> }).p_metadata,
+    ).toMatchObject({
+      role: "analyst",
+      granted_by: TEST_ADMIN.id,
+      was_new_grant: true,
+    });
+  });
+
+  it("re-grant on existing row: audit metadata carries was_new_grant=false", async () => {
+    // Pre-existing row → re-grant. The route MUST emit role.grant
+    // unconditionally (operator intent), but the metadata must
+    // distinguish this from a fresh grant.
+    adminMockState.preExistingGrant = {
+      granted_at: "2026-01-01T00:00:00.000Z",
+    };
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const grantCall = rpcSpy.mock.calls.find(
+      (c) => (c[1] as { p_action: string }).p_action === "role.grant",
+    );
+    expect(grantCall).toBeDefined();
+    expect(
+      (grantCall![1] as { p_metadata: Record<string, unknown> }).p_metadata,
+    ).toMatchObject({
+      role: "analyst",
+      granted_by: TEST_ADMIN.id,
+      was_new_grant: false,
+    });
+  });
+
+  it("pre-existing read failure surfaces 500 — mutation does NOT run", async () => {
+    // If the pre-upsert SELECT fails we cannot compute was_new_grant.
+    // Returning 500 BEFORE the upsert is correct: we'd rather refuse a
+    // grant we can't audit honestly than land a row with a missing
+    // discriminator.
+    adminMockState.preExistingGrantError = {
+      code: "57014",
+      message: "statement timeout",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(500);
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * audit-2026-05-07 fix C-0066 (api-contract conf-7): self-action
+ * rejection across admin routes must agree on the HTTP status code.
+ * Pre-fix this route returned 400 for self-revoke while the sibling
+ * deletion-requests routes returned 403 (via _shared.ts:84-94) for the
+ * same conceptual error class. The fix standardizes on 403.
+ */
+describe("self-action 403 standardization — C-0066 (audit-2026-05-07)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "admin" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("admin self-revoking their own admin role returns 403 (not 400)", async () => {
+    const { POST } = await import("./route");
+    // Target the admin themself.
+    const req = new NextRequest(
+      `http://localhost:3000/api/admin/users/${TEST_ADMIN.id}/roles`,
+      {
+        method: "POST",
+        headers: VALID_ORIGIN,
+        body: JSON.stringify({ action: "revoke", role: "admin" }),
+      },
+    );
+    const res = await POST(req, {
+      params: Promise.resolve({ id: TEST_ADMIN.id }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    // Same envelope shape as deletion-requests/_shared.ts:84-94: a
+    // single `error` field with a "another admin must act" message.
+    expect(body.error).toMatch(/another admin must act/i);
+    // Mutation must NOT have run.
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * audit-2026-05-07 fix C-0067 (red-team conf-7): emit
+ * `role.state_observed` with the post-write boolean so concurrent
+ * grant+revoke races have a forensic anchor. The audit_log is the
+ * source of truth; the observed-state event records what THIS request
+ * saw, which is the only signal that survives the interleave.
+ *
+ * NOTE: this does NOT serialize the underlying race — the fix is
+ * observability, not synchronization. The brief's option (b) was
+ * chosen over (a) [advisory lock RPC] because the user_app_roles row
+ * is a cached enforcement substrate, not the source of truth.
+ */
+describe("role.state_observed anchor — C-0067 (audit-2026-05-07)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("grant path emits role.state_observed with holds_role=true on successful grant", async () => {
+    // Post-mutation re-read returns rolesRows = [{role: "analyst"}],
+    // so holds_role for "analyst" should be true.
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const stateCall = rpcSpy.mock.calls.find(
+      (c) =>
+        (c[1] as { p_action: string }).p_action === "role.state_observed",
+    );
+    expect(stateCall).toBeDefined();
+    expect(
+      (stateCall![1] as { p_metadata: Record<string, unknown> }).p_metadata,
+    ).toMatchObject({
+      role: "analyst",
+      observed_by: TEST_ADMIN.id,
+      following_action: "grant",
+      holds_role: true,
+    });
+  });
+
+  it("revoke path emits role.state_observed with holds_role=false on successful revoke", async () => {
+    // Post-revoke role set is empty, so holds_role should be false.
+    adminMockState.rolesRows = [];
+    adminMockState.revokeCount = 1;
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    const stateCall = rpcSpy.mock.calls.find(
+      (c) =>
+        (c[1] as { p_action: string }).p_action === "role.state_observed",
+    );
+    expect(stateCall).toBeDefined();
+    expect(
+      (stateCall![1] as { p_metadata: Record<string, unknown> }).p_metadata,
+    ).toMatchObject({
+      role: "analyst",
+      observed_by: TEST_ADMIN.id,
+      following_action: "revoke",
+      holds_role: false,
+    });
+  });
+
+  it("no-op revoke does NOT emit role.state_observed (state did not change because of this call)", async () => {
+    adminMockState.revokeCount = 0;
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(404);
+    expect(rpcSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * audit-2026-05-07 fix C-0065 (red-team conf-6): RBAC-mutating routes
+ * await the audit emit synchronously so the RPC runs under the still-
+ * valid admin session. Pre-fix the emit was scheduled via `after()`,
+ * which on Vercel runs after the response flushes — if the admin's
+ * session was revoked or expired in that window, the log_audit_event
+ * RPC raised (auth.uid() = NULL) and the emit dropped silently to
+ * console.error.
+ *
+ * This test pins the timing contract: by the time POST returns, the
+ * audit RPC has ALREADY been invoked. Pre-fix this would race —
+ * `after()` schedules the emit and the response can flush first.
+ */
+describe("synchronous audit emit — C-0065 (audit-2026-05-07)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 1;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("audit RPC has been called by the time POST resolves (no after()-scheduling)", async () => {
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async () => ({ data: null, error: null }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({
+            data: { user: TEST_ADMIN },
+            error: null,
+          }),
+        },
+        rpc: rpcSpy,
+        from: () => ({
+          select: () => ({
+            eq: async () => ({
+              data: [{ role: "admin" }],
+              error: null,
+            }),
+          }),
+        }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "grant", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(200);
+    // The crucial assertion: the audit RPC has ALREADY landed by the
+    // time the route Promise resolves. NO vi.waitFor needed. Pre-fix
+    // the emit was deferred via after() and this would zero out.
+    expect(rpcSpy).toHaveBeenCalled();
+    const actions = rpcSpy.mock.calls.map(
+      (c) => (c[1] as { p_action: string }).p_action,
+    );
+    expect(actions).toContain("role.grant");
   });
 });

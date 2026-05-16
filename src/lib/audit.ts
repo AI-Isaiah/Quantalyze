@@ -244,6 +244,14 @@ export type AuditAction =
   // --- 7.2 RBAC --------------------------------------------------------
   | "role.grant"
   | "role.revoke"
+  // audit-2026-05-07 fix C-0067 (red-team conf-7): post-write observed-
+  // state anchor emitted alongside role.grant / role.revoke on the
+  // admin RBAC route. Records the boolean `holds_role` that THIS
+  // request observed after the mutation re-read, giving forensic
+  // reconstruction a stable signal when two admins race a concurrent
+  // grant + revoke on the same (user_id, role) pair. See ADR-0023
+  // entry for the full taxonomy + rationale.
+  | "role.state_observed"
   // --- 7.3 GDPR workflow -----------------------------------------------
   | "account.sanitize"
   | "account.export"
