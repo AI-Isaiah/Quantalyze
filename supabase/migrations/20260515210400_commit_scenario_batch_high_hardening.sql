@@ -5,8 +5,9 @@
 -- Why this migration exists
 -- -------------------------
 -- The audit-2026-05-07 H-pass on supabase/migrations/082_commit_scenario_batch_rpc.sql
--- identified three SQL-actionable HIGH defects beyond what migrations
--- 083 / 128 / 131 / 134 closed in the prior remediation rounds:
+-- identified three clusters of SQL-actionable HIGH defects (four
+-- individual H-IDs) beyond what migrations 083 / 128 / 131 / 134 closed
+-- in the prior remediation rounds:
 --
 --   * H-0974 (silent-failure-hunter c8): commit_scenario_batch emits
 --     ZERO audit_log rows on success. SECURITY DEFINER RPC that
@@ -72,9 +73,11 @@
 --    (c) Fail-soft on audit emission. A failed log_audit_event_service
 --        call (mig 123 role gate denial, mig 123 32 KB metadata
 --        overflow) emits RAISE NOTICE but does NOT roll back the
---        commit. Half-audited is worse than half-committed only on
---        compliance reviews; the commit itself is the durable
---        contract the allocator relies on.
+--        commit. Missing audit is recoverable — the operator can
+--        replay the emission from the route-layer correlation token —
+--        but a rolled-back commit silently discards the allocator's
+--        scenario submission. The commit is the durable user-visible
+--        contract; audit is the secondary trail.
 --    The mig 131 4-arg signature `(uuid, jsonb, text, text)` is
 --    preserved verbatim. Route handlers in src/app/api/allocator/scenario/
 --    commit/route.ts continue to work unchanged.
@@ -140,7 +143,12 @@ CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+-- audit-2026-05-07 Q#4 audit-A: search_path is locked to (public, pg_catalog)
+-- to match the rest of the audit-slice SECURITY DEFINER functions
+-- (enqueue_compute_job / mark_compute_job_done / sanitize_user). pg_temp
+-- is excluded so a less-trusted role with pg_temp WRITE cannot hijack
+-- function/operator resolution inside the privileged body.
+SET search_path = public, pg_catalog
 AS $func$
 DECLARE
   v_caller            uuid := auth.uid();
@@ -164,26 +172,14 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- (1a) audit-2026-05-07 H-0976 + H-0977: 50-diff cap inside the RPC
-  -- mirroring the route layer's zod-enforced cap. A direct
-  -- supabase.rpc('commit_scenario_batch', ...) call from an authenticated
-  -- session that bypasses the Next.js route cannot DoS the RPC by
-  -- pushing a 100k-element array.
-  IF jsonb_typeof(p_diffs) <> 'array' THEN
-    RAISE EXCEPTION 'commit_scenario_batch: p_diffs must be a jsonb array'
-      USING ERRCODE = '22023';
-  END IF;
-  v_batch_length := jsonb_array_length(p_diffs);
-  IF v_batch_length = 0 THEN
-    RAISE EXCEPTION 'commit_scenario_batch: p_diffs must be a non-empty jsonb array'
-      USING ERRCODE = '22023';
-  END IF;
-  IF v_batch_length > 50 THEN
-    RAISE EXCEPTION 'commit_scenario_batch: p_diffs exceeds the 50-diff per-batch cap (got %). audit-2026-05-07 H-0976.', v_batch_length
-      USING ERRCODE = '22023';
-  END IF;
-
-  -- (1b) Idempotency reservation (mig 131 / Block D F.2).
+  -- (2) Idempotency reservation (mig 131 / Block D F.2).
+  -- audit-2026-05-07 Q#6 audit-A: the (3) 50-diff cap below runs AFTER
+  -- this block so a retry with the same Idempotency-Key returns the
+  -- cached envelope (or idempotency_body_mismatch on hash mismatch)
+  -- instead of being intercepted with a 22023 cap error. First-ever
+  -- calls with oversized bodies still hit the cap and roll back the
+  -- 'in_flight' reservation atomically since the cap raises before any
+  -- mutating work runs.
   IF p_idempotency_key IS NOT NULL THEN
     IF p_request_hash IS NULL OR length(p_request_hash) <> 64 THEN
       RAISE EXCEPTION 'commit_scenario_batch: p_idempotency_key requires a 64-char p_request_hash'
@@ -249,7 +245,28 @@ BEGIN
     END IF;
   END IF;
 
-  -- (3) Iterate diffs.
+  -- (3) audit-2026-05-07 H-0976 + H-0977: 50-diff cap inside the RPC
+  -- mirroring the route layer's zod-enforced cap. A direct
+  -- supabase.rpc('commit_scenario_batch', ...) call from an authenticated
+  -- session that bypasses the Next.js route cannot DoS the RPC by
+  -- pushing a 100k-element array. Fires AFTER (2) so retries can be
+  -- served from the idempotency cache before payload validation can
+  -- mask the cached state (audit-A Q#6).
+  IF jsonb_typeof(p_diffs) <> 'array' THEN
+    RAISE EXCEPTION 'commit_scenario_batch: p_diffs must be a jsonb array'
+      USING ERRCODE = '22023';
+  END IF;
+  v_batch_length := jsonb_array_length(p_diffs);
+  IF v_batch_length = 0 THEN
+    RAISE EXCEPTION 'commit_scenario_batch: p_diffs must be a non-empty jsonb array'
+      USING ERRCODE = '22023';
+  END IF;
+  IF v_batch_length > 50 THEN
+    RAISE EXCEPTION 'commit_scenario_batch: p_diffs exceeds the 50-diff per-batch cap (got %). audit-2026-05-07 H-0976.', v_batch_length
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- (4) Iterate diffs.
   FOR v_diff IN SELECT * FROM jsonb_array_elements(p_diffs) LOOP
     v_kind := v_diff->>'kind';
 
@@ -488,9 +505,19 @@ BEGIN
         )
       )
     );
-  EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'audit-2026-05-07 H-0974: scenario.commit audit emission failed for allocator % (sqlstate=%, msg=%); commit succeeded',
-      p_allocator_id, SQLSTATE, SQLERRM;
+  EXCEPTION
+    WHEN unique_violation
+      OR check_violation
+      OR string_data_right_truncation
+      OR numeric_value_out_of_range
+      OR insufficient_privilege THEN
+      -- Narrow trap (see Q#3 audit-A finding): swallow only audit-shape /
+      -- size / role-gate failures so the scenario commit completes;
+      -- schema-drift errors (42703 undefined_column / 42P01 undefined_table /
+      -- 42883 undefined_function) propagate so they surface loudly instead
+      -- of silently dropping the scenario.commit audit_log row.
+      RAISE NOTICE 'audit-2026-05-07 H-0974: scenario.commit audit emission failed for allocator % (sqlstate=%, msg=%); commit succeeded',
+        p_allocator_id, SQLSTATE, SQLERRM;
   END;
 
   RETURN jsonb_build_object('ok', true, 'recorded', v_recorded);
@@ -564,6 +591,13 @@ BEGIN
   IF v_body NOT LIKE '%scenario_commit_idempotency%' THEN
     RAISE EXCEPTION 'audit-2026-05-07: commit_scenario_batch lost mig 131 idempotency reservation';
   END IF;
+  -- audit-2026-05-07 R#3: re-assert PUBLIC EXECUTE absence on the 4-arg
+  -- signature via the mig 134 / C-0284 helper. The REVOKE above strips
+  -- any leak; this PERFORM raises insufficient_privilege if a future
+  -- migration ever re-grants PUBLIC.
+  PERFORM public._assert_no_public_execute(
+    'public.commit_scenario_batch(uuid, jsonb, text, text)'
+  );
 END $$;
 
 COMMIT;
