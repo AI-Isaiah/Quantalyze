@@ -7,6 +7,25 @@ and this project adheres to a 4-digit MAJOR.MINOR.PATCH.MICRO scheme so `/ship`
 can bump without ambiguity.
 
 
+## [0.22.40.17] - 2026-05-16
+
+**audit-retro PR #183 — allocator dashboard retroactive specialist fixes.** Closes 18 findings (8 HIGH + 10 MED) surfaced by the 6-specialist + red-team retroactive audit on PR #183 (allocator dashboard, already in production). The inline pre-merge review missed two 3-way-confirmed HIGH user-facing failure paths: (1) `consumeDashboardRecoveryFlag` was exported but never imported, so the recovery flag infrastructure C-0332-0335 had no consumer — the banner is now wired into `AllocationDashboardV2.tsx` with explicit dismiss handling; (2) `OutcomesWidget` populated `setError` but never rendered it, so failures became silent empty sparklines — error text now renders in the column body. Additional HIGH fixes: `widgetViewsFiredRef` + `unknownLoggedRef` now reset on `tweaks.showOutcomes` toggle and `portfolio?.id` change (telemetry was suppressed by stale refs across toggles), `EquityChart` M-1065 NaN guard at allValues push plus 3-tick fallback filter (red-team L4 — NaN array reached yMin/yMax), and `ScenarioCommitDiff.kind` narrowed into a 4-branch discriminated union with downstream `ScenarioCommitDrawer.buildSubmitDiffs` adjusted for exhaustiveness. 10 MED conf-8 fixes applied: pickUnion drift warn, `Object.create(null)` prototype-poisoning guard, persist-quota warn dedupe, parseISO NaN filter on EquityChart, ScenarioComposer Map-build memo split, recovery-flag validation order (removeItem after validate), and `tiles:null` silent-reset detection. 10 new regression tests added covering H-1197 IntersectionObserver deps, H-1199 unknown-widget warn, 4 TweaksContext field validation paths, parseTweakState union whitelist, persist setItem warn, and STRATEGY_COMPOSITE_WIDGETS parity. Post-fix Grok 4.3 adversarial pass: PASS (consumeDashboardRecoveryFlag + banner, Outcomes error surfacing, ScenarioCommitDiff union, and refactors all correct per foci). Two findings deferred to separate PRs: `WidgetProps.data: any` root invariant gap (touches ~30 widget files — separate refactor PR), and cross-hook localStorage origin sharing (architectural — needs design discussion).
+
+Rebased onto `origin/main` (0.22.40.16) and re-bumped to 0.22.40.17 to claim a clean slot after PR #188 (v0.22.40.16, CI hardening retro) advanced main past this PR's base.
+
+### Added
+- `src/app/(dashboard)/allocations/AllocationDashboardV2.retro-audit.test.tsx` — 269-line regression suite covering H-1197 IntersectionObserver deps, H-1199 unknown-widget warn dedupe, parseTweakState union whitelist, persist setItem warn, and STRATEGY_COMPOSITE_WIDGETS parity (closes retro H-test-gap-cluster).
+- `src/app/(dashboard)/allocations/components/Tweaks.test.tsx` — 152-line TweaksContext field validation test suite covering pickUnion drift warn and 4 parseTweakState union whitelist paths.
+
+### Changed
+- `AllocationDashboardV2.tsx` — wired `consumeDashboardRecoveryFlag` into mount-only effect with non-blocking banner display; reset `widgetViewsFiredRef` + `unknownLoggedRef` on `tweaks.showOutcomes` toggle and `portfolio?.id` change.
+- `OutcomesWidget.tsx` — render error state in column body; move cancelled-guard above the post-unmount console.error path.
+- `EquityChart.tsx` — M-1065 NaN guard at allValues push, parseISO NaN filter in fallback tick path, 3-tick fallback filter on overlay series.
+- `TweaksContext.tsx` — pickUnion drift warn on unknown union values, `Object.create(null)` prototype-poisoning guard, persistWarnedRef quota-warn dedupe, parseTweakState union whitelist warn.
+- `useDashboardConfig.ts` — recovery-flag validation order (removeItem after validate, not before), `tiles:null` silent-reset detection with console.warn + recovery flag set.
+- `ScenarioComposer.tsx` + `ScenarioCommitDrawer.tsx` — `ScenarioCommitDiff.kind` discriminated union (4 branches: composite-rebalance / single-rebalance / pause / resume); `buildSubmitDiffs` adjusted for exhaustive narrowing; ScenarioComposer Map-build memo split into two memos to avoid recomputation when only one input changes.
+
+
 ## [0.22.40.16] - 2026-05-16
 
 **Retroactive specialist findings on PR #179 (CI hardening permissions C-0293) — 9 HIGH/MED findings closed.** After PR #179 landed (`fd8de279`), a retroactive 5-specialist + red-team audit on the merged diff surfaced findings the original pre-merge review missed. This PR closes them with code + tests + docs.
