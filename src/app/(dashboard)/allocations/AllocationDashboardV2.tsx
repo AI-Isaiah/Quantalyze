@@ -352,11 +352,47 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     [props, config.timeframe],
   );
 
+  // pr189-followup H1 (silent-failure-hunter HIGH/9) — render the recovery
+  // banner ABOVE both render paths so empty-holdings allocators see the
+  // same "saved layout was reset" signal as populated ones. The flag is
+  // consumed on mount (drained from sessionStorage), so without this the
+  // empty-holdings short-circuit silently swallowed the breadcrumb for
+  // exactly the population most likely to hit it (new allocators with no
+  // holdings still picking up a stale-version persisted layout).
+  const recoveryBanner = recoveryReason != null && (
+    <div
+      role="status"
+      data-testid="dashboard-recovery-banner"
+      data-recovery-reason={recoveryReason}
+      className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-text-primary"
+    >
+      <div className="flex items-start gap-2">
+        <span aria-hidden className="font-semibold">Heads up:</span>
+        <span>
+          {recoveryReason === "parse_failed"
+            ? "We couldn't read your saved dashboard layout and reset it to defaults."
+            : recoveryReason === "version_reset"
+              ? "Your saved dashboard layout was from an older version and has been reset to the latest defaults."
+              : "Your saved dashboard layout used a legacy format and has been migrated to the new defaults."}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={dismissRecoveryBanner}
+        aria-label="Dismiss layout reset notice"
+        className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-text-muted transition-colors hover:bg-warning/20 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+
   // Phase 07 D-08 short-circuit — must come AFTER all hook calls above so
   // hook-order invariant holds across the empty / non-empty render paths.
   if (holdingsEmpty && !hasSyncing) {
     return (
       <div data-ui-v2-shell="true">
+        {recoveryBanner}
         <EmptyState hasSyncing={false} />
       </div>
     );
@@ -379,33 +415,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
         flaggedCount={flaggedHoldings.length}
         className="mt-3 px-1"
       />
-      {recoveryReason != null && (
-        <div
-          role="status"
-          data-testid="dashboard-recovery-banner"
-          data-recovery-reason={recoveryReason}
-          className="mt-3 flex items-start justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-text-primary"
-        >
-          <div className="flex items-start gap-2">
-            <span aria-hidden className="font-semibold">Heads up:</span>
-            <span>
-              {recoveryReason === "parse_failed"
-                ? "We couldn't read your saved dashboard layout and reset it to defaults."
-                : recoveryReason === "version_reset"
-                  ? "Your saved dashboard layout was from an older version and has been reset to the latest defaults."
-                  : "Your saved dashboard layout used a legacy format and has been migrated to the new defaults."}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={dismissRecoveryBanner}
-            aria-label="Dismiss layout reset notice"
-            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-text-muted transition-colors hover:bg-warning/20 hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+      {recoveryBanner}
       <div
         ref={dashboardContainerRef}
         className="relative"
