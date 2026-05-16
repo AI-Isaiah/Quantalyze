@@ -1051,9 +1051,9 @@ export interface PortfolioAnalytics {
  * distinguish "still warming up" from "real null" — which fixes the
  * silent rendering of a 0% return as a freshly-warmed portfolio.
  */
-export function isCompletedAnalytics(
-  a: { computation_status: PortfolioAnalyticsComputationStatus } | null | undefined,
-): a is { computation_status: "complete" } & Record<string, unknown> {
+export function isCompletedAnalytics<
+  T extends { computation_status: PortfolioAnalyticsComputationStatus },
+>(a: T | null | undefined): a is T & { computation_status: "complete" } {
   return !!a && a.computation_status === "complete";
 }
 
@@ -1062,9 +1062,9 @@ export function isCompletedAnalytics(
  * "Computing…" placeholders. Distinct from `failed` (terminal error
  * state) and `complete` (real metrics, possibly nullable).
  */
-export function isPendingAnalytics(
-  a: { computation_status: PortfolioAnalyticsComputationStatus } | null | undefined,
-): boolean {
+export function isPendingAnalytics<
+  T extends { computation_status: PortfolioAnalyticsComputationStatus },
+>(a: T | null | undefined): boolean {
   return !!a && (a.computation_status === "pending" || a.computation_status === "computing");
 }
 
