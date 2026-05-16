@@ -28,11 +28,24 @@ import { createPortal } from "react-dom";
 import {
   REJECTION_REASONS,
   REJECTION_REASON_LABELS,
+  type RejectionReason,
 } from "@/lib/bridge-outcome-schema";
 import type { ScenarioCommitDiff } from "./ScenarioComposer";
 
+// pr189-followup M13 (type-design-analyzer MED/8) — narrow
+// `rejection_reason` from `string?` to the `RejectionReason` enum so the
+// drawer can't write a non-enum value. The runtime check in allFilled()
+// at REJECTION_REASONS.some(...) re-validates the same invariant, but
+// the type narrowing makes a future regression a compile error rather
+// than relying on the imperative re-check to catch it.
+//
+// PerRowState remains a 3-key bag for all four diff kinds (a fuller
+// discriminated-union refactor mirroring ScenarioCommitDiff was
+// considered but the runtime kind-switch at buildSubmitDiffs covers
+// the safety question and the refactor would be invasive). The
+// narrowing here closes the most-likely drift surface.
 interface PerRowState {
-  rejection_reason?: string;
+  rejection_reason?: RejectionReason;
   percent_allocated?: number;
   note?: string;
 }
@@ -290,26 +303,45 @@ export function ScenarioCommitDrawer({
       // would have left `merged: ScenarioCommitDiff` un-narrowed and
       // TypeScript couldn't know which optional field is valid on each
       // shape. The kind-switch carries the narrowing through.
-      if (d.kind === "voluntary_remove") {
-        return {
-          ...d,
-          ...(r.rejection_reason
-            ? { rejection_reason: r.rejection_reason }
-            : {}),
-          ...(note !== undefined ? { note } : {}),
-        };
+      //
+      // pr189-followup M7 (silent-failure-hunter MED/9) + red-team MED/8 —
+      // exhaustive switch on `kind` with an `assertNever` default so a
+      // future 5th union member produces a compile-time error in this
+      // function. Pre-followup, the trailing `else` was labeled
+      // 'voluntary_modify' but actually matched ANY unknown kind, silently
+      // shipping partial-shape diffs for new kinds with no kind-specific
+      // input field. The discriminated-union work's whole value
+      // proposition was undermined by this single non-exhaustive fallthrough.
+      switch (d.kind) {
+        case "voluntary_remove":
+          return {
+            ...d,
+            ...(r.rejection_reason
+              ? { rejection_reason: r.rejection_reason }
+              : {}),
+            ...(note !== undefined ? { note } : {}),
+          };
+        case "voluntary_add":
+        case "bridge_recommended":
+          return {
+            ...d,
+            ...(r.percent_allocated !== undefined
+              ? { percent_allocated: r.percent_allocated }
+              : {}),
+            ...(note !== undefined ? { note } : {}),
+          };
+        case "voluntary_modify":
+          // voluntary_modify — only `note` is a per-row drawer input.
+          return note !== undefined ? { ...d, note } : { ...d };
+        default: {
+          const _exhaustive: never = d;
+          throw new Error(
+            `[ScenarioCommitDrawer] buildSubmitDiffs — unhandled diff kind: ${
+              (_exhaustive as { kind: string }).kind
+            }`,
+          );
+        }
       }
-      if (d.kind === "voluntary_add" || d.kind === "bridge_recommended") {
-        return {
-          ...d,
-          ...(r.percent_allocated !== undefined
-            ? { percent_allocated: r.percent_allocated }
-            : {}),
-          ...(note !== undefined ? { note } : {}),
-        };
-      }
-      // voluntary_modify — only `note` is a per-row drawer input.
-      return note !== undefined ? { ...d, note } : { ...d };
     });
   }
 
@@ -371,9 +403,18 @@ export function ScenarioCommitDrawer({
     // edge-cached empty 200, or any other non-JSON payload surfaces as a
     // proper failure rather than as the catch branch's "network error"
     // (which would be wrong — the request did reach the server).
-    let json: SubmitResponse;
+    //
+    // pr189-followup M11 (type-design-analyzer MED/8) — guard against
+    // unstructured payloads BEFORE lifting into state. Pre-followup, the
+    // `as SubmitResponse` cast accepted any shape (an edge-cached `{}`,
+    // a future server change to a new envelope, an HTML error page that
+    // somehow parsed as JSON). The defensive `?? 0` further down in
+    // partial-render then masked the dishonesty. Validate the minimum
+    // structural shape — `recorded` must be a finite number — and
+    // surface a clear failure when it isn't.
+    let raw: unknown;
     try {
-      json = (await res.json()) as SubmitResponse;
+      raw = await res.json();
     } catch {
       if (controller.signal.aborted) return;
       setState({
@@ -393,6 +434,31 @@ export function ScenarioCommitDrawer({
       });
       return;
     }
+    const isValidShape =
+      raw !== null &&
+      typeof raw === "object" &&
+      typeof (raw as { recorded?: unknown }).recorded === "number" &&
+      Number.isFinite((raw as { recorded: number }).recorded);
+    if (!isValidShape) {
+      if (controller.signal.aborted) return;
+      setState({
+        kind: "failure",
+        failureReason: "generic",
+        response: {
+          recorded: 0,
+          errors: [
+            {
+              index: -1,
+              error: res.ok
+                ? "Server returned a malformed response — no decisions were recorded."
+                : `Server returned a malformed response (status ${res.status}) — no decisions were recorded.`,
+            },
+          ],
+        },
+      });
+      return;
+    }
+    const json = raw as SubmitResponse;
 
     // Strict success gate: the route's single-tx RPC commits the WHOLE batch
     // or rolls back the WHOLE batch. `recorded === diffs.length` is the only
@@ -548,11 +614,18 @@ export function ScenarioCommitDrawer({
                             <select
                               required
                               value={row.rejection_reason ?? ""}
-                              onChange={(e) =>
-                                setRow(idx, {
-                                  rejection_reason: e.target.value,
-                                })
-                              }
+                              onChange={(e) => {
+                                // pr189-followup M13 — value comes from the
+                                // REJECTION_REASONS-derived <option> list
+                                // below, so the runtime value is always a
+                                // member of the union. The cast bridges the
+                                // string-typed event payload to the narrowed
+                                // PerRowState.rejection_reason type. The
+                                // allFilled() check at L260 re-validates the
+                                // invariant defensively.
+                                const next = e.target.value as RejectionReason;
+                                setRow(idx, { rejection_reason: next });
+                              }}
                               className="rounded border border-border bg-surface px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
                               aria-label={`Why not? (${d.holding_ref})`}
                               data-testid={`commit-rejection-${idx}`}
