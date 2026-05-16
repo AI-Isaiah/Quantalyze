@@ -782,6 +782,60 @@ export interface ApiKey {
   last_429_at: string | null;
 }
 
+/**
+ * audit-2026-05-07 M-0583: trust-boundary parser for `api_keys` rows.
+ * The DB column `exchange` is plain TEXT with no CHECK constraint —
+ * the TS narrow union `"binance"|"okx"|"bybit"` was a compile-time
+ * promise the storage layer did not honor. A typo ("binnance") would
+ * land silently and break downstream `EXCHANGE_LABELS[key.exchange]`
+ * lookups with `undefined`. The Zod schema enforces the union at the
+ * read boundary; `parseApiKeyRows()` drops violators with a redacted
+ * warn. Mirrors `parsePositionRows` / `parseFundingFeeRows`.
+ *
+ * NOTE: this guard is opt-in for now — `getUserApiKeys` and the
+ * other callers that read api_keys rows should switch to
+ * `parseApiKeyRows(rows)` in a follow-up. The vocabulary lands here
+ * first.
+ */
+export const ApiKeyRowSchema = z
+  .object({
+    id: z.string(),
+    user_id: z.string(),
+    exchange: z.enum(["binance", "okx", "bybit"]),
+    label: z.string(),
+    is_active: z.boolean(),
+    sync_status: z.string().nullable(),
+    last_sync_at: _isoTimestampNullable,
+    account_balance_usdt: _coerceNumberNullable,
+    created_at: _isoTimestamp,
+    sync_error: z.string().nullable(),
+    last_429_at: _isoTimestampNullable,
+  })
+  .strict() satisfies z.ZodType<ApiKey>;
+
+export function parseApiKeyRows(rows: unknown[]): ApiKey[] {
+  const out: ApiKey[] = [];
+  for (const row of rows) {
+    const parsed = ApiKeyRowSchema.safeParse(row);
+    if (parsed.success) {
+      out.push(parsed.data);
+    } else {
+      const rowId = (row && typeof row === "object" && "id" in row)
+        ? (row as { id?: unknown }).id
+        : undefined;
+      const safeIssues = parsed.error.issues.map((i) => ({
+        path: i.path.join("."),
+        code: i.code,
+      }));
+      console.warn(
+        "[parseApiKeyRows] dropping invalid api_key row",
+        { rowId, issues: safeIssues },
+      );
+    }
+  }
+  return out;
+}
+
 export interface DiscoveryCategory {
   id: string;
   name: string;
