@@ -759,6 +759,73 @@ def test_derived_trade_metrics_win_rate_ulp_drift_stays_fractional():
     )
 
 
+# /simplify Phase B+C test-coverage HIGH #2: comprehensive boundary
+# parametrize covering ULP drift near 1.0, the 1.5 strict threshold, percent
+# values, and non-finite producer drift. A future "tidy" that flips the
+# threshold back to `> 1.0` (or relaxes it to `>= 1.5`) fails this loudly
+# across 13 cases — complementary to the ULP-drift test above, which pins
+# the named constant.
+@pytest.mark.parametrize(
+    "raw_win_rate, expected_normalized",
+    [
+        # Legitimate fractional values near 1.0 stay fractional.
+        (0.0, 0.0),
+        (0.5, 0.5),
+        (1.0, 1.0),
+        (1.0001, 1.0),     # ULP drift — clamped to 1.0, NOT divided by 100
+        (1.4999, 1.0),     # still below the 1.5 percent threshold
+        (1.5, 1.0),        # exactly at threshold (`> 1.5` is False) — clamp
+        (1.5001, 0.015001),  # just above threshold → percent → /100
+        (60.0, 0.6),
+        (100.0, 1.0),
+        (-0.1, 0.0),       # negative → clamped to 0
+        # Non-finite producer drift collapses to 0 (NOT NaN propagating).
+        (float("inf"), 0.0),
+        (float("-inf"), 0.0),
+        (float("nan"), 0.0),
+    ],
+)
+def test_derived_trade_metrics_win_rate_boundary(
+    raw_win_rate: float, expected_normalized: float,
+) -> None:
+    """Pins win_rate normalization across the load-bearing boundary (1.5,
+    ULP drift near 1.0, non-finite). Asserts expectancy reflects the
+    normalized win_rate by computing it independently against the same
+    avg_win / avg_loss.
+    """
+    from services.analytics_runner import _compute_derived_trade_metrics
+
+    v = {
+        "buy_volume_pct": 0.0,
+        "sell_volume_pct": 0.0,
+        "total_fills": 0,
+        "total_volume_usd": 0.0,
+    }
+    avg_win = 1.0
+    avg_loss = -1.0
+    result = _compute_derived_trade_metrics(
+        v,
+        {
+            "win_rate": raw_win_rate,
+            "avg_winning_trade": avg_win,
+            "avg_losing_trade": avg_loss,
+            "winners_count": 0,
+            "losers_count": 0,
+            "realized_pnl_per_trade": [],
+        },
+    )
+    # expectancy = wr * avg_win - (1 - wr) * |avg_loss|
+    expected_expectancy = (
+        expected_normalized * avg_win
+        - (1 - expected_normalized) * abs(avg_loss)
+    )
+    assert result["expectancy"] == pytest.approx(expected_expectancy), (
+        f"raw_win_rate={raw_win_rate!r} expected normalized "
+        f"{expected_normalized}, got expectancy {result['expectancy']} "
+        f"(expected {expected_expectancy})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 12 Plan 05 / METRICS-09 — volume aggregator over raw fills
 # Phase 12 Plan 05 / METRICS-10 — Trade Mix (audit-gated 4-bucket vs 2-bucket)
@@ -1895,7 +1962,7 @@ def _make_paginated_order_mock(rows: list[dict]) -> MagicMock:
 
     The runner now uses composite order_by tuples (e.g. (snapshot_date,
     symbol, side) for snapshots, (timestamp, id) for fills) so
-    ``_paginated_select`` chains multiple ``.order(col, desc=...)`` calls
+    ``paginated_select`` chains multiple ``.order(col, desc=...)`` calls
     before ``.range()``. Each ``.order()`` must land back on the same
     configured mock so the final ``.range()`` exposes ``_make_paged_range``.
     """

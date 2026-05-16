@@ -45,11 +45,11 @@ from fastapi import HTTPException
 from services.benchmark import get_benchmark_returns
 from services.db import (
     PaginatedSelectTruncated,
-    _paginated_select,
     db_execute,
     get_supabase,
+    paginated_select,
 )
-from services.metrics import compute_all_metrics
+from services.metrics import _safe_float, compute_all_metrics
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger("quantalyze.analytics.runner")
@@ -205,19 +205,12 @@ async def _load_position_time_series(
     # Audit-2026-05-07 H-0629 / H-0643: paginate the snapshot fetch. The
     # bare SELECT was bounded only by PostgREST's per-response cap
     # (1000 rows by default on hosted Supabase), so any strategy with
-    # > 1000 snapshot rows (multi-symbol × multi-year backfills hit this
-    # easily) silently truncated to a sub-sample of the recent window —
-    # corrupting turnover / NAV grids without any signal. Delegate to the
-    # shared ``_paginated_select`` helper which raises
-    # ``PaginatedSelectTruncated`` on hard-cap overflow (audit #52
-    # convention) — we let it propagate so a 1M-row strategy fails loud
-    # rather than silently aggregating over a partial window.
-    #
-    # Composite order_by: (snapshot_date, symbol, side) matches the
+    # > 1000 snapshot rows silently truncated. Composite order_by
+    # (snapshot_date, symbol, side) matches the
     # ``position_snapshots_unique_per_day`` index from migration 034 so
     # cross-page row ties cannot duplicate or skip rows.
     snapshots = await db_execute(
-        lambda: _paginated_select(
+        lambda: paginated_select(
             supabase.table("position_snapshots")
             .select("snapshot_date, symbol, side, size_usd, mark_price")
             .eq("strategy_id", strategy_id),
@@ -464,34 +457,26 @@ def _compute_derived_trade_metrics(
     # expectancy formula `win_rate * avg_win - (1 - win_rate) * |avg_loss|`
     # blows up by ~100×. Normalize at the boundary so a single-character
     # producer drift cannot ship inflated expectancy.
-    win_rate = float(trade_metrics_from_positions.get("win_rate") or 0.0)
-    # Audit-2026-05-07 red-team follow-up: the prior `if win_rate > 1.0`
-    # threshold misclassified `1.0001` (ULP drift from `winners/total` at
-    # 100% winners) as a percent and divided by 100, shipping a 1% win-rate
-    # for a 100%-winner strategy — a catastrophic 100× expectancy error in
-    # the WRONG direction. Use `> 1.5` so legitimate fractional drift near
-    # 1.0 stays fractional, while any value clearly outside [0,1] (e.g.
-    # 60.0 == 60%) is still treated as a percent. Also drop non-finite
-    # values and clamp to [0,1] so `inf` / NaN producer drift cannot ship
-    # nonsense expectancy.
-    if not math.isfinite(win_rate) or win_rate < 0:
+    # Threshold is `> 1.5` (not `> 1.0`): `winners/total` at 100% winners
+    # can ULP-drift to `1.0001`, and the old `> 1.0` check misclassified
+    # that as a percent, shipping a 1% win-rate for a 100%-winner strategy.
+    # Anything clearly outside [0,1] (e.g. 60.0 == 60%) is still treated
+    # as percent. Non-finite/negative inputs collapse to 0 so producer
+    # drift cannot ship nonsense expectancy.
+    win_rate = _safe_float(trade_metrics_from_positions.get("win_rate")) or 0.0
+    if win_rate < 0:
         win_rate = 0.0
     elif win_rate > WIN_RATE_PERCENT_HEURISTIC_THRESHOLD:
         win_rate = win_rate / 100.0
     win_rate = min(win_rate, 1.0)
-    avg_win = float(trade_metrics_from_positions.get("avg_winning_trade") or 0.0)
-    avg_loss = float(trade_metrics_from_positions.get("avg_losing_trade") or 0.0)
-    # Audit-2026-05-07 H-0647 / H-0648 follow-up: per-trade aggregations
-    # below filter non-finite pnl via `_finite_pnl`, but `avg_winning_trade`
-    # / `avg_losing_trade` are pre-aggregated UPSTREAM by reconstruct_positions
-    # — a `+inf` realized_pnl passes `pnl > 0` there and inflates the
-    # winners' average. Zero only the non-finite side so a healthy partner
-    # metric (e.g. legitimate `avg_loss` when `avg_win` is poisoned) still
-    # contributes to `risk_reward_ratio` instead of being wiped silently.
-    if not math.isfinite(avg_win):
-        avg_win = 0.0
-    if not math.isfinite(avg_loss):
-        avg_loss = 0.0
+    # Per-trade aggregations below filter non-finite pnl via `_safe_float`,
+    # but `avg_winning_trade` / `avg_losing_trade` are pre-aggregated
+    # UPSTREAM by reconstruct_positions — a `+inf` realized_pnl passes
+    # `pnl > 0` there and inflates the winners' average. Zero only the
+    # non-finite side so a healthy partner metric still contributes to
+    # `risk_reward_ratio` instead of being wiped silently.
+    avg_win = _safe_float(trade_metrics_from_positions.get("avg_winning_trade")) or 0.0
+    avg_loss = _safe_float(trade_metrics_from_positions.get("avg_losing_trade")) or 0.0
     winners_count = int(trade_metrics_from_positions.get("winners_count") or 0)
     losers_count = int(trade_metrics_from_positions.get("losers_count") or 0)
     per_trade = trade_metrics_from_positions.get("realized_pnl_per_trade") or []
@@ -505,22 +490,12 @@ def _compute_derived_trade_metrics(
         "profit_factor_short": None,
     }
 
-    # Shared coercion helper. Audit-2026-05-07 H-0647 / H-0648: a NaN / inf /
-    # non-numeric `realized_pnl` (typically from an upstream divide-by-zero in
-    # `reconstruct_positions`) must be dropped at the boundary, not let pass
-    # into SQN / profit-factor / weighted-R:R math where it silently corrupts
-    # JSONB output. Used by all per-trade aggregations below.
+    # NaN/inf/non-numeric `realized_pnl` (typically an upstream
+    # divide-by-zero in `reconstruct_positions`) must be dropped at the
+    # boundary — it silently corrupts SQN / profit-factor / weighted-R:R
+    # math (NaN evades both `p > 0` and `p < 0` filters).
     def _finite_pnl(t: dict) -> float | None:
-        raw = t.get("realized_pnl")
-        if raw is None:
-            return None
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(val):
-            return None
-        return val
+        return _safe_float(t.get("realized_pnl"))
 
     # Expectancy: only meaningful when at least one of avg_win / avg_loss is
     # non-zero. All-zero position book → keep expectancy=None per the empty
@@ -564,32 +539,19 @@ def _compute_derived_trade_metrics(
         out["weighted_risk_reward_ratio"] = pnl_weighted_num / pnl_weighted_den
 
     # METRICS-08: SQN over per-trade R-multiples (R = realized_pnl / risk_unit).
-    # risk_unit derived from |avg_loss| (the canonical Van Tharp denominator).
+    # risk_unit = |avg_loss| (canonical Van Tharp denominator).
     #
-    # SQN scaling note (audit-2026-05-07 H-0652): we cap the scaling factor at
-    # sqrt(min(N, 100)) rather than the academic sqrt(N). The 100-cap is
-    # Van Tharp's original SQN definition (Tharp, *Trade Your Way to
-    # Financial Freedom*, 2nd ed., 2007) — quantstats does NOT implement
-    # SQN, so there is no external parity oracle for this metric and the
-    # golden-fixture value is self-anchored. Unbounded sqrt(N) inflates
-    # SQN for high-trade-count strategies, distorting cross-strategy
-    # comparison. If a future change moves to the academic sqrt(N) form,
-    # regen the golden fixture in the same change.
-    #
-    # Audit-2026-05-07 H-0647 / H-0648: NaN / inf realized_pnl values
-    # (commonly an upstream divide-by-zero from reconstruct_positions when
-    # entry_price == 0) pass the `is not None` filter and silently corrupt
-    # the SQN math (NaN propagates through mean/var) and the profit_factor
-    # math (NaN values evade BOTH `p > 0` and `p < 0` filters, draining
-    # gross profit and gross loss). Filter on `math.isfinite` so non-finite
-    # inputs are dropped at the boundary rather than poisoning JSONB.
+    # Scaling cap is sqrt(min(N, 100)) — Van Tharp's original definition
+    # (Tharp, *Trade Your Way to Financial Freedom*, 2nd ed., 2007).
+    # quantstats does NOT implement SQN, so there is no external parity
+    # oracle and the golden-fixture value is self-anchored. Unbounded
+    # sqrt(N) inflates SQN for high-trade-count strategies, distorting
+    # cross-strategy comparison. If a future change moves to the academic
+    # sqrt(N) form, regen the golden fixture in the same change.
     risk_unit = abs(avg_loss) if avg_loss else 0.0
     if risk_unit > 0 and per_trade:
-        r_multiples = [
-            v / risk_unit
-            for t in per_trade
-            for v in [_finite_pnl(t)] if v is not None
-        ]
+        finite_pnls = [v for v in (_finite_pnl(t) for t in per_trade) if v is not None]
+        r_multiples = [v / risk_unit for v in finite_pnls]
         if len(r_multiples) >= 2:
             mean_r = sum(r_multiples) / len(r_multiples)
             var_r = sum((r - mean_r) ** 2 for r in r_multiples) / (
@@ -601,17 +563,18 @@ def _compute_derived_trade_metrics(
                     min(len(r_multiples), SQN_TRADE_COUNT_CAP)
                 )
 
-    # Profit Factor segmented by side — uses position-side
-    # realized_pnl_per_trade. Same `_finite_pnl` coercion as SQN /
-    # weighted-R:R so a non-finite pnl can't poison either bucket.
-    long_pnls = [
-        v for t in per_trade if t.get("side") == "long"
-        for v in [_finite_pnl(t)] if v is not None
-    ]
-    short_pnls = [
-        v for t in per_trade if t.get("side") == "short"
-        for v in [_finite_pnl(t)] if v is not None
-    ]
+    # Profit Factor segmented by side — same `_finite_pnl` coercion so a
+    # non-finite pnl can't poison either bucket.
+    long_pnls: list[float] = []
+    short_pnls: list[float] = []
+    for t in per_trade:
+        v = _finite_pnl(t)
+        if v is None:
+            continue
+        if t.get("side") == "long":
+            long_pnls.append(v)
+        elif t.get("side") == "short":
+            short_pnls.append(v)
 
     def _profit_factor(pnls: list[float]) -> float | None:
         gp = sum(p for p in pnls if p > 0)
@@ -1032,21 +995,16 @@ async def run_strategy_analytics(strategy_id: str) -> dict:
         fills_fetch_failed = False
         fills_fetch_error: str | None = None
         try:
-            # Audit-2026-05-07 H-0630 / H-0643: paginate the fills fetch.
-            # Active live OKX strategies routinely have tens of thousands of
-            # fills; the bare SELECT was capped at PostgREST's default 1000
+            # Active live OKX strategies routinely have tens of thousands
+            # of fills; bare SELECT was capped at PostgREST's default 1000
             # rows, silently corrupting volume / turnover / trade_mix math.
-            # Shared ``_paginated_select`` raises on hard-cap overflow so
-            # pathological strategies fail loud rather than silently
-            # aggregating over a partial fills set.
-            #
-            # Composite order_by: (timestamp, id) — OKX millisecond
+            # Composite order_by (timestamp, id) — OKX millisecond
             # timestamps collide trivially when one order fills against
             # multiple makers in the same ms; the UUID primary key is a
             # guaranteed tiebreaker so paginated rows cannot duplicate or
             # skip at page boundaries.
             raw_fills = await db_execute(
-                lambda: _paginated_select(
+                lambda: paginated_select(
                     supabase.table("trades")
                     .select("side, cost, is_maker, timestamp")
                     .eq("strategy_id", strategy_id)

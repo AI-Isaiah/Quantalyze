@@ -25,14 +25,14 @@ async def db_execute(fn):
 
 
 class PaginatedSelectTruncated(RuntimeError):
-    """Audit-2026-05-07 #52 — raised when ``_paginated_select`` exhausts its
-    hard-cap of pages without seeing a short page (the natural-stop signal).
+    """Raised when ``paginated_select`` exhausts its hard-cap of pages
+    without seeing a short page (the natural-stop signal).
 
-    Pre-fix the helper silently sliced at 1M rows and returned what it had,
-    so hit-rate metrics computed over a partially-loaded window reported
-    stable-looking numbers from corrupt data. Surfacing as a typed exception
-    forces the caller to either (a) raise to the operator (default), or
-    (b) explicitly catch and decide a degraded path is acceptable.
+    Forces the caller to either raise to the operator or explicitly catch
+    and accept a degraded path; pre-fix the helper silently sliced at 1M
+    rows and returned what it had, so aggregates computed over a
+    partially-loaded window reported stable-looking numbers from corrupt
+    data.
 
     Carries ``page_count``, ``page_size``, and a ``hint`` string for log
     triage. Callers typically pass count-only hints (e.g.
@@ -49,59 +49,55 @@ class PaginatedSelectTruncated(RuntimeError):
         self.page_size = page_size
         self.hint = hint
         super().__init__(
-            f"_paginated_select hit hard cap of {page_count} pages "
+            f"paginated_select hit hard cap of {page_count} pages "
             f"× {page_size} rows ({page_count * page_size:,} rows); "
             f"truncation would corrupt downstream aggregates"
             + (f" (hint: {hint})" if hint else "")
         )
 
 
-def _paginated_select(
+def paginated_select(
     builder,
-    order_by: str | tuple[tuple[str, bool], ...],
+    order_by: tuple[tuple[str, bool], ...],
     page_size: int = 1000,
     hard_cap_pages: int = 1000,
     truncation_hint: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Drain a PostgREST SELECT in fixed-size pages via `.range(start, end)`.
+    """Drain a PostgREST SELECT in fixed-size pages via ``.range(start, end)``.
 
-    The batched hit-rate path filters `match_batches` / `match_candidates`
-    by lists of ids, and at real production scale either result set can
-    exceed PostgREST's per-response limit (1000 rows by default on
-    Supabase hosted, sometimes lower). A single `.limit(N)` would silently
-    truncate beyond that ceiling — pagination keeps us correct at every
-    scale.
+    Necessary because a single ``.limit(N)`` silently truncates beyond
+    PostgREST's per-response ceiling (1000 rows by default on Supabase
+    hosted), and at production scale our batched filter-by-id paths
+    routinely exceed that.
 
-    ``order_by`` is REQUIRED: Postgres makes no guarantee about row order
-    without an explicit ORDER BY, so paginating without it can skip or
-    duplicate rows across pages. Callers must pass a stable sort key.
-    Two shapes are accepted:
+    ``order_by`` is REQUIRED — Postgres gives no row-order guarantee
+    without ORDER BY, so paginating without it can skip or duplicate rows
+    across pages. Pass each ``(column, desc)`` in the order they should be
+    applied. Composite shape lets callers ride specific indexes (e.g.
+    ``(allocator_id, computed_at DESC)`` →
+    ``idx_match_batches_allocator_recent``); UUIDv4 primary keys defeat
+    such indexes (see audit-2026-05-07 ``#27`` for the motivating
+    regression).
 
-      * ``str`` — single-column ascending sort (legacy shape).
-      * ``tuple[tuple[str, bool], ...]`` — composite sort, where each
-        ``(column, desc)`` tuple is applied in order. Use the composite
-        shape when the caller wants the helper's pagination to ride a
-        specific composite Postgres index (e.g. ``match_batches`` ->
-        ``idx_match_batches_allocator_recent`` is keyed
-        ``(allocator_id, computed_at DESC)``). UUIDv4 primary keys defeat
-        such indexes — see audit-2026-05-07 ``#27`` for the regression
-        that motivated this signature.
-
-    ``hard_cap_pages`` is a sanity belt: 1000 pages × 1000 rows = 1M rows
-    per query. Pre-fix (audit-2026-05-07 ``#52``) hitting this limit
-    logged a warning and silently returned partial data. We now raise
-    ``PaginatedSelectTruncated`` so the caller cannot accidentally
-    aggregate over a truncated window. Pass ``truncation_hint`` to
-    annotate the exception with caller-side context (e.g. the table
-    name + filter values).
+    ``hard_cap_pages`` is a sanity belt (1000 × 1000 = 1M rows). Hitting
+    it raises ``PaginatedSelectTruncated`` instead of returning partial
+    data; pass ``truncation_hint`` to annotate the exception with
+    caller-side context.
     """
-    rows: list[dict[str, Any]] = []
     if isinstance(order_by, str):
-        ordered = builder.order(order_by)
-    else:
-        ordered = builder
-        for column, desc in order_by:
-            ordered = ordered.order(column, desc=desc)
+        # Pre-2026-05 the helper accepted a bare ``str`` for single-column
+        # ASC. The current contract is composite-only; without this guard
+        # a stray str would unpack character-by-character and surface as a
+        # cryptic ``ValueError: not enough values to unpack`` from the
+        # ``for column, desc`` loop below.
+        raise TypeError(
+            "paginated_select: order_by must be tuple[tuple[str, bool], ...]; "
+            f"pass ((order_by, False),) for single-column ASC instead of {order_by!r}"
+        )
+    ordered = builder
+    for column, desc in order_by:
+        ordered = ordered.order(column, desc=desc)
+    rows: list[dict[str, Any]] = []
     for page in range(hard_cap_pages):
         start = page * page_size
         end = start + page_size - 1
@@ -110,13 +106,12 @@ def _paginated_select(
         rows.extend(chunk)
         if len(chunk) < page_size:
             return rows
-    # Audit-2026-05-07 red-team follow-up: a dataset whose row count is
-    # EXACTLY hard_cap_pages × page_size has the loop exhausting on a
-    # final full page without ever seeing a short page — yet every row
-    # was read. Peek one more page before raising so the truncation
-    # alarm only fires on actual truncation. Reading 1 extra page on
-    # the rare boundary case is cheap; falsely failing a 1M-row strategy
-    # is not.
+    # Boundary peek: a dataset whose row count is EXACTLY
+    # hard_cap_pages × page_size exits the loop on a final full page
+    # without ever seeing a short page — yet every row was read. One
+    # extra range() distinguishes "exact boundary" (peek empty) from
+    # "real overflow" (peek non-empty) so the alarm only fires on the
+    # latter.
     boundary_start = hard_cap_pages * page_size
     boundary_end = boundary_start + page_size - 1
     boundary_result = ordered.range(boundary_start, boundary_end).execute()
@@ -124,7 +119,7 @@ def _paginated_select(
     if not boundary_chunk:
         return rows
     logger.error(
-        "_paginated_select: hit hard cap of %d pages × %d rows — raising "
+        "paginated_select: hit hard cap of %d pages × %d rows — raising "
         "PaginatedSelectTruncated (hint=%s)",
         hard_cap_pages,
         page_size,
