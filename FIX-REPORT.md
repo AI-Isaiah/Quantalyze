@@ -211,3 +211,18 @@ noted these as out-of-PR-scope.)
 - `analytics-service/services/job_worker.py` (modified)
 - `.review/specialist.*.jsonl` (5 — input artifacts, untracked)
 - `.review/red-team.jsonl` (NEW — untracked)
+
+## Stage F — post-rebase Grok 4.3 adversarial pass (2026-05-16)
+
+**Status**: PASS
+
+Single adversarial pass on `analytics-service/services/job_worker.py` diff (29.6KB prompt, focus areas: concurrency, silent-failure regression, retry storm, cross-dep with portfolio.py reaper, test coverage).
+
+Findings (none BLOCKING):
+
+- **HIGH**, 8/10, `job_worker.py:334` (`classify_exception` + `_HTTP_UNKNOWN_4XX`): 403/404 now map to "unknown" (retried). Comment justifies deploy/rotation races but no per-job backoff bound visible in this diff. Scope-bounded: caller-side retry cap is in the dispatcher, not classify_exception. Backlog: long-tail tech-debt to add explicit max-retry cap visible from this layer.
+- **MEDIUM**, 7/10, `job_worker.py:675` (`run_sync_funding_job` upsert_errors → FAILED+transient): aligns with `classify_exception` but depends on caller-side retry/backoff (out of file scope). Same scope-bounded conclusion as the HIGH finding.
+- **LOW**, 6/10, `job_worker.py:892` (`phase2_failed` RMW): TOCTOU acknowledged + mitigated by best-effort + recovery writes. No new race introduced vs. prior cursor logic.
+- **LOW**, 5/10, `job_worker.py:607` (`_emit_audit` broad-except warning): intentional per P907 contract; does not re-introduce silent failure for job outcome.
+
+**VERDICT: PASS** — 30 prior findings remain closed; no BLOCKING concurrency / swallow / retry-storm defects in this diff.
