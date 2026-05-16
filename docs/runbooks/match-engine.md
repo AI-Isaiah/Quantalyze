@@ -85,7 +85,13 @@ Any profile with `role IN ('allocator', 'both')` is automatically included in th
 
 ## Metrics to watch
 
-- `match_engine_recompute_total{status}` — cron success/failure/disabled
+- `match_engine_recompute_total{status}` — cron status. Discrete values:
+  `ok` (failures don't outnumber successes), `degraded` (`failed > processed`,
+  majority-failure but at least one row through), `total_failure`
+  (`processed=0, failed>0` — structural fault, alert immediately),
+  `disabled`, `skipped` (recent batch), `no_allocators`, `empty_universe`.
+  Pre-v0.22.37.0 this label was binary `ok`/`failed` and `total_failure` was
+  masked as a green 200; alert on `degraded` or `total_failure` going forward.
 - `match_engine_candidates_generated_total` — should tick up each cron run
 - `match_engine_recompute_latency_seconds` — p95 < 30s
 - Eval dashboard hit rate — the single most important metric for v2 graduation
