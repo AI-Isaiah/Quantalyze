@@ -244,6 +244,30 @@ export type AuditAction =
   // --- 7.2 RBAC --------------------------------------------------------
   | "role.grant"
   | "role.revoke"
+  // audit-2026-05-07 fix C-0067 (red-team conf-7): post-write observed-
+  // state anchor emitted alongside role.grant / role.revoke on the
+  // admin RBAC route. Records the boolean `holds_role` that THIS
+  // request observed after the mutation re-read, giving forensic
+  // reconstruction a stable signal when two admins race a concurrent
+  // grant + revoke on the same (user_id, role) pair. See ADR-0023
+  // entry for the full taxonomy + rationale.
+  | "role.state_observed"
+  // audit-2026-05-07 specialist-apply (code-reviewer HIGH + security HIGH +
+  // silent-failure-hunter M-#4): the no-op revoke path (count=0 → 404) was
+  // suppressing both role.revoke and role.state_observed audit rows to
+  // close M-0287's false-success regression. The unintended consequence
+  // is a silent role-enumeration channel (a compromised admin can probe
+  // (user_id, role) pairs via revoke and observe 200 vs 404 with NO
+  // forensic trace). `role.revoke_noop` records the operator's INTENT
+  // (and the observed `was_held: false` outcome) while keeping the
+  // role.revoke action reserved for actual state-changing revokes.
+  | "role.revoke_noop"
+  // audit-2026-05-07 specialist-apply (api-contract HIGH + code-reviewer
+  // M-#4 + security #4): POST path now performs a profile-existence
+  // check before mutation (mirrors GET) so missing-user maps to a 404
+  // with code='user_not_found' uniformly. No new action needed for the
+  // 404 itself (no mutation, no audit row), but listed here for
+  // discoverability.
   // --- 7.3 GDPR workflow -----------------------------------------------
   | "account.sanitize"
   | "account.export"
