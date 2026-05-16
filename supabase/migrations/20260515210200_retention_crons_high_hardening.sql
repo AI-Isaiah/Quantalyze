@@ -60,8 +60,11 @@
 -- 3. Re-schedule JOB 3 (retention_notification_dispatches) with a
 --    body that PRESERVES queued reminders so an un-consumed signal
 --    isn't silently purged. Rows with status='queued' are excluded
---    from the 180d DELETE; rows in sent/failed/error/etc terminal
---    states are still pruned on the existing 180d schedule.
+--    from the 180d DELETE; rows in sent/failed terminal states (the
+--    only non-queued values permitted by the
+--    notification_dispatches.status CHECK in mig
+--    20260409002118_notification_dispatches.sql:20) are still pruned
+--    on the existing 180d schedule.
 -- 4. Re-schedule JOB 5 (retention_compute_jobs_failed) with a body
 --    that uses `next_attempt_at` (when present) as the cutoff instead
 --    of `created_at`. A failed_retry row with a future next_attempt_at
@@ -196,10 +199,11 @@ BEGIN
 
   -- ---- JOB 3: retention_notification_dispatches (H-0910) ----
   -- Preserve queued reminders so an un-consumed signal isn't silently
-  -- discarded. Terminal-state rows (sent/failed/error) follow the
-  -- existing 180d schedule. The api_key_rotation_reminder consumer
-  -- (Sprint 7) drains queued rows; until it ships, queued rows
-  -- accumulate but are NOT lost.
+  -- discarded. Terminal-state rows (sent/failed — the only non-queued
+  -- values permitted by the status CHECK) follow the existing 180d
+  -- schedule. The api_key_rotation_reminder consumer (Sprint 7) drains
+  -- queued rows; until it ships, queued rows accumulate but are NOT
+  -- lost.
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retention_notification_dispatches') THEN
     PERFORM cron.unschedule('retention_notification_dispatches');
   END IF;
