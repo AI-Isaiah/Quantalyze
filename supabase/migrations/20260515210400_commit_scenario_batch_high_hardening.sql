@@ -132,8 +132,12 @@ COMMENT ON INDEX allocator_holdings_ownership_probe_idx IS
 -- The mig 128 P1957 latest-asof ownership probe is preserved.
 -- The mig 128 P1956 single-encoding percent_allocated is preserved.
 -- The mig 131 idempotency reservation block is preserved.
-DROP FUNCTION IF EXISTS public.commit_scenario_batch(uuid, jsonb, text, text);
-
+--
+-- audit-2026-05-07 CR #1 (Phase B): the prior DROP FUNCTION IF EXISTS
+-- was cargo-culted from mig 131 (which changed the signature). Here
+-- the signature is identical to mig 131's, so CREATE OR REPLACE
+-- preserves ACLs and dependent objects atomically without the
+-- DROP+CREATE round-trip. Removed.
 CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
   p_allocator_id uuid,
   p_diffs jsonb,
@@ -578,8 +582,13 @@ BEGIN
   IF v_body NOT LIKE '%50-diff per-batch cap%' THEN
     RAISE EXCEPTION 'audit-2026-05-07 H-0976/H-0977 verification failed: 50-diff cap missing from body';
   END IF;
-  IF v_body NOT LIKE '%scenario.commit%' THEN
-    RAISE EXCEPTION 'audit-2026-05-07 H-0974 verification failed: scenario.commit audit emission missing from body';
+  -- audit-2026-05-07 PTA #1 / SFT #6 (Phase B): match the LITERAL
+  -- 'scenario.commit' string only when it appears inside a PERFORM
+  -- call to log_audit_event_service. The earlier substring probe
+  -- matched both the live PERFORM and the comment block above it,
+  -- so a refactor that commented out the PERFORM would pass.
+  IF v_body !~* 'PERFORM\s+public\.log_audit_event_service[^;]*''scenario\.commit''' THEN
+    RAISE EXCEPTION 'audit-2026-05-07 H-0974 verification failed: scenario.commit audit emission not present as a live PERFORM log_audit_event_service call';
   END IF;
   -- Preservation gates — mig 128 / mig 131
   IF v_body NOT LIKE '%value_usd > 0%' THEN

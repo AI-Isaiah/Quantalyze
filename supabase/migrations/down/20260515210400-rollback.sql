@@ -3,8 +3,15 @@
 --
 -- Restores the pre-forward state:
 --   * Drops allocator_holdings_ownership_probe_idx.
---   * Restores the migration-131 commit_scenario_batch body verbatim
---     (no 50-cap, no scenario.commit audit emission).
+--   * Restores the migration-131 commit_scenario_batch body — minus
+--     the 50-cap and the scenario.commit audit emission, BUT keeping
+--     search_path locked to (public, pg_catalog). Restoring
+--     `pg_temp` in search_path would re-introduce the SECURITY DEFINER
+--     search-path hijack vector that audit-A Q#4 closed; a rollback
+--     of the H-0974 audit additions is not a license to re-open a
+--     known security weakness. Same policy as mig 134's rollback
+--     ("restoring a known-bad ACL state is not a rollback, it is a
+--     regression").
 
 BEGIN;
 SET lock_timeout = '5s';
@@ -22,7 +29,10 @@ CREATE OR REPLACE FUNCTION public.commit_scenario_batch(
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+-- audit-2026-05-07 Q#4 + SFT #11 (Phase B): search_path stays locked to
+-- (public, pg_catalog) even on rollback. Restoring `pg_temp` would
+-- silently re-open the hijack vector the forward migration closed.
+SET search_path = public, pg_catalog
 AS $func$
 DECLARE
   v_caller            uuid := auth.uid();
