@@ -1001,6 +1001,25 @@ class TestStderrRedaction:
         # The redaction marker confirms the scrub ran.
         assert "<postgres-dsn-redacted>" in msg
 
+    def test_redact_kv_password_form(self) -> None:
+        """Specialist defense in depth: libpq's key=value error form
+        (rare but emitted by pgbouncer SSL probes) carries the password
+        in plain text. The kv redactor must scrub it even when the URI
+        regex doesn't match anything."""
+        msg = "could not connect: host=db.example.com user=postgres password=HUNTER2 dbname=q"
+        redacted = ks._redact_dsn(msg)
+        assert "HUNTER2" not in redacted
+        assert "password=<redacted>" in redacted
+        # Non-secret context must survive.
+        assert "host=db.example.com" in redacted
+        assert "user=postgres" in redacted
+
+    def test_redact_kv_password_case_insensitive(self) -> None:
+        """libpq accepts `Password=` / `PASSWORD=` interchangeably — the
+        scrub must be case-insensitive to match."""
+        assert "HUNTER2" not in ks._redact_dsn("PASSWORD=HUNTER2 trailing")
+        assert "HUNTER2" not in ks._redact_dsn("Password = HUNTER2 trailing")
+
 
 # --- H-0622: atomic TODOS write --------------------------------------------
 
@@ -1135,6 +1154,27 @@ class TestConfirmProdGate:
         monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/d")
         rc = await ks.main(cli_p999=100_000.0, cli_count=10)
         assert rc == 0
+
+    @pytest.mark.asyncio
+    async def test_garbage_confirmed_value_fails_loud(self, monkeypatch) -> None:
+        """Specialist gap: PHASE12_KILL_SWITCH_CONFIRMED=maybe must fail
+        loud (SystemExit) rather than silently default to either polarity.
+        Mirrors the RUN_KILL_SWITCH parser's Rule-12 contract."""
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_KILL_SWITCH_CONFIRMED", "maybe")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/d")
+        with pytest.raises(SystemExit):
+            await ks.main(cli_p999=100_000.0, cli_count=10)
+
+    @pytest.mark.asyncio
+    async def test_garbage_force_value_fails_loud(self, monkeypatch) -> None:
+        """Same Rule-12 contract for PHASE12_FORCE_CUTOVER — a typo
+        cannot silently flip the resume gate either polarity."""
+        monkeypatch.setenv("RUN_KILL_SWITCH", "true")
+        monkeypatch.setenv("PHASE12_FORCE_CUTOVER", "ture")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost/d")
+        with pytest.raises(SystemExit):
+            await ks.main(cli_p999=100_000.0, cli_count=10)
 
 
 # --- H-0614: --force overrides p999 threshold gate -------------------------

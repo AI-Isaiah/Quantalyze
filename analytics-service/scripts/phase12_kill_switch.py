@@ -246,24 +246,41 @@ _DSN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Specialist defense-in-depth: libpq also accepts a key=value
+# connection-string form (`host=db.example.com user=postgres
+# password=HUNTER2 dbname=quantalyze`). psql's error formatter
+# normally surfaces the URI form, but pgbouncer / sslmode adapters
+# can echo the kv form. The kv redactor scrubs `password=…` so
+# the secret never reaches the deploy log, even if our primary URI
+# regex misses something unusual.
+_KV_PASSWORD_PATTERN = re.compile(
+    r"\bpassword\s*=\s*\S+",
+    re.IGNORECASE,
+)
+
 
 def _redact_dsn(message: str) -> str:
-    """Strip embedded postgresql:// connection strings from an error message.
+    """Strip embedded postgresql:// connection strings (and key=value
+    `password=…` fragments) from an error message.
 
     psql commonly echoes the connection URI back in stderr on auth /
     SSL / parse failures — `connection to server at "postgresql://postgres:
     HUNTER2@db.host..." failed: ...`. Propagating that stderr verbatim
     into a RuntimeError → CI log = credential disclosure (H-0623).
 
-    The regex matches the full DSN (with or without `+psycopg` driver
+    The URI regex matches the full DSN (with or without `+psycopg` driver
     suffix) and replaces it with `<postgres-dsn-redacted>`. We don't try
     to extract just the password — the host is also sensitive (it
     confirms which Supabase project the operator was connected to, and
     co-tenants can use that to scope further probes).
+
+    The kv `password=…` regex is defense in depth for the rarer libpq
+    key=value error format.
     """
     if not message:
         return message
-    return _DSN_PATTERN.sub("<postgres-dsn-redacted>", message)
+    redacted = _DSN_PATTERN.sub("<postgres-dsn-redacted>", message)
+    return _KV_PASSWORD_PATTERN.sub("password=<redacted>", redacted)
 
 # Path to the phase 12 TODOS file — kill-switch trigger appends a log entry here.
 TODOS_PATH = (
