@@ -62,7 +62,16 @@ def _to_utc_iso(value: datetime | pd.Timestamp) -> str:
         return value.isoformat()
     raise TypeError(f"_to_utc_iso: unsupported value type {type(value).__name__}")
 
-from models.schemas import BridgeRequest, PortfolioAnalyticsRequest, PortfolioOptimizerRequest, VerifyStrategyRequest
+from models.schemas import (
+    BridgeRequest,
+    PortfolioAnalyticsRequest,
+    PortfolioAnalyticsResponse,
+    PortfolioBridgeResponse,
+    PortfolioOptimizerRequest,
+    PortfolioOptimizerResponse,
+    VerifyStrategyRequest,
+    VerifyStrategyResponse,
+)
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import get_supabase
@@ -1009,7 +1018,7 @@ def _generate_rebalance_drift_alert(supabase, portfolio_id: str) -> None:
 # Endpoint 1: POST /api/portfolio-analytics
 # ---------------------------------------------------------------------------
 
-@router.post("/portfolio-analytics")
+@router.post("/portfolio-analytics", response_model=PortfolioAnalyticsResponse)
 @limiter.limit("10/hour")
 async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
     """Compute full portfolio analytics for a given portfolio."""
@@ -1046,6 +1055,7 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
     # full sanitized payload inline so callers can render without an extra
     # round-trip; analytics_id is preserved for cache-key purposes.
     return {
+        "ok": True,
         "status": "complete",
         "portfolio_id": req.portfolio_id,
         **result,
@@ -1059,7 +1069,7 @@ async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest):
 _OPTIMIZER_PUBLISHED_LIMIT = 200  # max published strategies pulled per optimizer run
 
 
-@router.post("/portfolio-optimizer")
+@router.post("/portfolio-optimizer", response_model=PortfolioOptimizerResponse)
 @limiter.limit("10/hour")
 async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     """Find diversification candidates for a portfolio.
@@ -1216,6 +1226,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
     )
 
     return {
+        "ok": True,
         "status": "complete",
         "portfolio_id": req.portfolio_id,
         "suggestions": suggestions,
@@ -1227,7 +1238,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest):
 # Endpoint 3: POST /api/portfolio-bridge
 # ---------------------------------------------------------------------------
 
-@router.post("/portfolio-bridge")
+@router.post("/portfolio-bridge", response_model=PortfolioBridgeResponse)
 @limiter.limit("10/hour")
 async def portfolio_bridge(request: Request, req: BridgeRequest):
     """Find replacement candidates for an underperforming strategy (Bridge V1).
@@ -1324,6 +1335,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
             },
         )
         return {
+            "ok": True,
             "status": "complete",
             "portfolio_id": req.portfolio_id,
             "underperformer_strategy_id": req.underperformer_strategy_id,
@@ -1353,6 +1365,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
     )
 
     return {
+        "ok": True,
         "status": "complete",
         "portfolio_id": req.portfolio_id,
         "underperformer_strategy_id": req.underperformer_strategy_id,
@@ -1364,7 +1377,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest):
 # Endpoint 4: POST /api/verify-strategy
 # ---------------------------------------------------------------------------
 
-@router.post("/verify-strategy")
+@router.post("/verify-strategy", response_model=VerifyStrategyResponse)
 @limiter.limit("5/hour")
 async def verify_strategy(request: Request, req: VerifyStrategyRequest):
     """Verify a strategy from exchange API keys (landing page flow).
@@ -1542,6 +1555,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest):
         # the computed metrics in the response so the caller can stamp
         # them onto strategy_verifications.metrics_snapshot if desired.
         return {
+            "ok": True,
             "status": "complete",
             "verification_id": verification_id,
             "matched_strategy_id": matched_strategy_id,

@@ -493,6 +493,46 @@ class TestAnalyticsResponseInline:
         assert "**result" in src
 
 
+class TestResponseEnvelopeContract:
+    """H-0586 / H-0591: source-level contract guards for the shared
+    response envelopes added in models/schemas.py.
+
+    Each endpoint must:
+      1. Declare response_model on its @router.post decorator.
+      2. Include "ok": True in its return dict.
+
+    Without these, the OpenAPI schema is empty and a regression that
+    drops analytics_id / verification_id / etc. from the response
+    passes silently.
+    """
+
+    def test_portfolio_analytics_has_response_model(self):
+        src = _function_source("portfolio_analytics")
+        assert '"ok": True' in src
+
+    def test_portfolio_optimizer_has_response_model(self):
+        src = _function_source("portfolio_optimizer")
+        assert '"ok": True' in src
+
+    def test_portfolio_bridge_has_response_model(self):
+        src = _function_source("portfolio_bridge")
+        # Both branches (empty-candidates fast-path + main path).
+        assert src.count('"ok": True') >= 2
+
+    def test_verify_strategy_has_response_model(self):
+        src = _function_source("verify_strategy")
+        assert '"ok": True' in src
+
+    def test_response_models_are_declared(self):
+        """The response_model= annotation must be on the @router.post
+        decorator for each endpoint."""
+        # The decorator + response_model live at module scope; scan the raw source.
+        assert "response_model=PortfolioAnalyticsResponse" in _PORTFOLIO_SRC
+        assert "response_model=PortfolioOptimizerResponse" in _PORTFOLIO_SRC
+        assert "response_model=PortfolioBridgeResponse" in _PORTFOLIO_SRC
+        assert "response_model=VerifyStrategyResponse" in _PORTFOLIO_SRC
+
+
 class TestAuditSkipAnnotations:
     """M-0613 / M-0622 / H-0588 — every @audit-skip marker in portfolio.py
     must be followed within 8 lines by a supabase mutation call.

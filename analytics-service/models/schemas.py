@@ -1,6 +1,6 @@
 import math
-from pydantic import BaseModel, field_validator
-from typing import Optional
+from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Any, Optional
 
 
 class ComputeRequest(BaseModel):
@@ -70,3 +70,63 @@ class VerifyStrategyRequest(BaseModel):
     api_key: str
     api_secret: str
     passphrase: Optional[str] = None  # OKX only
+
+
+# ---------------------------------------------------------------------------
+# Response envelopes (audit H-0586 / H-0591)
+# ---------------------------------------------------------------------------
+# Previously each of /portfolio-analytics, /portfolio-optimizer, and
+# /verify-strategy returned an ad-hoc untyped dict. Without a Pydantic
+# response_model:
+#   1. OpenAPI schema was empty so typed-SDK consumers couldn't share
+#      a success supertype.
+#   2. A refactor that dropped `analytics_id` from the response would
+#      pass without any contract-level alarm.
+#   3. The three sibling endpoints had divergent envelopes
+#      (analytics_id vs verification_id vs suggestions).
+#
+# We model the response shapes here so FastAPI can serialize + validate
+# them. We keep the existing field names rather than rewriting the wire
+# format (TS callers depend on them), but we declare an `ok: True`
+# discriminator + a common `portfolio_id` field where applicable so
+# clients can share decoders. `extra="allow"` keeps existing inline
+# metrics (twr/sharpe/etc.) compatible until a follow-up tightens them.
+
+
+class PortfolioAnalyticsResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool = True
+    status: str  # legacy field kept for backward compat; mirrors ok
+    portfolio_id: str
+    analytics_id: str
+
+
+class PortfolioOptimizerResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool = True
+    status: str
+    portfolio_id: str
+    suggestions: list[dict[str, Any]] = []
+    persisted: bool = False
+
+
+class VerifyStrategyResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool = True
+    status: str
+    verification_id: str
+    matched_strategy_id: Optional[str] = None
+    matching_status: Optional[str] = None
+
+
+class PortfolioBridgeResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool = True
+    status: str
+    portfolio_id: str
+    underperformer_strategy_id: str
+    candidates: list[dict[str, Any]] = []
