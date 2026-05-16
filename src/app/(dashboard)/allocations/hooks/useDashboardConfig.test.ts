@@ -1,6 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { useDashboardConfig, useDashboardConfigV2 } from "./useDashboardConfig";
+import {
+  consumeDashboardRecoveryFlag,
+  useDashboardConfig,
+  useDashboardConfigV2,
+} from "./useDashboardConfig";
 import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 import {
   DESIGNER_KEY_TO_WIDGET_ID,
@@ -54,7 +58,27 @@ const localStorageMock = {
 
 vi.stubGlobal("localStorage", localStorageMock);
 
+const sessionStore = new Map<string, string>();
+const sessionStorageMock = {
+  getItem: vi.fn((key: string) => sessionStore.get(key) ?? null),
+  setItem: vi.fn((key: string, value: string) => {
+    sessionStore.set(key, value);
+  }),
+  removeItem: vi.fn((key: string) => {
+    sessionStore.delete(key);
+  }),
+  clear: vi.fn(() => {
+    sessionStore.clear();
+  }),
+  get length() {
+    return sessionStore.size;
+  },
+  key: vi.fn(() => null),
+};
+vi.stubGlobal("sessionStorage", sessionStorageMock);
+
 const STORAGE_KEY = "quantalyze-dashboard-config";
+const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
 const LEGACY_LAYOUT_VERSION = 3;
 
 // ---------------------------------------------------------------------------
@@ -542,5 +566,197 @@ describe("dual-hook ping-pong (Phase A3 regression)", () => {
     expect(
       final.current.config.tiles.some((t) => t.k === "correlation-matrix"),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// audit-2026-05-07 — silent-failure-hunter c10 regression coverage.
+// ---------------------------------------------------------------------------
+//
+// loadV2Config / loadLegacyConfig / persistV2 / persistLegacy used to swallow
+// every failure mode (corrupt JSON, Safari SecurityError, quota exceeded,
+// schema-version mismatch) in bare `catch {}` blocks — no console.warn,
+// no Sentry breadcrumb. C-0332..C-0335 (conf 10) flagged these as the
+// single most painful silent-failure cluster in the dashboard. The fixes
+// (a) console.warn on each catch and (b) set a sessionStorage recovery
+// flag for the V2 load path that the dashboard can drain to surface a
+// one-shot toast.
+
+describe("audit-2026-05-07 — silent-failure-hunter c10 (recovery flag + console.warn)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    store.clear();
+    sessionStore.clear();
+    vi.clearAllMocks();
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("loadV2Config: corrupt JSON triggers console.warn AND sets the parse_failed recovery flag", () => {
+    store.set(STORAGE_KEY, "{not-valid-json");
+
+    renderHook(() => useDashboardConfigV2());
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("loadV2Config failed"),
+      expect.any(Error),
+    );
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
+  });
+
+  it("loadV2Config: layoutVersion drift sets version_reset recovery flag without console.warn (expected drift, not error)", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [{ k: "kpi-strip", w: 4 }],
+        timeframe: "YTD",
+        layoutVersion: 9999, // future version
+      }),
+    );
+
+    renderHook(() => useDashboardConfigV2());
+
+    // Drift is expected on version bumps — no console.warn, just the flag.
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("version_reset");
+  });
+
+  it("loadV2Config: a v2 blob carrying legacy-shape tiles sets legacy_in_v2_blob recovery flag", () => {
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify({
+        tiles: [
+          // v4 shape mixed with v3 (legacy) shape — looksLikeLegacyTile trips
+          { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
+        ],
+        timeframe: "YTD",
+        layoutVersion: LAYOUT_VERSION,
+      }),
+    );
+
+    renderHook(() => useDashboardConfigV2());
+
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("legacy_in_v2_blob");
+  });
+
+  it("loadV2Config: getItem throwing (Safari SecurityError-equivalent) console.warns and sets parse_failed flag", () => {
+    localStorageMock.getItem.mockImplementationOnce(() => {
+      throw new Error("SecurityError: storage disabled");
+    });
+
+    renderHook(() => useDashboardConfigV2());
+
+    expect(warnSpy).toHaveBeenCalled();
+    expect(sessionStore.get(RECOVERY_FLAG_KEY)).toBe("parse_failed");
+  });
+
+  it("persistV2: localStorage.setItem throwing QuotaExceededError surfaces a distinct quota message", () => {
+    localStorageMock.setItem.mockImplementationOnce(() => {
+      const err = new DOMException(
+        "quota",
+        "QuotaExceededError",
+      );
+      throw err;
+    });
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+    // First mutation triggers the persist effect (hasMutated.current → true,
+    // then next render flips it; setTimeframe forces a re-render via
+    // setConfig).
+    act(() => {
+      result.current.setTimeframe("1M");
+    });
+    // The persist runs in the second effect pass, so trigger another
+    // mutation to push the change through.
+    act(() => {
+      result.current.setTimeframe("3M");
+    });
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" && c[0].includes("quota exceeded"),
+      ),
+    ).toBe(true);
+  });
+
+  it("persistV2: a generic setItem failure uses the non-quota copy", () => {
+    localStorageMock.setItem.mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    const { result } = renderHook(() => useDashboardConfigV2());
+    act(() => {
+      result.current.setTimeframe("1M");
+    });
+    act(() => {
+      result.current.setTimeframe("3M");
+    });
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" &&
+          c[0].includes("localStorage write failed") &&
+          !c[0].includes("quota"),
+      ),
+    ).toBe(true);
+  });
+
+  it("loadLegacyConfig: corrupt JSON triggers console.warn (legacy hook parity with V2)", () => {
+    store.set(STORAGE_KEY, "{bad");
+
+    renderHook(() => useDashboardConfig());
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("loadLegacyConfig failed"),
+      expect.any(Error),
+    );
+  });
+
+  it("persistLegacy: setItem failure triggers console.warn", () => {
+    localStorageMock.setItem.mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    const { result } = renderHook(() => useDashboardConfig());
+    // Force a mutation so the persist effect actually fires after the
+    // first observe-without-write pass.
+    act(() => {
+      result.current.addTile("rolling-sharpe");
+    });
+    act(() => {
+      result.current.addTile("correlation-matrix");
+    });
+
+    expect(
+      warnSpy.mock.calls.some(
+        (c: unknown[]) =>
+          typeof c[0] === "string" &&
+          c[0].includes("[useDashboardConfig] localStorage write failed"),
+      ),
+    ).toBe(true);
+  });
+
+  it("consumeDashboardRecoveryFlag drains the flag exactly once", () => {
+    sessionStore.set(RECOVERY_FLAG_KEY, "parse_failed");
+
+    expect(consumeDashboardRecoveryFlag()).toBe("parse_failed");
+    // Second call: flag was cleared on read.
+    expect(consumeDashboardRecoveryFlag()).toBeNull();
+  });
+
+  it("consumeDashboardRecoveryFlag returns null when no flag is set", () => {
+    expect(consumeDashboardRecoveryFlag()).toBeNull();
+  });
+
+  it("consumeDashboardRecoveryFlag ignores unrecognised values", () => {
+    sessionStore.set(RECOVERY_FLAG_KEY, "not_a_known_reason");
+
+    expect(consumeDashboardRecoveryFlag()).toBeNull();
   });
 });

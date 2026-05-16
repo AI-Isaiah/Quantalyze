@@ -40,6 +40,20 @@ import { DEFAULT_LAYOUT, LAYOUT_VERSION } from "../lib/dashboard-defaults";
 const STORAGE_KEY = "quantalyze-dashboard-config";
 
 /**
+ * sessionStorage flag set by `loadV2Config` whenever a corrupt blob OR a
+ * layoutVersion mismatch is observed. AllocationDashboardV2 can read it
+ * (one-shot) to surface a non-blocking toast / banner to the user. Stored
+ * in sessionStorage so the flag clears on browser-tab close — a refresh of
+ * the same tab still surfaces it; navigating away discards it.
+ *
+ * Set values:
+ *   "parse_failed"      — JSON.parse threw / shape was malformed
+ *   "version_reset"     — layoutVersion drifted from LAYOUT_VERSION
+ *   "legacy_in_v2_blob" — V2 hook saw legacy-shape tiles in the blob
+ */
+const RECOVERY_FLAG_KEY = "dashboard.config.recoveredFromCorruption";
+
+/**
  * The legacy hook's "what version it knows about". Hardcoded here (not
  * imported from dashboard-defaults.ts which now exports v4) so the dormant
  * legacy hook resets to v3 defaults when it sees a v4 blob. The legacy hook
@@ -53,6 +67,25 @@ const LAYOUT_VERSION_LEGACY = 3;
  * exported before the v4 bump. Retained while the legacy hook is dormant;
  * deleted alongside the hook in the follow-up legacy-tree cleanup PR.
  */
+/**
+ * Best-effort: mark that the V2 loader recovered from a corrupt or
+ * version-mismatched blob so the dashboard can surface a one-time toast.
+ * Failure to write the flag is itself silent (sessionStorage may be locked
+ * in the same private-mode contexts that produced the corrupt read), but
+ * the parent console.warn already reported the underlying error.
+ */
+function setRecoveryFlag(
+  reason: "parse_failed" | "version_reset" | "legacy_in_v2_blob",
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(RECOVERY_FLAG_KEY, reason);
+  } catch {
+    // best-effort: sessionStorage may itself be unavailable (private mode);
+    // the console.warn from the calling catch is the primary signal.
+  }
+}
+
 const LEGACY_DEFAULT_LAYOUT: LegacyTileConfig[] = [
   { i: "equity-curve-1", widgetId: "equity-curve", x: 0, y: 0, w: 12, h: 4 },
   { i: "drawdown-chart-1", widgetId: "drawdown-chart", x: 0, y: 4, w: 12, h: 4 },
@@ -90,8 +123,13 @@ function loadLegacyConfig(): LegacyDashboardConfig {
         return parsed;
       }
     }
-  } catch {
-    // Corrupted data — fall back to defaults.
+  } catch (err) {
+    // Surface the failure mode (corrupt JSON, Safari SecurityError, etc.)
+    // so the legacy hook stops eating destruction silently. The user-facing
+    // fallback to defaults is preserved.
+    if (typeof console !== "undefined") {
+      console.warn("[useDashboardConfig] loadLegacyConfig failed; falling back to defaults", err);
+    }
   }
   return { tiles: LEGACY_DEFAULT_LAYOUT, timeframe: "YTD", layoutVersion: LAYOUT_VERSION_LEGACY };
 }
@@ -99,8 +137,14 @@ function loadLegacyConfig(): LegacyDashboardConfig {
 function persistLegacy(config: LegacyDashboardConfig): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-  } catch {
-    // localStorage full or unavailable — silently ignore.
+  } catch (err) {
+    // Same UX hazard as the V2 persister: a user who saw their picker tiles
+    // / resize choices appear to work in-memory expects them to survive a
+    // reload. console.warn lets dev tools surface the storage failure
+    // instead of having an opaque "settings reset themselves" report.
+    if (typeof console !== "undefined") {
+      console.warn("[useDashboardConfig] localStorage write failed; preferences will not persist", err);
+    }
   }
 }
 
@@ -294,6 +338,10 @@ function loadV2Config(): DashboardConfig {
       const parsed = JSON.parse(raw) as DashboardConfig;
       // Reset on layoutVersion mismatch (Voice-D8 precedent).
       if (parsed.layoutVersion !== LAYOUT_VERSION) {
+        // Best-effort: tell the dashboard a layout reset happened so it can
+        // surface a one-time toast. The user-facing recovery decision lives
+        // in AllocationDashboardV2 — this hook only flags the cause.
+        setRecoveryFlag("version_reset");
         return defaultV2Config();
       }
       // Defensive: never let legacy-shape tiles into the V2 config.
@@ -302,6 +350,9 @@ function loadV2Config(): DashboardConfig {
         parsed.tiles.length === 0 ||
         parsed.tiles.some(looksLikeLegacyTile)
       ) {
+        if (Array.isArray(parsed.tiles) && parsed.tiles.some(looksLikeLegacyTile)) {
+          setRecoveryFlag("legacy_in_v2_blob");
+        }
         return defaultV2Config();
       }
       // Phase 09.1 Plan 05 / D-19 — normalize any persisted short keys to
@@ -309,8 +360,22 @@ function loadV2Config(): DashboardConfig {
       // blob can't slip designer short keys through to the render path.
       return { ...parsed, tiles: normalizeTilesToRegistryIds(parsed.tiles) };
     }
-  } catch {
-    // Corrupted JSON — fall through to defaults.
+  } catch (err) {
+    // Failure modes here include corrupt JSON (truncated quota write,
+    // sync conflict, hand-edit, schema drift), Safari SecurityError, and
+    // private-mode storage denial. The legacy code path collapsed all of
+    // these into an indistinguishable defaults reset that actively
+    // destroyed the user's customized layout with no trace.
+    //
+    // We now (a) console.warn so engineering sees the failure in dev tools
+    // and Sentry's automatic capture-console can pick it up, and (b) set a
+    // sessionStorage flag so AllocationDashboardV2 can render a one-time
+    // recovery toast (the visual surface for that toast is owned by a
+    // separate UI ticket — this hook just sets the breadcrumb).
+    if (typeof console !== "undefined") {
+      console.warn("[useDashboardConfigV2] loadV2Config failed; falling back to defaults", err);
+    }
+    setRecoveryFlag("parse_failed");
   }
   return defaultV2Config();
 }
@@ -318,8 +383,54 @@ function loadV2Config(): DashboardConfig {
 function persistV2(config: DashboardConfig): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+  } catch (err) {
+    // The user clicked "Add widget" / dragged a tile / resized a card and
+    // EXPECTS the change to survive a reload. Eating QuotaExceededError +
+    // SecurityError silently turns every Safari-private-mode tab into a
+    // "settings reset themselves" complaint. Distinguish the two common
+    // cases (quota vs unavailability) and surface either one to the
+    // console so the failure has a paper trail.
+    if (typeof console !== "undefined") {
+      const isQuota =
+        err instanceof DOMException && err.name === "QuotaExceededError";
+      console.warn(
+        isQuota
+          ? "[useDashboardConfigV2] localStorage write failed (quota exceeded); preferences will not persist"
+          : "[useDashboardConfigV2] localStorage write failed; preferences will not persist",
+        err,
+      );
+    }
+  }
+}
+
+/**
+ * One-shot drain of the recovery flag set by `loadV2Config`. Returns the
+ * reason if a recovery occurred during this session and clears the flag so
+ * the dashboard only surfaces the breadcrumb once per tab. Safe to call
+ * during render or inside a useEffect.
+ */
+export function consumeDashboardRecoveryFlag():
+  | "parse_failed"
+  | "version_reset"
+  | "legacy_in_v2_blob"
+  | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.sessionStorage.getItem(RECOVERY_FLAG_KEY);
+    if (!value) return null;
+    window.sessionStorage.removeItem(RECOVERY_FLAG_KEY);
+    if (
+      value === "parse_failed" ||
+      value === "version_reset" ||
+      value === "legacy_in_v2_blob"
+    ) {
+      return value;
+    }
+    return null;
   } catch {
-    // Silent — private-mode / quota-exceeded are non-fatal.
+    // best-effort: sessionStorage may be locked in private mode; absence of
+    // the flag is functionally equivalent to "no recovery happened".
+    return null;
   }
 }
 
