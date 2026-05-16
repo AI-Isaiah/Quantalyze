@@ -618,6 +618,23 @@ export interface ExportTablePayload {
 }
 
 /**
+ * INTERNAL — module-scoped cache of per-row JSON strings keyed by
+ * the ExportTablePayload object identity. Audit 2026-05-07
+ * (specialist apply, performance HIGH conf-9): the cumulative-size
+ * budget pass already serializes each row once for its UTF-8 byte
+ * length. Caching those strings here lets `encodeExportBundle`
+ * assemble the final upload from cached fragments without
+ * re-stringifying every row inside `JSON.stringify(bundle)`.
+ *
+ * Using a WeakMap (not a payload field) keeps the cache off the
+ * on-the-wire bundle: `JSON.stringify(bundle)` from tests / consumers
+ * remains identical in shape and size to the pre-apply bundle. The
+ * cache is GC'd automatically when the payload object becomes
+ * unreachable.
+ */
+const ROW_JSON_CACHE: WeakMap<ExportTablePayload, readonly string[]> = new WeakMap();
+
+/**
  * Typed view of a per-table payload. Audit 2026-05-07 M-0521: the
  * payload's `rows: unknown[]` loses every per-table contract for
  * downstream consumers (download script, regulator-facing
@@ -691,6 +708,124 @@ export interface ExportBundleV1 {
 export type ExportBundle = ExportBundleV1;
 
 /**
+ * Module-level shared encoder. Audit 2026-05-07 (specialist apply,
+ * performance LOW conf-7): pre-apply each per-row encode and the
+ * final upload encode each allocated a fresh `new TextEncoder()`.
+ * TextEncoder is cheap to construct but reusing one trims a constant
+ * per-call overhead and gives the encoder a single hoist point if
+ * we ever swap it (e.g., for a streaming variant).
+ */
+const SHARED_ENCODER = new TextEncoder();
+
+/**
+ * Assemble the export bundle into a Uint8Array suitable for upload.
+ *
+ * Audit 2026-05-07 (specialist apply, performance HIGH conf-9):
+ * pre-apply, the route called `new TextEncoder().encode(JSON.stringify(bundle))`,
+ * which re-stringified every row inside `bundle.tables[*].rows` even
+ * though the cumulative-size budget pass had already stringified
+ * each row once. For a 50,000-row table at ~800 bytes/row this was
+ * ~40MB of redundant serialization (and ~80MB of intermediate string
+ * allocations). The peak heap held the bundle object + the 100MB
+ * intermediate string + the 100MB Uint8Array simultaneously —
+ * ~300MB peak on a 1024MB Vercel Fluid lambda.
+ *
+ * The fix stitches the upload from the cached per-row JSON strings
+ * stored in `ExportTablePayload.__cached_rows_json`. Each row's JSON
+ * is encoded once during the budget pass and written directly into
+ * the output Uint8Array here. The envelope fields (schema_version,
+ * user_id, generated_at, total_row_count, parent_id_truncated_tables,
+ * partial, failed_tables, truncated_at_size_cap) and the per-table
+ * wrapper fields are still serialized via `JSON.stringify` because
+ * they are tiny (kilobytes total).
+ *
+ * The internal `__cached_rows_json` field is omitted from the
+ * upload by definition — this function never serializes it.
+ *
+ * Fallback: if a caller hand-constructs a bundle without the cache
+ * (testing-only), the function falls back to per-row JSON.stringify,
+ * matching legacy behaviour.
+ */
+export function encodeExportBundle(bundle: ExportBundle): Uint8Array {
+  // Strategy: produce the JSON in two halves separated at `tables`.
+  // The envelope JSON is built once (small — ~200 bytes); the tables
+  // array is stitched from the per-table wrapper + per-row cached
+  // JSON strings without re-stringifying any row.
+  //
+  // Field order matches `JSON.stringify(bundle)` exactly (insertion
+  // order of the ExportBundle literal returned by collectUserExportBundle):
+  //   schema_version, user_id, generated_at, total_row_count,
+  //   tables, truncated_at_size_cap, parent_id_truncated_tables,
+  //   partial, failed_tables.
+  // Tests assert against the BUNDLE OBJECT (not the encoded bytes),
+  // but downstream consumers parsing the upload need the on-the-wire
+  // shape to round-trip cleanly through JSON.parse.
+  const chunks: Uint8Array[] = [];
+
+  // Opener: everything up to `"tables":[`.
+  const opener =
+    `{"schema_version":${JSON.stringify(bundle.schema_version)},` +
+    `"user_id":${JSON.stringify(bundle.user_id)},` +
+    `"generated_at":${JSON.stringify(bundle.generated_at)},` +
+    `"total_row_count":${JSON.stringify(bundle.total_row_count)},` +
+    `"tables":[`;
+  chunks.push(SHARED_ENCODER.encode(opener));
+
+  for (let i = 0; i < bundle.tables.length; i += 1) {
+    const t = bundle.tables[i];
+    if (i > 0) chunks.push(SHARED_ENCODER.encode(","));
+    chunks.push(
+      SHARED_ENCODER.encode(
+        `{"table":${JSON.stringify(t.table)},"rows":[`,
+      ),
+    );
+    const cached = ROW_JSON_CACHE.get(t);
+    if (cached && cached.length === t.rows.length) {
+      for (let r = 0; r < cached.length; r += 1) {
+        if (r > 0) chunks.push(SHARED_ENCODER.encode(","));
+        chunks.push(SHARED_ENCODER.encode(cached[r]));
+      }
+    } else {
+      // Fallback for hand-constructed bundles (tests).
+      for (let r = 0; r < t.rows.length; r += 1) {
+        if (r > 0) chunks.push(SHARED_ENCODER.encode(","));
+        chunks.push(SHARED_ENCODER.encode(JSON.stringify(t.rows[r])));
+      }
+    }
+    chunks.push(
+      SHARED_ENCODER.encode(
+        `],"row_count":${JSON.stringify(t.row_count)},` +
+          `"truncated_at_cap":${JSON.stringify(t.truncated_at_cap)},` +
+          `"parent_id_truncated":${JSON.stringify(t.parent_id_truncated)},` +
+          `"fetch_error":${JSON.stringify(t.fetch_error)}}`,
+      ),
+    );
+  }
+
+  // Closer: close tables + remaining envelope fields.
+  const closer =
+    `],"truncated_at_size_cap":${JSON.stringify(bundle.truncated_at_size_cap)},` +
+    `"parent_id_truncated_tables":${JSON.stringify(bundle.parent_id_truncated_tables)},` +
+    `"partial":${JSON.stringify(bundle.partial)},` +
+    `"failed_tables":${JSON.stringify(bundle.failed_tables)}}`;
+  chunks.push(SHARED_ENCODER.encode(closer));
+
+  // Concatenate. The bundle keeps each cached chunk alive briefly —
+  // because the chunks are small Uint8Arrays referencing their own
+  // backing memory (not slices of the bundle), the original bundle
+  // object can be GC'd once this function returns.
+  let total = 0;
+  for (const c of chunks) total += c.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
+/**
  * Collect every row referenced by `user_id`, running one SELECT per
  * table in the manifest. Uses the provided admin client because (a)
  * the export aggregates ACROSS tables whose RLS scopes differ (e.g.,
@@ -745,6 +880,14 @@ export async function collectUserExportBundle(
     rows: unknown[];
     error: string | null;
     parent_id_truncated: boolean;
+    /**
+     * Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
+     * true when the source SELECT returned > EXPORT_PER_TABLE_ROW_CAP
+     * rows. For projected specs this is detected pre-projection so
+     * the post-projection row count cannot silently lose the cap-hit
+     * signal.
+     */
+    source_truncated: boolean;
   }
   const fetched: Array<FetchedEntry | null> = new Array(
     USER_EXPORT_TABLES.length,
@@ -769,6 +912,7 @@ export async function collectUserExportBundle(
             rows: [],
             error: result.error,
             parent_id_truncated: result.parent_id_truncated,
+            source_truncated: result.source_truncated,
           };
         } else {
           fetched[start + i] = {
@@ -776,6 +920,7 @@ export async function collectUserExportBundle(
             rows: result.rows,
             error: null,
             parent_id_truncated: result.parent_id_truncated,
+            source_truncated: result.source_truncated,
           };
         }
       } else {
@@ -791,6 +936,7 @@ export async function collectUserExportBundle(
           rows: [],
           error: reason,
           parent_id_truncated: false,
+          source_truncated: false,
         };
       }
     }
@@ -838,9 +984,19 @@ export async function collectUserExportBundle(
   let bytesUsed = encoder.encode(JSON.stringify(envelopeSkeleton)).byteLength;
   let truncatedAtSizeCap = false;
 
+  // Audit 2026-05-07 (specialist apply, performance HIGH conf-9):
+  // cache per-row UTF-8 byte payloads during the budget pass so the
+  // final upload can be assembled from the cached strings without a
+  // second JSON.stringify of every row. Pre-apply, each row was
+  // serialized twice — once for the size budget and again inside
+  // `JSON.stringify(bundle)` in the route — costing ~2× CPU and
+  // peaking memory at ~3× the payload size (object + intermediate
+  // string + Uint8Array). The shared `__cached_rows_json` array on
+  // the ExportTablePayload carries the JSON strings of each row so
+  // `encodeExportBundle` can stitch them directly into a Uint8Array.
   for (const entry of fetched) {
     if (!entry) continue;
-    const { spec, rows, error: fetchError, parent_id_truncated } = entry;
+    const { spec, rows, error: fetchError, parent_id_truncated, source_truncated } = entry;
 
     if (fetchError) {
       failedTables.push(spec.table);
@@ -849,20 +1005,16 @@ export async function collectUserExportBundle(
       parentTruncatedTables.push(spec.table);
     }
 
-    if (truncatedAtSizeCap) {
-      tables.push({
-        table: spec.table,
-        rows: [],
-        row_count: 0,
-        truncated_at_cap: true,
-        parent_id_truncated,
-        fetch_error: fetchError,
-      });
-      continue;
-    }
-
     // Reserve the per-table wrapper bytes BEFORE counting rows so the
     // cumulative budget reflects the real shape of the upload.
+    // Audit 2026-05-07 (specialist apply, code-reviewer MED conf-8):
+    // when `truncatedAtSizeCap` is already true, we STILL push an
+    // empty payload for completeness — but pre-apply the wrapper
+    // bytes were never accumulated, so a tail of ~22 empty tables
+    // could overflow the final upload by ~3KB. Reserve the wrapper
+    // bytes uniformly across both branches and surface
+    // `truncated_at_cap` only when the SIZE cap actually trimmed
+    // rows (or the source cap clipped before the projection ran).
     const tableWrapperBytes = encoder.encode(
       JSON.stringify({
         table: spec.table,
@@ -873,44 +1025,83 @@ export async function collectUserExportBundle(
         fetch_error: fetchError,
       }) + ",",
     ).byteLength;
-    if (bytesUsed + tableWrapperBytes > EXPORT_SIZE_CAP_BYTES) {
-      truncatedAtSizeCap = true;
-      tables.push({
+
+    if (truncatedAtSizeCap) {
+      bytesUsed += tableWrapperBytes;
+      const payload: ExportTablePayload = {
         table: spec.table,
         rows: [],
         row_count: 0,
-        truncated_at_cap: true,
+        // truncated_at_cap signals "the size cap or the source cap
+        // dropped data for this table". A fetch-error row never had
+        // a chance to fill rows — keep the flag false there so
+        // forensic readers don't conflate "fetch failed" with
+        // "size cap trimmed me".
+        truncated_at_cap: fetchError ? false : true,
         parent_id_truncated,
         fetch_error: fetchError,
-      });
+      };
+      ROW_JSON_CACHE.set(payload, []);
+      tables.push(payload);
+      continue;
+    }
+
+    if (bytesUsed + tableWrapperBytes > EXPORT_SIZE_CAP_BYTES) {
+      truncatedAtSizeCap = true;
+      bytesUsed += tableWrapperBytes;
+      const payload: ExportTablePayload = {
+        table: spec.table,
+        rows: [],
+        row_count: 0,
+        truncated_at_cap: fetchError ? false : true,
+        parent_id_truncated,
+        fetch_error: fetchError,
+      };
+      ROW_JSON_CACHE.set(payload, []);
+      tables.push(payload);
       continue;
     }
     bytesUsed += tableWrapperBytes;
 
     const includedRows: unknown[] = [];
-    let tableTruncated = rows.length >= EXPORT_PER_TABLE_ROW_CAP;
+    const includedRowsJson: string[] = [];
+    // source_truncated is the SQL-side cap signal (set by
+    // fetchRowsForSpec when the source SELECT hit > cap rows). For
+    // direct/indirect we also fall back to the post-fetch length
+    // check (rows.length >= cap) — both are correct because no
+    // projection collapses the count for those kinds. For projected
+    // entries source_truncated is the ONLY accurate signal.
+    let tableTruncated =
+      source_truncated || (rows.length >= EXPORT_PER_TABLE_ROW_CAP);
 
     for (const row of rows) {
-      // Stringify once. Per-row size includes the trailing comma the
-      // outer JSON.stringify would insert; small constant overhead.
-      const rowBytes = encoder.encode(JSON.stringify(row) + ",").byteLength;
+      const rowJson = JSON.stringify(row);
+      // Per-row size includes the trailing comma the outer
+      // JSON.stringify would insert; small constant overhead.
+      // Audit 2026-05-07 (specialist apply, performance MED conf-8):
+      // `+ ","` previously allocated a fresh string each loop;
+      // the comma is always 1 UTF-8 byte so we add 1 directly.
+      const rowBytes = encoder.encode(rowJson).byteLength + 1;
       if (bytesUsed + rowBytes > EXPORT_SIZE_CAP_BYTES) {
         truncatedAtSizeCap = true;
         tableTruncated = true;
         break;
       }
       includedRows.push(row);
+      includedRowsJson.push(rowJson);
       bytesUsed += rowBytes;
     }
 
-    tables.push({
+    const payload: ExportTablePayload = {
       table: spec.table,
       rows: includedRows,
       row_count: includedRows.length,
       truncated_at_cap: tableTruncated,
       parent_id_truncated,
       fetch_error: fetchError,
-    });
+    };
+    ROW_JSON_CACHE.set(payload, includedRowsJson);
+    tables.push(payload);
     totalRowCount += includedRows.length;
   }
 
@@ -956,6 +1147,16 @@ interface FetchRowsResult {
    * See audit 2026-05-07 H-0453.
    */
   parent_id_truncated: boolean;
+  /**
+   * Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
+   * true when the SOURCE-side SELECT hit `EXPORT_PER_TABLE_ROW_CAP`
+   * before the projection callback ran. For direct/indirect specs
+   * this is the same as the post-fetch row count (no projection
+   * shrinks the count), but for projected specs the projection can
+   * drop rows — pre-fix the post-projection length check missed the
+   * cap-hit signal and the bundle silently lost data.
+   */
+  source_truncated: boolean;
 }
 
 /**
@@ -1001,30 +1202,67 @@ async function fetchRowsForSpec(
       // when ANY table reports a fetch_error.
       const msg = `direct select failed for ${spec.table}: ${error.message}`;
       console.error(`[gdpr-export] ${msg}`);
-      return { rows: [], error: msg, parent_id_truncated: false };
+      return {
+        rows: [],
+        error: msg,
+        parent_id_truncated: false,
+        source_truncated: false,
+      };
     }
-    return { rows: data ?? [], error: null, parent_id_truncated: false };
+    const arr = data ?? [];
+    return {
+      rows: arr,
+      error: null,
+      parent_id_truncated: false,
+      // No projection drops rows for direct specs, so the post-fetch
+      // length matches the SQL cap exactly. The Phase 2 fallback
+      // (rows.length >= cap) still applies symmetrically, but setting
+      // the flag here lets all three kinds use a single signal.
+      source_truncated: arr.length >= EXPORT_PER_TABLE_ROW_CAP,
+    };
   }
 
   if (spec.kind === "projected") {
     // Fetch raw rows from the source table, filtered to the subject.
+    // Audit 2026-05-07 (specialist apply, code-reviewer HIGH conf-9):
+    // the source LIMIT bounds rows BEFORE the projection prunes them
+    // down. A user whose audit_log source contains > 50K total rows
+    // where only a fraction match the subject filter would silently
+    // lose later rows about themselves — the post-projection
+    // `rows.length >= cap` check in Phase 2 would read false, GDPR
+    // Art. 15 would silently fail. We probe with `cap + 1` rows so
+    // the caller can detect source-side truncation BEFORE the
+    // projection collapses the count.
     const { data, error } = await admin
       .from(spec.source_table)
       .select("*")
       .eq(spec.user_column, userId)
       .order(orderCol, { ascending: true })
-      .limit(EXPORT_PER_TABLE_ROW_CAP);
+      .limit(EXPORT_PER_TABLE_ROW_CAP + 1);
     if (error) {
       const msg = `projected select failed for ${spec.source_table} (->${spec.table}): ${error.message}`;
       console.error(`[gdpr-export] ${msg}`);
-      return { rows: [], error: msg, parent_id_truncated: false };
+      return {
+        rows: [],
+        error: msg,
+        parent_id_truncated: false,
+        source_truncated: false,
+      };
     }
+    const sourceArr = data ?? [];
+    const sourceTruncated = sourceArr.length > EXPORT_PER_TABLE_ROW_CAP;
     // Run the redaction projection. This is where cross-party PII in
     // metadata gets blanked.
     return {
-      rows: spec.project(data ?? [], userId),
+      rows: spec.project(
+        sourceTruncated
+          ? sourceArr.slice(0, EXPORT_PER_TABLE_ROW_CAP)
+          : sourceArr,
+        userId,
+      ),
       error: null,
       parent_id_truncated: false,
+      source_truncated: sourceTruncated,
     };
   }
 
@@ -1041,7 +1279,12 @@ async function fetchRowsForSpec(
   if (parentErr) {
     const msg = `parent select failed for ${spec.parent_table} (via ${spec.table}): ${parentErr.message}`;
     console.error(`[gdpr-export] ${msg}`);
-    return { rows: [], error: msg, parent_id_truncated: false };
+    return {
+      rows: [],
+      error: msg,
+      parent_id_truncated: false,
+      source_truncated: false,
+    };
   }
   // M-0524 fix: read parent id by the configured column name. Default
   // 'id' covers every parent in the current manifest; an indirect
@@ -1066,28 +1309,64 @@ async function fetchRowsForSpec(
   const parentRowsArr = ((parentRows ?? []) as unknown) as Array<
     Record<string, unknown>
   >;
-  const parentIds = parentRowsArr
-    .map((r) => r[parentIdColumn])
-    .filter((v): v is string => typeof v === "string");
+  const parentIdsRaw = parentRowsArr.map((r) => r[parentIdColumn]);
+  const parentIds = parentIdsRaw.filter(
+    (v): v is string => typeof v === "string",
+  );
+  // Audit 2026-05-07 (specialist apply, silent-failure MED conf-8):
+  // pre-apply, a non-string parent PK (bigint, composite) silently
+  // dropped all ids and returned `{ rows: [], error: null }` —
+  // indistinguishable from "user has no parent rows". Now if the
+  // filter dropped any id we fail loud with an error so the bundle's
+  // partial gate catches it.
+  if (parentIds.length < parentIdsRaw.length) {
+    const msg = `indirect parent id type mismatch for ${spec.parent_table}.${parentIdColumn} (via ${spec.table}): expected string PK, dropped ${parentIdsRaw.length - parentIds.length}/${parentIdsRaw.length} rows`;
+    console.error(`[gdpr-export] ${msg}`);
+    return {
+      rows: [],
+      error: msg,
+      parent_id_truncated: false,
+      source_truncated: false,
+    };
+  }
   const parentIdTruncated = parentRowsArr.length >= EXPORT_PARENT_ID_CAP;
   if (parentIds.length === 0) {
-    return { rows: [], error: null, parent_id_truncated: parentIdTruncated };
+    return {
+      rows: [],
+      error: null,
+      parent_id_truncated: parentIdTruncated,
+      source_truncated: false,
+    };
   }
 
+  // Audit 2026-05-07 (specialist apply, silent-failure MED conf-8 +
+  // performance LOW conf-7): use the same orderCol the direct branch
+  // uses so determinism is single-sourced. Today getOrderColumn
+  // returns 'id' for everything except audit_log (which is never an
+  // indirect spec), so behavior is unchanged; the future-proofing
+  // matters because the audit comment claims this branch is "same
+  // for the child select" — making the code match the doc.
   const { data, error } = await admin
     .from(spec.table)
     .select("*")
     .in(spec.via_column, parentIds)
-    .order("id", { ascending: true })
+    .order(orderCol, { ascending: true })
     .limit(EXPORT_PER_TABLE_ROW_CAP);
   if (error) {
     const msg = `indirect select failed for ${spec.table}: ${error.message}`;
     console.error(`[gdpr-export] ${msg}`);
-    return { rows: [], error: msg, parent_id_truncated: parentIdTruncated };
+    return {
+      rows: [],
+      error: msg,
+      parent_id_truncated: parentIdTruncated,
+      source_truncated: false,
+    };
   }
+  const arr = data ?? [];
   return {
-    rows: data ?? [],
+    rows: arr,
     error: null,
     parent_id_truncated: parentIdTruncated,
+    source_truncated: arr.length >= EXPORT_PER_TABLE_ROW_CAP,
   };
 }

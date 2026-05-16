@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { exportLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
-import { collectUserExportBundle } from "@/lib/gdpr-export";
+import { collectUserExportBundle, encodeExportBundle } from "@/lib/gdpr-export";
 
 /**
  * POST /api/account/export
@@ -70,37 +70,85 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // (owner-only, cross-party, service-role-only).
   const bundle = await collectUserExportBundle(admin, user.id);
 
-  // Issue 5 (audit-2026-05-07 follow-up): GDPR Art. 15 requires a
-  // COMPLETE export. Pre-fix, a rejected fetch or PG error caused
-  // `collectUserExportBundle` to silently substitute `[]` for the
-  // failed table and mint a signed URL anyway — the user received a
-  // bundle that LOOKED complete but was missing half its tables. We
-  // chose policy (a) from the audit playbook: refuse to mint a signed
-  // URL on any fetch failure. The user can retry on the next rate-
-  // limit window (the limiter is sliding 24h, so a fresh export
-  // attempt the next day is possible). Policy (b) — deliver a partial
-  // bundle marked `partial: true` — was rejected because a regulator
-  // receiving a flagged-partial export would still see it as a data-
-  // protection deficiency; "complete or nothing" is the safer default.
+  // Audit 2026-05-07 (specialist apply): GDPR Art. 15 requires a
+  // COMPLETE export. The route refuses to mint a signed URL whenever
+  // the bundle is incomplete for ANY reason — fetch failure, size
+  // cap, per-table row cap, or parent-id cap. Pre-fix the partial-
+  // gate only handled fetch failures; the three truncation modes
+  // shipped a 200 OK with a signed URL and advisory `incomplete_reasons`.
+  // That mixed two policies on identical "incomplete export" modes:
+  // "complete or nothing" for fetch errors, "partial and warn" for
+  // truncation. The specialist apply extends the gate so all four
+  // modes return the same refusal shape (200 OK is reserved for a
+  // genuinely complete bundle). The user retries on the next rate-
+  // limit window. Policy (b) — deliver a partial bundle — was
+  // rejected because a regulator receiving a flagged-partial export
+  // would still see it as a data-protection deficiency.
   //
   // Finding 2 (audit-2026-05-07 red-team): the failed_tables list is
   // schema reconnaissance — exposing which internal tables exist (and
   // which currently error) gives an attacker the map they need to
   // tune subsequent probes. Strip it from the client-facing body and
   // log it server-side only, correlated by a request_id the user can
-  // quote to support so we can find the matching log line.
-  if (bundle.partial) {
+  // quote to support so we can find the matching log line. The same
+  // policy applies to the row-cap / size-cap / parent-id truncation
+  // table lists.
+  const rowCappedTables = bundle.tables
+    .filter((t) => t.truncated_at_cap)
+    .map((t) => t.table);
+  const incompleteReasons: string[] = [];
+  if (bundle.truncated_at_size_cap) {
+    incompleteReasons.push(
+      "size_cap_exceeded:bundle exceeded 100MB cap; oldest-first packing kept the earliest rows.",
+    );
+  }
+  if (rowCappedTables.length > 0) {
+    incompleteReasons.push(
+      `per_table_row_cap_reached:${rowCappedTables.join(",")} — only the first 50000 rows are included per table.`,
+    );
+  }
+  if (bundle.parent_id_truncated_tables.length > 0) {
+    incompleteReasons.push(
+      `parent_id_cap_reached:${bundle.parent_id_truncated_tables.join(",")} — only the first 2000 parent rows are included; child rows of dropped parents are missing.`,
+    );
+  }
+
+  if (bundle.partial || incompleteReasons.length > 0) {
     const requestId = crypto.randomUUID();
-    console.error("[api/account/export] refusing to mint signed URL — partial bundle:", {
+    console.error("[api/account/export] refusing to mint signed URL — incomplete bundle:", {
       request_id: requestId,
       user_id: user.id,
+      partial: bundle.partial,
       failed_tables: bundle.failed_tables,
+      truncated_at_size_cap: bundle.truncated_at_size_cap,
+      row_capped_tables: rowCappedTables,
+      parent_id_truncated_tables: bundle.parent_id_truncated_tables,
+      incomplete_reasons: incompleteReasons,
+    });
+    // Audit the refusal so forensic reconstruction of "why this user
+    // got 500" survives the response-body discard. The metadata is
+    // also the only durable trail of which truncations occurred — if
+    // a regulator later asks "did the controller ever know about this
+    // user's truncation", the audit row is the answer.
+    logAuditEvent(supabase, {
+      action: "account.export_refused",
+      entity_type: "user",
+      entity_id: user.id,
+      metadata: {
+        request_id: requestId,
+        partial: bundle.partial,
+        truncated_at_size_cap: bundle.truncated_at_size_cap,
+        row_capped_tables: rowCappedTables,
+        parent_id_truncated_tables: bundle.parent_id_truncated_tables,
+        incomplete_reasons: incompleteReasons,
+      },
     });
     return NextResponse.json(
       {
-        error:
-          "Some tables failed to export. Please retry — GDPR Art. 15 requires a complete bundle.",
-        code: "export_partial",
+        error: bundle.partial
+          ? "Some tables failed to export. Please retry — GDPR Art. 15 requires a complete bundle."
+          : "Your data exceeds export limits and a complete bundle cannot be produced automatically. Please contact support — GDPR Art. 15 requires a complete bundle.",
+        code: bundle.partial ? "export_partial" : "export_truncated",
         request_id: requestId,
       },
       { status: 500 },
@@ -111,28 +159,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // RLS policy in migration 055 gates by `storage.foldername(name)[1]`
   // so the user prefix MUST be the auth.uid() text.
   //
-  // P448 (audit 2026-05-12 Lane E): pipe `JSON.stringify(bundle)`
-  // directly into `TextEncoder.encode` in a single expression — the
-  // intermediate string is still allocated by the JS engine, but its
-  // variable lifetime ends with the encode call, so the GC can
-  // reclaim it as soon as the Uint8Array is in hand. The legacy code
-  // held both `bundleJson` AND `bundleBytes` in scope until the
-  // upload returned, peaking at ~3× the payload size (object + JSON
-  // string + bytes). A future hardening pass could replace this with
-  // a true streaming serializer that writes chunks directly to a
-  // ReadableStream — tracked under audit P448 follow-up.
+  // Audit 2026-05-07 (specialist apply, performance HIGH conf-9):
+  // pre-apply the route ran `new TextEncoder().encode(JSON.stringify(bundle))`,
+  // which re-stringified every row a second time even though
+  // `collectUserExportBundle` had already serialized each row once
+  // for the cumulative-size budget. For a 50,000-row table at ~800
+  // bytes/row this was ~40MB of redundant CPU and ~80MB of
+  // intermediate string allocations. Peak heap held the bundle
+  // object + the 100MB string + the 100MB Uint8Array simultaneously
+  // — ~300MB peak on a 1024MB Fluid lambda. The new
+  // `encodeExportBundle` stitches the upload directly from the
+  // cached per-row JSON strings stored on `ExportTablePayload.__cached_rows_json`,
+  // skipping the redundant pass entirely. Peak heap drops to bundle
+  // + Uint8Array (~200MB) because the intermediate JSON string is
+  // never materialized.
   //
-  // Audit 2026-05-07 H-0448: peak heap is bounded by
-  // EXPORT_SIZE_CAP_BYTES (100MB) × ~3 (object + string + bytes) ≈
-  // 300MB on a 1024MB Vercel Fluid lambda. The envelope-aware budget
-  // (H-0454 fix) makes the cap strictly conservative — the upload
-  // size never exceeds 100MB, so the headroom-to-OOM is at least 3×.
-  // The true streaming refactor is queued as a separate sprint
-  // (would replace the single TextEncoder.encode with a chunked
-  // ReadableStream piped to Supabase storage); the bound + the GC
-  // reclaim pattern keep this within budget until then.
+  // The true streaming refactor (pipe directly into Supabase Storage
+  // multipart upload) remains queued for a follow-up sprint; the
+  // single-pass encode keeps headroom within budget until then.
   const objectKey = `${user.id}/${crypto.randomUUID()}.json`;
-  const bundleBytes = new TextEncoder().encode(JSON.stringify(bundle));
+  const bundleBytes = encodeExportBundle(bundle);
 
   const { error: uploadErr } = await admin.storage
     .from(EXPORTS_BUCKET)
@@ -190,36 +236,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     Date.now() + SIGNED_URL_EXPIRY_SECONDS * 1000,
   ).toISOString();
 
-  // Audit 2026-05-07 H-0451: row-cap / size-cap / parent-id
-  // truncation MUST be surfaced to the user. GDPR Art. 12 requires
-  // the controller to communicate the response — pre-fix the row
-  // cap silently dropped rows for users with >50K trades (or >2000
-  // strategies for the parent-id cap), shipping an incomplete
-  // bundle with no signal. Aggregate per-table flags into a
-  // user-readable `incomplete_reasons` array.
-  const rowCappedTables = bundle.tables
-    .filter((t) => t.truncated_at_cap)
-    .map((t) => t.table);
-  const incompleteReasons: string[] = [];
-  if (bundle.truncated_at_size_cap) {
-    incompleteReasons.push(
-      "size_cap_exceeded:bundle exceeded 100MB cap; oldest-first packing kept the earliest rows.",
-    );
-  }
-  if (rowCappedTables.length > 0) {
-    incompleteReasons.push(
-      `per_table_row_cap_reached:${rowCappedTables.join(",")} — only the first 50000 rows are included per table.`,
-    );
-  }
-  if (bundle.parent_id_truncated_tables.length > 0) {
-    incompleteReasons.push(
-      `parent_id_cap_reached:${bundle.parent_id_truncated_tables.join(",")} — only the first 2000 parent rows are included; child rows of dropped parents are missing.`,
-    );
-  }
-
   // Audit the export. Fire-and-forget; never gates the response.
   // entity_type 'user' per the Task 7.3 extension of ADR-0023 §4 —
-  // the "entity" is the account being exported.
+  // the "entity" is the account being exported. The gate above
+  // ensures `incompleteReasons` is empty here — if it were not, the
+  // route would have returned 500 already. We still serialize it
+  // into the audit metadata for forensic uniformity (one shape, easy
+  // to query).
   logAuditEvent(supabase, {
     action: "account.export",
     entity_type: "user",
