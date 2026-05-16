@@ -737,28 +737,43 @@ def _atomic_append_todos(content_to_append: str) -> None:
     # NamedTemporaryFile(delete=False) creates the file with a unique
     # name in the same parent — required for os.replace to be a single
     # rename rather than a cross-filesystem copy.
-    with tempfile.NamedTemporaryFile(
+    #
+    # code-reviewer LOW conf-9: capture tmp_path BEFORE the writes so
+    # a disk-full / EIO during tmp.write / fsync also gets cleaned up.
+    # The prior shape only cleaned up after a failed os.replace; a
+    # write-time failure inside the `with` block left an orphan
+    # .phase12_kill_switch_audit_*.tmp on disk with no log line.
+    tmp = tempfile.NamedTemporaryFile(
         mode="w",
         dir=str(parent),
         prefix=".phase12_kill_switch_audit_",
         suffix=".tmp",
         delete=False,
         encoding="utf-8",
-    ) as tmp:
-        tmp.write(payload)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_path = tmp.name
+    )
+    tmp_path = tmp.name
     try:
+        try:
+            tmp.write(payload)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        finally:
+            tmp.close()
         os.replace(tmp_path, TODOS_PATH)
-    except OSError:
-        # Clean up the temp file if the replace failed — otherwise a
-        # disk-full / permissions failure would leave orphan .tmp files
-        # accumulating in the audit directory.
+    except BaseException:
+        # Clean up the temp file on ANY failure (write, fsync, replace).
+        # BaseException so KeyboardInterrupt / SystemExit / cancellation
+        # mid-fsync also don't leak orphans into the audit directory.
         try:
             os.unlink(tmp_path)
         except OSError:
-            pass
+            # Log so a permission flip between create and unlink is
+            # visible post-incident — silently swallowing this hides the
+            # accumulation cause from future operators.
+            print(
+                f"phase12_kill_switch: tmp cleanup failed: {tmp_path}",
+                file=sys.stderr,
+            )
         raise
 
 
@@ -884,6 +899,13 @@ async def main(
     # leaving the partial state in place forever.
     force = cli_force or _env_truthy("PHASE12_FORCE_CUTOVER")
 
+    # Track whether `n` came from the in-process SQL probe (apples-to-
+    # apples with the downstream PostgREST count) vs the CLI shortcut
+    # (a value the deploy orchestrator passed in — already-aged by the
+    # time we reach the PostgREST count, so a divergence is expected
+    # and is not a signal). Red-team: without this guard the divergence
+    # WARNING would fire on every legitimate phase12_deploy run.
+    probe_was_in_process = cli_p999 is None or cli_count is None
     p999, n = await measure_p999(cli_p999=cli_p999, cli_count=cli_count)
     print(
         f"phase12_kill_switch: probe — p99.9 = {p999:.0f} bytes across {n} strategies "
@@ -941,7 +963,13 @@ async def main(
     # ever seeing the divergence. Surface a WARNING to stderr when
     # they differ so a cutover that "completes" against one set while
     # leaving the other un-cutover is at least visible post-incident.
-    if n != input_total:
+    #
+    # Red-team: skip the check when `n` came from --count (CLI passed
+    # from phase12_deploy.py, run minutes earlier). A divergence in
+    # that path is expected temporal drift, not a role/RLS asymmetry,
+    # so it would be a false-positive WARNING on every legitimate
+    # deploy run.
+    if probe_was_in_process and n != input_total:
         print(
             f"phase12_kill_switch: WARNING — probe count diverged from "
             f"PostgREST count: probe={n} postgrest={input_total}. RLS / "
