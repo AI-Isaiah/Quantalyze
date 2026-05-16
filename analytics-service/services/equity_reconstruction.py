@@ -51,6 +51,11 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 # ---------------------------------------------------------------------------
 
 STABLECOINS: set[str] = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USD"}
+# Pre-sorted longest-first so the holdings.symbol splitter picks
+# USDC/BUSD/etc before USD, avoiding false-positive substring matches.
+_STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
+    sorted(STABLECOINS, key=len, reverse=True)
+)
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
 BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommended cap)
@@ -227,8 +232,7 @@ def split_holdings_symbol_to_base_quote(symbol: str) -> tuple[str, str]:
     s = (symbol or "").upper()
     if not s:
         return "", "USDT"
-    # Stablecoins ordered longest-first so USDC/BUSD/etc match before USD.
-    for q in sorted(STABLECOINS, key=len, reverse=True):
+    for q in _STABLECOINS_LONGEST_FIRST:
         if s.endswith(q) and len(s) > len(q):
             return s[: -len(q)], q
     return s, "USDT"
