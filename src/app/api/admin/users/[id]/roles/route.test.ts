@@ -1401,3 +1401,49 @@ describe("specialist-apply — POST profile-existence (api-contract HIGH)", () =
     expect(body.code).toBe("user_not_found");
   });
 });
+
+/**
+ * audit-2026-05-07 red-team #5: assert role.revoke_noop fail-soft.
+ * If the audit emit throws (permission_denied), the route MUST still
+ * return 404 with code='role_not_held' — the probe-trail invariant
+ * must not become a control-flow oracle.
+ */
+describe("red-team — role.revoke_noop fail-soft (audit-2026-05-07)", () => {
+  beforeEach(() => {
+    upsertSpy.mockClear();
+    adminMockState.profileExists = true;
+    adminMockState.rolesRows = [{ role: "analyst" }];
+    adminMockState.rolesReadError = null;
+    adminMockState.preExistingGrant = null;
+    adminMockState.preExistingGrantError = null;
+    adminMockState.revokeCount = 0;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    vi.doUnmock("@/lib/ratelimit");
+    vi.resetModules();
+  });
+
+  it("role.revoke_noop emit failure leaves the 404 response unchanged", async () => {
+    const rpcSpy = vi.fn<(name: string, args: { p_action: string; p_entity_type: string; p_entity_id: string; p_metadata: Record<string, unknown> }) => Promise<{ data: unknown; error: unknown }>>(async (_n, args) => {
+      if (args.p_action === "role.revoke_noop") {
+        return { data: null, error: { code: "42501", message: "permission denied" } };
+      }
+      return { data: null, error: null };
+    });
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: { getUser: async () => ({ data: { user: TEST_ADMIN }, error: null }) },
+        rpc: rpcSpy,
+        from: () => ({ select: () => ({ eq: async () => ({ data: [{ role: "admin" }], error: null }) }) }),
+      }),
+    }));
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({ action: "revoke", role: "analyst" }),
+      makeCtx(),
+    );
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.code).toBe("role_not_held");
+  });
+});

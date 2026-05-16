@@ -565,42 +565,44 @@ export const POST = withRole<{ id: string }>("admin")(
       // briefs: role.grant/role.revoke is fail-loud (primary intent
       // row); role.state_observed is fail-soft (secondary observation).
       //
-      // api-contract M conf-8: gate state_observed on `wasNewGrant` —
-      // a no-op grant doesn't change state, so emitting state_observed
-      // unconditionally inverts the symmetry with the revoke no-op
-      // suppression path (which already skips state_observed on
-      // count=0). The role.grant row still emits unconditionally to
-      // preserve operator-intent forensic signal.
-      if (wasNewGrant) {
-        const holdsRoleAfterGrant = grantResult.roles.includes(role);
-        try {
-          await logAuditEvent(supabase, {
-            action: "role.state_observed",
-            entity_type: "user_app_role",
-            entity_id: targetUserId,
-            metadata: {
-              role,
-              observed_by: user.id,
-              following_action: "grant",
-              holds_role: holdsRoleAfterGrant,
-            },
-          });
-        } catch (auditError) {
-          console.error(
-            "[admin/users/roles] grant succeeded but role.state_observed emit failed (non-fatal):",
-            {
-              target_user_id: targetUserId,
-              role,
-              error:
-                auditError instanceof Error
-                  ? auditError.message
-                  : String(auditError),
-            },
-          );
-          // Intentionally do NOT propagate — observability metric
-          // drops, but the response stays honest. The primary
-          // role.grant row already landed above.
-        }
+      // Red-team correction (was: gated on wasNewGrant per api-contract
+      // M conf-8): the grant path's 200 response is symmetric with the
+      // revoke 200 path (count>0) — both change state. The revoke 404
+      // path now emits role.revoke_noop, so the audit symmetry is
+      // "every code path emits SOMETHING". A re-grant on an existing
+      // row STILL benefits from a state_observed anchor: if between
+      // pre-read and the (no-op) upsert another admin revoked, the
+      // upsert reinserts and state_observed records the race outcome.
+      // Keeping the emit unconditional preserves the C-0067 anchor
+      // value the api-contract finding was trying to economize.
+      const holdsRoleAfterGrant = grantResult.roles.includes(role);
+      try {
+        await logAuditEvent(supabase, {
+          action: "role.state_observed",
+          entity_type: "user_app_role",
+          entity_id: targetUserId,
+          metadata: {
+            role,
+            observed_by: user.id,
+            following_action: "grant",
+            holds_role: holdsRoleAfterGrant,
+          },
+        });
+      } catch (auditError) {
+        console.error(
+          "[admin/users/roles] grant succeeded but role.state_observed emit failed (non-fatal):",
+          {
+            target_user_id: targetUserId,
+            role,
+            error:
+              auditError instanceof Error
+                ? auditError.message
+                : String(auditError),
+          },
+        );
+        // Intentionally do NOT propagate — observability metric
+        // drops, but the response stays honest. The primary
+        // role.grant row already landed above.
       }
 
       return NextResponse.json({
