@@ -120,15 +120,19 @@ jobs:
         if: steps.check.outputs.configured == 'true'
         with:
           version: latest
-      - name: List migration diff (remote vs local)
+      - name: Plan — dry-run apply (remote vs local)
         if: steps.check.outputs.configured == 'true'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        # Plan output IS what apply runs, modulo --dry-run. The reviewer
+        # eyeballs the same `db push --include-all` command + flags here
+        # before approving the apply step — "what the reviewer approves
+        # IS what runs" invariant (red-team HIGH conf-8).
         run: |
           supabase link --project-ref "$SUPABASE_PROJECT_REF"
-          supabase migration list
+          supabase db push --include-all --dry-run
 
   apply:
     needs: plan
