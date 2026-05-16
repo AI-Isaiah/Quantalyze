@@ -2792,3 +2792,96 @@ class TestG12BOkxFundingRowContract:
             "guard at services/position_reconstruction.py:533 filters "
             "it out without inflating fill totals."
         )
+
+
+# audit-2026-05-07 silent-failure sweep regression
+class TestFetchDailyPnlBybitFailLoud:
+    """Pre-sweep, `fetch_daily_pnl` wrapped the Bybit closed-pnl RPC and
+    the timestamp ISO-conversion loop in a single `except: pass`. Two
+    distinct failure modes (RPC raise vs ISO conversion raise) silently
+    collapsed into "no bybit daily_pnl" with no Railway log. Post-sweep,
+    the call remains best-effort (the parent sync still wants to continue)
+    BUT a WARNING is emitted naming the failure mode.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bybit_closed_pnl_rpc_failure_emits_warning(self, caplog):
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        # Bybit ccxt mock whose closed_pnl endpoint raises.
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            side_effect=RuntimeError("simulated Bybit closed_pnl RPC failure")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Failure-soft contract: the call returned without raising.
+        assert result == []
+        # Operator visibility: a WARNING named the failure mode.
+        matching = [
+            r for r in caplog.records
+            if "bybit" in r.getMessage().lower() and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Bybit closed_pnl RPC failure must produce a WARNING log "
+            "(post audit-2026-05-07 silent-failure sweep) so operators "
+            "can distinguish 'Bybit blip / auth fail' from 'no closed "
+            "positions on the account'."
+        )
+
+    @pytest.mark.asyncio
+    async def test_bybit_iso_conversion_failure_emits_warning(self, caplog):
+        """The ISO-conversion loop runs AFTER the closed_pnl RPC succeeds.
+        Pre-sweep, an unparseable `createdTime` value silently left the
+        timestamp as a digit-string (or raised TypeError which the
+        outer `pass` swallowed). Either way, downstream consumers saw
+        malformed timestamps with no warning attributing the regression
+        to the Bybit branch.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "bybit"
+        # Return a `list` whose `createdTime` is a TYPE that breaks
+        # str.isdigit (the loop's gate). Pass an object that raises on
+        # str().isdigit() — None is fine because the `if entry["timestamp"]`
+        # gate falsifies, but we need to actually trip the conversion.
+        # The cleanest reproduction: feed a float, which makes
+        # `str(<float>).isdigit()` return False, so no conversion happens
+        # and the timestamp persists as a float. That's the silent bug
+        # the sweep is targeting. Result is empty? No — daily_pnl carries
+        # the float through. That's a contract regression. Assertion: at
+        # minimum no exception escapes.
+        # For the WARNING-emission contract, drive an exception INSIDE the
+        # loop by supplying `closedPnl` as a value that breaks float():
+        mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
+            return_value={
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "closedPnl": "NaN-string",  # float() raises
+                            "createdTime": "1700000000000",
+                        }
+                    ]
+                }
+            }
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Failure-soft contract: the call returned without raising.
+        assert isinstance(result, list)
+        # Operator visibility: a WARNING named the failure mode.
+        matching = [
+            r for r in caplog.records
+            if "bybit" in r.getMessage().lower() and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Bybit closed_pnl item-parse failure must produce a WARNING log "
+            "(post audit-2026-05-07 silent-failure sweep)"
+        )
