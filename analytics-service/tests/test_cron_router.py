@@ -3,19 +3,50 @@
 Covers audit-2026-05-07 findings:
 
   * C-0192 — `_sync_single_key` revoked-key branch sets api_keys
-    is_active=False scoped to .eq("id", key_id) only.
+    is_active=False scoped to .eq("id", key_id) only, with payload
+    `{"is_active": False}` (no other fields).
   * C-0194 — Transient validation failures (RATE_LIMITED, etc.) do
     NOT deactivate the key; only credential-rejection codes do.
   * C-0199 — Missing KEK raises HTTPException(500), not HTTP 200.
   * C-0200 — Strategy lifecycle filter: archived/suspended/deleted
-    strategies are skipped when building the per-key strategy list.
+    strategies are skipped when building the per-key strategy list,
+    AND a missing `status` field fails closed (strategy dropped).
   * C-0201 — Multi-strategy keys: sync_trades RPC fires for EVERY
     linked strategy (pre-fix the loop dropped strategies 2..N).
   * H-0541 / H-0545 — Portfolio recompute error-isolation: one
     portfolio failing must NOT abort recompute of subsequent ones.
-  * H-0546 — Portfolio recompute fans out via asyncio.gather (the
-    test confirms _compute_portfolio_analytics is awaited for every
-    portfolio_id in the result set, in any order).
+  * H-0546 — Portfolio recompute fans out via asyncio.gather.
+
+Phase-B specialist additions (post simplify pass):
+
+  * Initial api_keys SELECT failure raises HTTP 500 with logger.exception
+    rather than a raw FastAPI traceback (silent-failure-hunter F1).
+  * Deactivate UPDATE with empty `.data` logs an error so a mid-tick
+    row deletion doesn't masquerade as a successful deactivation
+    (silent-failure-hunter F3).
+  * `_sync_single_key` returns status="partial" when one of N
+    per-strategy sync_trades RPCs fails — the remaining strategies
+    are stored AND `last_sync_at` is still bumped so the next tick
+    doesn't refetch already-landed trades (silent-failure-hunter F4).
+  * `sync_trades` returning an unexpected (non-int) shape logs an
+    error before falling back to `len(trades)` (silent-failure-hunter F5).
+  * `validate_key_permissions` raising (vs returning valid=False)
+    yields status="error" with no key deactivation (test-analyzer F3).
+  * In-flight `computing` row → `_guarded_recompute` skips the
+    compute and counts as ok (test-analyzer F2 / silent-failure F13).
+  * `_compute_portfolio_analytics` raising HTTPException(400) for
+    benign business states ("No strategies") is classified as
+    "skipped", not "failed" (silent-failure-hunter F7).
+  * Per-portfolio `asyncio.wait_for(PORTFOLIO_RECOMPUTE_TIMEOUT)`
+    converts a wedged compute into a bounded failure that doesn't
+    starve `_compute_semaphore` for everyone else (code-reviewer F2).
+  * `portfolio_recomputes.failures` is capped at RECOMPUTE_FAILURE_CAP
+    with `failures_truncated`/`total_failures` set (silent-failure F8).
+  * Recompute-lookup Supabase blip is caught so per-key sync results
+    survive in the response (silent-failure-hunter F11).
+  * `transient_failure` and `partial` results are counted in the
+    summary log + response payload — pre-Phase-B they were silently
+    dropped from every counter (code-reviewer F1).
 
 Why pure stdlib + MagicMock: matching the established pattern in
 test_cron_recompute_is_test_filter.py. supabase-py + ccxt are real
@@ -75,6 +106,95 @@ def _stub_validation(
     }
 
 
+def _make_mock_supabase_for_cron_sync(
+    *,
+    keys_data: list[dict],
+    ps_data: list[dict] | None = None,
+    pf_data: list[dict] | None = None,
+    pa_data: list[dict] | None = None,
+    rpc_data: int | None = 1,
+    update_data: list[dict] | None = None,
+) -> MagicMock:
+    """Build a MagicMock supabase client wired for end-to-end cron_sync
+    integration tests. Each table name dispatches to its own chain so
+    SELECT / UPDATE / RPC calls can be asserted independently.
+
+    - keys_data: rows returned by api_keys SELECT (must include the
+      `strategies` embed key with status fields).
+    - ps_data: rows returned by portfolio_strategies SELECT.
+    - pf_data: rows returned by portfolios SELECT (post is_test=false
+      filter); defaults to mirroring ps_data's portfolio_ids.
+    - pa_data: rows returned by portfolio_analytics in-flight check;
+      empty list => "no in-flight row, run the compute."
+    - rpc_data: scalar returned by sync_trades RPC; pass `None` or a
+      non-int to exercise the shape-fallback path. Pass an Exception
+      instance to make rpc.execute raise.
+    - update_data: rows returned by api_keys UPDATE; defaults to one
+      row so the deactivation-no-op detection path isn't accidentally
+      tripped.
+    """
+    if ps_data is None:
+        ps_data = []
+    if pf_data is None:
+        pf_data = [{"id": r["portfolio_id"]} for r in ps_data]
+    if pa_data is None:
+        pa_data = []
+    if update_data is None:
+        update_data = [{"id": r.get("id", "key-1")} for r in keys_data]
+
+    mock_supabase = MagicMock()
+
+    keys_chain = MagicMock()
+    keys_chain.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=keys_data
+    )
+
+    ps_chain = MagicMock()
+    ps_chain.select.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=ps_data
+    )
+
+    pf_chain = MagicMock()
+    pf_chain.select.return_value.in_.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=pf_data
+    )
+
+    pa_chain = MagicMock()
+    pa_chain.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=pa_data
+    )
+
+    update_chain = MagicMock()
+    update_chain.eq.return_value.execute.return_value = MagicMock(data=update_data)
+
+    def _table(name: str):
+        if name == "api_keys":
+            t = MagicMock()
+            t.select.return_value.eq.return_value.execute.return_value = (
+                keys_chain.select.return_value.eq.return_value.execute.return_value
+            )
+            t.update.return_value = update_chain
+            return t
+        if name == "portfolio_strategies":
+            return ps_chain
+        if name == "portfolios":
+            return pf_chain
+        if name == "portfolio_analytics":
+            return pa_chain
+        return MagicMock()
+
+    mock_supabase.table.side_effect = _table
+
+    rpc_chain = MagicMock()
+    if isinstance(rpc_data, BaseException):
+        rpc_chain.execute.side_effect = rpc_data
+    else:
+        rpc_chain.execute.return_value = MagicMock(data=rpc_data)
+    mock_supabase.rpc.return_value = rpc_chain
+
+    return mock_supabase
+
+
 # ---------------------------------------------------------------------------
 # C-0192 / C-0194 — credential-rejection vs transient validation
 # ---------------------------------------------------------------------------
@@ -102,7 +222,10 @@ class TestRevokedKeyBranch:
         mock_supabase = MagicMock()
         update_chain = MagicMock()
         eq_chain = MagicMock()
-        eq_chain.execute.return_value = MagicMock(data=[])
+        # Realistic Supabase UPDATE return shape: `.data` is a list of
+        # updated rows. Empty `.data` would trigger the no-op detection
+        # path tested separately in TestDeactivateNoOpDetection.
+        eq_chain.execute.return_value = MagicMock(data=[{"id": "key-1"}])
         update_chain.eq.return_value = eq_chain
         mock_supabase.table.return_value.update.return_value = update_chain
 
@@ -124,8 +247,14 @@ class TestRevokedKeyBranch:
 
         assert result["status"] == "key_revoked"
         assert result["error_code"] == error_code
-        # Mutation contract: ONE .update on api_keys, ONE .eq('id', key_id).
+        # Mutation contract: ONE .update on api_keys, payload is
+        # exactly {"is_active": False} (no other fields — a flipped
+        # bool or an extra field would still pass an `assert_called`
+        # assertion), scoped to ONE .eq('id', key_id).
         mock_supabase.table.assert_any_call("api_keys")
+        mock_supabase.table.return_value.update.assert_called_once_with(
+            {"is_active": False}
+        )
         update_chain.eq.assert_called_once_with("id", "key-1")
         eq_chain.execute.assert_called_once()
 
@@ -172,8 +301,10 @@ class TestRevokedKeyBranch:
         assert result["status"] == "transient_failure"
         assert result["error_code"] == error_code
         # The deactivate path must NOT have been taken: .update was
-        # never called on api_keys.
-        update_chain.eq.assert_not_called()
+        # never called on api_keys. Asserting directly on `.update`
+        # (not `update_chain.eq`) survives changes to the post-`.update`
+        # chain shape.
+        mock_supabase.table.return_value.update.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +387,22 @@ class TestStrategyLifecycleFilter:
     strategies must NOT receive a sync_trades RPC.
     """
 
-    def test_status_filter_drops_archived_and_unknown(self):
-        """Replays the flatten-shape from cron.cron_sync against a
-        fixture and asserts only ALLOWED_STRATEGY_STATUSES survive.
+    @pytest.mark.asyncio
+    async def test_only_live_statuses_receive_sync_trades_rpc(self):
+        """Behavioural: drive `cron_sync` end-to-end with a single key
+        whose embedded strategies span every lifecycle status. Assert
+        the resulting `sync_trades` RPC fan-out only fires for the
+        three live statuses — the rest are silently dropped.
+
+        Replaces the prior local-replay test that re-implemented the
+        filter inline (a refactor that dropped the cron.py filter would
+        have left that test green).
         """
-        ALLOWED = {"draft", "pending_review", "published"}
-        embedded = [
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        mixed_strategies = [
             {"id": "s-pub", "status": "published"},
             {"id": "s-draft", "status": "draft"},
             {"id": "s-review", "status": "pending_review"},
@@ -269,30 +410,117 @@ class TestStrategyLifecycleFilter:
             {"id": "s-suspended", "status": "suspended"},
             {"id": "s-deleted", "status": "deleted"},
         ]
-        filtered = [
-            e["id"]
-            for e in embedded
-            if isinstance(e, dict)
-            and e.get("id")
-            and (e.get("status") in ALLOWED if "status" in e else True)
-        ]
-        assert filtered == ["s-pub", "s-draft", "s-review"]
 
-    def test_cron_source_pulls_status_from_embed(self):
-        """Static-source pin: cron.py must `select(...status)` and
-        check the lifecycle filter. Guards against a refactor that
-        drops the filter but otherwise looks plausible.
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": mixed_strategies,
+                }
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        rpc_strategy_ids = sorted(
+            call.args[1]["p_strategy_id"]
+            for call in mock_supabase.rpc.call_args_list
+            if call.args and call.args[0] == "sync_trades"
+        )
+        assert rpc_strategy_ids == ["s-draft", "s-pub", "s-review"]
+        # Result payload mirrors the filter
+        result_strategy_ids = sorted(response["results"][0]["strategy_ids"])
+        assert result_strategy_ids == ["s-draft", "s-pub", "s-review"]
+
+    @pytest.mark.asyncio
+    async def test_strategy_missing_status_field_is_dropped(self):
+        """SF-F9: pre-Phase-B the filter allowed an embedded strategy
+        through if it had no `status` field at all (`if "status" in e
+        else True`). That was a fail-open escape hatch that defeated
+        C-0200 if PostgREST or a schema migration ever omitted the
+        column. Post-fix, missing `status` fails closed.
         """
-        from pathlib import Path
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
 
-        src = (
-            Path(__file__).resolve().parent.parent / "routers" / "cron.py"
-        ).read_text(encoding="utf-8")
-        assert "id, status" in src
-        assert "ALLOWED_STRATEGY_STATUSES" in src
-        assert '"published"' in src
-        assert '"pending_review"' in src
-        assert '"draft"' in src
+        # One live strategy, one strategy entirely missing the
+        # `status` key. Only the first should appear in the RPC call.
+        partial_strategies = [
+            {"id": "s-live", "status": "published"},
+            {"id": "s-no-status"},  # status key missing entirely
+        ]
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": partial_strategies,
+                }
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        rpc_strategy_ids = [
+            call.args[1]["p_strategy_id"]
+            for call in mock_supabase.rpc.call_args_list
+            if call.args and call.args[0] == "sync_trades"
+        ]
+        assert rpc_strategy_ids == ["s-live"]
+        assert response["results"][0]["strategy_ids"] == ["s-live"]
 
 
 # ---------------------------------------------------------------------------
@@ -487,3 +715,1019 @@ class TestPortfolioRecomputeErrorIsolation:
         assert failed_pids == ["p1"]
         # Error repr captures the exception type for Sentry correlation.
         assert "RuntimeError" in pr["failures"][0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Phase-B specialist additions
+# ---------------------------------------------------------------------------
+
+
+class TestDeactivateNoOpDetection:
+    """SF-F3: If `.update({'is_active': False}).eq('id', key_id)` returns
+    an empty `.data`, the row vanished between the SELECT and the UPDATE
+    (deleted or re-keyed by another writer). The cron must log this as
+    an error so a silent vanishing doesn't masquerade as a successful
+    deactivation in the logs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_update_data_logs_error(self, caplog):
+        mock_supabase = MagicMock()
+        update_chain = MagicMock()
+        eq_chain = MagicMock()
+        # Simulate the row already deleted: UPDATE matched zero rows.
+        eq_chain.execute.return_value = MagicMock(data=[])
+        update_chain.eq.return_value = eq_chain
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(
+                     valid=False, error_code="AUTH_FAILED", error="bad creds"
+                 )),
+             ):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+                result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # Still marked revoked (the *intent* succeeded — we tried to
+        # deactivate), but the no-op is loud.
+        assert result["status"] == "key_revoked"
+        assert any(
+            "deactivation no-op" in record.message
+            and "key-1" in record.message
+            for record in caplog.records
+            if record.levelname == "ERROR"
+        ), (
+            "Expected an ERROR log mentioning 'deactivation no-op' and "
+            "the key id; got " + repr([r.message for r in caplog.records])
+        )
+
+
+class TestPartialStatusOnRpcFailure:
+    """SF-F4: If one of N per-strategy `sync_trades` RPCs fails, the
+    remaining strategies still get their trades stored AND
+    `last_sync_at` is still bumped so the next tick doesn't refetch
+    already-landed trades. Result status flips to "partial" and the
+    payload reports per-strategy errors.
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_failing_rpc_does_not_abort_loop_or_skip_cursor(self):
+        mock_supabase = MagicMock()
+
+        # rpc(...) returns a chain whose .execute() raises for strat-B
+        # only. We dispatch on the kwargs to pick the side-effect.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            if args.get("p_strategy_id") == "strat-B":
+                chain.execute.side_effect = RuntimeError("postgres deadlock")
+            else:
+                chain.execute.return_value = MagicMock(data=2)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A", "strat-B", "strat-C"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # The two surviving strategies stored their trades, the failing
+        # one is recorded as 0 + reported under strategy_errors.
+        assert result["status"] == "partial"
+        assert result["per_strategy_stored"] == {
+            "strat-A": 2,
+            "strat-B": 0,
+            "strat-C": 2,
+        }
+        assert "strat-B" in result["strategy_errors"]
+        assert "RuntimeError" in result["strategy_errors"]["strat-B"]
+        # CRITICAL: last_sync_at UPDATE MUST still have fired — else the
+        # next tick refetches `strat-A` / `strat-C`'s already-landed
+        # trades and re-runs the (still-broken) `strat-B` RPC needlessly.
+        mock_supabase.table.return_value.update.assert_called_once()
+        update_payload = mock_supabase.table.return_value.update.call_args.args[0]
+        assert "last_sync_at" in update_payload
+
+
+class TestSyncTradesShapeFallbackLogged:
+    """SF-F5: `sync_trades` is declared to return an integer count. If
+    Postgres ever returns a dict/list/None (e.g. someone changed the
+    function signature), cron silently falls back to `len(trades)`. The
+    fallback is necessary to avoid crashing, but it MUST log loudly so
+    contract drift is visible in the next operator review.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unexpected_rpc_shape_logs_error(self, caplog):
+        mock_supabase = MagicMock()
+        rpc_chain = MagicMock()
+        # Contract violation: sync_trades returns a dict instead of int.
+        rpc_chain.execute.return_value = MagicMock(data={"inserted": 5})
+        mock_supabase.rpc.return_value = rpc_chain
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+                result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "ok"
+        # Fallback fired: stored = len(trades).
+        assert result["per_strategy_stored"]["strat-A"] == 2
+        assert any(
+            "unexpected shape" in record.message
+            and "strat-A" in record.message
+            for record in caplog.records
+            if record.levelname == "ERROR"
+        ), (
+            "Expected ERROR log re: 'unexpected shape' for strat-A; got "
+            + repr([r.message for r in caplog.records])
+        )
+
+
+class TestApiKeysSelectFailureRaises500:
+    """SF-F1: Pre-fix, an exception from the initial `api_keys` SELECT
+    propagated as an unhandled 500 with a raw traceback in the body. The
+    cron alarm fires, but on-call has nothing actionable. Post-fix, the
+    exception is caught, `logger.exception` writes a structured entry to
+    Sentry, and HTTPException(500) is raised with a typed detail.
+    """
+
+    @pytest.mark.asyncio
+    async def test_select_failure_is_caught_and_reraised_as_500(self, caplog):
+        HTTPException = cron_mod.HTTPException
+
+        mock_supabase = MagicMock()
+        # Make the keys SELECT chain raise on .execute().
+        chain = MagicMock()
+        chain.select.return_value.eq.return_value.execute.side_effect = (
+            RuntimeError("supabase down")
+        )
+        mock_supabase.table.return_value = chain
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+                with pytest.raises(HTTPException) as excinfo:
+                    await cron_mod.cron_sync()
+
+        assert excinfo.value.status_code == 500
+        assert "api_keys SELECT failed" in str(excinfo.value.detail)
+        # Structured log with traceback (exc_info recorded).
+        assert any(
+            "api_keys SELECT failed" in record.message
+            and record.exc_info is not None
+            for record in caplog.records
+            if record.levelname == "ERROR"
+        ), (
+            "Expected ERROR log with exc_info for the SELECT failure; got "
+            + repr([(r.message, r.exc_info) for r in caplog.records])
+        )
+
+
+class TestInFlightSkipCountsAsInFlightBucket:
+    """TA-F2 / SF-F13 + red-team HIGH-2: when `portfolio_analytics`
+    already has a `computation_status='computing'` row for the
+    portfolio, another worker is handling it. `_guarded_recompute`
+    must SKIP the compute call entirely AND surface this as its own
+    `in_flight` bucket — NOT conflated with `ok`. Conflating with
+    `ok` would let a stuck "computing" row (the other worker may have
+    died) silently report as success forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_in_flight_portfolio_is_distinct_bucket(self):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": "p1"}],
+            pa_data=[{"id": "analytics-row-already-computing"}],  # in-flight!
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        compute_mock = AsyncMock()  # MUST NOT be called
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(portfolio_mod, "_compute_portfolio_analytics", compute_mock):
+            response = await cron_mod.cron_sync()
+
+        # The compute was NOT called — another worker has it.
+        compute_mock.assert_not_called()
+        pr = response["portfolio_recomputes"]
+        # The in-flight portfolio appears in its own bucket; ok=0,
+        # failed=0. An alert built on
+        # `pr["failed"] == 0 and pr["ok"] == pr["attempted"]` would
+        # no longer match this tick — operators must explicitly
+        # account for in_flight before treating "no failures" as
+        # "all done."
+        assert pr["attempted"] == 1
+        assert pr["ok"] == 0
+        assert pr["in_flight"] == 1
+        assert pr["failed"] == 0
+        assert pr["failures"] == []
+
+
+class TestValidateRaisingReturnsErrorNoDeactivate:
+    """TA-F3: If `validate_key_permissions` itself raises (vs returning
+    valid=False), the result MUST land in the generic-error bucket
+    (status="error") and MUST NOT trigger the deactivation path — we
+    can't tell from an opaque exception whether the credentials are
+    actually bad or our validator is broken.
+    """
+
+    @pytest.mark.asyncio
+    async def test_validator_raising_does_not_deactivate_key(self):
+        mock_supabase = MagicMock()
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(data=[])
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(side_effect=RuntimeError("ccxt internal blow-up")),
+             ):
+            key_row = _make_key_row(strategy_ids=["strat-A"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        assert result["status"] == "error"
+        assert "ccxt internal blow-up" in result["error"]
+        # Crucially: no deactivation — `.update` was never called on
+        # api_keys (a future bug that misclassified an opaque failure as
+        # credential-rejection would silently disable healthy keys).
+        mock_supabase.table.return_value.update.assert_not_called()
+
+
+class TestTransientCounterInSummary:
+    """CR-F1: Pre-Phase-B, transient_failure and partial results were
+    counted by NONE of the summary buckets (synced/failed/timed_out/
+    revoked) — a tick where every key hit a transient validation
+    failure logged "0 synced, 0 failed = idle" and the response
+    payload mirrored that. Post-fix, BOTH appear in the summary.
+    """
+
+    @pytest.mark.asyncio
+    async def test_transient_and_partial_appear_in_summary_counts(self):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        # Three keys, three different fates: one ok, one transient, one
+        # partial.
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": f"key-{i}",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": f"strat-{i}", "status": "published"}],
+                }
+                for i in (1, 2, 3)
+            ],
+            ps_data=[],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        # One transient + two ok validations, in any order. asyncio
+        # scheduling inside cron's `gather` doesn't guarantee which
+        # key gets the transient; the assertion below pivots on
+        # counters, not on key identity, so the test stays valid.
+        validations = iter([
+            _stub_validation(valid=True),
+            _stub_validation(
+                valid=False, error_code="RATE_LIMITED", error="429"
+            ),
+            _stub_validation(valid=True),
+        ])
+
+        async def _validate(exchange):
+            return next(validations)
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(cron_mod, "validate_key_permissions", _validate), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        # Counts: 2 ok, 1 transient. failed/timed_out/revoked/partial=0.
+        assert response["synced"] == 2
+        assert response["transient"] == 1
+        assert response["partial"] == 0
+        assert response["failed"] == 0
+        assert response["timed_out"] == 0
+        assert response["revoked"] == 0
+        assert response["total_keys"] == 3
+
+
+class TestRecomputeHttp400IsSkipped:
+    """SF-F7: `_compute_portfolio_analytics` raises HTTPException(400)
+    for benign business states ("No strategies", "No returns data").
+    Pre-Phase-B those landed in the generic-Exception branch and were
+    counted as failures, opening a Sentry ticket per portfolio per tick.
+    Post-fix, 400s are classified as 'skipped'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_http_400_is_skipped_not_failed(self):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": "p1"}, {"portfolio_id": "p2"}],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        async def _compute(pid: str):
+            if pid == "p1":
+                raise cron_mod.HTTPException(
+                    status_code=400, detail="No strategies found in portfolio"
+                )
+            return {"analytics_id": f"a-{pid}"}
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(
+                 portfolio_mod,
+                 "_compute_portfolio_analytics",
+                 AsyncMock(side_effect=_compute),
+             ):
+            response = await cron_mod.cron_sync()
+
+        pr = response["portfolio_recomputes"]
+        assert pr["attempted"] == 2
+        assert pr["ok"] == 1
+        assert pr["skipped"] == 1
+        assert pr["failed"] == 0
+        assert pr["failures"] == []
+
+
+class TestRecomputeTimeoutIsFailure:
+    """CR-F2: A wedged recompute on one portfolio must NOT block the
+    whole cron tick or starve `_compute_semaphore` for everyone else.
+    `_guarded_recompute` wraps the compute in `asyncio.wait_for` with
+    `PORTFOLIO_RECOMPUTE_TIMEOUT`; the timeout maps to status="failed"
+    with a TimeoutError repr.
+    """
+
+    @pytest.mark.asyncio
+    async def test_compute_timeout_is_bounded_and_marked_failed(
+        self, monkeypatch
+    ):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        # Shrink the timeout so the test doesn't actually wait 90 s.
+        monkeypatch.setattr(cron_mod, "PORTFOLIO_RECOMPUTE_TIMEOUT", 0.05)
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": "p1"}],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        import asyncio as _asyncio
+
+        async def _compute_wedged(pid: str):
+            await _asyncio.sleep(1.0)  # > the patched 0.05 s timeout
+            return {"analytics_id": "never-returned"}
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(
+                 portfolio_mod,
+                 "_compute_portfolio_analytics",
+                 AsyncMock(side_effect=_compute_wedged),
+             ):
+            response = await cron_mod.cron_sync()
+
+        pr = response["portfolio_recomputes"]
+        assert pr["attempted"] == 1
+        assert pr["ok"] == 0
+        assert pr["failed"] == 1
+        assert "TimeoutError" in pr["failures"][0]["error"]
+
+
+class TestRecomputeFailuresTruncation:
+    """SF-F8: `portfolio_recomputes.failures` is capped at
+    RECOMPUTE_FAILURE_CAP. A platform-wide outage producing thousands
+    of failure entries would otherwise breach the Vercel response body
+    limit. `failures_truncated` + `total_failures` surface the
+    truncation so the operator still knows the true count.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failures_list_is_capped_with_total_reported(
+        self, monkeypatch
+    ):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        # Shrink the cap so we don't have to generate 100 portfolios.
+        monkeypatch.setattr(cron_mod, "RECOMPUTE_FAILURE_CAP", 3)
+
+        portfolio_ids = [f"p{i}" for i in range(5)]
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": pid} for pid in portfolio_ids],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        async def _compute_all_fail(pid: str):
+            raise RuntimeError(f"supabase down for {pid}")
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(
+                 portfolio_mod,
+                 "_compute_portfolio_analytics",
+                 AsyncMock(side_effect=_compute_all_fail),
+             ):
+            response = await cron_mod.cron_sync()
+
+        pr = response["portfolio_recomputes"]
+        assert pr["attempted"] == 5
+        assert pr["failed"] == 5
+        # The list is truncated to the cap but the true count is preserved.
+        assert len(pr["failures"]) == 3
+        assert pr["failures_truncated"] is True
+        assert pr["total_failures"] == 5
+
+
+class TestRecomputeLookupErrorPreservesSync:
+    """SF-F11: A Supabase blip on the `portfolio_strategies` or
+    `portfolios` lookup must NOT lose the per-key sync results already
+    collected. The response payload still carries `results` for every
+    key, with `portfolio_recomputes.lookup_error` capturing the
+    failure for the operator.
+    """
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_preserves_per_key_sync_results(self):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        # Reuse the helper to set up api_keys + RPC + UPDATE, but
+        # override portfolio_strategies to raise on .execute().
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": "p1"}],
+        )
+
+        # Re-wire the portfolio_strategies path to blow up.
+        original_side_effect = mock_supabase.table.side_effect
+
+        def _table_with_ps_failure(name: str):
+            if name == "portfolio_strategies":
+                ps = MagicMock()
+                ps.select.return_value.in_.return_value.execute.side_effect = (
+                    RuntimeError("supabase blip")
+                )
+                return ps
+            return original_side_effect(name)
+
+        mock_supabase.table.side_effect = _table_with_ps_failure
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            response = await cron_mod.cron_sync()
+
+        # The cron returned (didn't 500) and per-key results survived.
+        assert response["synced"] == 1
+        assert len(response["results"]) == 1
+        assert response["results"][0]["key_id"] == "key-1"
+        # Recompute branch reports a lookup_error and no attempts.
+        pr = response["portfolio_recomputes"]
+        assert pr["attempted"] == 0
+        assert "lookup_error" in pr
+        assert "RuntimeError" in pr["lookup_error"]
+
+
+# ---------------------------------------------------------------------------
+# Red-team additions
+# ---------------------------------------------------------------------------
+
+
+class TestPartialStatusOnlyWhenSomeSucceed:
+    """Red-team MED 5: `partial` is misleading if *no* strategies
+    stored. When every RPC fails, surface `error` (not `partial`) so
+    the operator isn't tricked into thinking trades landed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_rpcs_failing_yields_error_status(self):
+        mock_supabase = MagicMock()
+
+        # Every sync_trades RPC blows up.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            chain.execute.side_effect = RuntimeError("postgres dead")
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        update_chain = MagicMock()
+        update_chain.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "key-1"}]
+        )
+        mock_supabase.table.return_value.update.return_value = update_chain
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None):
+            key_row = _make_key_row(strategy_ids=["strat-A", "strat-B"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # Zero stored across the board → status="error", NOT "partial".
+        assert result["status"] == "error"
+        assert result["per_strategy_stored"] == {"strat-A": 0, "strat-B": 0}
+        assert "strategy_errors" in result
+        # Top-level `error` field is surfaced so consumers that switch
+        # on `r.get("error")` see the failure.
+        assert "error" in result
+        assert "RuntimeError" in result["error"]
+
+
+class TestPartialKeyStillTriggersRecompute:
+    """Red-team MED 8: my Phase B introduction of `status="partial"`
+    accidentally dropped partial keys from `synced_strategy_ids`,
+    starving portfolios backed by the SUCCESSFUL secondaries of their
+    recompute window. The cascade must include strategies whose RPC
+    succeeded even on a partial-status key, and exclude those whose
+    RPC failed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_key_cascades_only_successful_strategies(self):
+        import sys
+        import routers.portfolio as portfolio_mod
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        # Key has 3 strategies; sync_trades succeeds for A and C,
+        # raises for B. Portfolios p-A / p-B / p-C are each backed
+        # 1:1 by their respective strategy. Only p-A and p-C should
+        # be recomputed; p-B's recompute would be stale because the
+        # trades that should have informed it didn't land.
+        strategy_to_portfolio = {
+            "strat-A": "p-A",
+            "strat-B": "p-B",
+            "strat-C": "p-C",
+        }
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [
+                        {"id": sid, "status": "published"}
+                        for sid in strategy_to_portfolio
+                    ],
+                }
+            ],
+            ps_data=[],  # overridden below — needs realistic .in_() filter
+            pf_data=[{"id": pid} for pid in strategy_to_portfolio.values()],
+        )
+
+        # Replace the portfolio_strategies chain with one that filters by
+        # the strategy_ids list passed to `.in_()`, mirroring real
+        # Supabase behaviour. Without this, the cascade test can't
+        # distinguish "B was excluded from the cascade" from "the mock
+        # returned B anyway."
+        original_table_dispatch = mock_supabase.table.side_effect
+
+        def _filtered_table_dispatch(name: str):
+            if name == "portfolio_strategies":
+                ps = MagicMock()
+
+                def _in_filter(_column, requested_strategy_ids):
+                    chain = MagicMock()
+                    rows = [
+                        {"portfolio_id": strategy_to_portfolio[sid]}
+                        for sid in requested_strategy_ids
+                        if sid in strategy_to_portfolio
+                    ]
+                    chain.execute.return_value = MagicMock(data=rows)
+                    return chain
+
+                ps.select.return_value.in_.side_effect = _in_filter
+                return ps
+            if name == "portfolios":
+                # `.select("id").in_("id", ids).eq("is_test", False).execute()`
+                # needs to filter by the requested ids so the cascade
+                # assertion can distinguish "B not in cascade" from
+                # "mock returned all 3 anyway."
+                pf = MagicMock()
+
+                def _pf_in(_column, requested_portfolio_ids):
+                    in_chain = MagicMock()
+                    rows = [
+                        {"id": pid} for pid in requested_portfolio_ids
+                    ]
+                    in_chain.eq.return_value.execute.return_value = MagicMock(
+                        data=rows
+                    )
+                    return in_chain
+
+                pf.select.return_value.in_.side_effect = _pf_in
+                return pf
+            return original_table_dispatch(name)
+
+        mock_supabase.table.side_effect = _filtered_table_dispatch
+
+        # RPC dispatch: B raises, A and C succeed.
+        def _rpc(name: str, args: dict):
+            chain = MagicMock()
+            sid = args.get("p_strategy_id")
+            if sid == "strat-B":
+                chain.execute.side_effect = RuntimeError("rpc blew up for B")
+            else:
+                chain.execute.return_value = MagicMock(data=5)
+            return chain
+
+        mock_supabase.rpc.side_effect = _rpc
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        recomputed: list[str] = []
+
+        async def _compute(pid: str):
+            recomputed.append(pid)
+            return {"analytics_id": f"a-{pid}"}
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}, {"id": "t2"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(
+                 portfolio_mod,
+                 "_compute_portfolio_analytics",
+                 AsyncMock(side_effect=_compute),
+             ):
+            response = await cron_mod.cron_sync()
+
+        # The single key is `partial` — some strategies landed, one
+        # didn't. Pre-red-team it was dropped from the cascade entirely
+        # because the filter was `status == "ok"` only.
+        assert response["partial"] == 1
+        assert response["synced"] == 0
+        # Only p-A and p-C were recomputed; p-B's trades didn't land
+        # so a recompute would be stale.
+        assert sorted(recomputed) == ["p-A", "p-C"]
+
+
+class TestCronRecomputeConcurrencyCap:
+    """Red-team HIGH 1: cron must NOT monopolise every
+    `_compute_semaphore` slot — if it `asyncio.gather`s a thousand
+    portfolios, live `POST /api/portfolio-analytics` requests would
+    stall for hours behind the cron backlog. The cron-internal
+    `CRON_RECOMPUTE_CONCURRENCY` cap leaves at least one slot of the
+    shared semaphore (size 3) free for interactive traffic.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cron_caps_its_own_concurrency_below_shared_limit(
+        self, monkeypatch
+    ):
+        import asyncio as _asyncio
+        import routers.portfolio as portfolio_mod
+        import sys
+        sys.modules["routers.portfolio"] = portfolio_mod
+
+        # Pin cron's own concurrency to 1 so we can directly observe
+        # the cap (the test would otherwise need to detect Semaphore(2)
+        # behaviour, which is harder to assert deterministically).
+        monkeypatch.setattr(cron_mod, "CRON_RECOMPUTE_CONCURRENCY", 1)
+
+        # Five portfolios so an unbounded gather would obviously
+        # exceed the cap.
+        portfolio_ids = [f"p{i}" for i in range(5)]
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": pid} for pid in portfolio_ids],
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        in_flight_max = 0
+        currently_running = 0
+        lock = _asyncio.Lock()
+
+        async def _compute(pid: str):
+            nonlocal in_flight_max, currently_running
+            async with lock:
+                currently_running += 1
+                in_flight_max = max(in_flight_max, currently_running)
+            # Give the scheduler a chance to start any other waiting
+            # coroutines; if the cap is broken, they'll all increment
+            # `currently_running` before any release.
+            await _asyncio.sleep(0.01)
+            async with lock:
+                currently_running -= 1
+            return {"analytics_id": f"a-{pid}"}
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(
+                 portfolio_mod,
+                 "_compute_portfolio_analytics",
+                 AsyncMock(side_effect=_compute),
+             ):
+            response = await cron_mod.cron_sync()
+
+        assert response["portfolio_recomputes"]["attempted"] == 5
+        assert response["portfolio_recomputes"]["ok"] == 5
+        # With CRON_RECOMPUTE_CONCURRENCY=1, at most ONE compute runs
+        # concurrently. Without the cap, the unbounded gather would
+        # have allowed up to 3 (the shared semaphore size).
+        assert in_flight_max == 1, (
+            f"Expected cron_recompute_sem to cap concurrency at 1, "
+            f"observed max in-flight = {in_flight_max}"
+        )

@@ -4,6 +4,7 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 
@@ -20,6 +21,58 @@ KEY_SYNC_TIMEOUT = 60
 BATCH_SIZE = 5
 # Delay between batches for the same exchange (seconds)
 EXCHANGE_BATCH_DELAY = 2.0
+# Per-portfolio recompute timeout (seconds). A wedged compute on one
+# portfolio must not block the cron tick or starve live HTTP requests
+# also competing for `_compute_semaphore`.
+PORTFOLIO_RECOMPUTE_TIMEOUT = 90
+# Cron-internal cap on how many portfolio recomputes are in flight at
+# once. `_compute_semaphore` is shared with live `POST
+# /api/portfolio-analytics` traffic; if cron `asyncio.gather`s N
+# portfolios it monopolises every slot and live requests stall.
+# Capping cron concurrency to (shared_limit - 1) leaves at least one
+# slot for interactive users.
+CRON_RECOMPUTE_CONCURRENCY = 2
+# Cap the number of failure entries returned in `portfolio_recomputes.failures`.
+# A platform-wide Supabase outage can fail N portfolios and the unbounded
+# list would otherwise bloat the response body Sentry/log aggregators
+# have to store and search.
+RECOMPUTE_FAILURE_CAP = 50
+
+# Wire-format status values for a per-key sync result. Annotated on
+# `_sync_single_key` / `_sync_key_with_timeout` returns so misspelled
+# comparisons (`"OK"`, `"errored"`) are caught at type-check time
+# before they silently misclassify a result in the summary counters.
+SyncStatus = Literal[
+    "ok",
+    "partial",
+    "key_revoked",
+    "transient_failure",
+    "error",
+    "timeout",
+]
+
+# Outcome bucket for a per-portfolio recompute attempt. `in_flight` is
+# distinct from `ok` so the response payload doesn't conflate "I
+# computed this" with "someone else might be computing this" — alerting
+# on `pr["failed"] == 0 and pr["ok"] == pr["attempted"]` would otherwise
+# silently treat unfinished work as success.
+RecomputeStatus = Literal["ok", "in_flight", "skipped", "failed"]
+
+# Only these validation error codes mean "credentials are bad, deactivate the
+# key." Transient codes (rate limit, network, exchange-down, unexpected) mean
+# "try again next tick" — treating them as credential failure would let a 30s
+# network blip permanently disable a user's key.
+CREDENTIAL_REJECTION_CODES = {
+    "AUTH_FAILED",
+    "PERMISSION_DENIED",
+    "WITHDRAW_SCOPE",
+    "TRADE_SCOPE",
+}
+
+# Lifecycle statuses that may receive cron-synced trades. Syncing into an
+# archived or deleted strategy can overwrite its submission snapshot and flip
+# its approval-gate verdict between Submit and Approve.
+ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
 
 
 async def _sync_single_key(
@@ -32,15 +85,13 @@ async def _sync_single_key(
     """
     key_id = key_row["id"]
     exchange_name = key_row["exchange"]
-    # audit-2026-05-07 C-0201 — an API key may link to MULTIPLE
-    # strategies (the FK lives on strategies.api_key_id, so a single
-    # key_id can appear N times). The pre-fix code did
-    # `strategy_rel[0]["id"]` and silently dropped strategies 2..N — they
-    # never received a sync_trades RPC and their windows went stale.
-    # `strategy_ids` is the full list; `strategy_id` is retained as the
-    # primary (first) entry for result-payload back-compat.
+    # One API key can back N strategies — the FK lives on
+    # `strategies.api_key_id`, so a single `key_id` appears in the join N
+    # times. `strategy_ids` is the authoritative list (each gets its own
+    # `sync_trades` RPC); `strategy_id` is the primary, kept only for
+    # result-payload back-compat.
     strategy_ids: list[str] = list(key_row.get("strategy_ids") or [])
-    strategy_id = strategy_ids[0] if strategy_ids else key_row.get("strategy_id")
+    strategy_id = strategy_ids[0] if strategy_ids else None
     start = time.monotonic()
 
     try:
@@ -52,19 +103,6 @@ async def _sync_single_key(
             # Re-validate key permissions before syncing
             validation = await validate_key_permissions(exchange)
             if not validation["valid"]:
-                # audit-2026-05-07 C-0194 — only deactivate keys for
-                # credential-rejection error codes. Transient codes
-                # (RATE_LIMITED, NETWORK_UNAVAILABLE, DDOS_PROTECTION,
-                # EXCHANGE_UNAVAILABLE, VALIDATION_UNEXPECTED) flag the
-                # validation as not-valid but mean "try again later"
-                # NOT "credentials are bad" — pre-fix, a 30s network
-                # blip permanently disabled the user's API key.
-                CREDENTIAL_REJECTION_CODES = {
-                    "AUTH_FAILED",
-                    "PERMISSION_DENIED",
-                    "WITHDRAW_SCOPE",
-                    "TRADE_SCOPE",
-                }
                 error_code = validation.get("error_code")
                 is_credential_failure = error_code in CREDENTIAL_REJECTION_CODES
 
@@ -76,9 +114,18 @@ async def _sync_single_key(
                         error_code,
                         validation.get("error", "unknown"),
                     )
-                    supabase.table("api_keys").update(
+                    update_result = supabase.table("api_keys").update(
                         {"is_active": False}
                     ).eq("id", key_id).execute()
+                    # A no-op UPDATE (row was deleted or re-keyed between
+                    # the cron SELECT and now) looks identical to success
+                    # in the logs unless we inspect `.data` here.
+                    if not getattr(update_result, "data", None):
+                        logger.error(
+                            "cron_sync: deactivation no-op for key %s — row "
+                            "vanished mid-tick (deleted/re-keyed by another writer)",
+                            key_id,
+                        )
                 else:
                     # Transient failure — leave is_active=True, retry next tick.
                     logger.warning(
@@ -105,38 +152,76 @@ async def _sync_single_key(
         finally:
             await exchange.close()
 
-        # Store trades atomically via RPC.
-        #
-        # audit-2026-05-07 C-0201 — one API key can back N strategies
-        # (strategies.api_key_id FK). Pre-fix this loop only invoked
-        # sync_trades for the first strategy; all other linked
-        # strategies missed the trade window. Run one RPC per linked
-        # strategy so every strategy gets the freshly-fetched trades.
+        # Store trades atomically via RPC — one call per linked strategy.
+        # Each RPC is wrapped so one failing strategy does NOT abort the
+        # rest of the fan-out or skip the `last_sync_at` UPDATE; otherwise
+        # the next tick refetches the same trades and we lose the cursor.
         supabase = get_supabase()
         trades_stored = 0
         per_strategy_stored: dict[str, int] = {}
+        strategy_errors: dict[str, str] = {}
 
         if trades and strategy_ids:
             trades_json = json.dumps(trades, default=str)
             for sid in strategy_ids:
-                result = supabase.rpc(
-                    "sync_trades",
-                    {"p_strategy_id": sid, "p_trades": trades_json},
-                ).execute()
-                stored = result.data if isinstance(result.data, int) else len(trades)
+                try:
+                    result = supabase.rpc(
+                        "sync_trades",
+                        {"p_strategy_id": sid, "p_trades": trades_json},
+                    ).execute()
+                except Exception as rpc_exc:
+                    logger.exception(
+                        "cron_sync: sync_trades RPC failed for key %s strategy %s",
+                        key_id,
+                        sid,
+                    )
+                    per_strategy_stored[sid] = 0
+                    strategy_errors[sid] = f"{type(rpc_exc).__name__}: {rpc_exc}"
+                    continue
+                if isinstance(result.data, int):
+                    stored = result.data
+                else:
+                    # Contract drift: sync_trades is declared to return
+                    # the integer row count. A dict / list / None here
+                    # means the SQL function changed shape; fall back to
+                    # `len(trades)` but log loudly so the drift surfaces.
+                    logger.error(
+                        "cron_sync: sync_trades returned unexpected shape "
+                        "for key %s strategy %s: %r — assuming %d stored",
+                        key_id,
+                        sid,
+                        result.data,
+                        len(trades),
+                    )
+                    stored = len(trades)
                 per_strategy_stored[sid] = stored
             # `trades_stored` reflects the primary strategy for back-compat;
             # `per_strategy_stored` carries the per-strategy breakdown.
             trades_stored = per_strategy_stored.get(strategy_id, 0)
 
-        # Update last_sync_at and balance
+        # Update last_sync_at and balance unconditionally — even if some
+        # per-strategy RPCs failed, the trades we *did* land must not be
+        # refetched on the next tick.
         update_data: dict = {"last_sync_at": datetime.now(timezone.utc).isoformat()}
         if account_balance is not None:
             update_data["account_balance_usdt"] = account_balance
         supabase.table("api_keys").update(update_data).eq("id", key_id).execute()
 
         duration = time.monotonic() - start
-        return {
+        # `partial` means *some* strategies landed AND *some* failed.
+        # If every per-strategy RPC raised, that's `error`, not
+        # `partial` — calling it partial would mislead the operator
+        # into thinking trades were stored when none were. The
+        # "no strategies attempted" case (empty list or no trades) is
+        # `ok` because there was nothing to do.
+        any_stored = any(n > 0 for n in per_strategy_stored.values())
+        if strategy_errors and any_stored:
+            status: SyncStatus = "partial"
+        elif strategy_errors:
+            status = "error"
+        else:
+            status = "ok"
+        result: dict = {
             "key_id": key_id,
             "strategy_id": strategy_id,
             "strategy_ids": strategy_ids,
@@ -146,17 +231,23 @@ async def _sync_single_key(
             "per_strategy_stored": per_strategy_stored,
             "balance_usdt": account_balance,
             "duration_s": round(duration, 2),
-            "status": "ok",
+            "status": status,
         }
+        if strategy_errors:
+            result["strategy_errors"] = strategy_errors
+            # When every strategy failed, surface a top-level error too
+            # for consumers that switch on `r.get("error")`.
+            if status == "error":
+                first_sid = next(iter(strategy_errors))
+                result["error"] = strategy_errors[first_sid]
+        return result
 
     except Exception as e:
         duration = time.monotonic() - start
-        logger.error(
-            "cron_sync: key %s failed after %.1fs: %s",
+        logger.exception(
+            "cron_sync: key %s failed after %.1fs",
             key_id,
             duration,
-            str(e),
-            exc_info=True,
         )
         return {
             "key_id": key_id,
@@ -178,15 +269,22 @@ async def _sync_key_with_timeout(key_row: dict, kek: bytes) -> dict:
             timeout=KEY_SYNC_TIMEOUT,
         )
     except asyncio.TimeoutError:
+        # `wait_for` cancels the inner coroutine, which best-effort runs
+        # the inner `finally: await exchange.close()`. A cancelled
+        # finally can itself be interrupted, so the aiohttp session may
+        # leak. Log so the symptom ("Unclosed connector" warnings) maps
+        # back to a specific key and isn't a mystery.
+        strategy_ids = list(key_row.get("strategy_ids") or [])
         logger.warning(
-            "cron_sync: key %s timed out after %ds",
+            "cron_sync: key %s timed out after %ds — exchange connection "
+            "may have leaked (cancelled `finally` is best-effort)",
             key_row["id"],
             KEY_SYNC_TIMEOUT,
         )
         return {
             "key_id": key_row["id"],
-            "strategy_id": key_row.get("strategy_id"),
-            "strategy_ids": list(key_row.get("strategy_ids") or []),
+            "strategy_id": strategy_ids[0] if strategy_ids else None,
+            "strategy_ids": strategy_ids,
             "exchange": key_row.get("exchange"),
             "trades_fetched": 0,
             "duration_s": KEY_SYNC_TIMEOUT,
@@ -209,42 +307,40 @@ async def cron_sync():
     try:
         kek = get_kek()
     except RuntimeError:
-        # audit-2026-05-07 C-0199 — return HTTP 500 (not 200) so the
-        # cron platform (Vercel/Railway) surfaces this as a failed
-        # invocation and alarms fire. A 200 + error-in-body kept KEK
-        # outages silent for days because the cron runner only watches
-        # the HTTP status code.
+        # Raise 500 — the cron runner only alarms on non-2xx; a 200 body
+        # with `error:` is silently treated as success and KEK outages
+        # go undetected.
         logger.critical("cron_sync: KEK not configured, aborting")
         raise HTTPException(status_code=500, detail="Encryption not configured (KEK missing)")
 
     supabase = get_supabase()
 
-    # audit-2026-05-07 C-0200 — only sync into strategies whose
-    # lifecycle status is live (draft/pending_review/published). Pre-fix
-    # the cron joined every linked strategy regardless of status and
-    # could overwrite the submission snapshot of an archived/deleted
-    # strategy, flipping its approval-gate verdict between Submit and
-    # Approve. Pull `status` along with `id` so we can filter
-    # in-process (PostgREST embedded-resource filters across the
-    # supabase-py versions we ship have been inconsistent — local
-    # filtering is robust to that churn).
-    ALLOWED_STRATEGY_STATUSES = {"draft", "pending_review", "published"}
-
-    # Batch query: fetch all active keys with their linked strategies
-    keys_result = (
-        supabase.table("api_keys")
-        .select("*, strategies!strategies_api_key_id_fkey(id, status)")
-        .eq("is_active", True)
-        .execute()
-    )
+    # Pull `status` alongside `id` so we can filter live strategies
+    # in-process. PostgREST's embedded-resource filter has behaved
+    # inconsistently across the supabase-py versions we ship; local
+    # filtering is robust to that churn.
+    try:
+        keys_result = (
+            supabase.table("api_keys")
+            .select("*, strategies!strategies_api_key_id_fkey(id, status)")
+            .eq("is_active", True)
+            .execute()
+        )
+    except Exception as exc:
+        logger.exception("cron_sync: initial api_keys SELECT failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail=f"cron_sync: api_keys SELECT failed: {type(exc).__name__}",
+        ) from exc
     raw_keys = keys_result.data or []
 
-    # Flatten: attach strategy_ids (full list) and strategy_id (primary)
-    # from the join. audit-2026-05-07 C-0201 — preserve the full list of
-    # linked strategies so _sync_single_key can fan out the sync_trades
-    # RPC to every one. Pre-fix the list-shape branch took only
-    # strategy_rel[0]["id"], silently dropping every strategy beyond the
-    # first.
+    # Flatten the embed: `strategy_ids` is the full linked set (each
+    # downstream `sync_trades` RPC fans out across all of them);
+    # `strategy_id` is the primary, kept only for result-payload
+    # back-compat. A strategy missing `status` entirely is dropped —
+    # the SELECT above always pulls `status`, so a missing key signals
+    # PostgREST or schema drift and we fail closed (don't sync into
+    # something whose lifecycle we can't verify).
     keys = []
     for row in raw_keys:
         strategy_rel = row.pop("strategies", None)
@@ -260,7 +356,7 @@ async def cron_sync():
             for e in entries
             if isinstance(e, dict)
             and e.get("id")
-            and (e.get("status") in ALLOWED_STRATEGY_STATUSES if "status" in e else True)
+            and e.get("status") in ALLOWED_STRATEGY_STATUSES
         ]
 
         row["strategy_ids"] = strategy_ids
@@ -299,21 +395,28 @@ async def cron_sync():
             if i + BATCH_SIZE < len(group_keys):
                 await asyncio.sleep(EXCHANGE_BATCH_DELAY)
 
-    # Summary
+    # Summary — every status bucket must be counted or the cron runner's
+    # alarm conditions (which watch the response body) silently misclassify
+    # a tick where every key hit a transient validation failure as
+    # "0 synced, 0 failed = idle" instead of "everything failed transiently."
     synced = sum(1 for r in all_results if r["status"] == "ok")
+    partial = sum(1 for r in all_results if r["status"] == "partial")
     failed = sum(1 for r in all_results if r["status"] == "error")
     timed_out = sum(1 for r in all_results if r["status"] == "timeout")
     revoked = sum(1 for r in all_results if r["status"] == "key_revoked")
+    transient = sum(1 for r in all_results if r["status"] == "transient_failure")
     total_trades = sum(r.get("trades_fetched", 0) for r in all_results)
     overall_duration = round(time.monotonic() - overall_start, 2)
 
     logger.info(
-        "cron_sync complete: %d synced, %d failed, %d timed out, %d revoked, "
-        "%d total trades, %.1fs total duration",
+        "cron_sync complete: %d synced, %d partial, %d failed, %d timed out, "
+        "%d revoked, %d transient, %d total trades, %.1fs total duration",
         synced,
+        partial,
         failed,
         timed_out,
         revoked,
+        transient,
         total_trades,
         overall_duration,
     )
@@ -350,40 +453,59 @@ async def cron_sync():
     # The Test Portfolios surface was hidden from the allocator sidebar
     # in the v0.4.0 pivot specifically because scenario books are
     # exploratory; the cron path was overlooked at that time.
-    # audit-2026-05-07 C-0201 — fan out across every strategy linked
-    # to each successfully-synced key, not just the primary. A key
-    # backing multiple strategies needs portfolio recompute for each.
-    synced_strategy_ids: list[str] = []
-    for r in all_results:
-        if r["status"] != "ok":
-            continue
-        sids = r.get("strategy_ids") or ([r["strategy_id"]] if r.get("strategy_id") else [])
-        for sid in sids:
-            if sid:
-                synced_strategy_ids.append(sid)
-    synced_strategy_ids = list(set(synced_strategy_ids))
+    # Include `partial` keys: at least one of their per-strategy RPCs
+    # succeeded, and the portfolios backed by those successful
+    # strategies still need a recompute. Iterating
+    # `per_strategy_stored` (instead of `strategy_ids`) restricts the
+    # cascade to the strategies that actually received trades, so a
+    # partial key doesn't drag its failed strategies' portfolios in.
+    synced_strategy_ids = list({
+        sid
+        for r in all_results
+        if r["status"] in ("ok", "partial")
+        for sid, stored in r.get("per_strategy_stored", {}).items()
+        if stored > 0
+    })
+    portfolio_recomputes_error: str | None = None
     if synced_strategy_ids:
-        ps_rows = supabase.table("portfolio_strategies") \
-            .select("portfolio_id") \
-            .in_("strategy_id", synced_strategy_ids) \
-            .execute()
-        candidate_portfolio_ids = list(
-            set(r["portfolio_id"] for r in (ps_rows.data or []))
-        )
-
-        # Second round-trip filters out is_test=true portfolios. We
-        # could in principle do this in one query via PostgREST's
-        # embedded-resource filter, but a simple .in_() on the
-        # already-deduped candidate id list is clearer and survives
-        # supabase-py syntax churn.
-        portfolio_ids: list[str] = []
-        if candidate_portfolio_ids:
-            real_rows = supabase.table("portfolios") \
-                .select("id") \
-                .in_("id", candidate_portfolio_ids) \
-                .eq("is_test", False) \
+        try:
+            ps_rows = (
+                supabase.table("portfolio_strategies")
+                .select("portfolio_id")
+                .in_("strategy_id", synced_strategy_ids)
                 .execute()
-            portfolio_ids = [r["id"] for r in (real_rows.data or [])]
+            )
+            candidate_portfolio_ids = list(
+                set(r["portfolio_id"] for r in (ps_rows.data or []))
+            )
+
+            # Second round-trip filters out is_test=true portfolios. We
+            # could in principle do this in one query via PostgREST's
+            # embedded-resource filter, but a simple .in_() on the
+            # already-deduped candidate id list is clearer and survives
+            # supabase-py syntax churn.
+            portfolio_ids: list[str] = []
+            if candidate_portfolio_ids:
+                real_rows = (
+                    supabase.table("portfolios")
+                    .select("id")
+                    .in_("id", candidate_portfolio_ids)
+                    .eq("is_test", False)
+                    .execute()
+                )
+                portfolio_ids = [r["id"] for r in (real_rows.data or [])]
+        except Exception as exc:
+            # A Supabase blip on the recompute lookup must NOT lose the
+            # per-key sync results we already collected. Record the
+            # error in the response and short-circuit the recompute
+            # branch instead of letting the exception propagate.
+            logger.exception(
+                "cron_sync: recompute lookup failed (%s) — sync results preserved",
+                type(exc).__name__,
+            )
+            portfolio_recomputes_error = f"{type(exc).__name__}: {exc}"
+            portfolio_ids = []
+            candidate_portfolio_ids = []
 
         skipped_test = len(candidate_portfolio_ids) - len(portfolio_ids)
         if skipped_test > 0:
@@ -393,36 +515,46 @@ async def cron_sync():
                 len(portfolio_ids),
             )
 
-        # audit-2026-05-07 H-0546 — run portfolio recomputes
-        # concurrently rather than awaiting one-at-a-time. The existing
-        # _compute_semaphore(3) in routers.portfolio naturally caps
-        # in-process concurrency; we wrap each call so the cron path
-        # honours the same semaphore + in-flight DB check the public
-        # HTTP handler enforces (C-0196 / H-0540 / H-0544).
+        # Best-effort within-process throttle via the shared
+        # `_compute_semaphore` (process-local, so it does NOT prevent
+        # double-compute across Vercel function instances or worker
+        # pods; nor does it serialize same-pod races — the Semaphore
+        # admits up to 3 coroutines concurrently and the DB-level
+        # in-flight check is itself TOCTOU between SELECT and the
+        # implicit INSERT inside `_compute_portfolio_analytics`).
+        # A real cross-process guard would need a UNIQUE INDEX on
+        # `portfolio_analytics(portfolio_id) WHERE computation_status='computing'`
+        # or a Postgres advisory lock — tracked separately.
         #
-        # audit-2026-05-07 H-0542 — aggregate per-portfolio recompute
-        # outcomes into the response so a 100% failure rate (e.g. DB
-        # schema drift) does NOT look like a healthy cron run. Pre-fix
-        # the cron returned the original synced/failed payload even
-        # when every recompute raised, leaving HTTP 200 + 'failed=0'
-        # masking total downstream collapse.
+        # The cron-internal `cron_recompute_sem` caps how many of the
+        # shared 3 slots cron itself is allowed to hold, leaving at
+        # least one slot for live `POST /api/portfolio-analytics`
+        # traffic during long cron ticks.
         #
-        # audit-2026-05-07 H-0543 — use logger.exception so the
-        # traceback (including the chained cause) lands in
-        # Sentry/aggregator, not just the str(e) message.
+        # Per-portfolio outcomes are aggregated into the response so a
+        # 100%-failure tick is not indistinguishable from a healthy one.
+        #
+        # Lazy import: test isolation (other test files have been
+        # observed to unload `routers.portfolio` from sys.modules; see
+        # test_cron_router.py TestPortfolioRecomputeErrorIsolation).
         from routers.portfolio import (
             _compute_portfolio_analytics,
             _compute_semaphore,
         )
 
-        async def _guarded_recompute(pid: str) -> tuple[str, bool, str | None]:
-            """Acquire the shared semaphore + check for an in-flight
-            'computing' row before recomputing, mirroring the public
-            POST /api/portfolio-analytics guard. Returns
-            (portfolio_id, ok, error_repr).
+        cron_recompute_sem = asyncio.Semaphore(CRON_RECOMPUTE_CONCURRENCY)
+
+        async def _guarded_recompute(
+            pid: str,
+        ) -> tuple[str, RecomputeStatus, str | None]:
+            """Acquire the cron-internal cap, then the shared
+            semaphore, then check for an in-flight 'computing' row
+            before recomputing. Mirrors the public POST
+            /api/portfolio-analytics guard. Returns
+            (portfolio_id, status, error_repr).
             """
             try:
-                async with _compute_semaphore:
+                async with cron_recompute_sem, _compute_semaphore:
                     in_flight = (
                         supabase.table("portfolio_analytics")
                         .select("id")
@@ -432,56 +564,122 @@ async def cron_sync():
                         .execute()
                     )
                     if in_flight.data:
+                        # Distinct bucket from `ok` and `failed`: we
+                        # neither computed nor crashed. Conflating
+                        # this with `ok` would let a stuck "computing"
+                        # row (the other worker may have died) report
+                        # as success forever — exactly the silent-
+                        # failure pattern this audit is closing.
                         logger.info(
-                            "cron_recompute skipped portfolio %s — another "
-                            "computation already in-flight",
+                            "cron_recompute: portfolio %s already in-flight elsewhere",
                             pid,
                         )
-                        return (pid, True, None)
-                    await _compute_portfolio_analytics(pid)
-                    return (pid, True, None)
+                        return (pid, "in_flight", None)
+                    await asyncio.wait_for(
+                        _compute_portfolio_analytics(pid),
+                        timeout=PORTFOLIO_RECOMPUTE_TIMEOUT,
+                    )
+                    return (pid, "ok", None)
+            except asyncio.TimeoutError:
+                # Capacity issue, not a logic bug — log as warning so
+                # the failure bucket sees it but Sentry doesn't open a
+                # ticket per portfolio.
+                logger.warning(
+                    "cron_recompute: portfolio %s exceeded %ds timeout",
+                    pid,
+                    PORTFOLIO_RECOMPUTE_TIMEOUT,
+                )
+                return (pid, "failed", f"TimeoutError: exceeded {PORTFOLIO_RECOMPUTE_TIMEOUT}s")
+            except HTTPException as http_exc:
+                # `_compute_portfolio_analytics` raises HTTP 400 for
+                # benign business states ("No strategies", "No returns
+                # data") — those are *skipped*, not failures. Anything
+                # else (500-level, unexpected) is a real failure.
+                if http_exc.status_code == 400:
+                    logger.info(
+                        "cron_recompute: portfolio %s skipped (benign): %s",
+                        pid,
+                        http_exc.detail,
+                    )
+                    return (pid, "skipped", None)
+                logger.exception(
+                    "Portfolio recompute failed for %s (HTTPException %d)",
+                    pid,
+                    http_exc.status_code,
+                )
+                return (pid, "failed", f"HTTPException {http_exc.status_code}: {http_exc.detail}")
             except Exception as exc:
                 logger.exception(
                     "Portfolio recompute failed for %s (%s)",
                     pid,
                     type(exc).__name__,
                 )
-                return (pid, False, f"{type(exc).__name__}: {exc}")
+                return (pid, "failed", f"{type(exc).__name__}: {exc}")
 
-        recompute_outcomes: list[tuple[str, bool, str | None]] = []
+        recompute_outcomes: list[tuple[str, RecomputeStatus, str | None]] = []
         if portfolio_ids:
             recompute_outcomes = await asyncio.gather(
                 *[_guarded_recompute(pid) for pid in portfolio_ids],
                 return_exceptions=False,
             )
 
-        recompute_ok = sum(1 for _, ok, _ in recompute_outcomes if ok)
-        recompute_failed = sum(1 for _, ok, _ in recompute_outcomes if not ok)
-        recompute_failures = [
+        recompute_ok = sum(1 for _, status, _ in recompute_outcomes if status == "ok")
+        recompute_in_flight = sum(
+            1 for _, status, _ in recompute_outcomes if status == "in_flight"
+        )
+        recompute_skipped = sum(
+            1 for _, status, _ in recompute_outcomes if status == "skipped"
+        )
+        recompute_failed = sum(
+            1 for _, status, _ in recompute_outcomes if status == "failed"
+        )
+        all_failures = [
             {"portfolio_id": pid, "error": err}
-            for pid, ok, err in recompute_outcomes
-            if not ok
+            for pid, status, err in recompute_outcomes
+            if status == "failed"
         ]
+        # Cap the failures list — a platform-wide outage can produce
+        # thousands of entries; the cap keeps the response payload
+        # usable in Sentry / log search and bounds the body size the
+        # cron runner has to store.
+        if len(all_failures) > RECOMPUTE_FAILURE_CAP:
+            recompute_failures = all_failures[:RECOMPUTE_FAILURE_CAP]
+            failures_truncated = True
+        else:
+            recompute_failures = all_failures
+            failures_truncated = False
 
         portfolio_recomputes = {
             "attempted": len(recompute_outcomes),
             "ok": recompute_ok,
+            "in_flight": recompute_in_flight,
+            "skipped": recompute_skipped,
             "failed": recompute_failed,
             "failures": recompute_failures,
+            "failures_truncated": failures_truncated,
+            "total_failures": len(all_failures),
         }
+        if portfolio_recomputes_error:
+            portfolio_recomputes["lookup_error"] = portfolio_recomputes_error
     else:
         portfolio_recomputes = {
             "attempted": 0,
             "ok": 0,
+            "in_flight": 0,
+            "skipped": 0,
             "failed": 0,
             "failures": [],
+            "failures_truncated": False,
+            "total_failures": 0,
         }
 
     return {
         "synced": synced,
+        "partial": partial,
         "failed": failed,
         "timed_out": timed_out,
         "revoked": revoked,
+        "transient": transient,
         "total_keys": len(keys),
         "total_trades": total_trades,
         "duration_s": overall_duration,
