@@ -1032,46 +1032,184 @@ def test_compute_all_metrics_gini_qstats_attribute_missing_logs_warning(
     )
 
 
-def test_compute_all_metrics_outlier_ratios_failure_logs_warning(caplog):
+def test_compute_all_metrics_outlier_ratios_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
     """Pre-sweep, the outlier_win_ratio / outlier_loss_ratio pair was
     wrapped in a single bare `try/except: pass`. Post-sweep, the pair
     still degrades together (consistent UI state) but emits a WARNING
-    when it fails. Asserts the WARNING shape directly by exercising the
-    handler.
+    when it fails.
+
+    Review-cluster gate (audit-2026-05-07): the previous test recreated
+    the exception handler inline AND grepped `inspect.getsource()` for
+    the literal string — that was a tautology: a /simplify revert to
+    bare-pass with the comment string left intact would have passed.
+    This version REAL-TRIGGERS the protected block: monkeypatches
+    `pd.Series.std` (called exactly once in compute_all_metrics — inside
+    the outlier block, at line 563 of services/metrics.py) to raise,
+    then calls compute_all_metrics. The WARNING must fire from the real
+    code path, not from a re-emit in the test body.
+    """
+    # The outlier block is the FIRST site in compute_all_metrics that
+    # calls `(returns > X).mean()` on a BOOLEAN Series (lines 566-567).
+    # Every earlier `.mean()` call is on numeric Series. Patch
+    # `pd.Series.mean` to raise ONLY when self.dtype is bool — a precise
+    # unique trigger that doesn't cascade through qs.stats internals.
+    orig_mean = pd.Series.mean
+
+    def _mean_raises_on_bool_series(self, *args, **kwargs):
+        # numpy dtype comparison is safer via str() — the .dtype object
+        # of a boolean pandas Series is numpy.dtype('bool'), distinct
+        # from the Python `bool` type.
+        if str(getattr(self, "dtype", "")) == "bool":
+            raise RuntimeError("simulated outlier ratios boolean-Series.mean failure")
+        return orig_mean(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.Series, "mean", _mean_raises_on_bool_series)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    # Failure-soft: outlier ratios may be absent, but the function still
+    # produced a result.
+    mj = result["metrics_json"]
+    assert "outlier_win_ratio" not in mj or mj["outlier_win_ratio"] is None
+    assert "outlier_loss_ratio" not in mj or mj["outlier_loss_ratio"] is None
+    # The real code path must have emitted the WARNING. Tightened from
+    # the prior loose 'outlier' substring filter to require the exact
+    # log message prefix this sweep introduced — pins the contract.
+    matching = [
+        r for r in caplog.records
+        if "outlier ratios failed" in r.getMessage()
+        and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING 'outlier ratios failed' when "
+        "the inner block raises (post audit-2026-05-07 silent-failure sweep); "
+        "the prior bare-pass swallow is a regression"
+    )
+    # Pin structured-logging contract: exc_info must propagate the traceback.
+    assert any(r.exc_info is not None for r in matching), (
+        "outlier-ratios WARNING must use exc_info=True so operators get "
+        "the traceback in Railway logs, not just the message"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review-cluster gate (audit-2026-05-07): regression tests for the 3 sweep
+# sites that the original parametrized test did NOT cover (var_1m_99 uses
+# np.percentile, skewness uses Series.skew, kurtosis uses Series.kurtosis —
+# all non-qs.stats so they can't be parametrized through the qs.stats
+# monkeypatch path). A /simplify pass that drops these 3 WARNINGs would
+# have shipped silently pre-gate.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_all_metrics_var_1m_99_np_percentile_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """var_1m_99 uses `np.percentile(monthly_rets, 1)`, not qs.stats. The
+    sweep added a WARNING for that site; this test pins the contract.
     """
     import services.metrics as metrics_module
 
-    # Direct exception-handler exercise. The outlier block in
-    # compute_all_metrics is small and self-contained; we verify the
-    # behavior by recreating the protected block here and confirming
-    # the same logger emits a WARNING that names "outlier" when the
-    # inner code raises.
-    logger_name = "quantalyze.analytics.metrics"
-    target_logger = logging.getLogger(logger_name)
-    with caplog.at_level(logging.WARNING, logger=logger_name):
-        try:
-            raise RuntimeError("simulated outlier ratio inner failure")
-        except Exception as exc:
-            # This matches the exact log shape in metrics.py post-sweep.
-            target_logger.warning(
-                "outlier ratios failed (returns_len=%s): %s",
-                200, exc, exc_info=True,
-            )
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated np.percentile failure")
+
+    monkeypatch.setattr(metrics_module.np, "percentile", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "var_1m_99" not in mj or mj["var_1m_99"] is None
     matching = [
         r for r in caplog.records
-        if "outlier" in r.getMessage().lower() and r.levelno == logging.WARNING
+        if "var_1m_99" in r.getMessage() and r.levelno == logging.WARNING
     ]
     assert matching, (
-        "outlier-ratios WARNING shape regression: the log message must "
-        "name 'outlier' (used by ops dashboards to filter by feature)"
+        "compute_all_metrics must log WARNING naming 'var_1m_99' when "
+        "np.percentile raises (post audit-2026-05-07 silent-failure sweep); "
+        "pre-sweep bare-pass swallow is a regression"
     )
-    # Also verify metrics.py contains the new logger call shape — a
-    # textual contract that a future cleanup pass shouldn't silently
-    # revert.
-    import inspect
-    source = inspect.getsource(metrics_module)
-    assert "outlier ratios failed" in source, (
-        "metrics.py must log 'outlier ratios failed' (added by the "
-        "audit-2026-05-07 silent-failure sweep); pre-sweep bare-pass "
-        "behavior is a regression"
+
+
+def test_compute_all_metrics_skewness_pandas_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """skewness uses `returns.skew()`, a pandas Series method. The sweep
+    added a WARNING for that site; this test pins the contract.
+    """
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("simulated Series.skew failure")
+
+    monkeypatch.setattr(pd.Series, "skew", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "skewness" not in mj or mj["skewness"] is None
+    matching = [
+        r for r in caplog.records
+        if "skewness" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING naming 'skewness' when "
+        "Series.skew raises (post audit-2026-05-07 silent-failure sweep)"
+    )
+
+
+def test_compute_all_metrics_kurtosis_pandas_failure_logs_warning(
+    golden_returns, caplog, monkeypatch
+):
+    """kurtosis uses `returns.kurtosis()`, a pandas Series method. The sweep
+    added a WARNING for that site; this test pins the contract.
+    """
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("simulated Series.kurtosis failure")
+
+    monkeypatch.setattr(pd.Series, "kurtosis", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        result = compute_all_metrics(golden_returns)
+    mj = result["metrics_json"]
+    assert "kurtosis" not in mj or mj["kurtosis"] is None
+    matching = [
+        r for r in caplog.records
+        if "kurtosis" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, (
+        "compute_all_metrics must log WARNING naming 'kurtosis' when "
+        "Series.kurtosis raises (post audit-2026-05-07 silent-failure sweep)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review-cluster gate (audit-2026-05-07): pin the structured-logging
+# contract (exc_info=True) for the parametrized qs.stats scalars. A
+# /simplify pass that drops `exc_info=True` as 'unused' would lose the
+# operator-triage trail in Railway. This test adds the missing assertion.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_all_metrics_qstats_scalar_warnings_carry_exc_info(
+    golden_returns, caplog, monkeypatch
+):
+    """The 11 sweep WARNINGs use `exc_info=True` to attach the traceback.
+    The original parametrized test asserted message + level only — a
+    regression that drops exc_info=True would pass. This test pins it for
+    one representative scalar; the assertion structure mirrors what
+    operators rely on in Railway log aggregation.
+    """
+    import services.metrics as metrics_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated qs.stats.value_at_risk failure")
+
+    monkeypatch.setattr(metrics_module.qs.stats, "value_at_risk", boom)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.metrics"):
+        compute_all_metrics(golden_returns)
+    matching = [
+        r for r in caplog.records
+        if "var_1d_95" in r.getMessage() and r.levelno == logging.WARNING
+    ]
+    assert matching, "expected a WARNING naming var_1d_95 for sanity"
+    assert any(r.exc_info is not None for r in matching), (
+        "qstats scalar WARNINGs must use exc_info=True so operators get "
+        "the traceback (post audit-2026-05-07 silent-failure sweep)"
     )

@@ -2821,50 +2821,71 @@ class TestFetchDailyPnlBybitFailLoud:
         # Failure-soft contract: the call returned without raising.
         assert result == []
         # Operator visibility: a WARNING named the failure mode.
+        # Review-cluster gate (audit-2026-05-07): tightened from the
+        # loose 'bybit' substring filter to require the exact log prefix
+        # the sweep introduced. Loose match could pass on an UNRELATED
+        # future warning that happens to contain 'bybit' from a different
+        # module.
         matching = [
             r for r in caplog.records
-            if "bybit" in r.getMessage().lower() and r.levelno == logging.WARNING
+            if "Bybit closed_pnl" in r.getMessage()
+            and r.levelno == logging.WARNING
         ]
         assert matching, (
             "Bybit closed_pnl RPC failure must produce a WARNING log "
-            "(post audit-2026-05-07 silent-failure sweep) so operators "
-            "can distinguish 'Bybit blip / auth fail' from 'no closed "
-            "positions on the account'."
+            "with prefix 'Bybit closed_pnl' (post audit-2026-05-07 "
+            "silent-failure sweep) so operators can distinguish 'Bybit "
+            "blip / auth fail' from 'no closed positions on the account'."
+        )
+        # Pin structured-logging contract: exc_info must carry the traceback.
+        assert any(r.exc_info is not None for r in matching), (
+            "Bybit closed_pnl WARNING must use exc_info=True so operators "
+            "get the traceback in Railway logs, not just the message"
+        )
+        # Pin the boundary: the inner WARNING must be THE log — the
+        # outer wrapper's ERROR ('fetch_daily_pnl failed') must NOT
+        # fire. A refactor that re-raises from the inner Bybit branch
+        # would create a doubled WARNING+ERROR; this assertion catches it.
+        assert not any(
+            r.levelno == logging.ERROR
+            and "fetch_daily_pnl failed" in r.getMessage()
+            for r in caplog.records
+        ), (
+            "Bybit closed_pnl failure must NOT escalate to the outer "
+            "fetch_daily_pnl ERROR — the fail-loud transformation is "
+            "WARNING-only at the inner branch (best-effort enrichment)"
         )
 
     @pytest.mark.asyncio
-    async def test_bybit_iso_conversion_failure_emits_warning(self, caplog):
-        """The ISO-conversion loop runs AFTER the closed_pnl RPC succeeds.
-        Pre-sweep, an unparseable `createdTime` value silently left the
-        timestamp as a digit-string (or raised TypeError which the
-        outer `pass` swallowed). Either way, downstream consumers saw
-        malformed timestamps with no warning attributing the regression
-        to the Bybit branch.
+    async def test_bybit_closed_pnl_item_parse_failure_emits_warning(self, caplog):
+        """A malformed item INSIDE the Bybit closed_pnl response (e.g.,
+        `closedPnl: 'NaN-string'` which `float()` rejects) raises inside
+        the per-item loop. Pre-sweep, the outer bare-pass swallowed it
+        and downstream timestamps remained malformed with no log.
+        Post-sweep, a WARNING fires.
+
+        Review-cluster gate rename (audit-2026-05-07): the prior test
+        name 'test_bybit_iso_conversion_failure' was misleading — the
+        actual trigger is closedPnl parsing, not the ISO conversion (the
+        mock data here has a valid digit-string createdTime). Renamed
+        to accurately describe what's tested. A separate test for the
+        true ISO-conversion path is a follow-up (would require mocking
+        datetime.fromtimestamp to raise).
         """
         import logging
         from services.exchange import fetch_daily_pnl
 
         mock_exchange = MagicMock()
         mock_exchange.id = "bybit"
-        # Return a `list` whose `createdTime` is a TYPE that breaks
-        # str.isdigit (the loop's gate). Pass an object that raises on
-        # str().isdigit() — None is fine because the `if entry["timestamp"]`
-        # gate falsifies, but we need to actually trip the conversion.
-        # The cleanest reproduction: feed a float, which makes
-        # `str(<float>).isdigit()` return False, so no conversion happens
-        # and the timestamp persists as a float. That's the silent bug
-        # the sweep is targeting. Result is empty? No — daily_pnl carries
-        # the float through. That's a contract regression. Assertion: at
-        # minimum no exception escapes.
-        # For the WARNING-emission contract, drive an exception INSIDE the
-        # loop by supplying `closedPnl` as a value that breaks float():
+        # `float('NaN-string')` raises ValueError inside the per-item
+        # parse loop, which is wrapped by the Bybit try/except.
         mock_exchange.private_get_v5_position_closed_pnl = AsyncMock(
             return_value={
                 "result": {
                     "list": [
                         {
                             "symbol": "BTCUSDT",
-                            "closedPnl": "NaN-string",  # float() raises
+                            "closedPnl": "NaN-string",
                             "createdTime": "1700000000000",
                         }
                     ]
@@ -2876,12 +2897,134 @@ class TestFetchDailyPnlBybitFailLoud:
             result = await fetch_daily_pnl(mock_exchange)
         # Failure-soft contract: the call returned without raising.
         assert isinstance(result, list)
-        # Operator visibility: a WARNING named the failure mode.
+        # Operator visibility: WARNING with exact prefix.
         matching = [
             r for r in caplog.records
-            if "bybit" in r.getMessage().lower() and r.levelno == logging.WARNING
+            if "Bybit closed_pnl" in r.getMessage()
+            and r.levelno == logging.WARNING
         ]
         assert matching, (
-            "Bybit closed_pnl item-parse failure must produce a WARNING log "
-            "(post audit-2026-05-07 silent-failure sweep)"
+            "Bybit closed_pnl item-parse failure must produce a WARNING "
+            "log with prefix 'Bybit closed_pnl' (post audit-2026-05-07 "
+            "silent-failure sweep)"
+        )
+
+
+# Review-cluster gate (audit-2026-05-07): the Binance branch fix at
+# exchange.py:552-562 — pre-gate it had NO regression test. A /simplify
+# pass that drops the new WARNING would land silently.
+class TestFetchDailyPnlBinanceFailLoud:
+    """Pre-sweep, the Binance futures-income failure path silently
+    swallowed the exception and fell back to BTC spot trades with no
+    log attributing the fallback to a futures-income drift. Post-sweep,
+    a WARNING fires before the fallback so operators can spot systemic
+    issues (Binance schema change, auth failure masquerading as
+    futures-permission denial) instead of only seeing 'BTC spot
+    fallback fired' in the data.
+    """
+
+    @pytest.mark.asyncio
+    async def test_binance_futures_income_failure_logs_warning_before_fallback(
+        self, caplog
+    ):
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        # fapiPrivate_get_income raises → WARNING + fallback to fetch_my_trades.
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=RuntimeError(
+                "simulated Binance futures-income RPC failure"
+            )
+        )
+        # The fallback returns one trade so we can verify the path was taken.
+        # Note: ccxt trade dicts use `datetime` as the ISO-string key (see
+        # exchange.py:572 — `t["datetime"]`), distinct from Python's
+        # datetime module. The fallback ALSO reads `t["symbol"]` /
+        # `t["side"]` / etc. via subscript (no .get default), so the
+        # mock must populate every required key.
+        mock_exchange.fetch_my_trades = AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTC/USDT",
+                    "amount": 0.1,
+                    "price": 50000.0,
+                    "side": "buy",
+                    "fee": {"cost": 0.5, "currency": "USDT"},
+                    "timestamp": 1700000000000,
+                    "datetime": "2023-11-14T22:13:20.000Z",
+                    "type": "market",
+                }
+            ]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Failure-soft + fallback contract: result is non-empty (fallback ran).
+        assert isinstance(result, list)
+        assert len(result) >= 1, (
+            "Binance branch must fall back to fetch_my_trades when "
+            "futures-income raises; fallback produced no rows"
+        )
+        # Operator visibility: WARNING naming the Binance futures-income mode.
+        matching = [
+            r for r in caplog.records
+            if "Binance futures-income" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "Binance futures-income failure must produce a WARNING log with "
+            "prefix 'Binance futures-income' (post audit-2026-05-07 "
+            "silent-failure sweep); the prior bare-pass swallow is a "
+            "regression"
+        )
+        # Pin structured-logging contract.
+        assert any(r.exc_info is not None for r in matching), (
+            "Binance futures-income WARNING must use exc_info=True"
+        )
+
+    @pytest.mark.asyncio
+    async def test_binance_fallback_failure_escapes_to_outer_error(self, caplog):
+        """Documents the cascade boundary (silent-failure-hunter LOW #5):
+        if BOTH futures-income AND the fallback fetch_my_trades raise,
+        the inner Binance WARNING fires AND the OUTER 'fetch_daily_pnl
+        failed' ERROR also fires (because the fallback has no try/except
+        of its own). Operators see TWO logs and can disambiguate
+        'transient' vs 'systemic' Binance issues. This test pins that
+        boundary so a future refactor wrapping the fallback in its own
+        try/except doesn't silently swallow the cascade.
+        """
+        import logging
+        from services.exchange import fetch_daily_pnl
+
+        mock_exchange = MagicMock()
+        mock_exchange.id = "binance"
+        mock_exchange.fapiPrivate_get_income = AsyncMock(
+            side_effect=RuntimeError("simulated futures-income failure")
+        )
+        mock_exchange.fetch_my_trades = AsyncMock(
+            side_effect=RuntimeError("simulated spot-trades fallback failure")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+            result = await fetch_daily_pnl(mock_exchange)
+        # Outer wrapper still returns [] (best-effort enrichment path).
+        assert result == []
+        # Inner WARNING fired naming the futures-income mode.
+        inner = [
+            r for r in caplog.records
+            if "Binance futures-income" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert inner, "inner Binance WARNING must fire"
+        # Outer wrapper ERROR fired (fallback also raised, escapes to L620).
+        outer = [
+            r for r in caplog.records
+            if "fetch_daily_pnl failed" in r.getMessage()
+            and r.levelno == logging.ERROR
+        ]
+        assert outer, (
+            "outer fetch_daily_pnl ERROR must fire when the fallback also "
+            "raises — this is the documented cascade contract"
         )

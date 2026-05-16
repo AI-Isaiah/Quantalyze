@@ -170,13 +170,35 @@ class MetricsResult:
 
 
 def _safe_float(value: Any) -> float | None:
-    """Convert to float, returning None for NaN/Inf values."""
+    """Convert to float, returning None for NaN/Inf values.
+
+    review-cluster gate (audit-2026-05-07): emit DEBUG when coercion fails or
+    produces NaN/Inf. This helper is called by every qs.stats wrapper in
+    compute_all_metrics — if qs.stats returns a numpy.complex128, NaN, or
+    a type that fails float() coercion (Decimal, an array-of-1, etc.), the
+    scalar silently becomes None and the outer try/except never fires.
+    Pre-gate, this was a doubly-silent failure mode the sweep's WARNINGs
+    did NOT cover. DEBUG (not WARNING) because this helper is also called
+    from sanitize_metrics for legitimate None paths and from many code
+    sites where missing values are normal; promoting to WARNING would
+    flood Railway with normal-path noise. An operator grepping DEBUG
+    output for `_safe_float` will see the coercion trail without
+    background spam.
+    """
     try:
         f = float(value)
         if math.isnan(f) or math.isinf(f):
+            logger.debug(
+                "_safe_float coerced to None (NaN/Inf detected, type=%s)",
+                type(value).__name__,
+            )
             return None
         return f
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        logger.debug(
+            "_safe_float coerce failed (type=%s): %s",
+            type(value).__name__, exc,
+        )
         return None
 
 
@@ -355,8 +377,13 @@ def compute_all_metrics(
         if len(monthly_rets) > 0:
             metrics_json["var_1m_99"] = _safe_float(np.percentile(monthly_rets, 1))
     except Exception as exc:  # noqa: BLE001
+        # review-cluster gate (audit-2026-05-07): log prefix is 'np.percentile'
+        # not 'qstats scalar' — the underlying call is numpy, not qs.stats.
+        # An operator grepping for the qs.stats source would dead-end on a
+        # 'qstats scalar var_1m_99' line; accurate attribution lets them find
+        # the right call site immediately.
         logger.warning(
-            "qstats scalar var_1m_99 failed (returns_len=%s, monthly_len=%s): %s",
+            "np.percentile scalar var_1m_99 failed (returns_len=%s, monthly_len=%s): %s",
             returns_len_for_log, len(monthly_rets), exc, exc_info=True,
         )
     # fail-soft: optional scalar.
@@ -393,20 +420,24 @@ def compute_all_metrics(
         )
 
     # Distribution metrics
-    # fail-soft: optional scalar.
+    # fail-soft: optional scalar (pandas Series.skew, not qs.stats).
     try:
         metrics_json["skewness"] = _safe_float(returns.skew())
     except Exception as exc:  # noqa: BLE001
+        # review-cluster gate (audit-2026-05-07): log prefix is 'pandas'
+        # not 'qstats scalar' — Series.skew is the call, not qs.stats.
         logger.warning(
-            "qstats scalar skewness failed (returns_len=%s): %s",
+            "pandas scalar skewness failed (returns_len=%s): %s",
             returns_len_for_log, exc, exc_info=True,
         )
-    # fail-soft: optional scalar.
+    # fail-soft: optional scalar (pandas Series.kurtosis, not qs.stats).
     try:
         metrics_json["kurtosis"] = _safe_float(returns.kurtosis())
     except Exception as exc:  # noqa: BLE001
+        # review-cluster gate (audit-2026-05-07): log prefix is 'pandas'
+        # not 'qstats scalar' — Series.kurtosis is the call, not qs.stats.
         logger.warning(
-            "qstats scalar kurtosis failed (returns_len=%s): %s",
+            "pandas scalar kurtosis failed (returns_len=%s): %s",
             returns_len_for_log, exc, exc_info=True,
         )
     # fail-soft: optional scalar.
