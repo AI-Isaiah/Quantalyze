@@ -65,6 +65,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -803,6 +804,20 @@ async def _run_cutovers_bounded(
                 moved = await cutover_strategy(sid)
                 return (sid, moved, None)
             except Exception as exc:
+                # silent-failure-hunter MED conf-8: per-strategy
+                # `except Exception` was collapsing TypeError /
+                # AttributeError / KeyError stack traces to a single
+                # `repr(exc)` line, hiding programmer-error regressions
+                # behind what looked like transient cutover failures.
+                # Emit the full traceback to stderr (in addition to the
+                # repr that goes into the failure tuple) so the deploy
+                # log retains the trace for at least the failing strategy.
+                print(
+                    f"phase12_kill_switch: strategy {sid} cutover raised "
+                    f"{type(exc).__name__}; full traceback follows:",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
                 return (sid, 0, repr(exc))
 
     raw_results = await asyncio.gather(
@@ -848,8 +863,16 @@ async def main(
 
     # H-0624: confirm gate — block prod-looking hosts unless the operator
     # has set either the --confirm-prod CLI flag or the
-    # PHASE12_KILL_SWITCH_CONFIRMED env var. phase12_deploy.py passes the
-    # env-var path so a single CI boolean propagates through the stack.
+    # PHASE12_KILL_SWITCH_CONFIRMED env var.
+    #
+    # code-reviewer MED conf-8: phase12_deploy.py does NOT explicitly
+    # forward cli_confirm_prod or PHASE12_KILL_SWITCH_CONFIRMED — the
+    # env-var path works only via in-process os.environ inheritance
+    # (same Python process re-importing this module). A future refactor
+    # that adds subprocess.run / asyncio.create_subprocess_exec to
+    # phase12_deploy.py for isolation would silently break this gate.
+    # If that refactor happens, also pass cli_confirm_prod through or
+    # explicitly forward the env var in the subprocess `env=` dict.
     _check_confirm_gate(cli_confirm_prod or _env_truthy("PHASE12_KILL_SWITCH_CONFIRMED"))
 
     # H-0614: --force / PHASE12_FORCE_CUTOVER overrides the p999 < threshold
@@ -909,6 +932,23 @@ async def main(
     # two, `len(strategy_ids) - len(failures)` produces a negative
     # success count when malformed_rows > valid rows.
     input_total = len(rows.data)
+    # silent-failure-hunter MED conf-8: the SQL-probe strategy count
+    # `n` (from psql under the operator's role + sslmode) and the
+    # PostgREST row count `input_total` (service-role over HTTP) are
+    # produced by different connection paths. Under RLS, statement_
+    # timeout, or replica lag they can disagree — and the audit log
+    # would silently report the PostgREST count without the operator
+    # ever seeing the divergence. Surface a WARNING to stderr when
+    # they differ so a cutover that "completes" against one set while
+    # leaving the other un-cutover is at least visible post-incident.
+    if n != input_total:
+        print(
+            f"phase12_kill_switch: WARNING — probe count diverged from "
+            f"PostgREST count: probe={n} postgrest={input_total}. RLS / "
+            f"role mismatch / replica lag could leave SQL-visible "
+            f"strategies un-cutover; investigate post-trigger.",
+            file=sys.stderr,
+        )
     strategy_ids: list[str] = []
     malformed_rows: list[tuple[str, str]] = []
     for idx, row in enumerate(rows.data):
@@ -963,7 +1003,13 @@ async def main(
     # is a developer-tree artifact, not shipped to Railway / prod
     # containers — the in-tree audit trail is silently lost in the very
     # environment where the kill-switch is most likely to fire).
-    print(f"phase12_kill_switch: AUDIT — {audit_line.strip()}", file=sys.stderr)
+    #
+    # code-reviewer LOW conf-9: collapse internal newlines so log
+    # aggregators that split on newline keep the full AUDIT entry as a
+    # single line (otherwise the `- p99.9 = …` detail loses the `AUDIT`
+    # prefix and grep -n AUDIT misses the line with the metric).
+    audit_stderr = audit_line.strip().replace("\n", " | ")
+    print(f"phase12_kill_switch: AUDIT — {audit_stderr}", file=sys.stderr)
 
     # H-0622: atomic write. Falls through to a stderr-only log if the
     # TODOS_PATH parent doesn't exist (deploy artifact case) AND we're
