@@ -84,6 +84,6 @@ Assign each mechanism a workload class:
   `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql` (lines 65-79).
 - Edge Functions: `supabase/functions/compute-trigger/index.ts`,
   `supabase/functions/notify-admin/index.ts`.
-- Python cron: `analytics-service/routers/cron.py` (lines 148-281).
+- Python cron: `analytics-service/routers/cron.py` (`cron_sync` at lines 297-688).
 - `cron_runs` table: `supabase/migrations/20260408113029_cron_heartbeat.sql`.
 - `vercel.json` crons block: `vercel.json` (lines 6-9).
